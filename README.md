@@ -56,10 +56,20 @@ python3 dunking_sheep_tui.py
 
 Then:
 
-1. **Pick a target** — press `c` to open the pane picker. Move with `j`/`k` or
-   the arrow keys, `Enter` selects, `Esc` cancels. The list shows each pane's
-   tab name, agent, status, directory, and pane id — so it's easy to tell tabs
-   apart at a glance.
+1. **Pick a target** — press `c` to open the pane picker. It's grouped by
+   workspace, with each workspace's tabs indented beneath its name and shown as
+   columns (Tab · Agent · Status · Directory), so it's easy to tell them apart:
+
+   ```
+   zoomies
+       Tab               Agent    Status    Directory
+       OpenAI            codex    idle      /home/hunter
+       Zoomies PS1       claude   done      /home/hunter/workspace/pspsps-engine
+   dunkingsheep
+       dunking sheep     claude   working   /home/hunter/workspace/dunkingsheep
+   ```
+
+   Move with `j`/`k` or the arrow keys, `Enter` selects, `Esc` cancels.
 2. **Set the interval** — press `i`, type minutes (e.g. `10`), `Enter` saves.
 3. **Set the text** — press `e` for the full-screen editor. `Ctrl+G` saves,
    `Esc` cancels. Default is `continue`.

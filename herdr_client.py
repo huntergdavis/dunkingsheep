@@ -125,6 +125,33 @@ class HerdrClient:
             pane["tab_label"] = labels.get(pane.get("tab_id"), pane.get("tab_id", "?"))
         return panes
 
+    def list_workspaces(self):
+        """Return a list of workspace dicts (possibly empty)."""
+        result = self._run_json(["workspace", "list"])
+        if not result:
+            return []
+        return result.get("workspaces", [])
+
+    def list_panes_grouped(self):
+        """Panes annotated with tab + workspace labels/numbers and sorted by
+        (workspace number, tab number) so callers can group them for display.
+
+        Each pane gains: `tab_label`, `tab_number`, `workspace_label`,
+        `workspace_number`.
+        """
+        tabs = {t.get("tab_id"): t for t in self.list_tabs()}
+        workspaces = {w.get("workspace_id"): w for w in self.list_workspaces()}
+        panes = self.list_panes()
+        for pane in panes:
+            tab = tabs.get(pane.get("tab_id"), {})
+            ws = workspaces.get(pane.get("workspace_id"), {})
+            pane["tab_label"] = tab.get("label") or pane.get("tab_id", "?")
+            pane["tab_number"] = tab.get("number", 0)
+            pane["workspace_label"] = ws.get("label") or pane.get("workspace_id", "?")
+            pane["workspace_number"] = ws.get("number", 0)
+        panes.sort(key=lambda p: (p.get("workspace_number", 0), p.get("tab_number", 0)))
+        return panes
+
     # -- sending -----------------------------------------------------------
 
     def send_text_and_enter(self, pane_id, text):

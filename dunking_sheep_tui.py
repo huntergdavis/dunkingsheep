@@ -293,7 +293,7 @@ class DunkingSheepTui:
 
     def pick_target(self):
         """Choose a herdr pane to target (replaces window capture)."""
-        panes = self.herdr.list_panes_with_tabs()
+        panes = self.herdr.list_panes_grouped()
         if not panes:
             self.current().set_status("No herdr panes")
             self.set_global_status(self.herdr.server_error_hint())
@@ -352,14 +352,31 @@ class DunkingSheepTui:
         finally:
             curses.curs_set(0)
 
+    # Indentation of tab rows beneath their workspace header.
+    TARGET_INDENT = 4
+
     def target_modal(self, panes):
-        """Full-screen selectable list of herdr panes. Returns a pane dict or None."""
+        """Full-screen picker of herdr panes, grouped by workspace with the tab
+        rows indented beneath each workspace name. Returns a pane dict or None."""
+        # Land the selection on the first agent pane for convenience.
         sel = 0
-        # Prefer to land on agent panes first for convenience.
         for idx, pane in enumerate(panes):
             if pane.get("agent"):
                 sel = idx
                 break
+
+        # Build the display: a workspace header row before each new workspace,
+        # then one selectable row per pane. `display` items are either
+        # ("ws", label) or ("pane", pane_index).
+        display = []
+        last_ws = object()
+        for i, pane in enumerate(panes):
+            ws = pane.get("workspace_label") or pane.get("workspace_id") or "?"
+            if ws != last_ws:
+                display.append(("ws", ws))
+                last_ws = ws
+            display.append(("pane", i))
+
         while True:
             h, w = self.stdscr.getmaxyx()
             win = curses.newwin(h, w, 0, 0)
@@ -369,26 +386,36 @@ class DunkingSheepTui:
             self.safe_addstr(win, 1, 2, "Select target pane", w - 4, curses.A_BOLD)
             self.safe_addstr(win, 2, 2,
                              "j/k or arrows move, Enter selects, Esc cancels", w - 4)
-            header = self._format_target_row("Tab", "Agent", "Status", "Directory", "Pane", w)
-            self.safe_addstr(win, 4, 2, header, w - 4, curses.A_BOLD)
+            indent = self.TARGET_INDENT
+            header = self._format_target_row("Tab", "Agent", "Status", "Directory", w, indent)
+            self.safe_addstr(win, 3, 2 + indent, header, w - 4 - indent, curses.A_BOLD)
 
             list_top = 5
             visible = max(1, h - list_top - 2)
+
+            # Scroll so the selected pane's display row stays on screen.
+            sel_row = next(i for i, d in enumerate(display) if d == ("pane", sel))
             start = 0
-            if sel >= visible:
-                start = sel - visible + 1
-            for screen_i, index in enumerate(range(start, min(len(panes), start + visible))):
-                pane = panes[index]
-                row = self._format_target_row(
-                    pane.get("tab_label") or pane.get("tab_id") or "?",
-                    pane.get("agent") or "-",
-                    pane.get("agent_status") or "-",
-                    pane.get("cwd") or "-",
-                    pane.get("pane_id", "?"),
-                    w,
-                )
-                attr = curses.A_REVERSE if index == sel else curses.A_NORMAL
-                self.safe_addstr(win, list_top + screen_i, 2, row, w - 4, attr)
+            if sel_row >= visible:
+                start = sel_row - visible + 1
+
+            for screen_i, drow in enumerate(range(start, min(len(display), start + visible))):
+                kind, payload = display[drow]
+                y = list_top + screen_i
+                if kind == "ws":
+                    self.safe_addstr(win, y, 2, payload, w - 4, curses.A_BOLD)
+                else:
+                    pane = panes[payload]
+                    row = self._format_target_row(
+                        pane.get("tab_label") or pane.get("tab_id") or "?",
+                        pane.get("agent") or "-",
+                        pane.get("agent_status") or "-",
+                        pane.get("cwd") or "-",
+                        w,
+                        indent,
+                    )
+                    attr = curses.A_REVERSE if payload == sel else curses.A_NORMAL
+                    self.safe_addstr(win, y, 2 + indent, row, w - 4 - indent, attr)
             win.refresh()
 
             key = win.getch()
@@ -401,15 +428,17 @@ class DunkingSheepTui:
             elif key in (curses.KEY_DOWN, ord("j")):
                 sel = min(len(panes) - 1, sel + 1)
 
-    def _format_target_row(self, tab, agent, status, cwd, pane, width):
+    def _format_target_row(self, tab, agent, status, cwd, width, indent=0):
+        avail = width - 4 - indent
+        # fixed cols + 3 separators: 20 + 1 + 10 + 1 + 9 + 1 = 42
+        dir_w = max(10, avail - 42)
         columns = [
             clip(tab, 20).ljust(20),
             clip(agent, 10).ljust(10),
             clip(status, 9).ljust(9),
-            clip(cwd, max(10, width - 66)).ljust(max(10, width - 66)),
-            clip(pane, 8).ljust(8),
+            clip(cwd, dir_w).ljust(dir_w),
         ]
-        return clip(" ".join(columns), width - 4)
+        return clip(" ".join(columns), avail)
 
     def text_modal(self, initial_text):
         h, w = self.stdscr.getmaxyx()

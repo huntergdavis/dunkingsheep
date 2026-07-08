@@ -41,12 +41,16 @@ calls instead of focus + ydotool. `start()` refuses to run without a target.
 
 Same key handling, same table layout, same modals. Differences:
 
-- `c` opens **`pick_target`** → `target_modal`, a scrollable list of herdr panes
-  (tab name, agent, status, cwd, pane id) instead of a 2-second active-window
-  grab. This is strictly better in a herdr world: you see every pane and choose
-  precisely. Tab labels come from `herdr tab list` joined onto panes by
-  `tab_id` (`HerdrClient.list_panes_with_tabs`), since `pane list` alone only
-  carries the raw `tab_id` — the tab name is what makes the list readable.
+- `c` opens **`pick_target`** → `target_modal`, a scrollable picker instead of a
+  2-second active-window grab. This is strictly better in a herdr world: you see
+  every pane and choose precisely. The picker is **grouped by workspace**: each
+  workspace name is a header and its tabs are indented beneath it, shown as
+  columns `Tab · Agent · Status · Directory`. The raw pane id is not displayed
+  (it means nothing to a human); it is still what gets stored as the send
+  target. Labels/ordering come from `herdr workspace list` + `herdr tab list`
+  joined onto `herdr pane list` by id (`HerdrClient.list_panes_grouped`), since
+  `pane list` alone only carries raw ids. Panes are sorted by (workspace number,
+  tab number) so the grouping is stable.
 - `runtime_checks()` checks the herdr server instead of ydotool.
 - The `suppress_typed_input` machinery is removed — sends never reach the OS
   keyboard, so there is nothing to suppress.
