@@ -58,7 +58,8 @@ Then:
 
 1. **Pick a target** — press `c` to open the pane picker. Move with `j`/`k` or
    the arrow keys, `Enter` selects, `Esc` cancels. The list shows each pane's
-   id, agent, status, and directory.
+   tab name, agent, status, directory, and pane id — so it's easy to tell tabs
+   apart at a glance.
 2. **Set the interval** — press `i`, type minutes (e.g. `10`), `Enter` saves.
 3. **Set the text** — press `e` for the full-screen editor. `Ctrl+G` saves,
    `Esc` cancels. Default is `continue`.

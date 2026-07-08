@@ -101,6 +101,30 @@ class HerdrClient:
                 return pane
         return None
 
+    def list_tabs(self):
+        """Return a list of tab dicts (possibly empty)."""
+        result = self._run_json(["tab", "list"])
+        if not result:
+            return []
+        return result.get("tabs", [])
+
+    def tab_labels(self):
+        """Map of tab_id -> human label for annotating panes."""
+        labels = {}
+        for tab in self.list_tabs():
+            tab_id = tab.get("tab_id")
+            if tab_id:
+                labels[tab_id] = tab.get("label") or tab.get("number") or tab_id
+        return labels
+
+    def list_panes_with_tabs(self):
+        """Panes from `list_panes`, each annotated with a `tab_label` key."""
+        labels = self.tab_labels()
+        panes = self.list_panes()
+        for pane in panes:
+            pane["tab_label"] = labels.get(pane.get("tab_id"), pane.get("tab_id", "?"))
+        return panes
+
     # -- sending -----------------------------------------------------------
 
     def send_text_and_enter(self, pane_id, text):

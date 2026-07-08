@@ -48,6 +48,7 @@ class DunkerTuiRow:
         self.target_pane_id = None
         self.target_agent = None
         self.target_cwd = None
+        self.target_tab = None
         self._lock = threading.Lock()
 
     def set_status(self, value):
@@ -61,9 +62,10 @@ class DunkerTuiRow:
     def window_label(self):
         if not self.target_pane_id:
             return "(no target)"
+        tab = self.target_tab or self.target_pane_id
         if self.target_agent:
-            return f"{self.target_agent} [{self.target_pane_id}]"
-        return self.target_pane_id
+            return f"{tab} / {self.target_agent}"
+        return tab
 
     def text_preview(self):
         return self.text_value.replace("\n", " ")
@@ -108,6 +110,7 @@ class DunkerTuiRow:
         self.target_pane_id = pane.get("pane_id")
         self.target_agent = pane.get("agent")
         self.target_cwd = pane.get("cwd")
+        self.target_tab = pane.get("tab_label") or pane.get("tab_id")
         self.set_status("Target set")
 
     def test_send(self):
@@ -290,7 +293,7 @@ class DunkingSheepTui:
 
     def pick_target(self):
         """Choose a herdr pane to target (replaces window capture)."""
-        panes = self.herdr.list_panes()
+        panes = self.herdr.list_panes_with_tabs()
         if not panes:
             self.current().set_status("No herdr panes")
             self.set_global_status(self.herdr.server_error_hint())
@@ -366,7 +369,7 @@ class DunkingSheepTui:
             self.safe_addstr(win, 1, 2, "Select target pane", w - 4, curses.A_BOLD)
             self.safe_addstr(win, 2, 2,
                              "j/k or arrows move, Enter selects, Esc cancels", w - 4)
-            header = self._format_target_row("Pane", "Agent", "Status", "Directory", w)
+            header = self._format_target_row("Tab", "Agent", "Status", "Directory", "Pane", w)
             self.safe_addstr(win, 4, 2, header, w - 4, curses.A_BOLD)
 
             list_top = 5
@@ -377,10 +380,11 @@ class DunkingSheepTui:
             for screen_i, index in enumerate(range(start, min(len(panes), start + visible))):
                 pane = panes[index]
                 row = self._format_target_row(
-                    pane.get("pane_id", "?"),
+                    pane.get("tab_label") or pane.get("tab_id") or "?",
                     pane.get("agent") or "-",
                     pane.get("agent_status") or "-",
                     pane.get("cwd") or "-",
+                    pane.get("pane_id", "?"),
                     w,
                 )
                 attr = curses.A_REVERSE if index == sel else curses.A_NORMAL
@@ -397,12 +401,13 @@ class DunkingSheepTui:
             elif key in (curses.KEY_DOWN, ord("j")):
                 sel = min(len(panes) - 1, sel + 1)
 
-    def _format_target_row(self, pane, agent, status, cwd, width):
+    def _format_target_row(self, tab, agent, status, cwd, pane, width):
         columns = [
-            clip(pane, 12).ljust(12),
-            clip(agent, 12).ljust(12),
+            clip(tab, 20).ljust(20),
+            clip(agent, 10).ljust(10),
             clip(status, 9).ljust(9),
-            clip(cwd, max(10, width - 44)),
+            clip(cwd, max(10, width - 66)).ljust(max(10, width - 66)),
+            clip(pane, 8).ljust(8),
         ]
         return clip(" ".join(columns), width - 4)
 
