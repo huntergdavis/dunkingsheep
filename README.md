@@ -11,6 +11,26 @@ instead of capturing an OS window and typing through `ydotool`, it targets a
 herdr **pane** and delivers text over herdr's socket API. You run it as a
 process in a herdr tab and point it at your agent panes.
 
+## 🎬 Demo
+
+<!--
+  GitHub plays a video INLINE only when the URL is a github.com/user-attachments
+  asset. To upgrade the embed below to true inline playback:
+    1. Open https://github.com/huntergdavis/dunkingsheep/issues/new
+    2. Drag dunkingsheep-demo.mp4 into the comment box and wait for it to upload
+    3. Copy the .../user-attachments/assets/<uuid> URL GitHub inserts
+    4. Replace the <video src="..."> below with that URL (you can close the issue)
+  Until then the poster below links straight to the raw .mp4 (click to play).
+-->
+
+<video src="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4"
+       poster="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-poster.png"
+       width="900" controls muted playsinline>
+  <a href="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4">▶ Watch the demo</a>
+</video>
+
+[▶ **Watch the demo**](https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4) — picking an agent pane from the workspace-grouped target list and dunking on it.
+
 ## Why a herdr version?
 
 Dunking Bird drives the OS input layer: capture a window, re-focus it, type with
@@ -145,3 +165,10 @@ The target pane may have been closed. Press `c` and re-select a live pane.
 ---
 
 *Dunking Sheep is to herdr what Dunking Bird is to your desktop. 🐑*
+
+---
+
+<p align="center">
+  <img src="dunkingsheep.png" alt="A sheep slam-dunking a keyboard through a basketball hoop" width="70%"><br>
+  <sub><em>required AI slop</em></sub>
+</p>

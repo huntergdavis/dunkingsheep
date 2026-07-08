@@ -5,3 +5,8 @@ venv/
 .venv/
 *.log
 .DS_Store
+
+# large local source recording (demo mp4 is committed instead)
+dunkingsheep.mov
+._*
+.DS_Store
