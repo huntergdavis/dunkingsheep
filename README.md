@@ -13,23 +13,9 @@ process in a herdr tab and point it at your agent panes.
 
 ## 🎬 Demo
 
-<!--
-  GitHub plays a video INLINE only when the URL is a github.com/user-attachments
-  asset. To upgrade the embed below to true inline playback:
-    1. Open https://github.com/huntergdavis/dunkingsheep/issues/new
-    2. Drag dunkingsheep-demo.mp4 into the comment box and wait for it to upload
-    3. Copy the .../user-attachments/assets/<uuid> URL GitHub inserts
-    4. Replace the <video src="..."> below with that URL (you can close the issue)
-  Until then the poster below links straight to the raw .mp4 (click to play).
--->
+https://github.com/user-attachments/assets/7cb5f9d6-4cab-44e1-82c7-6dd3567b21ac
 
-<video src="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4"
-       poster="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-poster.png"
-       width="900" controls muted playsinline>
-  <a href="https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4">▶ Watch the demo</a>
-</video>
-
-[▶ **Watch the demo**](https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4) — picking an agent pane from the workspace-grouped target list and dunking on it.
+*Picking an agent pane from the workspace-grouped target list and dunking on it. ([download the mp4](https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4))*
 
 ## Why a herdr version?
 
