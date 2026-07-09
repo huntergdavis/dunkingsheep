@@ -466,13 +466,27 @@ class DunkingSheepTui:
             win.box()
             self.safe_addstr(win, 1, 2, "Edit text to send", w - 4, curses.A_BOLD)
             self.safe_addstr(win, 2, 2, "Ctrl+G saves, Esc cancels", w - 4)
-            for idx, line in enumerate(initial_text.splitlines() or [""]):
+            # Write the initial text WITHOUT padding to the window width; padding
+            # would leave the cursor stranded at the far right of the line. Track
+            # the end of the last line so we can place the cursor there.
+            lines = initial_text.splitlines() or [""]
+            last_y, last_x = 0, 0
+            for idx, line in enumerate(lines):
                 if idx >= text_h:
                     break
-                self.safe_addstr(edit, idx, 0, line, text_w)
+                try:
+                    edit.addstr(idx, 0, line[:text_w - 1])
+                except curses.error:
+                    pass
+                last_y = idx
+                last_x = min(len(line), text_w - 1)
             win.refresh()
             edit.refresh()
             curses.curs_set(1)
+            try:
+                edit.move(last_y, last_x)
+            except curses.error:
+                pass
             box = textpad.Textbox(edit, insert_mode=True)
             text = box.edit(validate)
             if cancelled:
