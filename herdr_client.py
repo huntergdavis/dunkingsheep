@@ -12,6 +12,10 @@ import json
 import os
 import shutil
 import subprocess
+import time
+
+
+SEND_TEXT_SETTLE_DELAY_S = 0.1
 
 
 def _find_herdr():
@@ -161,6 +165,10 @@ class HerdrClient:
         code, _out, err = self._run(["pane", "send-text", pane_id, text])
         if code != 0:
             return False, (err.strip() or "send-text failed")
+        # Give terminal apps time to finish processing the injected text.
+        # Without this pause, burst/paste detection can consume Enter as a
+        # newline in the input editor instead of treating it as submit.
+        time.sleep(SEND_TEXT_SETTLE_DELAY_S)
         code, _out, err = self._run(["pane", "send-keys", pane_id, "Enter"])
         if code != 0:
             return False, (err.strip() or "send-keys failed")

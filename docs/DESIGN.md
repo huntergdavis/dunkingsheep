@@ -23,7 +23,9 @@ and parses JSON. It never raises to the UI; it returns data or `(ok, message)`.
 - `list_panes()` — the pool of targets, from `herdr pane list`.
 - `get_pane(pane_id)` — refresh a single target (detect if it disappeared).
 - `send_text_and_enter(pane_id, text)` — the core action:
-  `herdr pane send-text` then `herdr pane send-keys <pane> Enter`.
+  `herdr pane send-text`, a 100 ms input-settling pause, then
+  `herdr pane send-keys <pane> Enter`. The pause keeps terminal burst/paste
+  detection from treating Enter as another character in the input editor.
 - `notify(title, body)` — optional herdr toast.
 
 Shelling out to the CLI (rather than speaking the raw socket protocol) mirrors
