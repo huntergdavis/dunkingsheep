@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 #
-# Launch Dunking Sheep TUI. Meant to be run inside a herdr tab (the whole point
-# is to drive *other* herdr panes), but it works from any terminal as long as a
-# herdr server is running and the `herdr` binary is on PATH.
+# Launch the Dunking Sheep TUI. Meant to be run inside a herdr tab (the whole
+# point is to drive *other* herdr panes), but it works from any terminal as long
+# as a herdr server is running and the `herdr` binary is on PATH.
+#
+# The TUI is a live view onto the Dunking Sheep daemon (started automatically).
+# The same dunks are reachable from `./dunkingsheep ...`, the unix socket and
+# the MCP server; run `./dunkingsheep guide` for the whole story.
 
 set -euo pipefail
 
@@ -17,4 +21,4 @@ if ! command -v herdr >/dev/null 2>&1; then
 fi
 
 PYTHON="${PYTHON:-python3}"
-exec "$PYTHON" "$SCRIPT_DIR/dunking_sheep_tui.py" "$@"
+exec "$PYTHON" "$SCRIPT_DIR/dunkingsheep" tui "$@"

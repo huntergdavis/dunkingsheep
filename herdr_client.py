@@ -15,7 +15,34 @@ import subprocess
 import time
 
 
-SEND_TEXT_SETTLE_DELAY_S = 0.1
+# Keep individual paste events below Codex's large-paste placeholder path.  A
+# long placeholder can consume Enter instead of submitting; smaller ordered
+# paste events reconstruct the same text without entering that state.
+SEND_TEXT_CHUNK_CHARS = 900
+SEND_TEXT_CHUNK_DELAY_S = 0.05
+
+# Codex's paste-burst detector suppresses Enter for 120 ms after burst activity.
+# Cross that window with margin before sending the submit key.
+SEND_TEXT_SETTLE_DELAY_S = 0.2
+
+
+def _text_chunks(text, max_chars=SEND_TEXT_CHUNK_CHARS):
+    """Yield non-empty character chunks without splitting a CRLF pair."""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        if end < len(text) and text[end - 1:end + 1] == "\r\n":
+            # Prefer moving the pair to the next chunk.  With a one-character
+            # limit that would make no progress, so let this chunk exceed the
+            # requested size by one instead.
+            if end - start == 1:
+                end += 1
+            else:
+                end -= 1
+        yield text[start:end]
+        start = end
 
 
 def _find_herdr():
@@ -162,17 +189,68 @@ class HerdrClient:
         """Send literal text to a pane, then press Enter. Returns (ok, msg)."""
         if not pane_id:
             return False, "No target"
-        code, _out, err = self._run(["pane", "send-text", pane_id, text])
-        if code != 0:
-            return False, (err.strip() or "send-text failed")
-        # Give terminal apps time to finish processing the injected text.
-        # Without this pause, burst/paste detection can consume Enter as a
-        # newline in the input editor instead of treating it as submit.
+        chunks = list(_text_chunks(text))
+        for index, chunk in enumerate(chunks):
+            code, _out, err = self._run(["pane", "send-text", pane_id, chunk])
+            if code != 0:
+                return False, (err.strip() or "send-text failed")
+            if index + 1 < len(chunks):
+                time.sleep(SEND_TEXT_CHUNK_DELAY_S)
+
+        # Give terminal apps time to flush their paste/burst state.  Sending
+        # Enter inside that state inserts a newline instead of submitting.
         time.sleep(SEND_TEXT_SETTLE_DELAY_S)
         code, _out, err = self._run(["pane", "send-keys", pane_id, "Enter"])
         if code != 0:
             return False, (err.strip() or "send-keys failed")
         return True, "sent"
+
+    def send_text(self, pane_id, text):
+        """Send literal text to a pane without pressing Enter. Returns (ok, msg)."""
+        if not pane_id:
+            return False, "No target"
+        chunks = list(_text_chunks(text))
+        for index, chunk in enumerate(chunks):
+            code, _out, err = self._run(["pane", "send-text", pane_id, chunk])
+            if code != 0:
+                return False, (err.strip() or "send-text failed")
+            if index + 1 < len(chunks):
+                time.sleep(SEND_TEXT_CHUNK_DELAY_S)
+        return True, "sent"
+
+    # -- inspection --------------------------------------------------------
+
+    def agent_status(self, pane_id):
+        """Return the pane's agent_status (idle|working|blocked|unknown), or
+        None if the pane cannot be found."""
+        result = self._run_json(["pane", "get", pane_id])
+        if not result:
+            return None
+        pane = result.get("pane") or {}
+        return pane.get("agent_status") or "unknown"
+
+    def read_pane(self, pane_id, lines=40, source=None):
+        """Return the last `lines` lines of a pane's output as text, or None if
+        the pane cannot be read.
+
+        `herdr pane read` prints plain text (not JSON). The `recent` source
+        includes scrollback but comes back empty for a pane herdr has never
+        displayed, so fall back to the `visible` screen in that case."""
+        sources = [source] if source else ["recent", "visible"]
+        for src in sources:
+            args = ["pane", "read", pane_id, "--source", src, "--lines", str(int(lines))]
+            code, out, _err = self._run(args)
+            if code != 0:
+                return None
+            if out.strip():
+                # herdr pads the top with the empty rows above the content.
+                return out.lstrip("\n")
+        return ""
+
+    @staticmethod
+    def self_pane_id():
+        """The pane this process runs in, if herdr launched it."""
+        return os.environ.get("HERDR_PANE_ID") or None
 
     def notify(self, title, body=None):
         """Fire-and-forget herdr toast notification."""

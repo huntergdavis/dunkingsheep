@@ -1,9 +1,9 @@
 # Dunking Sheep has no third-party Python dependencies.
 #
-# It uses only the Python standard library (curses, threading, subprocess, json)
-# and shells out to the `herdr` CLI, which must be installed separately and have
-# a running server. See https://herdr.dev for herdr installation.
+# It uses only the Python standard library (curses, threading, subprocess,
+# socket, json) and shells out to the `herdr` CLI, which must be installed
+# separately and have a running server. The MCP server is also stdlib-only.
 #
 # Requirements:
-#   - Python 3.6+
-#   - herdr (with a running server) on PATH or at ~/.local/bin/herdr
+#   - Python 3.8+
+#   - herdr 0.7.4+ (with a running server) on PATH or at ~/.local/bin/herdr

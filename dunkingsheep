@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""
+dunkingsheep - command-line control of Dunking Sheep.
+
+    dunkingsheep add --target "Codex hunterdavis.com" --every 15 --text continue
+    dunkingsheep list
+    dunkingsheep remove d3
+    dunkingsheep send self "hello from the future"
+    dunkingsheep panes
+    dunkingsheep tui           # the curses UI
+    dunkingsheep mcp           # MCP server on stdio (for Claude Code etc.)
+    dunkingsheep serve         # run the daemon in the foreground
+
+Every subcommand except `serve`, `tui` and `mcp` is a thin client of the
+daemon over its unix socket; the daemon is started automatically if it is not
+running. Add `--json` for machine-readable output.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+from dunk_client import DaemonUnavailable, FlockClient  # noqa: E402
+from dunk_core import VERSION, DunkError, format_interval  # noqa: E402
+from dunk_help import SHORT, guide  # noqa: E402
+
+CLI_ABS = os.path.abspath(__file__)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="dunkingsheep",
+        description="Send text into herdr panes on a schedule; control it from the "
+                    "keyboard, this CLI, a unix socket, or MCP.",
+        epilog=SHORT,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action="version", version=f"dunkingsheep {VERSION}")
+    parser.add_argument("--json", action="store_true", help="print raw JSON results")
+    parser.add_argument("--socket", help="daemon socket path (default: $DUNKINGSHEEP_SOCKET "
+                                         "or ~/.config/dunkingsheep/dunkingsheep.sock)")
+    parser.add_argument("--self-pane", help="pane id to use for target 'self' "
+                                            "(default: $HERDR_PANE_ID)")
+    parser.add_argument("--no-start-daemon", action="store_true",
+                        help="fail instead of auto-starting the daemon")
+    # `--json` is also accepted after the subcommand (agents tend to put it last).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", metavar="<command>",
+                                parser_class=lambda **kw: argparse.ArgumentParser(
+                                    parents=[common], **kw))
+    sub.required = True
+
+    sub.add_parser("status", help="daemon health and counts")
+    p = sub.add_parser("list", aliases=["ls"], help="list all dunks",
+                       description="List every dunk: id, running, live status, target, "
+                                   "interval, sends (done/max), idle gate, text.")
+
+    p = sub.add_parser("get", help="show one dunk")
+    p.add_argument("id")
+
+    p = sub.add_parser(
+        "add", help="create a dunk (starts immediately)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Create a dunk that types TEXT + Enter into TARGET every EVERY minutes.",
+        epilog="examples:\n"
+               "  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n"
+               "  dunkingsheep add -T w8:p3 -e 1.5h -t \"status report please\" -n hourly\n"
+               "  dunkingsheep add -T self -e 30 --max-sends 1 -t \"check CI now\"\n"
+               "  dunkingsheep add -T self -e 60 --only-idle \\\n"
+               "      -t \"If the backlog is done: dunkingsheep remove {id}. Else continue.\"\n"
+               "placeholders in TEXT: {id} {name} {count} {target} {interval} {time} {date}",
+    )
+    p.add_argument("--target", "-T", help="pane id, 'self', or a unique label substring")
+    p.add_argument("--text", "-t", default="continue",
+                   help="text to send (default 'continue'); {id} etc. are expanded")
+    p.add_argument("--every", "-e", "--interval", dest="every", default="10",
+                   help="interval: minutes, or e.g. 90s / 1.5h (default 10)")
+    p.add_argument("--name", "-n", help="label for the dunk")
+    p.add_argument("--only-idle", action="store_true",
+                   help="hold each send until the target agent is idle")
+    p.add_argument("--max-sends", type=int, help="remove the dunk after N sends")
+    p.add_argument("--no-start", action="store_true", help="create it stopped")
+
+    p = sub.add_parser("update", aliases=["set"], help="change a dunk's settings")
+    p.add_argument("id")
+    p.add_argument("--target", "-T")
+    p.add_argument("--text", "-t")
+    p.add_argument("--every", "-e", "--interval", dest="every")
+    p.add_argument("--name", "-n")
+    gate = p.add_mutually_exclusive_group()
+    gate.add_argument("--only-idle", action="store_true")
+    gate.add_argument("--any-time", action="store_true", help="clear only-idle gating")
+    p.add_argument("--max-sends", type=int, help="0 clears the limit")
+
+    for name, aliases, help_text in (
+        ("remove", ["rm", "delete"], "delete a dunk"),
+        ("start", [], "start a dunk"),
+        ("stop", [], "stop a dunk"),
+        ("toggle", [], "start if stopped, stop if running"),
+    ):
+        p = sub.add_parser(name, aliases=aliases, help=help_text)
+        p.add_argument("id")
+
+    sub.add_parser("stop-all", help="stop every running dunk")
+
+    p = sub.add_parser("fire", aliases=["test"], help="send a dunk's text now")
+    p.add_argument("id")
+    p.add_argument("--countdown", type=int, default=0, help="seconds to count down first")
+
+    p = sub.add_parser("send", help="type text + Enter into a pane once, right now",
+                       epilog="example: dunkingsheep send \"Claude Proj\" please summarize your progress")
+    p.add_argument("target")
+    p.add_argument("text", nargs="+")
+
+    sub.add_parser("panes", help="list herdr panes (possible targets)")
+
+    p = sub.add_parser("read", help="read recent output of a pane")
+    p.add_argument("target")
+    p.add_argument("--lines", "-l", type=int, default=40)
+
+    p = sub.add_parser("shutdown", help="stop the daemon (dunks resume on next start)")
+    p.add_argument("--stop-all", action="store_true", help="also stop every dunk first")
+
+    p = sub.add_parser("serve", help="run the daemon in the foreground")
+    p.add_argument("--state-file", help="override the dunks.json path")
+    p.add_argument("--no-log-file", action="store_true")
+
+    sub.add_parser("tui", help="open the curses UI")
+    sub.add_parser("mcp", help="run the MCP server on stdio (for agent harnesses)")
+
+    p = sub.add_parser("mcp-setup", help="show or apply MCP registration for agent harnesses",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description="Print the exact command or config block that registers "
+                                   "Dunking Sheep as an MCP server with a harness.",
+                       epilog="harnesses: " + ", ".join(HARNESSES) + "\n"
+                              "example: dunkingsheep mcp-setup codex --apply")
+    p.add_argument("harness", nargs="?", default="all", choices=["all", *HARNESSES])
+    p.add_argument("--apply", action="store_true",
+                   help="run the harness CLI to register (claude, codex, gemini)")
+    p.add_argument("--scope", default="user", help="scope for claude/gemini (default user)")
+
+    p = sub.add_parser("guide", aliases=["help", "docs"],
+                       help="print the full guide (concepts, surfaces, protocol, recipes)")
+    p.add_argument("--markdown", action="store_true", help="render as markdown")
+
+    p = sub.add_parser("commands", help="list the socket/MCP command registry",
+                       description="Every command the socket API and MCP server accept. "
+                                   "With --json: names, descriptions and JSON schemas.")
+    return parser
+
+
+# -- MCP registration for agent harnesses ------------------------------------
+
+HARNESSES = ("claude", "codex", "gemini", "cursor", "json", "toml")
+
+
+def mcp_setup_text(harness, scope="user"):
+    """Return (text, apply_command or None) for one harness."""
+    launch = f"python3 {CLI_ABS} mcp"
+    json_block = json.dumps(
+        {"mcpServers": {"dunkingsheep": {"command": "python3", "args": [CLI_ABS, "mcp"]}}},
+        indent=2,
+    )
+    toml_block = (
+        "[mcp_servers.dunkingsheep]\n"
+        'command = "python3"\n'
+        f'args = ["{CLI_ABS}", "mcp"]\n'
+    )
+    if harness == "claude":
+        cmd = ["claude", "mcp", "add", "--scope", scope, "dunkingsheep", "--", "python3", CLI_ABS, "mcp"]
+        return (f"# Claude Code\n{' '.join(cmd)}\n"
+                f"claude mcp list   # expect: dunkingsheep: {launch} - Connected\n"), cmd
+    if harness == "codex":
+        cmd = ["codex", "mcp", "add", "dunkingsheep", "--", "python3", CLI_ABS, "mcp"]
+        return (f"# OpenAI Codex CLI\n{' '.join(cmd)}\n"
+                f"codex mcp list    # expect a dunkingsheep row, status enabled\n"
+                f"# or in ~/.codex/config.toml:\n{toml_block}"), cmd
+    if harness == "gemini":
+        cmd = ["gemini", "mcp", "add", "--scope", scope, "dunkingsheep", "python3", CLI_ABS, "mcp"]
+        return (f"# Gemini CLI\n{' '.join(cmd)}\n"
+                f"# or add the JSON block below to ~/.gemini/settings.json\n"), cmd
+    if harness == "cursor":
+        return (f"# Cursor / Windsurf / VS Code / Claude Desktop: add to the mcp.json "
+                f"(or claude_desktop_config.json) file:\n{json_block}\n"), None
+    if harness == "json":
+        return json_block + "\n", None
+    if harness == "toml":
+        return toml_block, None
+    raise DunkError(f"unknown harness {harness!r}")
+
+
+def run_mcp_setup(args):
+    harnesses = list(HARNESSES[:4]) if args.harness == "all" else [args.harness]
+    if args.harness == "all":
+        print("Register Dunking Sheep as an MCP server. Pick your harness, or run\n"
+              "`dunkingsheep mcp-setup <harness> --apply` to have this done for you.\n")
+    exit_code = 0
+    for harness in harnesses:
+        text, cmd = mcp_setup_text(harness, scope=args.scope)
+        print(text)
+        if args.apply and args.harness != "all":
+            if cmd is None:
+                print(f"error: {harness} has no CLI to apply; paste the block above", file=sys.stderr)
+                return 2
+            import shutil
+            import subprocess
+            if shutil.which(cmd[0]) is None:
+                print(f"error: {cmd[0]} is not on PATH", file=sys.stderr)
+                return 3
+            print(f"$ {' '.join(cmd)}")
+            proc = subprocess.run(cmd)
+            exit_code = proc.returncode
+    return exit_code
+
+
+# -- human formatting ---------------------------------------------------------------
+
+def _clip(text, width):
+    text = str(text if text is not None else "")
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _every(minutes):
+    text = format_interval(minutes)
+    return text if text.endswith("s") else text + "m"
+
+
+def print_dunks(dunks):
+    if not dunks:
+        print("no dunks")
+        return
+    print(f"{'ID':<5} {'RUN':<4} {'STATUS':<16} {'TARGET':<28} {'EVERY':>6} {'SENT':>6} {'GATE':<5} TEXT")
+    for dunk in dunks:
+        sent = str(dunk.get("send_count") or 0)
+        if dunk.get("max_sends"):
+            sent += f"/{dunk['max_sends']}"
+        name = f" ({dunk['name']})" if dunk.get("name") else ""
+        print(
+            f"{_clip(dunk['id'], 5):<5} "
+            f"{'yes' if dunk.get('running') else 'no':<4} "
+            f"{_clip(dunk.get('status'), 16):<16} "
+            f"{_clip(dunk.get('target_label'), 28):<28} "
+            f"{_every(dunk.get('interval_minutes') or 0):>6} "
+            f"{sent:>6} "
+            f"{_clip(dunk.get('only_when') or '-', 5):<5} "
+            f"{_clip((dunk.get('text') or '').replace(chr(10), ' ') + name, 60)}"
+        )
+
+
+def print_dunk(dunk):
+    order = ("id", "name", "running", "status", "target_label", "target_pane_id",
+             "interval_minutes", "only_when", "max_sends", "send_count",
+             "next_send_in_s", "last_error", "text")
+    for key in order:
+        if key in dunk and dunk[key] not in (None, ""):
+            value = dunk[key]
+            if key == "text":
+                print(f"{key:<16} {value!r}")
+            else:
+                print(f"{key:<16} {value}")
+
+
+def print_panes(result):
+    panes = result.get("panes", [])
+    if not panes:
+        print("no herdr panes (is the herdr server running?)")
+        return
+    print(f"{'PANE':<8} {'WORKSPACE':<20} {'TAB':<24} {'AGENT':<8} {'STATUS':<8} DIRECTORY")
+    for pane in panes:
+        marker = "*" if pane.get("is_self") else " "
+        print(
+            f"{marker}{_clip(pane.get('pane_id'), 7):<7} "
+            f"{_clip(pane.get('workspace_label'), 20):<20} "
+            f"{_clip(pane.get('tab_label'), 24):<24} "
+            f"{_clip(pane.get('agent') or '-', 8):<8} "
+            f"{_clip(pane.get('agent_status') or '-', 8):<8} "
+            f"{_clip(pane.get('cwd'), 50)}"
+        )
+    if result.get("self_pane_id"):
+        print(f"* = this pane ({result['self_pane_id']})")
+
+
+def print_status(result):
+    for key in ("version", "pid", "dunkers", "running", "herdr_available",
+                "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
+        if result.get(key) not in (None, ""):
+            print(f"{key:<16} {result[key]}")
+
+
+# -- main -------------------------------------------------------------------------------
+
+def main(argv=None):
+    parser = build_parser()
+    if not (argv if argv is not None else sys.argv[1:]):
+        parser.print_help()
+        return 0
+    args = parser.parse_args(argv)
+    command = args.command
+
+    if command in ("guide", "help", "docs"):
+        sys.stdout.write(guide(markdown=args.markdown))
+        return 0
+    if command == "mcp-setup":
+        return run_mcp_setup(args)
+
+    if command == "serve":
+        from dunk_server import SOCKET_PATH, run_daemon
+        return run_daemon(
+            socket_path=args.socket or SOCKET_PATH,
+            state_file=args.state_file,
+            log_to_file=not args.no_log_file,
+        )
+    if command == "tui":
+        if args.socket:
+            os.environ["DUNKINGSHEEP_SOCKET"] = args.socket
+        from dunking_sheep_tui import main as tui_main
+        tui_main()
+        return 0
+    if command == "mcp":
+        if args.socket:
+            os.environ["DUNKINGSHEEP_SOCKET"] = args.socket
+        if args.self_pane:
+            os.environ["HERDR_PANE_ID"] = args.self_pane
+        from dunk_mcp import main as mcp_main
+        mcp_main()
+        return 0
+    if command == "commands":
+        from dunk_api import COMMANDS
+        if args.json:
+            print(json.dumps([
+                {"name": c.name, "description": c.description,
+                 "input_schema": c.input_schema(), "mcp_tool": c.mcp}
+                for c in COMMANDS
+            ], indent=2))
+            return 0
+        for cmd in COMMANDS:
+            params = ", ".join(
+                f"{key}{'*' if key in cmd.required else ''}" for key in cmd.params
+            )
+            flag = "" if cmd.mcp else "  [socket/cli only]"
+            print(f"{cmd.name}({params}){flag}\n    {cmd.description}")
+        return 0
+
+    try:
+        client = FlockClient.connect_or_start(
+            socket_path=args.socket, self_pane_id=args.self_pane,
+            start=not args.no_start_daemon,
+        )
+        result, printer = run_client_command(client, args)
+    except DunkError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except (DaemonUnavailable, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        printer(result)
+    return 0
+
+
+def run_client_command(client, args):
+    """Map CLI args onto a registry command; return (result, human printer)."""
+    command = args.command
+    if command == "status":
+        return client.call("status"), print_status
+    if command in ("list", "ls"):
+        return client.call("list_dunks"), lambda r: print_dunks(r["dunks"])
+    if command == "get":
+        return client.call("get_dunk", id=args.id), print_dunk
+    if command == "add":
+        payload = {
+            "text": args.text,
+            "interval_minutes": args.every,
+            "start": not args.no_start,
+        }
+        if args.target:
+            payload["target"] = args.target
+        if args.name:
+            payload["name"] = args.name
+        if args.only_idle:
+            payload["only_when"] = "idle"
+        if args.max_sends:
+            payload["max_sends"] = args.max_sends
+        return client.call("add_dunk", **payload), print_dunk
+    if command in ("update", "set"):
+        payload = {"id": args.id}
+        if args.target:
+            payload["target"] = args.target
+        if args.text is not None:
+            payload["text"] = args.text
+        if args.every is not None:
+            payload["interval_minutes"] = args.every
+        if args.name is not None:
+            payload["name"] = args.name
+        if args.only_idle:
+            payload["only_when"] = "idle"
+        elif args.any_time:
+            payload["only_when"] = None
+        if args.max_sends is not None:
+            payload["max_sends"] = args.max_sends or None
+        return client.call("update_dunk", **payload), print_dunk
+    if command in ("remove", "rm", "delete"):
+        return client.call("remove_dunk", id=args.id), lambda r: print(f"removed {r['id']}")
+    if command == "start":
+        return client.call("start_dunk", id=args.id), print_dunk
+    if command == "stop":
+        return client.call("stop_dunk", id=args.id), print_dunk
+    if command == "toggle":
+        return client.call("toggle_dunk", id=args.id), print_dunk
+    if command == "stop-all":
+        return client.call("stop_all"), lambda r: print_dunks(r["dunks"])
+    if command in ("fire", "test"):
+        result = client.call("fire_dunk", id=args.id, countdown_s=args.countdown, wait=True)
+        return result, lambda r: print(f"{r['id']}: {'sent' if r['ok'] else 'FAILED'} ({r['message']})")
+    if command == "send":
+        result = client.call("send_text", target=args.target, text=" ".join(args.text))
+        return result, lambda r: print(
+            f"{'sent to' if r['ok'] else 'FAILED for'} {r['target_label']} ({r['pane_id']})"
+        )
+    if command == "panes":
+        return client.call("list_panes"), print_panes
+    if command == "read":
+        return client.call("read_pane", target=args.target, lines=args.lines), \
+            lambda r: sys.stdout.write(r["text"] if r["text"].endswith("\n") else r["text"] + "\n")
+    if command == "shutdown":
+        return client.call("shutdown", stop_all=args.stop_all), \
+            lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))
+    raise DunkError(f"unhandled command {command}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

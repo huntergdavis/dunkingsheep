@@ -2,22 +2,33 @@
 """
 Dunking Sheep TUI - terminal interface for automated text sending, for herdr.
 
-This is a herdr-native sibling of Dunking Bird. Instead of capturing an OS
-window and typing with ydotool, each "dunker" targets a herdr pane and sends
-text through the herdr socket API (via the `herdr` CLI). Run it in a herdr tab
-and point dunkers at your agent panes to keep them engaged with prompts like
+This is a herdr-native sibling of Dunking Bird. Each "dunker" targets a herdr
+pane and sends text through the herdr socket API. Run it in a herdr tab and
+point dunkers at your agent panes to keep them engaged with prompts like
 "continue" or "keep going".
 
-Supports multiple concurrent dunkers, herdr pane targeting, test sends, custom
-text, and live countdowns.
+Since 2.0 the TUI is a *view* onto the Dunking Sheep daemon: every keypress is
+the same command an agent would send over the MCP server, the unix socket or
+the `dunkingsheep` CLI, and dunks created from any of those appear here live.
+Quitting the TUI leaves the dunks running in the daemon.
 """
 
 import curses
-from curses import textpad
-import threading
+import os
+import sys
 import time
 
-from herdr_client import HerdrClient
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+from dunk_client import DaemonUnavailable, FlockClient  # noqa: E402
+from dunk_core import DunkError, Flock, format_interval  # noqa: E402
+from dunk_api import dispatch  # noqa: E402
+from text_editor import TextEditorBuffer  # noqa: E402
+
+REFRESH_MS = 200
+RECONNECT_S = 2.0
 
 
 def clip(value, width):
@@ -31,149 +42,19 @@ def clip(value, width):
     return text[:width - 3] + "..."
 
 
-class DunkerTuiRow:
-    """One dunking sheep instance shown as one row in the terminal UI."""
+class LocalFlock:
+    """In-process fallback with the FlockClient call() interface, used when the
+    daemon cannot be started (e.g. the config dir is unwritable)."""
 
-    def __init__(self, app, row_num):
-        self.app = app
-        self.row_num = row_num
-        self.is_running = False
-        self.timer_thread = None
-        self.interval_minutes = "10.0"
-        self.interval_seconds = 600
-        self.text_value = "continue"
-        self.status = "Ready"
+    def __init__(self):
+        self.flock = Flock(persist=False, restore=False)
+        self.self_pane_id = os.environ.get("HERDR_PANE_ID")
 
-        # herdr target (replaces the captured OS window)
-        self.target_pane_id = None
-        self.target_agent = None
-        self.target_cwd = None
-        self.target_tab = None
-        self._lock = threading.Lock()
+    def call(self, cmd, **args):
+        return dispatch(self.flock, cmd, args, self_pane_id=self.self_pane_id)
 
-    def set_status(self, value):
-        with self._lock:
-            self.status = value
-
-    def get_status(self):
-        with self._lock:
-            return self.status
-
-    def window_label(self):
-        if not self.target_pane_id:
-            return "(no target)"
-        tab = self.target_tab or self.target_pane_id
-        if self.target_agent:
-            return f"{tab} / {self.target_agent}"
-        return tab
-
-    def text_preview(self):
-        return self.text_value.replace("\n", " ")
-
-    def toggle_running(self):
-        if self.is_running:
-            self.stop()
-        else:
-            self.start()
-
-    def start(self):
-        try:
-            mins = float(self.interval_minutes)
-            if mins <= 0:
-                raise ValueError
-            self.interval_seconds = mins * 60
-        except ValueError:
-            self.set_status("Bad interval!")
-            return
-
-        if not self.target_pane_id:
-            self.set_status("No target - press c")
-            return
-
-        if self.is_running:
-            return
-        self.is_running = True
-        self.timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
-        self.timer_thread.start()
-        self.app.update_count()
-
-    def stop(self):
-        self.is_running = False
-        self.set_status("Stopped")
-        self.app.update_count()
-
-    def destroy(self):
-        self.stop()
-
-    def set_target(self, pane):
-        """Point this dunker at a herdr pane dict from `herdr pane list`."""
-        self.target_pane_id = pane.get("pane_id")
-        self.target_agent = pane.get("agent")
-        self.target_cwd = pane.get("cwd")
-        self.target_tab = pane.get("tab_label") or pane.get("tab_id")
-        self.set_status("Target set")
-
-    def test_send(self):
-        threading.Thread(target=self._test_send_worker, daemon=True).start()
-
-    def _test_send_worker(self):
-        try:
-            if not self.target_pane_id:
-                self.set_status("No target - press c")
-                return
-            for i in range(2, 0, -1):
-                self.set_status(f"Test in {i}...")
-                time.sleep(1)
-            with self.app.send_lock:
-                self.set_status("Sending...")
-                ok = self._do_send()
-            t = time.strftime("%H:%M:%S")
-            self.set_status(f"Tested {t}" if ok else "Test failed")
-        except Exception as e:
-            self.set_status("Test failed")
-            print(f"Test error dunker #{self.row_num}: {e}")
-
-    def _timer_loop(self):
-        while self.is_running:
-            try:
-                mins = float(self.interval_minutes)
-                total = max(1, int(mins * 60))
-            except ValueError:
-                total = int(self.interval_seconds)
-
-            for tick in range(total):
-                if not self.is_running:
-                    return
-                rem = total - tick
-                m, s = divmod(rem, 60)
-                self.set_status(f"Next: {m:02d}:{s:02d}")
-                time.sleep(1)
-
-            if not self.is_running:
-                return
-
-            self.set_status("Waiting...")
-            with self.app.send_lock:
-                if not self.is_running:
-                    return
-                self.set_status("Sending...")
-                ok = self._do_send()
-
-            if self.is_running:
-                t = time.strftime("%H:%M:%S")
-                self.set_status(f"Sent {t}" if ok else "Send failed!")
-                time.sleep(1)
-
-    def _do_send(self):
-        text = self.text_value.strip()
-        if not text:
-            return True
-        ok, msg = self.app.herdr.send_text_and_enter(self.target_pane_id, text)
-        if ok:
-            self.app.set_global_status(f"Sent to {self.window_label()}")
-        else:
-            self.app.set_global_status(f"Send failed: {msg}")
-        return ok
+    def close(self):
+        self.flock.close()
 
 
 class DunkingSheepTui:
@@ -181,19 +62,62 @@ class DunkingSheepTui:
 
     def __init__(self, stdscr):
         self.stdscr = stdscr
-        self.herdr = HerdrClient()
-        self.dunkers = []
+        self.dunks = []
         self.selected = 0
-        self.send_lock = threading.Lock()
-        self.status_lock = threading.Lock()
         self.global_status = ""
+        self.message = ""
+        self.message_until = 0
         self.quit_requested = False
+        self.client = None
+        self.mode = "daemon"
+        self.last_connect_attempt = 0
 
         curses.curs_set(0)
         self.stdscr.keypad(True)
-        self.stdscr.timeout(200)
-        self.add_dunker()
-        self.runtime_checks()
+        self.stdscr.timeout(REFRESH_MS)
+        self.connect()
+        self.refresh()
+
+    # -- daemon connection ---------------------------------------------------
+
+    def connect(self):
+        self.last_connect_attempt = time.time()
+        try:
+            self.client = FlockClient.connect_or_start()
+            self.mode = "daemon"
+        except (DaemonUnavailable, OSError) as error:
+            self.client = LocalFlock()
+            self.mode = "local"
+            self.flash(f"Daemon unavailable ({error}); running in-process")
+
+    def rpc(self, cmd, **args):
+        """Run a command against the daemon; errors become a status flash."""
+        try:
+            return self.client.call(cmd, **args)
+        except DunkError as error:
+            self.flash(str(error))
+        except (DaemonUnavailable, OSError, ValueError) as error:
+            self.flash(f"Daemon error: {error}")
+            if self.mode == "daemon" and time.time() - self.last_connect_attempt > RECONNECT_S:
+                self.connect()
+        return None
+
+    def refresh(self):
+        result = self.rpc("list_dunks")
+        if result is None:
+            return
+        self.dunks = result.get("dunks", [])
+        self.selected = max(0, min(self.selected, len(self.dunks) - 1))
+        running = sum(1 for d in self.dunks if d.get("running"))
+        n = len(self.dunks)
+        label = f"{n} dunker{'s' if n != 1 else ''}"
+        if running:
+            label += f" ({running} running)"
+        if self.mode == "local":
+            label += "  [in-process, not shared]"
+        self.global_status = label
+
+    # -- main loop ---------------------------------------------------------------
 
     def run(self):
         while not self.quit_requested:
@@ -201,106 +125,138 @@ class DunkingSheepTui:
             key = self.stdscr.getch()
             if key != -1:
                 self.handle_key(key)
+            self.refresh()
         self.shutdown()
 
-    def add_dunker(self):
-        self.dunkers.append(DunkerTuiRow(self, len(self.dunkers) + 1))
-        self.selected = len(self.dunkers) - 1
-        self.update_count()
+    def flash(self, text, seconds=4):
+        self.message = text
+        self.message_until = time.time() + seconds
 
-    def remove_dunker(self):
-        if not self.dunkers:
-            return
-        d = self.dunkers.pop(self.selected)
-        d.destroy()
-        for index, dunker in enumerate(self.dunkers, start=1):
-            dunker.row_num = index
-        self.selected = max(0, min(self.selected, len(self.dunkers) - 1))
-        if not self.dunkers:
-            self.add_dunker()
-        self.update_count()
+    def current(self):
+        if not self.dunks:
+            return None
+        return self.dunks[self.selected]
 
-    def update_count(self):
-        n = len(self.dunkers)
-        running = sum(1 for d in self.dunkers if d.is_running)
-        if running:
-            self.set_global_status(f"{n} dunker{'s' if n != 1 else ''} ({running} running)")
-        else:
-            self.set_global_status(f"{n} dunker{'s' if n != 1 else ''}")
-
-    def set_global_status(self, value):
-        with self.status_lock:
-            self.global_status = value
-
-    def get_global_status(self):
-        with self.status_lock:
-            return self.global_status
-
-    def runtime_checks(self):
-        try:
-            if not self.herdr.is_available():
-                self.set_global_status(self.herdr.server_error_hint())
-            else:
-                self.update_count()
-        except Exception as e:
-            self.set_global_status(f"Check error: {e}")
+    def current_id(self):
+        dunk = self.current()
+        if dunk is None:
+            self.flash("No dunker selected - press a")
+            return None
+        return dunk["id"]
 
     def handle_key(self, key):
         if key in (ord("q"), 27):
             self.quit_requested = True
+        elif key == ord("Q"):
+            self.quit_and_shutdown()
         elif key in (curses.KEY_UP, ord("k")):
             self.selected = max(0, self.selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
-            self.selected = min(len(self.dunkers) - 1, self.selected + 1)
+            self.selected = min(max(0, len(self.dunks) - 1), self.selected + 1)
         elif key == ord("a"):
-            self.add_dunker()
+            result = self.rpc("add_dunk", start=False)
+            if result:
+                self.refresh()
+                for index, dunk in enumerate(self.dunks):
+                    if dunk["id"] == result["id"]:
+                        self.selected = index
         elif key == ord("d"):
-            self.remove_dunker()
+            dunk_id = self.current_id()
+            if dunk_id:
+                self.rpc("remove_dunk", id=dunk_id)
         elif key in (ord(" "), ord("s")):
-            self.current().toggle_running()
+            dunk_id = self.current_id()
+            if dunk_id:
+                self.rpc("toggle_dunk", id=dunk_id)
         elif key == ord("c"):
             self.pick_target()
         elif key == ord("t"):
-            self.current().test_send()
+            dunk_id = self.current_id()
+            if dunk_id:
+                self.rpc("fire_dunk", id=dunk_id, countdown_s=2, wait=False)
         elif key == ord("i"):
             self.edit_interval()
         elif key == ord("e"):
             self.edit_text()
+        elif key == ord("n"):
+            self.edit_name()
+        elif key == ord("o"):
+            self.toggle_only_idle()
+        elif key == ord("m"):
+            self.edit_max_sends()
 
-    def current(self):
-        return self.dunkers[self.selected]
+    def quit_and_shutdown(self):
+        if self.mode == "daemon":
+            self.rpc("shutdown", stop_all=True)
+        self.quit_requested = True
+
+    # -- editing -------------------------------------------------------------------
 
     def edit_interval(self):
-        d = self.current()
-        value = self.line_modal("Interval minutes", d.interval_minutes)
-        if value is not None:
-            value = value.strip() or d.interval_minutes
-            try:
-                if float(value) <= 0:
-                    raise ValueError
-            except ValueError:
-                d.set_status("Bad interval!")
-                return
-            d.interval_minutes = value
-            d.set_status("Interval set")
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        value = self.line_modal("Interval (minutes, or e.g. 90s / 1.5h)",
+                                format_interval(dunk["interval_minutes"]))
+        if value is not None and value.strip():
+            self.rpc("update_dunk", id=dunk["id"], interval_minutes=value.strip())
 
     def edit_text(self):
-        d = self.current()
-        new_text = self.text_modal(d.text_value)
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        new_text = self.text_modal(dunk.get("text") or "")
         if new_text is not None:
-            d.text_value = new_text.strip()
-            d.set_status("Text set")
+            self.rpc("update_dunk", id=dunk["id"], text=new_text.strip())
+
+    def edit_name(self):
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        value = self.line_modal("Dunker name", dunk.get("name") or "")
+        if value is not None:
+            self.rpc("update_dunk", id=dunk["id"], name=value.strip())
+
+    def toggle_only_idle(self):
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        new_value = "any" if dunk.get("only_when") == "idle" else "idle"
+        self.rpc("update_dunk", id=dunk["id"], only_when=new_value)
+        self.flash("Sends wait for idle agent" if new_value == "idle" else "Sends on schedule")
+
+    def edit_max_sends(self):
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        current = str(dunk.get("max_sends") or "")
+        value = self.line_modal("Max sends (blank = forever)", current)
+        if value is None:
+            return
+        value = value.strip()
+        if value in ("", "0"):
+            self.rpc("update_dunk", id=dunk["id"], max_sends=0)
+        elif value.isdigit():
+            self.rpc("update_dunk", id=dunk["id"], max_sends=int(value))
+        else:
+            self.flash("Max sends must be a whole number")
 
     def pick_target(self):
         """Choose a herdr pane to target (replaces window capture)."""
-        panes = self.herdr.list_panes_grouped()
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        result = self.rpc("list_panes")
+        panes = result.get("panes", []) if result else []
         if not panes:
-            self.current().set_status("No herdr panes")
-            self.set_global_status(self.herdr.server_error_hint())
+            status = self.rpc("status")
+            self.flash((status or {}).get("herdr_hint") or "No herdr panes")
             return
         chosen = self.target_modal(panes)
         if chosen is not None:
-            self.current().set_target(chosen)
+            self.rpc("update_dunk", id=dunk["id"], target=chosen["pane_id"])
+
+    # -- modals ----------------------------------------------------------------------
 
     def line_modal(self, label, default=""):
         h, w = self.stdscr.getmaxyx()
@@ -406,8 +362,11 @@ class DunkingSheepTui:
                     self.safe_addstr(win, y, 2, payload, w - 4, curses.A_BOLD)
                 else:
                     pane = panes[payload]
+                    tab = pane.get("tab_label") or pane.get("tab_id") or "?"
+                    if pane.get("is_self"):
+                        tab = f"{tab} (this)"
                     row = self._format_target_row(
-                        pane.get("tab_label") or pane.get("tab_id") or "?",
+                        tab,
                         pane.get("agent") or "-",
                         pane.get("agent_status") or "-",
                         pane.get("cwd") or "-",
@@ -448,92 +407,152 @@ class DunkingSheepTui:
         text_w = max(1, w - 4)
         edit = curses.newwin(text_h, text_w, 3, 2)
         edit.keypad(True)
-        edit.scrollok(True)
-
-        cancelled = False
-
-        def validate(ch):
-            nonlocal cancelled
-            if ch == 27:
-                cancelled = True
-                return 7
-            if ch in (9,):
-                return ord(" ")
-            return ch
+        editor = TextEditorBuffer(initial_text)
+        top_row = 0
+        left_col = 0
+        visible_width = max(1, text_w - 1)
 
         try:
-            win.erase()
-            win.box()
-            self.safe_addstr(win, 1, 2, "Edit text to send", w - 4, curses.A_BOLD)
-            self.safe_addstr(win, 2, 2, "Ctrl+G saves, Esc cancels", w - 4)
-            # Write the initial text WITHOUT padding to the window width; padding
-            # would leave the cursor stranded at the far right of the line. Track
-            # the end of the last line so we can place the cursor there.
-            lines = initial_text.splitlines() or [""]
-            last_y, last_x = 0, 0
-            for idx, line in enumerate(lines):
-                if idx >= text_h:
-                    break
+            curses.curs_set(1)
+            while True:
+                if editor.row < top_row:
+                    top_row = editor.row
+                elif editor.row >= top_row + text_h:
+                    top_row = editor.row - text_h + 1
+                if editor.col < left_col:
+                    left_col = editor.col
+                elif editor.col >= left_col + visible_width:
+                    left_col = editor.col - visible_width + 1
+
+                win.erase()
+                win.box()
+                self.safe_addstr(win, 1, 2, "Edit text to send", w - 4, curses.A_BOLD)
+                location = (
+                    f"Ctrl+G saves, Esc cancels  "
+                    f"Line {editor.row + 1}/{len(editor.lines)}  Col {editor.col + 1}"
+                    "  Placeholders: {id} {name} {count} {target} {time}"
+                )
+                self.safe_addstr(win, 2, 2, location, w - 4)
+
+                edit.erase()
+                for screen_row, line_index in enumerate(
+                    range(top_row, min(len(editor.lines), top_row + text_h))
+                ):
+                    # Tabs render as one cell so cursor columns stay stable.
+                    segment = editor.lines[line_index][
+                        left_col:left_col + visible_width
+                    ].replace("\t", " ")
+                    try:
+                        edit.addnstr(screen_row, 0, segment, visible_width)
+                    except curses.error:
+                        pass
+
+                cursor_y = editor.row - top_row
+                cursor_x = editor.col - left_col
                 try:
-                    edit.addstr(idx, 0, line[:text_w - 1])
+                    edit.move(cursor_y, min(cursor_x, visible_width - 1))
                 except curses.error:
                     pass
-                last_y = idx
-                last_x = min(len(line), text_w - 1)
-            win.refresh()
-            edit.refresh()
-            curses.curs_set(1)
-            try:
-                edit.move(last_y, last_x)
-            except curses.error:
-                pass
-            box = textpad.Textbox(edit, insert_mode=True)
-            text = box.edit(validate)
-            if cancelled:
-                return None
-            return text.rstrip()
+                win.refresh()
+                edit.refresh()
+
+                try:
+                    key = edit.get_wch()
+                except curses.error:
+                    continue
+
+                if key in (7, "\x07"):
+                    return editor.text
+                if key in (27, "\x1b"):
+                    return None
+                if key in (10, 13, "\n", "\r", curses.KEY_ENTER):
+                    editor.newline()
+                elif key in (9, "\t"):
+                    editor.insert(" ")
+                elif key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
+                    editor.backspace()
+                elif key == curses.KEY_DC:
+                    editor.delete()
+                elif key in (curses.KEY_LEFT, 2):
+                    editor.move_left()
+                elif key in (curses.KEY_RIGHT, 6):
+                    editor.move_right()
+                elif key in (curses.KEY_UP, 16):
+                    editor.move_up()
+                elif key in (curses.KEY_DOWN, 14):
+                    editor.move_down()
+                elif key in (curses.KEY_HOME, 1):
+                    editor.move_home()
+                elif key in (curses.KEY_END, 5):
+                    editor.move_end()
+                elif key == curses.KEY_PPAGE:
+                    editor.move_up(text_h)
+                elif key == curses.KEY_NPAGE:
+                    editor.move_down(text_h)
+                elif isinstance(key, str) and key.isprintable():
+                    editor.insert(key)
         finally:
             curses.curs_set(0)
+
+    # -- drawing ---------------------------------------------------------------------
 
     def draw(self):
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
         self.safe_addstr(self.stdscr, 0, 0, "Dunking Sheep TUI", w - 1, curses.A_BOLD)
-        help_text = "a add  d remove  c target  t test  i interval  e text  space start/stop  q quit"
+        help_text = ("a add  d remove  c target  t test  i interval  e text  n name  "
+                     "o idle-gate  m max  space start/stop  q quit  Q stop all+quit")
         self.safe_addstr(self.stdscr, 1, 0, help_text, w - 1)
         self.safe_hline(self.stdscr, 2, 0, w - 1)
 
-        header = self.format_row("#", "Status", "Target", "Min", "Text", w)
+        header = self.format_row("#", "Status", "Target", "Every", "Sent", "Gate", "Text", w)
         self.safe_addstr(self.stdscr, 3, 0, header, w - 1, curses.A_BOLD)
 
         visible_rows = max(0, h - 7)
+        if not self.dunks:
+            self.safe_addstr(self.stdscr, 4, 0,
+                             "(no dunkers - press a to add one, or let an agent add one)",
+                             w - 1)
         start = 0
         if self.selected >= visible_rows:
             start = self.selected - visible_rows + 1
-        for screen_y, index in enumerate(range(start, min(len(self.dunkers), start + visible_rows)), start=4):
-            d = self.dunkers[index]
+        for screen_y, index in enumerate(range(start, min(len(self.dunks), start + visible_rows)), start=4):
+            d = self.dunks[index]
+            sent = str(d.get("send_count") or 0)
+            if d.get("max_sends"):
+                sent += f"/{d['max_sends']}"
+            label = d.get("target_label") or "(no target)"
+            if d.get("name"):
+                label = f"{d['name']}: {label}"
             row = self.format_row(
-                str(d.row_num),
-                d.get_status(),
-                d.window_label(),
-                d.interval_minutes,
-                d.text_preview(),
+                d["id"],
+                d.get("status") or "",
+                label,
+                format_interval(d.get("interval_minutes") or 0),
+                sent,
+                "idle" if d.get("only_when") == "idle" else "-",
+                (d.get("text") or "").replace("\n", " "),
                 w,
             )
             attr = curses.A_REVERSE if index == self.selected else curses.A_NORMAL
             self.safe_addstr(self.stdscr, screen_y, 0, row, w - 1, attr)
 
         self.safe_hline(self.stdscr, h - 3, 0, w - 1)
-        self.safe_addstr(self.stdscr, h - 2, 0, self.get_global_status(), w - 1)
+        bottom = self.global_status
+        if self.message and time.time() < self.message_until:
+            bottom = f"{bottom}  |  {self.message}"
+        self.safe_addstr(self.stdscr, h - 2, 0, bottom, w - 1)
         self.stdscr.refresh()
 
-    def format_row(self, num, status, window, minutes, text, width):
+    def format_row(self, num, status, window, minutes, sent, gate, text, width):
         columns = [
             clip(num, 4).ljust(4),
             clip(status, 18).ljust(18),
-            clip(window, 28).ljust(28),
-            clip(minutes, 7).rjust(7),
-            clip(text, max(10, width - 62)),
+            clip(window, 26).ljust(26),
+            clip(minutes, 6).rjust(6),
+            clip(sent, 6).rjust(6),
+            clip(gate, 4).ljust(4),
+            clip(text, max(10, width - 70)),
         ]
         row = clip(" ".join(columns), width - 1)
         return row.ljust(max(0, width - 1))
@@ -561,8 +580,10 @@ class DunkingSheepTui:
             pass
 
     def shutdown(self):
-        for dunker in self.dunkers:
-            dunker.destroy()
+        # Dunks live in the daemon and keep running. Only the in-process
+        # fallback has anything to tear down.
+        if isinstance(self.client, LocalFlock):
+            self.client.close()
 
 
 def main():

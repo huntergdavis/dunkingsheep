@@ -1,0 +1,92 @@
+"""Test doubles shared by the Dunking Sheep test suite."""
+
+import threading
+
+
+PANES = [
+    {"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1", "cwd": "/home/x",
+     "agent_status": "unknown", "terminal_id": "term_a",
+     "terminal_title_stripped": "shell"},
+    {"pane_id": "w1:p2", "tab_id": "w1:t2", "workspace_id": "w1", "cwd": "/home/x/proj",
+     "agent": "claude", "agent_status": "working", "terminal_id": "term_b",
+     "terminal_title_stripped": "claude proj"},
+    {"pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2", "cwd": "/home/x/site",
+     "agent": "codex", "agent_status": "idle", "terminal_id": "term_c",
+     "terminal_title_stripped": "site"},
+]
+TABS = [
+    {"tab_id": "w1:t1", "label": "shell", "number": 1},
+    {"tab_id": "w1:t2", "label": "Claude Proj", "number": 2},
+    {"tab_id": "w2:t1", "label": "Codex Site", "number": 1},
+]
+WORKSPACES = [
+    {"workspace_id": "w1", "label": "alpha", "number": 1},
+    {"workspace_id": "w2", "label": "beta", "number": 2},
+]
+
+
+class FakeHerdr:
+    """Stands in for HerdrClient: records sends, serves canned panes."""
+
+    def __init__(self, panes=None, available=True):
+        self.panes = [dict(p) for p in (panes or PANES)]
+        self.available = available
+        self.sends = []
+        self.statuses = {}
+        self.fail_sends = False
+        self.lock = threading.Lock()
+        self.sent = threading.Event()
+
+    def is_available(self):
+        return self.available
+
+    def server_error_hint(self):
+        return "herdr server not running - start herdr"
+
+    def list_panes(self):
+        return [dict(p) for p in self.panes]
+
+    def list_tabs(self):
+        return [dict(t) for t in TABS]
+
+    def list_workspaces(self):
+        return [dict(w) for w in WORKSPACES]
+
+    def list_panes_grouped(self):
+        tabs = {t["tab_id"]: t for t in TABS}
+        workspaces = {w["workspace_id"]: w for w in WORKSPACES}
+        panes = self.list_panes()
+        for pane in panes:
+            tab = tabs.get(pane["tab_id"], {})
+            ws = workspaces.get(pane["workspace_id"], {})
+            pane["tab_label"] = tab.get("label") or pane["tab_id"]
+            pane["tab_number"] = tab.get("number", 0)
+            pane["workspace_label"] = ws.get("label") or pane["workspace_id"]
+            pane["workspace_number"] = ws.get("number", 0)
+        panes.sort(key=lambda p: (p["workspace_number"], p["tab_number"]))
+        return panes
+
+    def agent_status(self, pane_id):
+        if pane_id in self.statuses:
+            return self.statuses[pane_id]
+        for pane in self.panes:
+            if pane["pane_id"] == pane_id:
+                return pane.get("agent_status", "unknown")
+        return None
+
+    def read_pane(self, pane_id, lines=40, source="recent"):
+        if not any(p["pane_id"] == pane_id for p in self.panes):
+            return None
+        mine = [text for pid, text in self.sends if pid == pane_id]
+        return "\n".join(mine[-lines:]) + "\n"
+
+    def send_text_and_enter(self, pane_id, text):
+        with self.lock:
+            if self.fail_sends:
+                return False, "boom"
+            self.sends.append((pane_id, text))
+            self.sent.set()
+        return True, "sent"
+
+    def notify(self, title, body=None):
+        pass
