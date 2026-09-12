@@ -337,6 +337,17 @@ class Flock:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return pane
         needle = spec.lower()
+        # Exact label matches beat substring matches, so a tab named
+        # "Dunking Sheep" wins over a pane whose title merely contains it.
+        for key in ("tab_label", "label", "workspace_label", "agent"):
+            exact = [p for p in panes if str(p.get(key) or "").lower() == needle]
+            if len(exact) == 1:
+                return exact[0]
+            if len(exact) > 1:
+                agents = [p for p in exact if p.get("agent")]
+                if len(agents) == 1:
+                    return agents[0]
+                raise DunkError(f"target {spec!r} is ambiguous: {_describe(exact)}")
         matches = []
         for pane in panes:
             haystack = " ".join(
@@ -355,12 +366,7 @@ class Flock:
         agents = [p for p in matches if p.get("agent")]
         if len(agents) == 1:
             return agents[0]
-        options = ", ".join(
-            f"{p.get('pane_id')} ({p.get('workspace_label')}/{p.get('tab_label')}"
-            f"{' ' + p['agent'] if p.get('agent') else ''})"
-            for p in matches
-        )
-        raise DunkError(f"target {spec!r} is ambiguous: {options}")
+        raise DunkError(f"target {spec!r} is ambiguous: {_describe(matches)}")
 
     # -- mutation -----------------------------------------------------------
 
@@ -644,6 +650,14 @@ class Flock:
             self.closed = True
             for dunker in self.dunkers:
                 self._halt(dunker)
+
+
+def _describe(panes):
+    return ", ".join(
+        f"{p.get('pane_id')} ({p.get('workspace_label')}/{p.get('tab_label')}"
+        f"{' ' + p['agent'] if p.get('agent') else ''})"
+        for p in panes
+    )
 
 
 def _numeric_id(dunk_id):

@@ -13,7 +13,9 @@ the command line, a unix socket, or the Model Context Protocol (MCP).
 - target: a herdr pane. Give a pane id (w8:p3), the word self (the pane the
   caller runs in, from $HERDR_PANE_ID), a terminal id, or a unique
   case-insensitive substring of a tab label, workspace label, agent name or
-  directory. Ambiguous names are rejected with the candidates listed.
+  directory. An exact tab/workspace/agent label wins over a substring; among
+  several substring matches a lone agent pane wins; anything still ambiguous
+  is rejected with the candidates listed.
 - send: the daemon runs `herdr pane send-text` then `herdr pane send-keys
   Enter` (chunked for long texts). Nothing touches the OS keyboard.
 - daemon: `dunkingsheep serve`, auto-started by any client. Listens on a unix

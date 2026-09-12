@@ -98,6 +98,16 @@ class FlockTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "ambiguous"):
             self.flock.resolve_target("/home/x")
 
+    def test_exact_tab_label_beats_title_substring_on_an_agent_pane(self):
+        # "Sheep" is the exact label of a shell tab and a substring of an agent
+        # pane's title; the exact label must win despite the agent tie-break.
+        self.assertEqual("w2:p2", self.flock.resolve_target("sheep")["pane_id"])
+        self.assertEqual("w2:p2", self.flock.resolve_target("Sheep")["pane_id"])
+        # A substring that only the title matches still resolves.
+        self.assertEqual("w2:p3", self.flock.resolve_target("release work")["pane_id"])
+        # Exact workspace label with one agent inside picks that agent.
+        self.assertEqual("w1:p2", self.flock.resolve_target("alpha")["pane_id"])
+
     def test_get_accepts_bare_number(self):
         self.flock.add(target="w1:p1")
         self.assertEqual("d1", self.flock.get("1")["id"])

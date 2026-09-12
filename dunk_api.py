@@ -21,7 +21,8 @@ TARGET_DOC = (
     "Which herdr pane. Accepts a pane id like 'w8:p3', the word 'self' for "
     "the pane this agent is running in, a terminal id, or a unique "
     "case-insensitive substring of a tab label, workspace label, agent name "
-    "or directory. Use list_panes to see candidates."
+    "or directory (an exact label wins over a substring). Use list_panes to "
+    "see candidates."
 )
 TEXT_DOC = (
     "Text to type into the pane, followed by Enter. Placeholders {id}, "

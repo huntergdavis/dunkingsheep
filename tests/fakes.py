@@ -13,11 +13,21 @@ PANES = [
     {"pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2", "cwd": "/home/x/site",
      "agent": "codex", "agent_status": "idle", "terminal_id": "term_c",
      "terminal_title_stripped": "site"},
+    # A plain shell whose tab is literally named "Sheep", next to an agent pane
+    # whose window title merely mentions sheep.
+    {"pane_id": "w2:p2", "tab_id": "w2:t2", "workspace_id": "w2", "cwd": "/home/x/sheep",
+     "agent_status": "unknown", "terminal_id": "term_d",
+     "terminal_title_stripped": "shell"},
+    {"pane_id": "w2:p3", "tab_id": "w2:t3", "workspace_id": "w2", "cwd": "/home/x/other",
+     "agent": "claude", "agent_status": "working", "terminal_id": "term_e",
+     "terminal_title_stripped": "Sheep release work"},
 ]
 TABS = [
     {"tab_id": "w1:t1", "label": "shell", "number": 1},
     {"tab_id": "w1:t2", "label": "Claude Proj", "number": 2},
     {"tab_id": "w2:t1", "label": "Codex Site", "number": 1},
+    {"tab_id": "w2:t2", "label": "Sheep", "number": 2},
+    {"tab_id": "w2:t3", "label": "Other", "number": 3},
 ]
 WORKSPACES = [
     {"workspace_id": "w1", "label": "alpha", "number": 1},
