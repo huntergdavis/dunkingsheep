@@ -1,75 +1,53 @@
 # Dunking Sheep 🐑
 
-A terminal-first automation tool that sends text to **herdr** panes at regular
-intervals. Perfect for keeping coding agents engaged with prompts like
-"continue" or "keep going" — without touching your keyboard or fighting window
-focus.
+Sends text (plus Enter) into [herdr](https://herdr.dev) terminal panes on a
+schedule. Keep coding agents moving with "continue", message one agent from
+another, or let an agent schedule nudges to *itself*.
 
-**New in 2.0: agents can drive it.** Every dunk lives in a small background
-daemon, and the same commands are available from the keyboard (TUI), the
-command line, a unix socket, and an **MCP server** that plugs into Claude Code,
-OpenAI Codex, Gemini CLI, Cursor and any other MCP harness. An agent can list
-dunks, create dunks for other agents, and dunk on *itself* — an external,
-repeating control loop for one agent or a whole herd of them.
-
-Dunking Sheep is a [herdr](https://herdr.dev)-native sibling of
-[Dunking Bird](../dunkingbird). Instead of capturing an OS window and typing
-through `ydotool`, it targets a herdr **pane** and delivers text over herdr's
-socket API.
+Each schedule is a **dunk**: a target pane, a text, an interval, a running
+flag. Dunks live in a small background daemon, so the TUI, the CLI, a unix
+socket and an **MCP server** (Claude Code, Codex, Gemini CLI, Cursor, …) all
+see and control the same dunks. Standard library only; no `pip install`.
 
 ## 🎬 Demo
 
 https://github.com/user-attachments/assets/7cb5f9d6-4cab-44e1-82c7-6dd3567b21ac
 
-*Picking an agent pane from the workspace-grouped target list and dunking on it. ([download the mp4](https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4))*
+*Picking an agent pane from the workspace-grouped target list and dunking on it. ([mp4](https://raw.githubusercontent.com/huntergdavis/dunkingsheep/main/dunkingsheep-demo.mp4))*
 
-## 🚀 Release 2.0 — Agent Control
+## 🚀 Quick start
 
-| Surface | How | Who uses it |
-| --- | --- | --- |
-| **TUI** | `./run_dunking_sheep.sh` or `dunkingsheep tui` | you, in a herdr tab |
-| **CLI** | `dunkingsheep add -T self -e 60 -t "..."` | you, scripts, cron, agents in a shell |
-| **Socket API** | JSON lines on `~/.config/dunkingsheep/dunkingsheep.sock` | anything that can open a unix socket |
-| **MCP server** | `dunkingsheep mcp` (stdio) | Claude Code, Codex, Gemini CLI, Cursor, … |
+```bash
+herdr status server                     # herdr must be running
+./dunkingsheep panes                    # what can I target? (* = this pane)
+./dunkingsheep add -T "Codex Site" -e 15 -t continue
+./dunkingsheep list                     # ids, live status, countdowns
+./dunkingsheep tui                      # the curses view of the same dunks
+./dunkingsheep mcp-setup claude --apply # let Claude Code drive it
+```
 
-All four call the same command registry on the same daemon, so a dunk created
-by Claude shows up in your TUI with a live countdown, and a dunk you add in the
-TUI is visible to Codex.
+## ✨ Capabilities
 
-### What's new
+| Capability | How |
+| --- | --- |
+| **Four control surfaces** | TUI keys, `dunkingsheep` CLI, JSON-lines unix socket, MCP tools. One command registry behind all of them. |
+| **Background daemon** | Auto-started by any client. Dunks survive closing the TUI, persist to `~/.config/dunkingsheep/dunks.json`, and resume running after a restart. |
+| **Target by name** | Pane id (`w8:p3`), `self` (the caller's own pane), or a unique substring of a tab, workspace, agent or directory. |
+| **Placeholders** | `{id}` `{name}` `{count}` `{target}` `{interval}` `{time}` `{date}` expand at send time. A dunk can tell its recipient which dunk to remove. |
+| **Idle gating** | `--only-idle` / `only_when="idle"` holds a send until herdr reports the target agent idle. |
+| **Max sends** | `--max-sends N` removes the dunk after N sends. `1` is a one-shot delayed nudge. |
+| **Direct messages** | `send <target> <text>` / `send_text` types into any pane now, no dunk. |
+| **Pane reading** | `read <target>` / `read_pane` returns a pane's recent output plus its agent and status. |
+| **Self-documenting** | `dunkingsheep` (no args), `guide`, `commands --json`, `mcp-setup`, MCP `help` tool, socket `help` command. |
 
-- **Background daemon.** Dunks keep running after you close the TUI. The daemon
-  is started automatically by any client and persists dunks to
-  `~/.config/dunkingsheep/dunks.json`, resuming them (still running) after a
-  restart or reboot.
-- **`dunkingsheep` CLI** with `--json` output on every command and a
-  self-documenting `--help`, `guide`, `commands` and `mcp-setup`.
-- **Unix socket API** with a `help` command that returns the guide, the
-  protocol, and every command's JSON schema.
-- **MCP server** (standard library only, protocol 2024-11-05 → 2025-11-25) with
-  14 tools and flat schemas that strict validators accept.
-- **Target by name:** `self`, a pane id, or a unique substring of a tab,
-  workspace, agent or directory.
-- **Text placeholders:** `{id}` `{name}` `{count}` `{target}` `{interval}`
-  `{time}` `{date}` expand at send time, so a dunk can tell its recipient which
-  dunk it came from.
-- **Idle gating** (`--only-idle`): hold a send until herdr reports the target
-  agent idle.
-- **Max sends** (`--max-sends N`): the dunk removes itself after N sends;
-  `1` is a one-shot delayed nudge.
-- **One-off sends and pane reading:** `dunkingsheep send <target> <text>` and
-  `dunkingsheep read <target>` (also MCP tools `send_text` / `read_pane`).
-- **TUI additions:** `n` name, `o` toggle idle gate, `m` max sends, `Q` stop
-  every dunk and shut the daemon down. `q` now just closes the view.
+## 🧠 Meta-dunking
 
-## 🧠 Meta-dunking: an agent that schedules itself
+Tell Claude (or Codex), with the MCP server registered:
 
-With the MCP server registered, you can say to Claude (or Codex):
+> Implement this backlog. Nudge yourself every 60 minutes; when the backlog is
+> done, remove the nudge.
 
-> I want this backlog implemented. Create a dunk that nudges you every 60
-> minutes; when the backlog is complete, the dunk should remove itself.
-
-The agent calls one tool:
+It calls one tool:
 
 ```
 add_dunk(target="self", interval_minutes=60, only_when="idle", name="backlog",
@@ -78,81 +56,54 @@ add_dunk(target="self", interval_minutes=60, only_when="idle", name="backlog",
                item, commit, and update BACKLOG.md.")
 ```
 
-Every hour the daemon types that prompt into the agent's own pane (waiting until
-the agent is idle). The prompt carries its own dunk id, so the future agent can
-end the loop by removing the dunk. The same agent can `read_pane` other agents,
-`send_text` them a message, or put them on their own schedules — orchestration of
-many agents through herdr and Dunking Sheep, with no extra infrastructure.
+Every hour the daemon types that into the agent's own pane once it is idle.
+The prompt carries its own dunk id, so the future agent can end the loop. The
+same agent can `read_pane` other agents, `send_text` them instructions, and
+`add_dunk` schedules for them: one agent watching and pacing a whole herd.
 
-## 📋 Requirements
-
-- **Python 3.8+** (standard library only — no `pip install` needed)
-- **[herdr](https://herdr.dev)** 0.7.4 or newer with a running server
-  (`herdr` on `PATH` or at `~/.local/bin/herdr`)
+## 🔌 MCP server
 
 ```bash
-herdr status server        # should report status: running
-```
-
-## 🔌 Register the MCP server
-
-```bash
-./dunkingsheep mcp-setup                 # prints the command/config for every harness
-./dunkingsheep mcp-setup claude --apply  # Claude Code (user scope)
-./dunkingsheep mcp-setup codex --apply   # OpenAI Codex CLI
+./dunkingsheep mcp-setup                 # commands and config blocks for every harness
+./dunkingsheep mcp-setup claude --apply  # claude mcp add --scope user dunkingsheep -- python3 …/dunkingsheep mcp
+./dunkingsheep mcp-setup codex  --apply  # codex mcp add dunkingsheep -- python3 …/dunkingsheep mcp
 ./dunkingsheep mcp-setup gemini --apply  # Gemini CLI
-./dunkingsheep mcp-setup cursor          # JSON block for Cursor/Windsurf/VS Code/Claude Desktop
+./dunkingsheep mcp-setup cursor          # mcpServers JSON for Cursor / Windsurf / VS Code / Claude Desktop
 ```
 
-Under the hood these are just:
+Stdio transport, protocol 2024-11-05 through 2025-11-25, flat schemas that
+strict validators accept. The harness spawns the server inside the agent's
+pane, so `HERDR_PANE_ID` is inherited and `self` means the agent itself.
+
+Tools: `help` `status` `list_panes` `read_pane` `list_dunks` `get_dunk`
+`add_dunk` `update_dunk` `remove_dunk` `start_dunk` `stop_dunk` `stop_all`
+`fire_dunk` `send_text`. Errors are `isError` results with a plain message;
+`shutdown` is not exposed to agents.
+
+## ⌨️ CLI
 
 ```bash
-claude mcp add --scope user dunkingsheep -- python3 /path/to/dunkingsheep mcp
-codex  mcp add dunkingsheep -- python3 /path/to/dunkingsheep mcp
+dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--max-sends N] [--no-start]
+dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--max-sends N]
+dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
+dunkingsheep send <target> <text…>            read <target> [-l N]
+dunkingsheep panes | status | shutdown [--stop-all] | serve | tui | mcp
+dunkingsheep guide | commands [--json] | mcp-setup [harness] [--apply]
 ```
 
-Verify with `claude mcp list` / `codex mcp list`. Because the harness spawns the
-server inside the agent's own herdr pane, it inherits `HERDR_PANE_ID` and the
-target `self` means the agent itself.
-
-MCP tools: `help`, `status`, `list_panes`, `read_pane`, `list_dunks`,
-`get_dunk`, `add_dunk`, `update_dunk`, `remove_dunk`, `start_dunk`,
-`stop_dunk`, `stop_all`, `fire_dunk`, `send_text`. Errors come back as tool
-results with `isError: true` and a plain-English message so the agent can
-recover; `shutdown` is deliberately not exposed to agents.
-
-## ⌨️ Command line
-
-```bash
-./dunkingsheep                          # help + quick start
-./dunkingsheep panes                    # targets (* marks the pane you're in)
-./dunkingsheep add -T "Codex Site" -e 15 -t continue
-./dunkingsheep add -T self -e 30 --max-sends 1 -t "check CI now"
-./dunkingsheep add -T w8:p3 -e 1.5h --only-idle -n hourly -t "status report please"
-./dunkingsheep list                     # ids, live status, countdowns
-./dunkingsheep update d2 -e 45 --any-time
-./dunkingsheep fire d2                  # send now (the TUI's test send)
-./dunkingsheep send "Claude Proj" please summarize your progress
-./dunkingsheep read "Claude Proj" -l 60
-./dunkingsheep stop d2 | start d2 | toggle d2 | stop-all | remove d2
-./dunkingsheep status | shutdown [--stop-all]
-./dunkingsheep guide                    # the full guide (also: docs/GUIDE.md)
-./dunkingsheep commands --json          # every command with its JSON schema
-```
-
-`-e` accepts minutes (`15`, `1.5`) or `90s` / `2h`. Add `--json` anywhere for
-machine-readable output; errors exit non-zero with the message on stderr.
+`-e` takes minutes (`15`, `1.5`) or `90s` / `2h`. `--json` anywhere gives
+machine-readable output. Errors exit non-zero with the message on stderr.
 
 ## 🔧 Socket API
 
 Newline-delimited JSON on `~/.config/dunkingsheep/dunkingsheep.sock`
-(`$DUNKINGSHEEP_SOCKET` to override). Command names and arguments are exactly
-the registry shown by `dunkingsheep commands`.
+(`$DUNKINGSHEEP_SOCKET` overrides). Command names and arguments match
+`dunkingsheep commands --json`.
 
 ```
 -> {"id": 1, "cmd": "add_dunk", "self_pane_id": "w8:p8",
     "args": {"target": "self", "text": "continue", "interval_minutes": 20}}
-<- {"id": 1, "ok": true, "result": {"id": "d4", "running": true, ...}}
+<- {"id": 1, "ok": true, "result": {"id": "d4", "running": true, …}}
 <- {"id": 1, "ok": false, "error": "no dunk with id 'd9'"}
 ```
 
@@ -162,99 +113,54 @@ printf '%s\n' '{"id":1,"cmd":"help"}' | nc -U ~/.config/dunkingsheep/dunkingshee
 
 ## 🖥️ TUI
 
-Open a tab in herdr and run `./run_dunking_sheep.sh` (or `./dunkingsheep tui`).
-It shows the daemon's dunks live and every key is one registry command:
+`./run_dunking_sheep.sh` in a herdr tab. Every key is one registry command.
 
-| Key | Action |
-| --- | --- |
-| `j` / `k` / ↑ / ↓ | Move selection |
-| `a` | Add a dunker |
-| `d` | Remove selected dunker |
-| `c` | Choose target pane (grouped by workspace; `(this)` marks your pane) |
-| `t` | Test send now |
-| `i` | Edit interval (`10`, `90s`, `1.5h`) |
-| `e` | Edit text to send (`Ctrl+G` saves, `Esc` cancels) |
-| `n` | Name the dunker |
-| `o` | Toggle only-when-idle gating |
-| `m` | Set max sends (blank = forever) |
-| `Space` / `s` | Start / stop |
-| `q` / `Esc` | Quit the view (dunks keep running) |
-| `Q` | Stop every dunk and shut the daemon down |
+| Key | Action | Key | Action |
+| --- | --- | --- | --- |
+| `j`/`k` ↑/↓ | move | `c` | choose target pane |
+| `a` / `d` | add / remove | `t` | test send now |
+| `Space` / `s` | start / stop | `i` / `e` / `n` | interval / text / name |
+| `o` / `m` | idle gate / max sends | `q` / `Q` | quit view / stop all + shut down daemon |
 
 ## 🧩 How it works
 
 ```
- TUI (curses)  ─┐
- dunkingsheep CLI ─┼─► unix socket ─► daemon (Flock) ─► herdr CLI ─► herdr server ─► pane
- MCP server (stdio) ┘        JSON lines        timers, persistence      send-text / send-keys Enter
+TUI ─┐
+CLI ─┼─► unix socket ─► daemon (Flock: timers, persistence) ─► herdr pane send-text + send-keys Enter
+MCP ─┘
 ```
-
-- `dunk_core.py` — the `Flock`: dunkers, timers, templates, idle gating,
-  persistence. The single mechanism every surface calls.
-- `dunk_api.py` — the command registry (names, descriptions, JSON schemas,
-  handlers) shared by the socket, CLI and MCP.
-- `dunk_server.py` / `dunk_client.py` — the daemon and its client (with
-  auto-start).
-- `dunk_mcp.py` — MCP over stdio, standard library only.
-- `dunkingsheep` — the CLI; `dunking_sheep_tui.py` — the curses view.
-- `herdr_client.py` — the herdr transport: `herdr pane send-text` then
-  `herdr pane send-keys <pane> Enter`, chunked for long texts.
-
-See [`docs/GUIDE.md`](docs/GUIDE.md) (generated from `dunkingsheep guide`),
-[`docs/DESIGN.md`](docs/DESIGN.md) and [`docs/RESEARCH.md`](docs/RESEARCH.md).
-
-## 🧪 Tests
-
-```bash
-python3 -m unittest discover -s tests
-```
-
-Covers the core state machine (with a fake herdr), the socket round trip, the
-MCP protocol over in-memory streams, and an end-to-end CLI run that auto-starts
-a real daemon against a fake `herdr` binary. No test touches your real herdr or
-`~/.config/dunkingsheep`.
-
-## 🔧 Troubleshooting
-
-**"herdr server not running - start herdr"** — start herdr, verify with
-`herdr status server`.
-
-**"no herdr pane matches ..."** — run `dunkingsheep panes` and use the pane id,
-or a longer substring; ambiguous names list the candidates.
-
-**"target 'self' needs HERDR_PANE_ID"** — the caller is not inside a herdr
-pane. Pass a pane id, or `--self-pane w8:p3`.
-
-**Daemon problems** — `~/.config/dunkingsheep/daemon.log`. `dunkingsheep
-shutdown` stops it; the next command restarts it with the saved dunks.
-
-**Send failed** — the target pane was closed. Re-target with
-`dunkingsheep update <id> -T ...` or press `c` in the TUI.
-
-## 📄 Files
 
 | File | Purpose |
 | --- | --- |
-| `dunkingsheep` | CLI: client commands, `serve`, `tui`, `mcp`, `mcp-setup`, `guide` |
-| `dunk_core.py` | The flock of dunkers and their timers (the shared mechanism) |
+| `dunkingsheep` | CLI, plus `serve`, `tui`, `mcp`, `mcp-setup`, `guide` |
+| `dunk_core.py` | Dunkers, timers, templates, gating, persistence |
 | `dunk_api.py` | Command registry shared by socket, CLI and MCP |
-| `dunk_server.py` | Daemon: unix socket server around the flock |
-| `dunk_client.py` | Socket client with daemon auto-start |
+| `dunk_server.py` / `dunk_client.py` | Daemon and client with auto-start |
 | `dunk_mcp.py` | MCP server (stdio, stdlib only) |
-| `dunk_help.py` | The guide text used by `--help`, `guide`, MCP and the socket |
-| `dunking_sheep_tui.py` | The curses TUI (a live view onto the daemon) |
-| `herdr_client.py` | Wrapper around the `herdr` CLI (the transport) |
-| `text_editor.py` | Logical-line buffer for the TUI text editor |
-| `run_dunking_sheep.sh` | TUI launcher |
-| `docs/GUIDE.md` | The full guide (generated) |
-| `docs/DESIGN.md` | Architecture and the Bird→Sheep mapping |
-| `docs/RESEARCH.md` | Study of Dunking Bird + the herdr API |
+| `dunk_help.py` | The guide behind every help surface |
+| `dunking_sheep_tui.py` | Curses view |
+| `herdr_client.py` | Wrapper around the `herdr` CLI |
+
+Docs: [`docs/GUIDE.md`](docs/GUIDE.md) (generated from `dunkingsheep guide`),
+[`docs/DESIGN.md`](docs/DESIGN.md), [`docs/RESEARCH.md`](docs/RESEARCH.md).
+Tests: `python3 -m unittest discover -s tests`.
+
+## 📋 Requirements
+
+Python 3.8+ and herdr 0.7.4+ with a running server (`herdr` on `PATH` or at
+`~/.local/bin/herdr`).
+
+## 🔧 Troubleshooting
+
+- **herdr server not running** — start herdr; check `herdr status server`.
+- **no herdr pane matches** — `dunkingsheep panes`, then use the pane id.
+- **target 'self' needs HERDR_PANE_ID** — not inside a herdr pane; pass a pane id or `--self-pane`.
+- **Daemon** — log at `~/.config/dunkingsheep/daemon.log`; `dunkingsheep shutdown` then any command restarts it with saved dunks.
+- **Send failed** — pane was closed; `update <id> -T …` or `c` in the TUI.
 
 ---
 
 *Dunking Sheep is to herdr what Dunking Bird is to your desktop. 🐑*
-
----
 
 <p align="center">
   <img src="dunkingsheep.png" alt="A sheep slam-dunking a keyboard through a basketball hoop" width="70%"><br>
