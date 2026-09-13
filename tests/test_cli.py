@@ -107,15 +107,20 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual("idle", dunk["only_when"])
         self.assertTrue(dunk["running"])
         other = self.run_json("add", "--target", "shell", "--every", "5", "--no-start",
-                              "--max-sends", "2")
+                              "--max-sends", "2", "--skip-if-unconsumed")
         self.assertEqual("w1:p1", other["target_pane_id"])
         self.assertFalse(other["running"])
         self.assertEqual(2, other["max_sends"])
+        self.assertTrue(other["skip_if_unconsumed"])
+        self.assertIn("skip_if_unconsumed True", self.run_cli("get", "d2").stdout)
 
         listing = self.run_cli("list").stdout
         self.assertIn("d1", listing)
         self.assertIn("Claude Tab / claude", listing)
         self.assertIn("0/2", listing)
+        self.assertIn("SKIP", listing)
+        self.assertIn(" skip ", listing)   # d2's gate column
+        self.assertIn(" idle ", listing)   # d1's gate column
 
         # 4. fire sends through the fake herdr: text, then Enter.
         fired = self.run_json("fire", "d1")
@@ -136,6 +141,8 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(45.0, updated["interval_minutes"])
         self.assertIsNone(updated["only_when"])
         self.assertEqual("go", updated["text"])
+        self.assertFalse(self.run_json("update", "d2", "--always-send")["skip_if_unconsumed"])
+        self.assertTrue(self.run_json("update", "d1", "--skip-if-unconsumed")["skip_if_unconsumed"])
         self.assertTrue(self.run_json("toggle", "d2")["running"])
         stopped = self.run_json("stop-all")["dunks"]
         self.assertFalse(any(d["running"] for d in stopped))

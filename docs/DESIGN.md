@@ -63,6 +63,25 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   `blocked`), send under the shared `send_lock`, reschedule, persist, and
   self-remove when `max_sends` is reached. `stop_event.wait()` instead of
   `sleep()` makes stop immediate.
+- Backpressure (`skip_if_unconsumed`, off by default). The idle gate cannot
+  see unread input: a pane sitting at a prompt with text queued in its input
+  buffer reports `idle`, so on 2026-09-12 a 240-minute self-dunk landed four
+  prompts in one unattended Claude pane and they flushed into a single turn.
+  With the flag on, each successful send sets `awaiting_consumption` and
+  remembers `last_sent_text`. While that is set, the existing countdown loop
+  samples `agent_status` every `IDLE_POLL_S` (the idle-gate loop does too) and
+  latches consumption the first time the target is `working`/`blocked`, then
+  stops sampling. At send time `_previous_send_consumed` says consumed if the
+  latch fired, or if the collapsed-whitespace prefix of the sent text is no
+  longer in the pane's last `CONSUMPTION_TAIL_LINES` lines (an unread input
+  buffer shows it verbatim; collapsing whitespace survives wrapping). An
+  unreadable pane is no evidence, so the send proceeds. A skip reschedules
+  `next_send_at`, bumps `skip_count`, sets status `Skipped (unconsumed)` and
+  leaves `send_count`, `last_sent_at` and `last_error` alone. Blind spots: a
+  turn shorter than one sampling gap is caught only by the tail check, and the
+  tail check is heuristic (a transcript echo can resemble unread input). It is
+  meant for agent panes; a shell echoes every command into its tail. No new
+  thread or busy-wait is involved.
 - Templates: only the known placeholders are substituted (regex), so JSON or
   code braces in a prompt survive intact.
 - Persistence: `dunks.json` written atomically on every structural change and
@@ -99,7 +118,7 @@ unions, no null enums) so OpenAI/Codex and Gemini validators accept them.
 Now a client. Each frame (200 ms) it fetches `list_dunks` and redraws; keys map
 1:1 onto registry commands (`a`→`add_dunk`, `d`→`remove_dunk`, `space`→
 `toggle_dunk`, `c`→`update_dunk(target)`, `t`→`fire_dunk(countdown_s=2,
-wait=false)`, `i/e/n/o/m`→`update_dunk`). `q` closes the view; `Q` sends
+wait=false)`, `i/e/n/o/u/m`→`update_dunk`). `q` closes the view; `Q` sends
 `shutdown(stop_all=true)`. If the daemon cannot be started at all, the TUI falls
 back to an in-process `Flock` (clearly labelled, not shared) so it still works.
 Modals (line input, workspace-grouped target picker, logical-line text editor)

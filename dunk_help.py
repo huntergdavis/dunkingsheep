@@ -22,7 +22,7 @@ socket and the MCP server all see and control the same dunks.
 quick start
   dunkingsheep panes                              # what can I target?
   dunkingsheep add -T "Codex Site" -e 15 -t continue
-  dunkingsheep add -T self -e 60 --only-idle \\
+  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\
       -t "Check the backlog. If done: dunkingsheep remove {id}. Else keep going."
   dunkingsheep list                               # live status, ids, countdowns
   dunkingsheep remove d2
@@ -92,13 +92,26 @@ def guide(markdown=False):
       "  detected agent count as idle.\n"
       "- max_sends = N: the dunk removes itself after its N-th send. N = 1 is a\n"
       "  one-shot delayed nudge (\"in 30 minutes, tell me to check CI\").\n"
+      "- skip_if_unconsumed = true: backpressure. Before each send the daemon\n"
+      "  decides whether the previous send was picked up: it was if the target was\n"
+      "  ever seen working/blocked since then (sampled every 5 s while waiting), or\n"
+      "  if the sent text is no longer sitting in the pane's last lines. Otherwise\n"
+      "  the send is skipped as a no-op: send_count unchanged, no error, skip_count\n"
+      "  +1, status 'Skipped (unconsumed)', next send rescheduled as usual. The\n"
+      "  first send always goes. Composes with only_when. Turn it on for self-dunks\n"
+      "  and unattended agents, where four hourly prompts would otherwise queue in\n"
+      "  the input box and flush into one turn. Blind spots: a turn that starts and\n"
+      "  ends inside one 5 s sampling gap is only caught by the tail check, and the\n"
+      "  tail check is a heuristic (a transcript echo of the prompt can look like\n"
+      "  unread input). Meant for agent panes, not shells.\n"
       "- start = false: create the dunk stopped; start it later.\n"
       "- Changing the interval of a running dunk reschedules its next send.\n")
 
     w(h(2, "Surface 1: command line"))
     w(code("dunkingsheep panes                          list targets (* marks this pane)\n"
            "dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle]\n"
-           "                 [--max-sends N] [--no-start]     -e takes 15, 90s, 1.5h\n"
+           "                 [--skip-if-unconsumed] [--max-sends N] [--no-start]\n"
+           "                 -e takes 15, 90s, 1.5h\n"
            "dunkingsheep list | get <id> | update <id> ... | remove <id>\n"
            "dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)\n"
            "dunkingsheep send <target> <text...>   one-off send, no dunk\n"
@@ -173,12 +186,13 @@ def guide(markdown=False):
     w(h(2, "Recipe: meta-dunking (an agent schedules itself)"))
     w("An agent with the MCP tools can implement a backlog under external control:\n")
     w(code("add_dunk(target=\"self\", interval_minutes=60, only_when=\"idle\",\n"
-           "         name=\"backlog\",\n"
+           "         skip_if_unconsumed=True, name=\"backlog\",\n"
            "         text=\"Backlog check #{count}: read BACKLOG.md. If every item is done,\\n\"\n"
            "              \"call remove_dunk('{id}') and stop. Otherwise implement the next\\n\"\n"
            "              \"item, commit, and update BACKLOG.md.\")"))
     w("Every hour the daemon types that prompt into the agent's pane (waiting for\n"
-      "it to be idle first). The prompt carries its own dunk id, so the future\n"
+      "it to be idle first, and skipping the hour entirely if the previous prompt\n"
+      "is still sitting unread). The prompt carries its own dunk id, so the future\n"
       "agent can end the loop by removing the dunk. The same agent can read other\n"
       "panes (read_pane), nudge other agents (send_text), or put them on their own\n"
       "schedules (add_dunk with their pane as target).\n")

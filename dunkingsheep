@@ -73,7 +73,7 @@ def build_parser():
                "  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n"
                "  dunkingsheep add -T w8:p3 -e 1.5h -t \"status report please\" -n hourly\n"
                "  dunkingsheep add -T self -e 30 --max-sends 1 -t \"check CI now\"\n"
-               "  dunkingsheep add -T self -e 60 --only-idle \\\n"
+               "  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\\n"
                "      -t \"If the backlog is done: dunkingsheep remove {id}. Else continue.\"\n"
                "placeholders in TEXT: {id} {name} {count} {target} {interval} {time} {date}",
     )
@@ -86,6 +86,8 @@ def build_parser():
     p.add_argument("--only-idle", action="store_true",
                    help="hold each send until the target agent is idle")
     p.add_argument("--max-sends", type=int, help="remove the dunk after N sends")
+    p.add_argument("--skip-if-unconsumed", action="store_true",
+                   help="backpressure: skip a send if the previous one was never picked up")
     p.add_argument("--no-start", action="store_true", help="create it stopped")
 
     p = sub.add_parser("update", aliases=["set"], help="change a dunk's settings")
@@ -98,6 +100,10 @@ def build_parser():
     gate.add_argument("--only-idle", action="store_true")
     gate.add_argument("--any-time", action="store_true", help="clear only-idle gating")
     p.add_argument("--max-sends", type=int, help="0 clears the limit")
+    bp = p.add_mutually_exclusive_group()
+    bp.add_argument("--skip-if-unconsumed", action="store_true",
+                    help="backpressure: skip a send if the previous one was never picked up")
+    bp.add_argument("--always-send", action="store_true", help="clear skip-if-unconsumed")
 
     for name, aliases, help_text in (
         ("remove", ["rm", "delete"], "delete a dunk"),
@@ -232,11 +238,20 @@ def _every(minutes):
     return text if text.endswith("s") else text + "m"
 
 
+def _gate(dunk):
+    parts = []
+    if dunk.get("only_when") == "idle":
+        parts.append("idle")
+    if dunk.get("skip_if_unconsumed"):
+        parts.append("skip")
+    return "+".join(parts) or "-"
+
+
 def print_dunks(dunks):
     if not dunks:
         print("no dunks")
         return
-    print(f"{'ID':<5} {'RUN':<4} {'STATUS':<16} {'TARGET':<28} {'EVERY':>6} {'SENT':>6} {'GATE':<5} TEXT")
+    print(f"{'ID':<5} {'RUN':<4} {'STATUS':<20} {'TARGET':<28} {'EVERY':>6} {'SENT':>6} {'SKIP':>4} {'GATE':<9} TEXT")
     for dunk in dunks:
         sent = str(dunk.get("send_count") or 0)
         if dunk.get("max_sends"):
@@ -245,21 +260,24 @@ def print_dunks(dunks):
         print(
             f"{_clip(dunk['id'], 5):<5} "
             f"{'yes' if dunk.get('running') else 'no':<4} "
-            f"{_clip(dunk.get('status'), 16):<16} "
+            f"{_clip(dunk.get('status'), 20):<20} "
             f"{_clip(dunk.get('target_label'), 28):<28} "
             f"{_every(dunk.get('interval_minutes') or 0):>6} "
             f"{sent:>6} "
-            f"{_clip(dunk.get('only_when') or '-', 5):<5} "
+            f"{dunk.get('skip_count') or 0:>4} "
+            f"{_gate(dunk):<9} "
             f"{_clip((dunk.get('text') or '').replace(chr(10), ' ') + name, 60)}"
         )
 
 
 def print_dunk(dunk):
     order = ("id", "name", "running", "status", "target_label", "target_pane_id",
-             "interval_minutes", "only_when", "max_sends", "send_count",
-             "next_send_in_s", "last_error", "text")
+             "interval_minutes", "only_when", "max_sends", "skip_if_unconsumed",
+             "send_count", "skip_count", "awaiting_consumption", "next_send_in_s",
+             "last_error", "text")
     for key in order:
-        if key in dunk and dunk[key] not in (None, ""):
+        if key in dunk and dunk[key] not in (None, "", False, 0) or key in (
+                "skip_if_unconsumed",):
             value = dunk[key]
             if key == "text":
                 print(f"{key:<16} {value!r}")
@@ -391,6 +409,8 @@ def run_client_command(client, args):
             payload["only_when"] = "idle"
         if args.max_sends:
             payload["max_sends"] = args.max_sends
+        if args.skip_if_unconsumed:
+            payload["skip_if_unconsumed"] = True
         return client.call("add_dunk", **payload), print_dunk
     if command in ("update", "set"):
         payload = {"id": args.id}
@@ -408,6 +428,10 @@ def run_client_command(client, args):
             payload["only_when"] = None
         if args.max_sends is not None:
             payload["max_sends"] = args.max_sends or None
+        if args.skip_if_unconsumed:
+            payload["skip_if_unconsumed"] = True
+        elif args.always_send:
+            payload["skip_if_unconsumed"] = False
         return client.call("update_dunk", **payload), print_dunk
     if command in ("remove", "rm", "delete"):
         return client.call("remove_dunk", id=args.id), lambda r: print(f"removed {r['id']}")

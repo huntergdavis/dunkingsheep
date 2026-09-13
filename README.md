@@ -35,6 +35,7 @@ herdr status server                     # herdr must be running
 | **Target by name** | Pane id (`w8:p3`), `self` (the caller's own pane), or a unique substring of a tab, workspace, agent or directory. |
 | **Placeholders** | `{id}` `{name}` `{count}` `{target}` `{interval}` `{time}` `{date}` expand at send time. A dunk can tell its recipient which dunk to remove. |
 | **Idle gating** | `--only-idle` / `only_when="idle"` holds a send until herdr reports the target agent idle. |
+| **Backpressure** | `--skip-if-unconsumed` / `skip_if_unconsumed=true` skips a send (no-op, no error, `skip_count`+1) while the previous one still sits unread in the pane. Stops prompts piling up in an unattended agent. |
 | **Max sends** | `--max-sends N` removes the dunk after N sends. `1` is a one-shot delayed nudge. |
 | **Direct messages** | `send <target> <text>` / `send_text` types into any pane now, no dunk. |
 | **Pane reading** | `read <target>` / `read_pane` returns a pane's recent output plus its agent and status. |
@@ -50,14 +51,17 @@ Tell Claude (or Codex), with the MCP server registered:
 It calls one tool:
 
 ```
-add_dunk(target="self", interval_minutes=60, only_when="idle", name="backlog",
+add_dunk(target="self", interval_minutes=60, only_when="idle",
+         skip_if_unconsumed=true, name="backlog",
          text="Backlog check #{count}: read BACKLOG.md. If every item is done,
                call remove_dunk('{id}') and stop. Otherwise implement the next
                item, commit, and update BACKLOG.md.")
 ```
 
-Every hour the daemon types that into the agent's own pane once it is idle.
-The prompt carries its own dunk id, so the future agent can end the loop. The
+Every hour the daemon types that into the agent's own pane once it is idle,
+and skips the hour if the previous prompt is still unread (so an unattended
+session finds one prompt waiting, not four). The prompt carries its own dunk
+id, so the future agent can end the loop. The
 same agent can `read_pane` other agents, `send_text` them instructions, and
 `add_dunk` schedules for them: one agent watching and pacing a whole herd.
 
@@ -83,8 +87,8 @@ Tools: `help` `status` `list_panes` `read_pane` `list_dunks` `get_dunk`
 ## ⌨️ CLI
 
 ```bash
-dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--max-sends N] [--no-start]
-dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--max-sends N]
+dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--skip-if-unconsumed] [--max-sends N] [--no-start]
+dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--skip-if-unconsumed|--always-send] [--max-sends N]
 dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
 dunkingsheep send <target> <text…>            read <target> [-l N]
 dunkingsheep panes | status | shutdown [--stop-all] | serve | tui | mcp
@@ -120,7 +124,8 @@ printf '%s\n' '{"id":1,"cmd":"help"}' | nc -U ~/.config/dunkingsheep/dunkingshee
 | `j`/`k` ↑/↓ | move | `c` | choose target pane |
 | `a` / `d` | add / remove | `t` | test send now |
 | `Space` / `s` | start / stop | `i` / `e` / `n` | interval / text / name |
-| `o` / `m` | idle gate / max sends | `q` / `Q` | quit view / stop all + shut down daemon |
+| `o` / `u` | idle gate / skip-if-unconsumed | `m` | max sends |
+| `q` / `Q` | quit view / stop all + shut down daemon | | |
 
 ## 🧩 How it works
 

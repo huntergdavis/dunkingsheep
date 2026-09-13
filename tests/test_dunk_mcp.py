@@ -59,6 +59,9 @@ class McpServerTests(unittest.TestCase):
         add = next(t for t in tools if t["name"] == "add_dunk")
         self.assertEqual(["target", "text", "interval_minutes"], add["inputSchema"]["required"])
         self.assertIn("only_when", add["inputSchema"]["properties"])
+        self.assertEqual("boolean", add["inputSchema"]["properties"]["skip_if_unconsumed"]["type"])
+        update = next(t for t in tools if t["name"] == "update_dunk")
+        self.assertIn("skip_if_unconsumed", update["inputSchema"]["properties"])
         self.assertIn("{id}", add["inputSchema"]["properties"]["text"]["description"])
         self.assertIn("help", names)
         # Flat schema types only, so strict validators (OpenAI/Codex, Gemini) accept them.
@@ -92,11 +95,13 @@ class McpServerTests(unittest.TestCase):
         response = self.rpc("tools/call", {
             "name": "add_dunk",
             "arguments": {"target": "self", "text": "check backlog, remove {id} when done",
-                          "interval_minutes": 60, "only_when": "idle"},
+                          "interval_minutes": 60, "only_when": "idle",
+                          "skip_if_unconsumed": True},
         })
         result = response["result"]
         self.assertFalse(result["isError"])
         self.assertEqual("d1", result["structuredContent"]["id"])
+        self.assertTrue(result["structuredContent"]["skip_if_unconsumed"])
         self.assertEqual("w1:p2", result["structuredContent"]["target_pane_id"])
         self.assertEqual("idle", result["structuredContent"]["only_when"])
         body = json.loads(result["content"][0]["text"])

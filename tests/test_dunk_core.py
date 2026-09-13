@@ -220,6 +220,137 @@ class FlockTests(unittest.TestCase):
         after = self.flock.get(dunk["id"])["next_send_in_s"]
         self.assertLessEqual(after, 60)
 
+    # -- backpressure (skip_if_unconsumed) ---------------------------------------
+
+    def _backpressured(self, **extra):
+        # One-second interval; sampling runs every tick with IDLE_POLL_S patched.
+        return self.flock.add(target="w2:p1", text="nudge {count}", interval_minutes=1 / 60,
+                              start=True, skip_if_unconsumed=True, **extra)
+
+    def test_first_send_always_fires_with_backpressure_on(self):
+        dunk = self._backpressured()
+        self.assertTrue(self.herdr.sent.wait(4))
+        self.assertEqual(("w2:p1", "nudge 1"), self.herdr.sends[0])
+        state = self.flock.get(dunk["id"])
+        self.assertTrue(state["awaiting_consumption"])
+        self.assertEqual(1, state["send_count"])
+
+    def test_unconsumed_send_is_skipped_without_error_and_reschedules(self):
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.05):
+            dunk = self._backpressured()
+            self.assertTrue(self.herdr.sent.wait(4))
+            # w2:p1 stays idle and its tail still shows "nudge 1": never consumed.
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["skip_count"] >= 2, 6))
+        state = self.flock.get(dunk["id"])
+        self.assertEqual(1, state["send_count"], "skips must not advance send_count")
+        self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
+        self.assertEqual("Skipped (unconsumed)", state["status"])
+        self.assertIsNone(state["last_error"])
+        self.assertIsNotNone(state["last_skipped_at"])
+        self.assertTrue(state["running"])
+        self.assertIsNotNone(state["next_send_in_s"], "the dunk reschedules, it does not stall")
+        self.assertTrue(state["awaiting_consumption"])
+
+    def test_busy_transition_after_send_lets_the_next_send_fire(self):
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.05):
+            dunk = self._backpressured()
+            self.assertTrue(self.herdr.sent.wait(4))
+            # The agent picks it up: goes working, tail no longer shows the text.
+            self.herdr.consume("w2:p1", busy=True)
+            self.assertTrue(wait_until(
+                lambda: not self.flock.get(dunk["id"])["awaiting_consumption"], 3))
+            # Back to idle before the next send is due; it must go out.
+            self.herdr.statuses["w2:p1"] = "idle"
+            self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 4))
+        state = self.flock.get(dunk["id"])
+        self.assertEqual(("w2:p1", "nudge 2"), self.herdr.sends[1])
+        self.assertEqual(0, state["skip_count"])
+
+    def test_busy_seen_during_countdown_counts_even_if_idle_again_at_send_time(self):
+        # The turn happened between polls of the countdown, not at send time.
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.05):
+            dunk = self._backpressured()
+            self.assertTrue(self.herdr.sent.wait(4))
+            self.herdr.statuses["w2:p1"] = "working"   # tail still shows the text
+            self.assertTrue(wait_until(
+                lambda: not self.flock.get(dunk["id"])["awaiting_consumption"], 3))
+            self.herdr.statuses["w2:p1"] = "idle"
+            self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 4))
+        self.assertEqual(0, self.flock.get(dunk["id"])["skip_count"])
+
+    def test_tail_check_catches_a_turn_missed_by_sampling(self):
+        # Never observed busy, but the text is gone from the tail: consumed.
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.05):
+            dunk = self._backpressured()
+            self.assertTrue(self.herdr.sent.wait(4))
+            self.herdr.consume("w2:p1", busy=False)
+            self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 4))
+        self.assertEqual(0, self.flock.get(dunk["id"])["skip_count"])
+
+    def test_tail_check_tolerates_wrapping(self):
+        dunker = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                        awaiting_consumption=True,
+                        last_sent_text="please continue with the very long backlog item")
+        self.herdr.statuses["w2:p1"] = "idle"
+        with mock.patch.object(self.herdr, "read_pane",
+                               return_value="prompt> please continue with the\nvery long backlog item\n"):
+            self.assertFalse(self.flock._previous_send_consumed(dunker))
+        with mock.patch.object(self.herdr, "read_pane", return_value="prompt> \n"):
+            self.assertTrue(self.flock._previous_send_consumed(dunker))
+
+    def test_unreadable_pane_gives_no_evidence_so_the_send_proceeds(self):
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.05):
+            dunk = self._backpressured()
+            self.assertTrue(self.herdr.sent.wait(4))
+            self.herdr.unreadable.add("w2:p1")
+            self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 4))
+        self.assertEqual(0, self.flock.get(dunk["id"])["skip_count"])
+
+    def test_backpressure_off_preserves_existing_behavior(self):
+        dunk = self.flock.add(target="w2:p1", text="tick", interval_minutes=1 / 60, start=True)
+        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 5))
+        state = self.flock.get(dunk["id"])
+        self.assertFalse(state["skip_if_unconsumed"])
+        self.assertEqual(0, state["skip_count"])
+        self.assertGreaterEqual(state["send_count"], 2)
+        # No consumption sampling happens for a plain dunk.
+        self.assertEqual(0, self.herdr.status_calls)
+
+    def test_backpressure_toggle_via_update_and_validation(self):
+        dunk = self.flock.add(target="w2:p1")
+        self.assertFalse(dunk["skip_if_unconsumed"])
+        self.assertTrue(self.flock.update(dunk["id"], skip_if_unconsumed="yes")["skip_if_unconsumed"])
+        self.assertFalse(self.flock.update(dunk["id"], skip_if_unconsumed=False)["skip_if_unconsumed"])
+        with self.assertRaises(DunkError):
+            self.flock.update(dunk["id"], skip_if_unconsumed="maybe")
+
+    def test_backpressure_state_round_trips_and_old_files_default_off(self):
+        dunk = self._backpressured(name="bp")
+        self.assertTrue(self.herdr.sent.wait(4))
+        self.flock.stop(dunk["id"])
+        with open(self.state) as handle:
+            saved = json.load(handle)["dunkers"][0]
+        self.assertTrue(saved["skip_if_unconsumed"])
+        self.assertTrue(saved["awaiting_consumption"])
+        self.assertEqual("nudge 1", saved["last_sent_text"])
+        # An old-format file has none of the new fields.
+        for key in ("skip_if_unconsumed", "skip_count", "last_skipped_at",
+                    "awaiting_consumption", "last_sent_text"):
+            del saved[key]
+        with open(self.state, "w") as handle:
+            json.dump({"version": 1, "next_id": 2, "dunkers": [saved]}, handle)
+        flock2 = Flock(herdr=FakeHerdr(), state_file=self.state)
+        try:
+            restored = flock2.get("d1")
+            self.assertFalse(restored["skip_if_unconsumed"])
+            self.assertEqual(0, restored["skip_count"])
+            self.assertFalse(restored["awaiting_consumption"])
+            self.assertIsNone(restored["last_sent_text"])
+            self.assertEqual("bp", restored["name"])
+        finally:
+            flock2.close()
+
     # -- persistence -------------------------------------------------------------
 
     def test_state_is_saved_and_restored_with_running_dunks(self):

@@ -19,6 +19,9 @@ Orchestration extras on top of the classic Dunking Bird model:
 - `only_when="idle"`: defer a send while herdr reports the target agent as
   working or blocked; re-check every few seconds.
 - `max_sends=N`: remove the dunk automatically after its N-th send.
+- `skip_if_unconsumed=True`: backpressure. A scheduled send becomes a no-op
+  when the previous send was never picked up by the target (see
+  `Flock._previous_send_consumed` for how that is decided).
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
 """
@@ -47,6 +50,10 @@ RESTORE_GRACE_S = 5
 DEFAULT_TEXT = "continue"
 DEFAULT_INTERVAL_MINUTES = 10.0
 ONLY_WHEN_CHOICES = (None, "idle")
+# How many trailing pane lines to inspect for a still-unconsumed previous send,
+# and how much of that text to look for (whitespace-collapsed).
+CONSUMPTION_TAIL_LINES = 15
+CONSUMPTION_PREFIX_CHARS = 80
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 
@@ -114,6 +121,8 @@ class Dunker:
         "target_workspace", "target_cwd", "interval_minutes", "text",
         "running", "only_when", "max_sends", "send_count", "created_at",
         "started_at", "last_sent_at", "next_send_at", "last_error",
+        "skip_if_unconsumed", "skip_count", "last_skipped_at",
+        "awaiting_consumption", "last_sent_text",
     )
 
     def __init__(self, id, **kwargs):
@@ -139,6 +148,13 @@ class Dunker:
         self.last_sent_at = kwargs.get("last_sent_at")
         self.next_send_at = kwargs.get("next_send_at")
         self.last_error = kwargs.get("last_error")
+        # Backpressure (all persisted; old state files simply lack them).
+        self.skip_if_unconsumed = bool(kwargs.get("skip_if_unconsumed", False))
+        self.skip_count = int(kwargs.get("skip_count") or 0)
+        self.last_skipped_at = kwargs.get("last_skipped_at")
+        # True from a successful send until the target is seen consuming it.
+        self.awaiting_consumption = bool(kwargs.get("awaiting_consumption", False))
+        self.last_sent_text = kwargs.get("last_sent_text")
         # Volatile (not persisted).
         self.status = kwargs.get("status", "Ready")
         self.stop_event = None
@@ -371,7 +387,8 @@ class Flock:
     # -- mutation -----------------------------------------------------------
 
     def add(self, target=None, text=DEFAULT_TEXT, interval_minutes=DEFAULT_INTERVAL_MINUTES,
-            name=None, start=False, only_when=None, max_sends=None, self_pane_id=None):
+            name=None, start=False, only_when=None, max_sends=None,
+            skip_if_unconsumed=False, self_pane_id=None):
         interval = parse_interval(interval_minutes)
         only_when = _check_only_when(only_when)
         max_sends = _check_max_sends(max_sends)
@@ -384,6 +401,7 @@ class Flock:
                 text=text if text is not None else DEFAULT_TEXT,
                 only_when=only_when,
                 max_sends=max_sends,
+                skip_if_unconsumed=_check_bool(skip_if_unconsumed, "skip_if_unconsumed"),
             )
             self.next_id += 1
             if pane:
@@ -399,7 +417,8 @@ class Flock:
             return dunker.to_dict()
 
     def update(self, dunk_id, target=None, text=None, interval_minutes=None,
-               name=None, only_when=..., max_sends=..., self_pane_id=None):
+               name=None, only_when=..., max_sends=..., skip_if_unconsumed=None,
+               self_pane_id=None):
         """Change fields on a dunk. Pass `only_when=None` / `max_sends=None`
         explicitly to clear them; omit them to leave them alone."""
         pane = self.resolve_target(target, self_pane_id) if target else None
@@ -432,6 +451,9 @@ class Flock:
             if max_sends is not ...:
                 dunker.max_sends = max_sends
                 changed.append("max_sends")
+            if skip_if_unconsumed is not None:
+                dunker.skip_if_unconsumed = _check_bool(skip_if_unconsumed, "skip_if_unconsumed")
+                changed.append("skip_if_unconsumed")
             if changed:
                 dunker.status = f"{changed[-1].replace('_', ' ').capitalize()} set"
                 self._save()
@@ -575,13 +597,54 @@ class Flock:
                 dunker.send_count += 1
                 dunker.last_sent_at = time.time()
                 dunker.last_error = None
+                dunker.last_sent_text = text
+                # Consumption tracking starts now; a target already mid-turn
+                # queues the text and will process it, so count that as taken.
+                dunker.awaiting_consumption = True
                 self.last_message = f"Sent to {dunker.target_label()}"
             else:
                 dunker.last_error = message
                 self.last_message = f"Send failed: {message}"
+        if ok and dunker.skip_if_unconsumed:
+            self._observe_consumption(dunker)
         log.info("%s -> %s: %s (%s)", dunker.id, dunker.target_pane_id,
                  "sent" if ok else "FAILED", message)
         return ok, message
+
+    def _observe_consumption(self, dunker):
+        """Sample the target once; latch consumption if it is busy.
+
+        A target that reports working/blocked after a send has taken the text
+        as input (or has it queued behind the current turn). Sampling happens
+        at IDLE_POLL_S cadence inside the existing countdown/gate loops, only
+        while a send is still awaiting consumption, so a turn shorter than one
+        sampling gap can be missed; the tail check below covers that case."""
+        if not dunker.awaiting_consumption:
+            return None
+        agent_status = self.herdr.agent_status(dunker.target_pane_id)
+        if agent_status in BUSY_STATUSES:
+            with self._lock:
+                dunker.awaiting_consumption = False
+                self._save()
+        return agent_status
+
+    def _previous_send_consumed(self, dunker):
+        """Decide, at send time, whether the last send was picked up.
+
+        Consumed if the target was ever seen busy since that send, or if the
+        sent text is no longer sitting in the pane's tail (an unconsumed
+        terminal input buffer shows the text verbatim at the bottom). A pane
+        that cannot be read yields no evidence, so it counts as consumed and
+        the send proceeds as it always did."""
+        if not dunker.awaiting_consumption:
+            return True
+        if self._observe_consumption(dunker) in BUSY_STATUSES:
+            return True
+        tail = self.herdr.read_pane(dunker.target_pane_id, lines=CONSUMPTION_TAIL_LINES)
+        if tail is None or not dunker.last_sent_text:
+            return True
+        needle = _collapse(dunker.last_sent_text)[:CONSUMPTION_PREFIX_CHARS]
+        return needle not in _collapse(tail)
 
     def _timer_loop(self, dunker, stop_event):
         try:
@@ -592,12 +655,20 @@ class Flock:
                         dunker.next_send_at = time.time() + total
 
                 # Countdown, re-reading next_send_at so interval edits apply.
+                # While a backpressured send awaits consumption, sample the
+                # target at the idle-gate cadence to catch it going busy.
+                next_probe = 0.0
                 while True:
-                    remaining = dunker.next_send_at - time.time()
+                    now = time.time()
+                    remaining = dunker.next_send_at - now
                     if remaining <= 0:
                         break
                     minutes, seconds = divmod(int(remaining + 0.999), 60)
                     dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
+                    if (dunker.skip_if_unconsumed and dunker.awaiting_consumption
+                            and now >= next_probe):
+                        self._observe_consumption(dunker)
+                        next_probe = now + IDLE_POLL_S
                     if stop_event.wait(min(1.0, remaining)):
                         return
 
@@ -611,9 +682,29 @@ class Flock:
                             break
                         if agent_status not in BUSY_STATUSES:
                             break
+                        if dunker.awaiting_consumption:
+                            with self._lock:
+                                dunker.awaiting_consumption = False
                         dunker.status = f"Busy ({agent_status})"
                         if stop_event.wait(IDLE_POLL_S):
                             return
+
+                # Backpressure: a no-op when the previous send was never taken.
+                if dunker.skip_if_unconsumed and not self._previous_send_consumed(dunker):
+                    with self._lock:
+                        if stop_event.is_set():
+                            return
+                        dunker.next_send_at = time.time() + max(1.0, dunker.interval_minutes * 60)
+                        dunker.skip_count += 1
+                        dunker.last_skipped_at = time.time()
+                        dunker.status = "Skipped (unconsumed)"
+                        self.last_message = f"Skipped {dunker.id}: previous send unconsumed"
+                        self._save()
+                    log.info("%s -> %s: skipped, previous send not consumed",
+                             dunker.id, dunker.target_pane_id)
+                    if stop_event.wait(1.0):
+                        return
+                    continue
 
                 dunker.status = "Waiting..."
                 with self.send_lock:
@@ -671,6 +762,24 @@ def _check_only_when(value):
     if value not in ONLY_WHEN_CHOICES:
         raise DunkError("only_when must be 'idle' or empty")
     return value
+
+
+def _collapse(text):
+    """Whitespace-insensitive form of text, so wrapped lines still match."""
+    return " ".join(str(text).split())
+
+
+def _check_bool(value, name):
+    if isinstance(value, bool):
+        return value
+    if value in (None, "", 0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    raise DunkError(f"{name} must be true or false")
 
 
 def _check_max_sends(value):

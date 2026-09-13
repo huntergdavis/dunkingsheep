@@ -39,10 +39,12 @@ an agent right now (send_text), inspect what an agent is doing (read_pane), or
 schedule a future nudge to yourself (target "self").
 
 Meta-dunking recipe: add_dunk(target="self", interval_minutes=60,
-only_when="idle", text="Backlog check #{count}: if every backlog item is done,
-call remove_dunk('{id}') and stop; otherwise implement the next item."). {id}
-expands to the dunk's own id at send time, so the future you knows exactly
-which dunk to remove. only_when="idle" waits until you are not mid-task;
+only_when="idle", skip_if_unconsumed=true, text="Backlog check #{count}: if
+every backlog item is done, call remove_dunk('{id}') and stop; otherwise
+implement the next item."). {id} expands to the dunk's own id at send time, so
+the future you knows exactly which dunk to remove. only_when="idle" waits until
+you are not mid-task; skip_if_unconsumed skips a send while the previous one is
+still unread in the pane (prevents prompts piling up in an unattended session);
 max_sends=1 makes a one-off reminder.
 """
 

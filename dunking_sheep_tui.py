@@ -182,6 +182,8 @@ class DunkingSheepTui:
             self.edit_name()
         elif key == ord("o"):
             self.toggle_only_idle()
+        elif key == ord("u"):
+            self.toggle_skip_if_unconsumed()
         elif key == ord("m"):
             self.edit_max_sends()
 
@@ -224,6 +226,15 @@ class DunkingSheepTui:
         new_value = "any" if dunk.get("only_when") == "idle" else "idle"
         self.rpc("update_dunk", id=dunk["id"], only_when=new_value)
         self.flash("Sends wait for idle agent" if new_value == "idle" else "Sends on schedule")
+
+    def toggle_skip_if_unconsumed(self):
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        new_value = not dunk.get("skip_if_unconsumed")
+        self.rpc("update_dunk", id=dunk["id"], skip_if_unconsumed=new_value)
+        self.flash("Skip sends the target never consumed" if new_value
+                   else "Always send on schedule")
 
     def edit_max_sends(self):
         dunk = self.current()
@@ -501,7 +512,8 @@ class DunkingSheepTui:
         h, w = self.stdscr.getmaxyx()
         self.safe_addstr(self.stdscr, 0, 0, "Dunking Sheep TUI", w - 1, curses.A_BOLD)
         help_text = ("a add  d remove  c target  t test  i interval  e text  n name  "
-                     "o idle-gate  m max  space start/stop  q quit  Q stop all+quit")
+                     "o idle-gate  u skip-unconsumed  m max  space start/stop  "
+                     "q quit  Q stop all+quit")
         self.safe_addstr(self.stdscr, 1, 0, help_text, w - 1)
         self.safe_hline(self.stdscr, 2, 0, w - 1)
 
@@ -524,13 +536,18 @@ class DunkingSheepTui:
             label = d.get("target_label") or "(no target)"
             if d.get("name"):
                 label = f"{d['name']}: {label}"
+            gate = "+".join(
+                flag for flag, on in (("idle", d.get("only_when") == "idle"),
+                                      ("skip", d.get("skip_if_unconsumed")))
+                if on
+            ) or "-"
             row = self.format_row(
                 d["id"],
                 d.get("status") or "",
                 label,
                 format_interval(d.get("interval_minutes") or 0),
                 sent,
-                "idle" if d.get("only_when") == "idle" else "-",
+                gate,
                 (d.get("text") or "").replace("\n", " "),
                 w,
             )
@@ -547,12 +564,12 @@ class DunkingSheepTui:
     def format_row(self, num, status, window, minutes, sent, gate, text, width):
         columns = [
             clip(num, 4).ljust(4),
-            clip(status, 18).ljust(18),
+            clip(status, 20).ljust(20),
             clip(window, 26).ljust(26),
             clip(minutes, 6).rjust(6),
             clip(sent, 6).rjust(6),
-            clip(gate, 4).ljust(4),
-            clip(text, max(10, width - 70)),
+            clip(gate, 9).ljust(9),
+            clip(text, max(10, width - 77)),
         ]
         row = clip(" ".join(columns), width - 1)
         return row.ljust(max(0, width - 1))

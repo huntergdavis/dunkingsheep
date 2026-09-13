@@ -43,6 +43,9 @@ class FakeHerdr:
         self.available = available
         self.sends = []
         self.statuses = {}
+        self.consumed = {}
+        self.unreadable = set()
+        self.status_calls = 0
         self.fail_sends = False
         self.lock = threading.Lock()
         self.sent = threading.Event()
@@ -77,6 +80,7 @@ class FakeHerdr:
         return panes
 
     def agent_status(self, pane_id):
+        self.status_calls += 1
         if pane_id in self.statuses:
             return self.statuses[pane_id]
         for pane in self.panes:
@@ -85,10 +89,23 @@ class FakeHerdr:
         return None
 
     def read_pane(self, pane_id, lines=40, source="recent"):
+        """The pane tail: every send not yet consumed is still visible, like an
+        unread terminal input buffer."""
         if not any(p["pane_id"] == pane_id for p in self.panes):
             return None
+        if pane_id in self.unreadable:
+            return None
         mine = [text for pid, text in self.sends if pid == pane_id]
+        mine = mine[self.consumed.get(pane_id, 0):]
         return "\n".join(mine[-lines:]) + "\n"
+
+    def consume(self, pane_id, busy=True):
+        """Simulate the target picking up everything sent so far: the tail no
+        longer shows it and (optionally) the agent goes busy for a turn."""
+        with self.lock:
+            self.consumed[pane_id] = len([1 for pid, _ in self.sends if pid == pane_id])
+        if busy:
+            self.statuses[pane_id] = "working"
 
     def send_text_and_enter(self, pane_id, text):
         with self.lock:

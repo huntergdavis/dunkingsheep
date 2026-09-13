@@ -92,6 +92,7 @@ def h_add_dunk(flock, args, self_pane_id):
         start=_bool(args.get("start"), True),
         only_when=args.get("only_when"),
         max_sends=args.get("max_sends"),
+        skip_if_unconsumed=_bool(args.get("skip_if_unconsumed"), False),
         self_pane_id=self_pane_id,
     )
 
@@ -106,6 +107,8 @@ def h_update_dunk(flock, args, self_pane_id):
         kwargs["only_when"] = args["only_when"]
     if "max_sends" in args:
         kwargs["max_sends"] = args["max_sends"]
+    if args.get("skip_if_unconsumed") is not None:
+        kwargs["skip_if_unconsumed"] = _bool(args["skip_if_unconsumed"], False)
     if not kwargs:
         raise DunkError("nothing to update")
     return flock.update(args["id"], self_pane_id=self_pane_id, **kwargs)
@@ -206,6 +209,15 @@ ONLY_WHEN_PARAM = {
         "(not working/blocked). 'any' (the default) sends on schedule."
     ),
 }
+SKIP_IF_UNCONSUMED_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Backpressure: skip a scheduled send (no-op, send_count unchanged) when "
+        "the previous send was never picked up by the target, instead of piling "
+        "duplicate prompts into an unattended pane. Default false. Recommended "
+        "for self-dunks and unattended agents."
+    ),
+}
 MAX_SENDS_PARAM = {
     "type": "integer",
     "minimum": 0,
@@ -233,7 +245,7 @@ COMMANDS = [
     Command(
         "list_dunks",
         "List every dunk with its target, text, interval, running state, "
-        "live status, send count and seconds until the next send.",
+        "live status, send count, skip count and seconds until the next send.",
         h_list_dunks,
     ),
     Command(
@@ -257,12 +269,14 @@ COMMANDS = [
             "start": {"type": "boolean", "description": "Start right away (default true)."},
             "only_when": ONLY_WHEN_PARAM,
             "max_sends": MAX_SENDS_PARAM,
+            "skip_if_unconsumed": SKIP_IF_UNCONSUMED_PARAM,
         },
         mcp_required=["target", "text", "interval_minutes"],
     ),
     Command(
         "update_dunk",
-        "Change a dunk's target, text, interval, name, only_when or max_sends. "
+        "Change a dunk's target, text, interval, name, only_when, max_sends or "
+        "skip_if_unconsumed. "
         "Changing the interval of a running dunk reschedules its next send.",
         h_update_dunk,
         params={
@@ -273,6 +287,7 @@ COMMANDS = [
             "name": NAME_PARAM,
             "only_when": ONLY_WHEN_PARAM,
             "max_sends": MAX_SENDS_PARAM,
+            "skip_if_unconsumed": SKIP_IF_UNCONSUMED_PARAM,
         },
         required=["id"],
     ),
