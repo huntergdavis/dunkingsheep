@@ -20,8 +20,9 @@ Orchestration extras on top of the classic Dunking Bird model:
   working or blocked; re-check every few seconds.
 - `max_sends=N`: remove the dunk automatically after its N-th send.
 - `skip_if_unconsumed=True`: backpressure. A scheduled send becomes a no-op
-  when the previous send was never picked up by the target (see
-  `Flock._previous_send_consumed` for how that is decided).
+  when the previous send is still sitting unread in the target's input box (see
+  `Flock._previous_send_consumed`). Judged by reading the pane, never by whether
+  the agent is merely busy.
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
 """
@@ -52,8 +53,21 @@ DEFAULT_INTERVAL_MINUTES = 10.0
 ONLY_WHEN_CHOICES = (None, "idle")
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
-CONSUMPTION_TAIL_LINES = 15
+# Reading the pane's visible screen to decide whether a send was consumed.
+CONSUMPTION_READ_LINES = 40
 CONSUMPTION_PREFIX_CHARS = 80
+# Prompt sigils that mark the start of an agent's input box (Claude ❯, Codex ›).
+INPUT_BOX_SIGILS = ("\u276f", "\u203a", ">")
+# Substrings an agent shows *inside the input box* when it has collapsed a long
+# or pasted input it has not yet submitted. Matched only within the box region,
+# so transcript-collapse chips ("ctrl + t to view transcript") never count.
+COLLAPSED_INPUT_MARKERS = (
+    "ctrl+o to expand",
+    "paste again to expand",
+    "pasted text",
+    "pasted content",
+    "[image",
+)
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 
@@ -598,53 +612,52 @@ class Flock:
                 dunker.last_sent_at = time.time()
                 dunker.last_error = None
                 dunker.last_sent_text = text
-                # Consumption tracking starts now; a target already mid-turn
-                # queues the text and will process it, so count that as taken.
+                # Backpressure looks at this text in the pane on the next send.
                 dunker.awaiting_consumption = True
                 self.last_message = f"Sent to {dunker.target_label()}"
             else:
                 dunker.last_error = message
                 self.last_message = f"Send failed: {message}"
-        if ok and dunker.skip_if_unconsumed:
-            self._observe_consumption(dunker)
         log.info("%s -> %s: %s (%s)", dunker.id, dunker.target_pane_id,
                  "sent" if ok else "FAILED", message)
         return ok, message
 
-    def _observe_consumption(self, dunker):
-        """Sample the target once; latch consumption if it is busy.
+    def _previous_send_consumed(self, dunker):
+        """Decide, at send time, whether the previous send has left the target's
+        input box. Returns True (consumed, go ahead) or False (still pending or
+        we could not tell, so hold).
 
-        A target that reports working/blocked after a send has taken the text
-        as input (or has it queued behind the current turn). Sampling happens
-        at IDLE_POLL_S cadence inside the existing countdown/gate loops, only
-        while a send is still awaiting consumption, so a turn shorter than one
-        sampling gap can be missed; the tail check below covers that case."""
-        if not dunker.awaiting_consumption:
-            return None
-        agent_status = self.herdr.agent_status(dunker.target_pane_id)
-        if agent_status in BUSY_STATUSES:
+        The signal is the pane's visible input box, not the agent's busy state:
+        a pane idling at a prompt with unread text reports idle, and a pane busy
+        on an earlier turn tells us nothing about the newest send. We read the
+        box and treat the send as still pending if it shows a collapsed-input
+        placeholder (how Claude Code renders a long queued paste) or the sent
+        text verbatim. An unreadable or unrecognisable box is inconclusive, and
+        for this opt-in feature the safe answer to "not sure" is to hold: a
+        missed nudge is recoverable next interval, a stacked pile-up is not.
+
+        Blind spots, stated honestly: we detect our own queued send (verbatim, or
+        the collapse placeholder a long one becomes) but not arbitrary unrelated
+        short text a human left in the box, because agents show rotating idle
+        hints there that cannot be told apart from typed text - so a short
+        unrelated line reads as "clear" and the send proceeds. A short prompt
+        whose echo lingers in the box region can hold one extra interval. This
+        assumes an agent pane that draws an input box (Claude/Codex), not a bare
+        shell."""
+        if dunker.send_count == 0 or not dunker.last_sent_text:
+            return True  # nothing sent yet; the first send always proceeds
+        tail = self.herdr.read_pane(
+            dunker.target_pane_id, lines=CONSUMPTION_READ_LINES, source="visible"
+        )
+        pending = _input_pending(tail, dunker.last_sent_text)
+        if pending is None:
+            log.info("%s: could not read %s input box; holding to avoid stacking",
+                     dunker.id, dunker.target_pane_id)
+            return False
+        if not pending:
             with self._lock:
                 dunker.awaiting_consumption = False
-                self._save()
-        return agent_status
-
-    def _previous_send_consumed(self, dunker):
-        """Decide, at send time, whether the last send was picked up.
-
-        Consumed if the target was ever seen busy since that send, or if the
-        sent text is no longer sitting in the pane's tail (an unconsumed
-        terminal input buffer shows the text verbatim at the bottom). A pane
-        that cannot be read yields no evidence, so it counts as consumed and
-        the send proceeds as it always did."""
-        if not dunker.awaiting_consumption:
-            return True
-        if self._observe_consumption(dunker) in BUSY_STATUSES:
-            return True
-        tail = self.herdr.read_pane(dunker.target_pane_id, lines=CONSUMPTION_TAIL_LINES)
-        if tail is None or not dunker.last_sent_text:
-            return True
-        needle = _collapse(dunker.last_sent_text)[:CONSUMPTION_PREFIX_CHARS]
-        return needle not in _collapse(tail)
+        return not pending
 
     def _timer_loop(self, dunker, stop_event):
         try:
@@ -655,20 +668,12 @@ class Flock:
                         dunker.next_send_at = time.time() + total
 
                 # Countdown, re-reading next_send_at so interval edits apply.
-                # While a backpressured send awaits consumption, sample the
-                # target at the idle-gate cadence to catch it going busy.
-                next_probe = 0.0
                 while True:
-                    now = time.time()
-                    remaining = dunker.next_send_at - now
+                    remaining = dunker.next_send_at - time.time()
                     if remaining <= 0:
                         break
                     minutes, seconds = divmod(int(remaining + 0.999), 60)
                     dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
-                    if (dunker.skip_if_unconsumed and dunker.awaiting_consumption
-                            and now >= next_probe):
-                        self._observe_consumption(dunker)
-                        next_probe = now + IDLE_POLL_S
                     if stop_event.wait(min(1.0, remaining)):
                         return
 
@@ -682,9 +687,6 @@ class Flock:
                             break
                         if agent_status not in BUSY_STATUSES:
                             break
-                        if dunker.awaiting_consumption:
-                            with self._lock:
-                                dunker.awaiting_consumption = False
                         dunker.status = f"Busy ({agent_status})"
                         if stop_event.wait(IDLE_POLL_S):
                             return
@@ -767,6 +769,42 @@ def _check_only_when(value):
 def _collapse(text):
     """Whitespace-insensitive form of text, so wrapped lines still match."""
     return " ".join(str(text).split())
+
+
+def _input_area(tail):
+    """Return the agent's input-box region: everything from the last prompt
+    sigil line (Claude ❯, Codex ›) to the end of the visible screen. None if no
+    such line is present, meaning we cannot isolate the box. The box sits at the
+    very bottom of the screen, so the *last* sigil line starts it; transcript
+    text above it (including transcript-collapse chips) is excluded."""
+    if not tail:
+        return None
+    lines = tail.splitlines()
+    last = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped[:1] in INPUT_BOX_SIGILS:
+            last = index
+    if last is None:
+        return None
+    return "\n".join(lines[last:])
+
+
+def _input_pending(tail, last_sent_text):
+    """True if the target's input box still holds unconsumed input, False if it
+    is clear, None if we cannot tell (unreadable pane or no recognisable box)."""
+    if tail is None:
+        return None
+    area = _input_area(tail)
+    if area is None:
+        return None
+    low = area.lower()
+    if any(marker in low for marker in COLLAPSED_INPUT_MARKERS):
+        return True
+    needle = _collapse(last_sent_text)[:CONSUMPTION_PREFIX_CHARS].lower()
+    if needle and needle in _collapse(area).lower():
+        return True
+    return False
 
 
 def _check_bool(value, name):

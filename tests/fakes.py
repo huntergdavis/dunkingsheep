@@ -43,8 +43,9 @@ class FakeHerdr:
         self.available = available
         self.sends = []
         self.statuses = {}
-        self.consumed = {}
+        self.screens = {}
         self.unreadable = set()
+        self.reads = []
         self.status_calls = 0
         self.fail_sends = False
         self.lock = threading.Lock()
@@ -88,24 +89,28 @@ class FakeHerdr:
                 return pane.get("agent_status", "unknown")
         return None
 
-    def read_pane(self, pane_id, lines=40, source="recent"):
-        """The pane tail: every send not yet consumed is still visible, like an
-        unread terminal input buffer."""
+    def set_screen(self, pane_id, screen):
+        """Emulate exactly what `herdr pane read` would return for this pane
+        (its rendered input box included). None makes the pane unreadable."""
+        with self.lock:
+            if screen is None:
+                self.unreadable.add(pane_id)
+            else:
+                self.unreadable.discard(pane_id)
+                self.screens[pane_id] = screen
+
+    def read_pane(self, pane_id, lines=40, source=None):
+        self.reads.append((pane_id, source))
         if not any(p["pane_id"] == pane_id for p in self.panes):
             return None
         if pane_id in self.unreadable:
             return None
+        if pane_id in self.screens:
+            tail = self.screens[pane_id].splitlines()[-int(lines):]
+            return "\n".join(tail) + "\n"
+        # Default: the last sends, verbatim (a plain terminal echo).
         mine = [text for pid, text in self.sends if pid == pane_id]
-        mine = mine[self.consumed.get(pane_id, 0):]
-        return "\n".join(mine[-lines:]) + "\n"
-
-    def consume(self, pane_id, busy=True):
-        """Simulate the target picking up everything sent so far: the tail no
-        longer shows it and (optionally) the agent goes busy for a turn."""
-        with self.lock:
-            self.consumed[pane_id] = len([1 for pid, _ in self.sends if pid == pane_id])
-        if busy:
-            self.statuses[pane_id] = "working"
+        return "\n".join(mine[-int(lines):]) + "\n"
 
     def send_text_and_enter(self, pane_id, text):
         with self.lock:
@@ -117,3 +122,77 @@ class FakeHerdr:
 
     def notify(self, title, body=None):
         pass
+
+
+# --- realistic input-box renderings, captured from live Claude Code / Codex panes ---
+
+def _claude_frame(box_lines):
+    """A Claude Code screen: some transcript, then the bordered input box."""
+    rule = "\u2500" * 54
+    return "\n".join([
+        "  earlier transcript line",
+        "\u273b Saut\u00e9ed for 1m 18s \u00b7 done 9:17 AM",
+        "",
+        rule,
+        *box_lines,
+        rule,
+        "  \u23f5\u23f5 bypass permissions on (shift+tab to cycle) \u00b7 \u2190 for agents",
+    ]) + "\n"
+
+
+def claude_box_empty():
+    return _claude_frame(["\u276f "])
+
+
+def claude_box_pending(text):
+    """A short send still sitting verbatim in the box."""
+    return _claude_frame(["\u276f " + text])
+
+
+def claude_box_collapsed(lines=75):
+    """A long send Claude collapsed into a paste placeholder in the box."""
+    return _claude_frame([
+        "\u276f [Pasted text #1 +%d lines]" % lines,
+        "  +%d lines (ctrl+o to expand)" % lines,
+    ])
+
+
+def claude_box_pasted_unsubmitted():
+    """The four-hour ghost: a paste that never submitted, box still holding it."""
+    return _claude_frame(["\u276f Pasted text #1 (paste again to expand)"])
+
+
+def codex_box_empty_with_transcript_collapse():
+    """Codex idle with an empty box, but a collapse chip up in the transcript
+    (which must NOT be mistaken for queued input)."""
+    return "\n".join([
+        "  \u2514 Map probe passed.",
+        "    \u2026 +28 lines (ctrl + t to view transcript)",
+        "",
+        "\u2022 Working (15m 08s \u00b7 esc to interrupt)",
+        "",
+        "\u203a Ask Codex to do anything",
+        "",
+        "  gpt-6-astra xhigh \u00b7 ~/workspace/the_grind_2 \u00b7 Main [default]",
+    ]) + "\n"
+
+
+def codex_box_rotating_hint():
+    """Codex idle box showing one of its rotating hints (not typed input)."""
+    return "\n".join([
+        "  \u2514 Committed and pushed to origin/main.",
+        "",
+        "\u203a Use /skills to list available skills",
+        "",
+        "  gpt-5.6-sol xhigh \u00b7 ~/workspace/site",
+    ]) + "\n"
+
+
+def codex_box_pending(text):
+    return "\n".join([
+        "  \u2514 earlier output",
+        "",
+        "\u203a " + text,
+        "",
+        "  gpt-6-astra xhigh \u00b7 ~/workspace \u00b7 Main [default]",
+    ]) + "\n"

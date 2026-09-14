@@ -45,18 +45,23 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
   detected agent count as idle.
 - max_sends = N: the dunk removes itself after its N-th send. N = 1 is a
   one-shot delayed nudge ("in 30 minutes, tell me to check CI").
-- skip_if_unconsumed = true: backpressure. Before each send the daemon
-  decides whether the previous send was picked up: it was if the target was
-  ever seen working/blocked since then (sampled every 5 s while waiting), or
-  if the sent text is no longer sitting in the pane's last lines. Otherwise
-  the send is skipped as a no-op: send_count unchanged, no error, skip_count
-  +1, status 'Skipped (unconsumed)', next send rescheduled as usual. The
-  first send always goes. Composes with only_when. Turn it on for self-dunks
-  and unattended agents, where four hourly prompts would otherwise queue in
-  the input box and flush into one turn. Blind spots: a turn that starts and
-  ends inside one 5 s sampling gap is only caught by the tail check, and the
-  tail check is a heuristic (a transcript echo of the prompt can look like
-  unread input). Meant for agent panes, not shells.
+- skip_if_unconsumed = true: backpressure. Before each send the daemon reads
+  the target's visible input box and skips the send if the previous one is
+  still sitting there unread: either the sent text verbatim, or the
+  collapsed-paste placeholder Claude Code shows for a long queued input
+  ('Pasted text', '+N lines (ctrl+o to expand)'). A skip is a no-op:
+  send_count unchanged, no error, skip_count +1, status 'Skipped
+  (unconsumed)', next send rescheduled as usual. The first send always
+  goes. It reads the input box, not the agent's busy state, because a pane
+  idling at a prompt with queued input reports idle and a pane busy on an
+  earlier turn says nothing about the newest send. If the box cannot be read
+  or recognised the send is held, since a missed nudge is recoverable next
+  interval but a stacked pile-up is not. Composes with only_when. Turn it on
+  for self-dunks and unattended agents, where several prompts would
+  otherwise queue in the box and flush into one turn. Blind spots: it
+  detects our own queued send (verbatim or its collapsed placeholder) but
+  not arbitrary short text a human left in the box, and it assumes an agent
+  pane that draws an input box (Claude/Codex), not a bare shell.
 - start = false: create the dunk stopped; start it later.
 - Changing the interval of a running dunk reschedules its next send.
 

@@ -65,23 +65,33 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   `sleep()` makes stop immediate.
 - Backpressure (`skip_if_unconsumed`, off by default). The idle gate cannot
   see unread input: a pane sitting at a prompt with text queued in its input
-  buffer reports `idle`, so on 2026-09-12 a 240-minute self-dunk landed four
+  box reports `idle`, so on 2026-09-12 a 240-minute self-dunk landed four
   prompts in one unattended Claude pane and they flushed into a single turn.
-  With the flag on, each successful send sets `awaiting_consumption` and
-  remembers `last_sent_text`. While that is set, the existing countdown loop
-  samples `agent_status` every `IDLE_POLL_S` (the idle-gate loop does too) and
-  latches consumption the first time the target is `working`/`blocked`, then
-  stops sampling. At send time `_previous_send_consumed` says consumed if the
-  latch fired, or if the collapsed-whitespace prefix of the sent text is no
-  longer in the pane's last `CONSUMPTION_TAIL_LINES` lines (an unread input
-  buffer shows it verbatim; collapsing whitespace survives wrapping). An
-  unreadable pane is no evidence, so the send proceeds. A skip reschedules
+  The first fix inferred consumption from agent busyness and a verbatim tail
+  match; both failed in the field (0b8a113): busyness on an unrelated turn
+  latched the newest send as taken, and Claude Code collapses a long queued
+  paste into a placeholder (`Pasted text`, `+N lines (ctrl+o to expand)`), so
+  the verbatim needle was never present and every send scored as consumed. It
+  never skipped once in production.
+- The mechanism now reads the pane. At send time (after the idle gate, so the
+  box has settled) `_previous_send_consumed` reads the target's visible screen
+  and, via `_input_area` + `_input_pending`, isolates the input-box region as
+  everything from the last prompt-sigil line (Claude `❯`, Codex `›`) to the
+  bottom. That excludes the transcript, so a transcript-collapse chip like
+  `+28 lines (ctrl + t to view transcript)` is not mistaken for queued input.
+  The previous send is still pending if the box holds a collapsed-input marker
+  (`COLLAPSED_INPUT_MARKERS`) or the sent text's whitespace-collapsed prefix.
+  A pending box, an unreadable pane, or an unrecognisable box all hold the
+  send: for this opt-in feature "not sure" means skip, because a missed nudge
+  is recoverable next interval and a stack is not. A skip reschedules
   `next_send_at`, bumps `skip_count`, sets status `Skipped (unconsumed)` and
-  leaves `send_count`, `last_sent_at` and `last_error` alone. Blind spots: a
-  turn shorter than one sampling gap is caught only by the tail check, and the
-  tail check is heuristic (a transcript echo can resemble unread input). It is
-  meant for agent panes; a shell echoes every command into its tail. No new
-  thread or busy-wait is involved.
+  leaves `send_count`, `last_sent_at` and `last_error` alone. Busyness is no
+  longer consulted for consumption, and there is no extra polling thread: the
+  one pane read happens inline at send time. Blind spots: it recognises our own
+  queued send (verbatim, or the collapse placeholder a long one becomes) but not
+  arbitrary short text a human left in the box, since agents render rotating
+  idle hints there that are indistinguishable from typed text; and it assumes an
+  agent pane that draws an input box, not a bare shell.
 - Templates: only the known placeholders are substituted (regex), so JSON or
   code braces in a prompt survive intact.
 - Persistence: `dunks.json` written atomically on every structural change and
