@@ -1,4 +1,4 @@
-# Dunking Sheep 2.2.0 guide
+# Dunking Sheep 2.3.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -73,8 +73,10 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
   (that is skip_if_unconsumed's job), and a pane with no input box (a bare
   shell) or an unreadable pane never holds. Only the sigil line is judged.
   Turn it off (--ignore-typing / hold_while_typing=false) only for a pane
-  nobody types in. fire_dunk and send_text are explicit 'now' commands and
-  do not hold.
+  nobody types in. The box must read clear twice, a second apart, before
+  anything is sent, so a pause between thoughts is not mistaken for being
+  done. This applies to scheduled sends, fired dunks and direct messages
+  alike.
 - start = false: create the dunk stopped; start it later.
 - Changing the interval of a running dunk reschedules its next send.
 
@@ -87,7 +89,9 @@ dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle]
                  -e takes 15, 90s, 1.5h
 dunkingsheep list | get <id> | update <id> ... | remove <id>
 dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)
-dunkingsheep send <target> <text...>   one-off send, no dunk
+dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)
+                 [--wait S] [--ignore-typing]
+dunkingsheep messages | cancel-message <id>   the direct-message queue
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
 dunkingsheep rename|focus|close workspace|tab|pane <target> [label]
@@ -151,7 +155,8 @@ set HERDR_PANE_ID in the server's env block.
 
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
-send_text, and for herdr control list_workspaces, create_workspace,
+send_text, list_messages, get_message, cancel_message, and for herdr
+control list_workspaces, create_workspace,
 create_tab, split_pane, start_agent, rename, focus, close, herdr,
 herdr_help. Call `help` first if unsure; `initialize` also returns these
 instructions. Errors come back as tool results with isError=true and a
@@ -235,6 +240,28 @@ send_text(target="Codex Site", text="Stop and write tests first.")
 add_dunk(target="Melt Squad", interval_minutes=20, only_when="idle",
          text="Progress report: what changed since the last one?")
 ```
+
+## Direct messages queue behind the human, like dunks
+
+send_text never types over someone mid-sentence. If the target's input box
+holds a draft, the message waits in the daemon and is delivered once the
+box has been clear for a second; several messages to the same pane keep
+their order. The result says which happened: `queued: true` with a
+`message_id`, or `ok: true` when it went straight out. fire_dunk queues the
+same way when its dunk holds while typing.
+
+```
+send_text(target="Codex Site", text="Stop and write tests first.")
+  -> {"message_id": "m3", "queued": true, ...}   # they were typing
+list_messages()                  # what is waiting, and what just landed
+get_message(message_id="m3")     # has it gone yet?
+cancel_message(message_id="m3")  # never mind, drop it
+send_text(target="Codex Site", text="...", wait_s=30)  # block for delivery
+send_text(target="Codex Site", text="...", hold_while_typing=false)  # barge in
+```
+
+Queued messages live in the daemon's memory, not on disk, so a daemon
+restart drops anything still waiting.
 
 send_text is a direct message with no schedule attached; read_pane is the
 eyes. Together with add_dunk they let an agent communicate with, monitor and

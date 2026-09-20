@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dunk_client import FlockClient  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_server import AlreadyRunning, FlockServer  # noqa: E402
-from fakes import FakeHerdr  # noqa: E402
+from fakes import FakeHerdr, claude_box_typing_ansi  # noqa: E402
 
 
 class ServerRoundTripTests(unittest.TestCase):
@@ -69,8 +69,21 @@ class ServerRoundTripTests(unittest.TestCase):
         panes = self.client.list_panes()
         self_panes = [p for p in panes["panes"] if p["is_self"]]
         self.assertEqual(["w1:p2"], [p["pane_id"] for p in self_panes])
-        self.client.send_text(target="codex", text="ping")
+        sent = self.client.send_text(target="codex", text="ping", wait_s=5)
+        self.assertTrue(sent["ok"])
         self.assertEqual("ping\n", self.client.read_pane(target="w2:p1")["text"])
+
+    def test_messages_queue_over_the_socket(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
+        queued = self.client.send_text(target="codex", text="hold this", wait_s=0.2)
+        self.assertTrue(queued["queued"])
+        self.assertEqual([queued["message_id"]],
+                         [m["message_id"] for m in self.client.list_messages()["queued"]])
+        self.assertEqual("queued", self.client.get_message(
+            message_id=queued["message_id"])["status"])
+        cancelled = self.client.cancel_message(message_id=queued["message_id"])
+        self.assertEqual("cancelled", cancelled["status"])
+        self.assertEqual([], self.client.list_messages()["queued"])
 
     def test_layout_control_over_the_socket(self):
         created = self.client.create_workspace(label="Site", command="claude")

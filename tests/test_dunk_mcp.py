@@ -64,6 +64,11 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("skip_if_unconsumed", update["inputSchema"]["properties"])
         self.assertEqual("boolean", add["inputSchema"]["properties"]["hold_while_typing"]["type"])
         self.assertIn("hold_while_typing", update["inputSchema"]["properties"])
+        self.assertIn("list_messages", names)
+        self.assertIn("cancel_message", names)
+        send = next(t for t in tools if t["name"] == "send_text")
+        self.assertIn("hold_while_typing", send["inputSchema"]["properties"])
+        self.assertIn("queued", send["description"])
         self.assertIn("{id}", add["inputSchema"]["properties"]["text"]["description"])
         self.assertIn("help", names)
         # Flat schema types only, so strict validators (OpenAI/Codex, Gemini) accept them.

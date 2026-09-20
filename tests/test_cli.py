@@ -164,7 +164,8 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(1, self.run_json("get", "d1")["send_count"])
 
         # 5. one-off send and read back.
-        self.run_cli("send", "w1:p1", "hello", "there")
+        self.assertIn("sent to", self.run_cli("send", "w1:p1", "hello", "there").stdout)
+        self.assertIn("m1    sent", self.run_cli("messages").stdout)
         read = self.run_cli("read", "w1:p1", "--lines", "10").stdout
         self.assertIn("TEXT w1:p1 hello there", read)
 
@@ -234,7 +235,7 @@ class CliEndToEndTests(unittest.TestCase):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
         self.assertIn("[socket/cli only]", out)
-        self.assertIn("dunkingsheep 2.2", self.run_cli("--version").stdout)
+        self.assertIn("dunkingsheep 2.3", self.run_cli("--version").stdout)
         registry = json.loads(self.run_cli("commands", "--json").stdout)
         names = [c["name"] for c in registry]
         self.assertIn("help", names)

@@ -113,8 +113,29 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   `hold_count` +1 once per hold, re-check every `TYPING_RECHECK_S` (60 s), and
   after the box clears the idle gate runs again because finishing typing
   usually means submitting. Unreadable pane or no box: never hold, since this
-  guards the human's draft rather than the agent's queue. `fire` and
-  `send_now` are explicit "now" commands and bypass it.
+  guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
+  and `send_now` respect it too, via the message queue below.
+- Direct-message queue (2.3.0). `send_text` used to type immediately, so an
+  agent messaging a pane could splice itself into a human's draft even though
+  scheduled dunks would not. Messages now go through a per-pane outbox in the
+  daemon: `Flock.send_now` builds a `Message`, `_enqueue` appends it to
+  `outbox[pane_id]` and starts one delivery thread per pane, and
+  `_outbox_worker` delivers in FIFO order, each only once `_clear_to_send`
+  agrees. While someone types it re-checks every `MESSAGE_RECHECK_S` (5 s,
+  against a dunk's 60 s, because a message is waiting to be delivered rather
+  than scheduled for later). `wait_s` lets a caller block for delivery;
+  `hold_while_typing=false` bypasses the queue. `fire_dunk` uses the same
+  outbox when its dunk holds while typing, with the dunk id as the message's
+  `source`, so a test send no longer bypasses the protection. `list_messages`,
+  `get_message` and `cancel_message` expose the queue plus a bounded history
+  (`MESSAGE_HISTORY`, 50). The queue is in memory only: a daemon restart drops
+  what is waiting, which is the right trade for "deliver this now-ish".
+- Typing settle window (2.3.0). `_clear_to_send` replaces a single typing
+  check: the box must read clear, then still read clear `TYPING_SETTLE_S`
+  (1 s) later. A pause between thoughts no longer looks like being finished.
+  Dunks pass their `stop_event` so a stop during the settle wait returns at
+  once. `_typing_in` is the pane-level form of the old `_human_typing`, which
+  now delegates to it.
 - herdr layout control (2.2.0). The same registry that schedules dunks can
   build the herd: `list_workspaces`, `create_workspace`, `create_tab`,
   `split_pane`, `start_agent`, `rename`, `focus`, `close`, and a generic

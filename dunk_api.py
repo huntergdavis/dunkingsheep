@@ -17,6 +17,10 @@ daemon's). Handlers return JSON-serialisable data or raise `DunkError`.
 
 from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError
 
+# A direct send waits briefly for actual delivery before reporting back, so
+# the common case (nobody typing) answers "sent" rather than "queued".
+DEFAULT_SEND_WAIT_S = 3.0
+
 TARGET_DOC = (
     "Which herdr pane. Accepts a pane id like 'w8:p3', the word 'self' for "
     "the pane this agent is running in, a terminal id, or a unique "
@@ -146,7 +150,21 @@ def h_fire_dunk(flock, args, self_pane_id):
 
 
 def h_send_text(flock, args, self_pane_id):
-    return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id)
+    return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id,
+                          hold_while_typing=_bool(args.get("hold_while_typing"), True),
+                          wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)))
+
+
+def h_list_messages(flock, args, self_pane_id):
+    return flock.list_messages()
+
+
+def h_get_message(flock, args, self_pane_id):
+    return flock.get_message(args["message_id"])
+
+
+def h_cancel_message(flock, args, self_pane_id):
+    return flock.cancel_message(args["message_id"])
 
 
 def h_list_panes(flock, args, self_pane_id):
@@ -295,6 +313,7 @@ HOLD_WHILE_TYPING_PARAM = {
         "Default true. Set false only for a pane nobody types in."
     ),
 }
+MESSAGE_ID_PARAM = {"type": "string", "description": "Message id, e.g. 'm3' (see list_messages)."}
 LABEL_PARAM = {"type": "string", "description": "Name to give it (how you will target it later)."}
 CWD_PARAM = {"type": "string", "description": "Working directory for the new shell (default: herdr's)."}
 RUN_COMMAND_PARAM = {
@@ -421,7 +440,9 @@ COMMANDS = [
     Command(
         "fire_dunk",
         "Send a dunk's text right now without disturbing its countdown "
-        "(the TUI's 't' test send).",
+        "(the TUI's 't' test send). If someone is typing in the target pane "
+        "and the dunk holds while typing, it is queued instead and delivered "
+        "when they finish.",
         h_fire_dunk,
         params={
             "id": ID_PARAM,
@@ -434,14 +455,53 @@ COMMANDS = [
     ),
     Command(
         "send_text",
-        "Send a direct message or instruction to a pane right now: type text + "
-        "Enter once, with no dunk created. Use it to talk to another agent "
-        "(target its pane) or to inject a command into a shell pane.",
+        "Send a direct message or instruction to a pane: type text + Enter once, "
+        "with no dunk created. Use it to talk to another agent (target its pane) "
+        "or to inject a command into a shell pane. Like a dunk it never types "
+        "over a human: if someone is composing in that pane the message is "
+        "queued and delivered, in order, once the box has been clear for a "
+        "second. The result says whether it was sent or queued (`message_id`).",
         h_send_text,
         params={"target": TARGET_PARAM,
                 "text": {"type": "string",
-                         "description": "Text to type, followed by Enter. Sent verbatim (no placeholders)."}},
+                         "description": "Text to type, followed by Enter. Sent verbatim (no placeholders)."},
+                "hold_while_typing": {
+                    "type": "boolean",
+                    "description": ("Queue the message instead of typing over a human who is "
+                                    "composing in the target's input box (default true). The "
+                                    "daemon delivers it, in order, once the box has been clear "
+                                    "for a second.")},
+                "wait_s": {
+                    "type": "number", "minimum": 0, "maximum": 3600,
+                    "description": ("Block up to this many seconds for delivery before "
+                                    "returning (default 3). 0 returns as soon as it is "
+                                    "queued; use list_messages or get_message to follow "
+                                    "up on a message still waiting.")}},
         required=["target", "text"],
+    ),
+    Command(
+        "list_messages",
+        "Direct messages waiting to be delivered (someone is typing in the "
+        "target pane) and the recently delivered ones. A queued message shows "
+        "how long it has waited; dunks fired while a human was typing appear "
+        "here too, with the dunk id as `source`.",
+        h_list_messages,
+    ),
+    Command(
+        "get_message",
+        "One message by id: its status (queued, sent, failed, cancelled), text "
+        "and target. Use it to check whether a queued message has landed.",
+        h_get_message,
+        params={"message_id": MESSAGE_ID_PARAM},
+        required=["message_id"],
+    ),
+    Command(
+        "cancel_message",
+        "Drop a queued message before it is delivered (e.g. it is no longer "
+        "relevant by the time the human finishes typing).",
+        h_cancel_message,
+        params={"message_id": MESSAGE_ID_PARAM},
+        required=["message_id"],
     ),
     Command(
         "list_panes",

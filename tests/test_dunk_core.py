@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -180,8 +181,10 @@ class FlockTests(unittest.TestCase):
         self.assertEqual("boom", self.flock.get(dunk["id"])["last_error"])
 
     def test_send_now_and_read_pane(self):
-        result = self.flock.send_now("codex", "ping")
+        # Nobody is typing, so it is delivered as soon as the box settles.
+        result = self.flock.send_now("codex", "ping", wait_s=5)
         self.assertTrue(result["ok"])
+        self.assertEqual("sent", result["status"])
         self.assertEqual([("w2:p1", "ping")], self.herdr.sends)
         read = self.flock.read_pane("w2:p1", lines=5)
         self.assertEqual("ping\n", read["text"])
@@ -461,9 +464,10 @@ class FlockTests(unittest.TestCase):
     def test_default_dunk_checks_the_box_once_and_sends_when_clear(self):
         self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
         dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True)
-        self.assertTrue(self.herdr.sent.wait(4))
+        self.assertTrue(self.herdr.sent.wait(5))
         self.assertTrue(dunk["hold_while_typing"])
-        self.assertEqual(["w2:p1"], self.herdr.ansi_reads)
+        # Two reads: clear, then still clear a second later (the settle window).
+        self.assertEqual(["w2:p1", "w2:p1"], self.herdr.ansi_reads)
         self.assertEqual(0, self.herdr.status_calls, "no idle gate unless asked")
 
     def test_hold_while_typing_toggle_round_trip_and_old_files_default_on(self):
@@ -566,6 +570,172 @@ class FlockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TypingSettleTests(unittest.TestCase):
+    """The box must be clear twice, a second apart, before anything is sent."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_clear_then_typing_within_the_window_is_not_clear(self):
+        with mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.15):
+            self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+
+            def start_typing():
+                time.sleep(0.05)
+                self.herdr.set_screen("w2:p1", claude_box_typing_ansi("wait, also"))
+
+            threading.Thread(target=start_typing, daemon=True).start()
+            # First check sees an empty box; by the second the human has typed.
+            self.assertFalse(self.flock._clear_to_send("w2:p1"))
+
+    def test_two_clear_checks_a_second_apart_allow_the_send(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        started = time.time()
+        self.assertTrue(self.flock._clear_to_send("w2:p1"))
+        self.assertGreaterEqual(time.time() - started, dunk_core.TYPING_SETTLE_S)
+        self.assertEqual(2, len(self.herdr.ansi_reads))
+
+    def test_typing_on_the_first_check_returns_at_once(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
+        started = time.time()
+        self.assertFalse(self.flock._clear_to_send("w2:p1"))
+        self.assertLess(time.time() - started, dunk_core.TYPING_SETTLE_S)
+        self.assertEqual(1, len(self.herdr.ansi_reads), "no need to wait it out")
+
+    def test_a_stopped_dunk_does_not_finish_its_settle_wait(self):
+        stop = threading.Event()
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        stop.set()
+        self.assertFalse(self.flock._clear_to_send("w2:p1", stop_event=stop))
+
+
+class MessageQueueTests(unittest.TestCase):
+    """Direct messages queue behind a human who is typing, like dunks do."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.settle = mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.05)
+        self.recheck = mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05)
+        self.settle.start()
+        self.recheck.start()
+
+    def tearDown(self):
+        self.settle.stop()
+        self.recheck.stop()
+        self.flock.close()
+
+    def test_message_waits_while_typing_then_lands_when_the_box_clears(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("hold on, I am writing"))
+        queued = self.flock.send_now("codex", "stop and write tests first", wait_s=0.3)
+        self.assertTrue(queued["queued"])
+        self.assertIsNone(queued["ok"])
+        self.assertEqual("m1", queued["message_id"])
+        self.assertIn("someone is typing", queued["message"])
+        self.assertEqual([], self.herdr.sends, "must not type over a draft")
+        listed = self.flock.list_messages()
+        self.assertEqual(["m1"], [m["message_id"] for m in listed["queued"]])
+        self.assertEqual([], listed["recent"])
+        self.assertEqual(1, self.flock.status()["queued_messages"])
+        # They finish; the daemon delivers it.
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(self.herdr.sent.wait(5))
+        self.assertEqual([("w2:p1", "stop and write tests first")], self.herdr.sends)
+        self.assertTrue(wait_until(
+            lambda: self.flock.get_message("m1")["status"] == "sent", 5))
+        done = self.flock.get_message("m1")
+        self.assertTrue(done["ok"])
+        self.assertFalse(done["queued"])
+        self.assertGreaterEqual(done["holds"], 1)
+        self.assertEqual(["m1"], [m["message_id"] for m in self.flock.list_messages()["recent"]])
+        self.assertEqual(0, self.flock.status()["queued_messages"])
+
+    def test_queued_messages_keep_their_order_per_pane(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))
+        for text in ("first", "second", "third"):
+            self.flock.send_now("codex", text, wait_s=0)
+        self.assertEqual(["first", "second", "third"],
+                         [m["text"] for m in self.flock.list_messages()["queued"]])
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(lambda: len(self.herdr.sends) == 3, 5))
+        self.assertEqual(["first", "second", "third"], [t for _p, t in self.herdr.sends])
+
+    def test_messages_to_a_quiet_pane_are_not_delayed_by_a_busy_one(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))
+        self.herdr.set_screen("w2:p3", claude_box_hint_ansi())
+        self.flock.send_now("codex", "waits", wait_s=0)
+        other = self.flock.send_now("w2:p3", "goes now", wait_s=2)
+        self.assertTrue(other["ok"])
+        self.assertEqual([("w2:p3", "goes now")], self.herdr.sends)
+
+    def test_wait_s_blocks_for_delivery_and_zero_returns_immediately(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        sent = self.flock.send_now("codex", "hello", wait_s=3)
+        self.assertTrue(sent["ok"])
+        self.assertEqual("sent", sent["status"])
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("busy"))
+        pending = self.flock.send_now("codex", "later", wait_s=0)
+        self.assertTrue(pending["queued"])
+
+    def test_cancel_a_queued_message(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))
+        queued = self.flock.send_now("codex", "never mind", wait_s=0)
+        cancelled = self.flock.cancel_message(queued["message_id"])
+        self.assertEqual("cancelled", cancelled["status"])
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        time.sleep(0.4)
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("cancelled", self.flock.get_message(queued["message_id"])["status"])
+        with self.assertRaisesRegex(DunkError, "already cancelled"):
+            self.flock.cancel_message(queued["message_id"])
+        with self.assertRaisesRegex(DunkError, "no queued message"):
+            self.flock.cancel_message("m99")
+        with self.assertRaisesRegex(DunkError, "no message with id"):
+            self.flock.get_message("m99")
+
+    def test_ignore_typing_sends_straight_over_a_draft(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))
+        result = self.flock.send_now("codex", "barging in", hold_while_typing=False)
+        self.assertTrue(result["ok"])
+        self.assertEqual([("w2:p1", "barging in")], self.herdr.sends)
+        self.assertEqual([], self.flock.list_messages()["queued"])
+
+    def test_a_failed_send_is_reported_not_retried(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.herdr.fail_sends = True
+        result = self.flock.send_now("codex", "doomed", wait_s=3)
+        self.assertFalse(result["ok"])
+        self.assertEqual("failed", result["status"])
+        self.assertEqual("boom", result["message"])
+        self.assertEqual([], self.flock.list_messages()["queued"])
+
+    def test_fired_dunk_queues_instead_of_typing_over_a_draft(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
+        dunk = self.flock.add(target="w2:p1", text="nudge {count}")
+        fired = self.flock.fire(dunk["id"])
+        self.assertTrue(fired["queued"])
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("Queued (typing)", self.flock.get(dunk["id"])["status"])
+        queued = self.flock.list_messages()["queued"]
+        self.assertEqual([dunk["id"]], [m["source"] for m in queued])
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(self.herdr.sent.wait(5))
+        self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
+        self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+
+    def test_fired_dunk_with_typing_ignored_still_sends_now(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
+        dunk = self.flock.add(target="w2:p1", text="now", hold_while_typing=False)
+        fired = self.flock.fire(dunk["id"])
+        self.assertTrue(fired["ok"])
+        self.assertFalse(fired["queued"])
+        self.assertEqual([("w2:p1", "now")], self.herdr.sends)
 
 
 class LayoutControlTests(unittest.TestCase):

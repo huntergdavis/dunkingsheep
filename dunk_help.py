@@ -120,8 +120,10 @@ def guide(markdown=False):
       "  (that is skip_if_unconsumed's job), and a pane with no input box (a bare\n"
       "  shell) or an unreadable pane never holds. Only the sigil line is judged.\n"
       "  Turn it off (--ignore-typing / hold_while_typing=false) only for a pane\n"
-      "  nobody types in. fire_dunk and send_text are explicit 'now' commands and\n"
-      "  do not hold.\n"
+      "  nobody types in. The box must read clear twice, a second apart, before\n"
+      "  anything is sent, so a pause between thoughts is not mistaken for being\n"
+      "  done. This applies to scheduled sends, fired dunks and direct messages\n"
+      "  alike.\n"
       "- start = false: create the dunk stopped; start it later.\n"
       "- Changing the interval of a running dunk reschedules its next send.\n")
 
@@ -132,7 +134,9 @@ def guide(markdown=False):
            "                 -e takes 15, 90s, 1.5h\n"
            "dunkingsheep list | get <id> | update <id> ... | remove <id>\n"
            "dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)\n"
-           "dunkingsheep send <target> <text...>   one-off send, no dunk\n"
+           "dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)\n"
+           "                 [--wait S] [--ignore-typing]\n"
+           "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
            "dunkingsheep rename|focus|close workspace|tab|pane <target> [label]\n"
@@ -183,7 +187,8 @@ def guide(markdown=False):
       "set HERDR_PANE_ID in the server's env block.\n")
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
-      "send_text, and for herdr control list_workspaces, create_workspace,\n"
+      "send_text, list_messages, get_message, cancel_message, and for herdr\n"
+      "control list_workspaces, create_workspace,\n"
       "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
       "herdr_help. Call `help` first if unsure; `initialize` also returns these\n"
       "instructions. Errors come back as tool results with isError=true and a\n"
@@ -253,6 +258,22 @@ def guide(markdown=False):
            "send_text(target=\"Codex Site\", text=\"Stop and write tests first.\")\n"
            "add_dunk(target=\"Melt Squad\", interval_minutes=20, only_when=\"idle\",\n"
            "         text=\"Progress report: what changed since the last one?\")"))
+    w(h(2, "Direct messages queue behind the human, like dunks"))
+    w("send_text never types over someone mid-sentence. If the target's input box\n"
+      "holds a draft, the message waits in the daemon and is delivered once the\n"
+      "box has been clear for a second; several messages to the same pane keep\n"
+      "their order. The result says which happened: `queued: true` with a\n"
+      "`message_id`, or `ok: true` when it went straight out. fire_dunk queues the\n"
+      "same way when its dunk holds while typing.\n")
+    w(code("send_text(target=\"Codex Site\", text=\"Stop and write tests first.\")\n"
+           "  -> {\"message_id\": \"m3\", \"queued\": true, ...}   # they were typing\n"
+           "list_messages()                  # what is waiting, and what just landed\n"
+           "get_message(message_id=\"m3\")     # has it gone yet?\n"
+           "cancel_message(message_id=\"m3\")  # never mind, drop it\n"
+           "send_text(target=\"Codex Site\", text=\"...\", wait_s=30)  # block for delivery\n"
+           "send_text(target=\"Codex Site\", text=\"...\", hold_while_typing=false)  # barge in"))
+    w("Queued messages live in the daemon's memory, not on disk, so a daemon\n"
+      "restart drops anything still waiting.\n")
     w("send_text is a direct message with no schedule attached; read_pane is the\n"
       "eyes. Together with add_dunk they let an agent communicate with, monitor and\n"
       "pace several projects in parallel.\n")

@@ -38,6 +38,12 @@ Typical uses: keep another agent moving (add_dunk target=<its pane>), message
 an agent right now (send_text), inspect what an agent is doing (read_pane), or
 schedule a future nudge to yourself (target "self").
 
+Nothing ever types over a human. If someone is composing in the target pane,
+both dunks and direct messages wait until the input box has been clear for a
+second; send_text then returns queued=true with a message_id, and the daemon
+delivers it (in order) when they finish. list_messages, get_message and
+cancel_message manage that queue.
+
 Building the herd: create_workspace / create_tab / split_pane open named
 spaces, tabs and panes (optionally running a command such as "claude" in the
 new pane); start_agent launches an agent registered with herdr by name; rename,

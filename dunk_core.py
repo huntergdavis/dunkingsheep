@@ -45,7 +45,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -77,8 +77,16 @@ COLLAPSED_INPUT_MARKERS = (
     "pasted content",
     "[image",
 )
-# While a human is typing in the target's input box, re-check this often.
+# While a human is typing in the target's input box, a dunk re-checks this often.
 TYPING_RECHECK_S = 60
+# A queued direct message re-checks this often (it is waiting to be delivered,
+# not scheduled for later, so it should land soon after the human finishes).
+MESSAGE_RECHECK_S = 5
+# The box must read clear on two checks this far apart before anything is
+# sent, so a pause between thoughts is not mistaken for being done.
+TYPING_SETTLE_S = 1.0
+# Delivered / failed / cancelled messages kept for list_messages.
+MESSAGE_HISTORY = 50
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 # CSI escape sequences (colours, dim, cursor moves) as `herdr pane read
@@ -234,6 +242,40 @@ class Dunker:
         return cls(dunk_id, **data)
 
 
+class Message:
+    """One direct message waiting in (or delivered from) a pane's outbox."""
+
+    def __init__(self, id, pane_id, target_label, text, source, deliver):
+        self.id = id
+        self.pane_id = pane_id
+        self.target_label = target_label
+        self.text = text
+        self.source = source          # "send_text" or the dunk id for a fired dunk
+        self.deliver = deliver        # callable -> (ok, detail)
+        self.status = "queued"        # queued | sent | failed | cancelled
+        self.detail = None
+        self.holds = 0
+        self.created_at = time.time()
+        self.finished_at = None
+        self.done = threading.Event()
+
+    def _queued_message(self):
+        if self.holds:
+            return f"queued: someone is typing in {self.target_label}"
+        return f"queued for {self.target_label}, delivering once the input box is clear"
+
+    def to_dict(self):
+        queued = self.status == "queued"
+        return {
+            "message_id": self.id, "pane_id": self.pane_id, "target_label": self.target_label,
+            "text": self.text, "source": self.source, "status": self.status,
+            "queued": queued, "ok": None if queued else self.status == "sent",
+            "message": (self._queued_message() if queued else self.detail or self.status),
+            "holds": self.holds, "created_at": self.created_at, "finished_at": self.finished_at,
+            "waiting_s": int(time.time() - self.created_at) if queued else None,
+        }
+
+
 class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
@@ -249,6 +291,12 @@ class Flock:
         self.started_at = time.time()
         self.last_message = ""
         self.closed = False
+        # Direct-message outbox: pane_id -> [Message], plus the per-pane
+        # delivery thread and a bounded history of finished messages.
+        self.outbox = {}
+        self.outbox_threads = {}
+        self.message_history = []
+        self.next_message_id = 1
         if restore:
             self._restore()
 
@@ -339,6 +387,7 @@ class Flock:
             "herdr_hint": None if available else self.herdr.server_error_hint(),
             "state_file": self.state_file if self.persist_enabled else None,
             "uptime_s": int(time.time() - self.started_at),
+            "queued_messages": sum(len(q) for q in self.outbox.values()),
             "message": self.last_message,
         }
 
@@ -890,29 +939,174 @@ class Flock:
             for remaining in range(int(countdown_s), 0, -1):
                 dunker.status = f"Test in {remaining}..."
                 time.sleep(1)
+            if dunker.hold_while_typing and not self._clear_to_send(
+                    dunker.target_pane_id, dunker.last_sent_text, dunker.awaiting_consumption):
+                # Same rule as a scheduled send: never type over a human. The
+                # send waits in the pane's outbox and lands when the box clears.
+                message = self._new_message(
+                    dunker.target_pane_id, dunker.target_label(), dunker.text,
+                    source=dunker.id, deliver=lambda: self._do_send(dunker))
+                dunker.status = "Queued (typing)"
+                self._enqueue(message)
+                return {"id": dunker.id, "ok": None, "queued": True, "message_id": message.id,
+                        "message": f"queued: someone is typing in {dunker.target_label()}"}
             with self.send_lock:
                 dunker.status = "Sending..."
                 ok, message = self._do_send(dunker)
             stamp = time.strftime("%H:%M:%S")
             dunker.status = f"Tested {stamp}" if ok else "Test failed"
-            return {"id": dunker.id, "ok": ok, "message": message}
+            return {"id": dunker.id, "ok": ok, "queued": False, "message": message}
         except Exception as error:  # noqa: BLE001 - keep the thread alive
             dunker.status = "Test failed"
             dunker.last_error = str(error)
             log.exception("test send failed for %s", dunker.id)
             return {"id": dunker.id, "ok": False, "message": str(error)}
 
-    def send_now(self, target, text, self_pane_id=None):
-        """One-off send to any pane, no dunk involved."""
+    def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0):
+        """One-off send to any pane, no dunk involved. Like a dunk, it never
+        types over a human: if someone is composing in the target's box (or
+        earlier messages to that pane are still waiting), the message is queued
+        in the daemon and delivered, in order, once the box has been clear for
+        TYPING_SETTLE_S. `wait_s` > 0 blocks up to that long for delivery
+        before returning, so a short hold still comes back as sent."""
         pane = self.resolve_target(target, self_pane_id)
         if not str(text or "").strip():
             raise DunkError("text is required")
-        with self.send_lock:
-            ok, message = self.herdr.send_text_and_enter(pane["pane_id"], text)
         label = pane.get("tab_label") or pane["pane_id"]
-        self.last_message = f"Sent to {label}" if ok else f"Send failed: {message}"
-        return {"pane_id": pane["pane_id"], "target_label": label, "ok": ok,
-                "message": message}
+        message = self._new_message(pane["pane_id"], label, str(text), source="send_text",
+                                    deliver=lambda: self.herdr.send_text_and_enter(
+                                        pane["pane_id"], str(text)))
+        if not _check_bool(hold_while_typing, "hold_while_typing"):
+            self._deliver(message)
+            return message.to_dict()
+        self._enqueue(message)
+        if wait_s:
+            message.done.wait(min(float(wait_s), 3600))
+        return message.to_dict()
+
+    # -- direct-message outbox ---------------------------------------------
+
+    def _new_message(self, pane_id, label, text, source, deliver):
+        with self._lock:
+            message = Message(f"m{self.next_message_id}", pane_id, label, text, source, deliver)
+            self.next_message_id += 1
+        return message
+
+    def _deliver(self, message):
+        """Send one message now (under the shared send lock) and record it."""
+        with self.send_lock:
+            if message.status == "cancelled":
+                return
+            try:
+                ok, detail = message.deliver()
+            except Exception as error:  # noqa: BLE001 - report, never crash a queue
+                ok, detail = False, str(error)
+        with self._lock:
+            message.status = "sent" if ok else "failed"
+            message.detail = detail
+            message.finished_at = time.time()
+            self.last_message = (f"Sent to {message.target_label}" if ok
+                                 else f"Send failed: {detail}")
+            self._remember(message)
+        log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
+                 "sent" if ok else f"FAILED {detail}")
+        message.done.set()
+
+    def _remember(self, message):
+        self.message_history.append(message)
+        del self.message_history[:-MESSAGE_HISTORY]
+
+    def _enqueue(self, message):
+        """Queue a message for its pane and make sure a delivery thread runs.
+        Delivery is immediate when nothing is queued and nobody is typing."""
+        with self._lock:
+            queue = self.outbox.setdefault(message.pane_id, [])
+            queue.append(message)
+            thread = self.outbox_threads.get(message.pane_id)
+            if thread is None or not thread.is_alive():
+                thread = threading.Thread(target=self._outbox_worker, args=(message.pane_id,),
+                                          name=f"outbox-{message.pane_id}", daemon=True)
+                self.outbox_threads[message.pane_id] = thread
+                thread.start()
+
+    def _outbox_worker(self, pane_id):
+        """Deliver a pane's queued messages in order, each only once the box
+        has been clear for TYPING_SETTLE_S; while someone types, wait and
+        re-check every MESSAGE_RECHECK_S."""
+        held_since = None
+        try:
+            while not self.closed:
+                with self._lock:
+                    queue = self.outbox.get(pane_id) or []
+                    queue[:] = [m for m in queue if m.status == "queued"]
+                    message = queue[0] if queue else None
+                    if message is None:
+                        self.outbox.pop(pane_id, None)
+                        return
+                if self._clear_to_send(pane_id):
+                    if held_since is not None:
+                        log.info("message %s -> %s: box clear after %ds, delivering",
+                                 message.id, pane_id, int(time.time() - held_since))
+                        held_since = None
+                    with self._lock:
+                        if message in queue:
+                            queue.remove(message)
+                    self._deliver(message)
+                    continue
+                if held_since is None:
+                    held_since = time.time()
+                    with self._lock:
+                        message.holds += 1
+                        self.last_message = f"Holding message for {message.target_label}: someone is typing"
+                    log.info("message %s -> %s: holding, someone is typing in the input box",
+                             message.id, pane_id)
+                time.sleep(MESSAGE_RECHECK_S)
+        except Exception:  # noqa: BLE001 - never kill the daemon
+            log.exception("outbox worker for %s crashed", pane_id)
+        finally:
+            with self._lock:
+                if self.outbox_threads.get(pane_id) is threading.current_thread():
+                    self.outbox_threads.pop(pane_id, None)
+
+    def list_messages(self):
+        """Queued messages (oldest first) and the recent delivered/failed ones."""
+        with self._lock:
+            queued = [m.to_dict() for queue in self.outbox.values() for m in queue
+                      if m.status == "queued"]
+            recent = [m.to_dict() for m in self.message_history]
+        queued.sort(key=lambda m: m["created_at"])
+        return {"queued": queued, "recent": recent[::-1]}
+
+    def get_message(self, message_id):
+        with self._lock:
+            for queue in self.outbox.values():
+                for message in queue:
+                    if message.id == message_id:
+                        return message.to_dict()
+            for message in self.message_history:
+                if message.id == message_id:
+                    return message.to_dict()
+        raise DunkError(f"no message with id {message_id!r}")
+
+    def cancel_message(self, message_id):
+        """Drop a queued message before it is delivered."""
+        with self._lock:
+            for pane_id, queue in self.outbox.items():
+                for message in queue:
+                    if message.id == message_id:
+                        if message.status != "queued":
+                            raise DunkError(f"message {message_id} already {message.status}")
+                        message.status = "cancelled"
+                        message.finished_at = time.time()
+                        queue.remove(message)
+                        self._remember(message)
+                        message.done.set()
+                        log.info("message %s -> %s cancelled", message.id, pane_id)
+                        return message.to_dict()
+            for message in self.message_history:
+                if message.id == message_id:
+                    raise DunkError(f"message {message_id} already {message.status}")
+        raise DunkError(f"no queued message with id {message_id!r}")
 
     def read_pane(self, target, lines=40, self_pane_id=None):
         pane = self.resolve_target(target, self_pane_id)
@@ -981,6 +1175,33 @@ class Flock:
                 dunker.awaiting_consumption = False
         return not pending
 
+    def _typing_in(self, pane_id, last_sent_text=None, awaiting_consumption=False):
+        """True if someone is composing text in `pane_id`'s input box. See
+        `_human_typing` for the reasoning; this is the pane-level form used by
+        dunks and by queued direct messages alike."""
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None:
+            return False
+        typed = _typed_text(screen)
+        if not typed:
+            return False
+        return not _is_our_send(typed, last_sent_text, awaiting_consumption)
+
+    def _clear_to_send(self, pane_id, last_sent_text=None, awaiting_consumption=False,
+                       stop_event=None):
+        """True once the box has read clear on two checks TYPING_SETTLE_S
+        apart, so a pause between thoughts is not mistaken for being done.
+        False as soon as either check sees typing (or the wait is stopped)."""
+        if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
+            return False
+        if stop_event is not None:
+            if stop_event.wait(TYPING_SETTLE_S):
+                return False
+        else:
+            time.sleep(TYPING_SETTLE_S)
+        return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
+
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right
         now, so a send would splice our text into the middle of theirs and
@@ -995,16 +1216,8 @@ class Flock:
         business. An unreadable pane or one with no input box (a bare shell) is
         inconclusive and does not hold, since this check guards the human's
         draft rather than the agent's queue."""
-        screen = self.herdr.read_pane(
-            dunker.target_pane_id, lines=CONSUMPTION_READ_LINES, source="visible",
-            ansi=True,
-        )
-        if screen is None:
-            return False
-        typed = _typed_text(screen)
-        if not typed:
-            return False
-        return not _is_our_send(typed, dunker.last_sent_text, dunker.awaiting_consumption)
+        return self._typing_in(dunker.target_pane_id, dunker.last_sent_text,
+                               dunker.awaiting_consumption)
 
     def _timer_loop(self, dunker, stop_event):
         try:
@@ -1042,8 +1255,12 @@ class Flock:
                             dunker.status = f"Busy ({agent_status})"
                             if stop_event.wait(IDLE_POLL_S):
                                 return
-                    if not dunker.hold_while_typing or not self._human_typing(dunker):
+                    if not dunker.hold_while_typing or self._clear_to_send(
+                            dunker.target_pane_id, dunker.last_sent_text,
+                            dunker.awaiting_consumption, stop_event):
                         break
+                    if stop_event.is_set():
+                        return
                     if held_since is None:
                         held_since = time.time()
                         with self._lock:
@@ -1112,6 +1329,9 @@ class Flock:
             self.closed = True
             for dunker in self.dunkers:
                 self._halt(dunker)
+            for queue in self.outbox.values():
+                for message in queue:
+                    message.done.set()
 
 
 def _looks_like_usage(text):

@@ -129,10 +129,18 @@ def build_parser():
     p.add_argument("id")
     p.add_argument("--countdown", type=int, default=0, help="seconds to count down first")
 
-    p = sub.add_parser("send", help="type text + Enter into a pane once, right now",
+    p = sub.add_parser("send", help="type text + Enter into a pane once (queued if someone is typing)",
                        epilog="example: dunkingsheep send \"Claude Proj\" please summarize your progress")
     p.add_argument("target")
     p.add_argument("text", nargs="+")
+    p.add_argument("--wait", type=float, default=10, metavar="S",
+                   help="block up to S seconds for delivery before returning (default 10)")
+    p.add_argument("--ignore-typing", action="store_true",
+                   help="send even while someone is typing (default: queue it)")
+
+    p = sub.add_parser("messages", aliases=["queue"], help="direct messages queued and recently sent")
+    p = sub.add_parser("cancel-message", aliases=["cancel"], help="drop a queued message")
+    p.add_argument("message_id")
 
     sub.add_parser("panes", help="list herdr panes (possible targets)")
 
@@ -361,6 +369,37 @@ def print_panes(result):
         print(f"* = this pane ({result['self_pane_id']})")
 
 
+def print_message(result):
+    if result.get("queued"):
+        print(f"{result['message_id']} queued for {result['target_label']} "
+              f"({result['pane_id']}): someone is typing")
+    elif result.get("ok"):
+        print(f"sent to {result['target_label']} ({result['pane_id']})")
+    else:
+        print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
+
+
+def print_messages(result):
+    queued, recent = result.get("queued", []), result.get("recent", [])
+    if not queued and not recent:
+        print("no messages")
+        return
+    if queued:
+        print(f"{'ID':<5} {'WAITING':>8} {'TARGET':<28} {'FROM':<10} TEXT")
+        for m in queued:
+            print(f"{m['message_id']:<5} {str(m['waiting_s']) + 's':>8} "
+                  f"{_clip(m['target_label'], 28):<28} {_clip(m['source'], 10):<10} "
+                  f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
+    if recent:
+        if queued:
+            print()
+        print(f"{'ID':<5} {'STATUS':<10} {'TARGET':<28} {'FROM':<10} TEXT")
+        for m in recent:
+            print(f"{m['message_id']:<5} {m['status']:<10} "
+                  f"{_clip(m['target_label'], 28):<28} {_clip(m['source'], 10):<10} "
+                  f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
+
+
 def print_workspaces(result):
     workspaces = result.get("workspaces", [])
     if not workspaces:
@@ -551,12 +590,18 @@ def run_client_command(client, args):
         return client.call("stop_all"), lambda r: print_dunks(r["dunks"])
     if command in ("fire", "test"):
         result = client.call("fire_dunk", id=args.id, countdown_s=args.countdown, wait=True)
-        return result, lambda r: print(f"{r['id']}: {'sent' if r['ok'] else 'FAILED'} ({r['message']})")
-    if command == "send":
-        result = client.call("send_text", target=args.target, text=" ".join(args.text))
         return result, lambda r: print(
-            f"{'sent to' if r['ok'] else 'FAILED for'} {r['target_label']} ({r['pane_id']})"
-        )
+            f"{r['id']}: {'queued' if r.get('queued') else 'sent' if r['ok'] else 'FAILED'} "
+            f"({r['message']})")
+    if command == "send":
+        result = client.call("send_text", target=args.target, text=" ".join(args.text),
+                             hold_while_typing=not args.ignore_typing, wait_s=args.wait)
+        return result, print_message
+    if command in ("messages", "queue"):
+        return client.call("list_messages"), print_messages
+    if command in ("cancel-message", "cancel"):
+        return client.call("cancel_message", message_id=args.message_id), \
+            lambda r: print(f"cancelled {r['message_id']} for {r['target_label']}")
     if command == "panes":
         return client.call("list_panes"), print_panes
     if command in ("workspaces", "tabs"):
