@@ -229,9 +229,11 @@ class HerdrClient:
         pane = result.get("pane") or {}
         return pane.get("agent_status") or "unknown"
 
-    def read_pane(self, pane_id, lines=40, source=None):
+    def read_pane(self, pane_id, lines=40, source=None, ansi=False):
         """Return the last `lines` lines of a pane's output as text, or None if
-        the pane cannot be read.
+        the pane cannot be read. With `ansi=True` the text keeps its SGR
+        styling (colours, dim), which is how the daemon tells typed input from
+        an agent's dim placeholder hint.
 
         `herdr pane read` prints plain text (not JSON). The `recent` source
         includes scrollback but comes back empty for a pane herdr has never
@@ -239,6 +241,8 @@ class HerdrClient:
         sources = [source] if source else ["recent", "visible"]
         for src in sources:
             args = ["pane", "read", pane_id, "--source", src, "--lines", str(int(lines))]
+            if ansi:
+                args += ["--format", "ansi"]
             code, out, _err = self._run(args)
             if code != 0:
                 return None

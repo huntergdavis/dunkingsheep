@@ -62,6 +62,8 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual("boolean", add["inputSchema"]["properties"]["skip_if_unconsumed"]["type"])
         update = next(t for t in tools if t["name"] == "update_dunk")
         self.assertIn("skip_if_unconsumed", update["inputSchema"]["properties"])
+        self.assertEqual("boolean", add["inputSchema"]["properties"]["hold_while_typing"]["type"])
+        self.assertIn("hold_while_typing", update["inputSchema"]["properties"])
         self.assertIn("{id}", add["inputSchema"]["properties"]["text"]["description"])
         self.assertIn("help", names)
         # Flat schema types only, so strict validators (OpenAI/Codex, Gemini) accept them.

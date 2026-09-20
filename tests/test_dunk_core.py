@@ -14,9 +14,10 @@ from dunk_core import (  # noqa: E402
     DunkError, Dunker, Flock, expand_template, format_interval, parse_interval,
 )
 from fakes import (  # noqa: E402
-    FakeHerdr, claude_box_collapsed, claude_box_empty, claude_box_pasted_unsubmitted,
-    claude_box_pending, codex_box_empty_with_transcript_collapse,
-    codex_box_rotating_hint,
+    FakeHerdr, claude_box_collapsed, claude_box_collapsed_ansi, claude_box_empty,
+    claude_box_empty_ansi, claude_box_hint_ansi, claude_box_pasted_unsubmitted,
+    claude_box_pending, claude_box_typing_ansi, codex_box_empty_with_transcript_collapse,
+    codex_box_hint_ansi, codex_box_rotating_hint, codex_box_typing_ansi,
 )
 
 
@@ -292,8 +293,11 @@ class FlockTests(unittest.TestCase):
     # ---- end to end through the running timer ----
 
     def test_first_send_always_fires_with_backpressure_on(self):
-        self.herdr.set_screen("w2:p1", claude_box_collapsed())  # box "full" from the start
-        dunk = self._bp()
+        # Box "full" from the start. Typing-hold is off here so the fixture
+        # exercises backpressure alone (a paste we never sent would otherwise
+        # read as someone else's draft and hold, see the typing tests).
+        self.herdr.set_screen("w2:p1", claude_box_collapsed())
+        dunk = self._bp(hold_while_typing=False)
         self.assertTrue(self.herdr.sent.wait(4))
         self.assertEqual(("w2:p1", "nudge 1"), self.herdr.sends[0])
         self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
@@ -341,15 +345,139 @@ class FlockTests(unittest.TestCase):
         self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
 
     def test_backpressure_off_preserves_existing_behavior(self):
-        dunk = self.flock.add(target="w2:p1", text="tick", interval_minutes=1 / 60, start=True)
+        dunk = self.flock.add(target="w2:p1", text="tick", interval_minutes=1 / 60, start=True,
+                              hold_while_typing=False)
         self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 5))
         state = self.flock.get(dunk["id"])
         self.assertFalse(state["skip_if_unconsumed"])
         self.assertEqual(0, state["skip_count"])
         self.assertGreaterEqual(state["send_count"], 2)
-        # A plain dunk never inspects the pane for consumption.
+        # With both gates off a dunk never inspects the pane at all.
         self.assertEqual([], self.herdr.reads)
         self.assertEqual(0, self.herdr.status_calls)
+
+    # ---- never type over a human: the classifier, on styled screens ----
+
+    def test_typed_text_tells_a_draft_from_a_dim_hint(self):
+        typed = dunk_core._typed_text
+        # A human mid-sentence in Claude Code / Codex.
+        self.assertEqual("delete numb", typed(claude_box_typing_ansi("delete numb")))
+        self.assertEqual("fix the flaky test", typed(codex_box_typing_ansi("fix the flaky test")))
+        # Empty boxes, including the dim placeholder hints both agents rotate.
+        self.assertEqual("", typed(claude_box_empty_ansi()))
+        self.assertEqual("", typed(claude_box_hint_ansi()))
+        self.assertEqual("", typed(codex_box_hint_ansi()))
+        self.assertEqual("", typed(codex_box_hint_ansi("Use /skills to list available skills")))
+        # A collapsed paste is content, not a hint.
+        self.assertEqual("[Pasted text #1 +75 lines]", typed(claude_box_collapsed_ansi()))
+        # No input box at all (a bare shell): inconclusive.
+        self.assertIsNone(typed("hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n"))
+        self.assertIsNone(typed(""))
+
+    def test_bright_text_ignores_truecolor_subparameters(self):
+        # "38;2;r;g;b" carries a literal 2 that must not read as dim.
+        line = "\x1b[38;2;255;255;255mhello\x1b[0m \x1b[2mdim\x1b[22m bright"
+        self.assertEqual("hello  bright", dunk_core._bright_text(line))
+
+    def test_human_typing_excludes_our_own_leftover_send(self):
+        d = Dunker("d1", target_pane_id="w2:p1", send_count=1,
+                   last_sent_text="nudge 1, a long prompt that wraps in the box",
+                   awaiting_consumption=True)
+        # A stranger's draft -> typing.
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("delete numb"))
+        self.assertTrue(self.flock._human_typing(d))
+        # Our own send still sitting there (the visible line is a prefix of it).
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("nudge 1, a long prompt that"))
+        self.assertFalse(self.flock._human_typing(d))
+        # Our long send collapsed to a placeholder while we await consumption.
+        self.herdr.set_screen("w2:p1", claude_box_collapsed_ansi())
+        self.assertFalse(self.flock._human_typing(d))
+        # The same placeholder when we have nothing outstanding is someone's paste.
+        fresh = Dunker("d2", target_pane_id="w2:p1")
+        self.assertTrue(self.flock._human_typing(fresh))
+        # Empty / hint / unreadable / shell never hold.
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertFalse(self.flock._human_typing(d))
+        self.herdr.set_screen("w2:p1", None)
+        self.assertFalse(self.flock._human_typing(d))
+        self.assertFalse(self.flock._human_typing(Dunker("d3", target_pane_id="w1:p1")))
+
+    def test_backpressure_still_reads_styled_screens_as_plain_text(self):
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="keep going please")
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("keep going please"))
+        self.assertFalse(self.flock._previous_send_consumed(d))
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(self.flock._previous_send_consumed(d))
+
+    # ---- never type over a human: end to end through the running timer ----
+
+    def test_send_is_held_while_someone_types_and_fires_once_they_finish(self):
+        with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.2):
+            self.herdr.set_screen("w2:p1", claude_box_typing_ansi("delete numb"))
+            dunk = self.flock.add(target="w2:p1", text="nudge {count}", interval_minutes=1 / 60,
+                                  start=True)
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["status"] == "Held (typing)", 5))
+            time.sleep(0.8)  # several re-checks go by
+            state = self.flock.get(dunk["id"])
+            self.assertEqual([], self.herdr.sends, "must not type over a draft")
+            self.assertEqual(1, state["hold_count"], "one hold, however many re-checks")
+            self.assertIsNotNone(state["last_held_at"])
+            self.assertIsNone(state["last_error"], "a hold is not an error")
+            self.assertGreater(len(self.herdr.ansi_reads), 1, "re-checks read the styled box")
+            # They finish and submit; the box shows only a dim hint now.
+            self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+            self.assertTrue(self.herdr.sent.wait(3))
+            self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
+            self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+
+    def test_idle_gate_runs_again_after_a_typing_hold(self):
+        # Finishing typing usually means submitting, so the agent goes busy
+        # right as the box clears; an idle-gated dunk must wait for that turn.
+        with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.2), \
+                mock.patch.object(dunk_core, "IDLE_POLL_S", 0.1):
+            self.herdr.set_screen("w2:p1", codex_box_typing_ansi("please also"))
+            dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60,
+                                  start=True, only_when="idle")
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["status"] == "Held (typing)", 5))
+            self.herdr.statuses["w2:p1"] = "working"
+            self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["status"] == "Busy (working)", 5))
+            self.assertEqual([], self.herdr.sends)
+            self.herdr.statuses["w2:p1"] = "idle"
+            self.assertTrue(self.herdr.sent.wait(3))
+
+    def test_ignore_typing_sends_over_a_draft(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("delete numb"))
+        dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True,
+                              hold_while_typing=False)
+        self.assertTrue(self.herdr.sent.wait(4))
+        self.assertEqual(0, self.flock.get(dunk["id"])["hold_count"])
+        self.assertEqual([], self.herdr.ansi_reads)
+
+    def test_default_dunk_checks_the_box_once_and_sends_when_clear(self):
+        self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
+        dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True)
+        self.assertTrue(self.herdr.sent.wait(4))
+        self.assertTrue(dunk["hold_while_typing"])
+        self.assertEqual(["w2:p1"], self.herdr.ansi_reads)
+        self.assertEqual(0, self.herdr.status_calls, "no idle gate unless asked")
+
+    def test_hold_while_typing_toggle_round_trip_and_old_files_default_on(self):
+        dunk = self.flock.add(target="w2:p1")
+        self.assertTrue(dunk["hold_while_typing"])
+        self.assertFalse(self.flock.update(dunk["id"], hold_while_typing="no")["hold_while_typing"])
+        self.assertTrue(self.flock.update(dunk["id"], hold_while_typing=True)["hold_while_typing"])
+        with self.assertRaises(DunkError):
+            self.flock.update(dunk["id"], hold_while_typing="sometimes")
+        old = Dunker.from_dict({"id": "d9", "target_pane_id": "w2:p1", "text": "x"})
+        self.assertTrue(old.hold_while_typing)
+        self.assertEqual(0, old.hold_count)
+        self.assertIn("hold_while_typing", old.to_dict())
+        self.assertIn("hold_count", old.to_dict())
 
     def test_backpressure_toggle_via_update_and_validation(self):
         dunk = self.flock.add(target="w2:p1")

@@ -184,6 +184,8 @@ class DunkingSheepTui:
             self.toggle_only_idle()
         elif key == ord("u"):
             self.toggle_skip_if_unconsumed()
+        elif key == ord("y"):
+            self.toggle_hold_while_typing()
         elif key == ord("m"):
             self.edit_max_sends()
 
@@ -235,6 +237,15 @@ class DunkingSheepTui:
         self.rpc("update_dunk", id=dunk["id"], skip_if_unconsumed=new_value)
         self.flash("Skip sends the target never consumed" if new_value
                    else "Always send on schedule")
+
+    def toggle_hold_while_typing(self):
+        dunk = self.current()
+        if dunk is None:
+            return self.current_id()
+        new_value = not dunk.get("hold_while_typing", True)
+        self.rpc("update_dunk", id=dunk["id"], hold_while_typing=new_value)
+        self.flash("Hold while someone is typing in the target" if new_value
+                   else "Send even while someone is typing")
 
     def edit_max_sends(self):
         dunk = self.current()
@@ -512,7 +523,7 @@ class DunkingSheepTui:
         h, w = self.stdscr.getmaxyx()
         self.safe_addstr(self.stdscr, 0, 0, "Dunking Sheep TUI", w - 1, curses.A_BOLD)
         help_text = ("a add  d remove  c target  t test  i interval  e text  n name  "
-                     "o idle-gate  u skip-unconsumed  m max  space start/stop  "
+                     "o idle-gate  u skip-unconsumed  y typing-hold  m max  space start/stop  "
                      "q quit  Q stop all+quit")
         self.safe_addstr(self.stdscr, 1, 0, help_text, w - 1)
         self.safe_hline(self.stdscr, 2, 0, w - 1)

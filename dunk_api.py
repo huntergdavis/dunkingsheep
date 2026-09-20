@@ -93,6 +93,7 @@ def h_add_dunk(flock, args, self_pane_id):
         only_when=args.get("only_when"),
         max_sends=args.get("max_sends"),
         skip_if_unconsumed=_bool(args.get("skip_if_unconsumed"), False),
+        hold_while_typing=_bool(args.get("hold_while_typing"), True),
         self_pane_id=self_pane_id,
     )
 
@@ -109,6 +110,8 @@ def h_update_dunk(flock, args, self_pane_id):
         kwargs["max_sends"] = args["max_sends"]
     if args.get("skip_if_unconsumed") is not None:
         kwargs["skip_if_unconsumed"] = _bool(args["skip_if_unconsumed"], False)
+    if args.get("hold_while_typing") is not None:
+        kwargs["hold_while_typing"] = _bool(args["hold_while_typing"], True)
     if not kwargs:
         raise DunkError("nothing to update")
     return flock.update(args["id"], self_pane_id=self_pane_id, **kwargs)
@@ -218,6 +221,15 @@ SKIP_IF_UNCONSUMED_PARAM = {
         "for self-dunks and unattended agents."
     ),
 }
+HOLD_WHILE_TYPING_PARAM = {
+    "type": "boolean",
+    "description": (
+        "Never type over a human: before each send the daemon reads the "
+        "target's input box and, if someone is mid-way through typing there, "
+        "holds the send and re-checks every minute until the box is clear. "
+        "Default true. Set false only for a pane nobody types in."
+    ),
+}
 MAX_SENDS_PARAM = {
     "type": "integer",
     "minimum": 0,
@@ -270,13 +282,14 @@ COMMANDS = [
             "only_when": ONLY_WHEN_PARAM,
             "max_sends": MAX_SENDS_PARAM,
             "skip_if_unconsumed": SKIP_IF_UNCONSUMED_PARAM,
+            "hold_while_typing": HOLD_WHILE_TYPING_PARAM,
         },
         mcp_required=["target", "text", "interval_minutes"],
     ),
     Command(
         "update_dunk",
-        "Change a dunk's target, text, interval, name, only_when, max_sends or "
-        "skip_if_unconsumed. "
+        "Change a dunk's target, text, interval, name, only_when, max_sends, "
+        "skip_if_unconsumed or hold_while_typing. "
         "Changing the interval of a running dunk reschedules its next send.",
         h_update_dunk,
         params={
@@ -288,6 +301,7 @@ COMMANDS = [
             "only_when": ONLY_WHEN_PARAM,
             "max_sends": MAX_SENDS_PARAM,
             "skip_if_unconsumed": SKIP_IF_UNCONSUMED_PARAM,
+            "hold_while_typing": HOLD_WHILE_TYPING_PARAM,
         },
         required=["id"],
     ),

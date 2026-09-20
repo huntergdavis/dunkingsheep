@@ -23,6 +23,10 @@ Orchestration extras on top of the classic Dunking Bird model:
   when the previous send is still sitting unread in the target's input box (see
   `Flock._previous_send_consumed`). Judged by reading the pane, never by whether
   the agent is merely busy.
+- `hold_while_typing=True` (the default): never type over a human. Before a
+  send the daemon reads the target's input box with its styling and, if the box
+  holds text someone is composing, holds the send and re-checks every minute
+  until the box is clear (see `Flock._human_typing`).
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
 """
@@ -36,7 +40,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -68,8 +72,16 @@ COLLAPSED_INPUT_MARKERS = (
     "pasted content",
     "[image",
 )
+# While a human is typing in the target's input box, re-check this often.
+TYPING_RECHECK_S = 60
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
+# CSI escape sequences (colours, dim, cursor moves) as `herdr pane read
+# --format ansi` emits them.
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Characters agents draw around the input box that are never typed input:
+# braille animation dots, box-drawing rules and block glyphs, whitespace.
+DECORATION_RE = re.compile(r"[─-▟⠀-⣿\s]+")
 
 log = logging.getLogger("dunkingsheep")
 
@@ -137,6 +149,7 @@ class Dunker:
         "started_at", "last_sent_at", "next_send_at", "last_error",
         "skip_if_unconsumed", "skip_count", "last_skipped_at",
         "awaiting_consumption", "last_sent_text",
+        "hold_while_typing", "hold_count", "last_held_at",
     )
 
     def __init__(self, id, **kwargs):
@@ -169,6 +182,10 @@ class Dunker:
         # True from a successful send until the target is seen consuming it.
         self.awaiting_consumption = bool(kwargs.get("awaiting_consumption", False))
         self.last_sent_text = kwargs.get("last_sent_text")
+        # Never type over a human (persisted; old state files default to on).
+        self.hold_while_typing = bool(kwargs.get("hold_while_typing", True))
+        self.hold_count = int(kwargs.get("hold_count") or 0)
+        self.last_held_at = kwargs.get("last_held_at")
         # Volatile (not persisted).
         self.status = kwargs.get("status", "Ready")
         self.stop_event = None
@@ -402,7 +419,7 @@ class Flock:
 
     def add(self, target=None, text=DEFAULT_TEXT, interval_minutes=DEFAULT_INTERVAL_MINUTES,
             name=None, start=False, only_when=None, max_sends=None,
-            skip_if_unconsumed=False, self_pane_id=None):
+            skip_if_unconsumed=False, hold_while_typing=True, self_pane_id=None):
         interval = parse_interval(interval_minutes)
         only_when = _check_only_when(only_when)
         max_sends = _check_max_sends(max_sends)
@@ -416,6 +433,7 @@ class Flock:
                 only_when=only_when,
                 max_sends=max_sends,
                 skip_if_unconsumed=_check_bool(skip_if_unconsumed, "skip_if_unconsumed"),
+                hold_while_typing=_check_bool(hold_while_typing, "hold_while_typing"),
             )
             self.next_id += 1
             if pane:
@@ -432,7 +450,7 @@ class Flock:
 
     def update(self, dunk_id, target=None, text=None, interval_minutes=None,
                name=None, only_when=..., max_sends=..., skip_if_unconsumed=None,
-               self_pane_id=None):
+               hold_while_typing=None, self_pane_id=None):
         """Change fields on a dunk. Pass `only_when=None` / `max_sends=None`
         explicitly to clear them; omit them to leave them alone."""
         pane = self.resolve_target(target, self_pane_id) if target else None
@@ -468,6 +486,9 @@ class Flock:
             if skip_if_unconsumed is not None:
                 dunker.skip_if_unconsumed = _check_bool(skip_if_unconsumed, "skip_if_unconsumed")
                 changed.append("skip_if_unconsumed")
+            if hold_while_typing is not None:
+                dunker.hold_while_typing = _check_bool(hold_while_typing, "hold_while_typing")
+                changed.append("hold_while_typing")
             if changed:
                 dunker.status = f"{changed[-1].replace('_', ' ').capitalize()} set"
                 self._save()
@@ -659,6 +680,31 @@ class Flock:
                 dunker.awaiting_consumption = False
         return not pending
 
+    def _human_typing(self, dunker):
+        """True if someone is composing text in the target's input box right
+        now, so a send would splice our text into the middle of theirs and
+        Enter would submit the mangled result.
+
+        Reads the pane *with styling*: both Claude Code and Codex draw their
+        empty-box placeholder hints dim (SGR 2) and typed text at full
+        intensity, so "non-dim text after the prompt sigil" is a human's draft
+        without having to know every rotating hint. Our own leftover send
+        (verbatim, or the collapse placeholder a long one becomes while we are
+        still awaiting its consumption) is not typing; that is backpressure's
+        business. An unreadable pane or one with no input box (a bare shell) is
+        inconclusive and does not hold, since this check guards the human's
+        draft rather than the agent's queue."""
+        screen = self.herdr.read_pane(
+            dunker.target_pane_id, lines=CONSUMPTION_READ_LINES, source="visible",
+            ansi=True,
+        )
+        if screen is None:
+            return False
+        typed = _typed_text(screen)
+        if not typed:
+            return False
+        return not _is_our_send(typed, dunker.last_sent_text, dunker.awaiting_consumption)
+
     def _timer_loop(self, dunker, stop_event):
         try:
             while not stop_event.is_set():
@@ -677,19 +723,41 @@ class Flock:
                     if stop_event.wait(min(1.0, remaining)):
                         return
 
-                # Optional gate: hold while the target agent is busy.
-                if dunker.only_when == "idle":
-                    while True:
-                        agent_status = self.herdr.agent_status(dunker.target_pane_id)
-                        if agent_status is None:
-                            dunker.status = "Target gone"
-                            dunker.last_error = "target pane not found"
-                            break
-                        if agent_status not in BUSY_STATUSES:
-                            break
-                        dunker.status = f"Busy ({agent_status})"
-                        if stop_event.wait(IDLE_POLL_S):
-                            return
+                # Gates. First the optional idle gate, then never type over a
+                # human. After a typing hold the idle gate runs again, because
+                # finishing typing usually means submitting, which makes the
+                # agent busy.
+                held_since = None
+                while True:
+                    if dunker.only_when == "idle":
+                        while True:
+                            agent_status = self.herdr.agent_status(dunker.target_pane_id)
+                            if agent_status is None:
+                                dunker.status = "Target gone"
+                                dunker.last_error = "target pane not found"
+                                break
+                            if agent_status not in BUSY_STATUSES:
+                                break
+                            dunker.status = f"Busy ({agent_status})"
+                            if stop_event.wait(IDLE_POLL_S):
+                                return
+                    if not dunker.hold_while_typing or not self._human_typing(dunker):
+                        break
+                    if held_since is None:
+                        held_since = time.time()
+                        with self._lock:
+                            dunker.hold_count += 1
+                            dunker.last_held_at = held_since
+                            self.last_message = f"Holding {dunker.id}: someone is typing"
+                            self._save()
+                        log.info("%s -> %s: holding, someone is typing in the input box",
+                                 dunker.id, dunker.target_pane_id)
+                    dunker.status = "Held (typing)"
+                    if stop_event.wait(TYPING_RECHECK_S):
+                        return
+                if held_since is not None:
+                    log.info("%s -> %s: input box clear after %ds, resuming",
+                             dunker.id, dunker.target_pane_id, int(time.time() - held_since))
 
                 # Backpressure: a no-op when the previous send was never taken.
                 if dunker.skip_if_unconsumed and not self._previous_send_consumed(dunker):
@@ -803,6 +871,90 @@ def _input_pending(tail, last_sent_text):
         return True
     needle = _collapse(last_sent_text)[:CONSUMPTION_PREFIX_CHARS].lower()
     if needle and needle in _collapse(area).lower():
+        return True
+    return False
+
+
+def _strip_ansi(text):
+    """Plain text of an ANSI-styled screen."""
+    return ANSI_RE.sub("", text)
+
+
+def _sgr_dim(params, dim):
+    """Apply one SGR parameter list to the current dim state."""
+    if not params:
+        return False
+    index = 0
+    while index < len(params):
+        code = params[index]
+        if code in ("", "0"):
+            dim = False
+        elif code == "2":
+            dim = True
+        elif code == "22":
+            dim = False
+        elif code in ("38", "48", "58"):
+            # Extended colour: skip its sub-parameters so "38;2;r;g;b" is not
+            # mistaken for dim.
+            if index + 1 < len(params) and params[index + 1] == "5":
+                index += 1
+            elif index + 1 < len(params) and params[index + 1] == "2":
+                index += 4
+        index += 1
+    return dim
+
+
+def _bright_text(line):
+    """The characters of one ANSI-styled line that are not rendered dim."""
+    out = []
+    dim = False
+    position = 0
+    for match in ANSI_RE.finditer(line):
+        if not dim:
+            out.append(line[position:match.start()])
+        sequence = match.group(0)
+        if sequence.endswith("m"):
+            dim = _sgr_dim(sequence[2:-1].split(";"), dim)
+        position = match.end()
+    if not dim:
+        out.append(line[position:])
+    return "".join(out)
+
+
+def _typed_text(screen):
+    """What a human has typed into the target's input box, judged from an
+    ANSI-styled screen: the non-dim text on the last prompt-sigil line, minus
+    the sigil and box decoration. '' when the box is empty or shows only a dim
+    placeholder hint; None when no input box can be found. Only the sigil line
+    is inspected: any draft starts there, and continuation lines are hard to
+    tell from an agent's footer."""
+    if not screen:
+        return None
+    sigil_line = None
+    for line in screen.splitlines():
+        plain = _strip_ansi(line).strip()
+        if plain[:1] in INPUT_BOX_SIGILS:
+            sigil_line = line
+    if sigil_line is None:
+        return None
+    bright = DECORATION_RE.sub(" ", _bright_text(sigil_line)).strip()
+    if bright[:1] in INPUT_BOX_SIGILS:
+        bright = bright[1:]
+    return _collapse(bright)
+
+
+def _is_our_send(typed, last_sent_text, awaiting_consumption):
+    """True if the text in the box is our own previous send rather than a
+    human's draft: the sent text (the visible line is a prefix of it, or starts
+    with its prefix), or a collapsed-paste placeholder while our last send is
+    still unaccounted for."""
+    low = _collapse(typed).lower()
+    if last_sent_text:
+        full = _collapse(last_sent_text).lower()
+        needle = full[:CONSUMPTION_PREFIX_CHARS]
+        if low and (full.startswith(low) or low.startswith(needle)):
+            return True
+    if awaiting_consumption and any(marker in low for marker in COLLAPSED_INPUT_MARKERS):
         return True
     return False
 

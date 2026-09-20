@@ -88,6 +88,9 @@ def build_parser():
     p.add_argument("--max-sends", type=int, help="remove the dunk after N sends")
     p.add_argument("--skip-if-unconsumed", action="store_true",
                    help="backpressure: skip a send if the previous one was never picked up")
+    p.add_argument("--ignore-typing", action="store_true",
+                   help="send even while someone is typing in the target's input box "
+                        "(default: hold and re-check every minute)")
     p.add_argument("--no-start", action="store_true", help="create it stopped")
 
     p = sub.add_parser("update", aliases=["set"], help="change a dunk's settings")
@@ -104,6 +107,11 @@ def build_parser():
     bp.add_argument("--skip-if-unconsumed", action="store_true",
                     help="backpressure: skip a send if the previous one was never picked up")
     bp.add_argument("--always-send", action="store_true", help="clear skip-if-unconsumed")
+    typing = p.add_mutually_exclusive_group()
+    typing.add_argument("--hold-while-typing", action="store_true",
+                        help="hold a send while someone is typing in the target (default)")
+    typing.add_argument("--ignore-typing", action="store_true",
+                        help="send even while someone is typing in the target")
 
     for name, aliases, help_text in (
         ("remove", ["rm", "delete"], "delete a dunk"),
@@ -273,11 +281,11 @@ def print_dunks(dunks):
 def print_dunk(dunk):
     order = ("id", "name", "running", "status", "target_label", "target_pane_id",
              "interval_minutes", "only_when", "max_sends", "skip_if_unconsumed",
-             "send_count", "skip_count", "awaiting_consumption", "next_send_in_s",
-             "last_error", "text")
+             "hold_while_typing", "send_count", "skip_count", "hold_count",
+             "awaiting_consumption", "next_send_in_s", "last_error", "text")
     for key in order:
         if key in dunk and dunk[key] not in (None, "", False, 0) or key in (
-                "skip_if_unconsumed",):
+                "skip_if_unconsumed", "hold_while_typing"):
             value = dunk[key]
             if key == "text":
                 print(f"{key:<16} {value!r}")
@@ -411,6 +419,8 @@ def run_client_command(client, args):
             payload["max_sends"] = args.max_sends
         if args.skip_if_unconsumed:
             payload["skip_if_unconsumed"] = True
+        if args.ignore_typing:
+            payload["hold_while_typing"] = False
         return client.call("add_dunk", **payload), print_dunk
     if command in ("update", "set"):
         payload = {"id": args.id}
@@ -432,6 +442,10 @@ def run_client_command(client, args):
             payload["skip_if_unconsumed"] = True
         elif args.always_send:
             payload["skip_if_unconsumed"] = False
+        if args.hold_while_typing:
+            payload["hold_while_typing"] = True
+        elif args.ignore_typing:
+            payload["hold_while_typing"] = False
         return client.call("update_dunk", **payload), print_dunk
     if command in ("remove", "rm", "delete"):
         return client.call("remove_dunk", id=args.id), lambda r: print(f"removed {r['id']}")

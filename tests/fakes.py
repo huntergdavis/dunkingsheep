@@ -1,6 +1,9 @@
 """Test doubles shared by the Dunking Sheep test suite."""
 
+import re
 import threading
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 PANES = [
@@ -46,6 +49,7 @@ class FakeHerdr:
         self.screens = {}
         self.unreadable = set()
         self.reads = []
+        self.ansi_reads = []
         self.status_calls = 0
         self.fail_sends = False
         self.lock = threading.Lock()
@@ -99,14 +103,19 @@ class FakeHerdr:
                 self.unreadable.discard(pane_id)
                 self.screens[pane_id] = screen
 
-    def read_pane(self, pane_id, lines=40, source=None):
+    def read_pane(self, pane_id, lines=40, source=None, ansi=False):
         self.reads.append((pane_id, source))
+        if ansi:
+            self.ansi_reads.append(pane_id)
         if not any(p["pane_id"] == pane_id for p in self.panes):
             return None
         if pane_id in self.unreadable:
             return None
         if pane_id in self.screens:
-            tail = self.screens[pane_id].splitlines()[-int(lines):]
+            screen = self.screens[pane_id]
+            if not ansi:
+                screen = ANSI_RE.sub("", screen)
+            tail = screen.splitlines()[-int(lines):]
             return "\n".join(tail) + "\n"
         # Default: the last sends, verbatim (a plain terminal echo).
         mine = [text for pid, text in self.sends if pid == pane_id]
@@ -196,3 +205,92 @@ def codex_box_pending(text):
         "",
         "  gpt-6-astra xhigh \u00b7 ~/workspace \u00b7 Main [default]",
     ]) + "\n"
+
+
+# --- the same boxes with their ANSI styling, as `herdr pane read --format ansi`
+# returns them (captured live 2026-09-19). Typed text is full intensity; the
+# empty-box placeholder hints are dim (SGR 2). ---
+
+E = "\x1b["
+CLAUDE_BG = E + "48;2;55;55;55m"
+
+
+def _claude_frame_ansi(box_lines):
+    rule = E + "0m" + E + "38;2;136;136;136m" + "\u2500" * 54 + E + "0m"
+    return "\r\n".join([
+        E + "0m  earlier transcript line",
+        E + "0m" + E + "38;2;153;153;153m\u273b Saut\u00e9ed for 1m 18s \u00b7 done 9:17 AM" + E + "0m",
+        "",
+        rule,
+        *box_lines,
+        rule,
+        "  " + E + "0m" + E + "38;2;255;107;128m\u23f5\u23f5 bypass permissions on" + E + "0m"
+        + E + "38;2;153;153;153m (shift+tab to cycle) \u00b7 \u2190 for agents" + E + "0m",
+    ]) + "\r\n"
+
+
+def claude_box_typing_ansi(text):
+    """A human mid-sentence: white text after the sigil, on the box background."""
+    return _claude_frame_ansi([
+        E + "0m" + E + "38;2;80;80;80m" + CLAUDE_BG + "\u276f " + E + "0m"
+        + E + "38;2;255;255;255m" + CLAUDE_BG + text + E + "0m" + CLAUDE_BG
+        + " " * 20 + E + "0m",
+    ])
+
+
+def claude_box_hint_ansi():
+    """Empty Claude box showing a dim hint ("Press up to edit queued messages")."""
+    return _claude_frame_ansi([
+        E + "0m" + E + "38;2;153;153;153m\u276f\u00a0 " + E + "0m" + E + "2m"
+        + "Press up to edit queued messages" + E + "0m",
+    ])
+
+
+def claude_box_empty_ansi():
+    return _claude_frame_ansi([
+        E + "0m" + E + "38;2;80;80;80m" + CLAUDE_BG + "\u276f " + E + "0m" + CLAUDE_BG
+        + " " * 40 + E + "0m",
+    ])
+
+
+def claude_box_collapsed_ansi(lines=75):
+    """Our long send collapsed into a paste placeholder (rendered full intensity)."""
+    return _claude_frame_ansi([
+        E + "0m" + E + "38;2;80;80;80m" + CLAUDE_BG + "\u276f " + E + "0m"
+        + E + "38;2;255;255;255m" + CLAUDE_BG + "[Pasted text #1 +%d lines]" % lines + E + "0m",
+        E + "0m" + CLAUDE_BG + "  " + E + "38;2;153;153;153m+%d lines (ctrl+o to expand)" % lines
+        + E + "0m",
+    ])
+
+
+CODEX_BG = E + "48;2;30;30;30m"
+
+
+def _codex_frame_ansi(sigil_line):
+    return "\r\n".join([
+        E + "0m" + E + "2m  done 6:03 PM" + E + "0m",
+        " ",
+        # Codex's animated braille border above the box, coloured, not dim.
+        E + "0m" + E + "38;2;40;40;40m" + CODEX_BG + "\u2801" + E + "0m" + CODEX_BG + "   "
+        + E + "0m" + E + "38;2;70;70;70m" + CODEX_BG + "\u2808" + E + "0m",
+        sigil_line,
+        E + "0m" + CODEX_BG + "       " + E + "0m" + E + "38;2;56;56;56m" + CODEX_BG + "\u2880"
+        + E + "0m" + CODEX_BG + "        " + E + "0m",
+        "  " + E + "0m" + E + "38;2;246;226;183mgpt-6-astra xhigh" + E + "0m" + E + "2m \u00b7 "
+        + E + "0m" + E + "38;2;171;223;167m~/workspace/poolrad-macmaps" + E + "0m",
+    ]) + "\r\n"
+
+
+def codex_box_hint_ansi(hint="Ask Codex to do anything"):
+    """Empty Codex box: bold-dim sigil, a coloured braille dot, then the dim hint."""
+    return _codex_frame_ansi(
+        E + "0m" + E + "1m" + CODEX_BG + "\u203a" + E + "0m" + E + "38;2;49;49;49m" + CODEX_BG
+        + "\u2801" + E + "0m" + E + "2m" + CODEX_BG + hint + E + "0m" + CODEX_BG + "   " + E + "0m"
+    )
+
+
+def codex_box_typing_ansi(text):
+    return _codex_frame_ansi(
+        E + "0m" + E + "1m" + E + "2m" + CODEX_BG + "\u203a " + E + "0m" + CODEX_BG + text
+        + E + "0m"
+    )

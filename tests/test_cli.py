@@ -106,13 +106,17 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual(1.5, dunk["interval_minutes"])
         self.assertEqual("idle", dunk["only_when"])
         self.assertTrue(dunk["running"])
+        self.assertTrue(dunk["hold_while_typing"])  # on by default
         other = self.run_json("add", "--target", "shell", "--every", "5", "--no-start",
-                              "--max-sends", "2", "--skip-if-unconsumed")
+                              "--max-sends", "2", "--skip-if-unconsumed", "--ignore-typing")
         self.assertEqual("w1:p1", other["target_pane_id"])
         self.assertFalse(other["running"])
         self.assertEqual(2, other["max_sends"])
         self.assertTrue(other["skip_if_unconsumed"])
-        self.assertIn("skip_if_unconsumed True", self.run_cli("get", "d2").stdout)
+        self.assertFalse(other["hold_while_typing"])
+        detail = self.run_cli("get", "d2").stdout
+        self.assertIn("skip_if_unconsumed True", detail)
+        self.assertIn("hold_while_typing False", detail)
 
         listing = self.run_cli("list").stdout
         self.assertIn("d1", listing)
@@ -143,6 +147,8 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertEqual("go", updated["text"])
         self.assertFalse(self.run_json("update", "d2", "--always-send")["skip_if_unconsumed"])
         self.assertTrue(self.run_json("update", "d1", "--skip-if-unconsumed")["skip_if_unconsumed"])
+        self.assertTrue(self.run_json("update", "d2", "--hold-while-typing")["hold_while_typing"])
+        self.assertFalse(self.run_json("update", "d2", "--ignore-typing")["hold_while_typing"])
         self.assertTrue(self.run_json("toggle", "d2")["running"])
         stopped = self.run_json("stop-all")["dunks"]
         self.assertFalse(any(d["running"] for d in stopped))
@@ -173,7 +179,7 @@ class CliEndToEndTests(unittest.TestCase):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
         self.assertIn("[socket/cli only]", out)
-        self.assertIn("dunkingsheep 2.0", self.run_cli("--version").stdout)
+        self.assertIn("dunkingsheep 2.1", self.run_cli("--version").stdout)
         registry = json.loads(self.run_cli("commands", "--json").stdout)
         names = [c["name"] for c in registry]
         self.assertIn("help", names)

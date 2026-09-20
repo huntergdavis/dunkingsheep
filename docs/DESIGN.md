@@ -92,6 +92,29 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   arbitrary short text a human left in the box, since agents render rotating
   idle hints there that are indistinguishable from typed text; and it assumes an
   agent pane that draws an input box, not a bare shell.
+- Never type over a human (`hold_while_typing`, on by default). A dunk that
+  lands while the human is mid-sentence splices its text into their draft and
+  Enter submits the mangled result; seen live on 2026-09-19 in a Claude pane
+  whose transcript reads `...in priorit yoPM poll: check list_panes...`. The
+  blind spot above ("hints are indistinguishable from typed text") is only
+  true in plain text: read with `herdr pane read --format ansi`, both Claude
+  Code and Codex draw their empty-box hints dim (SGR 2, including Claude's
+  dim prompt suggestions and Codex's rotating `Use /skills ...`) and typed
+  text at full intensity. `_typed_text` finds the last prompt-sigil line,
+  keeps only its non-dim characters (a small SGR walker that skips the `2` in
+  `38;2;r;g;b`), strips the sigil and box decoration (braille animation dots,
+  rules) and returns the draft; '' for an empty or hint-only box, None when no
+  box is drawn. Only the sigil line is judged: every draft starts there, and
+  continuation lines are hard to tell from an agent's footer. `_is_our_send`
+  excludes our own leftover text (the visible line is a prefix of the last
+  send, or a collapsed-paste placeholder while `awaiting_consumption`), which
+  stays backpressure's business. In the timer loop the gates form one loop:
+  idle gate, then typing check; while typing, status `Held (typing)`,
+  `hold_count` +1 once per hold, re-check every `TYPING_RECHECK_S` (60 s), and
+  after the box clears the idle gate runs again because finishing typing
+  usually means submitting. Unreadable pane or no box: never hold, since this
+  guards the human's draft rather than the agent's queue. `fire` and
+  `send_now` are explicit "now" commands and bypass it.
 - Templates: only the known placeholders are substituted (regex), so JSON or
   code braces in a prompt survive intact.
 - Persistence: `dunks.json` written atomically on every structural change and

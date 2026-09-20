@@ -36,6 +36,7 @@ herdr status server                     # herdr must be running
 | **Placeholders** | `{id}` `{name}` `{count}` `{target}` `{interval}` `{time}` `{date}` expand at send time. A dunk can tell its recipient which dunk to remove. |
 | **Idle gating** | `--only-idle` / `only_when="idle"` holds a send until herdr reports the target agent idle. |
 | **Backpressure** | `--skip-if-unconsumed` / `skip_if_unconsumed=true` skips a send (no-op, no error, `skip_count`+1) while the previous one still sits unread in the pane. Stops prompts piling up in an unattended agent. |
+| **Never type over you** | On by default. Before each send the daemon reads the target's input box with its styling; bright (non-dim) text after the prompt means someone is mid-sentence, so the send is held and re-checked every minute until the box clears. `--ignore-typing` / `hold_while_typing=false` turns it off. |
 | **Max sends** | `--max-sends N` removes the dunk after N sends. `1` is a one-shot delayed nudge. |
 | **Direct messages** | `send <target> <text>` / `send_text` types into any pane now, no dunk. |
 | **Pane reading** | `read <target>` / `read_pane` returns a pane's recent output plus its agent and status. |
@@ -87,8 +88,8 @@ Tools: `help` `status` `list_panes` `read_pane` `list_dunks` `get_dunk`
 ## ⌨️ CLI
 
 ```bash
-dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--skip-if-unconsumed] [--max-sends N] [--no-start]
-dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--skip-if-unconsumed|--always-send] [--max-sends N]
+dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--skip-if-unconsumed] [--ignore-typing] [--max-sends N] [--no-start]
+dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--skip-if-unconsumed|--always-send] [--hold-while-typing|--ignore-typing] [--max-sends N]
 dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
 dunkingsheep send <target> <text…>            read <target> [-l N]
 dunkingsheep panes | status | shutdown [--stop-all] | serve | tui | mcp
@@ -125,6 +126,7 @@ printf '%s\n' '{"id":1,"cmd":"help"}' | nc -U ~/.config/dunkingsheep/dunkingshee
 | `a` / `d` | add / remove | `t` | test send now |
 | `Space` / `s` | start / stop | `i` / `e` / `n` | interval / text / name |
 | `o` / `u` | idle gate / skip-if-unconsumed | `m` | max sends |
+| `y` | hold while someone is typing (default on) | | |
 | `q` / `Q` | quit view / stop all + shut down daemon | | |
 
 ## 🧩 How it works

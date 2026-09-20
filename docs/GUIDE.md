@@ -1,4 +1,4 @@
-# Dunking Sheep 2.0.0 guide
+# Dunking Sheep 2.1.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -62,6 +62,19 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
   detects our own queued send (verbatim or its collapsed placeholder) but
   not arbitrary short text a human left in the box, and it assumes an agent
   pane that draws an input box (Claude/Codex), not a bare shell.
+- hold_while_typing = true (the default): never type over a human. Before
+  each send the daemon reads the target's input box with its styling. Both
+  Claude Code and Codex draw their empty-box hints dim and typed text at
+  full intensity, so bright text after the prompt sigil means someone is
+  mid-sentence. The send is then held (status 'Held (typing)', hold_count
+  +1, no error) and re-checked every minute until the box is clear; an
+  idle-gated dunk re-runs its idle gate afterwards, since finishing typing
+  usually means submitting. Our own leftover send does not count as typing
+  (that is skip_if_unconsumed's job), and a pane with no input box (a bare
+  shell) or an unreadable pane never holds. Only the sigil line is judged.
+  Turn it off (--ignore-typing / hold_while_typing=false) only for a pane
+  nobody types in. fire_dunk and send_text are explicit 'now' commands and
+  do not hold.
 - start = false: create the dunk stopped; start it later.
 - Changing the interval of a running dunk reschedules its next send.
 
@@ -70,7 +83,7 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
 ```
 dunkingsheep panes                          list targets (* marks this pane)
 dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle]
-                 [--skip-if-unconsumed] [--max-sends N] [--no-start]
+                 [--skip-if-unconsumed] [--ignore-typing] [--max-sends N] [--no-start]
                  -e takes 15, 90s, 1.5h
 dunkingsheep list | get <id> | update <id> ... | remove <id>
 dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)

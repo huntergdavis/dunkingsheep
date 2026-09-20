@@ -45,7 +45,9 @@ implement the next item."). {id} expands to the dunk's own id at send time, so
 the future you knows exactly which dunk to remove. only_when="idle" waits until
 you are not mid-task; skip_if_unconsumed skips a send while the previous one is
 still unread in the pane (prevents prompts piling up in an unattended session);
-max_sends=1 makes a one-off reminder.
+max_sends=1 makes a one-off reminder. Every dunk also holds, by default, while
+a human is mid-sentence in the target's input box (hold_while_typing), so a
+scheduled send never splices itself into what they are typing.
 """
 
 
