@@ -19,6 +19,7 @@ running. Add `--json` for machine-readable output.
 import argparse
 import json
 import os
+import shlex
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -134,6 +135,53 @@ def build_parser():
     p.add_argument("text", nargs="+")
 
     sub.add_parser("panes", help="list herdr panes (possible targets)")
+
+    # -- herdr layout control -------------------------------------------------
+    sub.add_parser("workspaces", aliases=["tabs"], help="list herdr workspaces and their tabs")
+
+    def placement(p, workspace=True):
+        p.add_argument("--label", "-l", help="name it (how you will target it later)")
+        p.add_argument("--cwd", help="working directory for the new shell")
+        p.add_argument("--run", "-r", metavar="COMMAND",
+                       help="command to type + Enter into the new pane, e.g. 'claude'")
+        p.add_argument("--focus", action="store_true", help="switch the view to it")
+
+    p = sub.add_parser("new-workspace", aliases=["workspace"],
+                       help="create a named herdr workspace (first tab + shell pane)",
+                       epilog="example: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude")
+    placement(p)
+    p = sub.add_parser("new-tab", aliases=["tab"], help="create a named tab in a workspace",
+                       epilog="example: dunkingsheep new-tab -w Site -l writer -r 'codex'")
+    p.add_argument("--workspace", "-w", help="id, label, substring or 'self' (default: own workspace)")
+    placement(p)
+    p = sub.add_parser("split", help="split a pane right or down into a new shell pane")
+    p.add_argument("target")
+    p.add_argument("--down", action="store_true", help="new pane below (default: right)")
+    placement(p)
+    p = sub.add_parser("start-agent", aliases=["agent"],
+                       help="launch an agent in a new pane, registered with herdr by name",
+                       epilog="example: dunkingsheep start-agent writer -w Site -- claude --model opus")
+    p.add_argument("name")
+    p.add_argument("--workspace", "-w", help="new tab in this workspace (id, label or 'self')")
+    p.add_argument("--tab", help="into this tab (id, label or 'self')")
+    p.add_argument("--split", choices=["right", "down"], help="with --tab: split its pane")
+    p.add_argument("--cwd")
+    p.add_argument("--focus", action="store_true")
+    p.add_argument("argv", nargs="+", metavar="COMMAND", help="the agent command line")
+    for name, help_text in (("rename", "rename a workspace, tab or pane"),
+                            ("focus", "bring a workspace, tab or pane to the front"),
+                            ("close", "close a workspace, tab or pane (kills what runs inside)")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("kind", choices=["workspace", "tab", "pane"])
+        p.add_argument("target", help="id, label, unique substring or 'self'")
+        if name == "rename":
+            p.add_argument("label")
+    p = sub.add_parser("herdr", help="run any herdr subcommand through the daemon",
+                       epilog="example: dunkingsheep herdr pane zoom w9:p2 --on",
+                       prefix_chars="\x00")  # let herdr's own flags through untouched
+    p.add_argument("argv", nargs="+", metavar="ARGS", help="herdr subcommand and arguments")
+    p = sub.add_parser("herdr-help", help="herdr's own usage: command groups, or one group's subcommands")
+    p.add_argument("topic", nargs="?", help="e.g. pane, tab, workspace, agent, wait")
 
     p = sub.add_parser("read", help="read recent output of a pane")
     p.add_argument("target")
@@ -313,6 +361,50 @@ def print_panes(result):
         print(f"* = this pane ({result['self_pane_id']})")
 
 
+def print_workspaces(result):
+    workspaces = result.get("workspaces", [])
+    if not workspaces:
+        print("no herdr workspaces (is the herdr server running?)")
+        return
+    own = result.get("self") or {}
+    for ws in workspaces:
+        mark = "*" if ws.get("workspace_id") == own.get("workspace_id") else " "
+        print(f"{mark}{ws.get('workspace_id'):<6} {_clip(ws.get('label'), 30):<30} "
+              f"{ws.get('tab_count', len(ws.get('tabs', []))):>3} tabs  "
+              f"{ws.get('agent_status') or '-'}")
+        for tab in ws.get("tabs", []):
+            mark = "*" if tab.get("tab_id") == own.get("tab_id") else " "
+            print(f"   {mark}{tab.get('tab_id'):<8} {_clip(tab.get('label'), 30):<30} "
+                  f"{tab.get('pane_count', 0):>3} panes {tab.get('agent_status') or '-'}")
+    if own:
+        print(f"* = this pane's workspace/tab")
+
+
+def print_created(result):
+    ws, tab, pane = result.get("workspace"), result.get("tab"), result.get("pane") or {}
+    parts = []
+    if ws:
+        parts.append(f"workspace {ws.get('workspace_id')} {ws.get('label')!r}")
+    if tab:
+        parts.append(f"tab {tab.get('tab_id')} {tab.get('label')!r}")
+    parts.append(f"pane {pane.get('pane_id')}")
+    line = "created " + ", ".join(parts)
+    if result.get("ran"):
+        line += f"; running {result['ran']!r}"
+    print(line)
+    if result.get("error"):
+        print(result["error"], file=sys.stderr)
+
+
+def print_herdr(result):
+    if result.get("error"):
+        print(f"herdr error: {result['error']}", file=sys.stderr)
+    if result.get("result") is not None:
+        print(json.dumps(result["result"], indent=2))
+    elif result.get("text"):
+        sys.stdout.write(result["text"] if result["text"].endswith("\n") else result["text"] + "\n")
+
+
 def print_status(result):
     for key in ("version", "pid", "dunkers", "running", "herdr_available",
                 "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
@@ -467,6 +559,38 @@ def run_client_command(client, args):
         )
     if command == "panes":
         return client.call("list_panes"), print_panes
+    if command in ("workspaces", "tabs"):
+        return client.call("list_workspaces"), print_workspaces
+    if command in ("new-workspace", "workspace"):
+        return client.call("create_workspace", label=args.label, cwd=args.cwd,
+                           command=args.run, focus=args.focus), print_created
+    if command in ("new-tab", "tab"):
+        return client.call("create_tab", workspace=args.workspace, label=args.label,
+                           cwd=args.cwd, command=args.run, focus=args.focus), print_created
+    if command == "split":
+        return client.call("split_pane", target=args.target,
+                           direction="down" if args.down else "right", cwd=args.cwd,
+                           command=args.run, focus=args.focus), print_created
+    if command in ("start-agent", "agent"):
+        return client.call("start_agent", name=args.name, command=shlex.join(args.argv),
+                           workspace=args.workspace, tab=args.tab, split=args.split,
+                           cwd=args.cwd, focus=args.focus), \
+            lambda r: print(f"started agent {r['name']} in {r['pane_id']}: {shlex.join(r['argv'])}")
+    if command == "rename":
+        return client.call("rename", kind=args.kind, target=args.target, label=args.label), \
+            lambda r: print(f"renamed {r['kind']} {r['id']} -> {r['label']!r}")
+    if command == "focus":
+        return client.call("focus", kind=args.kind, target=args.target), \
+            lambda r: print(f"focused {r['kind']} {r['id']}")
+    if command == "close":
+        return client.call("close", kind=args.kind, target=args.target), \
+            lambda r: print(f"closed {r['kind']} {r['id']}; panes {', '.join(r['closed_panes']) or '-'}"
+                            + (f"; stopped dunks {', '.join(r['stopped_dunks'])}" if r["stopped_dunks"] else ""))
+    if command == "herdr":
+        return client.call("herdr", command=shlex.join(args.argv)), print_herdr
+    if command == "herdr-help":
+        return client.call("herdr_help", topic=args.topic), \
+            lambda r: sys.stdout.write(r["text"] if r["text"].endswith("\n") else r["text"] + "\n")
     if command == "read":
         return client.call("read_pane", target=args.target, lines=args.lines), \
             lambda r: sys.stdout.write(r["text"] if r["text"].endswith("\n") else r["text"] + "\n")

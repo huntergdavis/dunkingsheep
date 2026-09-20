@@ -38,6 +38,14 @@ Typical uses: keep another agent moving (add_dunk target=<its pane>), message
 an agent right now (send_text), inspect what an agent is doing (read_pane), or
 schedule a future nudge to yourself (target "self").
 
+Building the herd: create_workspace / create_tab / split_pane open named
+spaces, tabs and panes (optionally running a command such as "claude" in the
+new pane); start_agent launches an agent registered with herdr by name; rename,
+focus and close manage them (close refuses your own pane/tab/workspace). The
+`herdr` tool runs any other herdr subcommand ("pane zoom self --on",
+"notification show Done", "api schema --json") and `herdr_help` returns herdr's
+own usage so you can discover what it offers.
+
 Meta-dunking recipe: add_dunk(target="self", interval_minutes=60,
 only_when="idle", skip_if_unconsumed=true, text="Backlog check #{count}: if
 every backlog item is done, call remove_dunk('{id}') and stop; otherwise

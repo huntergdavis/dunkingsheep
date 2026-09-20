@@ -72,6 +72,28 @@ class ServerRoundTripTests(unittest.TestCase):
         self.client.send_text(target="codex", text="ping")
         self.assertEqual("ping\n", self.client.read_pane(target="w2:p1")["text"])
 
+    def test_layout_control_over_the_socket(self):
+        created = self.client.create_workspace(label="Site", command="claude")
+        self.assertEqual("Site", created["workspace"]["label"])
+        tab = self.client.create_tab(label="writer")  # defaults to the caller's workspace (w1)
+        self.assertEqual("w1", tab["tab"]["workspace_id"])
+        agent = self.client.start_agent(name="helper", command="codex", workspace="Site")
+        self.assertEqual(created["workspace"]["workspace_id"], agent["agent"]["workspace_id"])
+        listed = self.client.list_workspaces()
+        self.assertEqual({"workspace_id": "w1", "tab_id": "w1:t2"}, listed["self"])
+        self.assertIn("Site", [w["label"] for w in listed["workspaces"]])
+        self.assertEqual("writer", self.client.rename(kind="tab", target="writer",
+                                                      label="writer")["label"])
+        with self.assertRaisesRegex(DunkError, "refusing to close"):
+            self.client.close(kind="workspace", target="self")
+        closed = self.client.close(kind="workspace", target="Site")
+        self.assertEqual(created["workspace"]["workspace_id"], closed["id"])
+        self.assertIn(agent["pane_id"], closed["closed_panes"])
+        passthrough = self.client.herdr(command="pane zoom self --on")
+        self.assertEqual(["pane", "zoom", "w1:p2", "--on"], passthrough["argv"])
+        self.assertIn("Usage: herdr", self.client.herdr_help()["text"])
+        self.assertIn("Usage: herdr", self.client.help()["herdr_help"])
+
     def test_raw_protocol_handles_multiple_requests_and_bad_json(self):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(self.sock_path)

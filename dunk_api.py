@@ -166,10 +166,75 @@ def h_read_pane(flock, args, self_pane_id):
     )
 
 
+def h_list_workspaces(flock, args, self_pane_id):
+    own = None
+    if self_pane_id:
+        pane = flock.herdr.get_pane(self_pane_id)
+        own = {"workspace_id": pane.get("workspace_id"), "tab_id": pane.get("tab_id")} \
+            if pane else None
+    return {"self": own, "workspaces": flock.list_workspaces()}
+
+
+def h_create_workspace(flock, args, self_pane_id):
+    return flock.create_workspace(
+        label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
+        focus=_bool(args.get("focus"), False),
+    )
+
+
+def h_create_tab(flock, args, self_pane_id):
+    return flock.create_tab(
+        workspace=args.get("workspace"), label=args.get("label"), cwd=args.get("cwd"),
+        command=args.get("command"), focus=_bool(args.get("focus"), False),
+        self_pane_id=self_pane_id,
+    )
+
+
+def h_split_pane(flock, args, self_pane_id):
+    return flock.split_pane(
+        args["target"], direction=_opt(args, "direction", "right"), cwd=args.get("cwd"),
+        command=args.get("command"), focus=_bool(args.get("focus"), False),
+        self_pane_id=self_pane_id,
+    )
+
+
+def h_start_agent(flock, args, self_pane_id):
+    return flock.start_agent(
+        args["name"], args["command"], workspace=args.get("workspace"), tab=args.get("tab"),
+        split=args.get("split"), cwd=args.get("cwd"), focus=_bool(args.get("focus"), False),
+        self_pane_id=self_pane_id,
+    )
+
+
+def h_rename(flock, args, self_pane_id):
+    return flock.rename(args["kind"], args["target"], args["label"], self_pane_id=self_pane_id)
+
+
+def h_focus(flock, args, self_pane_id):
+    return flock.focus(args["kind"], args["target"], self_pane_id=self_pane_id)
+
+
+def h_close(flock, args, self_pane_id):
+    return flock.close_target(args["kind"], args["target"], self_pane_id=self_pane_id)
+
+
+def h_herdr(flock, args, self_pane_id):
+    return flock.herdr_command(args["command"], self_pane_id=self_pane_id)
+
+
+def h_herdr_help(flock, args, self_pane_id):
+    return flock.herdr_help(args.get("topic"))
+
+
 def h_help(flock, args, self_pane_id):
     from dunk_help import guide
+    try:
+        herdr_overview = flock.herdr_help().get("text")
+    except DunkError:
+        herdr_overview = None
     return {
         "guide": guide(markdown=_bool(args.get("markdown"), False)),
+        "herdr_help": herdr_overview,
         "protocol": {
             "transport": "unix socket, newline-delimited JSON",
             "request": {"id": "any", "cmd": "<command name>", "args": {},
@@ -229,6 +294,31 @@ HOLD_WHILE_TYPING_PARAM = {
         "holds the send and re-checks every minute until the box is clear. "
         "Default true. Set false only for a pane nobody types in."
     ),
+}
+LABEL_PARAM = {"type": "string", "description": "Name to give it (how you will target it later)."}
+CWD_PARAM = {"type": "string", "description": "Working directory for the new shell (default: herdr's)."}
+RUN_COMMAND_PARAM = {
+    "type": "string",
+    "description": ("Optional command line to type + Enter into the new pane once it "
+                    "exists, e.g. 'claude' to start an agent there."),
+}
+FOCUS_PARAM = {"type": "boolean",
+               "description": "Switch the human's view to it (default false: create in the background)."}
+WORKSPACE_PARAM = {
+    "type": "string",
+    "description": ("Workspace id ('w9'), label, unique label substring, or 'self' for the "
+                    "caller's own workspace (the default when omitted)."),
+}
+TAB_PARAM = {
+    "type": "string",
+    "description": "Tab id ('w9:t2'), label, unique label substring, or 'self' for the caller's tab.",
+}
+KIND_PARAM = {"type": "string", "enum": ["workspace", "tab", "pane"],
+              "description": "What `target` names."}
+KIND_TARGET_PARAM = {
+    "type": "string",
+    "description": ("Id, label, unique label substring or 'self'. For panes the same rules as "
+                    "other pane targets apply."),
 }
 MAX_SENDS_PARAM = {
     "type": "integer",
@@ -370,6 +460,133 @@ COMMANDS = [
                 "lines": {"type": "integer", "minimum": 1, "maximum": 2000,
                           "description": "How many recent lines (default 40)."}},
         required=["target"],
+    ),
+    # -- herdr layout control: build the herd, then dunk on it ---------------
+    Command(
+        "list_workspaces",
+        "List herdr workspaces with their tabs (ids, labels, agent status). "
+        "`self` is the caller's own workspace/tab. Use it to pick where to "
+        "create tabs or start agents.",
+        h_list_workspaces,
+    ),
+    Command(
+        "create_workspace",
+        "Create a new herdr workspace (a named space with its first tab and a "
+        "shell pane). Optionally run a command in that pane, e.g. 'claude' to "
+        "start an agent there. Returns the new workspace, tab and pane ids; the "
+        "pane id is a dunk target.",
+        h_create_workspace,
+        params={
+            "label": LABEL_PARAM,
+            "cwd": CWD_PARAM,
+            "command": RUN_COMMAND_PARAM,
+            "focus": FOCUS_PARAM,
+        },
+    ),
+    Command(
+        "create_tab",
+        "Create a new named tab (with a shell pane) in a workspace. Optionally "
+        "run a command in it, e.g. 'codex' or 'claude --model opus'. Returns the "
+        "new tab and pane ids.",
+        h_create_tab,
+        params={
+            "workspace": WORKSPACE_PARAM,
+            "label": LABEL_PARAM,
+            "cwd": CWD_PARAM,
+            "command": RUN_COMMAND_PARAM,
+            "focus": FOCUS_PARAM,
+        },
+        mcp_required=["label"],
+    ),
+    Command(
+        "split_pane",
+        "Split an existing pane right or down, giving a new shell pane beside "
+        "it. Optionally run a command in the new pane.",
+        h_split_pane,
+        params={
+            "target": TARGET_PARAM,
+            "direction": {"type": "string", "enum": ["right", "down"],
+                          "description": "Where the new pane goes (default right)."},
+            "cwd": CWD_PARAM,
+            "command": RUN_COMMAND_PARAM,
+            "focus": FOCUS_PARAM,
+        },
+        required=["target"],
+    ),
+    Command(
+        "start_agent",
+        "Launch an agent process in a new pane and register it with herdr under "
+        "`name` (herdr then tracks it by that name and status). `command` is the "
+        "full command line, e.g. 'claude' or 'codex --model gpt-5'. Place it in "
+        "`tab` (splitting when `split` is given) or in `workspace` (herdr picks "
+        "the tab; use create_tab + tab for a tab of your own naming); omit both "
+        "to let herdr choose. Returns the agent's pane id, ready to dunk on.",
+        h_start_agent,
+        params={
+            "name": {"type": "string",
+                     "description": "Agent name as herdr will show it, e.g. 'writer'."},
+            "command": {"type": "string",
+                        "description": "Command line to run, shell-split, e.g. 'claude --model opus'."},
+            "workspace": WORKSPACE_PARAM,
+            "tab": TAB_PARAM,
+            "split": {"type": "string", "enum": ["right", "down"],
+                      "description": "With `tab`: split that tab's pane instead of replacing it."},
+            "cwd": CWD_PARAM,
+            "focus": FOCUS_PARAM,
+        },
+        required=["name", "command"],
+    ),
+    Command(
+        "rename",
+        "Rename a workspace, tab or pane. Labels are how targets are named "
+        "everywhere else, so name things as you want to address them.",
+        h_rename,
+        params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM,
+                "label": {"type": "string", "description": "The new label."}},
+        required=["kind", "target", "label"],
+    ),
+    Command(
+        "focus",
+        "Bring a workspace, tab or pane to the front of the human's herdr "
+        "session (to draw their attention to it).",
+        h_focus,
+        params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM},
+        required=["kind", "target"],
+    ),
+    Command(
+        "close",
+        "Close a workspace, tab or pane, killing whatever runs inside and "
+        "stopping any dunks aimed at it. Refuses to close the caller's own "
+        "pane or its tab/workspace.",
+        h_close,
+        params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM},
+        required=["kind", "target"],
+    ),
+    Command(
+        "herdr",
+        "Run any herdr CLI subcommand and get its JSON result: the escape hatch "
+        "for everything herdr can do that has no dedicated tool here (`agent "
+        "list`, `pane zoom w9:p2 --on`, `notification show 'Done'`, `wait "
+        "agent-status w9:p2 --status idle --timeout 60000`, `api schema --json` "
+        "to discover all of it). Pass the subcommand line without the leading "
+        "'herdr'; the word `self` becomes the caller's pane id (its tab or "
+        "workspace id in `tab ...` / `workspace ...` commands). herdr takes ids "
+        "here, not labels: list_workspaces / list_panes give them. Commands that "
+        "would stop, update or attach herdr itself are refused.",
+        h_herdr,
+        params={"command": {"type": "string",
+                            "description": "herdr subcommand line, e.g. 'tab focus w9:t2'."}},
+        required=["command"],
+    ),
+    Command(
+        "herdr_help",
+        "herdr's own usage text, for discovering what the `herdr` tool can run: "
+        "no topic lists the command groups; a topic such as 'pane', 'tab', "
+        "'workspace', 'agent', 'wait' or 'notification' lists that group's "
+        "subcommands and flags.",
+        h_herdr_help,
+        params={"topic": {"type": "string",
+                          "description": "A herdr command group, e.g. 'pane'. Omit for the overview."}},
     ),
     Command(
         "shutdown",

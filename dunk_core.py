@@ -29,18 +29,23 @@ Orchestration extras on top of the classic Dunking Bird model:
   until the box is clear (see `Flock._human_typing`).
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
+- herdr layout control: `list_workspaces`, `create_workspace`, `create_tab`,
+  `split_pane`, `start_agent`, `rename`, `focus`, `close`, plus the
+  `herdr_command` passthrough for anything else the herdr CLI can do. An admin
+  agent builds its team here, then dunks on it.
 """
 
 import json
 import logging
 import os
 import re
+import shlex
 import threading
 import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -351,6 +356,302 @@ class Flock:
         for pane in panes:
             pane["is_self"] = bool(self_pane_id) and pane.get("pane_id") == self_pane_id
         return panes
+
+    # -- herdr layout control -----------------------------------------------
+    # Workspaces, tabs and panes can be created, renamed, focused and closed
+    # through the same surfaces that schedule dunks, so an admin agent can
+    # spin up a team (a workspace per project, a tab per agent) and then dunk
+    # on it. Everything here is a thin, resolved call into HerdrClient.
+
+    LAYOUT_KINDS = ("workspace", "tab", "pane")
+
+    def list_workspaces(self):
+        """Workspaces with their tabs nested, sorted by number."""
+        tabs = self.herdr.list_tabs()
+        for tab in tabs:  # older herdr omits workspace_id; it is the id's prefix
+            tab.setdefault("workspace_id", str(tab.get("tab_id", "")).split(":")[0])
+        workspaces = self.herdr.list_workspaces()
+        for workspace in workspaces:
+            workspace["tabs"] = sorted(
+                (t for t in tabs if t.get("workspace_id") == workspace.get("workspace_id")),
+                key=lambda t: t.get("number", 0),
+            )
+        workspaces.sort(key=lambda w: w.get("number", 0))
+        return workspaces
+
+    def _self_pane(self, self_pane_id):
+        if not self_pane_id:
+            raise DunkError("'self' needs HERDR_PANE_ID (run from inside a herdr pane)")
+        pane = self.herdr.get_pane(self_pane_id)
+        if pane is None:
+            raise DunkError(f"own pane {self_pane_id} not found in herdr")
+        return pane
+
+    @staticmethod
+    def _pick(items, spec, kind, id_key, label_key="label"):
+        """Resolve `spec` against a list: exact id, exact label (case-
+        insensitive), then unique substring of the label."""
+        needle = str(spec).strip()
+        if not needle:
+            raise DunkError(f"{kind} is required")
+        for item in items:
+            if item.get(id_key) == needle:
+                return item
+        low = needle.lower()
+        exact = [i for i in items if str(i.get(label_key) or "").lower() == low]
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            raise DunkError(f"{kind} {spec!r} is ambiguous: "
+                            + ", ".join(i[id_key] for i in exact))
+        partial = [i for i in items if low in str(i.get(label_key) or "").lower()]
+        if len(partial) == 1:
+            return partial[0]
+        if partial:
+            raise DunkError(f"{kind} {spec!r} is ambiguous: "
+                            + ", ".join(f"{i[id_key]} ({i.get(label_key)})" for i in partial))
+        raise DunkError(f"no herdr {kind} matches {spec!r}")
+
+    def resolve_workspace(self, spec, self_pane_id=None):
+        """Workspace dict from an id ('w9'), a label, a unique label substring
+        or 'self' (the caller's own workspace)."""
+        spec = str(spec or "").strip()
+        if spec.lower() in ("self", "me", "here"):
+            spec = self._self_pane(self_pane_id).get("workspace_id")
+        workspaces = self.herdr.list_workspaces()
+        if not workspaces:
+            raise DunkError(self.herdr.server_error_hint())
+        return self._pick(workspaces, spec, "workspace", "workspace_id")
+
+    def resolve_tab(self, spec, self_pane_id=None):
+        """Tab dict from an id ('w9:t2'), a label, a unique label substring or
+        'self' (the caller's own tab)."""
+        spec = str(spec or "").strip()
+        if spec.lower() in ("self", "me", "here"):
+            spec = self._self_pane(self_pane_id).get("tab_id")
+        tabs = self.herdr.list_tabs()
+        if not tabs:
+            raise DunkError(self.herdr.server_error_hint())
+        return self._pick(tabs, spec, "tab", "tab_id")
+
+    def _resolve_kind(self, kind, target, self_pane_id=None):
+        kind = str(kind or "").strip().lower()
+        if kind not in self.LAYOUT_KINDS:
+            raise DunkError("kind must be 'workspace', 'tab' or 'pane'")
+        if kind == "workspace":
+            item = self.resolve_workspace(target, self_pane_id)
+            return kind, item["workspace_id"], item
+        if kind == "tab":
+            item = self.resolve_tab(target, self_pane_id)
+            return kind, item["tab_id"], item
+        item = self.resolve_target(target, self_pane_id)
+        return kind, item["pane_id"], item
+
+    def _after_create(self, ok, result, command, what):
+        if not ok:
+            raise DunkError(f"herdr could not create the {what}: {result}")
+        pane = result.get("root_pane") or result.get("pane") or result.get("agent") or {}
+        out = {
+            "workspace": result.get("workspace"),
+            "tab": result.get("tab"),
+            "pane": pane,
+            "pane_id": pane.get("pane_id"),
+            "ran": None,
+        }
+        if command and pane.get("pane_id"):
+            ran, message = self.herdr.run_command(pane["pane_id"], command)
+            out["ran"] = command if ran else None
+            if not ran:
+                out["error"] = f"created, but running the command failed: {message}"
+        with self._lock:
+            self.last_message = f"Created {what}"
+        log.info("created %s -> %s%s", what, pane.get("pane_id"),
+                 f" running {command!r}" if command else "")
+        return out
+
+    def create_workspace(self, label=None, cwd=None, command=None, focus=False):
+        """New herdr workspace (with its first tab and pane). `command`, if
+        given, is typed + Enter into that pane once it exists."""
+        ok, result = self.herdr.create_workspace(label=label, cwd=cwd, focus=focus)
+        return self._after_create(ok, result, command, f"workspace {label or ''}".strip())
+
+    def create_tab(self, workspace=None, label=None, cwd=None, command=None, focus=False,
+                   self_pane_id=None):
+        """New tab. `workspace` is an id, label or 'self'; omitted means the
+        caller's own workspace when known, else herdr's focused one."""
+        workspace_id = None
+        if workspace:
+            workspace_id = self.resolve_workspace(workspace, self_pane_id)["workspace_id"]
+        elif self_pane_id:
+            own = self.herdr.get_pane(self_pane_id)
+            workspace_id = own.get("workspace_id") if own else None
+        ok, result = self.herdr.create_tab(workspace_id=workspace_id, label=label, cwd=cwd,
+                                           focus=focus)
+        return self._after_create(ok, result, command, f"tab {label or ''}".strip())
+
+    def split_pane(self, target, direction="right", cwd=None, command=None, focus=False,
+                   self_pane_id=None):
+        """Split an existing pane (any pane target) right or down."""
+        direction = str(direction or "right").lower()
+        if direction not in ("right", "down"):
+            raise DunkError("direction must be 'right' or 'down'")
+        pane = self.resolve_target(target, self_pane_id)
+        ok, result = self.herdr.split_pane(pane["pane_id"], direction=direction, cwd=cwd,
+                                           focus=focus)
+        return self._after_create(ok, result, command, "pane")
+
+    def start_agent(self, name, command, workspace=None, tab=None, split=None, cwd=None,
+                    focus=False, self_pane_id=None):
+        """Launch `command` in a new pane registered with herdr as agent `name`
+        (`herdr agent start`). Placement: inside `tab` (splitting it when
+        `split` is right/down), else in `workspace` (id, label or 'self';
+        herdr picks the tab), else wherever herdr puts it."""
+        name = str(name or "").strip()
+        if not name:
+            raise DunkError("agent name is required")
+        argv = shlex.split(str(command or ""))
+        if not argv:
+            raise DunkError("command is required (e.g. 'claude' or 'codex --model gpt-5')")
+        workspace_id = tab_id = None
+        if tab:
+            tab_id = self.resolve_tab(tab, self_pane_id)["tab_id"]
+        if workspace:
+            workspace_id = self.resolve_workspace(workspace, self_pane_id)["workspace_id"]
+        if split and split not in ("right", "down"):
+            raise DunkError("split must be 'right' or 'down'")
+        ok, result = self.herdr.start_agent(name, argv, workspace_id=workspace_id,
+                                            tab_id=tab_id, split=split, cwd=cwd, focus=focus)
+        if not ok:
+            raise DunkError(f"herdr could not start agent {name!r}: {result}")
+        agent = result.get("agent") or {}
+        with self._lock:
+            self.last_message = f"Started agent {name}"
+        log.info("started agent %s -> %s: %s", name, agent.get("pane_id"), argv)
+        return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
+                "argv": result.get("argv") or argv}
+
+    def rename(self, kind, target, label, self_pane_id=None):
+        label = str(label or "").strip()
+        if not label:
+            raise DunkError("label is required")
+        kind, target_id, _item = self._resolve_kind(kind, target, self_pane_id)
+        ok, result = self.herdr.rename(kind, target_id, label)
+        if not ok:
+            raise DunkError(f"herdr could not rename {kind} {target_id}: {result}")
+        log.info("renamed %s %s -> %r", kind, target_id, label)
+        return {"kind": kind, "id": target_id, "label": label,
+                kind: (result or {}).get(kind)}
+
+    def focus(self, kind, target, self_pane_id=None):
+        kind, target_id, _item = self._resolve_kind(kind, target, self_pane_id)
+        ok, result = self.herdr.focus(kind, target_id)
+        if not ok:
+            raise DunkError(f"herdr could not focus {kind} {target_id}: {result}")
+        return {"kind": kind, "id": target_id, "focused": True}
+
+    def close_target(self, kind, target, self_pane_id=None):
+        """Close a workspace, tab or pane, killing whatever runs inside.
+        Refuses to close the caller's own pane or its containers, since a
+        process closing its own terminal is almost always a mistake; do it
+        from another pane. Dunks aimed into the closed area are stopped."""
+        kind, target_id, item = self._resolve_kind(kind, target, self_pane_id)
+        own = self.herdr.get_pane(self_pane_id) if self_pane_id else None
+        if own and own.get({"workspace": "workspace_id", "tab": "tab_id",
+                            "pane": "pane_id"}[kind]) == target_id:
+            raise DunkError(f"refusing to close the {kind} this caller runs in "
+                            f"({target_id}); target it from another pane")
+        doomed = [p["pane_id"] for p in self.herdr.list_panes()
+                  if p.get({"workspace": "workspace_id", "tab": "tab_id",
+                            "pane": "pane_id"}[kind]) == target_id]
+        ok, result = self.herdr.close(kind, target_id)
+        if not ok:
+            raise DunkError(f"herdr could not close {kind} {target_id}: {result}")
+        stopped = []
+        with self._lock:
+            for dunker in self.dunkers:
+                if dunker.running and dunker.target_pane_id in doomed:
+                    self._halt(dunker)
+                    dunker.running = False
+                    dunker.next_send_at = None
+                    dunker.status = "Target closed"
+                    stopped.append(dunker.id)
+            if stopped:
+                self._save()
+            self.last_message = f"Closed {kind} {item.get('label') or target_id}"
+        log.info("closed %s %s (panes %s); stopped dunks %s", kind, target_id, doomed, stopped)
+        return {"kind": kind, "id": target_id, "closed_panes": doomed,
+                "stopped_dunks": stopped}
+
+    # Passthrough refusals: commands that would take herdr itself down or need
+    # an interactive terminal. Everything else herdr offers is fair game.
+    HERDR_BLOCKED = (
+        (), ("server", "stop"), ("update",), ("channel", "set"), ("session",),
+        ("completion",), ("agent", "attach"), ("integration",),
+    )
+
+    def herdr_command(self, command, self_pane_id=None):
+        """Run any `herdr <subcommand ...>` and return its parsed result. This
+        is the escape hatch for everything without a dedicated command:
+        `herdr_command("tab focus w9:t2")`, `herdr_command("api schema --json")`.
+        The word `self` as an argument becomes the caller's pane id (its tab
+        or workspace id for `tab ...` / `workspace ...` commands). herdr wants
+        ids here, not labels; the typed commands above resolve labels. Returns
+        {"ok", "result" (parsed JSON when herdr printed JSON, else None),
+        "text" (raw stdout), "error" (herdr's message, if any)}."""
+        argv = shlex.split(str(command or "")) if not isinstance(command, list) \
+            else [str(a) for a in command]
+        if argv and argv[0] == "herdr":
+            argv = argv[1:]
+        if not argv:
+            raise DunkError("command is required, e.g. 'workspace list' (see `herdr --help`)")
+        for blocked in self.HERDR_BLOCKED:
+            if blocked and tuple(argv[:len(blocked)]) == blocked:
+                raise DunkError(f"'herdr {' '.join(blocked)}' is not allowed from here "
+                                "(it would stop, replace or attach herdr itself)")
+        if any(a.startswith("-") and a in ("--remote", "--session") for a in argv):
+            raise DunkError("launching or attaching a herdr session is not allowed from here")
+        if self_pane_id and "self" in argv:
+            # `self` means the caller's tab for tab commands, its workspace
+            # for workspace commands, and its pane otherwise.
+            own_id = self_pane_id
+            if argv[0] in ("tab", "workspace"):
+                own = self.herdr.get_pane(self_pane_id) or {}
+                own_id = own.get(f"{argv[0]}_id") or self_pane_id
+            argv = [own_id if a == "self" else a for a in argv]
+        code, out, err = self.herdr._run(argv, timeout=30)
+        payload = None
+        for stream in (out, err):  # herdr prints JSON errors on stderr
+            if stream.strip():
+                try:
+                    payload = json.loads(stream)
+                    break
+                except ValueError:
+                    payload = None
+        error = None
+        text = out if out.strip() else err
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            error = payload["error"].get("message") or payload["error"].get("code")
+        elif code != 0 and not _looks_like_usage(text):
+            error = err.strip() or out.strip() or f"herdr exited {code}"
+        result = payload.get("result") if isinstance(payload, dict) and "result" in payload \
+            else payload
+        log.info("herdr %s -> %s", " ".join(argv), "ok" if not error else f"error: {error}")
+        return {"ok": error is None, "argv": argv, "result": result if error is None else None,
+                "text": text or "", "error": error, "exit_code": code}
+
+    def herdr_help(self, topic=None):
+        """herdr's own usage text: the command groups (`topic` empty) or one
+        group's subcommands (`topic` = 'pane', 'workspace', 'tab', 'agent',
+        'wait', 'notification', ...). This is how an agent discovers what the
+        `herdr` passthrough can do; `herdr api schema --json` has the full
+        machine-readable schema."""
+        topic = str(topic or "").strip().split()
+        argv = topic[:1] if topic else ["--help"]
+        code, out, err = self.herdr._run(argv, timeout=10)
+        text = out if out.strip() else err
+        if not text.strip():
+            raise DunkError(f"herdr printed no help for {' '.join(argv)!r} (exit {code})")
+        return {"topic": " ".join(topic) or None, "text": text}
 
     def resolve_target(self, spec, self_pane_id=None):
         """Turn a target spec into a pane dict.
@@ -811,6 +1112,13 @@ class Flock:
             self.closed = True
             for dunker in self.dunkers:
                 self._halt(dunker)
+
+
+def _looks_like_usage(text):
+    """herdr prints usage for a bare command group (exit non-zero); that is an
+    answer, not an error."""
+    head = (text or "").lstrip()[:200].lower()
+    return head.startswith("usage:") or head.startswith("herdr") and "commands:" in head
 
 
 def _describe(panes):

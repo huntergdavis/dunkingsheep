@@ -40,6 +40,34 @@ elif args[:2] == ["pane", "send-keys"]:
     with open(log, "a") as f: f.write(f"KEYS {args[2]} {' '.join(args[3:])}\n")
 elif args[:2] == ["pane", "read"]:
     sys.stdout.write(open(log).read() if os.path.exists(log) else "")
+elif args[:2] == ["workspace", "create"]:
+    label = args[args.index("--label") + 1] if "--label" in args else "2"
+    with open(log, "a") as f: f.write(f"WORKSPACE-CREATE {label}\n")
+    out({"type": "workspace_created",
+         "workspace": {"workspace_id": "w2", "label": label, "number": 2},
+         "tab": {"tab_id": "w2:t1", "workspace_id": "w2", "label": "1", "number": 1},
+         "root_pane": {"pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2", "cwd": "/tmp"}})
+elif args[:2] == ["tab", "create"]:
+    label = args[args.index("--label") + 1] if "--label" in args else "3"
+    ws = args[args.index("--workspace") + 1] if "--workspace" in args else "w1"
+    with open(log, "a") as f: f.write(f"TAB-CREATE {ws} {label}\n")
+    out({"type": "tab_created",
+         "tab": {"tab_id": ws + ":t9", "workspace_id": ws, "label": label, "number": 9},
+         "root_pane": {"pane_id": ws + ":p9", "tab_id": ws + ":t9", "workspace_id": ws, "cwd": "/tmp"}})
+elif args[:2] == ["pane", "run"]:
+    with open(log, "a") as f: f.write(f"RUN {args[2]} {args[3]}\n")
+elif args[:2] == ["tab", "rename"]:
+    with open(log, "a") as f: f.write(f"TAB-RENAME {args[2]} {args[3]}\n")
+    out({"type": "tab_info", "tab": {"tab_id": args[2], "label": args[3]}})
+elif args[:2] == ["tab", "close"]:
+    with open(log, "a") as f: f.write(f"TAB-CLOSE {args[2]}\n")
+    out({"type": "ok"})
+elif args[:2] == ["pane", "zoom"]:
+    out({"type": "ok", "zoomed": args[2]})
+elif args == ["--help"]:
+    print("herdr — terminal workspace manager\n\nUsage: herdr [options]")
+elif args == ["tab"]:
+    sys.exit("herdr tab commands:\n  herdr tab list")
 else:
     sys.exit(f"fake herdr: unsupported {args}")
 '''
@@ -153,6 +181,33 @@ class CliEndToEndTests(unittest.TestCase):
         stopped = self.run_json("stop-all")["dunks"]
         self.assertFalse(any(d["running"] for d in stopped))
 
+        # 6b. herdr layout control through the CLI.
+        created = self.run_json("new-workspace", "-l", "Site", "--cwd", "/tmp", "-r", "claude")
+        self.assertEqual("w2", created["workspace"]["workspace_id"])
+        self.assertEqual("claude", created["ran"])
+        human = self.run_cli("new-tab", "-w", "w1", "-l", "writer").stdout
+        self.assertIn("created tab w1:t9 'writer', pane w1:p9", human)
+        self.assertIn("renamed tab w1:t2 -> 'Main'", self.run_cli("rename", "tab", "Claude Tab", "Main").stdout)
+        self.assertIn("closed tab w1:t1", self.run_cli("close", "tab", "Shell").stdout)
+        zoom = self.run_json("herdr", "pane", "zoom", "self", "--on")
+        self.assertTrue(zoom["ok"])
+        self.assertEqual(["pane", "zoom", "w1:p2", "--on"], zoom["argv"])
+        self.assertEqual("w1:p2", zoom["result"]["zoomed"])
+        self.assertIn("Usage: herdr", self.run_cli("herdr-help").stdout)
+        self.assertIn("herdr tab commands", self.run_cli("herdr-help", "tab").stdout)
+        listing = self.run_cli("workspaces").stdout  # the fake herdr is stateless: canned w1
+        self.assertIn("*w1", listing)
+        self.assertIn("Claude Tab", listing)
+        with open(self.log) as handle:
+            log = handle.read()
+        self.assertIn("WORKSPACE-CREATE Site\n", log)
+        self.assertIn("RUN w2:p1 claude\n", log)
+        self.assertIn("TAB-CREATE w1 writer\n", log)
+        self.assertIn("TAB-RENAME w1:t2 Main\n", log)
+        self.assertIn("TAB-CLOSE w1:t1\n", log)
+        with self.assertRaises(AssertionError):  # own workspace is refused, exit code 1
+            self.run_cli("close", "workspace", "self")
+
         # 7. state persisted on disk.
         with open(os.path.join(self.config, "dunks.json")) as handle:
             saved = json.load(handle)
@@ -179,7 +234,7 @@ class CliEndToEndTests(unittest.TestCase):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
         self.assertIn("[socket/cli only]", out)
-        self.assertIn("dunkingsheep 2.1", self.run_cli("--version").stdout)
+        self.assertIn("dunkingsheep 2.2", self.run_cli("--version").stdout)
         registry = json.loads(self.run_cli("commands", "--json").stdout)
         names = [c["name"] for c in registry]
         self.assertIn("help", names)

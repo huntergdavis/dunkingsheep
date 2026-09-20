@@ -134,6 +134,9 @@ def guide(markdown=False):
            "dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)\n"
            "dunkingsheep send <target> <text...>   one-off send, no dunk\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
+           "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
+           "dunkingsheep rename|focus|close workspace|tab|pane <target> [label]\n"
+           "dunkingsheep herdr <herdr args...>     any herdr subcommand;  herdr-help [group]\n"
            "dunkingsheep status | shutdown [--stop-all] | serve | tui | mcp\n"
            "dunkingsheep commands [--json]         the full command registry\n"
            "Add --json to any command for machine-readable output."))
@@ -180,9 +183,62 @@ def guide(markdown=False):
       "set HERDR_PANE_ID in the server's env block.\n")
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
-      "send_text. Call `help` first if unsure; `initialize` also returns these\n"
+      "send_text, and for herdr control list_workspaces, create_workspace,\n"
+      "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
+      "herdr_help. Call `help` first if unsure; `initialize` also returns these\n"
       "instructions. Errors come back as tool results with isError=true and a\n"
       "plain-English message (never as protocol errors), so the agent can recover.\n")
+
+    w(h(2, "Building the herd: herdr control from the same surfaces"))
+    w("Every surface can also shape herdr itself, so an admin agent can spin up\n"
+      "workspaces, tabs and agents and then dunk on them. Targets for workspaces\n"
+      "and tabs follow the pane rules: id (w9, w9:t2), exact label, unique label\n"
+      "substring, or 'self' (the caller's own). Everything is created in the\n"
+      "background unless focus=true.\n")
+    w("- list_workspaces: workspaces with their tabs; `self` marks the caller's.\n"
+      "- create_workspace(label, cwd, command): a named space with its first tab\n"
+      "  and shell pane; `command` (e.g. 'claude') is typed + Enter into that pane.\n"
+      "- create_tab(workspace, label, cwd, command): a named tab; workspace\n"
+      "  defaults to the caller's own.\n"
+      "- split_pane(target, direction, cwd, command): a new shell pane right of or\n"
+      "  below any pane.\n"
+      "- start_agent(name, command, workspace|tab, split, cwd): launch an agent\n"
+      "  process registered with herdr under `name` (herdr agent start), so herdr\n"
+      "  lists it and tracks its status by that name. Returns its pane id. With\n"
+      "  `workspace`, herdr picks the tab; create_tab first and pass `tab` to\n"
+      "  control the tab's name.\n"
+      "- rename(kind, target, label) / focus(kind, target) / close(kind, target)\n"
+      "  for kind = workspace | tab | pane. close kills what runs inside, stops any\n"
+      "  dunks aimed there, and refuses the caller's own pane, tab or workspace.\n"
+      "- herdr(command): run any herdr subcommand ('pane zoom w9:p2 --on',\n"
+      "  'notification show Done', 'wait agent-status w9:p2 --status idle\n"
+      "  --timeout 60000', 'api schema --json'); returns its parsed JSON, or the\n"
+      "  usage text for a bare group. 'self' in the arguments becomes the caller's\n"
+      "  pane id (tab/workspace id in tab/workspace commands). herdr wants ids,\n"
+      "  not labels, here. Refused: server stop, update, channel set,\n"
+      "  session/agent attach.\n"
+      "- herdr_help(topic): herdr's own usage, overall or for one group, to\n"
+      "  discover the above. The `help` command also returns it as `herdr_help`.\n")
+    w(code("dunkingsheep workspaces                       # what exists\n"
+           "dunkingsheep new-workspace -l Site --cwd ~/site -r claude\n"
+           "dunkingsheep new-tab -w Site -l writer -r 'codex --model gpt-5'\n"
+           "dunkingsheep start-agent reviewer -w Site -- claude --model opus\n"
+           "dunkingsheep split Site --down -r 'npm test -- --watch'\n"
+           "dunkingsheep rename tab writer 'Site writer'   |  focus tab 'Site writer'\n"
+           "dunkingsheep close tab 'Site writer'          # kills it, stops its dunks\n"
+           "dunkingsheep herdr pane zoom self --on        # anything herdr can do\n"
+           "dunkingsheep herdr-help pane                  # herdr's own usage"))
+    w(h(2, "Recipe: an admin agent spins up a team and dunks on it"))
+    w(code("create_workspace(label=\"Site\", cwd=\"~/site\")\n"
+           "start_agent(name=\"builder\", command=\"claude\", workspace=\"Site\")\n"
+           "start_agent(name=\"writer\", command=\"codex\", workspace=\"Site\")\n"
+           "send_text(target=\"builder\", text=\"Implement the login page; tests first.\")\n"
+           "add_dunk(target=\"builder\", interval_minutes=15, only_when=\"idle\",\n"
+           "         skip_if_unconsumed=true, text=\"Status? Next step?\")\n"
+           "add_dunk(target=\"writer\", interval_minutes=30, only_when=\"idle\",\n"
+           "         text=\"Document what builder shipped since your last pass.\")\n"
+           "# later, when the work is done:\n"
+           "close(kind=\"workspace\", target=\"Site\")   # stops both dunks too"))
 
     w(h(2, "Surface 4: the TUI"))
     w("`dunkingsheep tui` (or ./run_dunking_sheep.sh) shows the same dunks live.\n"

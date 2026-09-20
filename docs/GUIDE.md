@@ -1,4 +1,4 @@
-# Dunking Sheep 2.1.0 guide
+# Dunking Sheep 2.2.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -89,6 +89,9 @@ dunkingsheep list | get <id> | update <id> ... | remove <id>
 dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)
 dunkingsheep send <target> <text...>   one-off send, no dunk
 dunkingsheep read <target> [-l N]      last N lines of a pane
+dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
+dunkingsheep rename|focus|close workspace|tab|pane <target> [label]
+dunkingsheep herdr <herdr args...>     any herdr subcommand;  herdr-help [group]
 dunkingsheep status | shutdown [--stop-all] | serve | tui | mcp
 dunkingsheep commands [--json]         the full command registry
 Add --json to any command for machine-readable output.
@@ -148,9 +151,71 @@ set HERDR_PANE_ID in the server's env block.
 
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
-send_text. Call `help` first if unsure; `initialize` also returns these
+send_text, and for herdr control list_workspaces, create_workspace,
+create_tab, split_pane, start_agent, rename, focus, close, herdr,
+herdr_help. Call `help` first if unsure; `initialize` also returns these
 instructions. Errors come back as tool results with isError=true and a
 plain-English message (never as protocol errors), so the agent can recover.
+
+## Building the herd: herdr control from the same surfaces
+
+Every surface can also shape herdr itself, so an admin agent can spin up
+workspaces, tabs and agents and then dunk on them. Targets for workspaces
+and tabs follow the pane rules: id (w9, w9:t2), exact label, unique label
+substring, or 'self' (the caller's own). Everything is created in the
+background unless focus=true.
+
+- list_workspaces: workspaces with their tabs; `self` marks the caller's.
+- create_workspace(label, cwd, command): a named space with its first tab
+  and shell pane; `command` (e.g. 'claude') is typed + Enter into that pane.
+- create_tab(workspace, label, cwd, command): a named tab; workspace
+  defaults to the caller's own.
+- split_pane(target, direction, cwd, command): a new shell pane right of or
+  below any pane.
+- start_agent(name, command, workspace|tab, split, cwd): launch an agent
+  process registered with herdr under `name` (herdr agent start), so herdr
+  lists it and tracks its status by that name. Returns its pane id. With
+  `workspace`, herdr picks the tab; create_tab first and pass `tab` to
+  control the tab's name.
+- rename(kind, target, label) / focus(kind, target) / close(kind, target)
+  for kind = workspace | tab | pane. close kills what runs inside, stops any
+  dunks aimed there, and refuses the caller's own pane, tab or workspace.
+- herdr(command): run any herdr subcommand ('pane zoom w9:p2 --on',
+  'notification show Done', 'wait agent-status w9:p2 --status idle
+  --timeout 60000', 'api schema --json'); returns its parsed JSON, or the
+  usage text for a bare group. 'self' in the arguments becomes the caller's
+  pane id (tab/workspace id in tab/workspace commands). herdr wants ids,
+  not labels, here. Refused: server stop, update, channel set,
+  session/agent attach.
+- herdr_help(topic): herdr's own usage, overall or for one group, to
+  discover the above. The `help` command also returns it as `herdr_help`.
+
+```
+dunkingsheep workspaces                       # what exists
+dunkingsheep new-workspace -l Site --cwd ~/site -r claude
+dunkingsheep new-tab -w Site -l writer -r 'codex --model gpt-5'
+dunkingsheep start-agent reviewer -w Site -- claude --model opus
+dunkingsheep split Site --down -r 'npm test -- --watch'
+dunkingsheep rename tab writer 'Site writer'   |  focus tab 'Site writer'
+dunkingsheep close tab 'Site writer'          # kills it, stops its dunks
+dunkingsheep herdr pane zoom self --on        # anything herdr can do
+dunkingsheep herdr-help pane                  # herdr's own usage
+```
+
+## Recipe: an admin agent spins up a team and dunks on it
+
+```
+create_workspace(label="Site", cwd="~/site")
+start_agent(name="builder", command="claude", workspace="Site")
+start_agent(name="writer", command="codex", workspace="Site")
+send_text(target="builder", text="Implement the login page; tests first.")
+add_dunk(target="builder", interval_minutes=15, only_when="idle",
+         skip_if_unconsumed=true, text="Status? Next step?")
+add_dunk(target="writer", interval_minutes=30, only_when="idle",
+         text="Document what builder shipped since your last pass.")
+# later, when the work is done:
+close(kind="workspace", target="Site")   # stops both dunks too
+```
 
 ## Surface 4: the TUI
 

@@ -1,5 +1,6 @@
 """Test doubles shared by the Dunking Sheep test suite."""
 
+import json
 import re
 import threading
 
@@ -43,7 +44,16 @@ class FakeHerdr:
 
     def __init__(self, panes=None, available=True):
         self.panes = [dict(p) for p in (panes or PANES)]
+        self.tabs = [dict(t, workspace_id=t['tab_id'].split(':')[0]) for t in TABS]
+        self.workspaces = [dict(w) for w in WORKSPACES]
         self.available = available
+        # Layout mutations, for assertions: ("create_tab", {...}), ("close", "tab", "w2:t2"), ...
+        self.layout_calls = []
+        self.runs = []          # (pane_id, command) typed via run_command
+        self.raw_runs = []      # argv lists sent through _run (the herdr passthrough)
+        self.raw_responses = {}  # tuple(argv) -> (code, stdout, stderr)
+        self.fail_layout = None  # message: make the next mutation fail
+        self._counter = 100
         self.sends = []
         self.statuses = {}
         self.screens = {}
@@ -64,15 +74,171 @@ class FakeHerdr:
     def list_panes(self):
         return [dict(p) for p in self.panes]
 
+    def get_pane(self, pane_id):
+        for pane in self.panes:
+            if pane["pane_id"] == pane_id:
+                return dict(pane)
+        return None
+
     def list_tabs(self):
-        return [dict(t) for t in TABS]
+        return [dict(t) for t in self.tabs]
 
     def list_workspaces(self):
-        return [dict(w) for w in WORKSPACES]
+        return [dict(w) for w in self.workspaces]
+
+    # -- layout control (mutates the canned lists like herdr would) ---------
+
+    def _fail(self):
+        if self.fail_layout:
+            message, self.fail_layout = self.fail_layout, None
+            return False, message
+        return None
+
+    def _new_pane(self, workspace_id, tab_id, cwd):
+        self._counter += 1
+        pane = {"pane_id": f"{workspace_id}:p{self._counter}", "tab_id": tab_id,
+                "workspace_id": workspace_id, "cwd": cwd or "/home/x",
+                "agent_status": "unknown", "terminal_id": f"term_{self._counter}",
+                "terminal_title_stripped": "shell", "focused": False}
+        self.panes.append(pane)
+        return dict(pane)
+
+    def create_workspace(self, label=None, cwd=None, focus=False, env=None):
+        failed = self._fail()
+        if failed:
+            return failed
+        self._counter += 1
+        ws_id = f"w{self._counter}"
+        number = len(self.workspaces) + 1
+        workspace = {"workspace_id": ws_id, "label": label or str(number), "number": number,
+                     "focused": focus, "agent_status": "unknown"}
+        tab = {"tab_id": f"{ws_id}:t1", "workspace_id": ws_id, "label": "1", "number": 1,
+               "focused": focus, "agent_status": "unknown", "pane_count": 1}
+        self.workspaces.append(workspace)
+        self.tabs.append(tab)
+        pane = self._new_pane(ws_id, tab["tab_id"], cwd)
+        self.layout_calls.append(("create_workspace", label, cwd, focus))
+        return True, {"type": "workspace_created", "workspace": dict(workspace),
+                      "tab": dict(tab), "root_pane": pane}
+
+    def create_tab(self, workspace_id=None, label=None, cwd=None, focus=False, env=None):
+        failed = self._fail()
+        if failed:
+            return failed
+        workspace_id = workspace_id or self.workspaces[0]["workspace_id"]
+        if not any(w["workspace_id"] == workspace_id for w in self.workspaces):
+            return False, f"workspace {workspace_id} not found"
+        siblings = [t for t in self.tabs if t["workspace_id"] == workspace_id]
+        number = max([t["number"] for t in siblings] + [0]) + 1
+        tab = {"tab_id": f"{workspace_id}:t{number}", "workspace_id": workspace_id,
+               "label": label or str(number), "number": number, "focused": focus,
+               "agent_status": "unknown", "pane_count": 1}
+        self.tabs.append(tab)
+        pane = self._new_pane(workspace_id, tab["tab_id"], cwd)
+        self.layout_calls.append(("create_tab", workspace_id, label, cwd, focus))
+        return True, {"type": "tab_created", "tab": dict(tab), "root_pane": pane}
+
+    def split_pane(self, pane_id, direction="right", cwd=None, ratio=None, focus=False,
+                   env=None):
+        failed = self._fail()
+        if failed:
+            return failed
+        origin = self.get_pane(pane_id)
+        if origin is None:
+            return False, f"pane {pane_id} not found"
+        pane = self._new_pane(origin["workspace_id"], origin["tab_id"], cwd)
+        self.layout_calls.append(("split_pane", pane_id, direction, cwd, focus))
+        return True, {"type": "pane_info", "pane": pane}
+
+    def start_agent(self, name, argv, workspace_id=None, tab_id=None, split=None,
+                    cwd=None, focus=False, env=None):
+        failed = self._fail()
+        if failed:
+            return failed
+        if tab_id:
+            tab = next((t for t in self.tabs if t["tab_id"] == tab_id), None)
+            if tab is None:
+                return False, f"tab {tab_id} not found"
+            workspace_id = tab["workspace_id"]
+        else:
+            workspace_id = workspace_id or self.workspaces[0]["workspace_id"]
+            ok, created = self.create_tab(workspace_id=workspace_id, label=name, cwd=cwd)
+            if not ok:
+                return ok, created
+            tab_id = created["tab"]["tab_id"]
+            self.panes.remove(next(p for p in self.panes
+                                   if p["pane_id"] == created["root_pane"]["pane_id"]))
+        pane = self._new_pane(workspace_id, tab_id, cwd)
+        for stored in self.panes:
+            if stored["pane_id"] == pane["pane_id"]:
+                stored["label"] = name
+                stored["agent"] = name
+                stored["agent_status"] = "idle"
+        self.layout_calls.append(("start_agent", name, list(argv), workspace_id, tab_id, split))
+        agent = dict(self.get_pane(pane["pane_id"]), name=name)
+        return True, {"type": "agent_started", "agent": agent, "argv": list(argv)}
+
+    def rename(self, kind, target_id, label):
+        failed = self._fail()
+        if failed:
+            return failed
+        items, key = {"workspace": (self.workspaces, "workspace_id"),
+                      "tab": (self.tabs, "tab_id"), "pane": (self.panes, "pane_id")}[kind]
+        for item in items:
+            if item[key] == target_id:
+                item["label"] = label
+                self.layout_calls.append(("rename", kind, target_id, label))
+                return True, {"type": f"{kind}_info", kind: dict(item)}
+        return False, f"{kind} {target_id} not found"
+
+    def close(self, kind, target_id):
+        failed = self._fail()
+        if failed:
+            return failed
+        key = {"workspace": "workspace_id", "tab": "tab_id", "pane": "pane_id"}[kind]
+        if not any(i.get(key) == target_id for i in self.workspaces + self.tabs + self.panes):
+            return False, f"{kind} {target_id} not found"
+        self.panes = [p for p in self.panes if p.get(key) != target_id]
+        self.tabs = [t for t in self.tabs if t.get(key) != target_id]
+        self.workspaces = [w for w in self.workspaces if w.get(key) != target_id]
+        self.layout_calls.append(("close", kind, target_id))
+        return True, {"type": "ok"}
+
+    def focus(self, kind, target_id):
+        self.layout_calls.append(("focus", kind, target_id))
+        return True, {"type": "ok"}
+
+    def run_command(self, pane_id, command):
+        if self.get_pane(pane_id) is None:
+            return False, f"pane {pane_id} not found"
+        self.runs.append((pane_id, command))
+        return True, "ran"
+
+    def _run(self, args, timeout=None):
+        """The raw herdr CLI, for the passthrough command. Canned responses by
+        argv tuple; otherwise a JSON result echoing the argv, and usage text
+        for a bare command group."""
+        self.raw_runs.append(list(args))
+        key = tuple(args)
+        if key in self.raw_responses:
+            return self.raw_responses[key]
+        if args == ["--help"]:
+            return 0, "herdr — terminal workspace manager\n\nUsage: herdr [options]\n", ""
+        if len(args) == 1 and args[0] in ("pane", "tab", "workspace", "agent", "wait"):
+            return 2, "", f"herdr {args[0]} commands:\n  herdr {args[0]} list\n"
+        if args[:2] == ["workspace", "list"]:
+            return 0, json.dumps({"id": "cli", "result": {"workspaces": self.list_workspaces()}}), ""
+        if args[:2] == ["tab", "get"]:
+            tab = next((t for t in self.tabs if t["tab_id"] == args[2]), None)
+            if tab is None:
+                return 1, "", json.dumps({"error": {"code": "tab_not_found",
+                                                    "message": f"tab {args[2]} not found"}})
+            return 0, json.dumps({"id": "cli", "result": {"tab": tab}}), ""
+        return 0, json.dumps({"id": "cli", "result": {"type": "ok", "argv": list(args)}}), ""
 
     def list_panes_grouped(self):
-        tabs = {t["tab_id"]: t for t in TABS}
-        workspaces = {w["workspace_id"]: w for w in WORKSPACES}
+        tabs = {t["tab_id"]: t for t in self.tabs}
+        workspaces = {w["workspace_id"]: w for w in self.workspaces}
         panes = self.list_panes()
         for pane in panes:
             tab = tabs.get(pane["tab_id"], {})

@@ -115,6 +115,25 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. `fire` and
   `send_now` are explicit "now" commands and bypass it.
+- herdr layout control (2.2.0). The same registry that schedules dunks can
+  build the herd: `list_workspaces`, `create_workspace`, `create_tab`,
+  `split_pane`, `start_agent`, `rename`, `focus`, `close`, and a generic
+  `herdr` passthrough plus `herdr_help`. `HerdrClient` gained thin wrappers
+  (`_run_result` parses herdr's JSON, including the JSON errors herdr prints
+  on stderr, into `(ok, result-or-message)`); `Flock` resolves workspace and
+  tab targets with the same id / exact label / unique substring / `self` rules
+  as panes (`_pick`), runs an optional command in a freshly created pane via
+  `herdr pane run` (verified to work immediately after creation), and turns
+  herdr refusals into `DunkError`s. `start_agent` uses `herdr agent start` so
+  herdr registers the process under the given name and tracks it. `close`
+  refuses the caller's own pane / tab / workspace (a process closing its own
+  terminal is almost always a mistake) and stops dunks whose target pane was
+  inside. The passthrough shell-splits the command, maps `self` to the
+  caller's pane id, returns parsed JSON or usage text (a bare group's usage is
+  an answer, not an error) and refuses only what would stop, replace or attach
+  herdr itself (`server stop`, `update`, `channel set`, `session`,
+  `completion`, `agent attach`, `integration`, `--session/--remote`). Nothing
+  here is persisted; herdr is the source of truth for layout.
 - Templates: only the known placeholders are substituted (regex), so JSON or
   code braces in a prompt survive intact.
 - Persistence: `dunks.json` written atomically on every structural change and

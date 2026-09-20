@@ -566,3 +566,175 @@ class FlockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayoutControlTests(unittest.TestCase):
+    """Building the herd: workspaces, tabs, panes and agents through the Flock."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_list_workspaces_nests_tabs_in_order(self):
+        workspaces = self.flock.list_workspaces()
+        self.assertEqual(["alpha", "beta"], [w["label"] for w in workspaces])
+        self.assertEqual(["Codex Site", "Sheep", "Other"],
+                         [t["label"] for t in workspaces[1]["tabs"]])
+
+    def test_resolve_workspace_and_tab_by_id_label_substring_and_self(self):
+        self.assertEqual("w2", self.flock.resolve_workspace("w2")["workspace_id"])
+        self.assertEqual("w2", self.flock.resolve_workspace("BETA")["workspace_id"])
+        self.assertEqual("w1", self.flock.resolve_workspace("alp")["workspace_id"])
+        self.assertEqual("w1", self.flock.resolve_workspace("self", self_pane_id="w1:p2")["workspace_id"])
+        self.assertEqual("w2:t2", self.flock.resolve_tab("Sheep")["tab_id"])
+        self.assertEqual("w2:t1", self.flock.resolve_tab("codex")["tab_id"])
+        self.assertEqual("w1:t2", self.flock.resolve_tab("self", self_pane_id="w1:p2")["tab_id"])
+        with self.assertRaisesRegex(DunkError, "no herdr workspace"):
+            self.flock.resolve_workspace("gamma")
+        with self.assertRaisesRegex(DunkError, "needs HERDR_PANE_ID"):
+            self.flock.resolve_workspace("self")
+        with self.assertRaisesRegex(DunkError, "ambiguous"):
+            self.flock.resolve_tab("e")  # Codex Site, Sheep, Other
+
+    def test_create_workspace_runs_command_in_its_pane_and_is_dunkable(self):
+        created = self.flock.create_workspace(label="Site", cwd="/home/x/site", command="claude")
+        self.assertEqual("Site", created["workspace"]["label"])
+        self.assertEqual(created["pane"]["pane_id"], created["pane_id"])
+        self.assertEqual("claude", created["ran"])
+        self.assertEqual([(created["pane_id"], "claude")], self.herdr.runs)
+        self.assertEqual(("create_workspace", "Site", "/home/x/site", False),
+                         self.herdr.layout_calls[0])
+        # The new pane is immediately a valid dunk target, by id and by label.
+        dunk = self.flock.add(target="Site", text="go")
+        self.assertEqual(created["pane_id"], dunk["target_pane_id"])
+
+    def test_create_tab_defaults_to_the_callers_workspace(self):
+        created = self.flock.create_tab(label="writer", self_pane_id="w2:p1")
+        self.assertEqual("w2", created["tab"]["workspace_id"])
+        self.assertEqual("writer", created["tab"]["label"])
+        self.assertIsNone(created["ran"])
+        self.assertEqual([], self.herdr.runs)
+        # Explicit workspace by label, from anywhere.
+        other = self.flock.create_tab(workspace="alpha", label="tests", command="pytest -q")
+        self.assertEqual("w1", other["tab"]["workspace_id"])
+        self.assertEqual([(other["pane_id"], "pytest -q")], self.herdr.runs)
+
+    def test_split_pane_validates_direction(self):
+        created = self.flock.split_pane("Sheep", direction="down", command="htop")
+        self.assertEqual("w2:t2", created["pane"]["tab_id"])
+        self.assertEqual(("split_pane", "w2:p2", "down", None, False), self.herdr.layout_calls[0])
+        with self.assertRaisesRegex(DunkError, "direction"):
+            self.flock.split_pane("Sheep", direction="sideways")
+
+    def test_start_agent_registers_by_name_and_places_it(self):
+        started = self.flock.start_agent("writer", "claude --model opus", workspace="beta",
+                                         cwd="/home/x/site")
+        self.assertEqual("writer", started["name"])
+        self.assertEqual(["claude", "--model", "opus"], started["argv"])
+        call = self.herdr.layout_calls[-1]
+        self.assertEqual("start_agent", call[0])
+        self.assertEqual(("writer", ["claude", "--model", "opus"], "w2"), call[1:4])
+        # herdr now lists it as an agent pane, so it resolves as a target by name.
+        pane = self.flock.resolve_target("writer")
+        self.assertEqual(started["pane_id"], pane["pane_id"])
+        with self.assertRaisesRegex(DunkError, "command is required"):
+            self.flock.start_agent("x", "")
+        with self.assertRaisesRegex(DunkError, "split must be"):
+            self.flock.start_agent("x", "claude", tab="Sheep", split="left")
+
+    def test_start_agent_into_a_tab_with_split(self):
+        started = self.flock.start_agent("helper", "codex", tab="Sheep", split="right")
+        self.assertEqual("w2:t2", started["agent"]["tab_id"])
+        self.assertEqual("w2:t2", self.herdr.layout_calls[-1][4])
+        self.assertEqual("right", self.herdr.layout_calls[-1][5])
+
+    def test_rename_focus_and_close_by_kind(self):
+        renamed = self.flock.rename("tab", "Sheep", "Sheep Ops")
+        self.assertEqual({"kind": "tab", "id": "w2:t2", "label": "Sheep Ops"},
+                         {k: renamed[k] for k in ("kind", "id", "label")})
+        self.assertEqual("w2:t2", self.flock.resolve_tab("Sheep Ops")["tab_id"])
+        self.assertEqual("w1", self.flock.rename("workspace", "alpha", "Alpha Prime")["id"])
+        self.assertEqual("w2:p1", self.flock.rename("pane", "codex", "codex main")["id"])
+        with self.assertRaisesRegex(DunkError, "label is required"):
+            self.flock.rename("tab", "Other", "  ")
+        with self.assertRaisesRegex(DunkError, "kind must be"):
+            self.flock.rename("window", "Other", "x")
+        self.assertEqual({"kind": "tab", "id": "w2:t3", "focused": True},
+                         self.flock.focus("tab", "Other"))
+        self.assertEqual(("focus", "tab", "w2:t3"), self.herdr.layout_calls[-1])
+
+    def test_close_stops_dunks_aimed_inside_and_refuses_own_container(self):
+        dunk = self.flock.add(target="w2:p3", text="go", interval_minutes=60, start=True)
+        bystander = self.flock.add(target="w1:p2", text="go", interval_minutes=60, start=True)
+        closed = self.flock.close_target("tab", "Other", self_pane_id="w1:p2")
+        self.assertEqual({"kind": "tab", "id": "w2:t3", "closed_panes": ["w2:p3"],
+                          "stopped_dunks": [dunk["id"]]}, closed)
+        self.assertFalse(self.flock.get(dunk["id"])["running"])
+        self.assertEqual("Target closed", self.flock.get(dunk["id"])["status"])
+        self.assertTrue(self.flock.get(bystander["id"])["running"])
+        with self.assertRaisesRegex(DunkError, "no herdr tab"):
+            self.flock.resolve_tab("Other")
+        # Never close the caller's own pane, tab or workspace.
+        for kind, target in (("pane", "self"), ("tab", "self"), ("workspace", "alpha")):
+            with self.assertRaisesRegex(DunkError, "refusing to close"):
+                self.flock.close_target(kind, target, self_pane_id="w1:p2")
+        # Closing a whole workspace stops every dunk inside it.
+        other = self.flock.add(target="w2:p1", text="go", interval_minutes=60, start=True)
+        closed = self.flock.close_target("workspace", "beta", self_pane_id="w1:p2")
+        self.assertEqual(sorted(["w2:p1", "w2:p2"]), sorted(closed["closed_panes"]))
+        self.assertEqual([other["id"]], closed["stopped_dunks"])
+
+    def test_herdr_failures_become_dunk_errors(self):
+        self.herdr.fail_layout = "workspace limit reached"
+        with self.assertRaisesRegex(DunkError, "could not create the workspace x: workspace limit"):
+            self.flock.create_workspace(label="x")
+        self.herdr.fail_layout = "nope"
+        with self.assertRaisesRegex(DunkError, "could not rename tab w2:t2: nope"):
+            self.flock.rename("tab", "Sheep", "y")
+        self.herdr.fail_layout = "nope"
+        with self.assertRaisesRegex(DunkError, "could not start agent 'a': nope"):
+            self.flock.start_agent("a", "claude")
+
+    def test_herdr_passthrough_runs_anything_and_parses_json(self):
+        result = self.flock.herdr_command("workspace list")
+        self.assertTrue(result["ok"])
+        self.assertEqual(["alpha", "beta"], [w["label"] for w in result["result"]["workspaces"]])
+        self.assertEqual([["workspace", "list"]], self.herdr.raw_runs)
+        # A leading 'herdr' is tolerated; quoting is shell-like; 'self' expands.
+        result = self.flock.herdr_command("herdr notification show 'All done' --body ok",
+                                          self_pane_id="w1:p2")
+        self.assertEqual(["notification", "show", "All done", "--body", "ok"], result["argv"])
+        result = self.flock.herdr_command("pane zoom self --on", self_pane_id="w1:p2")
+        self.assertEqual(["pane", "zoom", "w1:p2", "--on"], result["argv"])
+        # For tab / workspace commands, `self` is the caller's tab / workspace.
+        self.assertEqual(["tab", "focus", "w1:t2"],
+                         self.flock.herdr_command("tab focus self", self_pane_id="w1:p2")["argv"])
+        self.assertEqual(["workspace", "get", "w1"],
+                         self.flock.herdr_command("workspace get self", self_pane_id="w1:p2")["argv"])
+        # herdr's JSON errors (on stderr) come back as error text, not exceptions.
+        result = self.flock.herdr_command("tab get bogus")
+        self.assertFalse(result["ok"])
+        self.assertEqual("tab bogus not found", result["error"])
+        self.assertIsNone(result["result"])
+        # Usage text for a bare group is an answer, not an error.
+        result = self.flock.herdr_command("pane")
+        self.assertTrue(result["ok"])
+        self.assertIn("herdr pane commands", result["text"])
+        # Commands that would take herdr down are refused.
+        for blocked in ("server stop", "update", "channel set preview", "session attach x",
+                        "agent attach w1:p2", "--session foo"):
+            with self.assertRaisesRegex(DunkError, "not allowed"):
+                self.flock.herdr_command(blocked)
+        with self.assertRaisesRegex(DunkError, "command is required"):
+            self.flock.herdr_command("   ")
+
+    def test_herdr_help_overview_and_group(self):
+        self.assertIn("Usage: herdr", self.flock.herdr_help()["text"])
+        self.assertIsNone(self.flock.herdr_help()["topic"])
+        group = self.flock.herdr_help("pane list")
+        self.assertEqual("pane list", group["topic"])
+        self.assertIn("herdr pane commands", group["text"])
+        self.assertEqual(["pane"], self.herdr.raw_runs[-1])
