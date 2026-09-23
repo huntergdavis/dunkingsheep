@@ -26,7 +26,9 @@ Orchestration extras on top of the classic Dunking Bird model:
 - `hold_while_typing=True` (the default): never type over a human. Before a
   send the daemon reads the target's input box with its styling and, if the box
   holds text someone is composing, holds the send and re-checks every minute
-  until the box is clear (see `Flock._human_typing`).
+  until the box is clear (see `Flock._human_typing`). The last of those reads
+  happens with the send lock held (`Flock.send_guarded`), so a draft that
+  appears while this send queues behind another one still stops it.
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
 - herdr layout control: `list_workspaces`, `create_workspace`, `create_tab`,
@@ -45,7 +47,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -253,6 +255,7 @@ class Message:
         self.source = source          # "send_text" or the dunk id for a fired dunk
         self.deliver = deliver        # callable -> (ok, detail)
         self.status = "queued"        # queued | sent | failed | cancelled
+        self.hold_while_typing = True
         self.detail = None
         self.holds = 0
         self.created_at = time.time()
@@ -637,6 +640,16 @@ class Flock:
         (), ("server", "stop"), ("update",), ("channel", "set"), ("session",),
         ("completion",), ("agent", "attach"), ("integration",),
     )
+    # Typing into a pane must go through send_text, which waits for the human
+    # to stop typing. Reaching these through the passthrough would bypass every
+    # protection in this module; `pane send-keys ... Enter` is the worst of
+    # them, because it submits whatever half-finished sentence is in the box.
+    HERDR_TYPING = {
+        ("pane", "send-text"): "send_text(target=..., text=...)",
+        ("pane", "send-keys"): "send_text(target=..., text=...)",
+        ("pane", "run"): "send_text(target=..., text=...)",
+        ("agent", "send"): "send_text(target=..., text=...)",
+    }
 
     def herdr_command(self, command, self_pane_id=None):
         """Run any `herdr <subcommand ...>` and return its parsed result. This
@@ -657,6 +670,13 @@ class Flock:
             if blocked and tuple(argv[:len(blocked)]) == blocked:
                 raise DunkError(f"'herdr {' '.join(blocked)}' is not allowed from here "
                                 "(it would stop, replace or attach herdr itself)")
+        instead = self.HERDR_TYPING.get(tuple(argv[:2]))
+        if instead:
+            raise DunkError(
+                f"'herdr {' '.join(argv[:2])}' types into a pane, which would land on top of "
+                f"whatever a human is writing there. Use {instead} instead: it waits until "
+                "the input box is clear, keeps ordering, and reports back. Pass "
+                "hold_while_typing=false if you really must type over a draft.")
         if any(a.startswith("-") and a in ("--remote", "--session") for a in argv):
             raise DunkError("launching or attaching a herdr session is not allowed from here")
         if self_pane_id and "self" in argv:
@@ -950,9 +970,20 @@ class Flock:
                 self._enqueue(message)
                 return {"id": dunker.id, "ok": None, "queued": True, "message_id": message.id,
                         "message": f"queued: someone is typing in {dunker.target_label()}"}
-            with self.send_lock:
-                dunker.status = "Sending..."
-                ok, message = self._do_send(dunker)
+            dunker.status = "Sending..."
+            sent, ok, message = self.send_guarded(
+                dunker.target_pane_id, lambda: self._do_send(dunker),
+                dunker.last_sent_text, dunker.awaiting_consumption,
+                hold_while_typing=dunker.hold_while_typing)
+            if not sent:
+                queued = self._new_message(
+                    dunker.target_pane_id, dunker.target_label(), dunker.text,
+                    source=dunker.id, deliver=lambda: self._do_send(dunker))
+                dunker.status = "Queued (typing)"
+                self._enqueue(queued)
+                return {"id": dunker.id, "ok": None, "queued": True,
+                        "message_id": queued.id,
+                        "message": f"queued: someone is typing in {dunker.target_label()}"}
             stamp = time.strftime("%H:%M:%S")
             dunker.status = f"Tested {stamp}" if ok else "Test failed"
             return {"id": dunker.id, "ok": ok, "queued": False, "message": message}
@@ -962,7 +993,8 @@ class Flock:
             log.exception("test send failed for %s", dunker.id)
             return {"id": dunker.id, "ok": False, "message": str(error)}
 
-    def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0):
+    def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0,
+                 press_enter=True):
         """One-off send to any pane, no dunk involved. Like a dunk, it never
         types over a human: if someone is composing in the target's box (or
         earlier messages to that pane are still waiting), the message is queued
@@ -973,10 +1005,33 @@ class Flock:
         if not str(text or "").strip():
             raise DunkError("text is required")
         label = pane.get("tab_label") or pane["pane_id"]
+        send = (self.herdr.send_text_and_enter if press_enter else self.herdr.send_text)
         message = self._new_message(pane["pane_id"], label, str(text), source="send_text",
-                                    deliver=lambda: self.herdr.send_text_and_enter(
-                                        pane["pane_id"], str(text)))
+                                    deliver=lambda: send(pane["pane_id"], str(text)))
         if not _check_bool(hold_while_typing, "hold_while_typing"):
+            message.hold_while_typing = False
+            self._deliver(message)
+            return message.to_dict()
+        self._enqueue(message)
+        if wait_s:
+            message.done.wait(min(float(wait_s), 3600))
+        return message.to_dict()
+
+    def send_keys_now(self, target, keys, self_pane_id=None, hold_while_typing=True,
+                      wait_s=0):
+        """Press keys in a pane, queued behind a human who is typing exactly
+        like a message. `pane send-keys <pane> Enter` is how a half-written
+        sentence gets submitted by accident, so it takes the same path."""
+        pane = self.resolve_target(target, self_pane_id)
+        keys = [keys] if isinstance(keys, str) else [str(k) for k in keys]
+        keys = [k for k in keys if str(k).strip()]
+        if not keys:
+            raise DunkError("keys are required, e.g. 'Enter' or 'ctrl+c'")
+        label = pane.get("tab_label") or pane["pane_id"]
+        message = self._new_message(pane["pane_id"], label, " ".join(keys), source="send_keys",
+                                    deliver=lambda: self.herdr.send_keys(pane["pane_id"], keys))
+        if not _check_bool(hold_while_typing, "hold_while_typing"):
+            message.hold_while_typing = False
             self._deliver(message)
             return message.to_dict()
         self._enqueue(message)
@@ -993,14 +1048,19 @@ class Flock:
         return message
 
     def _deliver(self, message):
-        """Send one message now (under the shared send lock) and record it."""
-        with self.send_lock:
+        """Send one message, re-checking the box under the send lock. Returns
+        False when a draft appeared at the last moment and the message must
+        stay queued."""
+        with self._lock:
             if message.status == "cancelled":
-                return
-            try:
-                ok, detail = message.deliver()
-            except Exception as error:  # noqa: BLE001 - report, never crash a queue
-                ok, detail = False, str(error)
+                return True
+        sent, ok, detail = self.send_guarded(
+            message.pane_id, message.deliver,
+            hold_while_typing=message.hold_while_typing)
+        if not sent:
+            with self._lock:
+                message.holds += 1
+            return False
         with self._lock:
             message.status = "sent" if ok else "failed"
             message.detail = detail
@@ -1011,6 +1071,7 @@ class Flock:
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
                  "sent" if ok else f"FAILED {detail}")
         message.done.set()
+        return True
 
     def _remember(self, message):
         self.message_history.append(message)
@@ -1048,10 +1109,14 @@ class Flock:
                         log.info("message %s -> %s: box clear after %ds, delivering",
                                  message.id, pane_id, int(time.time() - held_since))
                         held_since = None
-                    with self._lock:
-                        if message in queue:
-                            queue.remove(message)
-                    self._deliver(message)
+                    if self._deliver(message):
+                        with self._lock:
+                            if message in queue:
+                                queue.remove(message)
+                    else:
+                        # A draft appeared under the lock; keep our place in the
+                        # queue and wait for them to finish.
+                        held_since = time.time()
                     continue
                 if held_since is None:
                     held_since = time.time()
@@ -1202,6 +1267,32 @@ class Flock:
             time.sleep(TYPING_SETTLE_S)
         return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
 
+    def send_guarded(self, pane_id, send, last_sent_text=None, awaiting_consumption=False,
+                     hold_while_typing=True):
+        """Run `send` (a callable that types into `pane_id`) with the send lock
+        held, after one final look at the input box under that same lock.
+
+        The settle check alone is not enough: between `_clear_to_send` returning
+        and the keystrokes actually going out, this send has to wait for the
+        global `send_lock`, which every other pane's send also holds. On a busy
+        flock that gap ran into seconds, and a human who started typing inside
+        it got our text spliced onto the end of their sentence (reproduced
+        2026-09-23). The final check closes the gap to one pane read.
+
+        Returns (sent, ok, detail): sent=False means a draft appeared and
+        nothing was typed."""
+        with self.send_lock:
+            if hold_while_typing and self._typing_in(pane_id, last_sent_text,
+                                                     awaiting_consumption):
+                log.info("%s: draft appeared while waiting for the send lock; not typing",
+                         pane_id)
+                return False, None, "someone started typing"
+            try:
+                ok, detail = send()
+            except Exception as error:  # noqa: BLE001 - report, never crash a caller
+                return True, False, str(error)
+            return True, ok, detail
+
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right
         now, so a send would splice our text into the middle of theirs and
@@ -1295,11 +1386,23 @@ class Flock:
                     continue
 
                 dunker.status = "Waiting..."
-                with self.send_lock:
-                    if stop_event.is_set():
+                if stop_event.is_set():
+                    return
+                dunker.status = "Sending..."
+                sent, ok, _message = self.send_guarded(
+                    dunker.target_pane_id, lambda: self._do_send(dunker),
+                    dunker.last_sent_text, dunker.awaiting_consumption,
+                    hold_while_typing=dunker.hold_while_typing)
+                if not sent:
+                    # They started typing while we waited for the send lock.
+                    with self._lock:
+                        dunker.hold_count += 1
+                        dunker.last_held_at = time.time()
+                        dunker.status = "Held (typing)"
+                        self._save()
+                    if stop_event.wait(TYPING_RECHECK_S):
                         return
-                    dunker.status = "Sending..."
-                    ok, _message = self._do_send(dunker)
+                    continue
 
                 with self._lock:
                     if stop_event.is_set():

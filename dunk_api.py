@@ -152,7 +152,14 @@ def h_fire_dunk(flock, args, self_pane_id):
 def h_send_text(flock, args, self_pane_id):
     return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id,
                           hold_while_typing=_bool(args.get("hold_while_typing"), True),
-                          wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)))
+                          wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)),
+                          press_enter=_bool(args.get("press_enter"), True))
+
+
+def h_send_keys(flock, args, self_pane_id):
+    return flock.send_keys_now(args["target"], args["keys"], self_pane_id=self_pane_id,
+                               hold_while_typing=_bool(args.get("hold_while_typing"), True),
+                               wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)))
 
 
 def h_list_messages(flock, args, self_pane_id):
@@ -476,8 +483,29 @@ COMMANDS = [
                     "description": ("Block up to this many seconds for delivery before "
                                     "returning (default 3). 0 returns as soon as it is "
                                     "queued; use list_messages or get_message to follow "
-                                    "up on a message still waiting.")}},
+                                    "up on a message still waiting.")},
+                "press_enter": {
+                    "type": "boolean",
+                    "description": ("Press Enter after the text (default true). false "
+                                    "leaves it in the box unsubmitted.")}},
         required=["target", "text"],
+    ),
+    Command(
+        "send_keys",
+        "Press named keys in a pane (e.g. 'Enter', 'Escape', 'ctrl+c'), queued "
+        "behind a human who is typing just like send_text. Use this rather than "
+        "the herdr passthrough: a bare Enter sent while someone is mid-sentence "
+        "submits their half-written message.",
+        h_send_keys,
+        params={"target": TARGET_PARAM,
+                "keys": {"type": "string",
+                         "description": "Key name, or several separated by spaces: 'Enter', 'ctrl+c'."},
+                "hold_while_typing": {
+                    "type": "boolean",
+                    "description": "Queue behind a human who is typing (default true)."},
+                "wait_s": {"type": "number", "minimum": 0, "maximum": 3600,
+                           "description": "Block up to this many seconds for delivery (default 3)."}},
+        required=["target", "keys"],
     ),
     Command(
         "list_messages",

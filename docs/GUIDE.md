@@ -1,4 +1,4 @@
-# Dunking Sheep 2.3.0 guide
+# Dunking Sheep 2.3.1 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -73,10 +73,10 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
   (that is skip_if_unconsumed's job), and a pane with no input box (a bare
   shell) or an unreadable pane never holds. Only the sigil line is judged.
   Turn it off (--ignore-typing / hold_while_typing=false) only for a pane
-  nobody types in. The box must read clear twice, a second apart, before
-  anything is sent, so a pause between thoughts is not mistaken for being
-  done. This applies to scheduled sends, fired dunks and direct messages
-  alike.
+  nobody types in. The box must read clear twice, a second apart, and once
+  more at the instant of sending, so neither a pause between thoughts nor a
+  draft begun while the send waits its turn can be typed over. This applies
+  to scheduled sends, fired dunks, direct messages and key presses alike.
 - start = false: create the dunk stopped; start it later.
 - Changing the interval of a running dunk reschedules its next send.
 
@@ -91,7 +91,9 @@ dunkingsheep list | get <id> | update <id> ... | remove <id>
 dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)
 dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)
                  [--wait S] [--ignore-typing]
+dunkingsheep send-keys <target> <keys...>     guarded key presses
 dunkingsheep messages | cancel-message <id>   the direct-message queue
+dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
 dunkingsheep rename|focus|close workspace|tab|pane <target> [label]
@@ -155,7 +157,7 @@ set HERDR_PANE_ID in the server's env block.
 
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
-send_text, list_messages, get_message, cancel_message, and for herdr
+send_text, send_keys, list_messages, get_message, cancel_message, and for herdr
 control list_workspaces, create_workspace,
 create_tab, split_pane, start_agent, rename, focus, close, herdr,
 herdr_help. Call `help` first if unsure; `initialize` also returns these
@@ -262,6 +264,30 @@ send_text(target="Codex Site", text="...", hold_while_typing=false)  # barge in
 
 Queued messages live in the daemon's memory, not on disk, so a daemon
 restart drops anything still waiting.
+
+send_keys(target, keys) presses keys the same guarded way. Use it rather
+than the herdr passthrough: a bare Enter sent while someone is mid-sentence
+submits their half-written message. For that reason the `herdr` tool
+refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.
+
+## The herdr guard: agents that shell out
+
+An agent with a shell can call the herdr CLI directly, and `herdr pane run
+<pane> "..."` types straight into a terminal with no idea anyone is writing
+there. Nothing inside this daemon can see that. `dunkingsheep guard install`
+puts a small `herdr` wrapper first on PATH which forwards exactly the four
+typing subcommands to the daemon and execs the real herdr for everything
+else, so agents get the same protection without changing how they work.
+
+```
+dunkingsheep guard status      # installed? active in this shell?
+dunkingsheep guard install     # wrapper + a PATH line in ~/.bashrc
+dunkingsheep guard check       # prove a typing command is intercepted
+dunkingsheep guard uninstall   # remove both
+```
+
+New shells pick it up; panes already open need a fresh shell. Set
+HERDR_GUARD_OFF=1 for a single command that must bypass it.
 
 send_text is a direct message with no schedule attached; read_pane is the
 eyes. Together with add_dunk they let an agent communicate with, monitor and

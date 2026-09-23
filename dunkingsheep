@@ -138,6 +138,29 @@ def build_parser():
     p.add_argument("--ignore-typing", action="store_true",
                    help="send even while someone is typing (default: queue it)")
 
+    p.add_argument("--no-enter", action="store_true",
+                   help="leave the text in the box without pressing Enter")
+
+    p = sub.add_parser("send-keys", help="press keys in a pane (queued if someone is typing)",
+                       epilog="example: dunkingsheep send-keys \"Codex Site\" Enter")
+    p.add_argument("target")
+    p.add_argument("keys", nargs="+")
+    p.add_argument("--wait", type=float, default=10, metavar="S",
+                   help="block up to S seconds for delivery before returning (default 10)")
+    p.add_argument("--ignore-typing", action="store_true",
+                   help="press them even while someone is typing (default: queue)")
+
+    p = sub.add_parser("guard", help="install the herdr guard so agents cannot type over you",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       description="Agents that call the herdr CLI directly (herdr pane run, "
+                                   "pane send-text, pane send-keys, agent send) bypass every "
+                                   "protection in the daemon. The guard is a herdr wrapper, "
+                                   "first on PATH, that routes exactly those four through the "
+                                   "daemon instead. Every other herdr command is untouched.",
+                       epilog="new shells pick it up; existing panes need a fresh shell")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["status", "install", "uninstall", "check"])
+
     p = sub.add_parser("messages", aliases=["queue"], help="direct messages queued and recently sent")
     p = sub.add_parser("cancel-message", aliases=["cancel"], help="drop a queued message")
     p.add_argument("message_id")
@@ -466,6 +489,18 @@ def main(argv=None):
         return 0
     if command == "mcp-setup":
         return run_mcp_setup(args)
+    if command == "guard":
+        import dunk_guard
+        result = getattr(dunk_guard, args.action)()
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+        else:
+            for key, value in result.items():
+                print(f"{key:<22} {value}")
+            if args.action == "install":
+                print("\nOpen a new shell (or run: export PATH=\"%s:$PATH\") so agents "
+                      "pick it up." % dunk_guard.GUARD_DIR)
+        return 0 if result.get("ok", True) else 1
 
     if command == "serve":
         from dunk_server import SOCKET_PATH, run_daemon
@@ -595,6 +630,11 @@ def run_client_command(client, args):
             f"({r['message']})")
     if command == "send":
         result = client.call("send_text", target=args.target, text=" ".join(args.text),
+                             hold_while_typing=not args.ignore_typing, wait_s=args.wait,
+                             press_enter=not args.no_enter)
+        return result, print_message
+    if command == "send-keys":
+        result = client.call("send_keys", target=args.target, keys=" ".join(args.keys),
                              hold_while_typing=not args.ignore_typing, wait_s=args.wait)
         return result, print_message
     if command in ("messages", "queue"):

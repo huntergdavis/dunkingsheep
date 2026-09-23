@@ -466,8 +466,9 @@ class FlockTests(unittest.TestCase):
         dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True)
         self.assertTrue(self.herdr.sent.wait(5))
         self.assertTrue(dunk["hold_while_typing"])
-        # Two reads: clear, then still clear a second later (the settle window).
-        self.assertEqual(["w2:p1", "w2:p1"], self.herdr.ansi_reads)
+        # Three reads: clear, still clear a second later (the settle window),
+        # then one last look with the send lock held, just before typing.
+        self.assertEqual(["w2:p1", "w2:p1", "w2:p1"], self.herdr.ansi_reads)
         self.assertEqual(0, self.herdr.status_calls, "no idle gate unless asked")
 
     def test_hold_while_typing_toggle_round_trip_and_old_files_default_on(self):
@@ -736,6 +737,157 @@ class MessageQueueTests(unittest.TestCase):
         self.assertTrue(fired["ok"])
         self.assertFalse(fired["queued"])
         self.assertEqual([("w2:p1", "now")], self.herdr.sends)
+
+
+class SendRaceTests(unittest.TestCase):
+    """The regression from 2026-09-23: a draft that appears between the settle
+    check and the keystrokes must still stop the send."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.settle = mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.05)
+        self.recheck = mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05)
+        self.settle.start()
+        self.recheck.start()
+
+    def tearDown(self):
+        self.settle.stop()
+        self.recheck.stop()
+        self.flock.close()
+
+    def test_draft_appearing_while_we_wait_for_the_send_lock_stops_the_send(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        # Someone else's send holds the global lock; the human starts typing
+        # during that wait, after our settle check already said "clear".
+        released = threading.Event()
+
+        def hog():
+            with self.flock.send_lock:
+                self.herdr.set_screen("w2:p1", claude_box_typing_ansi("I am mid sentence"))
+                released.set()
+                time.sleep(0.3)
+
+        self.assertTrue(self.flock._clear_to_send("w2:p1"), "box looked clear first")
+        threading.Thread(target=hog, daemon=True).start()
+        released.wait(2)
+        sent, ok, detail = self.flock.send_guarded(
+            "w2:p1", lambda: self.herdr.send_text_and_enter("w2:p1", "AGENT TEXT"))
+        self.assertFalse(sent, "must not type onto the end of their sentence")
+        self.assertIsNone(ok)
+        self.assertIn("typing", detail)
+        self.assertEqual([], self.herdr.sends)
+
+    def test_the_guard_sends_when_the_box_is_still_clear(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        sent, ok, _detail = self.flock.send_guarded(
+            "w2:p1", lambda: self.herdr.send_text_and_enter("w2:p1", "fine"))
+        self.assertTrue(sent)
+        self.assertTrue(ok)
+        self.assertEqual([("w2:p1", "fine")], self.herdr.sends)
+
+    def test_ignore_typing_still_bypasses_the_guard(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("drafting"))
+        sent, ok, _detail = self.flock.send_guarded(
+            "w2:p1", lambda: self.herdr.send_text_and_enter("w2:p1", "barge"),
+            hold_while_typing=False)
+        self.assertTrue(sent)
+        self.assertTrue(ok)
+
+    def test_a_refused_message_keeps_its_place_and_is_delivered_later(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        message = self.flock._new_message(
+            "w2:p1", "codex", "hello", source="send_text",
+            deliver=lambda: self.herdr.send_text_and_enter("w2:p1", "hello"))
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing now"))
+        self.assertFalse(self.flock._deliver(message), "refused, stays queued")
+        self.assertEqual("queued", message.status)
+        self.assertEqual([], self.herdr.sends)
+        self.flock._enqueue(message)
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(self.herdr.sent.wait(5))
+        self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
+
+    def test_a_dunk_refused_at_the_last_moment_holds_instead_of_sending(self):
+        with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.1):
+            self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+            # Hold the send lock before the dunk can take it, so the dunk is
+            # provably parked on it when the draft appears.
+            self.flock.send_lock.acquire()
+            dunk = self.flock.add(target="w2:p1", text="nudge", interval_minutes=1 / 60,
+                                  start=True)
+            try:
+                self.assertTrue(wait_until(
+                    lambda: self.flock.get(dunk["id"])["status"] == "Sending...", 5),
+                    "dunk should be waiting on the send lock")
+                self.herdr.set_screen("w2:p1", claude_box_typing_ansi("a late draft"))
+            finally:
+                self.flock.send_lock.release()
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["hold_count"] >= 1, 5))
+            self.assertEqual([], self.herdr.sends, "must not type onto their draft")
+            self.assertEqual("Held (typing)", self.flock.get(dunk["id"])["status"])
+            self.assertEqual(0, self.flock.get(dunk["id"])["send_count"])
+
+
+class GuardedKeysTests(unittest.TestCase):
+    """A bare Enter is how a half-written sentence gets submitted."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.settle = mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.05)
+        self.recheck = mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05)
+        self.settle.start()
+        self.recheck.start()
+
+    def tearDown(self):
+        self.settle.stop()
+        self.recheck.stop()
+        self.flock.close()
+
+    def test_send_keys_queues_behind_a_draft(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("half a sentence"))
+        queued = self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
+        self.assertTrue(queued["queued"], "Enter must not submit their draft")
+        self.assertEqual([], self.herdr.keys)
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(lambda: self.herdr.keys == [("w2:p1", ["Enter"])], 5))
+
+    def test_send_keys_validates_and_can_barge_in(self):
+        with self.assertRaisesRegex(DunkError, "keys are required"):
+            self.flock.send_keys_now("codex", "   ")
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("draft"))
+        forced = self.flock.send_keys_now("codex", "Escape", hold_while_typing=False)
+        self.assertTrue(forced["ok"])
+        self.assertEqual([("w2:p1", ["Escape"])], self.herdr.keys)
+
+    def test_send_text_can_skip_the_enter(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        result = self.flock.send_now("codex", "no newline", wait_s=3, press_enter=False)
+        self.assertTrue(result["ok"])
+        self.assertEqual([("w2:p1", "no newline")], self.herdr.text_only)
+        self.assertEqual([], self.herdr.sends)
+
+
+class PassthroughTypingTests(unittest.TestCase):
+    """The herdr passthrough must not be a way around any of this."""
+
+    def setUp(self):
+        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_typing_subcommands_are_refused_with_the_safe_alternative(self):
+        for command in ("pane send-text w2:p1 hi", "pane run w2:p1 ls",
+                        "agent send codex hi", "pane send-keys w2:p1 Enter"):
+            with self.assertRaises(DunkError) as caught:
+                self.flock.herdr_command(command)
+            self.assertIn("send_text", str(caught.exception))
+        # Everything else still goes through.
+        self.assertTrue(self.flock.herdr_command("workspace list")["ok"])
+        self.assertTrue(self.flock.herdr_command("pane list")["ok"])
 
 
 class LayoutControlTests(unittest.TestCase):

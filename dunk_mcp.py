@@ -42,7 +42,11 @@ Nothing ever types over a human. If someone is composing in the target pane,
 both dunks and direct messages wait until the input box has been clear for a
 second; send_text then returns queued=true with a message_id, and the daemon
 delivers it (in order) when they finish. list_messages, get_message and
-cancel_message manage that queue.
+cancel_message manage that queue. send_keys presses keys (Enter, Escape) the
+same guarded way. Do NOT reach for the herdr CLI to type into a pane: `herdr
+pane run`, `pane send-text`, `pane send-keys` and `agent send` bypass all of
+this and will land on top of whatever a human is writing, so the `herdr` tool
+refuses them.
 
 Building the herd: create_workspace / create_tab / split_pane open named
 spaces, tabs and panes (optionally running a command such as "claude" in the

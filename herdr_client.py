@@ -45,10 +45,30 @@ def _text_chunks(text, max_chars=SEND_TEXT_CHUNK_CHARS):
         start = end
 
 
+GUARD_DIR = os.path.join(
+    os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser("~/.config/dunkingsheep"),
+    "bin",
+)
+
+
 def _find_herdr():
-    """Locate the herdr binary, preferring PATH then the usual install dir."""
+    """Locate the *real* herdr binary, preferring PATH then the usual install
+    dir. `DUNKINGSHEEP_HERDR_BIN` overrides. The guard wrapper (see
+    `dunkingsheep guard`) shadows herdr on agents' PATH and routes typing
+    through this daemon, so resolving to it here would recurse; its directory
+    is skipped."""
+    override = os.environ.get("DUNKINGSHEEP_HERDR_BIN")
+    if override and os.path.exists(override):
+        return override
+    guard_dir = os.path.realpath(GUARD_DIR)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or os.path.realpath(directory) == guard_dir:
+            continue
+        candidate = os.path.join(directory, "herdr")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     found = shutil.which("herdr")
-    if found:
+    if found and os.path.realpath(os.path.dirname(found)) != guard_dir:
         return found
     fallback = os.path.expanduser("~/.local/bin/herdr")
     if os.path.exists(fallback):
@@ -292,6 +312,16 @@ class HerdrClient:
         code, _out, err = self._run(["pane", "send-keys", pane_id, "Enter"])
         if code != 0:
             return False, (err.strip() or "send-keys failed")
+        return True, "sent"
+
+    def send_keys(self, pane_id, keys):
+        """Press one or more named keys in a pane (`herdr pane send-keys`)."""
+        if not pane_id:
+            return False, "No target"
+        keys = [keys] if isinstance(keys, str) else [str(k) for k in keys]
+        code, out, err = self._run(["pane", "send-keys", pane_id, *keys])
+        if code != 0:
+            return False, (err.strip() or out.strip() or "send-keys failed")
         return True, "sent"
 
     def send_text(self, pane_id, text):

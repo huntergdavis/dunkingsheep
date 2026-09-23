@@ -120,10 +120,10 @@ def guide(markdown=False):
       "  (that is skip_if_unconsumed's job), and a pane with no input box (a bare\n"
       "  shell) or an unreadable pane never holds. Only the sigil line is judged.\n"
       "  Turn it off (--ignore-typing / hold_while_typing=false) only for a pane\n"
-      "  nobody types in. The box must read clear twice, a second apart, before\n"
-      "  anything is sent, so a pause between thoughts is not mistaken for being\n"
-      "  done. This applies to scheduled sends, fired dunks and direct messages\n"
-      "  alike.\n"
+      "  nobody types in. The box must read clear twice, a second apart, and once\n"
+      "  more at the instant of sending, so neither a pause between thoughts nor a\n"
+      "  draft begun while the send waits its turn can be typed over. This applies\n"
+      "  to scheduled sends, fired dunks, direct messages and key presses alike.\n"
       "- start = false: create the dunk stopped; start it later.\n"
       "- Changing the interval of a running dunk reschedules its next send.\n")
 
@@ -136,7 +136,9 @@ def guide(markdown=False):
            "dunkingsheep start|stop|toggle <id>    stop-all    fire <id> (send now)\n"
            "dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)\n"
            "                 [--wait S] [--ignore-typing]\n"
+           "dunkingsheep send-keys <target> <keys...>     guarded key presses\n"
            "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
+           "dunkingsheep guard [status|install|check|uninstall]\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
            "dunkingsheep rename|focus|close workspace|tab|pane <target> [label]\n"
@@ -187,7 +189,7 @@ def guide(markdown=False):
       "set HERDR_PANE_ID in the server's env block.\n")
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
-      "send_text, list_messages, get_message, cancel_message, and for herdr\n"
+      "send_text, send_keys, list_messages, get_message, cancel_message, and for herdr\n"
       "control list_workspaces, create_workspace,\n"
       "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
       "herdr_help. Call `help` first if unsure; `initialize` also returns these\n"
@@ -274,6 +276,23 @@ def guide(markdown=False):
            "send_text(target=\"Codex Site\", text=\"...\", hold_while_typing=false)  # barge in"))
     w("Queued messages live in the daemon's memory, not on disk, so a daemon\n"
       "restart drops anything still waiting.\n")
+    w("send_keys(target, keys) presses keys the same guarded way. Use it rather\n"
+      "than the herdr passthrough: a bare Enter sent while someone is mid-sentence\n"
+      "submits their half-written message. For that reason the `herdr` tool\n"
+      "refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.\n")
+    w(h(2, "The herdr guard: agents that shell out"))
+    w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"
+      "<pane> \"...\"` types straight into a terminal with no idea anyone is writing\n"
+      "there. Nothing inside this daemon can see that. `dunkingsheep guard install`\n"
+      "puts a small `herdr` wrapper first on PATH which forwards exactly the four\n"
+      "typing subcommands to the daemon and execs the real herdr for everything\n"
+      "else, so agents get the same protection without changing how they work.\n")
+    w(code("dunkingsheep guard status      # installed? active in this shell?\n"
+           "dunkingsheep guard install     # wrapper + a PATH line in ~/.bashrc\n"
+           "dunkingsheep guard check       # prove a typing command is intercepted\n"
+           "dunkingsheep guard uninstall   # remove both"))
+    w("New shells pick it up; panes already open need a fresh shell. Set\n"
+      "HERDR_GUARD_OFF=1 for a single command that must bypass it.\n")
     w("send_text is a direct message with no schedule attached; read_pane is the\n"
       "eyes. Together with add_dunk they let an agent communicate with, monitor and\n"
       "pace several projects in parallel.\n")

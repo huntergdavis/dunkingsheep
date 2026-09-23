@@ -115,6 +115,37 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Closing the send race, and the two ways around the protection (2.3.1). On
+  2026-09-23 an agent's message still landed in the middle of a sentence.
+  Red-teaming found the detector innocent (it classifies idle, working,
+  typing and queued-message states correctly on live Claude and Codex panes)
+  and three real holes, all reproduced:
+  1. **The race.** `_clear_to_send` returned, then the send waited on the
+     *global* `send_lock` that every pane's send shares, then typed. On a busy
+     flock that gap ran to seconds. Reproduced live: check clear, wait 2 s
+     while a human types, send, and the pane received
+     `I START TYPING RIGHT HERE and keep goingAGENT-MESSAGE-INTERLEAVED`.
+     Fix: `Flock.send_guarded` takes the send lock, re-reads the box *under*
+     it, and only then types; the remaining window is one pane read (~40 ms).
+     A refused message keeps its place in the queue; a refused dunk goes back
+     to holding. `_deliver` returns False in that case, so the outbox worker
+     does not drop it.
+  2. **The passthrough.** `herdr(command=...)` happily ran `pane send-text`,
+     `pane run`, `agent send` and `pane send-keys`. The daemon log shows
+     `herdr pane send-keys wH:p7 Enter` going through it: a bare Enter submits
+     whatever half-written sentence is in the box. These four are now refused
+     with a pointer to `send_text` / `send_keys`.
+  3. **Agents shelling out.** The dominant path in the evidence: the pane
+     transcripts are full of `Bash(herdr pane run wH:p7 "...")`, which never
+     touches this daemon. `dunk_guard.py` installs a `herdr` wrapper first on
+     PATH that forwards those four subcommands to the daemon and execs the
+     real herdr for everything else. Recursion is blocked from both ends: the
+     wrapper sets `DUNKINGSHEEP_GUARD=1` when calling back in and re-execs the
+     real binary when it sees it, and `_find_herdr` skips the guard directory.
+     The wrapper falls back to the real herdr if the daemon is unreachable, so
+     a broken guard can never make herdr unusable.
+  `send_keys` and `send_text(press_enter=false)` exist so the wrapper can
+  mirror `pane send-keys` and `pane send-text` semantics exactly.
 - Direct-message queue (2.3.0). `send_text` used to type immediately, so an
   agent messaging a pane could splice itself into a human's draft even though
   scheduled dunks would not. Messages now go through a per-pane outbox in the

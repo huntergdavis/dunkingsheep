@@ -55,6 +55,8 @@ class FakeHerdr:
         self.fail_layout = None  # message: make the next mutation fail
         self._counter = 100
         self.sends = []
+        self.keys = []
+        self.text_only = []
         self.statuses = {}
         self.screens = {}
         self.unreadable = set()
@@ -286,6 +288,20 @@ class FakeHerdr:
         # Default: the last sends, verbatim (a plain terminal echo).
         mine = [text for pid, text in self.sends if pid == pane_id]
         return "\n".join(mine[-int(lines):]) + "\n"
+
+    def send_keys(self, pane_id, keys):
+        with self.lock:
+            if self.fail_sends:
+                return False, "boom"
+            self.keys.append((pane_id, list(keys)))
+        return True, "sent"
+
+    def send_text(self, pane_id, text):
+        with self.lock:
+            if self.fail_sends:
+                return False, "boom"
+            self.text_only.append((pane_id, text))
+        return True, "sent"
 
     def send_text_and_enter(self, pane_id, text):
         with self.lock:

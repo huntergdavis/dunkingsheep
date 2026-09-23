@@ -36,10 +36,11 @@ herdr status server                     # herdr must be running
 | **Placeholders** | `{id}` `{name}` `{count}` `{target}` `{interval}` `{time}` `{date}` expand at send time. A dunk can tell its recipient which dunk to remove. |
 | **Idle gating** | `--only-idle` / `only_when="idle"` holds a send until herdr reports the target agent idle. |
 | **Backpressure** | `--skip-if-unconsumed` / `skip_if_unconsumed=true` skips a send (no-op, no error, `skip_count`+1) while the previous one still sits unread in the pane. Stops prompts piling up in an unattended agent. |
-| **Never type over you** | On by default, for scheduled dunks, fired dunks and direct messages. The daemon reads the target's input box with its styling; bright (non-dim) text after the prompt means someone is mid-sentence. It waits, and only sends once the box has read clear twice a second apart. `--ignore-typing` / `hold_while_typing=false` turns it off. |
+| **Never type over you** | On by default, for scheduled dunks, fired dunks, direct messages and key presses. The daemon reads the target's input box with its styling; bright (non-dim) text after the prompt means someone is mid-sentence. It waits, and sends only once the box has read clear twice a second apart **and once more at the instant of sending**, with the send lock held. `--ignore-typing` / `hold_while_typing=false` turns it off. |
 | **Max sends** | `--max-sends N` removes the dunk after N sends. `1` is a one-shot delayed nudge. |
 | **Build the herd** | `create_workspace`, `create_tab`, `split_pane` (each can run a command like `claude` in the new pane), `start_agent` (herdr-registered by name), `rename` / `focus` / `close` for workspaces, tabs and panes, `list_workspaces`. An admin agent spins up a team, then dunks on it. |
-| **Any herdr command** | `herdr <args…>` / `herdr(command=…)` runs any herdr subcommand through the daemon and returns its JSON; `herdr_help` returns herdr's own usage. Only stopping, updating or attaching herdr itself is refused. |
+| **Any herdr command** | `herdr <args…>` / `herdr(command=…)` runs any herdr subcommand through the daemon and returns its JSON; `herdr_help` returns herdr's own usage. Refused: stopping/updating/attaching herdr itself, and the four subcommands that type into a pane (use `send_text` / `send_keys`, which wait for the human). |
+| **herdr guard** | `dunkingsheep guard install` shadows `herdr` on PATH with a wrapper that routes `pane run`, `pane send-text`, `pane send-keys` and `agent send` through the daemon, so agents that shell out get the same protection. Everything else execs the real herdr untouched. |
 | **Direct messages** | `send <target> <text>` / `send_text` types into any pane, no dunk. Queues behind a human who is typing, exactly like a dunk, and delivers in order when they finish. `messages` / `list_messages` show the queue; `cancel-message` drops one. |
 | **Pane reading** | `read <target>` / `read_pane` returns a pane's recent output plus its agent and status. |
 | **Self-documenting** | `dunkingsheep` (no args), `guide`, `commands --json`, `mcp-setup`, MCP `help` tool, socket `help` command. |
@@ -95,7 +96,8 @@ dunkingsheep add -T <target> -e <every> -t <text> [-n name] [--only-idle] [--ski
 dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-idle|--any-time] [--skip-if-unconsumed|--always-send] [--hold-while-typing|--ignore-typing] [--max-sends N]
 dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
 dunkingsheep send <target> <text…> [--wait S] [--ignore-typing]   read <target> [-l N]
-dunkingsheep messages | cancel-message <id>
+dunkingsheep send-keys <target> <keys…> [--wait S] [--ignore-typing]
+dunkingsheep messages | cancel-message <id> | guard [status|install|check|uninstall]
 dunkingsheep workspaces | new-workspace -l L [--cwd D] [-r CMD] | new-tab [-w WS] -l L [-r CMD] | split <target> [--down] [-r CMD]
 dunkingsheep start-agent <name> [-w WS | --tab T [--split right|down]] -- <command…>
 dunkingsheep rename|focus|close workspace|tab|pane <target> [label]
