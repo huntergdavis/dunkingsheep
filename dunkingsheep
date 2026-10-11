@@ -419,6 +419,8 @@ def print_messages(result):
             print(f"{m['message_id']:<5} {str(m['waiting_s']) + 's':>8} "
                   f"{_clip(m['target_label'], 28):<28} {_clip(m['source'], 10):<10} "
                   f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
+            if m.get("blocked_by"):
+                print(f"{'':<5} {'':>8} blocked by {m['blocked_by']}")
     if recent:
         if queued:
             print()

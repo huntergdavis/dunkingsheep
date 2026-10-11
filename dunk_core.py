@@ -51,7 +51,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -107,6 +107,10 @@ MESSAGE_HISTORY = 50
 # these gaps a 2.2k message submits; the long tail only costs time when a send
 # is actually stuck, since a normal one is confirmed on the first press.
 SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+# How many recent sends per pane to recognise as ours. Remembering only the
+# last one meant a single mis-read lost track of our own text for good, and
+# every later message queued behind it until a human ran `flush`.
+REMEMBERED_SENDS = 4
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
@@ -330,7 +334,7 @@ class Flock:
         # The last text we typed into each pane, so text stranded by a failed
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
-        self.last_text_by_pane = {}
+        self.sent_text_by_pane = {}
         self.message_history = []
         self.next_message_id = 1
         if restore:
@@ -1167,13 +1171,27 @@ class Flock:
                 if self.outbox_threads.get(pane_id) is threading.current_thread():
                     self.outbox_threads.pop(pane_id, None)
 
-    def list_messages(self):
-        """Queued messages (oldest first) and the recent delivered/failed ones."""
+    def list_messages(self, why_blocked=True):
+        """Queued messages (oldest first) and the recent delivered/failed ones.
+        A queued message also says what its pane's box is holding, so a wedge
+        is visible instead of looking like an idle queue."""
         with self._lock:
             queued = [m.to_dict() for queue in self.outbox.values() for m in queue
                       if m.status == "queued"]
             recent = [m.to_dict() for m in self.message_history]
         queued.sort(key=lambda m: m["created_at"])
+        if why_blocked:
+            boxes = {}
+            for message in queued:
+                pane = message["pane_id"]
+                if pane not in boxes:
+                    content = self._box_text(pane)
+                    boxes[pane] = ("" if content is None else content)
+                content = boxes[pane]
+                message["blocked_by"] = (
+                    None if not content
+                    else "guarded send pending" if self._looks_like_ours(pane, content)
+                    else "input box contains a draft")
         return {"queued": queued, "recent": recent[::-1]}
 
     def get_message(self, message_id):
@@ -1287,11 +1305,9 @@ class Flock:
             return False
         if _is_our_send(typed, last_sent_text, awaiting_consumption):
             return False
-        with self._lock:
-            stranded = self.last_text_by_pane.get(pane_id)
         # Text we typed and failed to submit is ours to clean up, not a draft
         # to wait behind; `_ensure_box_clear` flushes it before the next send.
-        return not (stranded and _is_our_send(typed, stranded, True))
+        return not self._looks_like_ours(pane_id, typed)
 
     def _clear_to_send(self, pane_id, last_sent_text=None, awaiting_consumption=False,
                        stop_event=None):
@@ -1341,8 +1357,6 @@ class Flock:
                     time.sleep(SUBMIT_VERIFY_S)
                     if self._box_holds(pane_id, text) is True:
                         break        # it came back: that reading was a redraw
-                    with self._lock:
-                        self.last_text_by_pane.pop(pane_id, None)
                     if attempt > 1:
                         log.info("%s: submitted after %d Enter presses", pane_id, attempt)
                     return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
@@ -1350,6 +1364,25 @@ class Flock:
                      pane_id, attempt)
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
+
+    def _remember_typed(self, pane_id, text):
+        with self._lock:
+            recent = self.sent_text_by_pane.setdefault(pane_id, [])
+            if text in recent:
+                recent.remove(text)
+            recent.append(text)
+            del recent[:-REMEMBERED_SENDS]
+
+    def _looks_like_ours(self, pane_id, shown):
+        """True if what is in the box is text we typed. We keep the last few
+        sends rather than only the newest, and never forget one just because a
+        send reported success: a single mis-read used to orphan our own text,
+        and then nothing could tell it from a human's draft."""
+        if not shown:
+            return False
+        with self._lock:
+            recent = list(self.sent_text_by_pane.get(pane_id, []))
+        return any(_is_our_send(shown, text, True) for text in recent)
 
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
@@ -1383,8 +1416,7 @@ class Flock:
         ok, detail = self.herdr.send_text(pane_id, text)
         if not ok:
             return False, detail
-        with self._lock:
-            self.last_text_by_pane[pane_id] = text
+        self._remember_typed(pane_id, text)
         if not press_enter:
             return True, "sent"
         return self._press_until_submitted(pane_id, text)
@@ -1423,12 +1455,10 @@ class Flock:
         shown = _typed_text(screen)
         if shown is None or not shown:
             return True
-        with self._lock:
-            stranded = self.last_text_by_pane.get(pane_id)
-        if stranded and _is_our_send(shown, stranded, True):
+        if self._looks_like_ours(pane_id, shown):
             log.info("%s: our previous send is stranded in the box; submitting it first",
                      pane_id)
-            ok, _detail = self._press_until_submitted(pane_id, stranded)
+            ok, _detail = self._press_until_submitted(pane_id, shown)
             return ok
         return False                         # someone is writing
 

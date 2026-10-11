@@ -931,6 +931,25 @@ class ConfirmedSubmitTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "stranded")], self.herdr.sends)
         self.assertEqual({}, self.herdr.box)
 
+    def test_our_text_is_still_recognised_after_a_send_reported_success(self):
+        # The wedge: a send reported sent, the daemon forgot the text, and the
+        # text that was really still there then looked like a human's draft,
+        # parking everything queued behind it (37 minutes, in the field).
+        self.flock.submit_text("w2:p1", "first message")
+        self.assertEqual([("w2:p1", "first message")], self.herdr.sends)
+        # It is still there despite the success, as a bad reading would leave it.
+        self.herdr.box["w2:p1"] = "first message"
+        self.assertFalse(self.flock._typing_in("w2:p1"), "ours, not a draft")
+        self.assertTrue(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual(2, len(self.herdr.sends), "it gets submitted, not waited on")
+
+    def test_several_recent_sends_are_recognised_not_just_the_last(self):
+        for text in ("alpha message", "beta message", "gamma message"):
+            self.flock.submit_text("w2:p1", text)
+        for text in ("alpha message", "gamma message"):
+            self.assertTrue(self.flock._looks_like_ours("w2:p1", text), text)
+        self.assertFalse(self.flock._looks_like_ours("w2:p1", "something a human wrote"))
+
     def test_a_humans_draft_is_still_never_flushed(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("my own sentence"))
         self.assertTrue(self.flock._typing_in("w2:p1"))
@@ -1027,6 +1046,45 @@ class PassthroughTypingTests(unittest.TestCase):
         # Everything else still goes through.
         self.assertTrue(self.flock.herdr_command("workspace list")["ok"])
         self.assertTrue(self.flock.herdr_command("pane list")["ok"])
+
+
+class QueueVisibilityTests(unittest.TestCase):
+    """Held messages report the cause without exposing draft contents."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+            mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02)),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+
+    def test_unknown_draft_remains_held_even_when_idle(self):
+        self.herdr.box["w2:p1"] = "private unfinished draft"
+        queued = self.flock.send_now("codex", "wait your turn", wait_s=0)
+        time.sleep(0.3)
+        self.assertEqual([], self.herdr.sends, "never submit a draft being written")
+        self.assertEqual("queued", self.flock.get_message(queued["message_id"])["status"])
+
+    def test_list_messages_says_what_is_blocking_a_queue(self):
+        self.herdr.box["w2:p1"] = "something in the way"
+        self.flock.send_now("codex", "behind it", wait_s=0)
+        blocked = self.flock.list_messages()["queued"]
+        self.assertEqual(1, len(blocked))
+        self.assertEqual("input box contains a draft", blocked[0]["blocked_by"])
+        self.flock.submit_text("w2:p3", "ours")
+        self.herdr.box["w2:p3"] = "ours"
+        self.flock.send_now("w2:p3", "next", wait_s=0)
+        mine = [m for m in self.flock.list_messages()["queued"] if m["pane_id"] == "w2:p3"]
+        self.assertTrue(mine and mine[0]["blocked_by"] == "guarded send pending")
 
 
 class LayoutControlTests(unittest.TestCase):
