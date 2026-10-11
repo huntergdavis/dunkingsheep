@@ -139,6 +139,7 @@ def guide(markdown=False):
            "dunkingsheep send-keys <target> <keys...>     guarded key presses\n"
            "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
            "dunkingsheep flush <target>                   submit text stuck in a pane's box\n"
+           "dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch\n"
            "dunkingsheep guard [status|install|check|uninstall]\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
@@ -191,6 +192,8 @@ def guide(markdown=False):
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
       "send_text, send_keys, flush_box, list_messages, get_message, cancel_message,\n"
+      "inbox_send, inbox_count, inbox_list, inbox_read, inbox_status, inbox_ack,\n"
+      "inbox_cancel, inbox_delete, inbox_stats, inbox_fetch,\n"
       "and for herdr\n"
       "control list_workspaces, create_workspace,\n"
       "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
@@ -309,6 +312,44 @@ def guide(markdown=False):
       "using the herdr CLI, or someone who walked away mid-sentence), which would\n"
       "otherwise block that pane's queue indefinitely, `flush_box(target)` /\n"
       "`dunkingsheep flush <target>` submits it explicitly.\n")
+
+    w(h(2, "Inboxes: messaging that never types"))
+    w("Typing into a terminal is the human's channel, and an unreliable one for\n"
+      "machines: Enter does not always submit, long pastes strand, and a message\n"
+      "in flight can collide with someone mid-sentence. For agent-to-agent\n"
+      "traffic, use an inbox instead. A message is stored for the recipient to\n"
+      "read when it chooses, so none of those failures exist. There is no size\n"
+      "limit, messages survive a daemon restart, and they can carry files.\n")
+    w("The only thing typed is one short line telling the recipient it has mail,\n"
+      "which is the one send short enough to always submit. Pass notify=false to\n"
+      "skip even that.\n")
+    w(code("inbox_count()                          # how many am I holding?\n"
+           "inbox_read()                           # read them, oldest first\n"
+           "inbox_send(to=\"reviewer\", body=\"...\", subject=\"PR 12\")\n"
+           "inbox_send(to=\"reviewer\", body=\"...\", attach=\"/tmp/patch.diff\")\n"
+           "inbox_status(message_id=\"i42\")         # where is that message?\n"
+           "inbox_ack(message_ids=\"i42\")           # done with it\n"
+           "inbox_stats()                          # who has mail piling up?\n"
+           "\n"
+           "dunkingsheep inbox count | read | list | stats\n"
+           "dunkingsheep inbox send reviewer 'PR 12 is ready' -s review -a /tmp/p.diff\n"
+           "dunkingsheep inbox status i42 | ack i42 | cancel i42 | delete i42\n"
+           "dunkingsheep inbox fetch <attachment-id> -d ."))
+    w("A mailbox is an agent's herdr name when it has one, because a pane id\n"
+      "changes when a pane moves or restarts and a name does not. `self` means\n"
+      "your own. A name that matches no running pane still works, so mail can be\n"
+      "left for an agent that has not started.\n")
+    w("Every send returns a stable message id. `inbox_status` reports where that\n"
+      "message is - queued, read, acked or cancelled - with its destination,\n"
+      "sender, timestamps, size, attachment count and any failure reason. It\n"
+      "carries neither body nor subject, so a status board can poll it without\n"
+      "seeing the contents, and it answers across daemon restarts.\n")
+    w("Read, acknowledged and cancelled mail is kept for a week and then purged.\n"
+      "Unread mail is never purged by age. Attachments are stored by content\n"
+      "hash and deleted with the last message that referenced them.\n")
+    w("A standing dunk is the easy way to get an agent checking: point one at the\n"
+      "agent with text like \"call inbox_count; if anything is waiting, read and\n"
+      "act on it\".\n")
 
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"

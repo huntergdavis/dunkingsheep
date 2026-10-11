@@ -178,6 +178,63 @@ def h_cancel_message(flock, args, self_pane_id):
     return flock.cancel_message(args["message_id"])
 
 
+# -- inboxes ------------------------------------------------------------------
+
+def h_inbox_send(flock, args, self_pane_id):
+    attach = args.get("attach")
+    if isinstance(attach, str):
+        attach = [p for p in attach.split(",") if p.strip()]
+    return flock.inbox_send(args["to"], args["body"], subject=args.get("subject"),
+                            attach=attach, notify=_bool(args.get("notify"), True),
+                            self_pane_id=self_pane_id)
+
+
+def h_inbox_count(flock, args, self_pane_id):
+    return flock.inbox_count(args.get("mailbox"), self_pane_id=self_pane_id)
+
+
+def h_inbox_list(flock, args, self_pane_id):
+    return flock.inbox_list(args.get("mailbox"),
+                            unread_only=_bool(args.get("unread_only"), True),
+                            limit=int(_opt(args, "limit", 50)),
+                            self_pane_id=self_pane_id)
+
+
+def h_inbox_read(flock, args, self_pane_id):
+    return flock.inbox_read(args.get("mailbox"), limit=int(_opt(args, "limit", 10)),
+                            peek=_bool(args.get("peek"), False),
+                            self_pane_id=self_pane_id)
+
+
+def h_inbox_status(flock, args, self_pane_id):
+    return flock.inbox_status(args["message_id"])
+
+
+def _ids(args):
+    ids = args["message_ids"]
+    return [i for i in (ids.split(",") if isinstance(ids, str) else ids) if str(i).strip()]
+
+
+def h_inbox_ack(flock, args, self_pane_id):
+    return flock.inbox_ack(_ids(args))
+
+
+def h_inbox_cancel(flock, args, self_pane_id):
+    return flock.inbox_cancel(_ids(args))
+
+
+def h_inbox_delete(flock, args, self_pane_id):
+    return flock.inbox_delete(_ids(args))
+
+
+def h_inbox_stats(flock, args, self_pane_id):
+    return flock.inbox_stats()
+
+
+def h_inbox_fetch(flock, args, self_pane_id):
+    return flock.inbox_fetch(args["attachment_id"], args.get("dest"))
+
+
 def h_list_panes(flock, args, self_pane_id):
     panes = flock.list_panes(self_pane_id=self_pane_id)
     keep = ("pane_id", "is_self", "workspace_label", "tab_label", "agent",
@@ -324,6 +381,18 @@ HOLD_WHILE_TYPING_PARAM = {
         "Default true. Set false only for a pane nobody types in."
     ),
 }
+MAILBOX_PARAM = {
+    "type": "string",
+    "description": ("Whose inbox: an agent name, a pane id, a unique label substring, "
+                    "or 'self' for your own. Agent names are preferred because they "
+                    "survive a pane moving or restarting. A name that matches no live "
+                    "pane still works, so mail can be left for an agent that is not "
+                    "running."),
+}
+MESSAGE_ID_PARAM_INBOX = {"type": "string",
+                          "description": "Inbox message id, e.g. 'i42', as returned by inbox_send."}
+MESSAGE_IDS_PARAM = {"type": "string",
+                     "description": "One inbox message id, or several comma separated."}
 MESSAGE_ID_PARAM = {"type": "string", "description": "Message id, e.g. 'm3' (see list_messages)."}
 LABEL_PARAM = {"type": "string", "description": "Name to give it (how you will target it later)."}
 CWD_PARAM = {"type": "string", "description": "Working directory for the new shell (default: herdr's)."}
@@ -546,6 +615,106 @@ COMMANDS = [
         h_cancel_message,
         params={"message_id": MESSAGE_ID_PARAM},
         required=["message_id"],
+    ),
+    # -- inboxes: machine-to-machine messaging that never types -------------
+    Command(
+        "inbox_send",
+        "Put a message in another agent's inbox. Nothing is typed into their "
+        "terminal, so it cannot collide with what a human is writing, cannot "
+        "stick half-sent, and has no size limit. By default the recipient gets "
+        "one short line telling them they have mail. Prefer this over send_text "
+        "for anything going to another agent. Returns a stable message_id.",
+        h_inbox_send,
+        params={
+            "to": MAILBOX_PARAM,
+            "body": {"type": "string", "description": "The message. Any length."},
+            "subject": {"type": "string", "description": "Optional one-line summary."},
+            "attach": {"type": "string",
+                       "description": "Optional local file path(s) to attach, comma separated."},
+            "notify": {"type": "boolean",
+                       "description": "Nudge the recipient's pane that mail arrived (default true)."},
+        },
+        required=["to", "body"],
+    ),
+    Command(
+        "inbox_count",
+        "How many messages are waiting: unread, total, and how long the oldest "
+        "unread has waited. Cheap enough to poll. Defaults to your own inbox.",
+        h_inbox_count,
+        params={"mailbox": MAILBOX_PARAM},
+    ),
+    Command(
+        "inbox_list",
+        "Summaries of the messages in a mailbox, oldest first: sender, subject, "
+        "size, attachments and state. Does not mark anything read.",
+        h_inbox_list,
+        params={"mailbox": MAILBOX_PARAM,
+                "unread_only": {"type": "boolean",
+                                "description": "Only unread messages (default true)."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500,
+                          "description": "How many to return (default 50)."}},
+    ),
+    Command(
+        "inbox_read",
+        "Read waiting messages in order, with their full bodies, and mark them "
+        "read. This is the one an agent calls when it has mail. Use peek=true "
+        "to look without marking them read.",
+        h_inbox_read,
+        params={"mailbox": MAILBOX_PARAM,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                          "description": "How many to read (default 10)."},
+                "peek": {"type": "boolean",
+                         "description": "Do not mark them read (default false)."}},
+    ),
+    Command(
+        "inbox_status",
+        "State of one message by its id: queued, read, acked or cancelled, with "
+        "its destination, when it was sent and read, size, attachment count and "
+        "any failure reason. Deliberately carries no body or subject, so a "
+        "status board can poll it without seeing the contents. Survives daemon "
+        "restarts.",
+        h_inbox_status,
+        params={"message_id": MESSAGE_ID_PARAM_INBOX},
+        required=["message_id"],
+    ),
+    Command(
+        "inbox_ack",
+        "Acknowledge messages: mark them finished with, so they stop showing as "
+        "waiting and the sender can see they were handled.",
+        h_inbox_ack,
+        params={"message_ids": MESSAGE_IDS_PARAM},
+        required=["message_ids"],
+    ),
+    Command(
+        "inbox_cancel",
+        "Withdraw messages you sent that have not been read yet.",
+        h_inbox_cancel,
+        params={"message_ids": MESSAGE_IDS_PARAM},
+        required=["message_ids"],
+    ),
+    Command(
+        "inbox_delete",
+        "Delete messages outright, with their attachments.",
+        h_inbox_delete,
+        params={"message_ids": MESSAGE_IDS_PARAM},
+        required=["message_ids"],
+    ),
+    Command(
+        "inbox_stats",
+        "Unread and total counts for every mailbox, busiest first. Use it to "
+        "see which agents have mail piling up.",
+        h_inbox_stats,
+    ),
+    Command(
+        "inbox_fetch",
+        "Write an attachment out of the store to a local directory and return "
+        "the path it was written to.",
+        h_inbox_fetch,
+        params={"attachment_id": {"type": "string",
+                                  "description": "Attachment id, from inbox_read or inbox_list."},
+                "dest": {"type": "string",
+                         "description": "Directory to write into (default: the daemon's cwd)."}},
+        required=["attachment_id"],
     ),
     Command(
         "list_panes",

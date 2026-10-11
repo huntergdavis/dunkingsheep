@@ -1,4 +1,4 @@
-# Dunking Sheep 2.6.0 guide
+# Dunking Sheep 2.7.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -94,6 +94,7 @@ dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)
 dunkingsheep send-keys <target> <keys...>     guarded key presses
 dunkingsheep messages | cancel-message <id>   the direct-message queue
 dunkingsheep flush <target>                   submit text stuck in a pane's box
+dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch
 dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
@@ -159,6 +160,8 @@ set HERDR_PANE_ID in the server's env block.
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
 send_text, send_keys, flush_box, list_messages, get_message, cancel_message,
+inbox_send, inbox_count, inbox_list, inbox_read, inbox_status, inbox_ack,
+inbox_cancel, inbox_delete, inbox_stats, inbox_fetch,
 and for herdr
 control list_workspaces, create_workspace,
 create_tab, split_pane, start_agent, rename, focus, close, herdr,
@@ -304,6 +307,53 @@ waiting behind it for ever. For text the daemon did not type (an agent
 using the herdr CLI, or someone who walked away mid-sentence), which would
 otherwise block that pane's queue indefinitely, `flush_box(target)` /
 `dunkingsheep flush <target>` submits it explicitly.
+
+## Inboxes: messaging that never types
+
+Typing into a terminal is the human's channel, and an unreliable one for
+machines: Enter does not always submit, long pastes strand, and a message
+in flight can collide with someone mid-sentence. For agent-to-agent
+traffic, use an inbox instead. A message is stored for the recipient to
+read when it chooses, so none of those failures exist. There is no size
+limit, messages survive a daemon restart, and they can carry files.
+
+The only thing typed is one short line telling the recipient it has mail,
+which is the one send short enough to always submit. Pass notify=false to
+skip even that.
+
+```
+inbox_count()                          # how many am I holding?
+inbox_read()                           # read them, oldest first
+inbox_send(to="reviewer", body="...", subject="PR 12")
+inbox_send(to="reviewer", body="...", attach="/tmp/patch.diff")
+inbox_status(message_id="i42")         # where is that message?
+inbox_ack(message_ids="i42")           # done with it
+inbox_stats()                          # who has mail piling up?
+
+dunkingsheep inbox count | read | list | stats
+dunkingsheep inbox send reviewer 'PR 12 is ready' -s review -a /tmp/p.diff
+dunkingsheep inbox status i42 | ack i42 | cancel i42 | delete i42
+dunkingsheep inbox fetch <attachment-id> -d .
+```
+
+A mailbox is an agent's herdr name when it has one, because a pane id
+changes when a pane moves or restarts and a name does not. `self` means
+your own. A name that matches no running pane still works, so mail can be
+left for an agent that has not started.
+
+Every send returns a stable message id. `inbox_status` reports where that
+message is - queued, read, acked or cancelled - with its destination,
+sender, timestamps, size, attachment count and any failure reason. It
+carries neither body nor subject, so a status board can poll it without
+seeing the contents, and it answers across daemon restarts.
+
+Read, acknowledged and cancelled mail is kept for a week and then purged.
+Unread mail is never purged by age. Attachments are stored by content
+hash and deleted with the last message that referenced them.
+
+A standing dunk is the easy way to get an agent checking: point one at the
+agent with text like "call inbox_count; if anything is waiting, read and
+act on it".
 
 ## The herdr guard: agents that shell out
 

@@ -1141,17 +1141,28 @@ class UnwedgeTests(unittest.TestCase):
             patch.stop()
         self.flock.close()
 
-    def test_an_unrecognised_box_that_never_changes_is_submitted_not_waited_on(self):
-        # Text the daemon did not type, sitting there unchanged: the field
-        # case where three messages waited 37 minutes behind one send.
-        self.herdr.box["w2:p1"] = "left behind by something else"
+    def test_our_own_stranded_text_is_submitted_so_the_queue_moves(self):
+        # The field case: a dunk's text stranded in wN:p1 with three messages
+        # waiting 37 minutes behind it.
+        self.flock.submit_text("w2:p1", "a send of ours")
+        self.herdr.box["w2:p1"] = "a send of ours"        # it never really left
         queued = self.flock.send_now("codex", "please deliver me", wait_s=0)
-        self.assertTrue(queued["queued"])
-        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 8))
-        self.assertEqual("left behind by something else", self.herdr.sends[0][1])
-        self.assertEqual("please deliver me", self.herdr.sends[1][1])
         self.assertTrue(wait_until(
-            lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 5))
+            lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 8))
+        self.assertEqual("please deliver me", self.herdr.sends[-1][1])
+
+    def test_a_draft_we_did_not_type_is_never_auto_submitted(self):
+        # Unchanged text we do not recognise is most likely a person who
+        # started a sentence and walked away. Waiting beats sending half a
+        # thought on their behalf; `flush` releases it deliberately.
+        self.herdr.box["w2:p1"] = "I was in the middle of saying"
+        queued = self.flock.send_now("codex", "behind their draft", wait_s=0)
+        time.sleep(1.0)                                    # well past STALE_BOX_S
+        self.assertEqual([], self.herdr.sends, "never submit someone's draft")
+        self.assertEqual("queued",
+                         self.flock.get_message(queued["message_id"])["status"])
+        blocked = self.flock.list_messages()["queued"][0]
+        self.assertIn("draft", blocked["blocked_by"])
 
     def test_a_box_that_keeps_changing_is_someone_writing_and_is_left_alone(self):
         self.herdr.box["w2:p1"] = "I am typing"

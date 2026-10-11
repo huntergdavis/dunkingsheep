@@ -21,6 +21,7 @@ import json
 import os
 import shlex
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -163,6 +164,45 @@ def build_parser():
     p.add_argument("--no-shadow", action="store_true",
                    help="install the PATH wrapper only; do not take herdr's own place "
                         "(agents herdr starts itself will not be covered)")
+
+    # -- inboxes --------------------------------------------------------------
+    inbox = sub.add_parser("inbox", help="per-agent inboxes: messaging that never types",
+                           description="Machine-to-machine messaging. A message is stored "
+                                       "for the recipient agent to read, so it cannot "
+                                       "collide with a human typing, cannot stick "
+                                       "half-sent, and has no size limit.")
+    isub = inbox.add_subparsers(dest="inbox_command", metavar="<subcommand>")
+    isub.required = True
+    q = isub.add_parser("count", help="how many messages are waiting")
+    q.add_argument("mailbox", nargs="?", help="agent name, pane id or 'self' (default self)")
+    q = isub.add_parser("send", help="put a message in an agent's inbox",
+                        epilog="example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'")
+    q.add_argument("to")
+    q.add_argument("body", nargs="+")
+    q.add_argument("--subject", "-s")
+    q.add_argument("--attach", "-a", action="append", metavar="PATH",
+                   help="attach a local file (repeatable)")
+    q.add_argument("--no-notify", action="store_true",
+                   help="do not nudge the recipient's pane")
+    q = isub.add_parser("list", help="summaries of waiting messages")
+    q.add_argument("mailbox", nargs="?")
+    q.add_argument("--all", action="store_true", help="include messages already read")
+    q.add_argument("--limit", "-n", type=int, default=50)
+    q = isub.add_parser("read", help="read waiting messages and mark them read")
+    q.add_argument("mailbox", nargs="?")
+    q.add_argument("--limit", "-n", type=int, default=10)
+    q.add_argument("--peek", action="store_true", help="do not mark them read")
+    q = isub.add_parser("status", help="state of one message by id")
+    q.add_argument("message_id")
+    for name, help_text in (("ack", "mark messages handled"),
+                            ("cancel", "withdraw unread messages you sent"),
+                            ("delete", "delete messages and their attachments")):
+        q = isub.add_parser(name, help=help_text)
+        q.add_argument("message_ids", nargs="+")
+    isub.add_parser("stats", help="unread counts for every mailbox")
+    q = isub.add_parser("fetch", help="write an attachment to a local directory")
+    q.add_argument("attachment_id")
+    q.add_argument("--dest", "-d", default=".")
 
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
@@ -396,6 +436,81 @@ def print_panes(result):
         )
     if result.get("self_pane_id"):
         print(f"* = this pane ({result['self_pane_id']})")
+
+
+def print_inbox_count(r):
+    line = f"{r['mailbox']}: {r['unread']} unread of {r['total']}"
+    if r.get("oldest_unread_s"):
+        line += f", oldest waiting {_every(r['oldest_unread_s'] / 60)}"
+    if r.get("attachments_unread"):
+        line += f", {r['attachments_unread']} attachment(s)"
+    print(line)
+
+
+def print_inbox_sent(r):
+    line = f"{r['message_id']} -> {r['destination']}"
+    if r.get("attachments"):
+        line += f" with {len(r['attachments'])} attachment(s)"
+    print(line + ("; recipient nudged" if r.get("notified") else "; no nudge"))
+
+
+def _inbox_rows(messages):
+    if not messages:
+        print("no messages")
+        return
+    print(f"{'ID':<6} {'STATE':<9} {'FROM':<22} {'WAITING':>8} {'BYTES':>7} SUBJECT")
+    for m in messages:
+        waiting = f"{m['waiting_s']}s" if m.get("waiting_s") is not None else "-"
+        subject = m.get("subject") or ""
+        if m.get("attachments"):
+            subject += f"  [{len(m['attachments'])} attachment(s)]"
+        print(f"{m['message_id']:<6} {m['state']:<9} {_clip(m.get('sender') or '-', 22):<22} "
+              f"{waiting:>8} {m['body_bytes']:>7} {_clip(subject, 44)}")
+
+
+def print_inbox_list(r):
+    print(f"mailbox {r['mailbox']}")
+    _inbox_rows(r["messages"])
+
+
+def print_inbox_read(r):
+    messages = r["messages"]
+    if not messages:
+        print(f"mailbox {r['mailbox']}: no unread messages")
+        return
+    for m in messages:
+        print(f"--- {m['message_id']} from {m.get('sender') or 'unknown'}"
+              + (f" | {m['subject']}" if m.get("subject") else ""))
+        for blob in m.get("attachments") or []:
+            print(f"    attachment {blob['id']}  {blob['filename']}  "
+                  f"{blob['size']} bytes  {blob['media_type']}")
+        print(m["body"])
+        print()
+
+
+def print_inbox_status(r):
+    for key in ("message_id", "state", "destination", "pane_id", "sender",
+                "waiting_s", "body_bytes", "attachments", "attachment_bytes", "reason"):
+        if r.get(key) not in (None, ""):
+            print(f"{key:<17} {r[key]}")
+    for key, label in (("created_at", "sent"), ("read_at", "read"),
+                       ("acked_at", "acked"), ("cancelled_at", "cancelled")):
+        if r.get(key):
+            print(f"{label:<17} {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(r[key]))}")
+    if r.get("notify", {}).get("state"):
+        print(f"{'notify':<17} {r['notify']['state']}"
+              + (f" ({r['notify']['reason']})" if r["notify"].get("reason") else ""))
+
+
+def print_inbox_stats(r):
+    boxes = r["mailboxes"]
+    if not boxes:
+        print("no mailboxes")
+        return
+    print(f"{'MAILBOX':<30} {'UNREAD':>7} {'TOTAL':>7} OLDEST")
+    for b in boxes:
+        oldest = f"{b['oldest_unread_s']}s" if b.get("oldest_unread_s") else "-"
+        print(f"{_clip(b['destination'], 30):<30} {b['unread']:>7} {b['total']:>7} {oldest}")
 
 
 def print_message(result):
@@ -654,6 +769,34 @@ def run_client_command(client, args):
         result = client.call("send_keys", target=args.target, keys=" ".join(args.keys),
                              hold_while_typing=not args.ignore_typing, wait_s=args.wait)
         return result, print_message
+    if command == "inbox":
+        sub = args.inbox_command
+        if sub == "count":
+            return client.call("inbox_count", mailbox=args.mailbox), print_inbox_count
+        if sub == "send":
+            return client.call("inbox_send", to=args.to, body=" ".join(args.body),
+                               subject=args.subject,
+                               attach=",".join(args.attach) if args.attach else None,
+                               notify=not args.no_notify), print_inbox_sent
+        if sub == "list":
+            return client.call("inbox_list", mailbox=args.mailbox,
+                               unread_only=not args.all, limit=args.limit), print_inbox_list
+        if sub == "read":
+            return client.call("inbox_read", mailbox=args.mailbox, limit=args.limit,
+                               peek=args.peek), print_inbox_read
+        if sub == "status":
+            return client.call("inbox_status", message_id=args.message_id), print_inbox_status
+        if sub in ("ack", "cancel", "delete"):
+            return client.call(f"inbox_{sub}", message_ids=",".join(args.message_ids)), \
+                lambda r: print(f"{r.get('state', sub)}: "
+                                f"{', '.join(r.get('changed') or r.get('deleted') or []) or 'nothing'}"
+                                + (f"; unchanged {r['unchanged']}" if r.get("unchanged") else ""))
+        if sub == "stats":
+            return client.call("inbox_stats"), print_inbox_stats
+        if sub == "fetch":
+            return client.call("inbox_fetch", attachment_id=args.attachment_id,
+                               dest=args.dest), \
+                lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
     if command == "flush":
         return client.call("flush_box", target=args.target), lambda r: print(
             f"{r['target_label']} ({r['pane_id']}): {r['message']}"

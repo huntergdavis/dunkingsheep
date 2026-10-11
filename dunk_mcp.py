@@ -34,6 +34,12 @@ Each schedule is a "dunk": target pane, text, interval, running flag. Dunks
 live in a shared daemon, so what you create here also shows in the human's TUI
 and CLI. Call the `help` tool for the full guide.
 
+Messaging another agent: prefer the inbox over typing. inbox_send stores a
+message for them with no size limit and nudges them with one short line;
+inbox_count and inbox_read are what you call when you have mail. inbox_status
+tracks any message by its id. Typing (send_text) is for humans, or for agents
+without this tooling.
+
 Typical uses: keep another agent moving (add_dunk target=<its pane>), message
 an agent right now (send_text), inspect what an agent is doing (read_pane), or
 schedule a future nudge to yourself (target "self").

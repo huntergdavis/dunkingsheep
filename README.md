@@ -42,6 +42,7 @@ herdr status server                     # herdr must be running
 | **Build the herd** | `create_workspace`, `create_tab`, `split_pane` (each can run a command like `claude` in the new pane), `start_agent` (herdr-registered by name), `rename` / `focus` / `close` for workspaces, tabs and panes, `list_workspaces`. An admin agent spins up a team, then dunks on it. |
 | **Any herdr command** | `herdr <args…>` / `herdr(command=…)` runs any herdr subcommand through the daemon and returns its JSON; `herdr_help` returns herdr's own usage. Refused: stopping/updating/attaching herdr itself, and the four subcommands that type into a pane (use `send_text` / `send_keys`, which wait for the human). |
 | **herdr guard** | `dunkingsheep guard install` replaces the `herdr` binary with a wrapper (the real one becomes `herdr-real`) that routes `pane run`, `pane send-text`, `pane send-keys` and `agent send` through the daemon. Shadowing the binary, not just PATH, is what reaches agents herdr exec's itself, which inherit the server's environment and never read a shell profile. Everything else execs the real herdr untouched. |
+| **Inboxes** | `inbox_send` / `dunkingsheep inbox send` stores a message for an agent to read with `inbox_read`, so nothing is typed into its terminal: no Enter failures, no stranding, no collision with a human, no size limit, and it survives a daemon restart. Attachments supported. Every send returns a stable id that `inbox_status` tracks without exposing the message text. |
 | **Direct messages** | `send <target> <text>` / `send_text` types into any pane, no dunk. Queues behind a human who is typing, exactly like a dunk, and delivers in order when they finish. `messages` / `list_messages` show the queue; `cancel-message` drops one. |
 | **Pane reading** | `read <target>` / `read_pane` returns a pane's recent output plus its agent and status. |
 | **Self-documenting** | `dunkingsheep` (no args), `guide`, `commands --json`, `mcp-setup`, MCP `help` tool, socket `help` command. |
@@ -98,6 +99,8 @@ dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-id
 dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
 dunkingsheep send <target> <text…> [--wait S] [--ignore-typing]   read <target> [-l N]
 dunkingsheep send-keys <target> <keys…> [--wait S] [--ignore-typing]
+dunkingsheep inbox count|read|list|stats | inbox send <to> <body…> [-s subject] [-a file]
+dunkingsheep inbox status <id> | ack|cancel|delete <id…> | fetch <attachment-id> [-d dir]
 dunkingsheep messages | cancel-message <id> | flush <target> | guard [status|install|check|uninstall]
 dunkingsheep workspaces | new-workspace -l L [--cwd D] [-r CMD] | new-tab [-w WS] -l L [-r CMD] | split <target> [--down] [-r CMD]
 dunkingsheep start-agent <name> [-w WS | --tab T [--split right|down]] -- <command…>

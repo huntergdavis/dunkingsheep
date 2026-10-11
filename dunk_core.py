@@ -49,9 +49,10 @@ import shlex
 import threading
 import time
 
+from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.6.0"
+VERSION = "2.7.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -111,10 +112,11 @@ SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
 # last one meant a single mis-read lost track of our own text for good, and
 # every later message queued behind it until a human ran `flush`.
 REMEMBERED_SENDS = 4
-# How long a pane's input box may hold the same unchanged text while messages
-# wait behind it. A person writing changes what is in the box; text that has
-# not moved for minutes is stranded, and the queue must not wedge on it. One
-# send sat in wN:p1 for 37 minutes with three messages behind it before this.
+# How long our own text may sit unsubmitted in a pane's input box while
+# messages wait behind it before the daemon presses Enter again to clear it.
+# One send sat in wN:p1 for 37 minutes with three messages behind it before
+# this existed. Text the daemon did not type is never submitted this way: see
+# `Flock._unwedge`.
 STALE_BOX_S = 150.0
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
@@ -322,7 +324,7 @@ class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
     def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
-                 restore=True):
+                 restore=True, inbox=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
         self.persist_enabled = persist
@@ -341,6 +343,8 @@ class Flock:
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
         self.sent_text_by_pane = {}
+        self._warned_wedged = {}
+        self.inbox = Inbox() if inbox is None else inbox
         self.message_history = []
         self.next_message_id = 1
         if restore:
@@ -434,6 +438,7 @@ class Flock:
             "state_file": self.state_file if self.persist_enabled else None,
             "uptime_s": int(time.time() - self.started_at),
             "queued_messages": sum(len(q) for q in self.outbox.values()),
+            "inbox_unread": sum(m["unread"] for m in self.inbox.stats()),
             "message": self.last_message,
         }
 
@@ -451,6 +456,109 @@ class Flock:
         for pane in panes:
             pane["is_self"] = bool(self_pane_id) and pane.get("pane_id") == self_pane_id
         return panes
+
+    # -- inboxes ------------------------------------------------------------
+    # Machine-to-machine messaging that never types into a terminal. See
+    # dunk_inbox.py for why, and for the storage.
+
+    def resolve_mailbox(self, spec, self_pane_id=None):
+        """Turn a target into (mailbox key, label, pane id).
+
+        The key is the agent's herdr name when it has one, because a pane id
+        changes when a pane moves or restarts and a name does not. A spec that
+        matches no live pane is still accepted as a plain mailbox name, so mail
+        can be left for an agent that is not running yet."""
+        spec = str(spec or "").strip()
+        if not spec:
+            raise DunkError("a target mailbox is required")
+        try:
+            pane = self.resolve_target(spec, self_pane_id)
+        except DunkError:
+            if spec.lower() in ("self", "me", "here"):
+                raise
+            return spec, spec, None
+        name = pane.get("agent_name") or pane.get("label") or pane.get("agent")
+        key = name or pane["pane_id"]
+        label = pane.get("tab_label") or pane["pane_id"]
+        if name:
+            label = f"{name} ({pane['pane_id']})"
+        return key, label, pane["pane_id"]
+
+    def _own_mailbox(self, self_pane_id):
+        key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+        return key
+
+    def _mailbox_or_self(self, spec, self_pane_id):
+        if spec:
+            return self.resolve_mailbox(spec, self_pane_id)[0]
+        if not self_pane_id:
+            raise DunkError("no mailbox given and no caller pane to default to")
+        return self._own_mailbox(self_pane_id)
+
+    def inbox_send(self, to, body, subject=None, attach=None, notify=True,
+                   self_pane_id=None):
+        """Put a message in another agent's inbox. Nothing is typed into their
+        terminal except, when `notify`, a short line telling them they have
+        mail - which is the one send short enough to always submit."""
+        mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id)
+        sender = None
+        if self_pane_id:
+            try:
+                sender = self._own_mailbox(self_pane_id)
+            except DunkError:
+                sender = self_pane_id
+        attachments = [attach] if isinstance(attach, str) else list(attach or ())
+        message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
+                                  mailbox_label=label, pane_id=pane_id,
+                                  attachments=attachments)
+        message["notified"] = False
+        if notify and pane_id:
+            unread = self.inbox.count(mailbox)["unread"]
+            text = (f"[inbox] {unread} unread. Read with the dunkingsheep MCP tool "
+                    f"inbox_read, or: dunkingsheep inbox read")
+            try:
+                nudge = self.send_now(pane_id, text, wait_s=0)
+                self.inbox.record_notify(message["message_id"],
+                                         "queued" if nudge.get("queued") else "sent",
+                                         nudge.get("message"))
+                message["notified"] = True
+            except DunkError as error:
+                self.inbox.record_notify(message["message_id"], "failed", str(error))
+        with self._lock:
+            self.last_message = f"Inbox message to {label}"
+        log.info("inbox %s -> %s (%s)", message["message_id"], mailbox,
+                 "notified" if message["notified"] else "no nudge")
+        return message
+
+    def inbox_count(self, mailbox=None, self_pane_id=None):
+        return self.inbox.count(self._mailbox_or_self(mailbox, self_pane_id))
+
+    def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):
+        key = self._mailbox_or_self(mailbox, self_pane_id)
+        return {"mailbox": key,
+                "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
+
+    def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
+        key = self._mailbox_or_self(mailbox, self_pane_id)
+        return {"mailbox": key, "messages": self.inbox.read(key, limit=limit, peek=peek)}
+
+    def inbox_status(self, message_id):
+        return self.inbox.status(message_id)
+
+    def inbox_ack(self, message_ids):
+        return self.inbox.ack(message_ids)
+
+    def inbox_cancel(self, message_ids):
+        return self.inbox.cancel(message_ids)
+
+    def inbox_delete(self, message_ids):
+        return self.inbox.delete(message_ids)
+
+    def inbox_stats(self):
+        return {"mailboxes": self.inbox.stats()}
+
+    def inbox_fetch(self, attachment_id, dest=None):
+        return self.inbox.fetch(attachment_id, dest or os.getcwd())
 
     # -- herdr layout control -----------------------------------------------
     # Workspaces, tabs and panes can be created, renamed, focused and closed
@@ -1136,13 +1244,28 @@ class Flock:
 
     def _unwedge(self, pane_id, content, since):
         """Last resort when a box has held the same text, unchanged, for
-        STALE_BOX_S while messages wait behind it. Recognising our own
-        stranded text handles almost every case, but one mis-read used to park
-        a pane's whole queue until a human ran `flush`."""
+        STALE_BOX_S while messages wait behind it.
+
+        Only text we typed is ever submitted this way. Unchanged text we do
+        not recognise is far more likely to be a person who started a sentence
+        and walked away, and submitting half a thought on their behalf is
+        worse than a queue that waits: the wedge is visible in `messages` and
+        `flush` resolves it deliberately. Our own stranded text is a different
+        matter - it is ours to clean up, and recognising it is what the
+        remembered-sends list exists for."""
         if not content or time.time() - since < STALE_BOX_S:
             return False
-        log.warning("%s: input box unchanged for %ds with messages waiting; "
-                    "submitting it to unwedge the queue: %r",
+        if not self._looks_like_ours(pane_id, content):
+            if not self._warned_wedged.get(pane_id):
+                self._warned_wedged[pane_id] = True
+                log.warning("%s: input box has held text we did not type for %ds with "
+                            "messages waiting. Not submitting someone's draft; run "
+                            "`dunkingsheep flush %s` to release it: %r",
+                            pane_id, int(time.time() - since), pane_id, content[:80])
+            return False
+        self._warned_wedged.pop(pane_id, None)
+        log.warning("%s: our own text has sat unsubmitted for %ds with messages "
+                    "waiting; submitting it to unwedge the queue: %r",
                     pane_id, int(time.time() - since), content[:80])
         ok, detail = self._press_until_submitted(pane_id, content)
         if not ok:

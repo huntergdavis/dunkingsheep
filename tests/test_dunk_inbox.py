@@ -1,0 +1,266 @@
+"""Per-agent inboxes: the store, the Flock methods, and three-surface parity."""
+
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+import dunk_api  # noqa: E402
+from dunk_core import DunkError, Flock  # noqa: E402
+from dunk_inbox import Inbox, InboxError  # noqa: E402
+from fakes import FakeHerdr  # noqa: E402
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class InboxStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+
+    def tearDown(self):
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def test_send_read_and_count_in_queue_order(self):
+        for n in range(3):
+            self.inbox.send("writer", f"message {n}", sender="pm")
+        count = self.inbox.count("writer")
+        self.assertEqual((3, 3), (count["unread"], count["total"]))
+        first = self.inbox.read("writer", limit=2)
+        self.assertEqual(["message 0", "message 1"], [m["body"] for m in first])
+        self.assertEqual(1, self.inbox.count("writer")["unread"])
+        self.assertEqual(["message 2"], [m["body"] for m in self.inbox.read("writer")])
+        self.assertEqual(0, self.inbox.count("writer")["unread"])
+
+    def test_peek_does_not_consume(self):
+        self.inbox.send("writer", "still here")
+        self.assertEqual(["still here"],
+                         [m["body"] for m in self.inbox.read("writer", peek=True)])
+        self.assertEqual(1, self.inbox.count("writer")["unread"])
+
+    def test_mailboxes_are_separate(self):
+        self.inbox.send("a", "for a")
+        self.inbox.send("b", "for b")
+        self.assertEqual(["for a"], [m["body"] for m in self.inbox.read("a")])
+        self.assertEqual(1, self.inbox.count("b")["unread"])
+
+    # -- the owner's status query ------------------------------------------
+
+    def test_status_reports_every_state_and_never_the_text(self):
+        message = self.inbox.send("writer", "secret body text", subject="secret subject",
+                                  sender="pm")
+        mid = message["message_id"]
+        status = self.inbox.status(mid)
+        self.assertEqual("queued", status["state"])
+        self.assertEqual("writer", status["destination"])
+        self.assertEqual("pm", status["sender"])
+        self.assertIsNotNone(status["created_at"])
+        self.assertIsNone(status["read_at"])
+        self.assertEqual(len("secret body text"), status["body_bytes"])
+        blob = " ".join(str(v) for v in status.values())
+        self.assertNotIn("secret body", blob, "status must not leak the body")
+        self.assertNotIn("secret subject", blob, "status must not leak the subject")
+
+        self.inbox.read("writer")
+        status = self.inbox.status(mid)
+        self.assertEqual("read", status["state"])
+        self.assertIsNotNone(status["read_at"])
+        self.assertIsNone(status["waiting_s"])
+
+        self.inbox.ack([mid])
+        status = self.inbox.status(mid)
+        self.assertEqual("acked", status["state"])
+        self.assertIsNotNone(status["acked_at"])
+
+    def test_status_of_a_cancelled_message(self):
+        mid = self.inbox.send("writer", "never mind")["message_id"]
+        self.inbox.cancel([mid])
+        status = self.inbox.status(mid)
+        self.assertEqual("cancelled", status["state"])
+        self.assertIsNotNone(status["cancelled_at"])
+        self.assertEqual(0, self.inbox.count("writer")["unread"])
+
+    def test_unknown_ids_are_a_clear_error_everywhere(self):
+        for call in (lambda: self.inbox.status("i999"),
+                     lambda: self.inbox.get("i999"),
+                     lambda: self.inbox.ack(["i999"]),
+                     lambda: self.inbox.cancel(["i999"]),
+                     lambda: self.inbox.delete(["i999"]),
+                     lambda: self.inbox.fetch("nope", self.tmp.name)):
+            with self.assertRaises(InboxError) as caught:
+                call()
+            self.assertIn("i999" if "i999" in str(caught.exception) else "nope",
+                          str(caught.exception))
+
+    def test_a_read_message_cannot_be_cancelled(self):
+        mid = self.inbox.send("writer", "too late")["message_id"]
+        self.inbox.read("writer")
+        result = self.inbox.cancel([mid])
+        self.assertEqual([], result["changed"])
+        self.assertEqual("read", result["unchanged"][0]["state"])
+
+    def test_ids_are_stable_and_survive_a_restart(self):
+        mid = self.inbox.send("writer", "durable", subject="keep me")["message_id"]
+        path, blobs = self.inbox.path, self.inbox.blob_dir
+        self.inbox.close()
+        reopened = Inbox(path=path, blob_dir=blobs)
+        try:
+            self.assertEqual("queued", reopened.status(mid)["state"])
+            self.assertEqual("durable", reopened.read("writer")[0]["body"])
+            # And the next id does not collide with the one from before.
+            self.assertNotEqual(mid, reopened.send("writer", "next")["message_id"])
+        finally:
+            reopened.close()
+
+    # -- attachments --------------------------------------------------------
+
+    def test_attachments_round_trip(self):
+        source = os.path.join(self.tmp.name, "patch.diff")
+        with open(source, "w") as handle:
+            handle.write("--- a\n+++ b\n")
+        message = self.inbox.send("writer", "see attached", attachments=[source])
+        blob = message["attachments"][0]
+        self.assertEqual("patch.diff", blob["filename"])
+        self.assertEqual(12, blob["size"])
+        dest = os.path.join(self.tmp.name, "out")
+        written = self.inbox.fetch(blob["id"], dest)
+        self.assertEqual(open(written["path"]).read(), "--- a\n+++ b\n")
+        self.assertEqual(1, self.inbox.count("writer")["attachments_unread"])
+        # Deleting the message takes the blob with it.
+        self.inbox.delete([message["message_id"]])
+        self.assertEqual([], os.listdir(self.inbox.blob_dir))
+
+    def test_attaching_a_missing_file_is_refused(self):
+        with self.assertRaisesRegex(InboxError, "no such file"):
+            self.inbox.send("writer", "body", attachments=["/no/such/file"])
+
+    def test_an_empty_message_is_refused(self):
+        with self.assertRaisesRegex(InboxError, "body or an attachment"):
+            self.inbox.send("writer", "   ")
+
+    def test_purge_keeps_unread_mail_and_drops_old_read_mail(self):
+        old = self.inbox.send("writer", "old news")["message_id"]
+        self.inbox.read("writer")
+        self.inbox.send("writer", "still waiting")
+        self.assertEqual({"purged": 1}, self.inbox.purge(older_than_s=-1))
+        self.assertEqual(1, self.inbox.count("writer")["unread"])
+        with self.assertRaises(InboxError):
+            self.inbox.status(old)
+
+
+class InboxThroughTheFlockTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           inbox=self.inbox)
+
+    def tearDown(self):
+        self.flock.close()
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def test_mailboxes_key_on_the_agent_name_not_the_pane_id(self):
+        key, label, pane = self.flock.resolve_mailbox("codex")
+        self.assertEqual("codex", key, "a name survives a pane moving; an id does not")
+        self.assertEqual("w2:p1", pane)
+        self.assertIn("w2:p1", label)
+
+    def test_mail_can_be_left_for_an_agent_that_is_not_running(self):
+        key, label, pane = self.flock.resolve_mailbox("not-started-yet")
+        self.assertEqual("not-started-yet", key)
+        self.assertIsNone(pane)
+        sent = self.flock.inbox_send("not-started-yet", "waiting for you", notify=True)
+        self.assertEqual(1, self.flock.inbox_count("not-started-yet")["unread"])
+        self.assertFalse(sent["notified"], "nothing to nudge")
+
+    def test_send_nudges_the_recipient_with_one_short_line(self):
+        self.herdr.set_screen("w2:p1", None)       # unreadable: nudge still queues
+        sent = self.flock.inbox_send("codex", "a very long message " * 500,
+                                     subject="big", self_pane_id="w1:p2")
+        self.assertTrue(sent["notified"])
+        # The sender is recorded by agent name, not pane id, for the same
+        # reason mailboxes are: names outlive panes.
+        self.assertEqual("claude", self.flock.inbox.status(sent["message_id"])["sender"])
+        nudge = self.flock.list_messages()
+        texts = [m["text"] for m in nudge["queued"]] + [m["text"] for m in nudge["recent"]]
+        self.assertTrue(any("inbox" in t and len(t) < 200 for t in texts),
+                        "the only thing typed is a short nudge")
+
+    def test_self_defaults_to_the_callers_own_mailbox(self):
+        self.flock.inbox_send("codex", "for codex")
+        self.assertEqual(1, self.flock.inbox_count(self_pane_id="w2:p1")["unread"])
+        read = self.flock.inbox_read(self_pane_id="w2:p1")
+        self.assertEqual(["for codex"], [m["body"] for m in read["messages"]])
+
+    def test_counting_without_a_mailbox_or_a_caller_is_a_clear_error(self):
+        with self.assertRaisesRegex(DunkError, "no mailbox given"):
+            self.flock.inbox_count()
+
+    def test_stats_across_mailboxes(self):
+        self.flock.inbox_send("codex", "one", notify=False)
+        self.flock.inbox_send("claude", "two", notify=False)
+        self.flock.inbox_send("claude", "three", notify=False)
+        stats = {m["mailbox"]: m["unread"] for m in self.flock.inbox_stats()["mailboxes"]}
+        self.assertEqual({"codex": 1, "claude": 2}, stats)
+        self.assertEqual(3, self.flock.status()["inbox_unread"])
+
+
+class SurfaceParityTests(unittest.TestCase):
+    """Every registry command must exist on all three surfaces."""
+
+    def test_every_command_is_reachable_from_the_cli(self):
+        help_text = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dunkingsheep"), "--help"],
+            capture_output=True, text=True, timeout=60).stdout
+        inbox_help = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dunkingsheep"), "inbox", "--help"],
+            capture_output=True, text=True, timeout=60).stdout
+        blob = help_text + inbox_help
+        # The CLI spells commands as subcommands, sometimes grouped or renamed;
+        # this maps each registry command to the words that must appear.
+        spelled = {
+            "status": "status", "list_dunks": "list", "get_dunk": "get",
+            "add_dunk": "add", "update_dunk": "update", "remove_dunk": "remove",
+            "start_dunk": "start", "stop_dunk": "stop", "toggle_dunk": "toggle",
+            "stop_all": "stop-all", "fire_dunk": "fire", "send_text": "send",
+            "send_keys": "send-keys", "flush_box": "flush", "list_messages": "messages",
+            "cancel_message": "cancel-message", "list_panes": "panes",
+            "read_pane": "read", "list_workspaces": "workspaces",
+            "create_workspace": "new-workspace", "create_tab": "new-tab",
+            "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
+            "focus": "focus", "close": "close", "herdr": "herdr",
+            "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",
+            "get_message": "messages",
+            "inbox_send": "send", "inbox_count": "count", "inbox_list": "list",
+            "inbox_read": "read", "inbox_status": "status", "inbox_ack": "ack",
+            "inbox_cancel": "cancel", "inbox_delete": "delete",
+            "inbox_stats": "stats", "inbox_fetch": "fetch",
+        }
+        missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
+        self.assertEqual([], missing,
+                         "new registry commands need a CLI subcommand and an entry here")
+        for command, word in spelled.items():
+            self.assertIn(word, blob, f"{command} has no {word!r} in the CLI help")
+
+    def test_every_inbox_command_is_an_mcp_tool(self):
+        tools = {c.name for c in dunk_api.mcp_commands()}
+        for command in dunk_api.COMMANDS:
+            if command.name.startswith("inbox_"):
+                self.assertIn(command.name, tools)
+                for prop in command.input_schema()["properties"].values():
+                    self.assertIn(prop["type"],
+                                  ("string", "number", "integer", "boolean"))
+
+
+if __name__ == "__main__":
+    unittest.main()

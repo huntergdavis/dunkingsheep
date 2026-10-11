@@ -115,6 +115,28 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Inboxes (2.7.0). Every failure this module has fought comes from one
+  choice: delivering machine-to-machine messages by typing into the human's
+  input box. Enter does not reliably submit, long pastes strand, a send can
+  collide with someone mid-sentence, and a stranded box parks a queue. An
+  inbox removes the transport instead of patching it. `dunk_inbox.Inbox` is a
+  SQLite store in the config directory: a message is a row addressed to a
+  mailbox, read by the recipient through the same three surfaces as everything
+  else. It is durable across restarts (the typing outbox is in memory and has
+  lost messages to restarts twice), ordered per mailbox with read state,
+  unbounded in size, and carries attachments stored by content hash.
+  Mailboxes key on the agent's herdr name rather than its pane id, because a
+  name survives a pane moving or restarting; a name with no live pane is still
+  a valid mailbox, so mail can be left for an agent that has not started.
+  The only thing ever typed is one short nudge line on send, which is the one
+  case that always submits, and `notify=false` skips even that. Every send
+  returns a stable id; `inbox_status` reports queued / read / acked /
+  cancelled with destination, sender, timestamps, size, attachment count and
+  reason, and deliberately carries neither body nor subject so a status board
+  can poll it without seeing the contents. Read, acked and cancelled mail is
+  purged after a week; unread mail is never purged by age. A parity test now
+  asserts every registry command is reachable from the CLI, since the CLI
+  mapping is hand-written while the socket and MCP surfaces are generated.
 - The queue must never wedge (2.6.0). Recognising our own stranded text
   covers nearly every case, but one mis-read parked a pane's whole queue: a
   dunk's checkpoint sat in wN:p1 for 37 minutes with three messages behind it,
