@@ -874,6 +874,26 @@ class ConfirmedSubmitTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "a long message")], self.herdr.sends)
         self.assertEqual(2, len(self.herdr.keys))
 
+    def test_a_box_that_reads_clear_then_fills_again_is_not_counted_as_sent(self):
+        # What stranded a message in the VP pane: the box read empty for an
+        # instant mid-redraw, the send was declared done, and the text that
+        # came back blocked everything queued behind it.
+        self.herdr.enters_needed["w2:p1"] = 99
+        readings = iter([False, True])          # clear, then not clear
+        real = self.flock._box_holds
+
+        def flaky(pane_id, text):
+            try:
+                return next(readings)
+            except StopIteration:
+                return real(pane_id, text)
+
+        with mock.patch.object(self.flock, "_box_holds", flaky), \
+                mock.patch.object(dunk_core, "SUBMIT_VERIFY_S", 0.01):
+            ok, detail = self.flock.submit_text("w2:p1", "fragile")
+        self.assertFalse(ok, "a redraw must not count as submitted")
+        self.assertIn("did not submit", detail)
+
     def test_text_that_never_submits_is_reported_as_failed_not_sent(self):
         self.herdr.enters_needed["w2:p1"] = 99
         ok, detail = self.flock.submit_text("w2:p1", "stubborn")

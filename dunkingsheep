@@ -550,10 +550,16 @@ def main(argv=None):
         return 0
 
     try:
+        # A send may ask the daemon to block for --wait seconds; the socket read
+        # has to outlast that or the CLI reports a timeout for a send that is
+        # in fact queued and fine.
+        wait = getattr(args, "wait", None)
         client = FlockClient.connect_or_start(
             socket_path=args.socket, self_pane_id=args.self_pane,
             start=not args.no_start_daemon,
         )
+        if wait:
+            client.timeout = max(client.timeout, float(wait) + 10.0)
         result, printer = run_client_command(client, args)
     except DunkError as error:
         print(f"error: {error}", file=sys.stderr)

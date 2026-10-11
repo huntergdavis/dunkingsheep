@@ -166,6 +166,8 @@ class CliEndToEndTests(unittest.TestCase):
         # 5. one-off send and read back.
         self.assertIn("sent to", self.run_cli("send", "w1:p1", "hello", "there").stdout)
         self.assertIn("m1    sent", self.run_cli("messages").stdout)
+        # A long --wait must not trip the client's own socket timeout.
+        self.assertIn("sent to", self.run_cli("send", "--wait", "40", "w1:p1", "patience").stdout)
         read = self.run_cli("read", "w1:p1", "--lines", "10").stdout
         self.assertIn("TEXT w1:p1 hello there", read)
 

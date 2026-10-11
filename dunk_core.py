@@ -114,6 +114,10 @@ SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
 SUBMIT_POLL_S = (0.1, 0.2, 0.4, 0.8, 1.0)
+# A box can read clear for an instant while an agent redraws. Declaring the
+# send done on that one reading stranded a message in the VP pane on
+# 2026-10-11 and blocked everything queued behind it, so look once more.
+SUBMIT_VERIFY_S = 0.4
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 # CSI escape sequences (colours, dim, cursor moves) as `herdr pane read
@@ -1334,6 +1338,9 @@ class Flock:
                     break
                 time.sleep(wait)
                 if self._box_holds(pane_id, text) is not True:
+                    time.sleep(SUBMIT_VERIFY_S)
+                    if self._box_holds(pane_id, text) is True:
+                        break        # it came back: that reading was a redraw
                     with self._lock:
                         self.last_text_by_pane.pop(pane_id, None)
                     if attempt > 1:
