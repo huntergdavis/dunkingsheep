@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.7.0"
+VERSION = "2.7.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -145,6 +145,12 @@ log = logging.getLogger("dunkingsheep")
 
 class DunkError(ValueError):
     """A caller mistake (bad id, bad interval, ambiguous target). Safe to show."""
+
+
+class AmbiguousTarget(DunkError):
+    """A target matched more than one pane. Distinct from "no such pane",
+    because a mailbox may be a name with no pane behind it, but it must never
+    be a name that stands for several panes at once."""
 
 
 def _as_dunk_error(method):
@@ -358,6 +364,7 @@ class Flock:
         self.sent_text_by_pane = {}
         self._warned_wedged = {}
         self.inbox = Inbox() if inbox is None else inbox
+        self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
         self.message_history = []
         self.next_message_id = 1
         if restore:
@@ -452,6 +459,7 @@ class Flock:
             "uptime_s": int(time.time() - self.started_at),
             "queued_messages": sum(len(q) for q in self.outbox.values()),
             "inbox_unread": sum(m["unread"] for m in self.inbox.stats()),
+            "quarantined_mailboxes": self.quarantined_mailboxes or None,
             "message": self.last_message,
         }
 
@@ -474,28 +482,87 @@ class Flock:
     # Machine-to-machine messaging that never types into a terminal. See
     # dunk_inbox.py for why, and for the storage.
 
+    def _quarantine_shared_mailboxes(self):
+        """Move mail that an older resolver filed under an agent *type* out of
+        reach. Those mailboxes were shared by every pane of that type, so the
+        messages in them may have been readable by the wrong agent and we
+        cannot tell who they were meant for. They are renamed so no pane
+        resolves to them, and reported, rather than delivered to a guess."""
+        try:
+            types = {str(p.get("agent")).lower() for p in self.herdr.list_panes()
+                     if p.get("agent")}
+        except Exception:  # noqa: BLE001 - herdr may be down; nothing to do yet
+            return []
+        moved = []
+        for mailbox in types:
+            try:
+                count = self.inbox.rename_mailbox(mailbox, f"unrouted:{mailbox}")
+            except InboxError:
+                continue
+            if count:
+                moved.append({"was": mailbox, "now": f"unrouted:{mailbox}",
+                              "messages": count})
+                log.warning("inbox: %d message(s) were filed under the shared mailbox "
+                            "%r by an older version and may have been visible to the "
+                            "wrong agent; moved to 'unrouted:%s' for review",
+                            count, mailbox, mailbox)
+        return moved
+
     def resolve_mailbox(self, spec, self_pane_id=None):
         """Turn a target into (mailbox key, label, pane id).
 
-        The key is the agent's herdr name when it has one, because a pane id
-        changes when a pane moves or restarts and a name does not. A spec that
-        matches no live pane is still accepted as a plain mailbox name, so mail
-        can be left for an agent that is not running yet."""
+        The key has to identify one pane and keep identifying it. The pane's
+        own label comes first, since that is a name someone chose; then the tab
+        label; then the pane id, which is always unique but changes if the pane
+        moves. Each candidate is taken only if exactly one pane carries it.
+
+        The agent *type* is never a key. Keying on it was a bug: every Codex
+        pane shared one mailbox, so a message meant for the Poolrad PM was
+        readable from the website and worker panes too.
+
+        A spec matching no pane is still a valid mailbox name, so mail can be
+        left for an agent that has not started. A spec matching several panes
+        is refused rather than pooled."""
         spec = str(spec or "").strip()
         if not spec:
             raise DunkError("a target mailbox is required")
         try:
             pane = self.resolve_target(spec, self_pane_id)
+        except AmbiguousTarget:
+            raise
         except DunkError:
             if spec.lower() in ("self", "me", "here"):
                 raise
+            if self._is_agent_type(spec):
+                raise DunkError(
+                    f"{spec!r} is an agent type, not one agent: it would be a mailbox "
+                    "several panes share. Use a pane id, a pane or tab label, or a "
+                    "name of your own.")
             return spec, spec, None
-        name = pane.get("agent_name") or pane.get("label") or pane.get("agent")
-        key = name or pane["pane_id"]
-        label = pane.get("tab_label") or pane["pane_id"]
-        if name:
-            label = f"{name} ({pane['pane_id']})"
-        return key, label, pane["pane_id"]
+        return self._mailbox_for_pane(pane)
+
+    def _is_agent_type(self, spec):
+        """True if `spec` names a kind of agent (claude, codex) rather than
+        one of them, so it must never become a mailbox."""
+        low = str(spec).strip().lower()
+        return any(str(p.get("agent") or "").lower() == low
+                   for p in self.herdr.list_panes())
+
+    def _mailbox_for_pane(self, pane):
+        panes = self.herdr.list_panes_grouped()
+
+        def unique(field):
+            value = pane.get(field)
+            if not value:
+                return None
+            matches = [p for p in panes if p.get(field) == value]
+            return value if len(matches) == 1 else None
+
+        key = unique("label") or unique("tab_label") or pane["pane_id"]
+        label = pane.get("label") or pane.get("tab_label") or pane["pane_id"]
+        if label != pane["pane_id"]:
+            label = f"{label} ({pane['pane_id']})"
+        return str(key), label, pane["pane_id"]
 
     def _own_mailbox(self, self_pane_id):
         key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
@@ -938,7 +1005,7 @@ class Flock:
                 agents = [p for p in exact if p.get("agent")]
                 if len(agents) == 1:
                     return agents[0]
-                raise DunkError(f"target {spec!r} is ambiguous: {_describe(exact)}")
+                raise AmbiguousTarget(f"target {spec!r} is ambiguous: {_describe(exact)}")
         matches = []
         for pane in panes:
             haystack = " ".join(
@@ -957,7 +1024,7 @@ class Flock:
         agents = [p for p in matches if p.get("agent")]
         if len(agents) == 1:
             return agents[0]
-        raise DunkError(f"target {spec!r} is ambiguous: {_describe(matches)}")
+        raise AmbiguousTarget(f"target {spec!r} is ambiguous: {_describe(matches)}")
 
     # -- mutation -----------------------------------------------------------
 

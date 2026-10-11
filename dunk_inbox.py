@@ -23,9 +23,10 @@ Properties the typing path cannot offer:
 - attachments: arbitrary files, stored by content hash.
 - a stable message id, queryable for its state at any time, by anyone.
 
-Mailboxes are keyed by agent name where there is one, because a pane id
-changes when a pane moves or restarts and a name does not. Mail can be left
-for an agent that is not running.
+Mailboxes are keyed by whatever uniquely identifies one pane: its own label
+first, since that is a name someone chose, then its tab label, then its pane
+id. Never the agent type - keying on that pooled every Codex pane into one
+mailbox. Mail can be left for an agent that is not running.
 """
 
 import hashlib
@@ -162,6 +163,16 @@ class Inbox:
                      blob["size"], blob["sha256"], _now()))
             self.db.commit()
         return self.get(message_id)
+
+    def rename_mailbox(self, old, new):
+        """Move every message from one mailbox key to another. Returns how
+        many moved. Used to retire a mailbox that turned out to be shared."""
+        with self._lock:
+            cursor = self.db.execute(
+                "UPDATE messages SET mailbox = ?, mailbox_label = ? WHERE mailbox = ?",
+                (new, new, old))
+            self.db.commit()
+            return cursor.rowcount
 
     def record_notify(self, message_id, state, reason=None):
         with self._lock:

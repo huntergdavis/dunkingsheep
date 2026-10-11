@@ -169,10 +169,11 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.inbox.close()
         self.tmp.cleanup()
 
-    def test_mailboxes_key_on_the_agent_name_not_the_pane_id(self):
+    def test_a_mailbox_key_identifies_one_pane_and_is_never_the_agent_type(self):
         key, label, pane = self.flock.resolve_mailbox("codex")
-        self.assertEqual("codex", key, "a name survives a pane moving; an id does not")
         self.assertEqual("w2:p1", pane)
+        self.assertNotEqual("codex", key, "the agent type is not an identity")
+        self.assertEqual("Codex Site", key, "the tab label names this one pane")
         self.assertIn("w2:p1", label)
 
     def test_mail_can_be_left_for_an_agent_that_is_not_running(self):
@@ -190,7 +191,8 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertTrue(sent["notified"])
         # The sender is recorded by agent name, not pane id, for the same
         # reason mailboxes are: names outlive panes.
-        self.assertEqual("claude", self.flock.inbox.status(sent["message_id"])["sender"])
+        self.assertEqual("Claude Proj",
+                         self.flock.inbox.status(sent["message_id"])["sender"])
         nudge = self.flock.list_messages()
         texts = [m["text"] for m in nudge["queued"]] + [m["text"] for m in nudge["recent"]]
         self.assertTrue(any("inbox" in t and len(t) < 200 for t in texts),
@@ -207,12 +209,80 @@ class InboxThroughTheFlockTests(unittest.TestCase):
             self.flock.inbox_count()
 
     def test_stats_across_mailboxes(self):
-        self.flock.inbox_send("codex", "one", notify=False)
-        self.flock.inbox_send("claude", "two", notify=False)
-        self.flock.inbox_send("claude", "three", notify=False)
+        self.flock.inbox_send("w2:p1", "one", notify=False)
+        self.flock.inbox_send("w1:p2", "two", notify=False)
+        self.flock.inbox_send("w1:p2", "three", notify=False)
         stats = {m["mailbox"]: m["unread"] for m in self.flock.inbox_stats()["mailboxes"]}
-        self.assertEqual({"codex": 1, "claude": 2}, stats)
+        self.assertEqual({"Codex Site": 1, "Claude Proj": 2}, stats)
         self.assertEqual(3, self.flock.status()["inbox_unread"])
+
+
+class MailboxIdentityTests(unittest.TestCase):
+    """Two agents of the same kind must never share a mailbox."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                           blob_dir=os.path.join(self.tmp.name, "b"))
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           inbox=self.inbox)
+
+    def tearDown(self):
+        self.flock.close()
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def test_two_panes_of_the_same_agent_type_get_different_mailboxes(self):
+        # The field bug: three Codex panes all resolved to the key 'codex', so
+        # a message for one was readable from the others.
+        first = self.flock.resolve_mailbox("w1:p2")[0]     # claude
+        second = self.flock.resolve_mailbox("w2:p3")[0]    # also claude
+        self.assertNotEqual(first, second)
+        self.assertNotIn("claude", (first, second), "the agent type is not an identity")
+        self.flock.inbox_send("w1:p2", "for the first one", notify=False)
+        self.assertEqual(1, self.flock.inbox_count("w1:p2")["unread"])
+        self.assertEqual(0, self.flock.inbox_count("w2:p3")["unread"],
+                         "the other pane of the same type must not see it")
+
+    def test_every_live_agent_pane_has_its_own_mailbox(self):
+        keys = [self.flock.resolve_mailbox(p["pane_id"])[0]
+                for p in self.herdr.list_panes() if p.get("agent")]
+        self.assertEqual(len(keys), len(set(keys)), f"collision among {keys}")
+
+    def test_the_same_pane_resolves_the_same_way_however_it_is_addressed(self):
+        by_id = self.flock.resolve_mailbox("w2:p1")[0]
+        by_tab = self.flock.resolve_mailbox("Codex Site")[0]
+        by_self = self.flock.resolve_mailbox("self", self_pane_id="w2:p1")[0]
+        self.assertEqual({by_id}, {by_tab, by_self})
+
+    def test_an_agent_type_naming_several_panes_is_refused(self):
+        with self.assertRaisesRegex(DunkError, "ambiguous"):
+            self.flock.resolve_mailbox("claude")
+
+    def test_a_pane_id_is_used_when_nothing_else_is_unique(self):
+        for pane in self.herdr.panes:
+            if pane["pane_id"] in ("w1:p2", "w2:p3"):
+                pane["label"] = "twins"          # same label on two panes
+        for tab in self.herdr.tabs:
+            tab["label"] = "same tab name"
+        key_a = self.flock.resolve_mailbox("w1:p2")[0]
+        key_b = self.flock.resolve_mailbox("w2:p3")[0]
+        self.assertEqual({"w1:p2", "w2:p3"}, {key_a, key_b},
+                         "fall back to the pane id rather than share a mailbox")
+
+    def test_mail_filed_under_a_shared_mailbox_is_quarantined_not_delivered(self):
+        # What an older version left behind: messages filed under 'claude'.
+        self.inbox.send("claude", "meant for one of them")
+        moved = self.flock._quarantine_shared_mailboxes()
+        self.assertEqual([{"was": "claude", "now": "unrouted:claude", "messages": 1}],
+                         moved)
+        self.assertEqual(0, self.inbox.count("claude")["total"])
+        self.assertEqual(1, self.inbox.count("unrouted:claude")["unread"])
+        # And no pane resolves to the quarantine, so nobody reads it by accident.
+        keys = {self.flock.resolve_mailbox(p["pane_id"])[0]
+                for p in self.herdr.list_panes() if p.get("agent")}
+        self.assertNotIn("unrouted:claude", keys)
 
 
 class InboxErrorShapeTests(unittest.TestCase):

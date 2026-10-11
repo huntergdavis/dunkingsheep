@@ -115,6 +115,18 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Mailbox identity (2.7.1). The first cut keyed a mailbox on
+  `pane["agent"]`, which is the agent *type*, not one agent. Every Codex pane
+  therefore shared one mailbox: a message addressed to the Poolrad PM was
+  filed under `codex` and readable from the website and worker panes too.
+  `_mailbox_for_pane` now takes the pane's own label, then its tab label, then
+  its pane id, accepting each only if exactly one pane carries that value, so
+  the key always identifies one pane. A spec matching several panes raises
+  `AmbiguousTarget` rather than pooling them, and a bare agent type is refused
+  by name. Messages an older version filed under a shared mailbox cannot be
+  attributed to a recipient, so they are not guessed at: on startup they are
+  moved to `unrouted:<type>`, which no pane resolves to, logged, and reported
+  in `status` for review.
 - Inboxes (2.7.0). Every failure this module has fought comes from one
   choice: delivering machine-to-machine messages by typing into the human's
   input box. Enter does not reliably submit, long pastes strand, a send can

@@ -1,4 +1,4 @@
-# Dunking Sheep 2.7.0 guide
+# Dunking Sheep 2.7.1 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -336,10 +336,13 @@ dunkingsheep inbox status i42 | ack i42 | cancel i42 | delete i42
 dunkingsheep inbox fetch <attachment-id> -d .
 ```
 
-A mailbox is an agent's herdr name when it has one, because a pane id
-changes when a pane moves or restarts and a name does not. `self` means
-your own. A name that matches no running pane still works, so mail can be
-left for an agent that has not started.
+A mailbox identifies one pane: its own label first, since that is a name
+someone chose, then its tab label, then its pane id. Whichever is taken
+has to belong to exactly one pane. The agent *type* is never a mailbox,
+so 'codex' is refused rather than pooling every Codex pane together.
+`self` means your own. A name matching no running pane still works, so
+mail can be left for an agent that has not started. Renaming a pane or
+tab renames its mailbox, so mail already waiting stays under the old name.
 
 Every send returns a stable message id. `inbox_status` reports where that
 message is - queued, read, acked or cancelled - with its destination,

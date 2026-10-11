@@ -335,10 +335,13 @@ def guide(markdown=False):
            "dunkingsheep inbox send reviewer 'PR 12 is ready' -s review -a /tmp/p.diff\n"
            "dunkingsheep inbox status i42 | ack i42 | cancel i42 | delete i42\n"
            "dunkingsheep inbox fetch <attachment-id> -d ."))
-    w("A mailbox is an agent's herdr name when it has one, because a pane id\n"
-      "changes when a pane moves or restarts and a name does not. `self` means\n"
-      "your own. A name that matches no running pane still works, so mail can be\n"
-      "left for an agent that has not started.\n")
+    w("A mailbox identifies one pane: its own label first, since that is a name\n"
+      "someone chose, then its tab label, then its pane id. Whichever is taken\n"
+      "has to belong to exactly one pane. The agent *type* is never a mailbox,\n"
+      "so 'codex' is refused rather than pooling every Codex pane together.\n"
+      "`self` means your own. A name matching no running pane still works, so\n"
+      "mail can be left for an agent that has not started. Renaming a pane or\n"
+      "tab renames its mailbox, so mail already waiting stays under the old name.\n")
     w("Every send returns a stable message id. `inbox_status` reports where that\n"
       "message is - queued, read, acked or cancelled - with its destination,\n"
       "sender, timestamps, size, attachment count and any failure reason. It\n"
