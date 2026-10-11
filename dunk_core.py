@@ -41,6 +41,7 @@ Orchestration extras on top of the classic Dunking Bird model:
   agent builds its team here, then dunks on it.
 """
 
+import functools
 import json
 import logging
 import os
@@ -144,6 +145,18 @@ log = logging.getLogger("dunkingsheep")
 
 class DunkError(ValueError):
     """A caller mistake (bad id, bad interval, ambiguous target). Safe to show."""
+
+
+def _as_dunk_error(method):
+    """An unknown message id is a caller mistake like any other, so it should
+    come back as a plain message rather than as an internal error."""
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+    return wrapper
 
 
 def format_interval(minutes):
@@ -495,6 +508,7 @@ class Flock:
             raise DunkError("no mailbox given and no caller pane to default to")
         return self._own_mailbox(self_pane_id)
 
+    @_as_dunk_error
     def inbox_send(self, to, body, subject=None, attach=None, notify=True,
                    self_pane_id=None):
         """Put a message in another agent's inbox. Nothing is typed into their
@@ -530,33 +544,42 @@ class Flock:
                  "notified" if message["notified"] else "no nudge")
         return message
 
+    @_as_dunk_error
     def inbox_count(self, mailbox=None, self_pane_id=None):
         return self.inbox.count(self._mailbox_or_self(mailbox, self_pane_id))
 
+    @_as_dunk_error
     def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):
         key = self._mailbox_or_self(mailbox, self_pane_id)
         return {"mailbox": key,
                 "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
 
+    @_as_dunk_error
     def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
         key = self._mailbox_or_self(mailbox, self_pane_id)
         return {"mailbox": key, "messages": self.inbox.read(key, limit=limit, peek=peek)}
 
+    @_as_dunk_error
     def inbox_status(self, message_id):
         return self.inbox.status(message_id)
 
+    @_as_dunk_error
     def inbox_ack(self, message_ids):
         return self.inbox.ack(message_ids)
 
+    @_as_dunk_error
     def inbox_cancel(self, message_ids):
         return self.inbox.cancel(message_ids)
 
+    @_as_dunk_error
     def inbox_delete(self, message_ids):
         return self.inbox.delete(message_ids)
 
+    @_as_dunk_error
     def inbox_stats(self):
         return {"mailboxes": self.inbox.stats()}
 
+    @_as_dunk_error
     def inbox_fetch(self, attachment_id, dest=None):
         return self.inbox.fetch(attachment_id, dest or os.getcwd())
 

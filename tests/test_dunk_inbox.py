@@ -215,6 +215,37 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(3, self.flock.status()["inbox_unread"])
 
 
+class InboxErrorShapeTests(unittest.TestCase):
+    """An unknown id must read like a mistake, not like a crash."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False,
+                           inbox=Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                                       blob_dir=os.path.join(self.tmp.name, "b")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.tmp.cleanup()
+
+    def test_unknown_ids_come_back_as_plain_caller_errors(self):
+        for command, args in (("inbox_status", {"message_id": "i999"}),
+                              ("inbox_ack", {"message_ids": "i999"}),
+                              ("inbox_cancel", {"message_ids": "i999"}),
+                              ("inbox_delete", {"message_ids": "i999"}),
+                              ("inbox_fetch", {"attachment_id": "nope"})):
+            with self.assertRaises(DunkError) as caught:
+                dunk_api.dispatch(self.flock, command, args, self_pane_id="w1:p2")
+            self.assertNotIn("Traceback", str(caught.exception))
+            self.assertIn("no ", str(caught.exception))
+
+    def test_a_bad_attachment_path_is_a_caller_error_too(self):
+        with self.assertRaisesRegex(DunkError, "no such file"):
+            dunk_api.dispatch(self.flock, "inbox_send",
+                              {"to": "someone", "body": "hi", "attach": "/no/such/file",
+                               "notify": False}, self_pane_id="w1:p2")
+
+
 class SurfaceParityTests(unittest.TestCase):
     """Every registry command must exist on all three surfaces."""
 
