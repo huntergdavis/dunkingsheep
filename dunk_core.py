@@ -51,7 +51,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.5.1"
+VERSION = "2.6.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -111,6 +111,11 @@ SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
 # last one meant a single mis-read lost track of our own text for good, and
 # every later message queued behind it until a human ran `flush`.
 REMEMBERED_SENDS = 4
+# How long a pane's input box may hold the same unchanged text while messages
+# wait behind it. A person writing changes what is in the box; text that has
+# not moved for minutes is stranded, and the queue must not wedge on it. One
+# send sat in wN:p1 for 37 minutes with three messages behind it before this.
+STALE_BOX_S = 150.0
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
@@ -1129,11 +1134,28 @@ class Flock:
                 self.outbox_threads[message.pane_id] = thread
                 thread.start()
 
+    def _unwedge(self, pane_id, content, since):
+        """Last resort when a box has held the same text, unchanged, for
+        STALE_BOX_S while messages wait behind it. Recognising our own
+        stranded text handles almost every case, but one mis-read used to park
+        a pane's whole queue until a human ran `flush`."""
+        if not content or time.time() - since < STALE_BOX_S:
+            return False
+        log.warning("%s: input box unchanged for %ds with messages waiting; "
+                    "submitting it to unwedge the queue: %r",
+                    pane_id, int(time.time() - since), content[:80])
+        ok, detail = self._press_until_submitted(pane_id, content)
+        if not ok:
+            log.error("%s: could not unwedge the input box: %s", pane_id, detail)
+        return ok
+
     def _outbox_worker(self, pane_id):
         """Deliver a pane's queued messages in order, each only once the box
         has been clear for TYPING_SETTLE_S; while someone types, wait and
-        re-check every MESSAGE_RECHECK_S."""
+        re-check every MESSAGE_RECHECK_S. A box that never clears at all is
+        unwedged rather than waited on for ever."""
         held_since = None
+        seen, seen_since = None, time.time()
         try:
             while not self.closed:
                 with self._lock:
@@ -1164,6 +1186,15 @@ class Flock:
                         self.last_message = f"Holding message for {message.target_label}: someone is typing"
                     log.info("message %s -> %s: holding, someone is typing in the input box",
                              message.id, pane_id)
+                # Watch what is in the box. While it changes someone is
+                # writing and we wait; while it does not, we are wedged.
+                content = self._box_text(pane_id) or ""
+                if content != seen:
+                    seen, seen_since = content, time.time()
+                elif self._unwedge(pane_id, seen, seen_since):
+                    seen, seen_since = None, time.time()
+                    held_since = None
+                    continue
                 time.sleep(MESSAGE_RECHECK_S)
         except Exception:  # noqa: BLE001 - never kill the daemon
             log.exception("outbox worker for %s crashed", pane_id)
@@ -1325,16 +1356,20 @@ class Flock:
         return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
 
     def _box_holds(self, pane_id, text):
-        """True if `text` still sits in the pane's input box, False if the box
-        is empty or holds something else, None if there is no box to read."""
+        """True if `text` still sits in the pane's input box, False if nothing
+        of ours is waiting there, None if the pane could not be read.
+
+        A pane that reads fine but draws no input box is a bare shell: there
+        is no box for text to be stranded in, so there is nothing to confirm
+        and the send stands. Only a pane we cannot read at all is inconclusive,
+        and that is the case the strict rule is for. Conflating the two made
+        every send to a shell pane report failure."""
         screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
                                       source="visible", ansi=True)
         if screen is None:
             return None
         shown = _typed_text(screen)
-        if shown is None:
-            return None          # a bare shell: nothing to confirm against
-        if not shown:
+        if not shown:            # empty box, or no box at all
             return False
         return _is_our_send(shown, text, True)
 

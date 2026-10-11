@@ -347,7 +347,10 @@ class FlockTests(unittest.TestCase):
 
     def test_unreadable_pane_skips_rather_than_stacking(self):
         dunk = self._bp()
-        self.assertTrue(self.herdr.sent.wait(4))
+        # Let the first send be confirmed before the pane goes unreadable;
+        # an unreadable pane cannot confirm a submit at all.
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
         self.herdr.set_screen("w2:p1", None)
         self.assertTrue(wait_until(
             lambda: self.flock.get(dunk["id"])["skip_count"] >= 1, 5))
@@ -980,6 +983,12 @@ class ConfirmedSubmitTests(unittest.TestCase):
         self.assertFalse(self.flock._ensure_box_clear("w2:p1"))
         self.assertEqual([], self.herdr.keys, "never press Enter on their text")
 
+    def test_an_unreadable_pane_cannot_confirm_so_the_send_is_not_claimed(self):
+        self.herdr.set_screen("w2:p1", None)
+        ok, detail = self.flock.submit_text("w2:p1", "into the dark")
+        self.assertFalse(ok)
+        self.assertIn("unreadable", detail)
+
     def test_a_pane_with_no_input_box_needs_no_confirmation(self):
         # A bare shell: nothing to read back, so one Enter and done.
         self.herdr.set_screen("w1:p1", "hunter@cell:/tmp$ \n")
@@ -1109,6 +1118,54 @@ class QueueVisibilityTests(unittest.TestCase):
         self.flock.send_now("w2:p3", "next", wait_s=0)
         mine = [m for m in self.flock.list_messages()["queued"] if m["pane_id"] == "w2:p3"]
         self.assertTrue(mine and mine[0]["blocked_by"] == "guarded send pending")
+
+
+class UnwedgeTests(unittest.TestCase):
+    """A queue must never park for ever on a box that will not clear."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+            mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02)),
+            mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.01, 0.01)),
+            mock.patch.object(dunk_core, "STALE_BOX_S", 0.3),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+
+    def test_an_unrecognised_box_that_never_changes_is_submitted_not_waited_on(self):
+        # Text the daemon did not type, sitting there unchanged: the field
+        # case where three messages waited 37 minutes behind one send.
+        self.herdr.box["w2:p1"] = "left behind by something else"
+        queued = self.flock.send_now("codex", "please deliver me", wait_s=0)
+        self.assertTrue(queued["queued"])
+        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 8))
+        self.assertEqual("left behind by something else", self.herdr.sends[0][1])
+        self.assertEqual("please deliver me", self.herdr.sends[1][1])
+        self.assertTrue(wait_until(
+            lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 5))
+
+    def test_a_box_that_keeps_changing_is_someone_writing_and_is_left_alone(self):
+        self.herdr.box["w2:p1"] = "I am typing"
+        queued = self.flock.send_now("codex", "wait your turn", wait_s=0)
+        for extra in (" some", " more", " words", " still going", " and going"):
+            self.herdr.box["w2:p1"] += extra
+            time.sleep(0.12)
+        self.assertEqual([], self.herdr.sends, "never submit a draft being written")
+        self.assertEqual("queued", self.flock.get_message(queued["message_id"])["status"])
+
+    def test_nothing_is_unwedged_when_no_message_is_waiting(self):
+        self.herdr.box["w2:p1"] = "a draft nobody is waiting on"
+        time.sleep(0.6)
+        self.assertEqual([], self.herdr.sends)
 
 
 class LayoutControlTests(unittest.TestCase):

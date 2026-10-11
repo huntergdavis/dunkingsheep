@@ -115,6 +115,17 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- The queue must never wedge (2.6.0). Recognising our own stranded text
+  covers nearly every case, but one mis-read parked a pane's whole queue: a
+  dunk's checkpoint sat in wN:p1 for 37 minutes with three messages behind it,
+  needing a human to run `flush`. `_outbox_worker` now watches what the box
+  holds while it waits. Text that keeps changing is someone writing, and is
+  left alone; text unchanged for `STALE_BOX_S` while messages wait is
+  stranded, so `_unwedge` submits it and the queue moves. Nothing is unwedged
+  when no message is waiting, so an idle pane with a draft in it is untouched.
+  Also fixed here: `_box_holds` conflated "pane unreadable" with "pane has no
+  input box", so after the stricter confirmation rule every send to a bare
+  shell reported failure. Only an unreadable pane is inconclusive now.
 - Guard recursion incident, 2026-10-11 (2.5.0). Shadowing was first written so
   that `install()` did it implicitly, and a guard test called `install()`
   without sandboxing PATH. That renamed the real `~/.local/bin/herdr` to
