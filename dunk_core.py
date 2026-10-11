@@ -51,7 +51,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -107,6 +107,8 @@ MESSAGE_HISTORY = 50
 # these gaps a 2.2k message submits; the long tail only costs time when a send
 # is actually stuck, since a normal one is confirmed on the first press.
 SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+# Key names that mean "submit this".
+ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
@@ -538,7 +540,7 @@ class Flock:
             "ran": None,
         }
         if command and pane.get("pane_id"):
-            ran, message = self.herdr.run_command(pane["pane_id"], command)
+            ran, message = self.submit_text(pane["pane_id"], command)
             out["ran"] = command if ran else None
             if not ran:
                 out["error"] = f"created, but running the command failed: {message}"
@@ -1057,7 +1059,7 @@ class Flock:
             raise DunkError("keys are required, e.g. 'Enter' or 'ctrl+c'")
         label = pane.get("tab_label") or pane["pane_id"]
         message = self._new_message(pane["pane_id"], label, " ".join(keys), source="send_keys",
-                                    deliver=lambda: self.herdr.send_keys(pane["pane_id"], keys))
+                                    deliver=lambda: self.press_keys(pane["pane_id"], keys))
         if not _check_bool(hold_while_typing, "hold_while_typing"):
             message.hold_while_typing = False
             self._deliver(message)
@@ -1341,6 +1343,33 @@ class Flock:
                      pane_id, attempt)
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
+
+    def _box_text(self, pane_id):
+        """Whatever is sitting in the pane's input box: '' when empty, None
+        when there is no box to read."""
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None:
+            return None
+        return _typed_text(screen)
+
+    def press_keys(self, pane_id, keys):
+        """Press keys in a pane. When the last key is Enter and the box holds
+        text, the press is confirmed the same way a text send is: Enter does
+        not reliably submit, so pressing it once and reporting success was how
+        agent-to-agent messages were ending up stranded in the box."""
+        keys = [keys] if isinstance(keys, str) else [str(k) for k in keys]
+        if not keys or keys[-1] not in ENTER_KEYS:
+            return self.herdr.send_keys(pane_id, keys)
+        if len(keys) > 1:
+            ok, detail = self.herdr.send_keys(pane_id, keys[:-1])
+            if not ok:
+                return ok, detail
+        pending = self._box_text(pane_id)
+        if not pending:
+            # Nothing waiting: a bare Enter is just a key press.
+            return self.herdr.send_keys(pane_id, [keys[-1]])
+        return self._press_until_submitted(pane_id, pending)
 
     def submit_text(self, pane_id, text, press_enter=True):
         """Type `text` into a pane and confirm it was actually submitted."""

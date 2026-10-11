@@ -115,6 +115,40 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Guard recursion incident, 2026-10-11 (2.5.0). Shadowing was first written so
+  that `install()` did it implicitly, and a guard test called `install()`
+  without sandboxing PATH. That renamed the real `~/.local/bin/herdr` to
+  `herdr-real` and put the wrapper in its place at 08:30, under a daemon that
+  had been running since the previous evening. `HerdrClient` resolves the
+  binary once at construction, so the daemon kept calling the old path, which
+  was now the wrapper, and every internal send became a fresh
+  `dunkingsheep send` that timed out after 8 s: 39 messages queued and four
+  panes stranded. Recovery was to move the real binary back in place, which
+  needs no restart because the daemon holds the path, not an inode; the queue
+  drained on its own and the stranded text was flushed. Three sends were lost
+  to timeouts and resent. Two changes make the class impossible: `_run` now
+  passes `DUNKINGSHEEP_GUARD=1` to every herdr invocation, so a wrapper that a
+  daemon calls execs the real binary instead of routing back; and shadowing is
+  explicit (`install(shadow_binary=True)`, i.e. only the CLI asks for it), with
+  every guard test pinned to a sandboxed PATH that has its own stub herdr.
+- Universal confirmation (2.5.0). Direct agent-to-agent messages were still
+  sticking while dunks were fine, for two reasons. First, `send_keys` pressed
+  Enter once and reported success without reading the box, and agents that
+  type with `pane send-text` and submit with a separate `pane send-keys Enter`
+  therefore had no retry at all; `Flock.press_keys` now routes an Enter meant
+  to submit waiting text through `_press_until_submitted`. `_after_create`
+  (the `command=` argument on create_workspace / create_tab / split_pane) went
+  through the unconfirmed `herdr pane run` and now uses `submit_text` too.
+  Second, and the real cause: the guard was reaching nobody. Every agent pane
+  was checked and all nine were unguarded, including two started that morning,
+  because herdr starts agents by exec'ing them from its server process, so
+  they inherit the server's environment rather than a shell's. A PATH entry in
+  ~/.bashrc can never reach them. `dunk_guard.shadow()` therefore renames the
+  real binary to `herdr-real` and takes its place, which covers every caller
+  including agents already running. A `dunkingsheep-herdr-guard` marker in the
+  wrapper lets `_find_herdr` and the wrapper itself tell the two apart, so the
+  daemon never recurses into its own guard. `herdr update` will overwrite the
+  shadow, so `guard status` reports whether it is in place.
 - Confirmed submit (2.4.0). Messages were arriving stuck in the input box, or
   seeming to send too early. Measured on a live Codex pane 2026-10-10: a
   ~2.2k-character message stayed in the box 3 times out of 3; raising the

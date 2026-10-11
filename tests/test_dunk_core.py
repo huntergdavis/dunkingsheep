@@ -941,6 +941,30 @@ class GuardedKeysTests(unittest.TestCase):
         self.recheck.stop()
         self.flock.close()
 
+    def test_an_enter_meant_to_submit_is_confirmed_and_repeated(self):
+        # The agent-to-agent pattern: type with no Enter, then send Enter.
+        with mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02, 0.02)):
+            self.flock.submit_text("w2:p1", "a long message", press_enter=False)
+            self.assertEqual("a long message", self.herdr.box["w2:p1"])
+            self.herdr.enters_needed["w2:p1"] = 3     # the Codex case
+            ok, detail = self.flock.press_keys("w2:p1", ["Enter"])
+            self.assertTrue(ok)
+            self.assertEqual([("w2:p1", "a long message")], self.herdr.sends)
+            self.assertEqual({}, self.herdr.box, "nothing left stranded")
+
+    def test_a_bare_enter_on_an_empty_box_is_just_a_key_press(self):
+        ok, _detail = self.flock.press_keys("w2:p1", ["Enter"])
+        self.assertTrue(ok)
+        self.assertEqual([("w2:p1", ["Enter"])], self.herdr.keys)
+        self.assertEqual([], self.herdr.sends)
+
+    def test_keys_that_are_not_enter_are_sent_untouched(self):
+        self.flock.submit_text("w2:p1", "draft", press_enter=False)
+        ok, _detail = self.flock.press_keys("w2:p1", ["Escape"])
+        self.assertTrue(ok)
+        self.assertEqual([("w2:p1", ["Escape"])], self.herdr.keys)
+        self.assertEqual("draft", self.herdr.box["w2:p1"], "Escape must not submit")
+
     def test_send_keys_queues_behind_a_draft(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("half a sentence"))
         queued = self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
@@ -1021,7 +1045,8 @@ class LayoutControlTests(unittest.TestCase):
         self.assertEqual("Site", created["workspace"]["label"])
         self.assertEqual(created["pane"]["pane_id"], created["pane_id"])
         self.assertEqual("claude", created["ran"])
-        self.assertEqual([(created["pane_id"], "claude")], self.herdr.runs)
+        # Started through the confirmed submit, like any other send.
+        self.assertEqual([(created["pane_id"], "claude")], self.herdr.sends)
         self.assertEqual(("create_workspace", "Site", "/home/x/site", False),
                          self.herdr.layout_calls[0])
         # The new pane is immediately a valid dunk target, by id and by label.
@@ -1033,11 +1058,11 @@ class LayoutControlTests(unittest.TestCase):
         self.assertEqual("w2", created["tab"]["workspace_id"])
         self.assertEqual("writer", created["tab"]["label"])
         self.assertIsNone(created["ran"])
-        self.assertEqual([], self.herdr.runs)
+        self.assertEqual([], self.herdr.sends)
         # Explicit workspace by label, from anywhere.
         other = self.flock.create_tab(workspace="alpha", label="tests", command="pytest -q")
         self.assertEqual("w1", other["tab"]["workspace_id"])
-        self.assertEqual([(other["pane_id"], "pytest -q")], self.herdr.runs)
+        self.assertEqual([(other["pane_id"], "pytest -q")], self.herdr.sends)
 
     def test_split_pane_validates_direction(self):
         created = self.flock.split_pane("Sheep", direction="down", command="htop")

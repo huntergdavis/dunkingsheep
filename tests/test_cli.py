@@ -202,7 +202,7 @@ class CliEndToEndTests(unittest.TestCase):
         with open(self.log) as handle:
             log = handle.read()
         self.assertIn("WORKSPACE-CREATE Site\n", log)
-        self.assertIn("RUN w2:p1 claude\n", log)
+        self.assertIn("TEXT w2:p1 claude\n", log)  # typed, then confirmed
         self.assertIn("TAB-CREATE w1 writer\n", log)
         self.assertIn("TAB-RENAME w1:t2 Main\n", log)
         self.assertIn("TAB-CLOSE w1:t1\n", log)
@@ -235,7 +235,7 @@ class CliEndToEndTests(unittest.TestCase):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
         self.assertIn("[socket/cli only]", out)
-        self.assertIn("dunkingsheep 2.4", self.run_cli("--version").stdout)
+        self.assertIn("dunkingsheep 2.5", self.run_cli("--version").stdout)
         registry = json.loads(self.run_cli("commands", "--json").stdout)
         names = [c["name"] for c in registry]
         self.assertIn("help", names)

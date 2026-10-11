@@ -499,7 +499,8 @@ COMMANDS = [
         "Press named keys in a pane (e.g. 'Enter', 'Escape', 'ctrl+c'), queued "
         "behind a human who is typing just like send_text. Use this rather than "
         "the herdr passthrough: a bare Enter sent while someone is mid-sentence "
-        "submits their half-written message.",
+        "submits their half-written message. An Enter that is meant to submit "
+        "text waiting in the box is confirmed and repeated until it does.",
         h_send_keys,
         params={"target": TARGET_PARAM,
                 "keys": {"type": "string",

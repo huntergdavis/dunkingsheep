@@ -159,7 +159,10 @@ def build_parser():
                                    "daemon instead. Every other herdr command is untouched.",
                        epilog="new shells pick it up; existing panes need a fresh shell")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "install", "uninstall", "check"])
+                   choices=["status", "install", "uninstall", "check", "shadow", "unshadow"])
+    p.add_argument("--no-shadow", action="store_true",
+                   help="install the PATH wrapper only; do not take herdr's own place "
+                        "(agents herdr starts itself will not be covered)")
 
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
@@ -494,7 +497,10 @@ def main(argv=None):
         return run_mcp_setup(args)
     if command == "guard":
         import dunk_guard
-        result = getattr(dunk_guard, args.action)()
+        if args.action == "install":
+            result = dunk_guard.install(shadow_binary=not args.no_shadow)
+        else:
+            result = getattr(dunk_guard, args.action)()
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
         else:

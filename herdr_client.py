@@ -51,6 +51,18 @@ GUARD_DIR = os.path.join(
 )
 
 
+GUARD_MARKER = b"dunkingsheep-herdr-guard"
+
+
+def _is_guard(path):
+    """True if `path` is the Dunking Sheep herdr wrapper rather than herdr."""
+    try:
+        with open(path, "rb") as handle:
+            return GUARD_MARKER in handle.read(400)
+    except OSError:
+        return False
+
+
 def _find_herdr():
     """Locate the *real* herdr binary, preferring PATH then the usual install
     dir. `DUNKINGSHEEP_HERDR_BIN` overrides. The guard wrapper (see
@@ -58,7 +70,7 @@ def _find_herdr():
     through this daemon, so resolving to it here would recurse; its directory
     is skipped."""
     override = os.environ.get("DUNKINGSHEEP_HERDR_BIN")
-    if override and os.path.exists(override):
+    if override and os.path.exists(override) and not _is_guard(override):
         return override
     guard_dir = os.path.realpath(GUARD_DIR)
     for directory in os.environ.get("PATH", "").split(os.pathsep):
@@ -66,13 +78,17 @@ def _find_herdr():
             continue
         candidate = os.path.join(directory, "herdr")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if _is_guard(candidate):
+                # The guard shadows herdr in place; the real one sits beside it.
+                sibling = os.path.join(directory, "herdr-real")
+                if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+                    return sibling
+                continue
             return candidate
-    found = shutil.which("herdr")
-    if found and os.path.realpath(os.path.dirname(found)) != guard_dir:
-        return found
-    fallback = os.path.expanduser("~/.local/bin/herdr")
-    if os.path.exists(fallback):
-        return fallback
+    for fallback in (os.path.expanduser("~/.local/bin/herdr-real"),
+                     os.path.expanduser("~/.local/bin/herdr")):
+        if os.path.exists(fallback) and not _is_guard(fallback):
+            return fallback
     return "herdr"  # let subprocess raise FileNotFoundError if truly missing
 
 
@@ -86,12 +102,22 @@ class HerdrClient:
     # -- low level ---------------------------------------------------------
 
     def _run(self, args, timeout=None):
-        """Run `herdr <args>`; return (returncode, stdout, stderr)."""
+        """Run `herdr <args>`; return (returncode, stdout, stderr).
+
+        DUNKINGSHEEP_GUARD marks this as a call made *by* the daemon, so if
+        `self.binary` turns out to be the guard wrapper the wrapper execs the
+        real herdr instead of routing back into the daemon. Without it a
+        long-running daemon that resolved `herdr` before the guard was
+        installed recurses into itself: every internal send becomes a new
+        `dunkingsheep send`, which times out after 8 s and backs the queue up.
+        That happened on 2026-10-11 and is what this flag prevents."""
+        env = dict(os.environ, DUNKINGSHEEP_GUARD="1")
         try:
             proc = subprocess.run(
                 [self.binary, *args],
                 capture_output=True,
                 text=True,
+                env=env,
                 timeout=timeout or self.default_timeout,
             )
             return proc.returncode, proc.stdout, proc.stderr

@@ -1,4 +1,4 @@
-# Dunking Sheep 2.4.0 guide
+# Dunking Sheep 2.5.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -287,6 +287,10 @@ fall quiet and presses Enter again, with gaps that grow each time. A blind
 double Enter would be unsafe: if the first one worked, the second would
 submit whatever you typed next.
 
+The same confirmation covers a bare Enter sent to submit text already
+waiting in the box, which is how agents that type and submit in two steps
+were leaving messages stranded.
+
 What it costs, measured on Codex: about 0.4s for a short message, 4s at
 600 characters, 10s at 1.2k and 19s at 2.2k. Claude is about a second at
 any size. Only the confirmation is slow, and only while a send is actually
@@ -317,8 +321,16 @@ dunkingsheep guard check       # prove a typing command is intercepted
 dunkingsheep guard uninstall   # remove both
 ```
 
-New shells pick it up; panes already open need a fresh shell. Set
-HERDR_GUARD_OFF=1 for a single command that must bypass it.
+Installing does two things. It puts the wrapper first on PATH for new
+shells, and it takes herdr's own place: the real binary is renamed to
+`herdr-real` beside it. That second part matters, because herdr starts
+agents by exec'ing them from its server process, so they inherit the
+server's environment and never read a shell profile. Shadowing the binary
+is what covers agents that are already running.
+
+Set HERDR_GUARD_OFF=1 for a single command that must bypass it. If you
+update herdr, it replaces the shadowed binary, so run `dunkingsheep guard
+install` again afterwards; `guard status` shows whether it is in place.
 
 send_text is a direct message with no schedule attached; read_pane is the
 eyes. Together with add_dunk they let an agent communicate with, monitor and

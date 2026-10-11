@@ -294,6 +294,9 @@ def guide(markdown=False):
       "fall quiet and presses Enter again, with gaps that grow each time. A blind\n"
       "double Enter would be unsafe: if the first one worked, the second would\n"
       "submit whatever you typed next.\n")
+    w("The same confirmation covers a bare Enter sent to submit text already\n"
+      "waiting in the box, which is how agents that type and submit in two steps\n"
+      "were leaving messages stranded.\n")
     w("What it costs, measured on Codex: about 0.4s for a short message, 4s at\n"
       "600 characters, 10s at 1.2k and 19s at 2.2k. Claude is about a second at\n"
       "any size. Only the confirmation is slow, and only while a send is actually\n"
@@ -318,8 +321,15 @@ def guide(markdown=False):
            "dunkingsheep guard install     # wrapper + a PATH line in ~/.bashrc\n"
            "dunkingsheep guard check       # prove a typing command is intercepted\n"
            "dunkingsheep guard uninstall   # remove both"))
-    w("New shells pick it up; panes already open need a fresh shell. Set\n"
-      "HERDR_GUARD_OFF=1 for a single command that must bypass it.\n")
+    w("Installing does two things. It puts the wrapper first on PATH for new\n"
+      "shells, and it takes herdr's own place: the real binary is renamed to\n"
+      "`herdr-real` beside it. That second part matters, because herdr starts\n"
+      "agents by exec'ing them from its server process, so they inherit the\n"
+      "server's environment and never read a shell profile. Shadowing the binary\n"
+      "is what covers agents that are already running.\n")
+    w("Set HERDR_GUARD_OFF=1 for a single command that must bypass it. If you\n"
+      "update herdr, it replaces the shadowed binary, so run `dunkingsheep guard\n"
+      "install` again afterwards; `guard status` shows whether it is in place.\n")
     w("send_text is a direct message with no schedule attached; read_pane is the\n"
       "eyes. Together with add_dunk they let an agent communicate with, monitor and\n"
       "pace several projects in parallel.\n")

@@ -34,7 +34,11 @@ GUARD_PATH = os.path.join(GUARD_DIR, "herdr")
 BASHRC = os.path.expanduser("~/.bashrc")
 MARKER = "# dunkingsheep herdr guard"
 
+GUARD_MARKER = "dunkingsheep-herdr-guard"
+REAL_SUFFIX = "-real"
+
 WRAPPER = '''#!/usr/bin/env python3
+# dunkingsheep-herdr-guard
 """herdr guard - installed by `dunkingsheep guard install`; do not edit.
 
 Routes pane-typing subcommands through the Dunking Sheep daemon so they wait
@@ -49,17 +53,35 @@ DUNKINGSHEEP = {dunkingsheep!r}
 GUARD_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
+def is_guard(path):
+    try:
+        with open(path, "rb") as handle:
+            return b"dunkingsheep-herdr-guard" in handle.read(400)
+    except OSError:
+        return False
+
+
 def real_herdr():
+    """The actual herdr binary, never this wrapper. When the guard shadows
+    herdr in its own directory the real one sits beside it as `herdr-real`."""
     override = os.environ.get("DUNKINGSHEEP_HERDR_BIN")
-    if override and os.path.exists(override):
+    if override and os.path.exists(override) and not is_guard(override):
         return override
+    beside = os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr-real")
+    if os.path.isfile(beside) and os.access(beside, os.X_OK):
+        return beside
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory or os.path.realpath(directory) == GUARD_DIR:
             continue
         candidate = os.path.join(directory, "herdr")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if is_guard(candidate):
+                sibling = os.path.join(directory, "herdr-real")
+                if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+                    return sibling
+                continue
             return candidate
-    return os.path.expanduser("~/.local/bin/herdr")
+    return os.path.expanduser("~/.local/bin/herdr-real")
 
 
 def passthrough(argv):
@@ -135,27 +157,106 @@ def status():
     if os.path.exists(BASHRC):
         with open(BASHRC, "r", encoding="utf-8") as handle:
             bashrc = MARKER in handle.read()
+    herdr_path, real_path = _resolve_real_herdr()
+    shadowed = _is_guard(herdr_path) and os.path.exists(real_path)
     return {
         "installed": installed,
         "wrapper": GUARD_PATH if installed else None,
         "shell_configured": bashrc,
         "active_in_this_shell": on_path,
+        "shadowing_herdr": shadowed,
+        "covers_agents_started_by_herdr": shadowed,
         "herdr_resolves_to": resolved,
+        "real_herdr": real_path if shadowed else herdr_path,
         "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send"],
     }
 
 
-def install():
-    """Write the wrapper and put its directory first on PATH for new shells."""
+def install(shadow_binary=False):
+    """Write the wrapper and put its directory first on PATH for new shells.
+
+    `shadow_binary` additionally takes herdr's own place, which is what covers
+    agents herdr exec's itself. That renames a binary outside this project, so
+    it never happens implicitly: only an explicit `dunkingsheep guard install`
+    asks for it. (A test that called `install()` without sandboxing PATH once
+    renamed the real herdr out from under a running daemon.)"""
     os.makedirs(GUARD_DIR, exist_ok=True)
     with open(GUARD_PATH, "w", encoding="utf-8") as handle:
         handle.write(WRAPPER.format(dunkingsheep=_cli_path()))
     os.chmod(GUARD_PATH, os.stat(GUARD_PATH).st_mode | stat.S_IEXEC | stat.S_IXGRP
              | stat.S_IXOTH)
     added = _ensure_bashrc()
+    shadow_error = None
+    if shadow_binary:
+        try:
+            shadow()
+        except (OSError, RuntimeError) as error:
+            shadow_error = str(error)
     result = status()
     result["bashrc_updated"] = added
+    if shadow_error:
+        result["shadow_error"] = shadow_error
     return result
+
+
+def _resolve_real_herdr():
+    """The real herdr on PATH, ignoring any guard wrapper."""
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or os.path.realpath(directory) == os.path.realpath(GUARD_DIR):
+            continue
+        candidate = os.path.join(directory, "herdr")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            if _is_guard(candidate):
+                sibling = os.path.join(directory, "herdr" + REAL_SUFFIX)
+                if os.path.isfile(sibling):
+                    return candidate, sibling      # already shadowed
+                continue
+            return candidate, os.path.join(directory, "herdr" + REAL_SUFFIX)
+    fallback = os.path.expanduser("~/.local/bin/herdr")
+    return fallback, fallback + REAL_SUFFIX
+
+
+def _is_guard(path):
+    try:
+        with open(path, "rb") as handle:
+            return GUARD_MARKER.encode() in handle.read(400)
+    except OSError:
+        return False
+
+
+def shadow():
+    """Put the guard where herdr itself lives.
+
+    A PATH entry only reaches shells that read ~/.bashrc, and herdr starts
+    agents by exec'ing them from the server process, so they inherit the
+    server's environment and never see it. Shadowing the binary covers every
+    caller, including agents already running: the real herdr is renamed to
+    `herdr-real` and the wrapper takes its place."""
+    herdr_path, real_path = _resolve_real_herdr()
+    if not os.path.exists(herdr_path):
+        raise RuntimeError(f"cannot find the herdr binary (looked at {herdr_path})")
+    if not _is_guard(herdr_path):
+        if os.path.exists(real_path):
+            raise RuntimeError(f"{real_path} already exists; move it aside first")
+        os.rename(herdr_path, real_path)
+    os.makedirs(GUARD_DIR, exist_ok=True)
+    body = WRAPPER.format(dunkingsheep=_cli_path())
+    for target in (herdr_path, GUARD_PATH):
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(target, 0o755)
+    return {"shadowed": True, "wrapper": herdr_path, "real_herdr": real_path,
+            **status()}
+
+
+def unshadow():
+    """Put the real herdr back in its own place."""
+    herdr_path, real_path = _resolve_real_herdr()
+    restored = False
+    if _is_guard(herdr_path) and os.path.exists(real_path):
+        os.replace(real_path, herdr_path)
+        restored = True
+    return {"restored": restored, "herdr": herdr_path, **status()}
 
 
 def _ensure_bashrc():
@@ -171,7 +272,8 @@ def _ensure_bashrc():
 
 
 def uninstall():
-    """Remove the wrapper and the PATH line."""
+    """Remove the wrapper, restore herdr, and drop the PATH line."""
+    unshadow()
     removed = False
     if os.path.exists(GUARD_PATH):
         os.remove(GUARD_PATH)

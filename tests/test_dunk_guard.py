@@ -25,8 +25,22 @@ class GuardInstallTests(unittest.TestCase):
                               os.path.join(self.tmp.name, "bin", "herdr")),
             mock.patch.object(dunk_guard, "BASHRC", self.bashrc),
         ]
+        # A sandboxed PATH with a stand-in herdr, so nothing here can ever
+        # reach the real binary (it did once, and renamed it mid-incident).
+        self.bin_dir = os.path.join(self.tmp.name, "realbin")
+        os.makedirs(self.bin_dir)
+        self.real_herdr = os.path.join(self.bin_dir, "herdr")
+        with open(self.real_herdr, "w") as handle:
+            handle.write("#!/bin/sh\necho REAL HERDR\n")
+        os.chmod(self.real_herdr, 0o755)
+        # First on PATH, so every herdr lookup finds this stub and never the
+        # real binary, while the rest of PATH stays usable (python3 etc.).
+        self.patches.append(mock.patch.dict(
+            os.environ, {"PATH": self.bin_dir + os.pathsep + os.environ.get("PATH", "")},
+            clear=False))
         for patch in self.patches:
             patch.start()
+        os.environ.pop("DUNKINGSHEEP_HERDR_BIN", None)
 
     def tearDown(self):
         for patch in self.patches:
@@ -59,8 +73,7 @@ class GuardInstallTests(unittest.TestCase):
 
     def test_wrapper_routes_typing_and_passes_everything_else_through(self):
         self.guard.install()
-        fake_bin = os.path.join(self.tmp.name, "realbin")
-        os.makedirs(fake_bin)
+        fake_bin = self.bin_dir
         log = os.path.join(self.tmp.name, "calls.log")
         # A stand-in for the real herdr, and for the dunkingsheep CLI.
         with open(os.path.join(fake_bin, "herdr"), "w") as handle:
@@ -102,8 +115,7 @@ class GuardInstallTests(unittest.TestCase):
 
     def test_the_daemon_itself_is_never_routed_through_the_guard(self):
         self.guard.install()
-        fake_bin = os.path.join(self.tmp.name, "realbin")
-        os.makedirs(fake_bin, exist_ok=True)
+        fake_bin = self.bin_dir
         log = os.path.join(self.tmp.name, "calls.log")
         with open(os.path.join(fake_bin, "herdr"), "w") as handle:
             handle.write("#!/usr/bin/env python3\nimport sys\n"
@@ -114,6 +126,37 @@ class GuardInstallTests(unittest.TestCase):
         subprocess.run([sys.executable, self.guard.GUARD_PATH, "pane", "run", "w1:p1", "x"],
                        env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(["HERDR pane run w1:p1 x"], open(log).read().splitlines())
+
+    def test_install_alone_never_touches_the_herdr_binary(self):
+        self.guard.install()
+        self.assertFalse(self.guard._is_guard(self.real_herdr),
+                         "install must not rename herdr unless asked")
+        self.assertFalse(os.path.exists(os.path.join(self.bin_dir, "herdr-real")))
+        self.assertFalse(self.guard.status()["shadowing_herdr"])
+
+    def test_shadow_replaces_herdr_in_place_and_unshadow_restores_it(self):
+        bin_dir, real = self.bin_dir, self.real_herdr
+        if True:
+            self.guard.install(shadow_binary=True)
+            # herdr itself is now the wrapper, with the real one beside it.
+            self.assertTrue(self.guard._is_guard(real))
+            self.assertTrue(os.access(os.path.join(bin_dir, "herdr-real"), os.X_OK))
+            state = self.guard.status()
+            self.assertTrue(state["shadowing_herdr"])
+            self.assertTrue(state["covers_agents_started_by_herdr"])
+            # The daemon still resolves the real binary, not the wrapper.
+            import herdr_client
+            self.assertEqual(os.path.join(bin_dir, "herdr-real"),
+                             herdr_client._find_herdr())
+            # Installing again is harmless.
+            self.guard.install()
+            self.assertEqual("#!/bin/sh\necho REAL HERDR\n",
+                             open(os.path.join(bin_dir, "herdr-real")).read())
+            # And uninstall puts herdr back exactly as it was.
+            self.guard.uninstall()
+            self.assertFalse(self.guard._is_guard(real))
+            self.assertEqual("#!/bin/sh\necho REAL HERDR\n", open(real).read())
+            self.assertFalse(os.path.exists(os.path.join(bin_dir, "herdr-real")))
 
     def test_herdr_client_skips_the_guard_directory(self):
         self.guard.install()

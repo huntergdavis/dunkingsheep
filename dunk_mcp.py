@@ -51,7 +51,8 @@ refuses them.
 A send is confirmed, not assumed: the daemon reads the input box back and
 presses Enter again if the text is still sitting there, so a long message
 cannot silently stick. If it still will not submit you get an error rather
-than a false 'sent'.
+than a false 'sent'. The same applies to send_keys when the Enter is meant to
+submit text already waiting in the box.
 
 Building the herd: create_workspace / create_tab / split_pane open named
 spaces, tabs and panes (optionally running a command such as "claude" in the
