@@ -197,7 +197,8 @@ class FlockTests(unittest.TestCase):
                               start=True)
         self.assertTrue(self.herdr.sent.wait(4))
         self.assertEqual(("w1:p1", "tick 1"), self.herdr.sends[0])
-        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 4))
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] >= 2, 6))
         state = self.flock.get(dunk["id"])
         self.assertTrue(state["running"])
         self.assertGreaterEqual(state["send_count"], 2)
@@ -303,32 +304,37 @@ class FlockTests(unittest.TestCase):
         dunk = self._bp(hold_while_typing=False)
         self.assertTrue(self.herdr.sent.wait(4))
         self.assertEqual(("w2:p1", "nudge 1"), self.herdr.sends[0])
-        self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+        # Backpressure did not skip it; the text was typed into the pane.
+        self.assertEqual(0, self.flock.get(dunk["id"])["skip_count"])
+        self.assertIn(("w2:p1", "nudge 1"), self.herdr.text_only)
 
     def test_stacking_is_prevented_when_the_box_stays_full(self):
         # The field bug: a long prompt sits collapsed in the box and the next
         # send must be skipped, not stacked on top of it.
         dunk = self._bp()
-        self.assertTrue(self.herdr.sent.wait(4))
-        self.herdr.set_screen("w2:p1", claude_box_collapsed())  # never picked up
+        # Let the first send land and be confirmed, then make the box look as
+        # though the agent never picked that prompt up.
         self.assertTrue(wait_until(
-            lambda: self.flock.get(dunk["id"])["skip_count"] >= 2, 6))
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
+        self.herdr.set_screen("w2:p1", claude_box_collapsed())
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["skip_count"] >= 2, 10))
         state = self.flock.get(dunk["id"])
         self.assertEqual(1, state["send_count"], "skips must not advance send_count")
         self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
         self.assertEqual("Skipped (unconsumed)", state["status"])
         self.assertIsNone(state["last_error"], "a skip is not an error")
-        self.assertIsNotNone(state["last_skipped_at"])
         self.assertTrue(state["running"])
         self.assertIsNotNone(state["next_send_in_s"], "it reschedules, does not stall")
 
     def test_pane_going_busy_for_an_unrelated_reason_still_skips(self):
         dunk = self._bp()
-        self.assertTrue(self.herdr.sent.wait(4))
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
         self.herdr.statuses["w2:p1"] = "working"          # busy, but...
         self.herdr.set_screen("w2:p1", claude_box_collapsed())  # prompt still queued
         self.assertTrue(wait_until(
-            lambda: self.flock.get(dunk["id"])["skip_count"] >= 1, 5))
+            lambda: self.flock.get(dunk["id"])["skip_count"] >= 1, 8))
         self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
 
     def test_box_cleared_after_consumption_lets_the_next_send_fire(self):
@@ -350,14 +356,16 @@ class FlockTests(unittest.TestCase):
     def test_backpressure_off_preserves_existing_behavior(self):
         dunk = self.flock.add(target="w2:p1", text="tick", interval_minutes=1 / 60, start=True,
                               hold_while_typing=False)
-        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 2, 5))
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] >= 2, 7))
         state = self.flock.get(dunk["id"])
         self.assertFalse(state["skip_if_unconsumed"])
         self.assertEqual(0, state["skip_count"])
         self.assertGreaterEqual(state["send_count"], 2)
-        # With both gates off a dunk never inspects the pane at all.
-        self.assertEqual([], self.herdr.reads)
+        # With both gates off nothing polls the agent's status. The pane is
+        # still read, but only to confirm each send actually left the box.
         self.assertEqual(0, self.herdr.status_calls)
+        self.assertTrue(all(source == "visible" for _pane, source in self.herdr.reads))
 
     # ---- never type over a human: the classifier, on styled screens ----
 
@@ -433,7 +441,8 @@ class FlockTests(unittest.TestCase):
             self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
             self.assertTrue(self.herdr.sent.wait(3))
             self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
-            self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+            self.assertTrue(wait_until(
+                lambda: self.flock.get(dunk["id"])["send_count"] == 1, 5))
 
     def test_idle_gate_runs_again_after_a_typing_hold(self):
         # Finishing typing usually means submitting, so the agent goes busy
@@ -500,6 +509,9 @@ class FlockTests(unittest.TestCase):
         with open(self.state) as handle:
             saved = json.load(handle)["dunkers"][0]
         self.assertTrue(saved["skip_if_unconsumed"])
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
+        saved = self.flock.get(dunk["id"])
         self.assertEqual("nudge 1", saved["last_sent_text"])
         # An old-format file has none of the new fields; it must load with the
         # feature off and no crash.
@@ -728,7 +740,8 @@ class MessageQueueTests(unittest.TestCase):
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
         self.assertTrue(self.herdr.sent.wait(5))
         self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
-        self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 5))
 
     def test_fired_dunk_with_typing_ignored_still_sends_now(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
@@ -828,6 +841,88 @@ class SendRaceTests(unittest.TestCase):
             self.assertEqual([], self.herdr.sends, "must not type onto their draft")
             self.assertEqual("Held (typing)", self.flock.get(dunk["id"])["status"])
             self.assertEqual(0, self.flock.get(dunk["id"])["send_count"])
+
+
+class ConfirmedSubmitTests(unittest.TestCase):
+    """Enter is not reliable on its own: confirm the text left the box."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        # The real gaps are seconds long (Codex needs a quiet pane); the
+        # sequence is what matters here, not the waiting.
+        self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02, 0.02))
+        self.gaps.start()
+
+    def tearDown(self):
+        self.gaps.stop()
+        self.flock.close()
+
+    def test_one_enter_is_enough_when_it_works(self):
+        ok, detail = self.flock.submit_text("w2:p1", "hello")
+        self.assertTrue(ok)
+        self.assertEqual("sent", detail)
+        self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
+        self.assertEqual(1, len(self.herdr.keys), "no needless extra Enter")
+
+    def test_a_pane_that_needs_two_enters_still_submits(self):
+        # What a large paste does on Codex: the first Enter is swallowed.
+        self.herdr.enters_needed["w2:p1"] = 2
+        ok, detail = self.flock.submit_text("w2:p1", "a long message")
+        self.assertTrue(ok)
+        self.assertEqual("sent (Enter x2)", detail)
+        self.assertEqual([("w2:p1", "a long message")], self.herdr.sends)
+        self.assertEqual(2, len(self.herdr.keys))
+
+    def test_text_that_never_submits_is_reported_as_failed_not_sent(self):
+        self.herdr.enters_needed["w2:p1"] = 99
+        ok, detail = self.flock.submit_text("w2:p1", "stubborn")
+        self.assertFalse(ok)
+        self.assertIn("did not submit", detail)
+        self.assertIn("still in the pane's input box", detail)
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual(dunk_core.SUBMIT_ATTEMPTS, len(self.herdr.keys))
+
+    def test_a_dunk_whose_text_never_submits_does_not_count_it_as_sent(self):
+        self.herdr.enters_needed["w2:p1"] = 99
+        dunk = self.flock.add(target="w2:p1", text="nudge")
+        result = self.flock.fire(dunk["id"])
+        self.assertFalse(result["ok"])
+        state = self.flock.get(dunk["id"])
+        self.assertEqual(0, state["send_count"])
+        self.assertIn("did not submit", state["last_error"])
+
+    def test_press_enter_false_does_not_submit_or_confirm(self):
+        ok, _detail = self.flock.submit_text("w2:p1", "draft only", press_enter=False)
+        self.assertTrue(ok)
+        self.assertEqual([], self.herdr.keys)
+        self.assertEqual("draft only", self.herdr.box["w2:p1"])
+
+    def test_our_stranded_text_is_flushed_before_the_next_send(self):
+        # A send that failed to submit leaves our text sitting in the box.
+        self.herdr.enters_needed["w2:p1"] = 99
+        self.assertFalse(self.flock.submit_text("w2:p1", "stranded")[0])
+        self.assertEqual("stranded", self.herdr.box["w2:p1"])
+        # It is ours, so it must not look like a human's draft...
+        self.assertFalse(self.flock._typing_in("w2:p1"))
+        # ...and the next send flushes it first instead of appending to it.
+        self.herdr.enters_needed["w2:p1"] = 1
+        self.assertTrue(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual([("w2:p1", "stranded")], self.herdr.sends)
+        self.assertEqual({}, self.herdr.box)
+
+    def test_a_humans_draft_is_still_never_flushed(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("my own sentence"))
+        self.assertTrue(self.flock._typing_in("w2:p1"))
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual([], self.herdr.keys, "never press Enter on their text")
+
+    def test_a_pane_with_no_input_box_needs_no_confirmation(self):
+        # A bare shell: nothing to read back, so one Enter and done.
+        self.herdr.set_screen("w1:p1", "hunter@cell:/tmp$ \n")
+        ok, _detail = self.flock.submit_text("w1:p1", "ls -l")
+        self.assertTrue(ok)
+        self.assertEqual(1, len(self.herdr.keys))
 
 
 class GuardedKeysTests(unittest.TestCase):

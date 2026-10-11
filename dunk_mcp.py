@@ -48,6 +48,11 @@ pane run`, `pane send-text`, `pane send-keys` and `agent send` bypass all of
 this and will land on top of whatever a human is writing, so the `herdr` tool
 refuses them.
 
+A send is confirmed, not assumed: the daemon reads the input box back and
+presses Enter again if the text is still sitting there, so a long message
+cannot silently stick. If it still will not submit you get an error rather
+than a false 'sent'.
+
 Building the herd: create_workspace / create_tab / split_pane open named
 spaces, tabs and panes (optionally running a command such as "claude" in the
 new pane); start_agent launches an agent registered with herdr by name; rename,

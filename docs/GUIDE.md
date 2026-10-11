@@ -1,4 +1,4 @@
-# Dunking Sheep 2.3.1 guide
+# Dunking Sheep 2.4.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -93,6 +93,7 @@ dunkingsheep send <target> <text...>   one-off send, no dunk (queued if typing)
                  [--wait S] [--ignore-typing]
 dunkingsheep send-keys <target> <keys...>     guarded key presses
 dunkingsheep messages | cancel-message <id>   the direct-message queue
+dunkingsheep flush <target>                   submit text stuck in a pane's box
 dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
@@ -157,7 +158,8 @@ set HERDR_PANE_ID in the server's env block.
 
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
-send_text, send_keys, list_messages, get_message, cancel_message, and for herdr
+send_text, send_keys, flush_box, list_messages, get_message, cancel_message,
+and for herdr
 control list_workspaces, create_workspace,
 create_tab, split_pane, start_agent, rename, focus, close, herdr,
 herdr_help. Call `help` first if unsure; `initialize` also returns these
@@ -269,6 +271,35 @@ send_keys(target, keys) presses keys the same guarded way. Use it rather
 than the herdr passthrough: a bare Enter sent while someone is mid-sentence
 submits their half-written message. For that reason the `herdr` tool
 refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.
+
+## Getting the message actually submitted
+
+Pressing Enter once does not reliably submit. Measured on live panes:
+Claude Code submits on the first Enter whatever the size, but Codex needs
+the pane to have been quiet for a while first, and the bigger the paste the
+longer it needs. Raising the delay before Enter does not fix it on its own,
+and neither does a smaller paste chunk; pressing Enter repeatedly in quick
+succession does nothing either.
+
+So the daemon confirms rather than guesses. After typing it reads the input
+box back, and while its own text is still sitting there it lets the pane
+fall quiet and presses Enter again, with gaps that grow each time. A blind
+double Enter would be unsafe: if the first one worked, the second would
+submit whatever you typed next.
+
+What it costs, measured on Codex: about 0.4s for a short message, 4s at
+600 characters, 10s at 1.2k and 19s at 2.2k. Claude is about a second at
+any size. Only the confirmation is slow, and only while a send is actually
+sticking.
+
+Two consequences worth knowing. A send that never leaves the box is
+reported as failed rather than sent, and shows up in last_error and in
+`messages`. And text stranded in a box by an earlier failure is recognised
+as ours: the next send submits it first rather than appending to it or
+waiting behind it for ever. For text the daemon did not type (an agent
+using the herdr CLI, or someone who walked away mid-sentence), which would
+otherwise block that pane's queue indefinitely, `flush_box(target)` /
+`dunkingsheep flush <target>` submits it explicitly.
 
 ## The herdr guard: agents that shell out
 

@@ -115,6 +115,35 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Confirmed submit (2.4.0). Messages were arriving stuck in the input box, or
+  seeming to send too early. Measured on a live Codex pane 2026-10-10: a
+  ~2.2k-character message stayed in the box 3 times out of 3; raising the
+  pre-Enter delay from 0.2 s to 1 s and 2 s did not help (3/3 stuck each), and
+  neither did shrinking the paste chunk from 900 to 300 or 120 characters
+  (3/3 each). A second Enter submitted it every time. Claude Code submitted
+  single-line, multi-line and 2k messages first time. So this is not a timing
+  race and not the paste-chunk placeholder: a large input simply needs another
+  Enter. A separate shell-pane probe showed that a newline inside the text
+  executes immediately in a bare shell, though agent TUIs take it literally.
+  `Flock.submit_text` therefore types, then `_press_until_submitted` presses
+  Enter and reads the box back (`_box_holds`), pressing again only while our
+  own text is still there, up to `SUBMIT_ATTEMPTS` (3) with a backoff poll.
+  A blind second Enter was rejected as unsafe: if the first worked, the second
+  would submit whatever the human typed next. Follow-up measurement showed
+  what actually decides it on Codex is how long the pane has been *quiet*, and
+  that the requirement scales with the paste: pressing Enter again immediately
+  never worked, while escalating gaps (`SUBMIT_GAPS` = 0.2, 1, 3, 6 s) gave
+  3/3 submits at 2.2k. Cost on Codex: 0.4 s short, 4.2 s at 540 chars, 10 s at
+  1k, 18.9 s at 2.2k; Claude is ~1 s at any size and always submits on the
+  first press. `flush_box` submits text the daemon did not type, which would
+  otherwise block that pane's queue for ever. Text that never leaves the box
+  is reported failed, so `send_count` and message status stay honest.
+  `Flock.last_text_by_pane` remembers what we last typed into each pane, so
+  text stranded by a failed submit is recognised as ours: `_typing_in` does
+  not mistake it for a human draft (which stalled that pane's queue for ever)
+  and `_ensure_box_clear` flushes it with Enter before the next send instead
+  of appending to it. The test double now models the box for real, with
+  `enters_needed` to reproduce the Codex case.
 - Closing the send race, and the two ways around the protection (2.3.1). On
   2026-09-23 an agent's message still landed in the middle of a sentence.
   Red-teaming found the detector innocent (it classifies idle, working,

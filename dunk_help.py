@@ -138,6 +138,7 @@ def guide(markdown=False):
            "                 [--wait S] [--ignore-typing]\n"
            "dunkingsheep send-keys <target> <keys...>     guarded key presses\n"
            "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
+           "dunkingsheep flush <target>                   submit text stuck in a pane's box\n"
            "dunkingsheep guard [status|install|check|uninstall]\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
@@ -189,7 +190,8 @@ def guide(markdown=False):
       "set HERDR_PANE_ID in the server's env block.\n")
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
-      "send_text, send_keys, list_messages, get_message, cancel_message, and for herdr\n"
+      "send_text, send_keys, flush_box, list_messages, get_message, cancel_message,\n"
+      "and for herdr\n"
       "control list_workspaces, create_workspace,\n"
       "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
       "herdr_help. Call `help` first if unsure; `initialize` also returns these\n"
@@ -280,6 +282,31 @@ def guide(markdown=False):
       "than the herdr passthrough: a bare Enter sent while someone is mid-sentence\n"
       "submits their half-written message. For that reason the `herdr` tool\n"
       "refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.\n")
+    w(h(2, "Getting the message actually submitted"))
+    w("Pressing Enter once does not reliably submit. Measured on live panes:\n"
+      "Claude Code submits on the first Enter whatever the size, but Codex needs\n"
+      "the pane to have been quiet for a while first, and the bigger the paste the\n"
+      "longer it needs. Raising the delay before Enter does not fix it on its own,\n"
+      "and neither does a smaller paste chunk; pressing Enter repeatedly in quick\n"
+      "succession does nothing either.\n")
+    w("So the daemon confirms rather than guesses. After typing it reads the input\n"
+      "box back, and while its own text is still sitting there it lets the pane\n"
+      "fall quiet and presses Enter again, with gaps that grow each time. A blind\n"
+      "double Enter would be unsafe: if the first one worked, the second would\n"
+      "submit whatever you typed next.\n")
+    w("What it costs, measured on Codex: about 0.4s for a short message, 4s at\n"
+      "600 characters, 10s at 1.2k and 19s at 2.2k. Claude is about a second at\n"
+      "any size. Only the confirmation is slow, and only while a send is actually\n"
+      "sticking.\n")
+    w("Two consequences worth knowing. A send that never leaves the box is\n"
+      "reported as failed rather than sent, and shows up in last_error and in\n"
+      "`messages`. And text stranded in a box by an earlier failure is recognised\n"
+      "as ours: the next send submits it first rather than appending to it or\n"
+      "waiting behind it for ever. For text the daemon did not type (an agent\n"
+      "using the herdr CLI, or someone who walked away mid-sentence), which would\n"
+      "otherwise block that pane's queue indefinitely, `flush_box(target)` /\n"
+      "`dunkingsheep flush <target>` submits it explicitly.\n")
+
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"
       "<pane> \"...\"` types straight into a terminal with no idea anyone is writing\n"

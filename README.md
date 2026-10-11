@@ -37,6 +37,7 @@ herdr status server                     # herdr must be running
 | **Idle gating** | `--only-idle` / `only_when="idle"` holds a send until herdr reports the target agent idle. |
 | **Backpressure** | `--skip-if-unconsumed` / `skip_if_unconsumed=true` skips a send (no-op, no error, `skip_count`+1) while the previous one still sits unread in the pane. Stops prompts piling up in an unattended agent. |
 | **Never type over you** | On by default, for scheduled dunks, fired dunks, direct messages and key presses. The daemon reads the target's input box with its styling; bright (non-dim) text after the prompt means someone is mid-sentence. It waits, and sends only once the box has read clear twice a second apart **and once more at the instant of sending**, with the send lock held. `--ignore-typing` / `hold_while_typing=false` turns it off. |
+| **Confirmed submit** | One Enter does not reliably submit. Claude takes it first time at any size; Codex needs the pane quiet first, longer the bigger the paste. The daemon reads the box back and presses Enter again, with growing gaps, while its own text is still there. Measured on Codex: 0.4s short, 4s at 600 chars, 19s at 2.2k. A send that never leaves the box is reported failed, not sent; `flush <target>` submits text stranded by anything else. |
 | **Max sends** | `--max-sends N` removes the dunk after N sends. `1` is a one-shot delayed nudge. |
 | **Build the herd** | `create_workspace`, `create_tab`, `split_pane` (each can run a command like `claude` in the new pane), `start_agent` (herdr-registered by name), `rename` / `focus` / `close` for workspaces, tabs and panes, `list_workspaces`. An admin agent spins up a team, then dunks on it. |
 | **Any herdr command** | `herdr <args…>` / `herdr(command=…)` runs any herdr subcommand through the daemon and returns its JSON; `herdr_help` returns herdr's own usage. Refused: stopping/updating/attaching herdr itself, and the four subcommands that type into a pane (use `send_text` / `send_keys`, which wait for the human). |
@@ -97,7 +98,7 @@ dunkingsheep list | get <id> | update <id> [-T …] [-e …] [-t …] [--only-id
 dunkingsheep start|stop|toggle|remove <id>    stop-all    fire <id>
 dunkingsheep send <target> <text…> [--wait S] [--ignore-typing]   read <target> [-l N]
 dunkingsheep send-keys <target> <keys…> [--wait S] [--ignore-typing]
-dunkingsheep messages | cancel-message <id> | guard [status|install|check|uninstall]
+dunkingsheep messages | cancel-message <id> | flush <target> | guard [status|install|check|uninstall]
 dunkingsheep workspaces | new-workspace -l L [--cwd D] [-r CMD] | new-tab [-w WS] -l L [-r CMD] | split <target> [--down] [-r CMD]
 dunkingsheep start-agent <name> [-w WS | --tab T [--split right|down]] -- <command…>
 dunkingsheep rename|focus|close workspace|tab|pane <target> [label]

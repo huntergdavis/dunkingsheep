@@ -29,6 +29,10 @@ Orchestration extras on top of the classic Dunking Bird model:
   until the box is clear (see `Flock._human_typing`). The last of those reads
   happens with the send lock held (`Flock.send_guarded`), so a draft that
   appears while this send queues behind another one still stops it.
+- confirmed submit: after typing, the daemon reads the input box back and
+  presses Enter again while its own text is still sitting there (see
+  `Flock.submit_text`), because one Enter does not reliably submit a long
+  message. A send that never leaves the box is reported as failed, not sent.
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
 - herdr layout control: `list_workspaces`, `create_workspace`, `create_tab`,
@@ -47,7 +51,7 @@ import time
 
 from herdr_client import HerdrClient
 
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -89,6 +93,25 @@ MESSAGE_RECHECK_S = 5
 TYPING_SETTLE_S = 1.0
 # Delivered / failed / cancelled messages kept for list_messages.
 MESSAGE_HISTORY = 50
+# Pressing Enter once does not reliably submit. Measured on a live Codex pane
+# 2026-10-10: a ~2.2k-character message stayed in the input box 3 times out of
+# 3, at every pre-Enter delay from 0.2 s to 2 s and every paste chunk size from
+# 120 to 900 characters, and a second Enter submitted it every time. So the
+# submit is confirmed by reading the box back rather than timed, and Enter is
+# repeated while our own text is still sitting there. A blind second Enter
+# would be unsafe: if the first one worked, it would submit whatever the human
+# typed next.
+# Quiet period before each Enter press. Measured on a live Codex pane: what
+# decides whether a big paste submits is how long the pane has been quiet, not
+# the key itself, and pressing Enter again straight away does not help. With
+# these gaps a 2.2k message submits; the long tail only costs time when a send
+# is actually stuck, since a normal one is confirmed on the first press.
+SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
+SUBMIT_CONFIRM_S = 2.0
+# Most submits land at once, so look soon and back off rather than paying a
+# fixed delay on every send.
+SUBMIT_POLL_S = (0.1, 0.2, 0.4, 0.8, 1.0)
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 # CSI escape sequences (colours, dim, cursor moves) as `herdr pane read
@@ -298,6 +321,10 @@ class Flock:
         # delivery thread and a bounded history of finished messages.
         self.outbox = {}
         self.outbox_threads = {}
+        # The last text we typed into each pane, so text stranded by a failed
+        # submit is recognised as ours and flushed instead of being mistaken
+        # for a human's draft (which would stall that pane's queue for good).
+        self.last_text_by_pane = {}
         self.message_history = []
         self.next_message_id = 1
         if restore:
@@ -1005,9 +1032,10 @@ class Flock:
         if not str(text or "").strip():
             raise DunkError("text is required")
         label = pane.get("tab_label") or pane["pane_id"]
-        send = (self.herdr.send_text_and_enter if press_enter else self.herdr.send_text)
-        message = self._new_message(pane["pane_id"], label, str(text), source="send_text",
-                                    deliver=lambda: send(pane["pane_id"], str(text)))
+        message = self._new_message(
+            pane["pane_id"], label, str(text), source="send_text",
+            deliver=lambda: self.submit_text(pane["pane_id"], str(text),
+                                             press_enter=press_enter))
         if not _check_bool(hold_while_typing, "hold_while_typing"):
             message.hold_while_typing = False
             self._deliver(message)
@@ -1186,7 +1214,7 @@ class Flock:
         text = expand_template(dunker.text, dunker).strip()
         if not text:
             return True, "empty text, nothing sent"
-        ok, message = self.herdr.send_text_and_enter(dunker.target_pane_id, text)
+        ok, message = self.submit_text(dunker.target_pane_id, text)
         with self._lock:
             if ok:
                 dunker.send_count += 1
@@ -1251,7 +1279,13 @@ class Flock:
         typed = _typed_text(screen)
         if not typed:
             return False
-        return not _is_our_send(typed, last_sent_text, awaiting_consumption)
+        if _is_our_send(typed, last_sent_text, awaiting_consumption):
+            return False
+        with self._lock:
+            stranded = self.last_text_by_pane.get(pane_id)
+        # Text we typed and failed to submit is ours to clean up, not a draft
+        # to wait behind; `_ensure_box_clear` flushes it before the next send.
+        return not (stranded and _is_our_send(typed, stranded, True))
 
     def _clear_to_send(self, pane_id, last_sent_text=None, awaiting_consumption=False,
                        stop_event=None):
@@ -1266,6 +1300,101 @@ class Flock:
         else:
             time.sleep(TYPING_SETTLE_S)
         return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
+
+    def _box_holds(self, pane_id, text):
+        """True if `text` still sits in the pane's input box, False if the box
+        is empty or holds something else, None if there is no box to read."""
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None:
+            return None
+        shown = _typed_text(screen)
+        if shown is None:
+            return None          # a bare shell: nothing to confirm against
+        if not shown:
+            return False
+        return _is_our_send(shown, text, True)
+
+    def _press_until_submitted(self, pane_id, text):
+        """Press Enter until `text` has left the input box. Returns
+        (ok, detail). Only ever presses again while our own text is still
+        there, so it can never submit something a human typed afterwards."""
+        for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
+            # Let the pane fall quiet first; a burst of Enters does not submit.
+            if gap:
+                time.sleep(gap)
+            ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            if not ok:
+                return False, detail
+            deadline = time.time() + SUBMIT_CONFIRM_S
+            for wait in SUBMIT_POLL_S:
+                if time.time() >= deadline:
+                    break
+                time.sleep(wait)
+                if self._box_holds(pane_id, text) is not True:
+                    with self._lock:
+                        self.last_text_by_pane.pop(pane_id, None)
+                    if attempt > 1:
+                        log.info("%s: submitted after %d Enter presses", pane_id, attempt)
+                    return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
+            log.info("%s: still in the input box after Enter #%d; pressing again",
+                     pane_id, attempt)
+        return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
+                       "it is still in the pane's input box")
+
+    def submit_text(self, pane_id, text, press_enter=True):
+        """Type `text` into a pane and confirm it was actually submitted."""
+        ok, detail = self.herdr.send_text(pane_id, text)
+        if not ok:
+            return False, detail
+        with self._lock:
+            self.last_text_by_pane[pane_id] = text
+        if not press_enter:
+            return True, "sent"
+        return self._press_until_submitted(pane_id, text)
+
+    def flush_box(self, target, self_pane_id=None):
+        """Submit whatever is sitting unsent in a pane's input box.
+
+        The daemon flushes its own stranded text automatically, but text left
+        by something else (an agent typing through the herdr CLI, an older
+        daemon, a person who walked away) looks exactly like a draft, so every
+        message to that pane queues behind it for ever. This is the explicit
+        "yes, send that" for those cases."""
+        pane = self.resolve_target(target, self_pane_id)
+        pane_id = pane["pane_id"]
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        shown = _typed_text(screen) if screen is not None else None
+        if shown is None:
+            raise DunkError(f"could not read the input box of {pane_id}")
+        label = pane.get("tab_label") or pane_id
+        if not shown:
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "text": None, "message": "the input box is already empty"}
+        ok, detail = self._press_until_submitted(pane_id, shown)
+        log.info("flush %s: %s (%s)", pane_id, "submitted" if ok else "FAILED", detail)
+        return {"pane_id": pane_id, "target_label": label, "flushed": ok,
+                "text": shown, "message": detail}
+
+    def _ensure_box_clear(self, pane_id):
+        """Make the input box ready to type into. Our own text stranded by a
+        failed submit is flushed with Enter; a human's draft is left alone."""
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None:
+            return True                      # unreadable: nothing to go on
+        shown = _typed_text(screen)
+        if shown is None or not shown:
+            return True
+        with self._lock:
+            stranded = self.last_text_by_pane.get(pane_id)
+        if stranded and _is_our_send(shown, stranded, True):
+            log.info("%s: our previous send is stranded in the box; submitting it first",
+                     pane_id)
+            ok, _detail = self._press_until_submitted(pane_id, stranded)
+            return ok
+        return False                         # someone is writing
 
     def send_guarded(self, pane_id, send, last_sent_text=None, awaiting_consumption=False,
                      hold_while_typing=True):
@@ -1282,8 +1411,7 @@ class Flock:
         Returns (sent, ok, detail): sent=False means a draft appeared and
         nothing was typed."""
         with self.send_lock:
-            if hold_while_typing and self._typing_in(pane_id, last_sent_text,
-                                                     awaiting_consumption):
+            if hold_while_typing and not self._ensure_box_clear(pane_id):
                 log.info("%s: draft appeared while waiting for the send lock; not typing",
                          pane_id)
                 return False, None, "someone started typing"

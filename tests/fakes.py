@@ -57,6 +57,9 @@ class FakeHerdr:
         self.sends = []
         self.keys = []
         self.text_only = []
+        self.box = {}                # pane_id -> text sitting in the input box
+        self.enters_needed = {}      # pane_id -> Enter presses a submit takes
+        self.enter_presses = {}
         self.statuses = {}
         self.screens = {}
         self.unreadable = set()
@@ -279,21 +282,38 @@ class FakeHerdr:
             return None
         if pane_id in self.unreadable:
             return None
-        if pane_id in self.screens:
-            screen = self.screens[pane_id]
+        screen = self.screens.get(pane_id)
+        if screen is None and ansi:
+            # No screen pinned by the test: render the modelled input box, so
+            # a send that has not been submitted is visibly still sitting there.
+            pending = self.box.get(pane_id)
+            screen = claude_box_typing_ansi(pending) if pending else claude_box_empty_ansi()
+        if screen is not None:
             if not ansi:
                 screen = ANSI_RE.sub("", screen)
             tail = screen.splitlines()[-int(lines):]
             return "\n".join(tail) + "\n"
-        # Default: the last sends, verbatim (a plain terminal echo).
+        # Default plain read: the last sends, verbatim (a terminal echo).
         mine = [text for pid, text in self.sends if pid == pane_id]
         return "\n".join(mine[-int(lines):]) + "\n"
+
+    # The pane's input box is modelled for real: send_text puts characters in
+    # it, Enter submits (and `enters_needed` makes a pane need more than one,
+    # the way a large paste does on Codex), and a submitted message lands in
+    # `sends`. Anything still in the box is what a reader would see.
 
     def send_keys(self, pane_id, keys):
         with self.lock:
             if self.fail_sends:
                 return False, "boom"
-            self.keys.append((pane_id, list(keys)))
+            keys = [keys] if isinstance(keys, str) else list(keys)
+            self.keys.append((pane_id, keys))
+            if "Enter" in keys and self.box.get(pane_id):
+                self.enter_presses[pane_id] = self.enter_presses.get(pane_id, 0) + 1
+                if self.enter_presses[pane_id] >= self.enters_needed.get(pane_id, 1):
+                    self.sends.append((pane_id, self.box.pop(pane_id)))
+                    self.enter_presses[pane_id] = 0
+                    self.sent.set()
         return True, "sent"
 
     def send_text(self, pane_id, text):
@@ -301,15 +321,14 @@ class FakeHerdr:
             if self.fail_sends:
                 return False, "boom"
             self.text_only.append((pane_id, text))
+            self.box[pane_id] = self.box.get(pane_id, "") + text
         return True, "sent"
 
     def send_text_and_enter(self, pane_id, text):
-        with self.lock:
-            if self.fail_sends:
-                return False, "boom"
-            self.sends.append((pane_id, text))
-            self.sent.set()
-        return True, "sent"
+        ok, detail = self.send_text(pane_id, text)
+        if not ok:
+            return ok, detail
+        return self.send_keys(pane_id, "Enter")
 
     def notify(self, title, body=None):
         pass

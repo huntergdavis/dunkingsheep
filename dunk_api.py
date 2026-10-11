@@ -162,6 +162,10 @@ def h_send_keys(flock, args, self_pane_id):
                                wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)))
 
 
+def h_flush_box(flock, args, self_pane_id):
+    return flock.flush_box(args["target"], self_pane_id=self_pane_id)
+
+
 def h_list_messages(flock, args, self_pane_id):
     return flock.list_messages()
 
@@ -506,6 +510,17 @@ COMMANDS = [
                 "wait_s": {"type": "number", "minimum": 0, "maximum": 3600,
                            "description": "Block up to this many seconds for delivery (default 3)."}},
         required=["target", "keys"],
+    ),
+    Command(
+        "flush_box",
+        "Submit whatever is sitting unsent in a pane's input box. Use it when "
+        "messages to a pane stay queued: something left text in the box (an "
+        "agent typing through the herdr CLI, or a person who walked away "
+        "mid-sentence), and every message queues behind it. Returns the text "
+        "it submitted.",
+        h_flush_box,
+        params={"target": TARGET_PARAM},
+        required=["target"],
     ),
     Command(
         "list_messages",

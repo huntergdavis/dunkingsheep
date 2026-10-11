@@ -161,6 +161,9 @@ def build_parser():
     p.add_argument("action", nargs="?", default="status",
                    choices=["status", "install", "uninstall", "check"])
 
+    p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
+    p.add_argument("target")
+
     p = sub.add_parser("messages", aliases=["queue"], help="direct messages queued and recently sent")
     p = sub.add_parser("cancel-message", aliases=["cancel"], help="drop a queued message")
     p.add_argument("message_id")
@@ -637,6 +640,10 @@ def run_client_command(client, args):
         result = client.call("send_keys", target=args.target, keys=" ".join(args.keys),
                              hold_while_typing=not args.ignore_typing, wait_s=args.wait)
         return result, print_message
+    if command == "flush":
+        return client.call("flush_box", target=args.target), lambda r: print(
+            f"{r['target_label']} ({r['pane_id']}): {r['message']}"
+            + (f" -> {r['text'][:60]!r}" if r.get("text") else ""))
     if command in ("messages", "queue"):
         return client.call("list_messages"), print_messages
     if command in ("cancel-message", "cancel"):
