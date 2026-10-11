@@ -120,8 +120,9 @@ SUBMIT_CONFIRM_S = 2.0
 SUBMIT_POLL_S = (0.1, 0.2, 0.4, 0.8, 1.0)
 # A box can read clear for an instant while an agent redraws. Declaring the
 # send done on that one reading stranded a message in the VP pane on
-# 2026-10-11 and blocked everything queued behind it, so look once more.
-SUBMIT_VERIFY_S = 0.4
+# 2026-10-11 and blocked everything queued behind it. Require two later,
+# readable checks; an absent input box during redraw cannot prove delivery.
+SUBMIT_VERIFY_GAPS = (0.4, 1.0)
 
 TEMPLATE_RE = re.compile(r"\{(id|name|count|target|interval|time|date)\}")
 # CSI escape sequences (colours, dim, cursor moves) as `herdr pane read
@@ -1349,17 +1350,28 @@ class Flock:
             if not ok:
                 return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
+            last_hold = None
             for wait in SUBMIT_POLL_S:
                 if time.time() >= deadline:
                     break
                 time.sleep(wait)
-                if self._box_holds(pane_id, text) is not True:
-                    time.sleep(SUBMIT_VERIFY_S)
-                    if self._box_holds(pane_id, text) is True:
-                        break        # it came back: that reading was a redraw
-                    if attempt > 1:
-                        log.info("%s: submitted after %d Enter presses", pane_id, attempt)
-                    return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
+                last_hold = self._box_holds(pane_id, text)
+                if last_hold is False:
+                    for verify_gap in SUBMIT_VERIFY_GAPS:
+                        time.sleep(verify_gap)
+                        last_hold = self._box_holds(pane_id, text)
+                        if last_hold is not False:
+                            break    # it came back, or the pane became unreadable
+                    else:
+                        # Only repeated readable checks prove submission. A
+                        # missing input box during redraw proves nothing.
+                        if attempt > 1:
+                            log.info("%s: submitted after %d Enter presses", pane_id, attempt)
+                        return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
+                    if last_hold is True:
+                        break        # our text returned; another Enter is safe
+            if last_hold is not True:
+                return False, "submission unconfirmed: input box unreadable or changing"
             log.info("%s: still in the input box after Enter #%d; pressing again",
                      pane_id, attempt)
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
@@ -1419,6 +1431,11 @@ class Flock:
         self._remember_typed(pane_id, text)
         if not press_enter:
             return True, "sent"
+        pane = next((item for item in self.herdr.list_panes()
+                     if item.get("pane_id") == pane_id), None)
+        if pane is not None and not pane.get("agent"):
+            # A bare shell has no chat input box to read back.
+            return self.herdr.send_keys(pane_id, "Enter")
         return self._press_until_submitted(pane_id, text)
 
     def flush_box(self, target, self_pane_id=None):

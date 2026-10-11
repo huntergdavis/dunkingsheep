@@ -853,9 +853,12 @@ class ConfirmedSubmitTests(unittest.TestCase):
         # sequence is what matters here, not the waiting.
         self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02, 0.02))
         self.gaps.start()
+        self.verify_gaps = mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.01, 0.01))
+        self.verify_gaps.start()
 
     def tearDown(self):
         self.gaps.stop()
+        self.verify_gaps.stop()
         self.flock.close()
 
     def test_one_enter_is_enough_when_it_works(self):
@@ -888,11 +891,32 @@ class ConfirmedSubmitTests(unittest.TestCase):
             except StopIteration:
                 return real(pane_id, text)
 
-        with mock.patch.object(self.flock, "_box_holds", flaky), \
-                mock.patch.object(dunk_core, "SUBMIT_VERIFY_S", 0.01):
+        with mock.patch.object(self.flock, "_box_holds", flaky):
             ok, detail = self.flock.submit_text("w2:p1", "fragile")
         self.assertFalse(ok, "a redraw must not count as submitted")
         self.assertIn("did not submit", detail)
+
+    def test_delayed_redraw_after_two_clear_reads_is_not_sent(self):
+        self.herdr.enters_needed["w2:p1"] = 99
+        readings = iter([False, False, True])
+        real = self.flock._box_holds
+
+        def delayed(pane_id, text):
+            try:
+                return next(readings)
+            except StopIteration:
+                return real(pane_id, text)
+
+        with mock.patch.object(self.flock, "_box_holds", delayed):
+            ok, detail = self.flock.submit_text("w2:p1", "delayed")
+        self.assertFalse(ok)
+        self.assertIn("did not submit", detail)
+
+    def test_unreadable_box_does_not_claim_success(self):
+        with mock.patch.object(self.flock, "_box_holds", return_value=None):
+            ok, detail = self.flock.submit_text("w2:p1", "unconfirmed")
+        self.assertFalse(ok)
+        self.assertIn("unconfirmed", detail)
 
     def test_text_that_never_submits_is_reported_as_failed_not_sent(self):
         self.herdr.enters_needed["w2:p1"] = 99
