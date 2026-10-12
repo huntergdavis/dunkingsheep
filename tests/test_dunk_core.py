@@ -1138,6 +1138,59 @@ class WorkerLivelockTests(unittest.TestCase):
                              "an agent waiting on a notice should not wait longer")
 
 
+class TransientDraftTests(unittest.TestCase):
+    """A single frame of an agent redrawing is not a half-written sentence."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.gap = mock.patch.object(dunk_core, "DRAFT_CONFIRM_S", 0.02)
+        self.gap.start()
+
+    def tearDown(self):
+        self.gap.stop()
+        self.flock.close()
+
+    def test_a_one_frame_artifact_does_not_refuse_a_send(self):
+        # First read catches status text on the prompt line; by the second the
+        # pane has finished redrawing. This cost a Codex pane 14 refusals.
+        screens = iter([claude_box_typing_ansi("Working (3m 13s)"),
+                        claude_box_hint_ansi()])
+        real = self.herdr.read_pane
+
+        def flaky(pane_id, lines=40, source=None, ansi=False):
+            try:
+                return next(screens)
+            except StopIteration:
+                return real(pane_id, lines=lines, source=source, ansi=ansi)
+
+        with mock.patch.object(self.herdr, "read_pane", flaky):
+            self.assertTrue(self.flock._ensure_box_clear("w2:p1"),
+                            "a redraw must not look like a draft")
+
+    def test_a_real_draft_still_refuses(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("I am still writing this"))
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"),
+                         "a draft that is still there must hold the send")
+
+    def test_a_draft_that_turns_out_to_be_ours_is_flushed(self):
+        self.flock.submit_text("w2:p1", "our own text")
+        screens = iter([claude_box_typing_ansi("unrecognised for a frame"),
+                        claude_box_typing_ansi("our own text")])
+        real = self.herdr.read_pane
+
+        def flaky(pane_id, lines=40, source=None, ansi=False):
+            try:
+                return next(screens)
+            except StopIteration:
+                return real(pane_id, lines=lines, source=source, ansi=ansi)
+
+        self.herdr.box["w2:p1"] = "our own text"
+        with mock.patch.object(self.herdr, "read_pane", flaky):
+            self.assertTrue(self.flock._ensure_box_clear("w2:p1"))
+        self.assertIn(("w2:p1", "our own text"), self.herdr.sends)
+
+
 class InboxNoticeTests(unittest.TestCase):
     """One notice per pane, carrying the current count."""
 
@@ -1172,6 +1225,22 @@ class InboxNoticeTests(unittest.TestCase):
                   if m["pane_id"] == "w2:p1"]
         self.assertEqual(1, len(queued), f"stacked {len(queued)} notices")
         self.assertIn("4 unread", queued[0]["text"], "it carries the latest count")
+
+    def test_notify_state_follows_the_notice_instead_of_going_stale(self):
+        # status used to say "queued" for ever, because the inbox record was
+        # written when the notice was created and never updated.
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("writing"))
+        first = self.flock.inbox_send("w2:p1", "one", notify=True)
+        second = self.flock.inbox_send("w2:p1", "two", notify=True)
+        self.assertEqual("queued",
+                         self.flock.inbox_status(first["message_id"])["notify"]["state"])
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(
+            lambda: self.flock.inbox_status(first["message_id"])["notify"]["state"]
+            == "sent", 8))
+        # The folded one is updated too: one notice covered both.
+        self.assertEqual("sent",
+                         self.flock.inbox_status(second["message_id"])["notify"]["state"])
 
     def test_the_folded_notice_is_what_actually_gets_delivered(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("writing"))

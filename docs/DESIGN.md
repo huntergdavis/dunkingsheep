@@ -115,6 +115,20 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Transient drafts and honest notify state (2.8.2). After the livelock fix a
+  notice to a Codex pane was still refused 14 times in 82 seconds while the
+  pane showed only its dim placeholder. Sampling `_typed_text` on that pane
+  492 times over two minutes found no false positive, so the artifact is
+  sub-second: an agent redrawing its pane can put status text on the prompt
+  line for a frame. `_clear_to_send` has always taken two readings a second
+  apart for exactly this reason; `_ensure_box_clear` took one, and a single
+  unlucky sample refused the send. `_draft_persists` gives it the other half
+  of that pair, so a draft must survive `DRAFT_CONFIRM_S` to hold a send,
+  and the refusal now logs what it saw so the next case needs no guesswork.
+  Separately, `inbox_status` reported notify=queued for ever: the record was
+  written when the notice was created and never updated. A notice now carries
+  the inbox ids it speaks for (`Message.notify_for`, appended to when notices
+  fold) and `_deliver` writes the real outcome back.
 - The worker livelock (2.8.1). A VP inbox notice was stored at 07:40 and not
   read until 08:07, and only because the daemon was restarted. The log shows
   the worker alternating, about once a second for the whole 27 minutes,

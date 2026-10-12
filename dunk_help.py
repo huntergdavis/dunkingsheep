@@ -356,7 +356,12 @@ def guide(markdown=False):
       "line being queued behind it: an agent that reads its inbox once has dealt\n"
       "with all of it. If our own text is sitting unsubmitted in the way, the\n"
       "daemon clears it within 30 seconds rather than waiting on itself; a human's\n"
-      "draft is still never touched.\n")
+      "draft is still never touched. A draft has to be there on two readings\n"
+      "before a send is held, so a frame of an agent redrawing its pane is not\n"
+      "mistaken for someone writing.\n")
+    w("`inbox_status` tracks the notice too: it says queued while the notice is\n"
+      "waiting and sent once it lands, including for messages whose notice was\n"
+      "folded into another.\n")
     w("A standing dunk is the easy way to get an agent checking: point one at the\n"
       "agent with text like \"call inbox_count; if anything is waiting, read and\n"
       "act on it\".\n")

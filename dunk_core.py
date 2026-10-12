@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.8.1"
+VERSION = "2.8.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -138,6 +138,9 @@ MODAL_MARKERS = (
 # Every inbox notice starts with this, which is how one is recognised as
 # replaceable rather than stacked behind another.
 NOTICE_PREFIX = "[inbox] "
+# How long to wait before confirming that a draft in the box is really there
+# and not a frame of an agent redrawing its pane.
+DRAFT_CONFIRM_S = 0.5
 
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
@@ -342,6 +345,7 @@ class Message:
         self.hold_while_typing = True
         self.kind = "text"            # "keys" presses are how a panel is dismissed
         self.is_notice = False        # an inbox notice: one per pane, never stacked
+        self.notify_for = []          # inbox message ids whose notice this is
         self.detail = None
         self.holds = 0
         self.created_at = time.time()
@@ -635,12 +639,16 @@ class Flock:
                 if existing is not None:
                     # A notice for this pane is already waiting. Say the new
                     # count rather than stacking a second one: an agent that
-                    # reads its inbox once has handled both messages.
+                    # reads its inbox once has handled both messages. This
+                    # message's notify state follows that notice from here.
+                    with self._lock:
+                        existing.notify_for.append(message["message_id"])
                     self.inbox.record_notify(message["message_id"], "queued",
-                                             f"folded into {existing}")
+                                             f"folded into {existing.id}")
                     message["notified"] = True
                     raise _NoticeFolded
-                nudge = self.send_now(pane_id, text, wait_s=0)
+                nudge = self.send_now(pane_id, text, wait_s=0,
+                                      notify_for=message["message_id"])
                 self.inbox.record_notify(message["message_id"],
                                          "queued" if nudge.get("queued") else "sent",
                                          nudge.get("message"))
@@ -658,7 +666,7 @@ class Flock:
     @_as_dunk_error
     def _refresh_queued_notice(self, pane_id, text):
         """If an inbox notice for this pane is still waiting, update it to the
-        new unread count and return its id. Otherwise None.
+        new unread count and return it. Otherwise None.
 
         Stacking one notice per message means an agent that was away comes
         back to a pile of identical lines, each of which it has to submit.
@@ -669,7 +677,7 @@ class Flock:
                 if queued.status == "queued" and queued.is_notice:
                     queued.text = text
                     queued.deliver = lambda: self.submit_text(pane_id, text)
-                    return queued.id
+                    return queued
         return None
 
     def inbox_count(self, mailbox=None, self_pane_id=None):
@@ -1295,7 +1303,7 @@ class Flock:
             return {"id": dunker.id, "ok": False, "message": str(error)}
 
     def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0,
-                 press_enter=True, is_notice=False):
+                 press_enter=True, is_notice=False, notify_for=None):
         """One-off send to any pane, no dunk involved. Like a dunk, it never
         types over a human: if someone is composing in the target's box (or
         earlier messages to that pane are still waiting), the message is queued
@@ -1311,6 +1319,8 @@ class Flock:
             deliver=lambda: self.submit_text(pane["pane_id"], message.text,
                                              press_enter=press_enter))
         message.is_notice = is_notice or str(text).startswith(NOTICE_PREFIX)
+        if notify_for:
+            message.notify_for.append(notify_for)
         if not _check_bool(hold_while_typing, "hold_while_typing"):
             message.hold_while_typing = False
             self._deliver(message)
@@ -1373,6 +1383,13 @@ class Flock:
             self.last_message = (f"Sent to {message.target_label}" if ok
                                  else f"Send failed: {detail}")
             self._remember(message)
+        for inbox_id in list(message.notify_for):
+            # The inbox record said "queued" when the notice was created; say
+            # what actually happened, so a status query is not stale.
+            try:
+                self.inbox.record_notify(inbox_id, "sent" if ok else "failed", detail)
+            except InboxError:
+                pass
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
                  "sent" if ok else f"FAILED {detail}")
         message.done.set()
@@ -1786,6 +1803,23 @@ class Flock:
         return {"pane_id": pane_id, "target_label": label, "flushed": ok,
                 "text": shown, "message": detail}
 
+    def _draft_persists(self, pane_id):
+        """Read the box again after a moment and return what is still there.
+
+        One reading is not enough to refuse a send. An agent redrawing its
+        pane can put status text on the prompt line for a frame, and a single
+        unlucky sample then looks exactly like a half-written sentence. A
+        person's draft is still there a moment later; a redraw is not. The
+        settle check has always taken two readings for the same reason, and
+        this is the other half of that pair - without it a Codex pane that was
+        merely working kept refusing a notification, 14 times in 82 seconds."""
+        time.sleep(DRAFT_CONFIRM_S)
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None or _modal_open(screen):
+            return None
+        return _typed_text(screen) or None
+
     def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
         failed submit is flushed with Enter; a human's draft is left alone."""
@@ -1806,6 +1840,14 @@ class Flock:
                      pane_id)
             ok, _detail = self._press_until_submitted(pane_id, shown)
             return ok
+        still = self._draft_persists(pane_id)
+        if still is None:
+            return True                      # a redraw, not a draft
+        if self._looks_like_ours(pane_id, still):
+            ok, _detail = self._press_until_submitted(pane_id, still)
+            return ok
+        log.info("%s: holding, the input box still holds a draft: %r",
+                 pane_id, still[:60])
         return False                         # someone is writing
 
     def _lock_for(self, pane_id):
