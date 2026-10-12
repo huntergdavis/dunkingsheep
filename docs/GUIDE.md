@@ -1,4 +1,4 @@
-# Dunking Sheep 2.7.1 guide
+# Dunking Sheep 2.8.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -380,6 +380,20 @@ mode run it without prompting.
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which
 is why the launcher is the first thing to install.
+
+## Panels and dialogs
+
+A slash command such as /usage replaces the input box with a panel, and a
+dialog draws its selected row with the same prompt sigil the input box
+uses. Both used to read as occupied input: a /usage send was reported
+failed although it had run, three further Enter presses landed on the
+panel, and an Escape meant to dismiss it queued behind what looked like
+someone typing.
+
+The daemon now recognises an open panel. A send whose text opened one is
+finished, not stuck. Text waits for the panel to go rather than typing
+into it, while key presses go straight through, since keys are how a panel
+is dismissed.
 
 ## The herdr guard: agents that shell out
 

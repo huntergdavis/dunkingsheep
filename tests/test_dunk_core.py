@@ -779,7 +779,7 @@ class SendRaceTests(unittest.TestCase):
         released = threading.Event()
 
         def hog():
-            with self.flock.send_lock:
+            with self.flock._lock_for("w2:p1"):
                 self.herdr.set_screen("w2:p1", claude_box_typing_ansi("I am mid sentence"))
                 released.set()
                 time.sleep(0.3)
@@ -829,7 +829,7 @@ class SendRaceTests(unittest.TestCase):
             self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
             # Hold the send lock before the dunk can take it, so the dunk is
             # provably parked on it when the draft appears.
-            self.flock.send_lock.acquire()
+            self.flock._lock_for("w2:p1").acquire()
             dunk = self.flock.add(target="w2:p1", text="nudge", interval_minutes=1 / 60,
                                   start=True)
             try:
@@ -838,7 +838,7 @@ class SendRaceTests(unittest.TestCase):
                     "dunk should be waiting on the send lock")
                 self.herdr.set_screen("w2:p1", claude_box_typing_ansi("a late draft"))
             finally:
-                self.flock.send_lock.release()
+                self.flock._lock_for("w2:p1").release()
             self.assertTrue(wait_until(
                 lambda: self.flock.get(dunk["id"])["hold_count"] >= 1, 5))
             self.assertEqual([], self.herdr.sends, "must not type onto their draft")
@@ -995,6 +995,98 @@ class ConfirmedSubmitTests(unittest.TestCase):
         ok, _detail = self.flock.submit_text("w1:p1", "ls -l")
         self.assertTrue(ok)
         self.assertEqual(1, len(self.herdr.keys))
+
+
+class ModalPaneTests(unittest.TestCase):
+    """A panel or dialog is not a half-written sentence, and not our text."""
+
+    PANEL = ("  Current session \u00b7 Resets 4:30am\n  11% used\n"
+             "  \u276f  Switch model\n  Esc to cancel\n")
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02))
+        self.gaps.start()
+
+    def tearDown(self):
+        self.gaps.stop()
+        self.flock.close()
+
+    def test_a_slash_command_that_opens_a_panel_counts_as_submitted(self):
+        # /usage ran, the panel replaced the box, and the daemon used to spend
+        # four Enter presses on the panel and then report the send failed.
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        ok, detail = self.flock.submit_text("w2:p1", "/usage")
+        self.assertTrue(ok, detail)
+        self.assertEqual(1, len(self.herdr.keys), "no Enter presses into the panel")
+
+    def test_an_open_panel_is_not_someone_typing(self):
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        self.assertFalse(self.flock._typing_in("w2:p1"),
+                         "a dialog's selected row is not a draft")
+
+    def test_keys_meant_for_a_panel_are_not_queued_behind_it(self):
+        # Escape to dismiss the panel used to queue for ever, because the
+        # panel looked like occupied input.
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        result = self.flock.send_keys_now("w2:p1", "Escape", wait_s=3)
+        self.assertTrue(result["ok"], result["message"])
+        self.assertEqual([("w2:p1", ["Escape"])], self.herdr.keys)
+
+    def test_text_is_not_typed_into_an_open_panel(self):
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"),
+                         "wait for the panel to go rather than type into it")
+
+    def test_a_normal_box_is_unaffected(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
+        self.assertTrue(self.flock._typing_in("w2:p1"))
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertFalse(self.flock._typing_in("w2:p1"))
+
+
+class PaneIndependenceTests(unittest.TestCase):
+    """One slow pane must not stall every other pane's send."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_a_pane_stuck_in_retries_does_not_block_another_pane(self):
+        # Hold one pane's lock, as a long confirm-and-retry sequence does.
+        self.flock._lock_for("w2:p1").acquire()
+        try:
+            started = time.time()
+            sent, ok, _detail = self.flock.send_guarded(
+                "w2:p3", lambda: self.herdr.send_text_and_enter("w2:p3", "unrelated"))
+            self.assertTrue(sent and ok)
+            self.assertLess(time.time() - started, 3,
+                            "a busy pane must not hold up a different one")
+            self.assertEqual([("w2:p3", "unrelated")], self.herdr.sends)
+        finally:
+            self.flock._lock_for("w2:p1").release()
+
+    def test_two_sends_to_the_same_pane_are_still_serialised(self):
+        held = self.flock._lock_for("w2:p1")
+        held.acquire()
+        done = []
+
+        def attempt():
+            self.flock.send_guarded(
+                "w2:p1", lambda: self.herdr.send_text_and_enter("w2:p1", "second"))
+            done.append(True)
+
+        thread = threading.Thread(target=attempt, daemon=True)
+        thread.start()
+        time.sleep(0.4)
+        self.assertEqual([], done, "the same pane waits its turn")
+        held.release()
+        thread.join(5)
+        self.assertEqual([True], done)
 
 
 class GuardedKeysTests(unittest.TestCase):

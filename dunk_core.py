@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.7.1"
+VERSION = "2.8.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -119,6 +119,22 @@ REMEMBERED_SENDS = 4
 # this existed. Text the daemon did not type is never submitted this way: see
 # `Flock._unwedge`.
 STALE_BOX_S = 150.0
+# Phrases an agent only shows while a full-screen panel or dialog is open
+# (/usage, settings, a confirmation). Such a screen is not an input box: its
+# selected row is drawn with the same prompt sigil, which made the daemon read
+# a modal as "someone is typing". That cost a Poolrad worker a /usage read on
+# 2026-10-12 - the command had run, the panel was open, and the daemon spent
+# four Enter presses on the panel before reporting the send failed, while a
+# follow-up Escape queued behind the modal for ever.
+MODAL_MARKERS = (
+    "esc to cancel",
+    "esc to close",
+    "esc to exit",
+    "enter to confirm",
+    "press enter to continue",
+    "to go back",
+)
+
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
@@ -316,6 +332,7 @@ class Message:
         self.deliver = deliver        # callable -> (ok, detail)
         self.status = "queued"        # queued | sent | failed | cancelled
         self.hold_while_typing = True
+        self.kind = "text"            # "keys" presses are how a panel is dismissed
         self.detail = None
         self.holds = 0
         self.created_at = time.time()
@@ -348,7 +365,14 @@ class Flock:
         self.state_file = state_file
         self.persist_enabled = persist
         self._lock = threading.RLock()
-        self.send_lock = threading.Lock()
+        # One lock per pane, not one for the whole flock. A send holds its
+        # lock across the confirm-and-retry sequence, which can run for tens of
+        # seconds when an agent will not take Enter. With a single lock that
+        # stalled every other pane's send behind it, and a caller waiting on
+        # the daemon saw a timeout: that is what a Poolrad /usage read hit on
+        # 2026-10-12. Panes are independent; their sends should be too.
+        self.send_lock = threading.Lock()          # kept: tests and callers hold it
+        self._pane_locks = {}
         self.dunkers = []
         self.next_id = 1
         self.started_at = time.time()
@@ -1272,6 +1296,7 @@ class Flock:
         label = pane.get("tab_label") or pane["pane_id"]
         message = self._new_message(pane["pane_id"], label, " ".join(keys), source="send_keys",
                                     deliver=lambda: self.press_keys(pane["pane_id"], keys))
+        message.kind = "keys"
         if not _check_bool(hold_while_typing, "hold_while_typing"):
             message.hold_while_typing = False
             self._deliver(message)
@@ -1298,7 +1323,8 @@ class Flock:
                 return True
         sent, ok, detail = self.send_guarded(
             message.pane_id, message.deliver,
-            hold_while_typing=message.hold_while_typing)
+            hold_while_typing=message.hold_while_typing,
+            allow_modal=(message.kind == "keys"))
         if not sent:
             with self._lock:
                 message.holds += 1
@@ -1545,6 +1571,11 @@ class Flock:
                                       source="visible", ansi=True)
         if screen is None:
             return False
+        if _modal_open(screen):
+            # A panel or dialog, not a half-written sentence. Its selected row
+            # carries the same sigil as the prompt, which is what made a
+            # queued Escape wait for ever behind an open /usage panel.
+            return False
         typed = _typed_text(screen)
         if not typed:
             return False
@@ -1581,6 +1612,10 @@ class Flock:
                                       source="visible", ansi=True)
         if screen is None:
             return None
+        if _modal_open(screen):
+            # A panel or dialog is open, so our text left the box and opened
+            # it. Pressing Enter again would act on the panel instead.
+            return False
         shown = _typed_text(screen)
         if not shown:            # empty box, or no box at all
             return False
@@ -1710,13 +1745,18 @@ class Flock:
         return {"pane_id": pane_id, "target_label": label, "flushed": ok,
                 "text": shown, "message": detail}
 
-    def _ensure_box_clear(self, pane_id):
+    def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
         failed submit is flushed with Enter; a human's draft is left alone."""
         screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
                                       source="visible", ansi=True)
         if screen is None:
             return True                      # unreadable: nothing to go on
+        if _modal_open(screen):
+            # Typing into an open panel does nothing useful and its keys mean
+            # something else, so text waits for it to go. Key presses are how
+            # a panel is dismissed, so they go through.
+            return allow_modal
         shown = _typed_text(screen)
         if shown is None or not shown:
             return True
@@ -1727,8 +1767,15 @@ class Flock:
             return ok
         return False                         # someone is writing
 
+    def _lock_for(self, pane_id):
+        with self._lock:
+            lock = self._pane_locks.get(pane_id)
+            if lock is None:
+                lock = self._pane_locks[pane_id] = threading.Lock()
+            return lock
+
     def send_guarded(self, pane_id, send, last_sent_text=None, awaiting_consumption=False,
-                     hold_while_typing=True):
+                     hold_while_typing=True, allow_modal=False):
         """Run `send` (a callable that types into `pane_id`) with the send lock
         held, after one final look at the input box under that same lock.
 
@@ -1741,8 +1788,8 @@ class Flock:
 
         Returns (sent, ok, detail): sent=False means a draft appeared and
         nothing was typed."""
-        with self.send_lock:
-            if hold_while_typing and not self._ensure_box_clear(pane_id):
+        with self._lock_for(pane_id):
+            if hold_while_typing and not self._ensure_box_clear(pane_id, allow_modal):
                 log.info("%s: draft appeared while waiting for the send lock; not typing",
                          pane_id)
                 return False, None, "someone started typing"
@@ -2009,6 +2056,15 @@ def _bright_text(line):
     if not dim:
         out.append(line[position:])
     return "".join(out)
+
+
+def _modal_open(screen):
+    """True if the pane is showing a panel or dialog rather than an input box.
+    Nothing can be typed into one, and nothing is waiting in it."""
+    if not screen:
+        return False
+    low = _strip_ansi(screen).lower()
+    return any(marker in low for marker in MODAL_MARKERS)
 
 
 def _typed_text(screen):

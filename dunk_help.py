@@ -140,6 +140,7 @@ def guide(markdown=False):
            "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
            "dunkingsheep flush <target>                   submit text stuck in a pane's box\n"
            "dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch\n"
+           "dunkingsheep install                          put the CLI on PATH\n"
            "dunkingsheep guard [status|install|check|uninstall]\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
@@ -353,6 +354,34 @@ def guide(markdown=False):
     w("A standing dunk is the easy way to get an agent checking: point one at the\n"
       "agent with text like \"call inbox_count; if anything is waiting, read and\n"
       "act on it\".\n")
+
+    w(h(2, "Setting an agent up to use its inbox"))
+    w("Two things make the inbox reachable from an agent's session.\n")
+    w(code("dunkingsheep install     # put the CLI on PATH as a plain command\n"
+           "dunkingsheep mcp-setup claude --apply   # register the MCP server"))
+    w("`install` matters more than it looks. herdr starts agents by exec'ing them\n"
+      "from its server process, so they inherit that environment: ~/.local/bin is\n"
+      "on their PATH but this project is not. Without the launcher an agent has to\n"
+      "invoke the CLI by its path inside a workspace, which a sandboxed agent\n"
+      "should refuse and does - Claude's auto mode reads it as running external\n"
+      "code. A plain `dunkingsheep inbox read` is the supported shape, and an\n"
+      "allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto\n"
+      "mode run it without prompting.\n")
+    w("An agent whose MCP connection predates the inbox has a stale tool list and\n"
+      "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
+      "is why the launcher is the first thing to install.\n")
+
+    w(h(2, "Panels and dialogs"))
+    w("A slash command such as /usage replaces the input box with a panel, and a\n"
+      "dialog draws its selected row with the same prompt sigil the input box\n"
+      "uses. Both used to read as occupied input: a /usage send was reported\n"
+      "failed although it had run, three further Enter presses landed on the\n"
+      "panel, and an Escape meant to dismiss it queued behind what looked like\n"
+      "someone typing.\n")
+    w("The daemon now recognises an open panel. A send whose text opened one is\n"
+      "finished, not stuck. Text waits for the panel to go rather than typing\n"
+      "into it, while key presses go straight through, since keys are how a panel\n"
+      "is dismissed.\n")
 
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"

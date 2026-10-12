@@ -115,6 +115,23 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Panels, dialogs and pane independence (2.8.0). A Poolrad worker's `/usage`
+  read was reported as a daemon timeout. Two causes, both reproduced live.
+  First, a slash command replaces the input box with a panel, and a dialog
+  draws its selected row with the same sigil the prompt uses, so both read as
+  occupied input. `/usage` had actually run on the first Enter; the daemon
+  then spent three more presses on the open panel and reported the send
+  failed, and a follow-up Escape queued for ever behind it. `_modal_open`
+  recognises a panel by the phrases only a panel shows ("esc to cancel",
+  "enter to confirm"). A send whose text opened a panel counts as submitted;
+  `_typing_in` no longer calls a panel a draft; text waits for a panel to go
+  rather than typing into it, while key presses pass through, since keys are
+  how a panel is dismissed (Message.kind distinguishes them).
+  Second, `send_guarded` held one global lock across the whole
+  confirm-and-retry sequence, which runs for tens of seconds when an agent
+  will not take Enter. Every other pane's send queued behind it, and a caller
+  waiting on the daemon saw a timeout. Locks are now per pane, so panes are
+  as independent as they look; sends to the same pane are still serialised.
 - Mailbox identity (2.7.1). The first cut keyed a mailbox on
   `pane["agent"]`, which is the agent *type*, not one agent. Every Codex pane
   therefore shared one mailbox: a message addressed to the Poolrad PM was
