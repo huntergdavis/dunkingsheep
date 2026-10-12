@@ -1089,6 +1089,100 @@ class PaneIndependenceTests(unittest.TestCase):
         self.assertEqual([True], done)
 
 
+class WorkerLivelockTests(unittest.TestCase):
+    """The 27-minute VP wake-up: two checks disagreed and the worker span."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+            mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02)),
+            mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.01, 0.01)),
+            mock.patch.object(dunk_core, "STALE_BOX_S", 0.4),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+
+    def test_a_refused_delivery_recovers_instead_of_spinning(self):
+        # Our own text sits in the box and will not submit, so the queue check
+        # says "not a human, go ahead" while the send refuses under the lock.
+        # That disagreement used to loop with no sleep and no progress.
+        self.flock.submit_text("w2:p1", "an earlier send of ours")
+        self.herdr.box["w2:p1"] = "an earlier send of ours"
+        self.herdr.enters_needed["w2:p1"] = 99        # it will not submit
+
+        queued = self.flock.send_now("codex", "wake up please", wait_s=0)
+        reads_at_start = len(self.herdr.reads)
+        time.sleep(1.0)
+        # The worker must not have burned through hundreds of reads.
+        self.assertLess(len(self.herdr.reads) - reads_at_start, 120,
+                        "worker is spinning instead of waiting")
+
+        # Once the box will take Enter again, recovery delivers within the
+        # stale-box window rather than waiting for a restart.
+        self.herdr.enters_needed["w2:p1"] = 1
+        self.assertTrue(wait_until(
+            lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 8),
+            "the message never got through")
+        self.assertIn(("w2:p1", "wake up please"), self.herdr.sends)
+
+    def test_recovery_is_bounded_by_the_stale_box_window(self):
+        self.assertLessEqual(dunk_core.STALE_BOX_S, 30.0,
+                             "an agent waiting on a notice should not wait longer")
+
+
+class InboxNoticeTests(unittest.TestCase):
+    """One notice per pane, carrying the current count."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        from dunk_inbox import Inbox
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                           blob_dir=os.path.join(self.tmp.name, "b"))
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           inbox=self.inbox)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def test_notices_fold_into_one_instead_of_stacking(self):
+        # Hold the pane so notices queue rather than going straight out.
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("a human is writing"))
+        for _ in range(4):
+            self.flock.inbox_send("w2:p1", "another message", notify=True)
+        queued = [m for m in self.flock.list_messages()["queued"]
+                  if m["pane_id"] == "w2:p1"]
+        self.assertEqual(1, len(queued), f"stacked {len(queued)} notices")
+        self.assertIn("4 unread", queued[0]["text"], "it carries the latest count")
+
+    def test_the_folded_notice_is_what_actually_gets_delivered(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("writing"))
+        self.flock.inbox_send("w2:p1", "first", notify=True)
+        self.flock.inbox_send("w2:p1", "second", notify=True)
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 1, 6))
+        self.assertEqual(1, len(self.herdr.sends), "only one notice typed")
+        self.assertIn("2 unread", self.herdr.sends[0][1])
+
+
 class GuardedKeysTests(unittest.TestCase):
     """A bare Enter is how a half-written sentence gets submitted."""
 

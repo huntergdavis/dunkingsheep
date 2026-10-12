@@ -115,6 +115,22 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- The worker livelock (2.8.1). A VP inbox notice was stored at 07:40 and not
+  read until 08:07, and only because the daemon was restarted. The log shows
+  the worker alternating, about once a second for the whole 27 minutes,
+  between "box clear after 1s, delivering" and "draft appeared while waiting
+  for the send lock; not typing". Two checks disagreed about the same box:
+  `_clear_to_send` forgives our own stranded text (it is ours to clean up),
+  while `_ensure_box_clear` only forgives it if it can be flushed, and the
+  flush was failing. The refusal branch then looped straight back with no
+  sleep, so it never reached the stale-box recovery further down, which is why
+  the 150s backstop never fired. The refusal now falls through to that
+  recovery, and `STALE_BOX_S` drops to 30s, which bounds how long an agent
+  waits on a notice. The backstop still only ever submits text we typed, so a
+  human's draft is untouched by the shorter window.
+  Notices also no longer stack: `_refresh_queued_notice` updates the notice
+  already waiting for a pane to the new unread count instead of queueing a
+  second one, since an agent that reads its inbox once has handled all of it.
 - Panels, dialogs and pane independence (2.8.0). A Poolrad worker's `/usage`
   read was reported as a daemon timeout. Two causes, both reproduced live.
   First, a slash command replaces the input box with a panel, and a dialog

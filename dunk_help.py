@@ -351,6 +351,12 @@ def guide(markdown=False):
     w("Read, acknowledged and cancelled mail is kept for a week and then purged.\n"
       "Unread mail is never purged by age. Attachments are stored by content\n"
       "hash and deleted with the last message that referenced them.\n")
+    w("A notice is never stacked. If one is still waiting for a pane when more\n"
+      "mail arrives, it is updated to the new unread count rather than a second\n"
+      "line being queued behind it: an agent that reads its inbox once has dealt\n"
+      "with all of it. If our own text is sitting unsubmitted in the way, the\n"
+      "daemon clears it within 30 seconds rather than waiting on itself; a human's\n"
+      "draft is still never touched.\n")
     w("A standing dunk is the easy way to get an agent checking: point one at the\n"
       "agent with text like \"call inbox_count; if anything is waiting, read and\n"
       "act on it\".\n")

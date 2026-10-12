@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.8.0"
+VERSION = "2.8.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -115,10 +115,10 @@ SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
 REMEMBERED_SENDS = 4
 # How long our own text may sit unsubmitted in a pane's input box while
 # messages wait behind it before the daemon presses Enter again to clear it.
-# One send sat in wN:p1 for 37 minutes with three messages behind it before
-# this existed. Text the daemon did not type is never submitted this way: see
-# `Flock._unwedge`.
-STALE_BOX_S = 150.0
+# Text the daemon did not type is never submitted this way (see
+# `Flock._unwedge`), so this only bounds how long we wait on ourselves, and a
+# notification an agent is waiting for should not take longer than this.
+STALE_BOX_S = 30.0
 # Phrases an agent only shows while a full-screen panel or dialog is open
 # (/usage, settings, a confirmation). Such a screen is not an input box: its
 # selected row is drawn with the same prompt sigil, which made the daemon read
@@ -134,6 +134,10 @@ MODAL_MARKERS = (
     "press enter to continue",
     "to go back",
 )
+
+# Every inbox notice starts with this, which is how one is recognised as
+# replaceable rather than stacked behind another.
+NOTICE_PREFIX = "[inbox] "
 
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
@@ -157,6 +161,10 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 DECORATION_RE = re.compile(r"[─-▟⠀-⣿\s]+")
 
 log = logging.getLogger("dunkingsheep")
+
+
+class _NoticeFolded(Exception):
+    """Internal: a notice was merged into one already waiting."""
 
 
 class DunkError(ValueError):
@@ -333,6 +341,7 @@ class Message:
         self.status = "queued"        # queued | sent | failed | cancelled
         self.hold_while_typing = True
         self.kind = "text"            # "keys" presses are how a panel is dismissed
+        self.is_notice = False        # an inbox notice: one per pane, never stacked
         self.detail = None
         self.holds = 0
         self.created_at = time.time()
@@ -619,14 +628,25 @@ class Flock:
         message["notified"] = False
         if notify and pane_id:
             unread = self.inbox.count(mailbox)["unread"]
-            text = (f"[inbox] {unread} unread. Read with the dunkingsheep MCP tool "
-                    f"inbox_read, or: dunkingsheep inbox read")
+            text = (f"{NOTICE_PREFIX}{unread} unread. Read with the dunkingsheep MCP "
+                    f"tool inbox_read, or: dunkingsheep inbox read")
             try:
+                existing = self._refresh_queued_notice(pane_id, text)
+                if existing is not None:
+                    # A notice for this pane is already waiting. Say the new
+                    # count rather than stacking a second one: an agent that
+                    # reads its inbox once has handled both messages.
+                    self.inbox.record_notify(message["message_id"], "queued",
+                                             f"folded into {existing}")
+                    message["notified"] = True
+                    raise _NoticeFolded
                 nudge = self.send_now(pane_id, text, wait_s=0)
                 self.inbox.record_notify(message["message_id"],
                                          "queued" if nudge.get("queued") else "sent",
                                          nudge.get("message"))
                 message["notified"] = True
+            except _NoticeFolded:
+                pass
             except DunkError as error:
                 self.inbox.record_notify(message["message_id"], "failed", str(error))
         with self._lock:
@@ -636,6 +656,22 @@ class Flock:
         return message
 
     @_as_dunk_error
+    def _refresh_queued_notice(self, pane_id, text):
+        """If an inbox notice for this pane is still waiting, update it to the
+        new unread count and return its id. Otherwise None.
+
+        Stacking one notice per message means an agent that was away comes
+        back to a pile of identical lines, each of which it has to submit.
+        One notice carrying the current count is the whole of the information.
+        """
+        with self._lock:
+            for queued in self.outbox.get(pane_id) or []:
+                if queued.status == "queued" and queued.is_notice:
+                    queued.text = text
+                    queued.deliver = lambda: self.submit_text(pane_id, text)
+                    return queued.id
+        return None
+
     def inbox_count(self, mailbox=None, self_pane_id=None):
         return self.inbox.count(self._mailbox_or_self(mailbox, self_pane_id))
 
@@ -1259,7 +1295,7 @@ class Flock:
             return {"id": dunker.id, "ok": False, "message": str(error)}
 
     def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0,
-                 press_enter=True):
+                 press_enter=True, is_notice=False):
         """One-off send to any pane, no dunk involved. Like a dunk, it never
         types over a human: if someone is composing in the target's box (or
         earlier messages to that pane are still waiting), the message is queued
@@ -1272,8 +1308,9 @@ class Flock:
         label = pane.get("tab_label") or pane["pane_id"]
         message = self._new_message(
             pane["pane_id"], label, str(text), source="send_text",
-            deliver=lambda: self.submit_text(pane["pane_id"], str(text),
+            deliver=lambda: self.submit_text(pane["pane_id"], message.text,
                                              press_enter=press_enter))
+        message.is_notice = is_notice or str(text).startswith(NOTICE_PREFIX)
         if not _check_bool(hold_while_typing, "hold_while_typing"):
             message.hold_while_typing = False
             self._deliver(message)
@@ -1413,12 +1450,16 @@ class Flock:
                         with self._lock:
                             if message in queue:
                                 queue.remove(message)
-                    else:
-                        # A draft appeared under the lock; keep our place in the
-                        # queue and wait for them to finish.
-                        held_since = time.time()
-                    continue
-                if held_since is None:
+                        seen, seen_since = None, time.time()
+                        continue
+                    # Refused under the lock. This used to loop straight back,
+                    # and when the two checks disagreed - the box holding our
+                    # own text that would not submit, which `_clear_to_send`
+                    # forgives and `_ensure_box_clear` does not - the worker
+                    # span for 27 minutes without delivering or ever reaching
+                    # the recovery below. Fall through to it instead.
+                    held_since = held_since or time.time()
+                elif held_since is None:
                     held_since = time.time()
                     with self._lock:
                         message.holds += 1

@@ -1,4 +1,4 @@
-# Dunking Sheep 2.8.0 guide
+# Dunking Sheep 2.8.1 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -354,6 +354,13 @@ seeing the contents, and it answers across daemon restarts.
 Read, acknowledged and cancelled mail is kept for a week and then purged.
 Unread mail is never purged by age. Attachments are stored by content
 hash and deleted with the last message that referenced them.
+
+A notice is never stacked. If one is still waiting for a pane when more
+mail arrives, it is updated to the new unread count rather than a second
+line being queued behind it: an agent that reads its inbox once has dealt
+with all of it. If our own text is sitting unsubmitted in the way, the
+daemon clears it within 30 seconds rather than waiting on itself; a human's
+draft is still never touched.
 
 A standing dunk is the easy way to get an agent checking: point one at the
 agent with text like "call inbox_count; if anything is waiting, read and
