@@ -95,6 +95,7 @@ dunkingsheep send-keys <target> <keys...>     guarded key presses
 dunkingsheep messages | cancel-message <id>   the direct-message queue
 dunkingsheep flush <target>                   submit text stuck in a pane's box
 dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch
+dunkingsheep install                          put the CLI on PATH
 dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
@@ -357,6 +358,28 @@ hash and deleted with the last message that referenced them.
 A standing dunk is the easy way to get an agent checking: point one at the
 agent with text like "call inbox_count; if anything is waiting, read and
 act on it".
+
+## Setting an agent up to use its inbox
+
+Two things make the inbox reachable from an agent's session.
+
+```
+dunkingsheep install     # put the CLI on PATH as a plain command
+dunkingsheep mcp-setup claude --apply   # register the MCP server
+```
+
+`install` matters more than it looks. herdr starts agents by exec'ing them
+from its server process, so they inherit that environment: ~/.local/bin is
+on their PATH but this project is not. Without the launcher an agent has to
+invoke the CLI by its path inside a workspace, which a sandboxed agent
+should refuse and does - Claude's auto mode reads it as running external
+code. A plain `dunkingsheep inbox read` is the supported shape, and an
+allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto
+mode run it without prompting.
+
+An agent whose MCP connection predates the inbox has a stale tool list and
+will not see inbox_read until it reconnects. The CLI works meanwhile, which
+is why the launcher is the first thing to install.
 
 ## The herdr guard: agents that shell out
 

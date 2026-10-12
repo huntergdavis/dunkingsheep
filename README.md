@@ -71,6 +71,19 @@ id, so the future agent can end the loop. The
 same agent can `read_pane` other agents, `send_text` them instructions, and
 `add_dunk` schedules for them: one agent watching and pacing a whole herd.
 
+## 📥 Setting agents up
+
+```bash
+./dunkingsheep install                   # put the CLI on PATH as a plain command
+./dunkingsheep mcp-setup claude --apply  # register the MCP server
+```
+
+`install` matters: herdr starts agents by exec'ing them from its server process,
+so they inherit ~/.local/bin on PATH but not this project. Without the launcher
+an agent must invoke the CLI by its workspace path, which a sandboxed agent
+refuses as external code. Add `Bash(dunkingsheep *)` to the allow list in
+`~/.claude/settings.json` so auto mode runs it without prompting.
+
 ## 🔌 MCP server
 
 ```bash

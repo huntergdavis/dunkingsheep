@@ -151,6 +151,14 @@ def build_parser():
     p.add_argument("--ignore-typing", action="store_true",
                    help="press them even while someone is typing (default: queue)")
 
+    p = sub.add_parser("install", help="put `dunkingsheep` on PATH as a plain command",
+                       description="Install a launcher so agents can run `dunkingsheep "
+                                   "inbox read` as an ordinary command, instead of "
+                                   "executing a file inside this workspace, which a "
+                                   "sandboxed agent should and does refuse.")
+    p.add_argument("--bin-dir", default="~/.local/bin",
+                   help="where to install it (default ~/.local/bin)")
+
     p = sub.add_parser("guard", help="install the herdr guard so agents cannot type over you",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
                        description="Agents that call the herdr CLI directly (herdr pane run, "
@@ -612,6 +620,17 @@ def main(argv=None):
         return 0
     if command == "mcp-setup":
         return run_mcp_setup(args)
+    if command == "install":
+        import dunk_guard
+        result = dunk_guard.install_launcher(args.bin_dir)
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+        else:
+            for key, value in result.items():
+                print(f"{key:<16} {value}")
+            if not result["resolves_to"]:
+                print("\nNote: %s is not on this shell's PATH." % args.bin_dir)
+        return 0
     if command == "guard":
         import dunk_guard
         if args.action == "install":
