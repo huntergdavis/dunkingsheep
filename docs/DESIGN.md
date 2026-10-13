@@ -115,6 +115,12 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- A notice that says what arrived (2.12.0). The nudge used to say only how
+  many messages were unread, which told a recipient nothing about whether to
+  stop what it was doing. It now names the inbox (an agent may be asked about
+  more than one), the sender and the subject, while staying one short line,
+  because a short send is the one that always submits and the content itself
+  never has to be typed.
 - The daemon was answering dialogs (2.11.0). Two faults compounded. The modal
   check scanned the whole visible screen, so an approval prompt that had
   scrolled up into the transcript still read as a live dialog long after it

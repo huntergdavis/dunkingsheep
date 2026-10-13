@@ -1420,6 +1420,26 @@ class InboxNoticeTests(unittest.TestCase):
         self.inbox.close()
         self.tmp.cleanup()
 
+    def test_a_notice_names_the_inbox_the_sender_and_the_subject(self):
+        line = dunk_core._notice_text("poolrad-codex", 1, "PM", "PR 130 review")
+        self.assertIn("new message for poolrad-codex", line)
+        self.assertIn("from PM", line)
+        self.assertIn("PR 130 review", line)
+        self.assertIn("dunkingsheep inbox read", line)
+        self.assertLess(len(line), 200, "a notice stays one short line")
+        # With more waiting it says so; with nothing else known it still works.
+        self.assertIn("(3 unread)", dunk_core._notice_text("vp", 3, "pm", None))
+        self.assertIn("new message for writer", dunk_core._notice_text("writer", 1))
+
+    def test_the_notice_typed_into_a_pane_names_the_inbox(self):
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.flock.inbox_send("w2:p1", "body", subject="a subject", notify=True)
+        self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 1, 6))
+        typed = self.herdr.sends[0][1]
+        self.assertTrue(typed.startswith(dunk_core.NOTICE_PREFIX))
+        self.assertIn("new message for", typed)
+        self.assertIn("a subject", typed)
+
     def test_notices_fold_into_one_instead_of_stacking(self):
         # Hold the pane so notices queue rather than going straight out.
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("a human is writing"))
@@ -1428,7 +1448,7 @@ class InboxNoticeTests(unittest.TestCase):
         queued = [m for m in self.flock.list_messages()["queued"]
                   if m["pane_id"] == "w2:p1"]
         self.assertEqual(1, len(queued), f"stacked {len(queued)} notices")
-        self.assertIn("4 unread", queued[0]["text"], "it carries the latest count")
+        self.assertIn("(4 unread)", queued[0]["text"], "it carries the latest count")
 
     def test_notify_state_follows_the_notice_instead_of_going_stale(self):
         # status used to say "queued" for ever, because the inbox record was
@@ -1453,7 +1473,7 @@ class InboxNoticeTests(unittest.TestCase):
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
         self.assertTrue(wait_until(lambda: len(self.herdr.sends) >= 1, 6))
         self.assertEqual(1, len(self.herdr.sends), "only one notice typed")
-        self.assertIn("2 unread", self.herdr.sends[0][1])
+        self.assertIn("(2 unread)", self.herdr.sends[0][1])
 
 
 class GuardedKeysTests(unittest.TestCase):

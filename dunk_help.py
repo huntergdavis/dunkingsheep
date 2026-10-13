@@ -323,9 +323,14 @@ def guide(markdown=False):
       "traffic, use an inbox instead. A message is stored for the recipient to\n"
       "read when it chooses, so none of those failures exist. There is no size\n"
       "limit, messages survive a daemon restart, and they can carry files.\n")
-    w("The only thing typed is one short line telling the recipient it has mail,\n"
-      "which is the one send short enough to always submit. Pass notify=false to\n"
-      "skip even that.\n")
+    w("The only thing typed is one short line telling the recipient it has mail.\n"
+      "It names the inbox, who it is from and what it is about, so they can judge\n"
+      "urgency without reading first:\n")
+    w(code("[inbox] new message for poolrad-codex from PM: PR 130 review.\n"
+           "        Read it with: dunkingsheep inbox read"))
+    w("That is the one send short enough to always submit, which is the point:\n"
+      "the message itself never has to be typed. Pass notify=false to skip even\n"
+      "the line.\n")
     w(code("inbox_count()                          # how many am I holding?\n"
            "inbox_read()                           # read them, oldest first\n"
            "inbox_send(to=\"reviewer\", body=\"...\", subject=\"PR 12\")\n"

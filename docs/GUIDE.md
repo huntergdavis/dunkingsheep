@@ -1,4 +1,4 @@
-# Dunking Sheep 2.11.0 guide
+# Dunking Sheep 2.12.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -320,9 +320,18 @@ traffic, use an inbox instead. A message is stored for the recipient to
 read when it chooses, so none of those failures exist. There is no size
 limit, messages survive a daemon restart, and they can carry files.
 
-The only thing typed is one short line telling the recipient it has mail,
-which is the one send short enough to always submit. Pass notify=false to
-skip even that.
+The only thing typed is one short line telling the recipient it has mail.
+It names the inbox, who it is from and what it is about, so they can judge
+urgency without reading first:
+
+```
+[inbox] new message for poolrad-codex from PM: PR 130 review.
+        Read it with: dunkingsheep inbox read
+```
+
+That is the one send short enough to always submit, which is the point:
+the message itself never has to be typed. Pass notify=false to skip even
+the line.
 
 ```
 inbox_count()                          # how many am I holding?

@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.11.0"
+VERSION = "2.12.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -642,8 +642,7 @@ class Flock:
         message["notified"] = False
         if notify and pane_id:
             unread = self.inbox.count(mailbox)["unread"]
-            text = (f"{NOTICE_PREFIX}{unread} unread. Read with the dunkingsheep MCP "
-                    f"tool inbox_read, or: dunkingsheep inbox read")
+            text = _notice_text(mailbox, unread, sender, subject)
             try:
                 existing = self._refresh_queued_notice(pane_id, text)
                 if existing is not None:
@@ -674,6 +673,9 @@ class Flock:
         return message
 
     @_as_dunk_error
+    def _notice_for(self, mailbox, unread, sender, subject):
+        return _notice_text(mailbox, unread, sender, subject)
+
     def _refresh_queued_notice(self, pane_id, text):
         """If an inbox notice for this pane is still waiting, update it to the
         new unread count and return it. Otherwise None.
@@ -686,7 +688,7 @@ class Flock:
             for queued in self.outbox.get(pane_id) or []:
                 if queued.status == "queued" and queued.is_notice:
                     queued.text = text
-                    queued.deliver = lambda: self.submit_text(pane_id, text)
+                    queued.deliver = lambda: self.submit_text(pane_id, queued.text)
                     return queued
         return None
 
@@ -2216,6 +2218,24 @@ def _bright_text(line):
     if not dim:
         out.append(line[position:])
     return "".join(out)
+
+
+def _notice_text(mailbox, unread, sender=None, subject=None):
+    """The line typed into a pane to say mail has arrived.
+
+    It names the inbox, because an agent may be asked about several, and says
+    who it is from and what it is about so the recipient can judge urgency
+    without reading first. It stays one short line on purpose: a short send is
+    the one that always submits, and the point of the inbox is that the
+    content does not have to be typed at all."""
+    head = f"{NOTICE_PREFIX}new message for {mailbox}"
+    if unread > 1:
+        head += f" ({unread} unread)"
+    if sender:
+        head += f" from {sender}"
+    if subject:
+        head += f": {str(subject).strip()[:60]}"
+    return f"{head}. Read it with: dunkingsheep inbox read"
 
 
 def _modal_open(screen):
