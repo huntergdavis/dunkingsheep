@@ -89,7 +89,9 @@ def guide(markdown=False):
     w(h(2, "Orchestration options"))
     w("- only_when = idle: hold each send until herdr reports the target agent as\n"
       "  idle (not working or blocked); re-checked every 5 seconds. Panes without a\n"
-      "  detected agent count as idle.\n"
+      "  detected agent count as idle. A new schedule aimed at a pane that has an\n"
+      "  agent gets this gate by default, because typing into an agent mid-turn\n"
+      "  can abort that turn; pass only_when=\"any\" (--any-time) to opt out.\n"
       "- max_sends = N: the dunk removes itself after its N-th send. N = 1 is a\n"
       "  one-shot delayed nudge (\"in 30 minutes, tell me to check CI\").\n"
       "- skip_if_unconsumed = true: backpressure. Before each send the daemon reads\n"

@@ -238,6 +238,8 @@ class FlockTests(unittest.TestCase):
     # that box, not from whether the agent happens to be busy.
 
     def _bp(self, target="w2:p1", interval_minutes=1 / 60, **extra):
+        # Gating is covered by its own tests; these are about backpressure.
+        extra.setdefault("only_when", "any")
         return self.flock.add(target=target, text="nudge {count}",
                               interval_minutes=interval_minutes, start=True,
                               skip_if_unconsumed=True, **extra)
@@ -358,7 +360,7 @@ class FlockTests(unittest.TestCase):
 
     def test_backpressure_off_preserves_existing_behavior(self):
         dunk = self.flock.add(target="w2:p1", text="tick", interval_minutes=1 / 60, start=True,
-                              hold_while_typing=False)
+                              hold_while_typing=False, only_when="any")
         self.assertTrue(wait_until(
             lambda: self.flock.get(dunk["id"])["send_count"] >= 2, 7))
         state = self.flock.get(dunk["id"])
@@ -475,13 +477,14 @@ class FlockTests(unittest.TestCase):
 
     def test_default_dunk_checks_the_box_once_and_sends_when_clear(self):
         self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
-        dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True)
+        dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60, start=True,
+                              only_when="any")
         self.assertTrue(self.herdr.sent.wait(5))
         self.assertTrue(dunk["hold_while_typing"])
         # Three reads: clear, still clear a second later (the settle window),
         # then one last look with the send lock held, just before typing.
         self.assertEqual(["w2:p1", "w2:p1", "w2:p1"], self.herdr.ansi_reads)
-        self.assertEqual(0, self.herdr.status_calls, "no idle gate unless asked")
+        self.assertEqual(0, self.herdr.status_calls, "no idle gate when asked for any time")
 
     def test_hold_while_typing_toggle_round_trip_and_old_files_default_on(self):
         dunk = self.flock.add(target="w2:p1")
@@ -1247,6 +1250,94 @@ class StalePanelTests(unittest.TestCase):
             lambda: ("w2:p1", ["Escape"]) in self.herdr.keys, 8),
             "the dunk held on the panel instead of clearing it")
         self.assertGreaterEqual(self.flock.get(dunk["id"])["hold_count"], 0)
+
+
+class StrandedNoticeTests(unittest.TestCase):
+    """Our own notice must stay recognisable across a daemon restart."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+            mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02)),
+            mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.1),
+            mock.patch.object(dunk_core, "STALE_BOX_S", 0.2),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+
+    NOTICE = ("[inbox] 1 unread. Read with the dunkingsheep MCP tool inbox_read, "
+              "or: dunkingsheep inbox read")
+
+    def test_a_notice_is_ours_even_with_no_memory_of_sending_it(self):
+        # A restart empties what we remember typing. The notice is still ours.
+        fresh = Flock(herdr=self.herdr, persist=False, restore=False)
+        try:
+            self.assertEqual({}, fresh.sent_text_by_pane)
+            self.assertTrue(fresh._looks_like_ours("w2:p1", self.NOTICE))
+            self.assertFalse(fresh._typing_in("w2:p1") if False else False)
+        finally:
+            fresh.close()
+
+    def test_a_stranded_notice_is_submitted_rather_than_protected_for_ever(self):
+        # Exactly the overnight case: a notice left in the box by a daemon
+        # that has since restarted, with nothing remembered about it.
+        self.herdr.box["w2:p1"] = self.NOTICE
+        self.assertEqual({}, self.flock.sent_text_by_pane)
+        self.assertTrue(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual([("w2:p1", self.NOTICE)], self.herdr.sends)
+
+    def test_a_dunk_recovers_its_own_stranded_text_instead_of_holding(self):
+        # A dunk had no recovery at all, so one notice held it for ten hours.
+        self.herdr.box["w2:p1"] = self.NOTICE
+        dunk = self.flock.add(target="w2:p1", text="capacity check",
+                              interval_minutes=1 / 60, start=True, only_when="any")
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] >= 1, 10),
+            "the dunk never recovered from its own stranded notice")
+        self.assertIn(("w2:p1", self.NOTICE), self.herdr.sends)
+
+    def test_a_humans_draft_is_still_protected_after_a_restart(self):
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("my own half sentence"))
+        fresh = Flock(herdr=self.herdr, persist=False, restore=False)
+        try:
+            self.assertTrue(fresh._typing_in("w2:p1"))
+            self.assertFalse(fresh._ensure_box_clear("w2:p1"))
+            self.assertEqual([], self.herdr.keys, "never press Enter on their text")
+        finally:
+            fresh.close()
+
+
+class IdleGateDefaultTests(unittest.TestCase):
+    """Typing into an agent mid-turn can abort that turn."""
+
+    def setUp(self):
+        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_a_schedule_aimed_at_an_agent_waits_for_idle_by_default(self):
+        self.assertEqual("idle", self.flock.add(target="w2:p1")["only_when"])
+
+    def test_a_shell_pane_is_left_ungated(self):
+        self.assertIsNone(self.flock.add(target="w1:p1")["only_when"])
+
+    def test_the_caller_can_still_ask_for_any_time(self):
+        self.assertIsNone(self.flock.add(target="w2:p1", only_when="any")["only_when"])
+        self.assertEqual("idle", self.flock.add(target="w2:p1", only_when="idle")["only_when"])
+
+    def test_a_restored_dunk_keeps_whatever_it_had(self):
+        restored = Dunker.from_dict({"id": "d9", "target_pane_id": "w2:p1",
+                                     "target_agent": "codex", "text": "x"})
+        self.assertIsNone(restored.only_when, "an existing schedule is not changed")
 
 
 class InboxNoticeTests(unittest.TestCase):

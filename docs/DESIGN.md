@@ -115,6 +115,23 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- A notice orphaned by a restart, and the idle gate default (2.10.0). A PM
+  pane held an `[inbox] 1 unread` line in its composer for ten hours and its
+  hourly dunk never recovered. The log is unambiguous: the daemon restarted at
+  21:02, and 30 seconds later wrote "input box has held text we did not type
+  for 30s with messages waiting. Not submitting someone's draft". The text was
+  ours - we had typed it minutes earlier - but `sent_text_by_pane` lives in
+  the process, so the restart erased the record and the backstop correctly
+  refused to submit what then looked like a draft. `_looks_like_ours` now
+  recognises an inbox notice by its fixed prefix as well as by memory, which
+  survives a restart because no person writes that line. The dunk timer loop
+  also gained the stranded-text recovery the outbox has had since 2.6.0; it
+  had none, which is why the dunk held rather than escalating.
+  Separately, a one-minute schedule sent into active Codex turns and aborted
+  them. A new schedule aimed at a pane with a detected agent now defaults to
+  `only_when="idle"`, since typing into an agent mid-turn costs that turn's
+  work silently. Existing schedules keep whatever they were given, a pane with
+  no agent is left ungated, and `only_when="any"` opts out.
 - A panel blocks a pane for ever (2.9.0). A VP self-dunk on a one-minute
   interval held 34 consecutive times over 34 minutes, and the outbox beside it
   looped between "box clear, delivering" and "draft appeared, not typing" at

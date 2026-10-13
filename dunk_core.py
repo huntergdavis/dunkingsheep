@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1105,6 +1105,7 @@ class Flock:
             name=None, start=False, only_when=None, max_sends=None,
             skip_if_unconsumed=False, hold_while_typing=True, self_pane_id=None):
         interval = parse_interval(interval_minutes)
+        gate_given = only_when is not None
         only_when = _check_only_when(only_when)
         max_sends = _check_max_sends(max_sends)
         pane = self.resolve_target(target, self_pane_id) if target else None
@@ -1123,6 +1124,12 @@ class Flock:
             if pane:
                 dunker.set_target(pane)
                 dunker.status = "Target set"
+                if not gate_given and pane.get("agent"):
+                    # Typing into an agent mid-turn can abort that turn, which
+                    # is silent and costs the whole turn's work. A schedule
+                    # aimed at an agent therefore waits for it to be idle
+                    # unless the caller says otherwise (only_when="any").
+                    dunker.only_when = "idle"
             self.dunkers.append(dunker)
             if start and pane:
                 self._start(dunker)
@@ -1733,10 +1740,15 @@ class Flock:
             del recent[:-REMEMBERED_SENDS]
 
     def _looks_like_ours(self, pane_id, shown):
-        """True if what is in the box is text we typed. We keep the last few
-        sends rather than only the newest, and never forget one just because a
-        send reported success: a single mis-read used to orphan our own text,
-        and then nothing could tell it from a human's draft."""
+        """True if what is in the box is text we typed."""
+        if shown and _collapse(shown).startswith(NOTICE_PREFIX.strip()):
+            # An inbox notice is unmistakably ours whatever we remember: no
+            # person writes this line. Recognising it by shape rather than by
+            # memory is what makes it survive a daemon restart, which is how
+            # one sat in a PM's composer for ten hours - the restart wiped the
+            # record of having typed it, so it became "someone's draft" and
+            # the backstop rightly refused to submit a draft.
+            return True
         if not shown:
             return False
         with self._lock:
@@ -2031,6 +2043,14 @@ class Flock:
                         panel_seen, panel_since = signature, now
                     elif self._dismiss_stale_panel(dunker.target_pane_id, panel_seen,
                                                    panel_since):
+                        panel_seen, panel_since = None, now
+                        continue
+                    elif (panel_seen[0] == "box"
+                          and self._unwedge(dunker.target_pane_id, panel_seen[1],
+                                            panel_since)):
+                        # Our own text stranded in the box. The outbox has had
+                        # this recovery since 2.6.0; a dunk had none, so d39
+                        # held on one notice for ten hours.
                         panel_seen, panel_since = None, now
                         continue
                     with self._lock:

@@ -1,4 +1,4 @@
-# Dunking Sheep 2.9.0 guide
+# Dunking Sheep 2.10.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -42,7 +42,9 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
 
 - only_when = idle: hold each send until herdr reports the target agent as
   idle (not working or blocked); re-checked every 5 seconds. Panes without a
-  detected agent count as idle.
+  detected agent count as idle. A new schedule aimed at a pane that has an
+  agent gets this gate by default, because typing into an agent mid-turn
+  can abort that turn; pass only_when="any" (--any-time) to opt out.
 - max_sends = N: the dunk removes itself after its N-th send. N = 1 is a
   one-shot delayed nudge ("in 30 minutes, tell me to check CI").
 - skip_if_unconsumed = true: backpressure. Before each send the daemon reads
