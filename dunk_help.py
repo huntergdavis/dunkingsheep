@@ -393,6 +393,12 @@ def guide(markdown=False):
       "finished, not stuck. Text waits for the panel to go rather than typing\n"
       "into it, while key presses go straight through, since keys are how a panel\n"
       "is dismissed.\n")
+    w("A panel that is left open would otherwise block its pane indefinitely: the\n"
+      "queue check does not see a panel as a draft, so it keeps saying the pane is\n"
+      "free while every send is refused. After 30 seconds open and unchanged, with\n"
+      "something waiting, the daemon presses Escape, which is the key the panel\n"
+      "itself advertises. A panel somebody is navigating keeps changing, so it is\n"
+      "left alone, and a human's draft is never a panel.\n")
 
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"

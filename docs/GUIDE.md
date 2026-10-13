@@ -1,4 +1,4 @@
-# Dunking Sheep 2.8.2 guide
+# Dunking Sheep 2.9.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -407,6 +407,13 @@ The daemon now recognises an open panel. A send whose text opened one is
 finished, not stuck. Text waits for the panel to go rather than typing
 into it, while key presses go straight through, since keys are how a panel
 is dismissed.
+
+A panel that is left open would otherwise block its pane indefinitely: the
+queue check does not see a panel as a draft, so it keeps saying the pane is
+free while every send is refused. After 30 seconds open and unchanged, with
+something waiting, the daemon presses Escape, which is the key the panel
+itself advertises. A panel somebody is navigating keeps changing, so it is
+left alone, and a human's draft is never a panel.
 
 ## The herdr guard: agents that shell out
 

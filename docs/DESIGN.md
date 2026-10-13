@@ -115,6 +115,24 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- A panel blocks a pane for ever (2.9.0). A VP self-dunk on a one-minute
+  interval held 34 consecutive times over 34 minutes, and the outbox beside it
+  looped between "box clear, delivering" and "draft appeared, not typing" at
+  the recheck interval. None of the diagnostic lines added in 2.8.1 and 2.8.2
+  appeared in that window, which left exactly one silent `return False` in
+  `_ensure_box_clear`: the modal branch. A panel had been open on the pane the
+  whole time. `_typing_in` correctly says a panel is not a draft, so
+  `_clear_to_send` kept reporting the pane free, while `_ensure_box_clear`
+  correctly refuses to type into one - a disagreement with nothing to break
+  it, since `_unwedge` only submits text it recognises as ours and a panel is
+  not text. The pane recovered only when an owner message dismissed the panel.
+  `_box_signature` now distinguishes a panel from a draft, and
+  `_dismiss_stale_panel` presses Escape - the key the panel itself advertises
+  - once one has been open and unchanged for `MODAL_WAIT_S` with something
+  waiting. A panel being navigated keeps changing and is left alone, and a
+  draft is never a panel, so draft protection is untouched. The dunk timer
+  loop gained the same recovery; it previously had none at all, which is why a
+  dunk could hold indefinitely while only the outbox had a backstop.
 - Transient drafts and honest notify state (2.8.2). After the livelock fix a
   notice to a Codex pane was still refused 14 times in 82 seconds while the
   pane showed only its dim placeholder. Sampling `_typed_text` on that pane

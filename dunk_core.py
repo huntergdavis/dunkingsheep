@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.8.2"
+VERSION = "2.9.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -141,6 +141,11 @@ NOTICE_PREFIX = "[inbox] "
 # How long to wait before confirming that a draft in the box is really there
 # and not a frame of an agent redrawing its pane.
 DRAFT_CONFIRM_S = 0.5
+# How long a panel may sit open on a pane, unchanged, while something waits to
+# be delivered there, before the daemon presses the key the panel itself
+# advertises to dismiss it. A panel is not a draft, so this never discards
+# anything a person wrote: the markers are the phrases only a dialog shows.
+MODAL_WAIT_S = 30.0
 
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
@@ -1485,10 +1490,11 @@ class Flock:
                              message.id, pane_id)
                 # Watch what is in the box. While it changes someone is
                 # writing and we wait; while it does not, we are wedged.
-                content = self._box_text(pane_id) or ""
-                if content != seen:
-                    seen, seen_since = content, time.time()
-                elif self._unwedge(pane_id, seen, seen_since):
+                signature = self._box_signature(pane_id)
+                if signature != seen:
+                    seen, seen_since = signature, time.time()
+                elif (self._dismiss_stale_panel(pane_id, seen, seen_since)
+                      or (seen[0] == "box" and self._unwedge(pane_id, seen[1], seen_since))):
                     seen, seen_since = None, time.time()
                     held_since = None
                     continue
@@ -1803,6 +1809,36 @@ class Flock:
         return {"pane_id": pane_id, "target_label": label, "flushed": ok,
                 "text": shown, "message": detail}
 
+    def _box_signature(self, pane_id):
+        """What the pane is showing, as ("modal"|"box", text). A panel and a
+        draft both stop a send, but they are cleared in different ways, so the
+        stale-state tracking has to tell them apart."""
+        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                      source="visible", ansi=True)
+        if screen is None:
+            return ("gone", "")
+        if _modal_open(screen):
+            return ("modal", _collapse(_strip_ansi(screen))[-120:])
+        return ("box", _typed_text(screen) or "")
+
+    def _dismiss_stale_panel(self, pane_id, signature, since):
+        """A panel left open blocks every text send to its pane, and the queue
+        check does not see it as a draft, so the two disagree for as long as it
+        is there: a VP self-dunk held 34 times over 34 minutes this way. When
+        one has been open and unchanged for MODAL_WAIT_S with something
+        waiting, press Escape, which is the key the panel itself advertises.
+        A panel being navigated keeps changing, so it is left alone."""
+        kind, _text = signature
+        if kind != "modal" or time.time() - since < MODAL_WAIT_S:
+            return False
+        log.warning("%s: a panel has been open and unchanged for %ds with a send "
+                    "waiting; pressing Escape to dismiss it",
+                    pane_id, int(time.time() - since))
+        ok, detail = self.herdr.send_keys(pane_id, "Escape")
+        if not ok:
+            log.error("%s: could not dismiss the panel: %s", pane_id, detail)
+        return ok
+
     def _draft_persists(self, pane_id):
         """Read the box again after a moment and return what is still there.
 
@@ -1900,6 +1936,7 @@ class Flock:
                                dunker.awaiting_consumption)
 
     def _timer_loop(self, dunker, stop_event):
+        panel_seen, panel_since = None, time.time()
         try:
             while not stop_event.is_set():
                 with self._lock:
@@ -1983,10 +2020,22 @@ class Flock:
                     dunker.last_sent_text, dunker.awaiting_consumption,
                     hold_while_typing=dunker.hold_while_typing)
                 if not sent:
-                    # They started typing while we waited for the send lock.
+                    # They started typing while we waited for the send lock -
+                    # or a panel is open, which blocks a send without being a
+                    # draft. A dunk used to hold on that for ever (34 times
+                    # over 34 minutes on a one-minute interval), because only
+                    # the message outbox had any recovery.
+                    now = time.time()
+                    signature = self._box_signature(dunker.target_pane_id)
+                    if signature != panel_seen:
+                        panel_seen, panel_since = signature, now
+                    elif self._dismiss_stale_panel(dunker.target_pane_id, panel_seen,
+                                                   panel_since):
+                        panel_seen, panel_since = None, now
+                        continue
                     with self._lock:
                         dunker.hold_count += 1
-                        dunker.last_held_at = time.time()
+                        dunker.last_held_at = now
                         dunker.status = "Held (typing)"
                         self._save()
                     if stop_event.wait(TYPING_RECHECK_S):

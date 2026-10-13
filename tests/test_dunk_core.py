@@ -1191,6 +1191,64 @@ class TransientDraftTests(unittest.TestCase):
         self.assertIn(("w2:p1", "our own text"), self.herdr.sends)
 
 
+class StalePanelTests(unittest.TestCase):
+    """A panel left open must not block a pane for ever."""
+
+    PANEL = ("  Current session \u00b7 Resets 4:30am\n  11% used\n  Esc to cancel\n")
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.patches = [
+            mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.02),
+            mock.patch.object(dunk_core, "MESSAGE_RECHECK_S", 0.05),
+            mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.02, 0.02)),
+            mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.1),
+            mock.patch.object(dunk_core, "MODAL_WAIT_S", 0.3),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self):
+        for patch in self.patches:
+            patch.stop()
+        self.flock.close()
+
+    def test_the_two_gates_disagree_about_a_panel(self):
+        # The disagreement itself: the queue check sees no draft, the send
+        # check refuses. That is what span for 34 minutes.
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        self.assertFalse(self.flock._typing_in("w2:p1"), "a panel is not a draft")
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"), "but cannot be typed into")
+
+    def test_a_stale_panel_is_dismissed_so_a_message_gets_through(self):
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        queued = self.flock.send_now("codex", "behind a panel", wait_s=0)
+        self.assertTrue(wait_until(
+            lambda: ("w2:p1", ["Escape"]) in self.herdr.keys, 6),
+            "the panel was never dismissed")
+        # Once it is gone the message goes.
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(
+            lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 8))
+
+    def test_a_panel_being_navigated_is_left_alone(self):
+        for n in range(6):
+            self.herdr.set_screen("w2:p1", self.PANEL.replace("11%", f"1{n}%"))
+            time.sleep(0.08)
+        self.assertNotIn(("w2:p1", ["Escape"]), self.herdr.keys,
+                         "a changing panel is someone using it")
+
+    def test_a_dunk_does_not_hold_on_a_panel_for_ever(self):
+        self.herdr.set_screen("w2:p1", self.PANEL)
+        dunk = self.flock.add(target="w2:p1", text="nudge", interval_minutes=1 / 60,
+                              start=True)
+        self.assertTrue(wait_until(
+            lambda: ("w2:p1", ["Escape"]) in self.herdr.keys, 8),
+            "the dunk held on the panel instead of clearing it")
+        self.assertGreaterEqual(self.flock.get(dunk["id"])["hold_count"], 0)
+
+
 class InboxNoticeTests(unittest.TestCase):
     """One notice per pane, carrying the current count."""
 
