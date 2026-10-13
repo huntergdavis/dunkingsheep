@@ -398,6 +398,34 @@ def codex_box_rotating_hint():
     ]) + "\n"
 
 
+def codex_approval_dialog():
+    """A live Codex approval prompt, captured from a real pane. The agent is
+    waiting for a person to choose; nothing may be typed or pressed."""
+    return "\n".join([
+        "  \u2514 Run the command: inspect pc \u2026",
+        "  \u2514   1. Yes, proceed (y)",
+        "  \u2514   2. No, and tell Codex what to do differently (esc)",
+        "",
+        "      Press Enter to confirm or Esc to cancel",
+        "",
+        "  gpt-6-sol high \u00b7 ~/workspace",
+    ]) + "\n"
+
+
+def codex_answered_dialog_in_scrollback():
+    """The same prompt, answered a while ago and now only transcript, with an
+    ordinary idle input box at the bottom. Real panes carry many lines of
+    output between the two, which is the point: history is not the live
+    screen."""
+    history = [
+        "  \u2514 Run the command: inspect pc \u2026",
+        "  \u2514   1. Yes, proceed (y)",
+        "  \u2514   2. No, and tell Codex what to do differently (esc)",
+        "      Press Enter to confirm or Esc to cancel",
+    ] + [f"  \u2514 output line {n}" for n in range(1, 21)]
+    return "\n".join(history) + "\n" + codex_box_hint_ansi()
+
+
 def codex_box_pending(text):
     return "\n".join([
         "  \u2514 earlier output",

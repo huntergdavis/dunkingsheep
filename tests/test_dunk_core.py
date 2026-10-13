@@ -18,6 +18,7 @@ from fakes import (  # noqa: E402
     FakeHerdr, claude_box_collapsed, claude_box_collapsed_ansi, claude_box_empty,
     claude_box_empty_ansi, claude_box_hint_ansi, claude_box_pasted_unsubmitted,
     claude_box_pending, claude_box_typing_ansi, codex_box_empty_with_transcript_collapse,
+    codex_approval_dialog, codex_answered_dialog_in_scrollback,
     codex_box_hint_ansi, codex_box_rotating_hint, codex_box_typing_ansi,
 )
 
@@ -1195,7 +1196,7 @@ class TransientDraftTests(unittest.TestCase):
 
 
 class StalePanelTests(unittest.TestCase):
-    """A panel left open must not block a pane for ever."""
+    """A dialog is a person's to answer; the daemon waits and says so."""
 
     PANEL = ("  Current session \u00b7 Resets 4:30am\n  11% used\n  Esc to cancel\n")
 
@@ -1224,13 +1225,16 @@ class StalePanelTests(unittest.TestCase):
         self.assertFalse(self.flock._typing_in("w2:p1"), "a panel is not a draft")
         self.assertFalse(self.flock._ensure_box_clear("w2:p1"), "but cannot be typed into")
 
-    def test_a_stale_panel_is_dismissed_so_a_message_gets_through(self):
+    def test_a_message_waits_for_a_person_to_answer_the_dialog(self):
+        # The daemon must not answer it. Pressing Escape on a Codex approval
+        # prompt chooses "no" for the human, and interrupts a working pane.
         self.herdr.set_screen("w2:p1", self.PANEL)
         queued = self.flock.send_now("codex", "behind a panel", wait_s=0)
-        self.assertTrue(wait_until(
-            lambda: ("w2:p1", ["Escape"]) in self.herdr.keys, 6),
-            "the panel was never dismissed")
-        # Once it is gone the message goes.
+        time.sleep(1.0)
+        self.assertEqual([], self.herdr.keys, "nothing may be pressed at a dialog")
+        self.assertEqual("queued",
+                         self.flock.get_message(queued["message_id"])["status"])
+        # Once a person answers it, delivery resumes on its own.
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
         self.assertTrue(wait_until(
             lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 8))
@@ -1242,14 +1246,65 @@ class StalePanelTests(unittest.TestCase):
         self.assertNotIn(("w2:p1", ["Escape"]), self.herdr.keys,
                          "a changing panel is someone using it")
 
-    def test_a_dunk_does_not_hold_on_a_panel_for_ever(self):
+    def test_a_dunk_waits_at_a_dialog_rather_than_answering_it(self):
         self.herdr.set_screen("w2:p1", self.PANEL)
         dunk = self.flock.add(target="w2:p1", text="nudge", interval_minutes=1 / 60,
-                              start=True)
+                              start=True, only_when="any")
         self.assertTrue(wait_until(
-            lambda: ("w2:p1", ["Escape"]) in self.herdr.keys, 8),
-            "the dunk held on the panel instead of clearing it")
-        self.assertGreaterEqual(self.flock.get(dunk["id"])["hold_count"], 0)
+            lambda: self.flock.get(dunk["id"])["hold_count"] >= 1, 8))
+        self.assertEqual([], self.herdr.keys, "a dunk may not answer a dialog either")
+        self.assertEqual(0, self.flock.get(dunk["id"])["send_count"])
+        # And it goes through once the dialog is gone.
+        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] >= 1, 8))
+
+
+class DialogScopeTests(unittest.TestCase):
+    """A dialog counts only while it is the live screen, and is never answered."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.wait = mock.patch.object(dunk_core, "MODAL_WAIT_S", 0.1)
+        self.wait.start()
+
+    def tearDown(self):
+        self.wait.stop()
+        self.flock.close()
+
+    def test_a_live_dialog_is_recognised(self):
+        self.assertTrue(dunk_core._modal_open(codex_approval_dialog()))
+
+    def test_an_answered_dialog_in_the_scrollback_is_not(self):
+        # Scanning the whole screen matched history as well as the live
+        # interface, so a pane that had ever shown a prompt stayed "modal".
+        screen = codex_answered_dialog_in_scrollback()
+        self.assertIn("Press Enter to confirm", screen, "the history is still there")
+        self.assertFalse(dunk_core._modal_open(screen),
+                         "only the bottom of the screen is the live interface")
+
+    def test_a_dialog_is_reported_and_never_answered(self):
+        # 2.9.0 pressed Escape, which answers a Codex approval prompt with
+        # "no" and interrupts a working pane. It did so 1042 times.
+        self.herdr.set_screen("w2:p1", codex_approval_dialog())
+        signature = self.flock._box_signature("w2:p1")
+        self.assertEqual("modal", signature[0])
+        time.sleep(0.15)
+        self.assertFalse(
+            self.flock._note_stale_panel("w2:p1", signature, time.time() - 5),
+            "a dialog is for a person to answer")
+        self.assertEqual([], self.herdr.keys, "nothing may be pressed there")
+
+    def test_nothing_is_typed_into_a_live_dialog(self):
+        self.herdr.set_screen("w2:p1", codex_approval_dialog())
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"))
+        self.assertFalse(self.flock._typing_in("w2:p1"), "a dialog is not a draft")
+
+    def test_an_ordinary_pane_under_old_history_still_takes_a_send(self):
+        self.herdr.set_screen("w2:p1", codex_answered_dialog_in_scrollback())
+        self.assertTrue(self.flock._ensure_box_clear("w2:p1"),
+                        "history must not block the pane")
 
 
 class StrandedNoticeTests(unittest.TestCase):

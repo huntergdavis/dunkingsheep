@@ -53,7 +53,7 @@ import time
 from dunk_inbox import Inbox, InboxError
 from herdr_client import HerdrClient
 
-VERSION = "2.10.0"
+VERSION = "2.11.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -126,6 +126,10 @@ STALE_BOX_S = 30.0
 # 2026-10-12 - the command had run, the panel was open, and the daemon spent
 # four Enter presses on the panel before reporting the send failed, while a
 # follow-up Escape queued behind the modal for ever.
+# Only this many lines from the bottom of the screen are the live interface;
+# anything above is transcript.
+MODAL_TAIL_LINES = 8
+
 MODAL_MARKERS = (
     "esc to cancel",
     "esc to close",
@@ -405,6 +409,7 @@ class Flock:
         # for a human's draft (which would stall that pane's queue for good).
         self.sent_text_by_pane = {}
         self._warned_wedged = {}
+        self._warned_modal = {}
         self.inbox = Inbox() if inbox is None else inbox
         self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
         self.message_history = []
@@ -1500,7 +1505,7 @@ class Flock:
                 signature = self._box_signature(pane_id)
                 if signature != seen:
                     seen, seen_since = signature, time.time()
-                elif (self._dismiss_stale_panel(pane_id, seen, seen_since)
+                elif (self._note_stale_panel(pane_id, seen, seen_since)
                       or (seen[0] == "box" and self._unwedge(pane_id, seen[1], seen_since))):
                     seen, seen_since = None, time.time()
                     held_since = None
@@ -1833,23 +1838,26 @@ class Flock:
             return ("modal", _collapse(_strip_ansi(screen))[-120:])
         return ("box", _typed_text(screen) or "")
 
-    def _dismiss_stale_panel(self, pane_id, signature, since):
-        """A panel left open blocks every text send to its pane, and the queue
-        check does not see it as a draft, so the two disagree for as long as it
-        is there: a VP self-dunk held 34 times over 34 minutes this way. When
-        one has been open and unchanged for MODAL_WAIT_S with something
-        waiting, press Escape, which is the key the panel itself advertises.
-        A panel being navigated keeps changing, so it is left alone."""
+    def _note_stale_panel(self, pane_id, signature, since):
+        """Say once that a dialog is holding up this pane. Never answer it.
+
+        2.9.0 pressed Escape after MODAL_WAIT_S to get a blocked pane moving
+        again. That was wrong twice over: a Codex approval prompt asks a person
+        to choose, so Escape answers "no" on their behalf, and Escape in a
+        working pane interrupts the turn. Combined with a modal check that read
+        the transcript as well as the live screen, it fired 1042 times. A
+        dialog means the agent is waiting for a person, which is a thing to
+        report, not to resolve."""
         kind, _text = signature
         if kind != "modal" or time.time() - since < MODAL_WAIT_S:
             return False
-        log.warning("%s: a panel has been open and unchanged for %ds with a send "
-                    "waiting; pressing Escape to dismiss it",
-                    pane_id, int(time.time() - since))
-        ok, detail = self.herdr.send_keys(pane_id, "Escape")
-        if not ok:
-            log.error("%s: could not dismiss the panel: %s", pane_id, detail)
-        return ok
+        if not self._warned_modal.get(pane_id):
+            self._warned_modal[pane_id] = True
+            log.warning("%s: a dialog has been open for %ds with a send waiting. "
+                        "It is waiting for a person to answer it; nothing will be "
+                        "typed or pressed there until it is.",
+                        pane_id, int(time.time() - since))
+        return False
 
     def _draft_persists(self, pane_id):
         """Read the box again after a moment and return what is still there.
@@ -2041,7 +2049,7 @@ class Flock:
                     signature = self._box_signature(dunker.target_pane_id)
                     if signature != panel_seen:
                         panel_seen, panel_since = signature, now
-                    elif self._dismiss_stale_panel(dunker.target_pane_id, panel_seen,
+                    elif self._note_stale_panel(dunker.target_pane_id, panel_seen,
                                                    panel_since):
                         panel_seen, panel_since = None, now
                         continue
@@ -2211,11 +2219,17 @@ def _bright_text(line):
 
 
 def _modal_open(screen):
-    """True if the pane is showing a panel or dialog rather than an input box.
-    Nothing can be typed into one, and nothing is waiting in it."""
+    """True if the pane is showing a panel or dialog *right now*.
+
+    Only the bottom of the screen counts. Scanning the whole thing matched the
+    transcript as well as the live interface, so a pane that had shown an
+    approval prompt at any point still read as a dialog long after it was
+    answered - and that is how the daemon came to press Escape into working
+    agents 1042 times."""
     if not screen:
         return False
-    low = _strip_ansi(screen).lower()
+    lines = [line for line in _strip_ansi(screen).splitlines() if line.strip()]
+    low = "\n".join(lines[-MODAL_TAIL_LINES:]).lower()
     return any(marker in low for marker in MODAL_MARKERS)
 
 

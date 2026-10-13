@@ -115,6 +115,22 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- The daemon was answering dialogs (2.11.0). Two faults compounded. The modal
+  check scanned the whole visible screen, so an approval prompt that had
+  scrolled up into the transcript still read as a live dialog long after it
+  was answered: four ordinary Codex panes were flagged modal at once. And
+  2.9.0 pressed Escape at a "stale" panel to get the pane moving. Together
+  they pressed Escape into working agent panes 1042 times. On a Codex approval
+  prompt Escape chooses "No, and tell Codex what to do differently"; in a
+  working pane it interrupts the turn. That is the likeliest source of the
+  aborted turns reported from the field, and of sends refused on panes that
+  were not actually blocked.
+  `_modal_open` now reads only the last `MODAL_TAIL_LINES` of the screen, which
+  is the live interface; anything above is transcript. The dismissal is gone
+  entirely: `_note_stale_panel` logs once that a dialog is waiting for a
+  person and returns False. A dialog is a question put to someone, not a state
+  to resolve, so the daemon types nothing and presses nothing there and
+  delivery resumes on its own once it is answered.
 - A notice orphaned by a restart, and the idle gate default (2.10.0). A PM
   pane held an `[inbox] 1 unread` line in its composer for ten hours and its
   hourly dunk never recovered. The log is unambiguous: the daemon restarted at
