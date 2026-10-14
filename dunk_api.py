@@ -235,6 +235,11 @@ def h_inbox_fetch(flock, args, self_pane_id):
     return flock.inbox_fetch(args["attachment_id"], args.get("dest"))
 
 
+def h_metrics(flock, args, self_pane_id):
+    return flock.metrics_summary(window_s=float(_opt(args, "window_s", 3600)),
+                                 since=args.get("since"), until=args.get("until"))
+
+
 def h_list_panes(flock, args, self_pane_id):
     panes = flock.list_panes(self_pane_id=self_pane_id)
     keep = ("pane_id", "is_self", "workspace_label", "tab_label", "agent",
@@ -715,6 +720,22 @@ COMMANDS = [
                 "dest": {"type": "string",
                          "description": "Directory to write into (default: the daemon's cwd)."}},
         required=["attachment_id"],
+    ),
+    Command(
+        "metrics",
+        "Read-only operations metrics as JSON: counts by sender, recipient, "
+        "pane and source, duration distributions for queue wait, delivery and "
+        "handling, the Enter-retry histogram, live queue depth, and a coverage "
+        "block saying what is and is not measured. Carries identifiers and "
+        "numbers only, never message text. Durations are null rather than zero "
+        "when nothing in the window measures them.",
+        h_metrics,
+        params={"window_s": {"type": "number", "minimum": 1, "maximum": 2592000,
+                             "description": "Window ending now, in seconds (default 3600)."},
+                "since": {"type": "number",
+                          "description": "Window start as a unix timestamp (overrides window_s)."},
+                "until": {"type": "number",
+                          "description": "Window end as a unix timestamp (default now)."}},
     ),
     Command(
         "list_panes",

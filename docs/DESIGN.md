@@ -115,6 +115,24 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   usually means submitting. Unreadable pane or no box: never hold, since this
   guards the human's draft rather than the agent's queue. Since 2.3.0 `fire`
   and `send_now` respect it too, via the message queue below.
+- Operations telemetry (2.13.0). Two durable stores already existed but
+  neither answered "how is delivery going": `inbox.db` knows when mail was
+  written, read and acknowledged, and `dunks.json` keeps cumulative counters
+  per schedule. Everything about the typing pipeline - how long a send waited,
+  how many Enter presses it took, what blocked it - lived only in memory and
+  in an unstructured 5 MB log, and was lost on every restart. `dunk_metrics`
+  adds an append-only event store in its own database, so telemetry retention
+  is independent of mail and can be pruned or dropped without touching
+  anything a person is waiting to read. Ten hooks record where a real event
+  already happens; nothing is inferred or back-filled. `metrics_summary`
+  returns a versioned, self-describing document carrying its own interval,
+  units and definitions. Two deliberate choices: a duration is null rather
+  than zero when nothing measured it, with the names listed in
+  `coverage.missing`, and `coverage.events_since` states when recording began
+  so a window reaching further back is reported as partly covered rather than
+  quietly empty. Cumulative per-schedule counters are kept in their own block,
+  since reading them as a rate would be wrong. Privacy is enforced by a test
+  that asserts no body, subject or address can reach the output.
 - A notice that says what arrived (2.12.0). The nudge used to say only how
   many messages were unread, which told a recipient nothing about whether to
   stop what it was doing. It now names the inbox (an agent may be asked about

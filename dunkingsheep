@@ -219,6 +219,15 @@ def build_parser():
     p = sub.add_parser("cancel-message", aliases=["cancel"], help="drop a queued message")
     p.add_argument("message_id")
 
+    p = sub.add_parser("metrics", help="read-only operations metrics as JSON",
+                       description="Counts, duration distributions and coverage for a "
+                                   "time window. Identifiers and numbers only; never "
+                                   "message text.")
+    p.add_argument("--window", "-w", type=float, default=3600, metavar="SECONDS",
+                   help="window ending now, in seconds (default 3600)")
+    p.add_argument("--since", type=float, help="window start as a unix timestamp")
+    p.add_argument("--until", type=float, help="window end as a unix timestamp")
+
     sub.add_parser("panes", help="list herdr panes (possible targets)")
 
     # -- herdr layout control -------------------------------------------------
@@ -825,6 +834,9 @@ def run_client_command(client, args):
     if command in ("cancel-message", "cancel"):
         return client.call("cancel_message", message_id=args.message_id), \
             lambda r: print(f"cancelled {r['message_id']} for {r['target_label']}")
+    if command == "metrics":
+        return client.call("metrics", window_s=args.window, since=args.since,
+                           until=args.until), lambda r: print(json.dumps(r, indent=2))
     if command == "panes":
         return client.call("list_panes"), print_panes
     if command in ("workspaces", "tabs"):

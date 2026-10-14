@@ -142,6 +142,7 @@ def guide(markdown=False):
            "dunkingsheep messages | cancel-message <id>   the direct-message queue\n"
            "dunkingsheep flush <target>                   submit text stuck in a pane's box\n"
            "dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch\n"
+           "dunkingsheep metrics [--window S]             operations metrics as JSON\n"
            "dunkingsheep install                          put the CLI on PATH\n"
            "dunkingsheep guard [status|install|check|uninstall]\n"
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
@@ -408,6 +409,29 @@ def guide(markdown=False):
       "by itself once somebody answers.\n")
     w("Only the bottom of the screen counts as the live interface. An approval\n"
       "prompt scrolled up into the transcript is history, not a dialog.\n")
+
+    w(h(2, "Operations metrics"))
+    w("`metrics` returns a read-only JSON snapshot of how delivery is going, for\n"
+      "a status board to poll. It carries identifiers and numbers only: mailbox\n"
+      "names, pane ids, dunk ids, counts, durations and byte sizes. No message\n"
+      "body, no subject, no filename, no account email, and nothing about token\n"
+      "spend, which would be a guess dressed as a measurement.\n")
+    w(code("dunkingsheep metrics --window 3600        # the last hour, as JSON\n"
+           "dunkingsheep metrics --since <epoch> --until <epoch>\n"
+           "metrics(window_s=3600)                    # same thing over MCP or the socket"))
+    w("The document is versioned (`schema_version`) and self-describing: it\n"
+      "carries its own interval, units, and a definition of every event kind,\n"
+      "outcome and block reason it can report.\n")
+    w("Two things to read carefully. A duration is null, never zero, when nothing\n"
+      "in the window measured it, and the names of those appear in\n"
+      "`coverage.missing`. And `coverage.events_since` says when durable\n"
+      "recording began, so a window that reaches back further is reported as\n"
+      "partially covered rather than quietly empty. Counters kept per schedule\n"
+      "appear under `cumulative`, separate from anything windowed, because they\n"
+      "run from each schedule's creation and are not a rate.\n")
+    w("Events are kept for thirty days and pruned on daemon start. The store is a\n"
+      "separate database from the inbox, so it can be pruned or deleted without\n"
+      "touching mail anyone is waiting to read.\n")
 
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"

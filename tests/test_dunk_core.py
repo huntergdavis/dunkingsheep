@@ -674,7 +674,9 @@ class MessageQueueTests(unittest.TestCase):
         self.assertFalse(done["queued"])
         self.assertGreaterEqual(done["holds"], 1)
         self.assertEqual(["m1"], [m["message_id"] for m in self.flock.list_messages()["recent"]])
-        self.assertEqual(0, self.flock.status()["queued_messages"])
+        self.assertTrue(wait_until(
+            lambda: self.flock.status()["queued_messages"] == 0, 5),
+            "the queue should drain once the message is delivered")
 
     def test_queued_messages_keep_their_order_per_pane(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))

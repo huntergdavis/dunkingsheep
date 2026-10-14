@@ -1,4 +1,4 @@
-# Dunking Sheep 2.12.0 guide
+# Dunking Sheep 2.13.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -97,6 +97,7 @@ dunkingsheep send-keys <target> <keys...>     guarded key presses
 dunkingsheep messages | cancel-message <id>   the direct-message queue
 dunkingsheep flush <target>                   submit text stuck in a pane's box
 dunkingsheep inbox count|read|list|send|status|ack|cancel|delete|stats|fetch
+dunkingsheep metrics [--window S]             operations metrics as JSON
 dunkingsheep install                          put the CLI on PATH
 dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
@@ -428,6 +429,36 @@ by itself once somebody answers.
 
 Only the bottom of the screen counts as the live interface. An approval
 prompt scrolled up into the transcript is history, not a dialog.
+
+## Operations metrics
+
+`metrics` returns a read-only JSON snapshot of how delivery is going, for
+a status board to poll. It carries identifiers and numbers only: mailbox
+names, pane ids, dunk ids, counts, durations and byte sizes. No message
+body, no subject, no filename, no account email, and nothing about token
+spend, which would be a guess dressed as a measurement.
+
+```
+dunkingsheep metrics --window 3600        # the last hour, as JSON
+dunkingsheep metrics --since <epoch> --until <epoch>
+metrics(window_s=3600)                    # same thing over MCP or the socket
+```
+
+The document is versioned (`schema_version`) and self-describing: it
+carries its own interval, units, and a definition of every event kind,
+outcome and block reason it can report.
+
+Two things to read carefully. A duration is null, never zero, when nothing
+in the window measured it, and the names of those appear in
+`coverage.missing`. And `coverage.events_since` says when durable
+recording began, so a window that reaches back further is reported as
+partially covered rather than quietly empty. Counters kept per schedule
+appear under `cumulative`, separate from anything windowed, because they
+run from each schedule's creation and are not a rate.
+
+Events are kept for thirty days and pruned on daemon start. The store is a
+separate database from the inbox, so it can be pruned or deleted without
+touching mail anyone is waiting to read.
 
 ## The herdr guard: agents that shell out
 

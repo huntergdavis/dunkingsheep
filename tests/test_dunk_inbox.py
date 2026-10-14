@@ -341,7 +341,7 @@ class SurfaceParityTests(unittest.TestCase):
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",
-            "get_message": "messages",
+            "get_message": "messages", "metrics": "metrics",
             "inbox_send": "send", "inbox_count": "count", "inbox_list": "list",
             "inbox_read": "read", "inbox_status": "status", "inbox_ack": "ack",
             "inbox_cancel": "cancel", "inbox_delete": "delete",

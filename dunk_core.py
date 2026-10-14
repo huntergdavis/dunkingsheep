@@ -51,9 +51,11 @@ import threading
 import time
 
 from dunk_inbox import Inbox, InboxError
+from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
+import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.12.0"
+VERSION = "2.13.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -382,7 +384,7 @@ class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
     def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
-                 restore=True, inbox=None):
+                 restore=True, inbox=None, metrics=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
         self.persist_enabled = persist
@@ -410,8 +412,23 @@ class Flock:
         self.sent_text_by_pane = {}
         self._warned_wedged = {}
         self._warned_modal = {}
+        # Why the most recent refusal happened, per pane, so a held event can
+        # say which of draft / dialog / stranded it was.
+        self._last_block_reason = {}
         self.inbox = Inbox() if inbox is None else inbox
         self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
+        if metrics is not None:
+            self.metrics = metrics
+        elif self.persist_enabled:
+            # Telemetry lives beside the state file, so a flock persisting into
+            # a temporary directory keeps its events there too. Hard-coding the
+            # real path meant any in-process test that persisted appended to the
+            # live store, and tidying that up is not a test's business.
+            self.metrics = Metrics(path=os.path.join(
+                os.path.dirname(os.path.abspath(self.state_file)), "metrics.db"))
+        else:
+            self.metrics = Metrics(path=":memory:")
+        self.metrics.prune()
         self.message_history = []
         self.next_message_id = 1
         if restore:
@@ -666,6 +683,10 @@ class Flock:
                 pass
             except DunkError as error:
                 self.inbox.record_notify(message["message_id"], "failed", str(error))
+        self.metrics.record("inbox.sent", pane_id=pane_id, mailbox=mailbox,
+                            sender=sender, source="inbox", outcome="ok",
+                            bytes=len(str(body or "").encode("utf-8")),
+                            attempts=len(message.get("attachments") or []) or None)
         with self._lock:
             self.last_message = f"Inbox message to {label}"
         log.info("inbox %s -> %s (%s)", message["message_id"], mailbox,
@@ -704,7 +725,16 @@ class Flock:
     @_as_dunk_error
     def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
         key = self._mailbox_or_self(mailbox, self_pane_id)
-        return {"mailbox": key, "messages": self.inbox.read(key, limit=limit, peek=peek)}
+        messages = self.inbox.read(key, limit=limit, peek=peek)
+        if not peek:
+            for message in messages:
+                # How long it waited to be picked up.
+                self.metrics.record(
+                    "inbox.read", pane_id=message.get("pane_id"), mailbox=key,
+                    sender=message.get("sender"), source="inbox", outcome="ok",
+                    duration_ms=int((message["read_at"] - message["created_at"]) * 1000),
+                    bytes=message.get("body_bytes"))
+        return {"mailbox": key, "messages": messages}
 
     @_as_dunk_error
     def inbox_status(self, message_id):
@@ -712,7 +742,23 @@ class Flock:
 
     @_as_dunk_error
     def inbox_ack(self, message_ids):
-        return self.inbox.ack(message_ids)
+        before = {}
+        for message_id in ([message_ids] if isinstance(message_ids, str)
+                           else list(message_ids)):
+            try:
+                before[message_id] = self.inbox.status(message_id)
+            except InboxError:
+                pass
+        result = self.inbox.ack(message_ids)
+        for message_id in result.get("changed", []):
+            was = before.get(message_id) or {}
+            started = was.get("read_at") or was.get("created_at")
+            # How long the recipient held it after picking it up.
+            self.metrics.record(
+                "inbox.acked", pane_id=was.get("pane_id"), mailbox=was.get("mailbox"),
+                sender=was.get("sender"), source="inbox", outcome="ok",
+                duration_ms=int((time.time() - started) * 1000) if started else None)
+        return result
 
     @_as_dunk_error
     def inbox_cancel(self, message_ids):
@@ -729,6 +775,85 @@ class Flock:
     @_as_dunk_error
     def inbox_fetch(self, attachment_id, dest=None):
         return self.inbox.fetch(attachment_id, dest or os.getcwd())
+
+    # -- operations telemetry -----------------------------------------------
+
+    def metrics_summary(self, window_s=3600, since=None, until=None):
+        """A read-only snapshot of how delivery is going, for a status board.
+
+        Carries identifiers and numbers only: mailbox names, pane ids, dunk
+        ids, counts, durations and byte sizes. No message body, no subject, no
+        filename, no account email, and nothing about token spend, which would
+        be a guess dressed as a measurement.
+
+        A duration is null, never zero, when the window holds no event that
+        measures it, and `coverage` says when durable recording began, so
+        "nothing happened" is never confused with "not recorded"."""
+        now = time.time()
+        end = float(until) if until else now
+        start = float(since) if since else end - max(1.0, float(window_s))
+        counts, durations, retries = self.metrics.summary(start, end)
+
+        missing = [name for name, value in durations.items() if value is None]
+        earliest = self.metrics.earliest()
+        if earliest is None:
+            notes = ("no events recorded yet; durable telemetry began with this "
+                     "daemon and records as traffic happens")
+        elif earliest > start:
+            notes = ("the window starts before durable recording did, so it is "
+                     "only covered from coverage.events_since onwards")
+        else:
+            notes = "the window is fully covered by durable recording"
+
+        with self._lock:
+            queued = [m for queue in self.outbox.values() for m in queue
+                      if m.status == "queued"]
+            dunks = [{
+                "id": d.id,
+                "target_pane_id": d.target_pane_id,
+                "running": d.running,
+                "interval_minutes": d.interval_minutes,
+                "send_count": d.send_count,
+                "skip_count": d.skip_count,
+                "hold_count": d.hold_count,
+                "created_at": d.created_at,
+            } for d in self.dunkers]
+
+        inbox_stats = self.inbox.stats()
+        return {
+            "schema_version": METRICS_SCHEMA_VERSION,
+            "generated_at": now,
+            "interval": {"start": start, "end": end, "seconds": round(end - start, 3)},
+            "units": {"duration": "milliseconds", "size": "bytes",
+                      "timestamp": "unix_epoch_seconds", "rate": "per_hour"},
+            "event_definitions": dunk_metrics.KINDS,
+            "outcome_definitions": dunk_metrics.OUTCOMES,
+            "reason_definitions": dunk_metrics.REASONS,
+            "counts": counts,
+            "durations": durations,
+            "retries": retries,
+            "queue": {
+                "depth_now": len(queued),
+                "oldest_wait_s": (int(now - min(m.created_at for m in queued))
+                                  if queued else None),
+            },
+            "inbox": {
+                "unread_now": sum(m["unread"] for m in inbox_stats),
+                "mailboxes": len(inbox_stats),
+            },
+            "cumulative": {
+                "note": ("counters kept per schedule since it was created; these "
+                         "are not windowed and must not be read as a rate"),
+                "dunks": dunks,
+            },
+            "coverage": {
+                "events_since": earliest,
+                "window_has_events": counts["events"] > 0,
+                "missing": missing,
+                "retention_s": self.metrics.retention_s,
+                "notes": notes,
+            },
+        }
 
     # -- herdr layout control -----------------------------------------------
     # Workspaces, tabs and panes can be created, renamed, focused and closed
@@ -1394,6 +1519,10 @@ class Flock:
         if not sent:
             with self._lock:
                 message.holds += 1
+            self.metrics.record("message.held", pane_id=message.pane_id,
+                                mailbox=message.target_label, source=message.source,
+                                outcome="held", reason=self._last_block_reason.get(
+                                    message.pane_id))
             return False
         with self._lock:
             message.status = "sent" if ok else "failed"
@@ -1402,6 +1531,14 @@ class Flock:
             self.last_message = (f"Sent to {message.target_label}" if ok
                                  else f"Send failed: {detail}")
             self._remember(message)
+        self.metrics.record(
+            "message.sent" if ok else "message.failed",
+            pane_id=message.pane_id, mailbox=message.target_label,
+            source=message.source, outcome="ok" if ok else "failed",
+            reason=None if ok else "unconfirmed",
+            duration_ms=int((message.finished_at - message.created_at) * 1000),
+            attempts=message.holds or None,
+            bytes=len((message.text or "").encode("utf-8")))
         for inbox_id in list(message.notify_for):
             # The inbox record said "queued" when the notice was created; say
             # what actually happened, so a status query is not stale.
@@ -1600,6 +1737,10 @@ class Flock:
             else:
                 dunker.last_error = message
                 self.last_message = f"Send failed: {message}"
+        self.metrics.record("dunk.sent", pane_id=dunker.target_pane_id,
+                            mailbox=dunker.target_label(), source=dunker.id,
+                            outcome="ok" if ok else "failed",
+                            bytes=len((text or "").encode("utf-8")))
         log.info("%s -> %s: %s (%s)", dunker.id, dunker.target_pane_id,
                  "sent" if ok else "FAILED", message)
         return ok, message
@@ -1728,6 +1869,9 @@ class Flock:
                         # missing input box during redraw proves nothing.
                         if attempt > 1:
                             log.info("%s: submitted after %d Enter presses", pane_id, attempt)
+                        self.metrics.record("submit.attempt", pane_id=pane_id,
+                                            outcome="ok", attempts=attempt,
+                                            bytes=len((text or "").encode("utf-8")))
                         return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
                     if last_hold is True:
                         break        # our text returned; another Enter is safe
@@ -1855,6 +1999,9 @@ class Flock:
             return False
         if not self._warned_modal.get(pane_id):
             self._warned_modal[pane_id] = True
+            self.metrics.record("panel.blocking", pane_id=pane_id, outcome="held",
+                                reason="dialog",
+                                duration_ms=int((time.time() - since) * 1000))
             log.warning("%s: a dialog has been open for %ds with a send waiting. "
                         "It is waiting for a person to answer it; nothing will be "
                         "typed or pressed there until it is.",
@@ -1889,11 +2036,13 @@ class Flock:
             # Typing into an open panel does nothing useful and its keys mean
             # something else, so text waits for it to go. Key presses are how
             # a panel is dismissed, so they go through.
+            self._last_block_reason[pane_id] = "dialog"
             return allow_modal
         shown = _typed_text(screen)
         if shown is None or not shown:
             return True
         if self._looks_like_ours(pane_id, shown):
+            self._last_block_reason[pane_id] = "stranded"
             log.info("%s: our previous send is stranded in the box; submitting it first",
                      pane_id)
             ok, _detail = self._press_until_submitted(pane_id, shown)
@@ -1904,6 +2053,7 @@ class Flock:
         if self._looks_like_ours(pane_id, still):
             ok, _detail = self._press_until_submitted(pane_id, still)
             return ok
+        self._last_block_reason[pane_id] = "draft"
         log.info("%s: holding, the input box still holds a draft: %r",
                  pane_id, still[:60])
         return False                         # someone is writing
@@ -2027,6 +2177,9 @@ class Flock:
                         dunker.status = "Skipped (unconsumed)"
                         self.last_message = f"Skipped {dunker.id}: previous send unconsumed"
                         self._save()
+                    self.metrics.record("dunk.skipped", pane_id=dunker.target_pane_id,
+                                        mailbox=dunker.target_label(), source=dunker.id,
+                                        outcome="held", reason="stranded")
                     log.info("%s -> %s: skipped, previous send not consumed",
                              dunker.id, dunker.target_pane_id)
                     if stop_event.wait(1.0):
@@ -2068,6 +2221,11 @@ class Flock:
                         dunker.last_held_at = now
                         dunker.status = "Held (typing)"
                         self._save()
+                    self.metrics.record("dunk.held", pane_id=dunker.target_pane_id,
+                                        mailbox=dunker.target_label(), source=dunker.id,
+                                        outcome="held",
+                                        reason=self._last_block_reason.get(
+                                            dunker.target_pane_id))
                     if stop_event.wait(TYPING_RECHECK_S):
                         return
                     continue
