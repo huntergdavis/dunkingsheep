@@ -51,11 +51,12 @@ import threading
 import time
 
 from dunk_inbox import Inbox, InboxError
+from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.13.0"
+VERSION = "2.14.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -70,6 +71,10 @@ RESTORE_GRACE_S = 5
 DEFAULT_TEXT = "continue"
 DEFAULT_INTERVAL_MINUTES = 10.0
 ONLY_WHEN_CHOICES = (None, "idle")
+# Deterministic task coordination cadence. The reaper requeues expired/dead
+# claims; the pusher feeds idle followers without any agent polling.
+TASK_REAP_S = float(os.environ.get("DUNKINGSHEEP_REAP_S", "15"))
+TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
 # Reading the pane's visible screen to decide whether a send was consumed.
@@ -198,9 +203,17 @@ def _as_dunk_error(method):
     def wrapper(*args, **kwargs):
         try:
             return method(*args, **kwargs)
-        except InboxError as error:
+        except (InboxError, TaskError) as error:
             raise DunkError(str(error)) from None
     return wrapper
+
+
+def _truthy(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 def format_interval(minutes):
@@ -384,7 +397,7 @@ class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
     def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
-                 restore=True, inbox=None, metrics=None):
+                 restore=True, inbox=None, metrics=None, tasks=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
         self.persist_enabled = persist
@@ -416,6 +429,11 @@ class Flock:
         # say which of draft / dialog / stranded it was.
         self._last_block_reason = {}
         self.inbox = Inbox() if inbox is None else inbox
+        self.tasks = Tasks() if tasks is None else tasks
+        # Panes that asked the daemon to feed them work when they go idle.
+        # pane_id -> scope (global or that pane's private queue).
+        self.task_waiters = {}
+        self._task_stop = threading.Event()
         self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
         if metrics is not None:
             self.metrics = metrics
@@ -433,6 +451,8 @@ class Flock:
         self.next_message_id = 1
         if restore:
             self._restore()
+        if self.persist_enabled:
+            self._start_task_workers()
 
     # -- persistence --------------------------------------------------------
 
@@ -523,6 +543,8 @@ class Flock:
             "uptime_s": int(time.time() - self.started_at),
             "queued_messages": sum(len(q) for q in self.outbox.values()),
             "inbox_unread": sum(m["unread"] for m in self.inbox.stats()),
+            "tasks": self.tasks.stats()["totals"],
+            "task_followers": len(self.task_waiters),
             "quarantined_mailboxes": self.quarantined_mailboxes or None,
             "message": self.last_message,
         }
@@ -734,7 +756,12 @@ class Flock:
                     sender=message.get("sender"), source="inbox", outcome="ok",
                     duration_ms=int((message["read_at"] - message["created_at"]) * 1000),
                     bytes=message.get("body_bytes"))
-        return {"mailbox": key, "messages": messages}
+        result = {"mailbox": key, "messages": messages}
+        if self_pane_id:
+            # The owner's directive: mail and the reader's task queues travel
+            # together, so one inbox read is the whole handoff.
+            result["tasks"] = self.tasks.for_pane(self_pane_id)
+        return result
 
     @_as_dunk_error
     def inbox_status(self, message_id):
@@ -775,6 +802,355 @@ class Flock:
     @_as_dunk_error
     def inbox_fetch(self, attachment_id, dest=None):
         return self.inbox.fetch(attachment_id, dest or os.getcwd())
+
+    # -- global and per-pane tasks ------------------------------------------
+
+    def _task_scope(self, scope, self_pane_id, default=TASK_GLOBAL):
+        """Resolve a caller's scope and enforce per-pane privacy.
+
+        Global is fleet-wide. A pane id is private to that pane; an agent may
+        only name its own pane (or 'self'). A caller with no pane, such as the
+        human's CLI outside herdr, may name any pane for inspection.
+        """
+        if scope is None or str(scope).strip() in ("", "all"):
+            return default
+        value = str(scope).strip()
+        if value == "self":
+            if not self_pane_id:
+                raise DunkError("scope 'self' requires a known caller pane")
+            return self_pane_id
+        try:
+            value = validate_task_scope(value)
+        except TaskError as error:
+            raise DunkError(str(error)) from None
+        if self_pane_id and value != TASK_GLOBAL and value != self_pane_id:
+            raise DunkError(
+                f"per-pane tasks are private to {value}; caller runs in {self_pane_id}")
+        return value
+
+    def _task_assignees(self, assignees, self_pane_id):
+        """Expand 'self'/'me' to the caller's pane id."""
+        if not assignees:
+            return []
+        values = [assignees] if isinstance(assignees, str) else list(assignees)
+        resolved = []
+        for value in values:
+            value = str(value).strip()
+            if not value:
+                continue
+            if value in ("self", "me"):
+                if not self_pane_id:
+                    raise DunkError("self-assign requires a known caller pane")
+                resolved.append(self_pane_id)
+            else:
+                resolved.append(value)
+        return resolved
+
+    def _require_task_visible(self, task, self_pane_id):
+        if not self_pane_id:
+            return task
+        scope = task.get("scope")
+        if scope != TASK_GLOBAL and scope != self_pane_id:
+            raise DunkError(
+                f"task {task['id']} belongs to another pane's private queue ({scope})")
+        return task
+
+    @_as_dunk_error
+    def task_add(self, title, scope=None, body=None, status=None, priority=None,
+                 assignees=None, parent_id=None, depends_on=None,
+                 multi_assignee=False, self_pane_id=None):
+        target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        return self.tasks.add(
+            target, title, body=body or "", status=status or "open",
+            priority=priority or "medium",
+            assignees=self._task_assignees(assignees, self_pane_id),
+            parent_id=parent_id, depends_on=depends_on,
+            created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False))
+
+    @_as_dunk_error
+    def task_list(self, scope=None, status=None, assignee=None, include_done=True,
+                  limit=200, self_pane_id=None):
+        explicit = None
+        if scope is not None and str(scope).strip() not in ("", "all"):
+            explicit = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        tasks = self.tasks.list(
+            scope=explicit, status=status, assignee=assignee,
+            include_done=_truthy(include_done, True), limit=int(limit or 200),
+            self_pane_id=self_pane_id)
+        return {"scope": explicit or "visible", "pane_id": self_pane_id,
+                "tasks": tasks}
+
+    @_as_dunk_error
+    def task_read(self, task_id, self_pane_id=None):
+        return self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+
+    @_as_dunk_error
+    def task_update(self, task_id, title=None, body=None, status=None,
+                    priority=None, parent_id=..., assignees=None,
+                    depends_on=None, block_reason=..., multi_assignee=None,
+                    self_pane_id=None, updated_by=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        resolved = (self._task_assignees(assignees, self_pane_id)
+                    if assignees is not None else None)
+        return self.tasks.update(
+            task_id, title=title, body=body, status=status, priority=priority,
+            parent_id=parent_id, assignees=resolved, depends_on=depends_on,
+            block_reason=block_reason, multi_assignee=multi_assignee,
+            updated_by=updated_by or self_pane_id)
+
+    @_as_dunk_error
+    def task_assign(self, task_id, assignees, mode="add", self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.assign(
+            task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
+
+    @_as_dunk_error
+    def task_complete(self, task_id, by=None, self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.complete(task_id, by=by or self_pane_id)
+
+    @_as_dunk_error
+    def task_block(self, task_id, reason=None, self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.block(task_id, reason=reason)
+
+    @_as_dunk_error
+    def task_unblock(self, task_id, self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.unblock(task_id)
+
+    @_as_dunk_error
+    def task_cancel(self, task_id, reason=None, self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.cancel(task_id, reason=reason)
+
+    @_as_dunk_error
+    def task_delete(self, task_id, self_pane_id=None):
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.delete(task_id)
+
+    @_as_dunk_error
+    def task_next(self, scope=None, lease_seconds=None, self_pane_id=None):
+        """Atomically claim the next task; subscribe if the queue is empty.
+
+        Auto-following on an empty queue is what makes the pull cheap: the
+        daemon pushes the next task when this pane next goes idle instead of
+        the agent polling.
+        """
+        value = "" if scope is None else str(scope).strip()
+        follow_scope = TASK_GLOBAL
+        if value in ("", "global"):
+            target = TASK_GLOBAL
+        elif value == "self":
+            if not self_pane_id:
+                raise DunkError("scope 'self' requires a known caller pane")
+            target = self_pane_id
+            follow_scope = self_pane_id
+        elif value == "auto":
+            target = TASK_GLOBAL
+            if self_pane_id:
+                local = self.tasks.claim_next(scope=self_pane_id,
+                                              pane_id=self_pane_id,
+                                              lease_seconds=lease_seconds)
+                if local.get("task"):
+                    return local
+        else:
+            target = self._task_scope(value, self_pane_id, default=TASK_GLOBAL)
+            follow_scope = target
+
+        result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
+                                       lease_seconds=lease_seconds)
+        if not result.get("task") and self_pane_id:
+            with self._lock:
+                self.task_waiters[self_pane_id] = follow_scope
+            result["following"] = True
+        return result
+
+    @_as_dunk_error
+    def task_follow(self, scope=None, self_pane_id=None):
+        """Ask the daemon to push the next task when this pane is idle."""
+        if not self_pane_id:
+            raise DunkError("task follow requires a known caller pane")
+        target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        with self._lock:
+            self.task_waiters[self_pane_id] = target
+            followers = sorted(self.task_waiters)
+        return {"pane_id": self_pane_id, "scope": target, "following": True,
+                "followers": followers}
+
+    @_as_dunk_error
+    def task_unfollow(self, self_pane_id=None):
+        if not self_pane_id:
+            raise DunkError("task unfollow requires a known caller pane")
+        with self._lock:
+            existed = self.task_waiters.pop(self_pane_id, None) is not None
+            followers = sorted(self.task_waiters)
+        return {"pane_id": self_pane_id, "following": False,
+                "was_following": existed, "followers": followers}
+
+    @_as_dunk_error
+    def task_followers(self):
+        with self._lock:
+            items = [{"pane_id": pane_id, "scope": scope}
+                     for pane_id, scope in sorted(self.task_waiters.items())]
+        return {"followers": items}
+
+    @_as_dunk_error
+    def task_heartbeat(self, task_id, lease_seconds=None, self_pane_id=None):
+        if not self_pane_id:
+            raise DunkError("task heartbeat requires a known caller pane")
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.heartbeat(task_id, self_pane_id,
+                                    lease_seconds=lease_seconds)
+
+    @_as_dunk_error
+    def task_release(self, task_id, self_pane_id=None):
+        if not self_pane_id:
+            raise DunkError("task release requires a known caller pane")
+        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self.tasks.release(task_id, self_pane_id)
+
+    @_as_dunk_error
+    def task_reap(self, self_pane_id=None):
+        try:
+            panes = {p["pane_id"] for p in self.herdr.list_panes()}
+        except Exception:
+            panes = None
+        return {"requeued": self.tasks.reap(alive_panes=panes)}
+
+    @_as_dunk_error
+    def task_stats(self, scope=None, self_pane_id=None):
+        explicit = None
+        if scope is not None and str(scope).strip() not in ("", "all"):
+            explicit = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        return self.tasks.stats(scope=explicit, self_pane_id=self_pane_id)
+
+    @_as_dunk_error
+    def task_metrics(self, window_s=3600, since=None, until=None, scope=None,
+                     bucket="hour", self_pane_id=None):
+        """Deterministic, timeseries-friendly task metrics for the CTO.
+
+        Complements the delivery `metrics` endpoint. Current state, throughput
+        buckets and latencies all come from SQL; no model is involved. An
+        agent can see global plus its own pane; a caller with no pane (the
+        human/CTO CLI outside herdr) can see all scopes.
+        """
+        value = "" if scope is None else str(scope).strip()
+        if value in ("", "all"):
+            if self_pane_id:
+                scopes = [TASK_GLOBAL, self_pane_id]
+                label = "visible"
+            else:
+                scopes = None
+                label = "all"
+        elif value == "global":
+            scopes = [TASK_GLOBAL]
+            label = "global"
+        else:
+            target = self._task_scope(value, self_pane_id, default=TASK_GLOBAL)
+            scopes = [target]
+            label = target
+        return self.tasks.metrics(window_s=window_s, since=since, until=until,
+                                  scopes=scopes, bucket=bucket,
+                                  scope_label=label)
+
+    # -- deterministic task push/reap workers -------------------------------
+
+    def _start_task_workers(self):
+        threading.Thread(target=self._task_reaper_loop, name="task-reaper",
+                         daemon=True).start()
+        threading.Thread(target=self._task_push_loop, name="task-push",
+                         daemon=True).start()
+
+    def _task_reaper_loop(self):
+        while not self._task_stop.wait(TASK_REAP_S):
+            try:
+                panes = {p["pane_id"] for p in self.herdr.list_panes()}
+            except Exception:
+                panes = None
+            try:
+                requeued = self.tasks.reap(alive_panes=panes)
+            except Exception:
+                log.exception("task reaper failed")
+                continue
+            if requeued:
+                with self._lock:
+                    self.last_message = (
+                        f"Requeued {len(requeued)} task(s) "
+                        f"({', '.join(item['task_id'] for item in requeued[:5])})")
+                log.info("requeued task leases: %s", requeued)
+            if panes is not None:
+                with self._lock:
+                    for pane_id in list(self.task_waiters):
+                        if pane_id not in panes:
+                            self.task_waiters.pop(pane_id, None)
+
+    def _task_push_loop(self):
+        while not self._task_stop.wait(TASK_PUSH_S):
+            try:
+                self._push_tasks()
+            except Exception:
+                log.exception("task push failed")
+
+    def _push_tasks(self):
+        """Feed idle followers one task each, using the same idle signal as
+        `only_when="idle"` and the same guarded inbox nudge as everything else.
+
+        No model is involved: the daemon selects, claims and delivers
+        deterministically. A follower already holding a live lease is skipped.
+        """
+        with self._lock:
+            followers = dict(self.task_waiters)
+        if not followers:
+            return
+        try:
+            panes = {p["pane_id"]: p for p in self.herdr.list_panes()}
+        except Exception:
+            return
+        for pane_id in sorted(followers):
+            pane = panes.get(pane_id)
+            if pane is None:
+                continue
+            if (pane.get("agent_status") or "unknown") in BUSY_STATUSES:
+                continue
+            if self.tasks.leases_for_pane(pane_id):
+                continue
+            try:
+                claimed = self.tasks.claim_next(
+                    scope=followers[pane_id], pane_id=pane_id)
+            except Exception:
+                log.exception("task claim failed for %s", pane_id)
+                continue
+            task = claimed.get("task")
+            if not task:
+                continue
+            self._announce_task(pane_id, task, claimed.get("lease_seconds"))
+
+    def _announce_task(self, pane_id, task, lease_seconds):
+        body = [
+            f"TASK {task['id']} [{task['priority']}] {task['title']}",
+            f"scope {task['scope']} | status {task['status']} | "
+            f"lease {int(lease_seconds or 0)}s",
+        ]
+        if task.get("body"):
+            body += ["", task["body"]]
+        if task.get("depends_on"):
+            body += ["", "depends on: " + ", ".join(task["depends_on"])]
+        body += [
+            "",
+            f"heartbeat: dunkingsheep task heartbeat {task['id']}",
+            f"complete:  dunkingsheep task complete {task['id']}",
+            "next:      dunkingsheep task next",
+        ]
+        try:
+            self.inbox_send(pane_id, "\n".join(body),
+                            subject=f"TASK {task['id']}: {task['title']}",
+                            self_pane_id=None)
+        except Exception:
+            log.exception("could not announce task %s to %s",
+                          task["id"], pane_id)
+        with self._lock:
+            self.last_message = f"Pushed task {task['id']} to {pane_id}"
 
     # -- operations telemetry -----------------------------------------------
 
@@ -2254,6 +2630,7 @@ class Flock:
     def close(self):
         """Halt every timer thread, keeping persisted running flags so a new
         Flock resumes them."""
+        self._task_stop.set()
         with self._lock:
             self.closed = True
             for dunker in self.dunkers:

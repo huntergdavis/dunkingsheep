@@ -326,7 +326,10 @@ class SurfaceParityTests(unittest.TestCase):
         inbox_help = subprocess.run(
             [sys.executable, os.path.join(ROOT, "dunkingsheep"), "inbox", "--help"],
             capture_output=True, text=True, timeout=60).stdout
-        blob = help_text + inbox_help
+        task_help = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dunkingsheep"), "task", "--help"],
+            capture_output=True, text=True, timeout=60).stdout
+        blob = help_text + inbox_help + task_help
         # The CLI spells commands as subcommands, sometimes grouped or renamed;
         # this maps each registry command to the words that must appear.
         spelled = {
@@ -346,6 +349,15 @@ class SurfaceParityTests(unittest.TestCase):
             "inbox_read": "read", "inbox_status": "status", "inbox_ack": "ack",
             "inbox_cancel": "cancel", "inbox_delete": "delete",
             "inbox_stats": "stats", "inbox_fetch": "fetch",
+            "task_add": "add", "task_list": "list", "task_read": "read",
+            "task_update": "update", "task_assign": "assign",
+            "task_complete": "complete", "task_block": "block",
+            "task_unblock": "unblock", "task_cancel": "cancel",
+            "task_delete": "delete", "task_next": "next",
+            "task_heartbeat": "heartbeat", "task_release": "release",
+            "task_follow": "follow", "task_unfollow": "unfollow",
+            "task_followers": "followers", "task_stats": "stats",
+            "task_metrics": "metrics", "task_reap": "reap",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

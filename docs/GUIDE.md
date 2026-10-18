@@ -1,4 +1,4 @@
-# Dunking Sheep 2.13.0 guide
+# Dunking Sheep 2.14.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -405,6 +405,80 @@ mode run it without prompting.
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which
 is why the launcher is the first thing to install.
+
+## Tasks: deterministic coordination
+
+Tasks are the fleet's shared work queue. The daemon stores them in SQLite
+and serves them through the same CLI, socket and MCP surfaces as
+everything else. Nothing in the loop is a model: selection, priority
+ordering, dependency gating, atomic claims and requeueing are
+deterministic algorithms, so agents can spend their tokens on work rather
+than coordination.
+
+A task is global (visible fleet-wide) or scoped to one pane (private to
+that pane and its agent). Global is the default because it is the
+coordination backbone; use scope='self' for local work.
+
+```
+fields: id, title, body, status (open|in_progress|blocked|done|cancelled),
+        priority (urgent > high > medium > low), assignees (0..N),
+        parent_id (subtasks), depends_on, attempts, and a lease
+        (claimed_at, heartbeat_at, expires_at)
+rules:  global completion (any assignee completes it for all);
+        next = open/in_progress, unblocked, deps done, priority then age;
+        atomic claim under BEGIN IMMEDIATE (two agents never win the
+        same exclusive task); multi_assignee tasks accept several;
+        lease default 1800s; expired or dead-pane leases requeue;
+        push to idle followers reuses the dunk idle gate + inbox nudge
+```
+
+`task_next` is the atomic pull: it selects, assigns you, sets in_progress
+and records a lease in one SQLite transaction. `task_heartbeat` extends the
+lease; `task_complete` completes it for everyone. `task_follow` is the
+push: the daemon then hands you the next task when herdr reports your
+pane idle, so you do not poll. An empty task_next subscribes you
+automatically. `inbox_read` returns your global tasks and your own pane's
+tasks after the messages.
+
+```
+dunkingsheep task add "Ship the parser" -p high --body "..."
+dunkingsheep task add "Write tests" --depends-on t12
+dunkingsheep task next                 # atomic claim (global by default)
+dunkingsheep task next auto            # own pane queue, then global
+dunkingsheep task heartbeat t12        # extend the lease
+dunkingsheep task complete t12         # global completion
+dunkingsheep task follow               # receive pushed work when idle
+dunkingsheep task list --all
+dunkingsheep task assign t12 self      # explicit self-assign
+dunkingsheep task block t12 --reason "waiting on API"
+
+task_add(title=..., priority="urgent", depends_on=["t3"])
+task_next(scope="auto"); task_heartbeat(id="t12"); task_complete(id="t12")
+task_follow(); task_list(); task_assign(id="t12", assignees=["self"])
+```
+
+`task_metrics` is the read-only analytics endpoint for a status board or
+the CTO. It reports current queue depth and the status / priority / scope
+mix, per-assignee load, created/claimed/completed/cancelled/requeued
+throughput in hourly or daily buckets, completion and claim latency
+(avg/p50/p90/max), and per-actor counts. It is computed deterministically
+from an append-only `task_events` table, so it is timeseries-friendly and
+needs no model. Scope is 'all' (default), 'global', 'self' or a pane id:
+an agent sees global plus its own pane, while the human/CTO CLI sees
+everything.
+
+```
+dunkingsheep task metrics                 # last hour, hourly buckets
+dunkingsheep task metrics --window 86400 --bucket day
+dunkingsheep task metrics global --since <epoch> --until <epoch>
+task_metrics(window_s=3600, scope="global", bucket="hour")
+```
+
+Per-pane privacy is enforced by the daemon: an agent may add, list, read
+or claim only its own pane's tasks (plus global tasks). A caller with no
+pane, such as the human CLI outside herdr, may inspect any pane. Use
+`task_reap` to requeue expired or dead-pane leases immediately; the daemon
+also does it on a timer.
 
 ## Panels and dialogs
 

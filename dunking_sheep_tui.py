@@ -68,6 +68,9 @@ class DunkingSheepTui:
         self.message = ""
         self.message_until = 0
         self.quit_requested = False
+        self.view = "dunks"       # or "tasks"
+        self.tasks = []
+        self.task_selected = 0
         self.client = None
         self.mode = "daemon"
         self.last_connect_attempt = 0
@@ -116,6 +119,18 @@ class DunkingSheepTui:
         if self.mode == "local":
             label += "  [in-process, not shared]"
         self.global_status = label
+        if self.view == "tasks":
+            self.refresh_tasks()
+
+    def refresh_tasks(self):
+        result = self.rpc("task_list", include_done=True, limit=500)
+        if result is None:
+            return
+        self.tasks = result.get("tasks", [])
+        self.task_selected = max(0, min(self.task_selected, len(self.tasks) - 1))
+        open_count = sum(1 for task in self.tasks
+                         if task.get("status") in ("open", "in_progress"))
+        self.global_status = f"{len(self.tasks)} tasks ({open_count} open/in-progress)"
 
     # -- main loop ---------------------------------------------------------------
 
@@ -145,6 +160,14 @@ class DunkingSheepTui:
         return dunk["id"]
 
     def handle_key(self, key):
+        if key == ord("v"):
+            self.view = "tasks" if self.view == "dunks" else "dunks"
+            self.flash(f"{self.view.title()} view")
+            self.refresh()
+            return
+        if self.view == "tasks":
+            self.handle_task_key(key)
+            return
         if key in (ord("q"), 27):
             self.quit_requested = True
         elif key == ord("Q"):
@@ -188,6 +211,85 @@ class DunkingSheepTui:
             self.toggle_hold_while_typing()
         elif key == ord("m"):
             self.edit_max_sends()
+
+    def current_task(self):
+        if not self.tasks:
+            self.flash("No task selected")
+            return None
+        return self.tasks[self.task_selected]
+
+    def handle_task_key(self, key):
+        """Keys for the tasks view. All coordination goes through the daemon."""
+        if key in (ord("q"), 27):
+            self.quit_requested = True
+        elif key == ord("Q"):
+            self.quit_and_shutdown()
+        elif key in (curses.KEY_UP, ord("k")):
+            self.task_selected = max(0, self.task_selected - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self.task_selected = min(max(0, len(self.tasks) - 1),
+                                     self.task_selected + 1)
+        elif key in (ord(" "), ord("c")):
+            task = self.current_task()
+            if task:
+                self.rpc("task_complete", id=task["id"])
+        elif key == ord("s"):
+            task = self.current_task()
+            if task:
+                self.rpc("task_update", id=task["id"], status="in_progress")
+        elif key == ord("b"):
+            task = self.current_task()
+            if task:
+                reason = self.line_modal("Why is it blocked?",
+                                         task.get("block_reason") or "")
+                if reason is not None:
+                    self.rpc("task_block", id=task["id"],
+                             reason=reason.strip() or None)
+        elif key == ord("u"):
+            task = self.current_task()
+            if task:
+                self.rpc("task_unblock", id=task["id"])
+        elif key == ord("p"):
+            task = self.current_task()
+            if task:
+                order = ["low", "medium", "high", "urgent"]
+                current = task.get("priority") or "medium"
+                priority = order[(order.index(current) + 1) % len(order)]
+                self.rpc("task_update", id=task["id"], priority=priority)
+        elif key == ord("d"):
+            task = self.current_task()
+            if task:
+                self.rpc("task_delete", id=task["id"])
+        elif key == ord("e"):
+            task = self.current_task()
+            if task:
+                title = self.line_modal("Task title", task.get("title") or "")
+                if title is not None and title.strip():
+                    self.rpc("task_update", id=task["id"], title=title.strip())
+        elif key == ord("h"):
+            task = self.current_task()
+            if task:
+                self.rpc("task_heartbeat", id=task["id"])
+        elif key == ord("r"):
+            task = self.current_task()
+            if task:
+                self.rpc("task_release", id=task["id"])
+        elif key == ord("n"):
+            result = self.rpc("task_next", scope="auto")
+            if result and result.get("task"):
+                self.flash(f"claimed {result['task']['id']}")
+            elif result:
+                self.flash("no task ready; following the queue")
+        elif key == ord("f"):
+            result = self.rpc("task_follow")
+            if result:
+                self.flash(f"receiving pushed tasks as {result['pane_id']}")
+        elif key == ord("F"):
+            self.rpc("task_unfollow")
+        elif key == ord("a"):
+            title = self.line_modal("New task title")
+            if title is not None and title.strip():
+                self.rpc("task_add", title=title.strip())
 
     def quit_and_shutdown(self):
         if self.mode == "daemon":
@@ -519,6 +621,9 @@ class DunkingSheepTui:
     # -- drawing ---------------------------------------------------------------------
 
     def draw(self):
+        if self.view == "tasks":
+            self.draw_tasks()
+            return
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
         self.safe_addstr(self.stdscr, 0, 0, "Dunking Sheep TUI", w - 1, curses.A_BOLD)
@@ -571,6 +676,61 @@ class DunkingSheepTui:
             bottom = f"{bottom}  |  {self.message}"
         self.safe_addstr(self.stdscr, h - 2, 0, bottom, w - 1)
         self.stdscr.refresh()
+
+    def draw_tasks(self):
+        self.stdscr.erase()
+        h, w = self.stdscr.getmaxyx()
+        self.safe_addstr(self.stdscr, 0, 0, "Dunking Sheep TUI - tasks",
+                         w - 1, curses.A_BOLD)
+        help_text = ("a add  e title  c/space complete  s start  b block  u unblock  "
+                     "p priority  h heartbeat  r release  n next  f follow  F unfollow  "
+                     "d delete  v dunks  q quit")
+        self.safe_addstr(self.stdscr, 1, 0, help_text, w - 1)
+        self.safe_hline(self.stdscr, 2, 0, w - 1)
+
+        header = self.format_task_row("#", "Status", "Prio", "Scope",
+                                      "Assignees", "Title", w)
+        self.safe_addstr(self.stdscr, 3, 0, header, w - 1, curses.A_BOLD)
+        visible_rows = max(0, h - 7)
+        if not self.tasks:
+            self.safe_addstr(self.stdscr, 4, 0,
+                             "(no tasks - press a to add one, or n to take the next)",
+                             w - 1)
+        start = 0
+        if self.task_selected >= visible_rows:
+            start = self.task_selected - visible_rows + 1
+        for screen_y, index in enumerate(
+                range(start, min(len(self.tasks), start + visible_rows)), start=4):
+            task = self.tasks[index]
+            row = self.format_task_row(
+                task["id"],
+                task.get("status") or "",
+                task.get("priority") or "",
+                "global" if task.get("is_global") else task.get("scope", ""),
+                ",".join(task.get("assignees") or []) or "-",
+                task.get("title") or "",
+                w,
+            )
+            attr = curses.A_REVERSE if index == self.task_selected else curses.A_NORMAL
+            self.safe_addstr(self.stdscr, screen_y, 0, row, w - 1, attr)
+
+        self.safe_hline(self.stdscr, h - 3, 0, w - 1)
+        bottom = self.global_status
+        if self.message and time.time() < self.message_until:
+            bottom = f"{bottom}  |  {self.message}"
+        self.safe_addstr(self.stdscr, h - 2, 0, bottom, w - 1)
+        self.stdscr.refresh()
+
+    def format_task_row(self, num, status, priority, scope, assignees, title, width):
+        columns = [
+            clip(num, 5).ljust(5),
+            clip(status, 11).ljust(11),
+            clip(priority, 6).ljust(6),
+            clip(scope, 10).ljust(10),
+            clip(assignees, 18).ljust(18),
+            clip(title, max(10, width - 55)),
+        ]
+        return clip(" ".join(columns), width - 1).ljust(max(0, width - 1))
 
     def format_row(self, num, status, window, minutes, sent, gate, text, width):
         columns = [

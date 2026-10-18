@@ -16,6 +16,7 @@ daemon's). Handlers return JSON-serialisable data or raise `DunkError`.
 """
 
 from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError
+from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
 # A direct send waits briefly for actual delivery before reporting back, so
 # the common case (nobody typing) answers "sent" rather than "queued".
@@ -69,6 +70,56 @@ def _bool(value, default):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+# -- task params --------------------------------------------------------------
+TASK_ID_PARAM = {"type": "string", "description": "Task id, e.g. t12."}
+TASK_SCOPE_PARAM = {
+    "type": "string",
+    "description": "'global' for the fleet queue, a pane id for a private queue, "
+                   "or 'self' for the caller's pane.",
+}
+TASK_SCOPE_ADD_PARAM = {
+    "type": "string",
+    "description": "'global' (default, fleet-wide), 'self' (private to the "
+                   "caller's pane), or a pane id.",
+}
+TASK_SCOPE_NEXT_PARAM = {
+    "type": "string",
+    "description": "'global' (default), 'self' (own pane queue), 'auto' (pane "
+                   "then global), or a pane id.",
+}
+TASK_TITLE_PARAM = {"type": "string", "description": "Short task title."}
+TASK_BODY_PARAM = {
+    "type": "string",
+    "description": "Longer description or acceptance notes.",
+}
+TASK_STATUS_PARAM = {
+    "type": "string",
+    "enum": list(TASK_STATUSES),
+    "description": "open, in_progress, blocked, done or cancelled.",
+}
+TASK_PRIORITY_PARAM = {
+    "type": "string",
+    "enum": list(TASK_PRIORITIES),
+    "description": "urgent, high, medium or low (default medium).",
+}
+TASK_ASSIGNEES_PARAM = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Pane ids or agent names. 'self' means the caller's pane.",
+}
+TASK_PARENT_PARAM = {"type": "string", "description": "Parent task id, for a subtask."}
+TASK_DEPS_PARAM = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Task ids that must be done before this one is eligible.",
+}
+TASK_LEASE_PARAM = {
+    "type": "number",
+    "minimum": 1,
+    "description": "Lease length in seconds (default 1800).",
+}
 
 
 # -- handlers -----------------------------------------------------------------
@@ -233,6 +284,124 @@ def h_inbox_stats(flock, args, self_pane_id):
 
 def h_inbox_fetch(flock, args, self_pane_id):
     return flock.inbox_fetch(args["attachment_id"], args.get("dest"))
+
+
+def _task_values(value):
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def h_task_add(flock, args, self_pane_id):
+    return flock.task_add(
+        args["title"], scope=args.get("scope"), body=args.get("body"),
+        status=args.get("status"), priority=args.get("priority"),
+        assignees=_task_values(args.get("assignees")),
+        parent_id=args.get("parent_id"),
+        depends_on=_task_values(args.get("depends_on")),
+        multi_assignee=_bool(args.get("multi_assignee"), False),
+        self_pane_id=self_pane_id)
+
+
+def h_task_list(flock, args, self_pane_id):
+    return flock.task_list(scope=args.get("scope"), status=args.get("status"),
+                           assignee=args.get("assignee"),
+                           include_done=_bool(args.get("include_done"), True),
+                           limit=int(_opt(args, "limit", 200)),
+                           self_pane_id=self_pane_id)
+
+
+def h_task_read(flock, args, self_pane_id):
+    return flock.task_read(args["id"], self_pane_id=self_pane_id)
+
+
+def h_task_update(flock, args, self_pane_id):
+    fields = {}
+    for key in ("title", "body", "status", "priority", "parent_id",
+                "block_reason"):
+        if key in args:
+            fields[key] = args[key]
+    if "assignees" in args:
+        fields["assignees"] = _task_values(args["assignees"])
+    if "depends_on" in args:
+        fields["depends_on"] = _task_values(args["depends_on"])
+    if "multi_assignee" in args:
+        fields["multi_assignee"] = _bool(args["multi_assignee"], False)
+    return flock.task_update(args["id"], self_pane_id=self_pane_id, **fields)
+
+
+def h_task_assign(flock, args, self_pane_id):
+    return flock.task_assign(args["id"], _task_values(args["assignees"]),
+                             mode=args.get("mode") or "add",
+                             self_pane_id=self_pane_id)
+
+
+def h_task_complete(flock, args, self_pane_id):
+    return flock.task_complete(args["id"], by=args.get("by"),
+                               self_pane_id=self_pane_id)
+
+
+def h_task_block(flock, args, self_pane_id):
+    return flock.task_block(args["id"], reason=args.get("reason"),
+                            self_pane_id=self_pane_id)
+
+
+def h_task_unblock(flock, args, self_pane_id):
+    return flock.task_unblock(args["id"], self_pane_id=self_pane_id)
+
+
+def h_task_cancel(flock, args, self_pane_id):
+    return flock.task_cancel(args["id"], reason=args.get("reason"),
+                             self_pane_id=self_pane_id)
+
+
+def h_task_delete(flock, args, self_pane_id):
+    return flock.task_delete(args["id"], self_pane_id=self_pane_id)
+
+
+def h_task_next(flock, args, self_pane_id):
+    return flock.task_next(scope=args.get("scope"),
+                           lease_seconds=args.get("lease_seconds"),
+                           self_pane_id=self_pane_id)
+
+
+def h_task_heartbeat(flock, args, self_pane_id):
+    return flock.task_heartbeat(args["id"], lease_seconds=args.get("lease_seconds"),
+                                self_pane_id=self_pane_id)
+
+
+def h_task_release(flock, args, self_pane_id):
+    return flock.task_release(args["id"], self_pane_id=self_pane_id)
+
+
+def h_task_follow(flock, args, self_pane_id):
+    return flock.task_follow(scope=args.get("scope"), self_pane_id=self_pane_id)
+
+
+def h_task_unfollow(flock, args, self_pane_id):
+    return flock.task_unfollow(self_pane_id=self_pane_id)
+
+
+def h_task_followers(flock, args, self_pane_id):
+    return flock.task_followers()
+
+
+def h_task_reap(flock, args, self_pane_id):
+    return flock.task_reap(self_pane_id=self_pane_id)
+
+
+def h_task_stats(flock, args, self_pane_id):
+    return flock.task_stats(scope=args.get("scope"), self_pane_id=self_pane_id)
+
+
+def h_task_metrics(flock, args, self_pane_id):
+    return flock.task_metrics(
+        window_s=float(_opt(args, "window_s", 3600)),
+        since=args.get("since"), until=args.get("until"),
+        scope=args.get("scope"), bucket=args.get("bucket") or "hour",
+        self_pane_id=self_pane_id)
 
 
 def h_metrics(flock, args, self_pane_id):
@@ -720,6 +889,202 @@ COMMANDS = [
                 "dest": {"type": "string",
                          "description": "Directory to write into (default: the daemon's cwd)."}},
         required=["attachment_id"],
+    ),
+    # -- global and per-pane tasks ------------------------------------------
+    Command(
+        "task_add",
+        "Create a global (fleet-wide) or per-pane task. Global is the default; "
+        "scope='self' makes it private to the caller's pane. Use parent_id for "
+        "subtasks and depends_on for ordering. Returns the task.",
+        h_task_add,
+        params={
+            "title": TASK_TITLE_PARAM,
+            "scope": TASK_SCOPE_ADD_PARAM,
+            "body": TASK_BODY_PARAM,
+            "status": TASK_STATUS_PARAM,
+            "priority": TASK_PRIORITY_PARAM,
+            "assignees": TASK_ASSIGNEES_PARAM,
+            "parent_id": TASK_PARENT_PARAM,
+            "depends_on": TASK_DEPS_PARAM,
+            "multi_assignee": {"type": "boolean",
+                               "description": "Allow several agents to claim this task."},
+        },
+        required=["title"],
+    ),
+    Command(
+        "task_list",
+        "List tasks visible to the caller: global tasks plus its own pane's "
+        "queue. Filter by scope, status or assignee.",
+        h_task_list,
+        params={
+            "scope": TASK_SCOPE_PARAM,
+            "status": TASK_STATUS_PARAM,
+            "assignee": {"type": "string",
+                         "description": "Only tasks assigned to this pane/agent."},
+            "include_done": {"type": "boolean",
+                             "description": "Include done/cancelled (default true)."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500,
+                      "description": "Maximum tasks to return (default 200)."},
+        },
+    ),
+    Command(
+        "task_read",
+        "Read one task with its children, live leases and blocking dependencies.",
+        h_task_read,
+        params={"id": TASK_ID_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_update",
+        "Change a task's title, body, status, priority, assignees, dependencies "
+        "or parent. Any assignee completing it completes it for everyone.",
+        h_task_update,
+        params={
+            "id": TASK_ID_PARAM,
+            "title": TASK_TITLE_PARAM,
+            "body": TASK_BODY_PARAM,
+            "status": TASK_STATUS_PARAM,
+            "priority": TASK_PRIORITY_PARAM,
+            "assignees": TASK_ASSIGNEES_PARAM,
+            "depends_on": TASK_DEPS_PARAM,
+            "parent_id": TASK_PARENT_PARAM,
+            "block_reason": {"type": "string", "description": "Why it is blocked."},
+            "multi_assignee": {"type": "boolean",
+                               "description": "Allow multiple claimants."},
+        },
+        required=["id"],
+    ),
+    Command(
+        "task_assign",
+        "Assign a task to one or more panes/agents. assignees=['self'] assigns "
+        "it to the caller. mode=add|remove|set (default add).",
+        h_task_assign,
+        params={
+            "id": TASK_ID_PARAM,
+            "assignees": TASK_ASSIGNEES_PARAM,
+            "mode": {"type": "string", "enum": ["add", "remove", "set"],
+                     "description": "How to apply the assignees (default add)."},
+        },
+        required=["id", "assignees"],
+    ),
+    Command(
+        "task_complete",
+        "Complete a task for everyone. Global completion: the first assignee "
+        "to complete a shared task completes it for all.",
+        h_task_complete,
+        params={
+            "id": TASK_ID_PARAM,
+            "by": {"type": "string",
+                   "description": "Who completed it (defaults to caller pane)."},
+        },
+        required=["id"],
+    ),
+    Command(
+        "task_block",
+        "Mark a task blocked, with an optional reason.",
+        h_task_block,
+        params={"id": TASK_ID_PARAM,
+                "reason": {"type": "string", "description": "Why it is blocked."}},
+        required=["id"],
+    ),
+    Command(
+        "task_unblock",
+        "Return a blocked task to the open queue.",
+        h_task_unblock,
+        params={"id": TASK_ID_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_cancel",
+        "Cancel a task without completing it.",
+        h_task_cancel,
+        params={"id": TASK_ID_PARAM,
+                "reason": {"type": "string", "description": "Why it was cancelled."}},
+        required=["id"],
+    ),
+    Command(
+        "task_delete",
+        "Delete a task. Refused while it has children or is a dependency.",
+        h_task_delete,
+        params={"id": TASK_ID_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_next",
+        "ATOMIC CLAIM: take the highest-priority unblocked task the caller may "
+        "work on, assign it to the caller and set it in_progress in one SQLite "
+        "transaction. scope=global (default), self (own pane), auto (pane then "
+        "global), or a pane id. Returns {task, lease_seconds, expires_at}; when "
+        "the queue is empty the caller is auto-subscribed for a push.",
+        h_task_next,
+        params={"scope": TASK_SCOPE_NEXT_PARAM,
+                "lease_seconds": TASK_LEASE_PARAM},
+    ),
+    Command(
+        "task_heartbeat",
+        "Extend the lease on a task you have claimed. Expired or dead-pane "
+        "leases are requeued automatically.",
+        h_task_heartbeat,
+        params={"id": TASK_ID_PARAM, "lease_seconds": TASK_LEASE_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_release",
+        "Give a claimed task back to the queue without completing it.",
+        h_task_release,
+        params={"id": TASK_ID_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_follow",
+        "Ask the daemon to PUSH the next task to this pane when it is idle. "
+        "Deterministic: the daemon selects, claims and delivers it; no model "
+        "polling. scope=global (default) or self.",
+        h_task_follow,
+        params={"scope": TASK_SCOPE_ADD_PARAM},
+    ),
+    Command(
+        "task_unfollow",
+        "Stop receiving pushed tasks.",
+        h_task_unfollow,
+    ),
+    Command(
+        "task_followers",
+        "List panes currently subscribed to task pushes.",
+        h_task_followers,
+    ),
+    Command(
+        "task_stats",
+        "Task counts by status across the caller's visible scopes.",
+        h_task_stats,
+        params={"scope": TASK_SCOPE_PARAM},
+    ),
+    Command(
+        "task_metrics",
+        "Timeseries-friendly task metrics: current queue depth, per-status / "
+        "priority / scope breakdown, per-assignee load, created/claimed/"
+        "completed/cancelled/requeued throughput in hourly or daily buckets, "
+        "completion and claim latency (avg/p50/p90/max), and per-actor counts. "
+        "Computed deterministically from an append-only event log; no model.",
+        h_task_metrics,
+        params={
+            "window_s": {"type": "number", "minimum": 1,
+                         "description": "Window ending now, seconds (default 3600)."},
+            "since": {"type": "number",
+                      "description": "Window start epoch (overrides window_s)."},
+            "until": {"type": "number",
+                      "description": "Window end epoch (default now)."},
+            "scope": TASK_SCOPE_PARAM,
+            "bucket": {"type": "string", "enum": ["hour", "day"],
+                       "description": "Throughput bucket size (default hour)."},
+        },
+    ),
+    Command(
+        "task_reap",
+        "Requeue expired or dead-pane task leases now (the daemon also does "
+        "this on a timer).",
+        h_task_reap,
+        mcp=False,
     ),
     Command(
         "metrics",

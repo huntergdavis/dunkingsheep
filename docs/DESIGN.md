@@ -133,6 +133,23 @@ state, one Lock serializing sends across dunkers, as in Dunking Bird).
   quietly empty. Cumulative per-schedule counters are kept in their own block,
   since reading them as a rate would be wrong. Privacy is enforced by a test
   that asserts no body, subject or address can reach the output.
+- Global task system (2.14.0). Coordination is an algorithm, not a
+  conversation. `dunk_tasks.py` stores tasks and append-only task events in
+  their own SQLite database; `task_leases` carries one row per live claim.
+  Scope is `global` (fleet-wide) or a pane id (private to that pane), and
+  per-pane privacy is enforced in `Flock` before the store is touched. The
+  atomicity the fleet depends on is SQLite's: `claim_next` runs `BEGIN
+  IMMEDIATE`, selects eligible tasks, checks `depends_on`, writes the lease and
+  flips the task to `in_progress` in one transaction, so two agents polling at
+  the same instant cannot win the same exclusive task. A lease is a claim with
+  a deadline: `task_heartbeat` extends it, and a reaper requeues one whose
+  lease expired or whose pane disappeared from herdr, so an agent that dies
+  does not strand work. `task_follow` turns pull into push: the daemon checks
+  the same `agent_status` idle gate that `only_when="idle"` uses, claims the
+  next task for an idle follower, and delivers it through the guarded inbox
+  notice, so the agent never polls. `task_metrics` computes throughput, queue
+  depth, per-actor load and completion/claim latency from the event log; no
+  model is in any of it.
 - A notice that says what arrived (2.12.0). The nudge used to say only how
   many messages were unread, which told a recipient nothing about whether to
   stop what it was doing. It now names the inbox (an agent may be asked about

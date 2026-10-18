@@ -40,9 +40,25 @@ inbox_count and inbox_read are what you call when you have mail. inbox_status
 tracks any message by its id. Typing (send_text) is for humans, or for agents
 without this tooling.
 
+Global task queue: tasks are the fleet's deterministic coordination backbone.
+Use task_next to ATOMICALLY claim the highest-priority unblocked task (the
+same call assigns you and sets in_progress, with a lease); task_heartbeat to
+extend the lease; task_complete when done (global completion: it is done for
+everyone). task_follow asks the daemon to PUSH the next task to you when your
+pane is idle, reusing the dunk idle gate and guarded inbox nudge, so you do not
+poll. task_add/task_list/task_read/task_update/task_assign/task_block/
+task_unblock manage the queue. scope is 'global' (default, fleet-wide) or
+'self' (your pane only). inbox_read also returns your global and pane tasks
+after the messages. task_metrics is the timeseries-friendly query endpoint
+(queue depth, status/priority/scope mix, per-assignee load, created/claimed/
+completed throughput in hourly or daily buckets, completion and claim latency)
+for a status board or the CTO. Everything is priority order, dependency
+gating, leases and requeue-on-death in SQL; no model is involved.
+
 Typical uses: keep another agent moving (add_dunk target=<its pane>), message
-an agent right now (send_text), inspect what an agent is doing (read_pane), or
-schedule a future nudge to yourself (target "self").
+an agent right now (send_text), inspect what an agent is doing (read_pane),
+claim the next unit of work (task_next), or schedule a future nudge to
+yourself (target "self").
 
 Nothing ever types over a human. If someone is composing in the target pane,
 both dunks and direct messages wait until the input box has been clear for a

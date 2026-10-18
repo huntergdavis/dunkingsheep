@@ -13,6 +13,8 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "dunkingsheep")
+sys.path.insert(0, ROOT)
+from dunk_core import VERSION  # noqa: E402
 
 FAKE_HERDR = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -237,7 +239,7 @@ class CliEndToEndTests(unittest.TestCase):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
         self.assertIn("[socket/cli only]", out)
-        self.assertIn("dunkingsheep 2.13", self.run_cli("--version").stdout)
+        self.assertIn(f"dunkingsheep {VERSION}", self.run_cli("--version").stdout)
         registry = json.loads(self.run_cli("commands", "--json").stdout)
         names = [c["name"] for c in registry]
         self.assertIn("help", names)

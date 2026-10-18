@@ -75,7 +75,13 @@ class McpServerTests(unittest.TestCase):
         for tool in tools:
             for prop in tool["inputSchema"]["properties"].values():
                 self.assertIsInstance(prop["type"], str, msg=tool["name"])
-                self.assertIn(prop["type"], ("string", "number", "integer", "boolean"))
+                if prop["type"] == "array":
+                    self.assertIn(prop.get("items", {}).get("type"),
+                                  ("string", "number", "integer", "boolean"),
+                                  msg=tool["name"])
+                else:
+                    self.assertIn(prop["type"],
+                                  ("string", "number", "integer", "boolean"))
                 self.assertNotIn(None, prop.get("enum", []))
 
     def test_help_tool_returns_guide_and_registry(self):

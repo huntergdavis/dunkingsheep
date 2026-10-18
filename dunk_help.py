@@ -390,6 +390,65 @@ def guide(markdown=False):
       "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
       "is why the launcher is the first thing to install.\n")
 
+    w(h(2, "Tasks: deterministic coordination"))
+    w("Tasks are the fleet's shared work queue. The daemon stores them in SQLite\n"
+      "and serves them through the same CLI, socket and MCP surfaces as\n"
+      "everything else. Nothing in the loop is a model: selection, priority\n"
+      "ordering, dependency gating, atomic claims and requeueing are\n"
+      "deterministic algorithms, so agents can spend their tokens on work rather\n"
+      "than coordination.\n")
+    w("A task is global (visible fleet-wide) or scoped to one pane (private to\n"
+      "that pane and its agent). Global is the default because it is the\n"
+      "coordination backbone; use scope='self' for local work.\n")
+    w(code("fields: id, title, body, status (open|in_progress|blocked|done|cancelled),\n"
+           "        priority (urgent > high > medium > low), assignees (0..N),\n"
+           "        parent_id (subtasks), depends_on, attempts, and a lease\n"
+           "        (claimed_at, heartbeat_at, expires_at)\n"
+           "rules:  global completion (any assignee completes it for all);\n"
+           "        next = open/in_progress, unblocked, deps done, priority then age;\n"
+           "        atomic claim under BEGIN IMMEDIATE (two agents never win the\n"
+           "        same exclusive task); multi_assignee tasks accept several;\n"
+           "        lease default 1800s; expired or dead-pane leases requeue;\n"
+           "        push to idle followers reuses the dunk idle gate + inbox nudge"))
+    w("`task_next` is the atomic pull: it selects, assigns you, sets in_progress\n"
+      "and records a lease in one SQLite transaction. `task_heartbeat` extends the\n"
+      "lease; `task_complete` completes it for everyone. `task_follow` is the\n"
+      "push: the daemon then hands you the next task when herdr reports your\n"
+      "pane idle, so you do not poll. An empty task_next subscribes you\n"
+      "automatically. `inbox_read` returns your global tasks and your own pane's\n"
+      "tasks after the messages.\n")
+    w(code("dunkingsheep task add \"Ship the parser\" -p high --body \"...\"\n"
+           "dunkingsheep task add \"Write tests\" --depends-on t12\n"
+           "dunkingsheep task next                 # atomic claim (global by default)\n"
+           "dunkingsheep task next auto            # own pane queue, then global\n"
+           "dunkingsheep task heartbeat t12        # extend the lease\n"
+           "dunkingsheep task complete t12         # global completion\n"
+           "dunkingsheep task follow               # receive pushed work when idle\n"
+           "dunkingsheep task list --all\n"
+           "dunkingsheep task assign t12 self      # explicit self-assign\n"
+           "dunkingsheep task block t12 --reason \"waiting on API\"\n"
+           "\n"
+           "task_add(title=..., priority=\"urgent\", depends_on=[\"t3\"])\n"
+           "task_next(scope=\"auto\"); task_heartbeat(id=\"t12\"); task_complete(id=\"t12\")\n"
+           "task_follow(); task_list(); task_assign(id=\"t12\", assignees=[\"self\"])"))
+    w("`task_metrics` is the read-only analytics endpoint for a status board or\n"
+      "the CTO. It reports current queue depth and the status / priority / scope\n"
+      "mix, per-assignee load, created/claimed/completed/cancelled/requeued\n"
+      "throughput in hourly or daily buckets, completion and claim latency\n"
+      "(avg/p50/p90/max), and per-actor counts. It is computed deterministically\n"
+      "from an append-only `task_events` table, so it is timeseries-friendly and\n"
+      "needs no model. Scope is 'all' (default), 'global', 'self' or a pane id:\n"
+      "an agent sees global plus its own pane, while the human/CTO CLI sees\n"
+      "everything.\n")
+    w(code("dunkingsheep task metrics                 # last hour, hourly buckets\n"
+           "dunkingsheep task metrics --window 86400 --bucket day\n"
+           "dunkingsheep task metrics global --since <epoch> --until <epoch>\n"
+           "task_metrics(window_s=3600, scope=\"global\", bucket=\"hour\")"))
+    w("Per-pane privacy is enforced by the daemon: an agent may add, list, read\n"
+      "or claim only its own pane's tasks (plus global tasks). A caller with no\n"
+      "pane, such as the human CLI outside herdr, may inspect any pane. Use\n"
+      "`task_reap` to requeue expired or dead-pane leases immediately; the daemon\n"
+      "also does it on a timer.\n")
     w(h(2, "Panels and dialogs"))
     w("A slash command such as /usage replaces the input box with a panel, and a\n"
       "dialog draws its selected row with the same prompt sigil the input box\n"

@@ -30,6 +30,7 @@ if HERE not in sys.path:
 from dunk_client import DaemonUnavailable, FlockClient  # noqa: E402
 from dunk_core import VERSION, DunkError, format_interval  # noqa: E402
 from dunk_help import SHORT, guide  # noqa: E402
+from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES  # noqa: E402
 
 CLI_ABS = os.path.abspath(__file__)
 
@@ -211,6 +212,104 @@ def build_parser():
     q = isub.add_parser("fetch", help="write an attachment to a local directory")
     q.add_argument("attachment_id")
     q.add_argument("--dest", "-d", default=".")
+
+    # -- tasks ----------------------------------------------------------------
+    task = sub.add_parser(
+        "task", help="global and per-pane tasks: the coordination queue",
+        description="Tasks are global (fleet-wide) by default, or scoped to one "
+                    "pane. `task next` claims atomically; `task follow` asks the "
+                    "daemon to push work to you when idle.")
+    tsub = task.add_subparsers(dest="task_command", metavar="<subcommand>")
+    tsub.required = True
+
+    q = tsub.add_parser("add", help="create a task")
+    q.add_argument("title")
+    q.add_argument("--scope", help="'global' (default), 'self' or a pane id")
+    q.add_argument("--body", "-b", default="")
+    q.add_argument("--status", choices=list(TASK_STATUSES), default="open")
+    q.add_argument("--priority", "-p", choices=list(TASK_PRIORITIES), default="medium")
+    q.add_argument("--assign", "-a", action="append", metavar="PANE",
+                   help="assignee pane id/agent name (repeatable; 'self' = caller)")
+    q.add_argument("--depends-on", "-d", action="append", metavar="ID",
+                   help="task id that must be done first (repeatable)")
+    q.add_argument("--parent", metavar="ID", help="parent task id (subtask)")
+    q.add_argument("--multi", action="store_true",
+                   help="allow several agents to claim this task")
+
+    q = tsub.add_parser("list", aliases=["ls"], help="list visible tasks")
+    q.add_argument("scope", nargs="?", help="'global', 'self' or a pane id")
+    q.add_argument("--status", choices=list(TASK_STATUSES))
+    q.add_argument("--assignee", metavar="PANE")
+    q.add_argument("--all", action="store_true", help="include done/cancelled")
+    q.add_argument("--limit", "-n", type=int, default=200)
+
+    q = tsub.add_parser("read", help="read one task in full")
+    q.add_argument("id")
+
+    q = tsub.add_parser("update", help="change a task")
+    q.add_argument("id")
+    q.add_argument("--title")
+    q.add_argument("--body", "-b")
+    q.add_argument("--status", choices=list(TASK_STATUSES))
+    q.add_argument("--priority", "-p", choices=list(TASK_PRIORITIES))
+    q.add_argument("--assign", "-a", action="append", metavar="PANE")
+    q.add_argument("--depends-on", "-d", action="append", metavar="ID")
+    q.add_argument("--parent", metavar="ID")
+    q.add_argument("--block-reason", metavar="TEXT")
+    q.add_argument("--multi", dest="multi_assignee", action="store_true", default=None)
+    q.add_argument("--no-multi", dest="multi_assignee", action="store_false")
+
+    q = tsub.add_parser("assign", help="assign a task (use 'self' for yourself)")
+    q.add_argument("id")
+    q.add_argument("assignees", nargs="+")
+    q.add_argument("--mode", choices=["add", "remove", "set"], default="add")
+
+    q = tsub.add_parser("complete", help="complete a task for everyone")
+    q.add_argument("id")
+    q.add_argument("--by")
+
+    q = tsub.add_parser("block", help="mark a task blocked")
+    q.add_argument("id")
+    q.add_argument("--reason")
+
+    q = tsub.add_parser("unblock", help="return a blocked task to the queue")
+    q.add_argument("id")
+
+    q = tsub.add_parser("cancel", help="cancel a task")
+    q.add_argument("id")
+    q.add_argument("--reason")
+
+    q = tsub.add_parser("delete", help="delete a task")
+    q.add_argument("id")
+
+    q = tsub.add_parser("next", help="atomically claim the next task")
+    q.add_argument("scope", nargs="?",
+                   help="'global' (default), 'self', 'auto' or a pane id")
+    q.add_argument("--lease", type=float, metavar="SECONDS")
+
+    q = tsub.add_parser("heartbeat", help="extend the lease on a claimed task")
+    q.add_argument("id")
+    q.add_argument("--lease", type=float, metavar="SECONDS")
+
+    q = tsub.add_parser("release", help="give a claimed task back")
+    q.add_argument("id")
+
+    q = tsub.add_parser("follow", help="receive pushed tasks when idle")
+    q.add_argument("scope", nargs="?", help="'global' (default) or 'self'")
+
+    tsub.add_parser("unfollow", help="stop receiving pushed tasks")
+    tsub.add_parser("followers", help="list panes receiving pushed tasks")
+    q = tsub.add_parser("stats", help="task counts by status")
+    q.add_argument("scope", nargs="?")
+    q = tsub.add_parser("metrics", help="task throughput, depth and latency (JSON)")
+    q.add_argument("scope", nargs="?",
+                   help="'all' (default), 'global', 'self' or a pane id")
+    q.add_argument("--window", type=float, metavar="SECONDS",
+                   help="window ending now (default 3600)")
+    q.add_argument("--since", type=float, metavar="EPOCH")
+    q.add_argument("--until", type=float, metavar="EPOCH")
+    q.add_argument("--bucket", choices=["hour", "day"], default="hour")
+    tsub.add_parser("reap", help="requeue expired/dead leases now")
 
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
@@ -490,10 +589,124 @@ def print_inbox_list(r):
     _inbox_rows(r["messages"])
 
 
+def _task_row(task):
+    scope = "global" if task.get("is_global") else task.get("scope")
+    assignees = ",".join(task.get("assignees") or []) or "-"
+    return (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
+            f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
+            f"{_clip(task['title'], 50)}")
+
+
+def print_task(task):
+    print(f"{task['id']} [{task['priority']}] {task['status']}  {task['title']}")
+    print(f"scope       {task['scope']}")
+    if task.get("assignees"):
+        print(f"assignees   {', '.join(task['assignees'])}")
+    if task.get("claimed_by"):
+        print(f"claimed by  {', '.join(task['claimed_by'])}")
+    if task.get("depends_on"):
+        blocked = task.get("blocked_by") or []
+        print(f"depends on  {', '.join(task['depends_on'])}"
+              + (f" (blocked by {', '.join(blocked)})" if blocked else ""))
+    if task.get("parent_id"):
+        print(f"parent      {task['parent_id']}")
+    if task.get("block_reason"):
+        print(f"blocked     {task['block_reason']}")
+    if task.get("body"):
+        print()
+        print(task["body"])
+    if task.get("children"):
+        print()
+        print("subtasks:")
+        for child in task["children"]:
+            print("  " + _task_row(child))
+    if task.get("lease_expires_at"):
+        print(f"lease       {time.strftime('%Y-%m-%d %H:%M:%S',
+                                        time.localtime(task['lease_expires_at']))}")
+
+
+def print_task_list(result):
+    tasks = result.get("tasks") or []
+    print(f"scope {result.get('scope')} (pane {result.get('pane_id') or '-'})")
+    if not tasks:
+        print("no tasks")
+        return
+    print(f"{'ID':<5} {'STATUS':<11} {'PRIORITY':<6} {'SCOPE':<10} "
+          f"{'ASSIGNEES':<18} TITLE")
+    for task in tasks:
+        print(_task_row(task))
+
+
+def print_task_next(result):
+    task = result.get("task")
+    if not task:
+        print("no eligible task")
+        if result.get("following"):
+            print("following the queue: the daemon will push the next task "
+                  "when this pane is idle")
+        return
+    print(f"claimed {task['id']} (lease {int(result.get('lease_seconds') or 0)}s)")
+    print_task(task)
+
+
+def print_task_followers(result):
+    followers = result.get("followers") or []
+    if not followers:
+        print("no followers")
+        return
+    for item in followers:
+        print(f"{item['pane_id']:<12} {item['scope']}")
+
+
+def print_task_stats(result):
+    totals = result.get("totals") or {}
+    print(" ".join(f"{key}={value}" for key, value in totals.items()))
+    for scope, counts in (result.get("by_scope") or {}).items():
+        print(f"  {scope}: " + " ".join(f"{key}={value}" for key, value in counts.items() if value))
+
+
+def print_task_metrics(result):
+    window = result.get("window") or {}
+    print(f"scope {result.get('scope')}  window {window.get('seconds')}s "
+          f"({window.get('bucket')} buckets)")
+    current = result.get("current") or {}
+    print("status:   " + " ".join(f"{key}={value}"
+                                   for key, value in (current.get("by_status") or {}).items()))
+    print("priority: " + " ".join(f"{key}={value}"
+                                   for key, value in (current.get("by_priority") or {}).items()))
+    print(f"scope:    global={current.get('by_scope', {}).get('global', 0)} "
+          f"pane={current.get('by_scope', {}).get('pane', 0)}")
+    throughput = result.get("throughput") or {}
+    print(f"throughput: created={throughput.get('created', 0)} "
+          f"claimed={throughput.get('claimed', 0)} "
+          f"completed={throughput.get('completed', 0)} "
+          f"cancelled={throughput.get('cancelled', 0)} "
+          f"requeued={throughput.get('requeued', 0)}")
+    for bucket in throughput.get("buckets") or []:
+        stamp = time.strftime("%Y-%m-%d %H:00", time.localtime(bucket["bucket"]))
+        print(f"  {stamp} created={bucket['created']} completed={bucket['completed']}"
+              + (f" requeued={bucket['requeued']}" if bucket.get("requeued") else ""))
+    for name in ("completion", "claim"):
+        latency = (result.get("latency_ms") or {}).get(name) or {}
+        if latency.get("count"):
+            print(f"{name} latency: n={latency['count']} avg={latency['avg']}ms "
+                  f"p50={latency['p50']} p90={latency['p90']} max={latency['max']}")
+    for name in ("completed", "claimed"):
+        rows = (result.get("by_actor") or {}).get(name) or []
+        if rows:
+            print(f"by actor ({name}): "
+                  + ", ".join(f"{row['actor']}={row['count']}" for row in rows))
+    assignees = current.get("by_assignee") or []
+    if assignees:
+        print("open by assignee: "
+              + ", ".join(f"{row['assignee']}={row['count']}" for row in assignees))
+
+
 def print_inbox_read(r):
     messages = r["messages"]
     if not messages:
         print(f"mailbox {r['mailbox']}: no unread messages")
+        _print_inbox_tasks(r)
         return
     for m in messages:
         print(f"--- {m['message_id']} from {m.get('sender') or 'unknown'}"
@@ -503,6 +716,22 @@ def print_inbox_read(r):
                   f"{blob['size']} bytes  {blob['media_type']}")
         print(m["body"])
         print()
+    _print_inbox_tasks(r)
+
+
+def _print_inbox_tasks(r):
+    tasks = r.get("tasks") or {}
+    global_tasks = tasks.get("global") or []
+    pane_tasks = tasks.get("pane") or []
+    if not global_tasks and not pane_tasks:
+        return
+    print("--- tasks ---")
+    for task in pane_tasks + global_tasks:
+        print("  " + _task_row(task))
+    nxt = (tasks.get("next") or {}).get("pick")
+    if nxt:
+        print(f"next: {nxt['id']} [{nxt['priority']}] {nxt['title']}")
+    print()
 
 
 def print_inbox_status(r):
@@ -825,6 +1054,83 @@ def run_client_command(client, args):
             return client.call("inbox_fetch", attachment_id=args.attachment_id,
                                dest=args.dest), \
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
+    if command == "task":
+        sub = args.task_command
+        if sub == "add":
+            return client.call("task_add", title=args.title, scope=args.scope,
+                               body=args.body, status=args.status,
+                               priority=args.priority,
+                               assignees=args.assign or None,
+                               depends_on=args.depends_on or None,
+                               parent_id=args.parent,
+                               multi_assignee=args.multi), print_task
+        if sub in ("list", "ls"):
+            return client.call("task_list", scope=args.scope, status=args.status,
+                               assignee=args.assignee, include_done=args.all,
+                               limit=args.limit), print_task_list
+        if sub == "read":
+            return client.call("task_read", id=args.id), print_task
+        if sub == "update":
+            payload = {"id": args.id}
+            for key, value in (("title", args.title), ("body", args.body),
+                               ("status", args.status), ("priority", args.priority),
+                               ("parent_id", args.parent),
+                               ("block_reason", args.block_reason)):
+                if value is not None:
+                    payload[key] = value
+            if args.assign is not None:
+                payload["assignees"] = args.assign
+            if args.depends_on is not None:
+                payload["depends_on"] = args.depends_on
+            if args.multi_assignee is not None:
+                payload["multi_assignee"] = args.multi_assignee
+            return client.call("task_update", **payload), print_task
+        if sub == "assign":
+            return client.call("task_assign", id=args.id, assignees=args.assignees,
+                               mode=args.mode), print_task
+        if sub == "complete":
+            return client.call("task_complete", id=args.id, by=args.by), print_task
+        if sub == "block":
+            return client.call("task_block", id=args.id, reason=args.reason), print_task
+        if sub == "unblock":
+            return client.call("task_unblock", id=args.id), print_task
+        if sub == "cancel":
+            return client.call("task_cancel", id=args.id, reason=args.reason), print_task
+        if sub == "delete":
+            return client.call("task_delete", id=args.id), \
+                lambda r: print(f"deleted {r['deleted']}")
+        if sub == "next":
+            return client.call("task_next", scope=args.scope,
+                               lease_seconds=args.lease), print_task_next
+        if sub == "heartbeat":
+            return client.call("task_heartbeat", id=args.id,
+                               lease_seconds=args.lease), \
+                lambda r: print(f"lease on {r['task_id']} extended "
+                                f"({int(r['lease_seconds'])}s)")
+        if sub == "release":
+            return client.call("task_release", id=args.id), print_task
+        if sub == "follow":
+            return client.call("task_follow", scope=args.scope), \
+                lambda r: print(f"following {r['scope']} as {r['pane_id']} "
+                                f"({len(r['followers'])} follower(s))")
+        if sub == "unfollow":
+            return client.call("task_unfollow"), \
+                lambda r: print("stopped following" if r["was_following"]
+                                else "was not following")
+        if sub == "followers":
+            return client.call("task_followers"), print_task_followers
+        if sub == "stats":
+            return client.call("task_stats", scope=args.scope), print_task_stats
+        if sub == "metrics":
+            return client.call("task_metrics", scope=args.scope,
+                               window_s=args.window, since=args.since,
+                               until=args.until, bucket=args.bucket), \
+                print_task_metrics
+        if sub == "reap":
+            return client.call("task_reap"), \
+                lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
+                                + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
+                                   if r["requeued"] else ""))
     if command == "flush":
         return client.call("flush_box", target=args.target), lambda r: print(
             f"{r['target_label']} ({r['pane_id']}): {r['message']}"

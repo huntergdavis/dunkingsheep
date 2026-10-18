@@ -73,6 +73,50 @@ id, so the future agent can end the loop. The
 same agent can `read_pane` other agents, `send_text` them instructions, and
 `add_dunk` schedules for them: one agent watching and pacing a whole herd.
 
+## 🧵 Global task queue (deterministic coordination)
+
+Tasks are the fleet's shared work queue, stored by the daemon in SQLite and
+served over the same CLI / socket / MCP surfaces. Selection, ordering,
+dependency gating, atomic claims, leases and requeueing are deterministic
+algorithms — no model in the loop.
+
+- **Scope**: `global` (fleet-wide, the default) or a pane id (private to that
+  pane and its agent).
+- **Fields**: id, title, body, status (`open|in_progress|blocked|done|cancelled`),
+  priority (`urgent > high > medium > low`), assignees, `parent_id` subtasks,
+  `depends_on` order, attempts, and a lease.
+- **Global completion**: any assignee completing a shared task completes it for
+  everyone.
+- **Atomic claim**: `task_next` selects, assigns the caller and sets
+  `in_progress` in one `BEGIN IMMEDIATE` transaction, so two agents never take
+  the same exclusive task.
+- **Leases**: 1800s by default; `task_heartbeat` extends one. Expired or
+  dead-pane leases are requeued automatically.
+- **Push**: `task_follow` has the daemon push the next task to an idle pane,
+  reusing the same idle gate and guarded inbox nudge as dunks. An empty
+  `task_next` subscribes the caller, so agents do not poll.
+- **Inbox**: `inbox_read` returns the reader's global and own-pane tasks after
+  the messages.
+- **Metrics**: `task_metrics` is an append-only, timeseries-friendly query
+  endpoint: queue depth, status/priority/scope mix, per-assignee load,
+  created/claimed/completed/cancelled/requeued throughput in hourly or daily
+  buckets, and completion/claim latency (avg/p50/p90/max). Scope `all`, `global`,
+  `self` or a pane id.
+
+```bash
+dunkingsheep task add "Ship the parser" -p high
+dunkingsheep task next                 # atomic claim -> in_progress + lease
+dunkingsheep task heartbeat t12
+dunkingsheep task complete t12         # done for everyone
+dunkingsheep task follow               # pushed work when idle
+dunkingsheep task list --all
+```
+
+MCP tools: `task_add`, `task_list`, `task_read`, `task_update`, `task_assign`,
+`task_complete`, `task_block`, `task_unblock`, `task_cancel`, `task_delete`,
+`task_next`, `task_heartbeat`, `task_release`, `task_follow`, `task_unfollow`,
+`task_followers`, `task_stats`, `task_metrics`.
+
 ## 📥 Setting agents up
 
 ```bash
