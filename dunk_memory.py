@@ -429,12 +429,27 @@ class MemoryStore:
                 self.db.rollback()
                 raise
 
-    def finish(self, lease, ok, error=None, stats=None):
+    def finish(self, lease, ok, error=None, stats=None, skipped=False):
         now = time.time()
         stats = stats or {}
         with self._lock:
             self._begin_write()
             try:
+                if skipped:
+                    # A deliberate stop (operator/acceptance) is not a failure:
+                    # record it as skipped with a reason so coverage is visible
+                    # and the source can be resumed by a later enqueue.
+                    self.db.execute(
+                        "UPDATE ingest_queue SET state='skipped', finished_at=?, "
+                        "error=?, lease_until=NULL WHERE id=?",
+                        (now, str(error or "skipped")[:2000], lease["queue_id"]))
+                    self.db.execute(
+                        "UPDATE sources SET state='partial', error=?, "
+                        "lease_until=NULL WHERE id=?",
+                        (str(error or "skipped")[:2000], lease["source_id"]))
+                    self.db.commit()
+                    return {"ok": False, "skipped": True, "stats": stats,
+                            "error": error}
                 if ok:
                     self.db.execute(
                         "UPDATE ingest_queue SET state='done', finished_at=?, "
@@ -913,7 +928,8 @@ class MemoryStore:
                 ).fetchone()["n"]
             counts = {"sources": count("sources"),
                       "sessions": count("sessions"),
-                      "chunks": count("chunks")}
+                      "chunks": count("chunks"),
+                      "partial": count("sources", "WHERE state='partial'")}
             by_harness = [dict(row) for row in conn.execute(
                 "SELECT harness, COUNT(*) AS chunks, COUNT(DISTINCT session_id) "
                 "AS sessions FROM chunks c JOIN sessions s ON s.id = c.session_id "
@@ -922,6 +938,7 @@ class MemoryStore:
                 "queued": count("ingest_queue", "WHERE state='queued'"),
                 "leased": count("ingest_queue", "WHERE state='leased'"),
                 "failed": count("ingest_queue", "WHERE state='failed'"),
+                "skipped": count("ingest_queue", "WHERE state='skipped'"),
                 "done": count("ingest_queue", "WHERE state='done'"),
             }
             last = conn.execute(
@@ -941,6 +958,7 @@ class MemoryStore:
             "harness": by_harness,
             "queue": queue,
             "queue_depth": queue["queued"] + queue["leased"] + queue["failed"],
+            "partial_sources": counts["partial"],
             "db_bytes": sizes,
             "last_ingest": last,
             "queries": self._percentiles(),
@@ -1027,7 +1045,9 @@ class MemoryIngestor:
                     project=lease.get("project"),
                     should_stop=self._stop.is_set)
                 if result.get("stopped"):
-                    self.store.finish(lease, False, error="stopped")
+                    self.store.finish(lease, False,
+                                      error="stopped by operator",
+                                      skipped=True)
                 else:
                     self.store.finish(lease, True, stats=result)
                 with self._lock:

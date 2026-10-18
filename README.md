@@ -137,6 +137,9 @@ MCP tools: `memory_recall`, `memory_context`, `memory_search`, `memory_stats`,
 box; billions is a later sharded/remote tier. Deja remains until parity and the
 agent upgrade (t10/t11). See [`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
 
+Parity harness (bounded backfill, deja top-5 comparison, rollback proof):
+`python3 tools/memory_parity.py`. Acceptance: `python3 tools/memory_acceptance.py`.
+
 ## 🔒 Superusers and destructive operations
 
 Only panes and names on the superuser allowlist may close a pane/tab/workspace,

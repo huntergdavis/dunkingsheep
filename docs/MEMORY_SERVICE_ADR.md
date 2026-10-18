@@ -381,6 +381,28 @@ The test is the gate for t10 (migration/parity) and t11 (agent upgrade).
 - Embeddings/semantic recall are **deferred** until the lexical baseline is
   measured; `sqlite-vec` or pgvector is the likely v2 path.
 
+## t10 bounded parity result (2026-10-18)
+
+`tools/memory_parity.py` ingested a bounded 26-file sample (all pi sessions, 4
+Claude, 6 Codex, opencode) into a temp DB — 33 sessions / 58,191 chunks / 64 MB
+— then ran 30 golden queries (5-word phrases drawn from claude/codex/opencode
+sessions; deja does not index pi). Deja's results were restricted to the same
+session set.
+
+- **memory recall@5 = 1.000** vs **deja recall@5 = 0.733** — the new engine
+  surfaced the source session in the top five for every query, more often than
+  deja.
+- Exact top-5 **set** overlap: 0.717 (top-1 match 0.667): the rankers differ, but
+  the migration-relevant recall is not worse.
+- p50 6.6 ms, p95 13.9 ms.
+- Rollback proven: consistent SQLite backup, delete → 0 chunks, restore →
+  identical counts (26/33/58,191), and deja still answering throughout.
+- Stopped ingest now records `skipped` with a reason and a `partial` source
+  (resumable), never a silent `failed`.
+
+The full 17 GB backfill and the agent upgrade remain gated on the reviewer's
+sign-off of this parity result.
+
 ## Risks and open questions
 
 - FTS5 index size and write amplification on a 17 GB corpus; measure before the

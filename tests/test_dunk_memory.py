@@ -146,6 +146,19 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(1, stats["queue"]["done"])
         self.assertTrue(self.store.recall("flux capacitor"))
 
+    def test_stopped_ingest_is_skipped_not_failed(self):
+        sample = write_jsonl(os.path.join(self.tmp.name, "stop.jsonl"))
+        self.store.enqueue(sample, harness="generic", project="demo")
+        lease = self.store.claim_next()
+        self.store.finish(lease, False, error="stopped by operator", skipped=True)
+        stats = self.store.stats()
+        self.assertEqual(1, stats["queue"]["skipped"])
+        self.assertEqual(0, stats["queue"]["failed"])
+        self.assertEqual(1, stats["partial_sources"])
+        # A later enqueue can resume the source.
+        resumed = self.store.enqueue(sample, harness="generic", project="demo")
+        self.assertEqual(1, self.store.stats()["queue"]["queued"])
+
     def test_recall_never_ingests_or_enqueues(self):
         sample = write_jsonl(os.path.join(self.tmp.name, "r.jsonl"))
         self.store.ingest_path(sample, harness="generic", project="demo")
