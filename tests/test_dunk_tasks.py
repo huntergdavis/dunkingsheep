@@ -183,6 +183,60 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, len(metrics["throughput"]["buckets"]))
         self.assertEqual(2, metrics["throughput"]["buckets"][0]["created"])
 
+    def test_concurrent_add_never_collides(self):
+        first, second = Tasks(self.path), Tasks(self.path)
+        ids, errors = [], []
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+
+        def worker(tasks):
+            barrier.wait()
+            for index in range(50):
+                try:
+                    task = tasks.add(GLOBAL, f"concurrent {index}")
+                    with lock:
+                        ids.append(task["id"])
+                except Exception as error:  # noqa: BLE001 - reported below
+                    with lock:
+                        errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(first,)),
+                   threading.Thread(target=worker, args=(second,))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        try:
+            self.assertEqual([], errors)
+            self.assertEqual(100, len(ids))
+            self.assertEqual(100, len(set(ids)), "duplicate task id allocated")
+        finally:
+            first.close()
+            second.close()
+
+    def test_assigned_agent_can_claim_its_task(self):
+        task = self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
+        other = self.store.list(scope=GLOBAL, self_pane_id="w2:p2")[0]
+        mine = self.store.list(scope=GLOBAL, self_pane_id="w1:p1")[0]
+        self.assertFalse(other["eligible"])
+        self.assertTrue(mine["eligible"])
+        self.assertIsNone(self.store.claim_next(GLOBAL, "w2:p2")["task"])
+        claimed = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual(task["id"], claimed["task"]["id"])
+
+    def test_reap_records_actual_status_when_another_lease_lives(self):
+        task = self.store.add(GLOBAL, "shared", multi_assignee=True)
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        self.store.claim_next(GLOBAL, "w2:p2", lease_seconds=300)
+        import time as _time
+        _time.sleep(0.1)
+        reaped = self.store.reap(alive_panes={"w1:p1", "w2:p2"})
+        self.assertEqual(1, len(reaped))
+        self.assertEqual("in_progress", self.store.get(task["id"])["status"])
+        metrics = self.store.metrics(scopes=[GLOBAL])
+        self.assertEqual(0, metrics["throughput"]["requeued"],
+                         "a task still held by another lease is not a requeue")
+
 
 class FlockTaskTests(unittest.TestCase):
     def setUp(self):
@@ -200,6 +254,8 @@ class FlockTaskTests(unittest.TestCase):
 
     def tearDown(self):
         self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
         self.tmp.cleanup()
 
     def test_self_assign_and_global_completion(self):

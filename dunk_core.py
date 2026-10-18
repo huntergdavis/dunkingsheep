@@ -56,7 +56,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.14.0"
+VERSION = "2.14.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -434,6 +434,7 @@ class Flock:
         # pane_id -> scope (global or that pane's private queue).
         self.task_waiters = {}
         self._task_stop = threading.Event()
+        self._task_threads = []
         self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
         if metrics is not None:
             self.metrics = metrics
@@ -882,7 +883,8 @@ class Flock:
 
     @_as_dunk_error
     def task_read(self, task_id, self_pane_id=None):
-        return self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        return self._require_task_visible(
+            self.tasks.get(task_id, pane_id=self_pane_id), self_pane_id)
 
     @_as_dunk_error
     def task_update(self, task_id, title=None, body=None, status=None,
@@ -1057,10 +1059,14 @@ class Flock:
     # -- deterministic task push/reap workers -------------------------------
 
     def _start_task_workers(self):
-        threading.Thread(target=self._task_reaper_loop, name="task-reaper",
-                         daemon=True).start()
-        threading.Thread(target=self._task_push_loop, name="task-push",
-                         daemon=True).start()
+        self._task_threads = [
+            threading.Thread(target=self._task_reaper_loop,
+                             name="task-reaper", daemon=True),
+            threading.Thread(target=self._task_push_loop,
+                             name="task-push", daemon=True),
+        ]
+        for thread in self._task_threads:
+            thread.start()
 
     def _task_reaper_loop(self):
         while not self._task_stop.wait(TASK_REAP_S):
@@ -1917,10 +1923,13 @@ class Flock:
             bytes=len((message.text or "").encode("utf-8")))
         for inbox_id in list(message.notify_for):
             # The inbox record said "queued" when the notice was created; say
-            # what actually happened, so a status query is not stale.
+            # what actually happened, so a status query is not stale. After
+            # shutdown the store may already be closed; delivery bookkeeping
+            # must never crash a worker or race a tempdir cleanup.
             try:
-                self.inbox.record_notify(inbox_id, "sent" if ok else "failed", detail)
-            except InboxError:
+                if not self.closed:
+                    self.inbox.record_notify(inbox_id, "sent" if ok else "failed", detail)
+            except Exception:  # noqa: BLE001 - bookkeeping only
                 pass
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
                  "sent" if ok else f"FAILED {detail}")
@@ -2027,7 +2036,8 @@ class Flock:
                     continue
                 time.sleep(MESSAGE_RECHECK_S)
         except Exception:  # noqa: BLE001 - never kill the daemon
-            log.exception("outbox worker for %s crashed", pane_id)
+            if not self.closed:
+                log.exception("outbox worker for %s crashed", pane_id)
         finally:
             with self._lock:
                 if self.outbox_threads.get(pane_id) is threading.current_thread():
@@ -2638,6 +2648,12 @@ class Flock:
             for queue in self.outbox.values():
                 for message in queue:
                     message.done.set()
+        # F5: let the task workers (and any queued direct-message threads)
+        # exit before a caller removes their temp state.
+        for thread in getattr(self, "_task_threads", ()):
+            thread.join(timeout=2)
+        for thread in list(getattr(self, "outbox_threads", {}).values()):
+            thread.join(timeout=2)
 
 
 def _looks_like_usage(text):

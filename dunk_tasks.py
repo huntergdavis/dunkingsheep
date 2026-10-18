@@ -196,13 +196,14 @@ class Tasks:
     # -- ids ----------------------------------------------------------------
 
     def _next_id(self):
+        # F1: allocate with a single write statement. The old SELECT-then-upsert
+        # let two processes compute the same number; the UPSERT starts the write
+        # transaction so SQLite serialises concurrent adders.
         row = self.db.execute(
-            "SELECT value FROM counters WHERE name = 'task'").fetchone()
-        number = (row["value"] if row else 0) + 1
-        self.db.execute(
-            "INSERT INTO counters (name, value) VALUES ('task', ?) "
-            "ON CONFLICT(name) DO UPDATE SET value = ?", (number, number))
-        return f"t{number}"
+            "INSERT INTO counters (name, value) VALUES ('task', 1) "
+            "ON CONFLICT(name) DO UPDATE SET value = value + 1 "
+            "RETURNING value").fetchone()
+        return f"t{row[0]}"
 
     def _record(self, task_id, event, at=None, actor=None, scope=None,
                 priority=None, status_from=None, status_to=None,
@@ -228,7 +229,7 @@ class Tasks:
         ).fetchall()
         return {row["id"]: row["status"] for row in rows}
 
-    def _decorate(self, row):
+    def _decorate(self, row, pane_id=None):
         task = dict(row)
         task["assignees"] = _decode(task.get("assignees"))
         task["depends_on"] = _decode(task.get("depends_on"))
@@ -244,19 +245,27 @@ class Tasks:
         task["blocked_by"] = [
             dep for dep in task["depends_on"] if statuses.get(dep) != "done"
         ]
+        # F2: eligibility is per-viewer. An assigned task is not claimable by
+        # anyone except its named assignee, so a generic list must not advertise
+        # it as eligible.
+        task["claimable"] = (
+            self._claimable(task, pane_id) if pane_id
+            else (not task["assignees"] or task["multi_assignee"])
+        )
         task["eligible"] = (
             task["status"] in ("open", "in_progress")
             and not task["blocked_by"]
+            and task["claimable"]
         )
         return task
 
-    def _full(self, row):
-        task = self._decorate(row)
+    def _full(self, row, pane_id=None):
+        task = self._decorate(row, pane_id)
         children = self.db.execute(
             "SELECT * FROM tasks WHERE parent_id = ? ORDER BY created_at",
             (task["id"],),
         ).fetchall()
-        task["children"] = [self._decorate(child) for child in children]
+        task["children"] = [self._decorate(child, pane_id) for child in children]
         if task.get("parent_id"):
             parent = self.db.execute(
                 "SELECT id, title, status FROM tasks WHERE id = ?",
@@ -303,132 +312,166 @@ class Tasks:
             self._require(dep)
 
         with self._lock:
-            task_id = self._next_id()
-            now = _now()
-            self.db.execute(
-                "INSERT INTO tasks (id, scope, title, body, status, priority, "
-                "parent_id, multi_assignee, assignees, depends_on, created_at, "
-                "updated_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (task_id, scope, title, "" if body is None else str(body),
-                 status, priority, parent_id, 1 if multi_assignee else 0,
-                 _encode(_as_list(assignees)), _encode(deps), now, now,
-                 created_by),
-            )
-            self._record(task_id, "created", at=now, actor=created_by,
-                         scope=scope, priority=priority, status_to=status)
-            self.db.commit()
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                task_id = self._next_id()
+                now = _now()
+                self.db.execute(
+                    "INSERT INTO tasks (id, scope, title, body, status, priority, "
+                    "parent_id, multi_assignee, assignees, depends_on, created_at, "
+                    "updated_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (task_id, scope, title, "" if body is None else str(body),
+                     status, priority, parent_id, 1 if multi_assignee else 0,
+                     _encode(_as_list(assignees)), _encode(deps), now, now,
+                     created_by),
+                )
+                self._record(task_id, "created", at=now, actor=created_by,
+                             scope=scope, priority=priority, status_to=status)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
         return self.get(task_id)
 
     def update(self, task_id, title=None, body=None, status=None, priority=None,
                parent_id=..., assignees=None, depends_on=None,
                block_reason=..., updated_by=None, multi_assignee=None):
         """Change any mutable field. ``...`` (Ellipsis) means "leave alone"."""
-        row = self._require(task_id)
-        task_id = row["id"]
-        sets = {}
-        now = _now()
-
-        if title is not None:
-            title = str(title).strip()
-            if not title:
-                raise TaskError("a task needs a title")
-            sets["title"] = title
-        if body is not None:
-            sets["body"] = str(body)
-        if priority is not None:
-            sets["priority"] = validate_priority(priority)
-        if parent_id is not ...:
-            parent_id = str(parent_id).strip() if parent_id else None
-            if parent_id:
-                if parent_id == task_id:
-                    raise TaskError("a task cannot be its own parent")
-                self._require(parent_id)
-            sets["parent_id"] = parent_id
-        if assignees is not None:
-            sets["assignees"] = _encode(_as_list(assignees))
-        if multi_assignee is not None:
-            sets["multi_assignee"] = 1 if multi_assignee else 0
-        if depends_on is not None:
-            deps = _as_list(depends_on)
-            if task_id in deps:
-                raise TaskError("a task cannot depend on itself")
-            for dep in deps:
-                self._require(dep)
-            sets["depends_on"] = _encode(deps)
-        if status is not None:
-            status = validate_status(status)
-            sets["status"] = status
-            if status == "done":
-                sets["completed_by"] = updated_by
-                sets["completed_at"] = now
-                sets["cancelled_at"] = None
-                sets["block_reason"] = None
-            elif status == "cancelled":
-                sets["cancelled_at"] = now
-                sets["block_reason"] = None
-            else:
-                sets["completed_by"] = None
-                sets["completed_at"] = None
-                sets["cancelled_at"] = None
-                if status != "blocked":
-                    sets["block_reason"] = None
-        if block_reason is not ...:
-            sets["block_reason"] = block_reason
-
-        if not sets:
-            return self.get(task_id)
-        sets["updated_at"] = now
-        assignments = ", ".join(f"{key} = ?" for key in sets)
         with self._lock:
-            self.db.execute(
-                f"UPDATE tasks SET {assignments} WHERE id = ?",
-                (*sets.values(), task_id),
-            )
-            if "status" in sets and sets["status"] != row["status"]:
-                new_status = sets["status"]
-                if new_status == "done":
-                    event = "completed"
-                    duration = int((now - row["created_at"]) * 1000)
-                elif new_status == "cancelled":
-                    event, duration = "cancelled", None
-                elif new_status == "blocked":
-                    event, duration = "blocked", None
-                elif row["status"] == "blocked":
-                    event, duration = "unblocked", None
-                else:
-                    event, duration = "status", None
-                self._record(task_id, event, at=now, actor=updated_by,
-                             scope=row["scope"],
-                             priority=sets.get("priority", row["priority"]),
-                             status_from=row["status"], status_to=new_status,
-                             duration_ms=duration)
-            if "priority" in sets and sets["priority"] != row["priority"]:
-                self._record(task_id, "priority", at=now, actor=updated_by,
-                             scope=row["scope"], priority=sets["priority"],
-                             meta={"from": row["priority"], "to": sets["priority"]})
-            if "assignees" in sets and sets["assignees"] != row["assignees"]:
-                self._record(task_id, "assigned", at=now, actor=updated_by,
-                             scope=row["scope"], priority=row["priority"],
-                             meta={"assignees": _decode(sets["assignees"])})
-            self.db.commit()
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                task_id = row["id"]
+                sets = {}
+                now = _now()
+
+                if title is not None:
+                    title = str(title).strip()
+                    if not title:
+                        raise TaskError("a task needs a title")
+                    sets["title"] = title
+                if body is not None:
+                    sets["body"] = str(body)
+                if priority is not None:
+                    sets["priority"] = validate_priority(priority)
+                if parent_id is not ...:
+                    parent_id = str(parent_id).strip() if parent_id else None
+                    if parent_id:
+                        if parent_id == task_id:
+                            raise TaskError("a task cannot be its own parent")
+                        self._require(parent_id)
+                    sets["parent_id"] = parent_id
+                if assignees is not None:
+                    sets["assignees"] = _encode(_as_list(assignees))
+                if multi_assignee is not None:
+                    sets["multi_assignee"] = 1 if multi_assignee else 0
+                if depends_on is not None:
+                    deps = _as_list(depends_on)
+                    if task_id in deps:
+                        raise TaskError("a task cannot depend on itself")
+                    for dep in deps:
+                        self._require(dep)
+                    sets["depends_on"] = _encode(deps)
+                if status is not None:
+                    status = validate_status(status)
+                    sets["status"] = status
+                    if status == "done":
+                        sets["completed_by"] = updated_by
+                        sets["completed_at"] = now
+                        sets["cancelled_at"] = None
+                        sets["block_reason"] = None
+                    elif status == "cancelled":
+                        sets["cancelled_at"] = now
+                        sets["block_reason"] = None
+                    else:
+                        sets["completed_by"] = None
+                        sets["completed_at"] = None
+                        sets["cancelled_at"] = None
+                        if status != "blocked":
+                            sets["block_reason"] = None
+                if block_reason is not ...:
+                    sets["block_reason"] = block_reason
+
+                if not sets:
+                    self.db.commit()
+                    return self.get(task_id)
+                sets["updated_at"] = now
+                assignments = ", ".join(f"{key} = ?" for key in sets)
+                self.db.execute(
+                    f"UPDATE tasks SET {assignments} WHERE id = ?",
+                    (*sets.values(), task_id),
+                )
+                if "status" in sets and sets["status"] != row["status"]:
+                    new_status = sets["status"]
+                    if new_status == "done":
+                        event = "completed"
+                        duration = int((now - row["created_at"]) * 1000)
+                    elif new_status == "cancelled":
+                        event, duration = "cancelled", None
+                    elif new_status == "blocked":
+                        event, duration = "blocked", None
+                    elif row["status"] == "blocked":
+                        event, duration = "unblocked", None
+                    else:
+                        event, duration = "status", None
+                    self._record(task_id, event, at=now, actor=updated_by,
+                                 scope=row["scope"],
+                                 priority=sets.get("priority", row["priority"]),
+                                 status_from=row["status"], status_to=new_status,
+                                 duration_ms=duration)
+                if "priority" in sets and sets["priority"] != row["priority"]:
+                    self._record(task_id, "priority", at=now, actor=updated_by,
+                                 scope=row["scope"], priority=sets["priority"],
+                                 meta={"from": row["priority"], "to": sets["priority"]})
+                if "assignees" in sets and sets["assignees"] != row["assignees"]:
+                    self._record(task_id, "assigned", at=now, actor=updated_by,
+                                 scope=row["scope"], priority=row["priority"],
+                                 meta={"assignees": _decode(sets["assignees"])})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
         return self.get(task_id)
 
     def assign(self, task_id, assignees, mode="add"):
-        row = self._require(task_id)
-        current = _decode(row["assignees"])
         incoming = _as_list(assignees)
         if not incoming:
             raise TaskError("at least one assignee is required")
         mode = (mode or "add").strip().lower()
-        if mode in ("add", "append"):
-            merged = current + [item for item in incoming if item not in current]
-        elif mode in ("remove", "rm"):
-            merged = [item for item in current if item not in incoming]
-        elif mode in ("set", "replace"):
-            merged = incoming
-        else:
+        if mode not in ("add", "append", "remove", "rm", "set", "replace"):
             raise TaskError("assign mode must be add, remove or set")
-        return self.update(task_id, assignees=merged)
+        # F4: read-modify-write under one write transaction, so a concurrent
+        # assign cannot be lost between the read and the update.
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                current = _decode(row["assignees"])
+                if mode in ("add", "append"):
+                    merged = current + [item for item in incoming if item not in current]
+                elif mode in ("remove", "rm"):
+                    merged = [item for item in current if item not in incoming]
+                else:
+                    merged = incoming
+                now = _now()
+                self.db.execute(
+                    "UPDATE tasks SET assignees = ?, updated_at = ? WHERE id = ?",
+                    (_encode(merged), now, row["id"]),
+                )
+                self._record(row["id"], "assigned", at=now,
+                             scope=row["scope"], priority=row["priority"],
+                             meta={"assignees": merged})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            return self.get(row["id"])
 
     def complete(self, task_id, by=None):
         row = self._require(task_id)
@@ -449,35 +492,43 @@ class Tasks:
         return self.update(task_id, status="cancelled", block_reason=reason)
 
     def delete(self, task_id):
-        row = self._require(task_id)
-        task_id = row["id"]
-        children = self.db.execute(
-            "SELECT COUNT(*) AS n FROM tasks WHERE parent_id = ?", (task_id,)
-        ).fetchone()["n"]
-        if children:
-            raise TaskError(
-                f"task {task_id} has {children} child task(s); delete or re-parent them first"
-            )
-        dependents = [
-            candidate["id"]
-            for candidate in self.db.execute("SELECT id, depends_on FROM tasks").fetchall()
-            if task_id in _decode(candidate["depends_on"])
-        ]
-        if dependents:
-            raise TaskError(
-                f"task {task_id} is a dependency of {', '.join(dependents)}"
-            )
+        # F4: the checks and the delete are one write transaction.
         with self._lock:
-            self._record(task_id, "deleted", at=_now(), scope=row["scope"],
-                         priority=row["priority"], status_from=row["status"])
-            self.db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-            self.db.commit()
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                task_id = row["id"]
+                children = self.db.execute(
+                    "SELECT COUNT(*) AS n FROM tasks WHERE parent_id = ?", (task_id,)
+                ).fetchone()["n"]
+                if children:
+                    raise TaskError(
+                        f"task {task_id} has {children} child task(s); "
+                        "delete or re-parent them first")
+                dependents = [
+                    candidate["id"]
+                    for candidate in self.db.execute(
+                        "SELECT id, depends_on FROM tasks").fetchall()
+                    if task_id in _decode(candidate["depends_on"])
+                ]
+                if dependents:
+                    raise TaskError(
+                        f"task {task_id} is a dependency of {', '.join(dependents)}")
+                self._record(task_id, "deleted", at=_now(), scope=row["scope"],
+                             priority=row["priority"], status_from=row["status"])
+                self.db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
         return {"deleted": task_id}
 
     # -- reading ------------------------------------------------------------
 
-    def get(self, task_id):
-        return self._full(self._require(task_id))
+    def get(self, task_id, pane_id=None):
+        return self._full(self._require(task_id), pane_id)
 
     def _visible_scopes(self, scope, self_pane_id):
         """Which scopes a caller may see.
@@ -514,7 +565,7 @@ class Tasks:
         rows = self.db.execute(
             f"SELECT * FROM tasks WHERE {' AND '.join(where)}", params
         ).fetchall()
-        tasks = [self._decorate(row) for row in rows]
+        tasks = [self._decorate(row, self_pane_id) for row in rows]
         if assignee:
             assignee = str(assignee).strip()
             tasks = [task for task in tasks if assignee in task["assignees"]]
@@ -581,10 +632,14 @@ class Tasks:
             return False  # already holds this one
         if task["leases"]:
             return task["multi_assignee"]
+        assigned_to_me = bool(pane_id and pane_id in task["assignees"])
         if task["status"] == "open":
-            return not task["assignees"] or task["multi_assignee"]
+            # F2: a named assignee can pull its own task; previously any
+            # assignee list made the task unclaimable by everyone.
+            return (not task["assignees"] or task["multi_assignee"]
+                    or assigned_to_me)
         if task["status"] == "in_progress":
-            return task["multi_assignee"]
+            return task["multi_assignee"] or assigned_to_me
         return False
 
     def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None):
@@ -680,18 +735,27 @@ class Tasks:
 
     def release(self, task_id, pane_id):
         """Give a claim back without completing it."""
-        row = self._require(task_id)
-        task_id = row["id"]
-        now = _now()
         with self._lock:
-            self.db.execute(
-                "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
-                (task_id, str(pane_id)),
-            )
-            self._after_lease_change(task_id, row["assignees"], now, pane_id)
-            self._record(task_id, "released", at=now, actor=pane_id,
-                         scope=row["scope"], priority=row["priority"])
-            self.db.commit()
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                task_id = row["id"]
+                now = _now()
+                self.db.execute(
+                    "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
+                    (task_id, str(pane_id)),
+                )
+                resulting = self._after_lease_change(
+                    task_id, row["assignees"], now, pane_id)
+                self._record(task_id, "released", at=now, actor=pane_id,
+                             scope=row["scope"], priority=row["priority"],
+                             status_from=row["status"], status_to=resulting)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
         return self.get(task_id)
 
     def reap(self, alive_panes=None, now=None):
@@ -724,15 +788,18 @@ class Tasks:
                     ).fetchone()
                     if row is None:
                         continue
-                    self._after_lease_change(
+                    resulting = self._after_lease_change(
                         lease["task_id"], row["assignees"], now,
                         lease["pane_id"], row=row,
                     )
+                    # F3: a task with another live lease stays in_progress;
+                    # only a task that actually reopened counts as requeued.
+                    event = "requeued" if resulting == "open" else "released"
                     self._record(
-                        lease["task_id"], "requeued", at=now,
+                        lease["task_id"], event, at=now,
                         actor=lease["pane_id"], scope=row["scope"],
                         priority=row["priority"], status_from=row["status"],
-                        status_to="open",
+                        status_to=resulting,
                         meta={"reason": "pane_gone" if gone else "expired"})
                     requeued.append({
                         "task_id": lease["task_id"],
@@ -759,6 +826,9 @@ class Tasks:
             "updated_at = ? WHERE id = ?",
             (_encode(assignees), status, now, task_id),
         )
+        # F3: tell the caller what actually happened; a task with another live
+        # lease stays in_progress and its requeue event must say so.
+        return status
 
     def stats(self, scope=None, self_pane_id=None):
         scopes = self._visible_scopes(scope, self_pane_id)
