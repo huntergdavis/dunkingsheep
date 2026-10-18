@@ -449,6 +449,28 @@ def guide(markdown=False):
       "pane, such as the human CLI outside herdr, may inspect any pane. Use\n"
       "`task_reap` to requeue expired or dead-pane leases immediately; the daemon\n"
       "also does it on a timer.\n")
+    w(h(2, "Superusers and destructive operations"))
+    w("Only panes and names on the superuser allowlist may close a pane, tab or\n"
+      "workspace, stop the daemon, manage dunks, spawn agents, or use the raw\n"
+      "herdr passthrough. Everyone else communicates through the inbox and task\n"
+      "queue, and may type only into their own pane. This is the response to the\n"
+      "2026-10-18 incident, where a free model's cleanup closed the VP's tab and\n"
+      "took nine panes with it.\n")
+    w(code("dunkingsheep superuser status\n"
+           "dunkingsheep superuser add <pane-or-name>\n"
+           "dunkingsheep superuser remove <pane-or-name>\n"
+           "dunkingsheep superuser recover    # setup/takeover: add this pane + VP name"))
+    w("The allowlist is ~/.config/dunkingsheep/superusers.json: pane ids and\n"
+      "names. A name matches a pane's own label, tab label or workspace label, so\n"
+      "the VP is recognised after its pane id changes. An empty allowlist refuses\n"
+      "every destructive operation; the first `superuser recover` bootstraps it.\n"
+      "Names default to the VP and owner; the setup/recovery step adds the VP's\n"
+      "actual pane id.\n")
+    w("Self-protection: even a superuser cannot close the pane, tab or workspace\n"
+      "it runs in unless it passes `close --force`. Spawning an agent without an\n"
+      "explicit workspace/tab puts it in the dedicated `sandbox` workspace,\n"
+      "never the caller's tab.\n")
+
     w(h(2, "Panels and dialogs"))
     w("A slash command such as /usage replaces the input box with a panel, and a\n"
       "dialog draws its selected row with the same prompt sigil the input box\n"

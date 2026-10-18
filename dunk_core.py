@@ -52,11 +52,12 @@ import time
 
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
+from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.14.2"
+VERSION = "2.15.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -397,7 +398,8 @@ class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
     def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
-                 restore=True, inbox=None, metrics=None, tasks=None):
+                 restore=True, inbox=None, metrics=None, tasks=None,
+                 superusers=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
         self.persist_enabled = persist
@@ -430,6 +432,7 @@ class Flock:
         self._last_block_reason = {}
         self.inbox = Inbox() if inbox is None else inbox
         self.tasks = Tasks() if tasks is None else tasks
+        self.superusers = Superusers() if superusers is None else superusers
         # Panes that asked the daemon to feed them work when they go idle.
         # pane_id -> scope (global or that pane's private queue).
         self.task_waiters = {}
@@ -1314,6 +1317,107 @@ class Flock:
             raise DunkError(self.herdr.server_error_hint())
         return self._pick(tabs, spec, "tab", "tab_id")
 
+    # -- superuser allowlist -------------------------------------------------
+
+    def _pane_info(self, pane_id):
+        if not pane_id:
+            return None
+        try:
+            return self.herdr.get_pane(pane_id)
+        except Exception:  # noqa: BLE001 - identity check must not crash
+            return None
+
+    def is_superuser(self, self_pane_id):
+        return self.superusers.is_superuser(self_pane_id,
+                                            self._pane_info(self_pane_id))
+
+    def require_superuser(self, self_pane_id, action):
+        """Fail closed: no non-empty allowlist means no destructive action."""
+        if self.superusers.empty():
+            raise DunkError(
+                "superuser allowlist is empty; run `dunkingsheep superuser "
+                "recover` from the VP pane, or add a pane/name as a superuser")
+        if not self.is_superuser(self_pane_id):
+            raise DunkError(
+                f"{action} requires a superuser; {self_pane_id or 'this caller'} "
+                "is not on the allowlist. Non-superusers can use the inbox and "
+                "task queue.")
+
+    def superuser_status(self, self_pane_id=None):
+        return {"superuser": self.is_superuser(self_pane_id),
+                "pane_id": self_pane_id,
+                **self.superusers.describe()}
+
+    def superuser_add(self, entry, self_pane_id=None):
+        if not self.superusers.empty() and not self.is_superuser(self_pane_id):
+            raise DunkError("superuser add requires a superuser")
+        try:
+            value = self.superusers.add(entry)
+        except SuperuserError as error:
+            raise DunkError(str(error)) from None
+        with self._lock:
+            self.last_message = f"Added superuser {value}"
+        return {"added": value, **self.superuser_status(self_pane_id)}
+
+    def superuser_remove(self, entry, self_pane_id=None):
+        if not self.is_superuser(self_pane_id):
+            raise DunkError("superuser remove requires a superuser")
+        entry = str(entry or "").strip()
+        remaining = (len(self.superusers.panes) - (1 if ":" in entry else 0)
+                     + len(self.superusers.names) - (0 if ":" in entry else 1))
+        if remaining <= 0:
+            raise DunkError("refusing to remove the last superuser")
+        try:
+            removed = self.superusers.remove(entry)
+        except SuperuserError as error:
+            raise DunkError(str(error)) from None
+        with self._lock:
+            self.last_message = f"Removed superuser {entry}"
+        return {"removed": removed, "entry": entry,
+                **self.superuser_status(self_pane_id)}
+
+    def superuser_recover(self, self_pane_id=None, name=None):
+        """Re-assert the caller's pane and the configured VP name.
+
+        Bootstrap (empty allowlist) is allowed; after that only an existing
+        superuser can recover. This is the setup/takeover step: the VP pane
+        gets its current HERDR_PANE_ID and name written into the allowlist.
+        """
+        if not self_pane_id:
+            raise DunkError("superuser recover requires a known caller pane")
+        if not self.superusers.empty() and not self.is_superuser(self_pane_id):
+            raise DunkError(
+                "superuser recover requires an existing superuser; ask one to "
+                "run `dunkingsheep superuser add <your-pane>`")
+        name = str(name or DEFAULT_VP_NAME).strip()
+        try:
+            self.superusers.add(self_pane_id)
+            if name:
+                self.superusers.add(name)
+        except SuperuserError as error:
+            raise DunkError(str(error)) from None
+        with self._lock:
+            self.last_message = f"Recovered superuser {self_pane_id} ({name})"
+        return {"recovered": True, "pane_id": self_pane_id, "name": name,
+                **self.superuser_status(self_pane_id)}
+
+    def require_send_self(self, target, self_pane_id, action):
+        """Non-superusers may only type into their own pane."""
+        if self.is_superuser(self_pane_id):
+            return
+        if not self_pane_id:
+            raise DunkError(
+                f"{action} requires a superuser; non-superusers can use the "
+                "inbox and task queue")
+        try:
+            resolved = self.resolve_target(target, self_pane_id)["pane_id"]
+        except DunkError:
+            raise
+        if resolved != self_pane_id:
+            raise DunkError(
+                f"{action} to another pane requires a superuser; use "
+                "`dunkingsheep inbox send` instead")
+
     def _resolve_kind(self, kind, target, self_pane_id=None):
         kind = str(kind or "").strip().lower()
         if kind not in self.LAYOUT_KINDS:
@@ -1380,12 +1484,32 @@ class Flock:
                                            focus=focus)
         return self._after_create(ok, result, command, "pane")
 
+    def _sandbox_workspace_id(self):
+        """The dedicated workspace where spawned agents go by default.
+
+        The 2026-10-18 incident: agents started without an explicit
+        workspace/tab split into the VP's own tab, and a cleanup then closed
+        that tab with the VP in it. Never default into the caller's tab.
+        """
+        label = (os.environ.get("DUNKINGSHEEP_SANDBOX_WORKSPACE")
+                 or "sandbox").strip() or "sandbox"
+        for workspace in self.herdr.list_workspaces():
+            if str(workspace.get("label") or "").strip().lower() == label.lower():
+                return workspace.get("workspace_id")
+        ok, result = self.herdr.create_workspace(label=label, cwd=None, focus=False)
+        if not ok:
+            raise DunkError(f"could not create sandbox workspace {label!r}: {result}")
+        workspace_id = (result.get("workspace") or {}).get("workspace_id")
+        if not workspace_id:
+            raise DunkError(f"sandbox workspace {label!r} was created without an id")
+        return workspace_id
+
     def start_agent(self, name, command, workspace=None, tab=None, split=None, cwd=None,
                     focus=False, self_pane_id=None):
         """Launch `command` in a new pane registered with herdr as agent `name`
         (`herdr agent start`). Placement: inside `tab` (splitting it when
         `split` is right/down), else in `workspace` (id, label or 'self';
-        herdr picks the tab), else wherever herdr puts it."""
+        herdr picks the tab), else in the dedicated sandbox workspace."""
         name = str(name or "").strip()
         if not name:
             raise DunkError("agent name is required")
@@ -1397,6 +1521,8 @@ class Flock:
             tab_id = self.resolve_tab(tab, self_pane_id)["tab_id"]
         if workspace:
             workspace_id = self.resolve_workspace(workspace, self_pane_id)["workspace_id"]
+        if not tab and not workspace:
+            workspace_id = self._sandbox_workspace_id()
         if split and split not in ("right", "down"):
             raise DunkError("split must be 'right' or 'down'")
         ok, result = self.herdr.start_agent(name, argv, workspace_id=workspace_id,
@@ -1429,17 +1555,20 @@ class Flock:
             raise DunkError(f"herdr could not focus {kind} {target_id}: {result}")
         return {"kind": kind, "id": target_id, "focused": True}
 
-    def close_target(self, kind, target, self_pane_id=None):
+    def close_target(self, kind, target, self_pane_id=None, force=False):
         """Close a workspace, tab or pane, killing whatever runs inside.
-        Refuses to close the caller's own pane or its containers, since a
-        process closing its own terminal is almost always a mistake; do it
-        from another pane. Dunks aimed into the closed area are stopped."""
+        Refuses to close the caller's own pane or its containers unless
+        `force` is set, since a process closing its own terminal is almost
+        always a mistake; do it from another pane. Dunks aimed into the
+        closed area are stopped."""
         kind, target_id, item = self._resolve_kind(kind, target, self_pane_id)
         own = self.herdr.get_pane(self_pane_id) if self_pane_id else None
         if own and own.get({"workspace": "workspace_id", "tab": "tab_id",
-                            "pane": "pane_id"}[kind]) == target_id:
-            raise DunkError(f"refusing to close the {kind} this caller runs in "
-                            f"({target_id}); target it from another pane")
+                            "pane": "pane_id"}[kind]) == target_id and not force:
+            raise DunkError(
+                f"refusing to close the {kind} this caller runs in "
+                f"({target_id}); pass --force only if you intend to kill your "
+                "own pane/tab/workspace")
         doomed = [p["pane_id"] for p in self.herdr.list_panes()
                   if p.get({"workspace": "workspace_id", "tab": "tab_id",
                             "pane": "pane_id"}[kind]) == target_id]

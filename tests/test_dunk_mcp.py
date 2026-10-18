@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -10,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dunk_api import dispatch, mcp_commands  # noqa: E402
 from dunk_core import Flock  # noqa: E402
 from dunk_mcp import McpServer  # noqa: E402
+from dunk_superusers import Superusers  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
@@ -27,7 +29,13 @@ class InProcessClient:
 class McpServerTests(unittest.TestCase):
     def setUp(self):
         self.herdr = FakeHerdr()
-        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.superusers = Superusers(
+            path=os.path.join(self.tmp.name, "superusers.json"))
+        self.superusers.add("w1:p2")
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           superusers=self.superusers)
         self.client = InProcessClient(self.flock)
         self.server = McpServer(client_factory=lambda: self.client)
 

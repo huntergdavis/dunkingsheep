@@ -120,6 +120,15 @@ TASK_LEASE_PARAM = {
     "minimum": 1,
     "description": "Lease length in seconds (default 1800).",
 }
+SUPERUSER_ENTRY_PARAM = {
+    "type": "string",
+    "description": "A pane id (e.g. w9:p8) or a name matching a pane's "
+                   "label/tab label (e.g. 'VP of agentry').",
+}
+SUPERUSER_NAME_PARAM = {
+    "type": "string",
+    "description": "Name to re-assert (default 'VP of agentry').",
+}
 
 
 # -- handlers -----------------------------------------------------------------
@@ -201,6 +210,7 @@ def h_fire_dunk(flock, args, self_pane_id):
 
 
 def h_send_text(flock, args, self_pane_id):
+    flock.require_send_self(args["target"], self_pane_id, "send_text")
     return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id,
                           hold_while_typing=_bool(args.get("hold_while_typing"), True),
                           wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)),
@@ -208,12 +218,14 @@ def h_send_text(flock, args, self_pane_id):
 
 
 def h_send_keys(flock, args, self_pane_id):
+    flock.require_send_self(args["target"], self_pane_id, "send_keys")
     return flock.send_keys_now(args["target"], args["keys"], self_pane_id=self_pane_id,
                                hold_while_typing=_bool(args.get("hold_while_typing"), True),
                                wait_s=float(_opt(args, "wait_s", DEFAULT_SEND_WAIT_S)))
 
 
 def h_flush_box(flock, args, self_pane_id):
+    flock.require_send_self(args["target"], self_pane_id, "flush_box")
     return flock.flush_box(args["target"], self_pane_id=self_pane_id)
 
 
@@ -475,7 +487,9 @@ def h_focus(flock, args, self_pane_id):
 
 
 def h_close(flock, args, self_pane_id):
-    return flock.close_target(args["kind"], args["target"], self_pane_id=self_pane_id)
+    return flock.close_target(args["kind"], args["target"],
+                              self_pane_id=self_pane_id,
+                              force=_bool(args.get("force"), False))
 
 
 def h_herdr(flock, args, self_pane_id):
@@ -508,6 +522,22 @@ def h_help(flock, args, self_pane_id):
             for c in COMMANDS
         ],
     }
+
+
+def h_superuser_status(flock, args, self_pane_id):
+    return flock.superuser_status(self_pane_id)
+
+
+def h_superuser_add(flock, args, self_pane_id):
+    return flock.superuser_add(args["entry"], self_pane_id)
+
+
+def h_superuser_remove(flock, args, self_pane_id):
+    return flock.superuser_remove(args["entry"], self_pane_id)
+
+
+def h_superuser_recover(flock, args, self_pane_id):
+    return flock.superuser_recover(self_pane_id, name=args.get("name"))
 
 
 def h_shutdown(flock, args, self_pane_id):
@@ -1179,7 +1209,8 @@ COMMANDS = [
         "full command line, e.g. 'claude' or 'codex --model gpt-5'. Place it in "
         "`tab` (splitting when `split` is given) or in `workspace` (herdr picks "
         "the tab; use create_tab + tab for a tab of your own naming); omit both "
-        "to let herdr choose. Returns the agent's pane id, ready to dunk on.",
+        "to place it in the dedicated sandbox workspace, never the caller's tab. "
+        "Superusers only. Returns the agent's pane id, ready to dunk on.",
         h_start_agent,
         params={
             "name": {"type": "string",
@@ -1218,7 +1249,9 @@ COMMANDS = [
         "stopping any dunks aimed at it. Refuses to close the caller's own "
         "pane or its tab/workspace.",
         h_close,
-        params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM},
+        params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM,
+                "force": {"type": "boolean",
+                          "description": "Allow closing the caller's own pane/tab/workspace. Superusers only; use with care."}},
         required=["kind", "target"],
     ),
     Command(
@@ -1249,11 +1282,43 @@ COMMANDS = [
     ),
     Command(
         "shutdown",
-        "Stop the daemon process. With stop_all, also stop every dunk first "
-        "(otherwise they resume when the daemon next starts).",
+        "Stop the daemon process (superusers only). With stop_all, also stop "
+        "every dunk first (otherwise they resume when the daemon next starts).",
         h_shutdown,
         params={"stop_all": {"type": "boolean"}},
         mcp=False,
+    ),
+    # -- superuser allowlist -------------------------------------------------
+    Command(
+        "superuser_status",
+        "Show the superuser allowlist and whether this caller is on it. "
+        "Non-superusers may use the inbox and task queue only.",
+        h_superuser_status,
+    ),
+    Command(
+        "superuser_add",
+        "Add a pane id or name to the superuser allowlist (superusers only; "
+        "the first entry may bootstrap an empty list). Names match a pane's "
+        "label/tab label, so the VP is recognised across pane-id changes.",
+        h_superuser_add,
+        params={"entry": SUPERUSER_ENTRY_PARAM},
+        required=["entry"],
+    ),
+    Command(
+        "superuser_remove",
+        "Remove a pane id or name from the allowlist (superusers only; the "
+        "last superuser cannot be removed).",
+        h_superuser_remove,
+        params={"entry": SUPERUSER_ENTRY_PARAM},
+        required=["entry"],
+    ),
+    Command(
+        "superuser_recover",
+        "Re-assert the caller's pane id and the configured VP name in the "
+        "allowlist. Bootstrap when the list is empty; afterwards an existing "
+        "superuser must run it. Run this on VP setup/takeover/recovery.",
+        h_superuser_recover,
+        params={"name": SUPERUSER_NAME_PARAM},
     ),
 ]
 
@@ -1264,11 +1329,25 @@ def mcp_commands():
     return [command for command in COMMANDS if command.mcp]
 
 
+# Destructive or affecting-others operations. The 2026-10-18 incident: a free
+# model closed the VP's tab (nine panes) through the herdr CLI. Non-superusers
+# keep the inbox, the task queue and read-only tools; everything here needs an
+# entry in superusers.json.
+SUPERUSER_ONLY = {
+    "add_dunk", "update_dunk", "remove_dunk", "start_dunk", "stop_dunk",
+    "toggle_dunk", "stop_all", "fire_dunk",
+    "start_agent", "create_workspace", "create_tab", "split_pane",
+    "rename", "focus", "close", "herdr", "shutdown",
+}
+
+
 def dispatch(flock, name, args=None, self_pane_id=None):
     """Run a named command. Raises DunkError for unknown commands or bad args."""
     command = COMMANDS_BY_NAME.get(name)
     if command is None:
         raise DunkError(f"unknown command {name!r}")
+    if name in SUPERUSER_ONLY:
+        flock.require_superuser(self_pane_id, name)
     args = dict(args or {})
     missing = [key for key in command.required if args.get(key) in (None, "")]
     if missing:

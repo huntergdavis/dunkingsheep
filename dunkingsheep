@@ -311,6 +311,22 @@ def build_parser():
     q.add_argument("--bucket", choices=["hour", "day"], default="hour")
     tsub.add_parser("reap", help="requeue expired/dead leases now")
 
+    # -- superusers -----------------------------------------------------------
+    superuser = sub.add_parser(
+        "superuser",
+        help="who may close panes/tabs/workspaces, stop the daemon or manage dunks",
+        description="Superusers may perform destructive or affecting-others "
+                    "operations. Everyone else uses the inbox and task queue.")
+    ssub = superuser.add_subparsers(dest="superuser_command", metavar="<subcommand>")
+    ssub.required = True
+    ssub.add_parser("status", help="show the allowlist and whether this pane is on it")
+    q = ssub.add_parser("add", help="add a pane id or name")
+    q.add_argument("entry", help="pane id (w9:p8) or name (VP of agentry)")
+    q = ssub.add_parser("remove", help="remove a pane id or name")
+    q.add_argument("entry")
+    q = ssub.add_parser("recover", help="re-assert this pane and the configured VP name")
+    q.add_argument("--name", help="name to re-assert (default: VP of agentry)")
+
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
 
@@ -369,6 +385,9 @@ def build_parser():
         p.add_argument("target", help="id, label, unique substring or 'self'")
         if name == "rename":
             p.add_argument("label")
+        if name == "close":
+            p.add_argument("--force", action="store_true",
+                           help="allow closing the caller's own pane/tab/workspace")
     p = sub.add_parser("herdr", help="run any herdr subcommand through the daemon",
                        epilog="example: dunkingsheep herdr pane zoom w9:p2 --on",
                        prefix_chars="\x00")  # let herdr's own flags through untouched
@@ -380,7 +399,8 @@ def build_parser():
     p.add_argument("target")
     p.add_argument("--lines", "-l", type=int, default=40)
 
-    p = sub.add_parser("shutdown", help="stop the daemon (dunks resume on next start)")
+    p = sub.add_parser("shutdown",
+                       help="stop the daemon (superusers only; dunks resume on next start)")
     p.add_argument("--stop-all", action="store_true", help="also stop every dunk first")
 
     p = sub.add_parser("serve", help="run the daemon in the foreground")
@@ -665,6 +685,22 @@ def print_task_stats(result):
         print(f"  {scope}: " + " ".join(f"{key}={value}" for key, value in counts.items() if value))
 
 
+def print_superuser(result):
+    print(f"allowlist {result.get('path')}")
+    print(f"  superuser: {'yes' if result.get('superuser') else 'no'}"
+          f" (pane {result.get('pane_id') or '-'})")
+    print("  panes: " + (", ".join(result.get("panes") or []) or "(none)"))
+    print("  names: " + (", ".join(result.get("names") or []) or "(none)"))
+    if result.get("empty"):
+        print("  empty: destructive operations are refused until a superuser is added")
+    if "added" in result:
+        print(f"  added: {result['added']}")
+    if "removed" in result:
+        print(f"  removed: {result['removed']} ({result.get('entry')})")
+    if "recovered" in result:
+        print(f"  recovered: {result.get('pane_id')} ({result.get('name')})")
+
+
 def print_task_metrics(result):
     window = result.get("window") or {}
     print(f"scope {result.get('scope')}  window {window.get('seconds')}s "
@@ -868,6 +904,8 @@ def main(argv=None):
                 print(f"{key:<16} {value}")
             if not result["resolves_to"]:
                 print("\nNote: %s is not on this shell's PATH." % args.bin_dir)
+            print("\nSuperuser setup: run `dunkingsheep superuser recover` "
+                  "from the VP pane, then `dunkingsheep superuser status`.")
         return 0
     if command == "guard":
         import dunk_guard
@@ -1169,7 +1207,8 @@ def run_client_command(client, args):
         return client.call("focus", kind=args.kind, target=args.target), \
             lambda r: print(f"focused {r['kind']} {r['id']}")
     if command == "close":
-        return client.call("close", kind=args.kind, target=args.target), \
+        return client.call("close", kind=args.kind, target=args.target,
+                           force=args.force), \
             lambda r: print(f"closed {r['kind']} {r['id']}; panes {', '.join(r['closed_panes']) or '-'}"
                             + (f"; stopped dunks {', '.join(r['stopped_dunks'])}" if r["stopped_dunks"] else ""))
     if command == "herdr":
@@ -1180,6 +1219,16 @@ def run_client_command(client, args):
     if command == "read":
         return client.call("read_pane", target=args.target, lines=args.lines), \
             lambda r: sys.stdout.write(r["text"] if r["text"].endswith("\n") else r["text"] + "\n")
+    if command == "superuser":
+        sub = args.superuser_command
+        if sub == "status":
+            return client.call("superuser_status"), print_superuser
+        if sub == "add":
+            return client.call("superuser_add", entry=args.entry), print_superuser
+        if sub == "remove":
+            return client.call("superuser_remove", entry=args.entry), print_superuser
+        if sub == "recover":
+            return client.call("superuser_recover", name=args.name), print_superuser
     if command == "shutdown":
         return client.call("shutdown", stop_all=args.stop_all), \
             lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))

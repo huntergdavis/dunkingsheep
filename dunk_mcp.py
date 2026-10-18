@@ -55,6 +55,15 @@ completed throughput in hourly or daily buckets, completion and claim latency)
 for a status board or the CTO. Everything is priority order, dependency
 gating, leases and requeue-on-death in SQL; no model is involved.
 
+Superuser gate: close, shutdown, dunk management (add/update/remove/start/
+stop/toggle/stop_all/fire), start_agent, the layout creators and the raw herdr
+passthrough require a superuser. The allowlist lives in superusers.json and is
+managed with superuser_status / superuser_add / superuser_remove /
+superuser_recover. Non-superusers use the inbox and task queue and may type
+only into their own pane. Even a superuser needs close(force=true) to close
+the pane/tab/workspace it runs in. Agents started without an explicit
+workspace/tab go to the dedicated sandbox workspace, never the caller's tab.
+
 Typical uses: keep another agent moving (add_dunk target=<its pane>), message
 an agent right now (send_text), inspect what an agent is doing (read_pane),
 claim the next unit of work (task_next), or schedule a future nudge to

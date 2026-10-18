@@ -10,9 +10,9 @@ with no idea a human is writing there. On 2026-09-23 exactly that landed in
 the middle of a sentence and Enter submitted the mangled result.
 
 `dunkingsheep guard install` puts a small `herdr` wrapper in a directory that
-comes first on PATH. The wrapper forwards the four typing subcommands to the
-daemon (which queues them behind the human) and execs the real herdr for
-everything else, so `herdr pane list`, `tab create` and the rest are untouched.
+comes first on PATH. The wrapper forwards typing and destructive/layout
+subcommands to the daemon (which queues typing behind the human and enforces
+the superuser allowlist) and execs the real herdr for read-only commands.
 
 Recursion is avoided from both ends: the wrapper sets DUNKINGSHEEP_GUARD=1
 before calling back into dunkingsheep, and re-execs the real binary when it
@@ -37,107 +37,15 @@ MARKER = "# dunkingsheep herdr guard"
 GUARD_MARKER = "dunkingsheep-herdr-guard"
 REAL_SUFFIX = "-real"
 
-WRAPPER = '''#!/usr/bin/env python3
-# dunkingsheep-herdr-guard
-"""herdr guard - installed by `dunkingsheep guard install`; do not edit.
-
-Routes pane-typing subcommands through the Dunking Sheep daemon so they wait
-for the human to stop typing. Everything else execs the real herdr unchanged.
-"""
-import os
-import shutil
-import subprocess
-import sys
-
-DUNKINGSHEEP = {dunkingsheep!r}
-GUARD_DIR = os.path.dirname(os.path.realpath(__file__))
+WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "dunk_guard_wrapper.py")
 
 
-def is_guard(path):
-    try:
-        with open(path, "rb") as handle:
-            return b"dunkingsheep-herdr-guard" in handle.read(400)
-    except OSError:
-        return False
+def _wrapper():
+    """The guard source, with the CLI path substituted."""
+    with open(WRAPPER_PATH, "r", encoding="utf-8") as handle:
+        return handle.read().replace("__DUNKINGSHEEP__", repr(_cli_path()))
 
-
-def real_herdr():
-    """The actual herdr binary, never this wrapper. When the guard shadows
-    herdr in its own directory the real one sits beside it as `herdr-real`."""
-    override = os.environ.get("DUNKINGSHEEP_HERDR_BIN")
-    if override and os.path.exists(override) and not is_guard(override):
-        return override
-    beside = os.path.join(os.path.dirname(os.path.realpath(__file__)), "herdr-real")
-    if os.path.isfile(beside) and os.access(beside, os.X_OK):
-        return beside
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        if not directory or os.path.realpath(directory) == GUARD_DIR:
-            continue
-        candidate = os.path.join(directory, "herdr")
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            if is_guard(candidate):
-                sibling = os.path.join(directory, "herdr-real")
-                if os.path.isfile(sibling) and os.access(sibling, os.X_OK):
-                    return sibling
-                continue
-            return candidate
-    return os.path.expanduser("~/.local/bin/herdr-real")
-
-
-def passthrough(argv):
-    binary = real_herdr()
-    try:
-        os.execv(binary, [binary, *argv])
-    except OSError as error:
-        sys.stderr.write("herdr guard: cannot run %s: %s\\n" % (binary, error))
-        return 127
-
-
-def route(kind, target, payload, argv):
-    """Hand a typing command to the daemon. Falls back to the real herdr if the
-    daemon cannot be reached, so the guard never makes herdr unusable."""
-    cmd = [sys.executable, DUNKINGSHEEP, "--json", "send", target, payload] \\
-        if kind == "text" else \\
-        [sys.executable, DUNKINGSHEEP, "--json", "send-keys", target, payload]
-    if kind == "text-no-enter":
-        cmd = [sys.executable, DUNKINGSHEEP, "--json", "send", target, payload,
-               "--no-enter"]
-    env = dict(os.environ, DUNKINGSHEEP_GUARD="1")
-    try:
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=120)
-    except Exception as error:  # noqa: BLE001 - never block the caller
-        sys.stderr.write("herdr guard: daemon unreachable (%s); sending directly\\n" % error)
-        return passthrough(argv)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr or "herdr guard: send failed\\n")
-        return proc.returncode
-    sys.stdout.write(proc.stdout)
-    return 0
-
-
-def main(argv):
-    # Already inside the guard (the daemon calling herdr), or explicitly
-    # bypassed: go straight to the real binary.
-    if os.environ.get("DUNKINGSHEEP_GUARD") or os.environ.get("HERDR_GUARD_OFF"):
-        return passthrough(argv)
-    head = tuple(argv[:2])
-    try:
-        if head == ("pane", "run") and len(argv) >= 4:
-            return route("text", argv[2], argv[3], argv)
-        if head == ("pane", "send-text") and len(argv) >= 4:
-            return route("text-no-enter", argv[2], argv[3], argv)
-        if head == ("agent", "send") and len(argv) >= 4:
-            return route("text", argv[2], argv[3], argv)
-        if head == ("pane", "send-keys") and len(argv) >= 4:
-            return route("keys", argv[2], " ".join(argv[3:]), argv)
-    except Exception as error:  # noqa: BLE001 - a broken guard must not break herdr
-        sys.stderr.write("herdr guard: %s; sending directly\\n" % error)
-    return passthrough(argv)
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-'''
 
 PATH_LINE = 'export PATH="{guard_dir}:$PATH"'
 
@@ -199,7 +107,12 @@ def status():
         "covers_agents_started_by_herdr": shadowed,
         "herdr_resolves_to": resolved,
         "real_herdr": real_path if shadowed else herdr_path,
-        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send"],
+        "guarded_commands": [
+            "pane run", "pane send-text", "pane send-keys", "agent send",
+            "pane close", "pane kill", "tab close", "workspace close",
+            "pane split/rename/focus", "tab create/rename/focus",
+            "workspace create/rename/focus", "agent start",
+        ],
     }
 
 
@@ -213,7 +126,7 @@ def install(shadow_binary=False):
     renamed the real herdr out from under a running daemon.)"""
     os.makedirs(GUARD_DIR, exist_ok=True)
     with open(GUARD_PATH, "w", encoding="utf-8") as handle:
-        handle.write(WRAPPER.format(dunkingsheep=_cli_path()))
+        handle.write(_wrapper())
     os.chmod(GUARD_PATH, os.stat(GUARD_PATH).st_mode | stat.S_IEXEC | stat.S_IXGRP
              | stat.S_IXOTH)
     added = _ensure_bashrc()
@@ -271,7 +184,7 @@ def shadow():
             raise RuntimeError(f"{real_path} already exists; move it aside first")
         os.rename(herdr_path, real_path)
     os.makedirs(GUARD_DIR, exist_ok=True)
-    body = WRAPPER.format(dunkingsheep=_cli_path())
+    body = _wrapper()
     for target in (herdr_path, GUARD_PATH):
         with open(target, "w", encoding="utf-8") as handle:
             handle.write(body)

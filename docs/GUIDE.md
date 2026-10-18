@@ -1,4 +1,4 @@
-# Dunking Sheep 2.14.2 guide
+# Dunking Sheep 2.15.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -479,6 +479,34 @@ or claim only its own pane's tasks (plus global tasks). A caller with no
 pane, such as the human CLI outside herdr, may inspect any pane. Use
 `task_reap` to requeue expired or dead-pane leases immediately; the daemon
 also does it on a timer.
+
+## Superusers and destructive operations
+
+Only panes and names on the superuser allowlist may close a pane, tab or
+workspace, stop the daemon, manage dunks, spawn agents, or use the raw
+herdr passthrough. Everyone else communicates through the inbox and task
+queue, and may type only into their own pane. This is the response to the
+2026-10-18 incident, where a free model's cleanup closed the VP's tab and
+took nine panes with it.
+
+```
+dunkingsheep superuser status
+dunkingsheep superuser add <pane-or-name>
+dunkingsheep superuser remove <pane-or-name>
+dunkingsheep superuser recover    # setup/takeover: add this pane + VP name
+```
+
+The allowlist is ~/.config/dunkingsheep/superusers.json: pane ids and
+names. A name matches a pane's own label, tab label or workspace label, so
+the VP is recognised after its pane id changes. An empty allowlist refuses
+every destructive operation; the first `superuser recover` bootstraps it.
+Names default to the VP and owner; the setup/recovery step adds the VP's
+actual pane id.
+
+Self-protection: even a superuser cannot close the pane, tab or workspace
+it runs in unless it passes `close --force`. Spawning an agent without an
+explicit workspace/tab puts it in the dedicated `sandbox` workspace,
+never the caller's tab.
 
 ## Panels and dialogs
 

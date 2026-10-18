@@ -117,6 +117,33 @@ MCP tools: `task_add`, `task_list`, `task_read`, `task_update`, `task_assign`,
 `task_next`, `task_heartbeat`, `task_release`, `task_follow`, `task_unfollow`,
 `task_followers`, `task_stats`, `task_metrics`.
 
+## 🔒 Superusers and destructive operations
+
+Only panes and names on the superuser allowlist may close a pane/tab/workspace,
+stop the daemon, manage dunks, spawn agents, or use the raw herdr passthrough.
+Everyone else communicates through the inbox and task queue, and may type only
+into their own pane. This is the response to the 2026-10-18 incident where a
+free model's cleanup closed the VP's tab and took nine panes with it.
+
+```bash
+dunkingsheep superuser status
+dunkingsheep superuser add <pane-or-name>
+dunkingsheep superuser remove <pane-or-name>
+dunkingsheep superuser recover    # setup/takeover: add this pane + VP name
+```
+
+The allowlist lives in `~/.config/dunkingsheep/superusers.json` (0600). Pane
+ids are exact; names match a pane's own label, tab label or workspace label, so
+the VP is recognised after a pane-id change. An empty allowlist refuses every
+destructive operation; the first `superuser recover` bootstraps it.
+
+Even a superuser cannot close the pane/tab/workspace it is running in without
+`close --force`. An agent started without an explicit workspace/tab is placed
+in the dedicated `sandbox` workspace, never the caller's tab. The installed
+`herdr` guard routes `pane close`, `pane kill`, `tab close`, `workspace close`
+and layout mutations through the daemon (fail-closed: it never falls back to
+the real herdr on a refusal).
+
 ## 📥 Setting agents up
 
 ```bash

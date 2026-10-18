@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from dunk_client import FlockClient  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_server import AlreadyRunning, FlockServer  # noqa: E402
+from dunk_superusers import Superusers  # noqa: E402
 from fakes import FakeHerdr, claude_box_typing_ansi  # noqa: E402
 
 
@@ -20,7 +21,11 @@ class ServerRoundTripTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.sock_path = os.path.join(self.tmp.name, "s.sock")
         self.herdr = FakeHerdr()
-        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.superusers = Superusers(
+            path=os.path.join(self.tmp.name, "superusers.json"))
+        self.superusers.add("w1:p2")
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           superusers=self.superusers)
         self.server = FlockServer(self.flock, socket_path=self.sock_path)
         self.server.bind()
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

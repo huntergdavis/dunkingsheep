@@ -94,6 +94,9 @@ class CliEndToEndTests(unittest.TestCase):
             DUNKINGSHEEP_DIR=cls.config,
             DUNKINGSHEEP_SOCKET=os.path.join(cls.tmp.name, "ds.sock"),
             HERDR_PANE_ID="w1:p2",
+            # Bootstrap this test pane as the superuser; the CLI lifecycle
+            # exercises gated dunk/close/shutdown commands.
+            DUNKINGSHEEP_VP_PANE="w1:p2",
         )
 
     @classmethod

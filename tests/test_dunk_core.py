@@ -1789,7 +1789,7 @@ class LayoutControlTests(unittest.TestCase):
             self.flock.rename("tab", "Sheep", "y")
         self.herdr.fail_layout = "nope"
         with self.assertRaisesRegex(DunkError, "could not start agent 'a': nope"):
-            self.flock.start_agent("a", "claude")
+            self.flock.start_agent("a", "claude", workspace="beta")
 
     def test_herdr_passthrough_runs_anything_and_parses_json(self):
         result = self.flock.herdr_command("workspace list")
