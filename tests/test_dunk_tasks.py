@@ -231,7 +231,11 @@ class TaskStoreTests(unittest.TestCase):
         import time as _time
         _time.sleep(0.1)
         reaped = self.store.reap(alive_panes={"w1:p1", "w2:p2"})
-        self.assertEqual(1, len(reaped))
+        self.assertEqual([], reaped,
+                         "the task was not requeued; another lease lives")
+        self.assertEqual(["w2:p2"],
+                         [lease["pane_id"]
+                          for lease in self.store.leases_for(task["id"])])
         self.assertEqual("in_progress", self.store.get(task["id"])["status"])
         metrics = self.store.metrics(scopes=[GLOBAL])
         self.assertEqual(0, metrics["throughput"]["requeued"],

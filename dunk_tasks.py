@@ -801,11 +801,15 @@ class Tasks:
                         priority=row["priority"], status_from=row["status"],
                         status_to=resulting,
                         meta={"reason": "pane_gone" if gone else "expired"})
-                    requeued.append({
-                        "task_id": lease["task_id"],
-                        "pane_id": lease["pane_id"],
-                        "reason": "pane_gone" if gone else "expired",
-                    })
+                    # Only a task that actually reopened is a requeue. A
+                    # lease released while another claimant keeps the task in
+                    # progress is logged as a release by the events, not here.
+                    if resulting == "open":
+                        requeued.append({
+                            "task_id": lease["task_id"],
+                            "pane_id": lease["pane_id"],
+                            "reason": "pane_gone" if gone else "expired",
+                        })
                 self.db.commit()
             except Exception:
                 self.db.rollback()
