@@ -57,7 +57,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.15.0"
+VERSION = "2.15.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1322,6 +1322,14 @@ class Flock:
     def _pane_info(self, pane_id):
         if not pane_id:
             return None
+        # list_panes_grouped annotates each pane with its tab/workspace labels;
+        # get_pane alone does not, and the name-based allowlist needs them.
+        try:
+            for pane in self.herdr.list_panes_grouped():
+                if pane.get("pane_id") == pane_id:
+                    return pane
+        except Exception:  # noqa: BLE001 - identity check must not crash
+            pass
         try:
             return self.herdr.get_pane(pane_id)
         except Exception:  # noqa: BLE001 - identity check must not crash
