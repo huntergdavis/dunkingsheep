@@ -64,6 +64,11 @@ only into their own pane. Even a superuser needs close(force=true) to close
 the pane/tab/workspace it runs in. Agents started without an explicit
 workspace/tab go to the dedicated sandbox workspace, never the caller's tab.
 
+Memory: memory_recall / memory_context / memory_search / memory_stats /
+memory_status are the deterministic SQLite+FTS5 recall layer. They are
+read-only: a query never reindexes and never waits for ingest. memory_ingest
+(superuser) queues a source. Deja remains until parity is signed off.
+
 Typical uses: keep another agent moving (add_dunk target=<its pane>), message
 an agent right now (send_text), inspect what an agent is doing (read_pane),
 claim the next unit of work (task_next), or schedule a future nudge to

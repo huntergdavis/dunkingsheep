@@ -449,6 +449,23 @@ def guide(markdown=False):
       "pane, such as the human CLI outside herdr, may inspect any pane. Use\n"
       "`task_reap` to requeue expired or dead-pane leases immediately; the daemon\n"
       "also does it on a timer.\n")
+    w(h(2, "Memory and recall"))
+    w("A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions\n"
+      "in the background through one writer, and answers recall from read-only\n"
+      "connections. A query never reindexes, never swaps an index, and never\n"
+      "waits for ingest; that separation is the fix for the 2026-10-18 stalls.\n"
+      "The sample acceptance is 20 clients for 60 s while ingest runs, p95 <1 s.\n")
+    w(code("dunkingsheep memory recall \"query\" [--limit 10] [--harness ...]\n"
+           "dunkingsheep memory context \"query\" [--sessions 5]\n"
+           "dunkingsheep memory search \"query\" --project ... --since ...\n"
+           "dunkingsheep memory stats | status\n"
+           "dunkingsheep memory ingest <session.jsonl|history.sqlite> [--harness ...]"))
+    w("MCP: memory_recall / memory_context / memory_search / memory_stats /\n"
+      "memory_status; memory_ingest is superuser-only. `memory_stats` reports\n"
+      "p50/p95/p99, DB bytes and queue depth. Deja stays in place until parity\n"
+      "(t10) and the agent upgrade (t11); do not start the full backfill before\n"
+      "the sample acceptance passes.\n")
+
     w(h(2, "Superusers and destructive operations"))
     w("Only panes and names on the superuser allowlist may close a pane, tab or\n"
       "workspace, stop the daemon, manage dunks, spawn agents, or use the raw\n"

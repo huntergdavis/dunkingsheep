@@ -318,7 +318,7 @@ Current surface measured in this repo: **65 registry commands, 62 MCP tools,
 ~25 KB of JSON schema** for Dunking Sheep alone, plus deja and the task board.
 That is already too much context for every agent.
 
-v1 memory surface (6 tools, small schemas):
+v1 implements six memory commands so the engine can be measured directly:
 
 | Tool | Purpose |
 |---|---|
@@ -332,11 +332,17 @@ v1 memory surface (6 tools, small schemas):
 CLI: `dunkingsheep memory recall|context|search|stats|ingest|status`.
 Socket: the same command names.
 
-**Dedupe audit (t8):** remove/merge overlapping tools and commands, keep the
-large surfaces on `deferred`/`codemode` exposure, and target a **< 10 KB**
-schema budget per agent for the common path. The memory tools stay `direct`
-because they are small and frequently used; the 40-tool dunkingsheep surface
-stays deferred.
+**Grouping (t8, owner #860):** simplify by grouping, never by deleting. The
+target is one namespaced MCP tool per domain with an `action` argument —
+`inbox`, `task`, `dunk`, `pane`, `workspace`, `superuser`, `memory`, `metrics` —
+with a small hot set on `direct` exposure (`memory_recall`, `memory_context`,
+`inbox_read`, `inbox_send`, `task_next`, `task_complete`) and everything else
+`deferred`/optional. Memory stays one call for `recall`/`context`; the grouped
+`memory` action tool is acceptable if its schema stays small. A published
+old-tool → new-grouped-tool mapping plus a test that every old capability still
+exists is the acceptance for t8. Measure and report the before/after tool list
+and schema bytes (today: 62 MCP tools, ~25 KB schema for Dunking Sheep alone;
+target < 10 KB on the common path).
 
 ## Acceptance test
 

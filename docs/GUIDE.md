@@ -1,4 +1,4 @@
-# Dunking Sheep 2.15.1 guide
+# Dunking Sheep 2.16.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -479,6 +479,28 @@ or claim only its own pane's tasks (plus global tasks). A caller with no
 pane, such as the human CLI outside herdr, may inspect any pane. Use
 `task_reap` to requeue expired or dead-pane leases immediately; the daemon
 also does it on a timer.
+
+## Memory and recall
+
+A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions
+in the background through one writer, and answers recall from read-only
+connections. A query never reindexes, never swaps an index, and never
+waits for ingest; that separation is the fix for the 2026-10-18 stalls.
+The sample acceptance is 20 clients for 60 s while ingest runs, p95 <1 s.
+
+```
+dunkingsheep memory recall "query" [--limit 10] [--harness ...]
+dunkingsheep memory context "query" [--sessions 5]
+dunkingsheep memory search "query" --project ... --since ...
+dunkingsheep memory stats | status
+dunkingsheep memory ingest <session.jsonl|history.sqlite> [--harness ...]
+```
+
+MCP: memory_recall / memory_context / memory_search / memory_stats /
+memory_status; memory_ingest is superuser-only. `memory_stats` reports
+p50/p95/p99, DB bytes and queue depth. Deja stays in place until parity
+(t10) and the agent upgrade (t11); do not start the full backfill before
+the sample acceptance passes.
 
 ## Superusers and destructive operations
 

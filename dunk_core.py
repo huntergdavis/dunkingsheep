@@ -53,11 +53,12 @@ import time
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
+from dunk_memory import MemoryStore, MemoryIngestor
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.15.1"
+VERSION = "2.16.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -399,7 +400,7 @@ class Flock:
 
     def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
-                 superusers=None):
+                 superusers=None, memory=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
         self.persist_enabled = persist
@@ -433,6 +434,10 @@ class Flock:
         self.inbox = Inbox() if inbox is None else inbox
         self.tasks = Tasks() if tasks is None else tasks
         self.superusers = Superusers() if superusers is None else superusers
+        self._owns_memory = memory is None and self.persist_enabled
+        self.memory = (memory if memory is not None
+                       else (MemoryStore() if self.persist_enabled else None))
+        self.memory_ingestor = MemoryIngestor(self.memory) if self.memory else None
         # Panes that asked the daemon to feed them work when they go idle.
         # pane_id -> scope (global or that pane's private queue).
         self.task_waiters = {}
@@ -1059,9 +1064,57 @@ class Flock:
                                   scopes=scopes, bucket=bucket,
                                   scope_label=label)
 
+    # -- memory and recall service -------------------------------------------
+
+    def _memory_required(self):
+        if self.memory is None:
+            raise DunkError("memory service is not enabled; start the daemon "
+                            "with persistence")
+        return self.memory
+
+    @_as_dunk_error
+    def memory_recall(self, query, limit=10, harness=None, project=None,
+                      since=None):
+        return self._memory_required().recall(
+            query, limit=limit, harness=harness, project=project, since=since)
+
+    @_as_dunk_error
+    def memory_context(self, query, sessions=5):
+        return self._memory_required().context(query, sessions=sessions)
+
+    @_as_dunk_error
+    def memory_search(self, query, limit=10, harness=None, project=None,
+                      since=None):
+        return self.memory_recall(query, limit=limit, harness=harness,
+                                  project=project, since=since)
+
+    @_as_dunk_error
+    def memory_stats(self):
+        return self._memory_required().stats()
+
+    @_as_dunk_error
+    def memory_status(self):
+        status = self._memory_required().status()
+        if self.memory_ingestor is not None:
+            status["ingestor"] = self.memory_ingestor.status()
+        return status
+
+    @_as_dunk_error
+    def memory_ingest(self, path, harness=None, project=None):
+        store = self._memory_required()
+        try:
+            result = store.enqueue(path, harness=harness, project=project)
+        except ValueError as error:
+            raise DunkError(str(error)) from None
+        with self._lock:
+            self.last_message = f"Queued memory ingest {os.path.basename(path)}"
+        return result
+
     # -- deterministic task push/reap workers -------------------------------
 
     def _start_task_workers(self):
+        if self.memory_ingestor is not None:
+            self.memory_ingestor.start()
         self._task_threads = [
             threading.Thread(target=self._task_reaper_loop,
                              name="task-reaper", daemon=True),
@@ -2778,6 +2831,10 @@ class Flock:
         """Halt every timer thread, keeping persisted running flags so a new
         Flock resumes them."""
         self._task_stop.set()
+        if self.memory_ingestor is not None:
+            self.memory_ingestor.stop()
+        if self._owns_memory and self.memory is not None:
+            self.memory.close()
         with self._lock:
             self.closed = True
             for dunker in self.dunkers:

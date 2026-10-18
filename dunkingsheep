@@ -327,6 +327,31 @@ def build_parser():
     q = ssub.add_parser("recover", help="re-assert this pane and the configured VP name")
     q.add_argument("--name", help="name to re-assert (default: VP of agentry)")
 
+    # -- memory ---------------------------------------------------------------
+    memory = sub.add_parser(
+        "memory", help="memory/recall over past agent sessions",
+        description="Ranked recall over Claude/Codex/opencode/pi sessions, backed "
+                    "by SQLite + FTS5. Queries never reindex or wait for ingest.")
+    msub = memory.add_subparsers(dest="memory_command", metavar="<subcommand>")
+    msub.required = True
+    for name, help_text in (("recall", "ranked snippets"),
+                            ("search", "filtered search (same engine)")):
+        q = msub.add_parser(name, help=help_text)
+        q.add_argument("query")
+        q.add_argument("--limit", "-n", type=int, default=10)
+        q.add_argument("--harness", choices=["claude", "codex", "opencode", "pi", "generic"])
+        q.add_argument("--project")
+        q.add_argument("--since", type=float, help="unix timestamp lower bound")
+    q = msub.add_parser("context", help="compact session-start digest")
+    q.add_argument("query")
+    q.add_argument("--sessions", type=int, default=5)
+    msub.add_parser("stats", help="counts, DB bytes, queue depth, latency")
+    msub.add_parser("status", help="health, schema, ingest worker")
+    q = msub.add_parser("ingest", help="queue a session log/sqlite for async ingest")
+    q.add_argument("path")
+    q.add_argument("--harness", choices=["claude", "codex", "opencode", "pi", "generic"])
+    q.add_argument("--project")
+
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
 
@@ -683,6 +708,45 @@ def print_task_stats(result):
     print(" ".join(f"{key}={value}" for key, value in totals.items()))
     for scope, counts in (result.get("by_scope") or {}).items():
         print(f"  {scope}: " + " ".join(f"{key}={value}" for key, value in counts.items() if value))
+
+
+def print_memory(rows):
+    if not rows:
+        print("no matches")
+        return
+    for row in rows:
+        print(f"{row['score']:.3f} {(row['harness'] or '-'):<8} "
+              f"{(row['project'] or '-'):<20} #{row['session_id']} "
+              f"[{row['role'] or '-'}]")
+        print("  " + (row["snippet"] or "").replace("\n", " ")[:200])
+
+
+def print_memory_context(result):
+    print(f"query {result.get('query')!r}  sessions {result['counts']['sessions']}  "
+          f"snippets {result['counts']['snippets']}")
+    for item in result.get("sessions", []):
+        print(f"- {item['harness']} {item['project'] or '-'} #{item['session_id']} "
+              f"{item.get('title') or ''} (score {item['score']:.3f})")
+        for snippet in item.get("snippets", []):
+            print("    " + (snippet["snippet"] or "").replace("\n", " ")[:160])
+
+
+def print_memory_stats(result):
+    print(f"path {result.get('path')}  schema {result.get('schema_version')}  "
+          f"ok {result.get('ok')}")
+    print(f"sources {result.get('sources')}  sessions {result.get('sessions')}  "
+          f"chunks {result.get('chunks')}")
+    print(f"queue depth {result.get('queue_depth')}  {result.get('queue')}")
+    print(f"db bytes {result.get('db_bytes')}")
+    queries = result.get("queries") or {}
+    print(f"queries n={queries.get('count')} p50={queries.get('p50')} "
+          f"p95={queries.get('p95')} p99={queries.get('p99')} "
+          f"errors={queries.get('errors')}")
+    if result.get("ingestor"):
+        print(f"ingestor {result['ingestor']}")
+    if result.get("harness"):
+        for item in result["harness"]:
+            print(f"  {item['harness']}: {item['chunks']} chunks / {item['sessions']} sessions")
 
 
 def print_superuser(result):
@@ -1229,6 +1293,24 @@ def run_client_command(client, args):
             return client.call("superuser_remove", entry=args.entry), print_superuser
         if sub == "recover":
             return client.call("superuser_recover", name=args.name), print_superuser
+    if command == "memory":
+        sub = args.memory_command
+        if sub in ("recall", "search"):
+            call = "memory_recall" if sub == "recall" else "memory_search"
+            return client.call(call, query=args.query, limit=args.limit,
+                               harness=args.harness, project=args.project,
+                               since=args.since), print_memory
+        if sub == "context":
+            return client.call("memory_context", query=args.query,
+                               sessions=args.sessions), print_memory_context
+        if sub == "stats":
+            return client.call("memory_stats"), print_memory_stats
+        if sub == "status":
+            return client.call("memory_status"), print_memory_stats
+        if sub == "ingest":
+            return client.call("memory_ingest", path=args.path,
+                               harness=args.harness, project=args.project), \
+                lambda r: print(f"queued {r['path']} ({r['harness']})")
     if command == "shutdown":
         return client.call("shutdown", stop_all=args.stop_all), \
             lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))

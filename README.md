@@ -117,6 +117,26 @@ MCP tools: `task_add`, `task_list`, `task_read`, `task_update`, `task_assign`,
 `task_next`, `task_heartbeat`, `task_release`, `task_follow`, `task_unfollow`,
 `task_followers`, `task_stats`, `task_metrics`.
 
+## 🧠 Memory and recall service (v1)
+
+SQLite + FTS5 in WAL mode: one background ingest writer, a pool of read-only
+query connections. A query never reindexes, never swaps an index, and never
+waits for ingest — the fix for the 2026-10-18 stalls.
+
+```bash
+dunkingsheep memory recall "query" --limit 10
+dunkingsheep memory context "query" --sessions 5
+dunkingsheep memory search "query" --harness codex --project poolrad
+dunkingsheep memory stats          # p50/p95/p99, chunks, DB bytes, queue
+dunkingsheep memory status
+dunkingsheep memory ingest <path>  # superuser; async
+```
+
+MCP tools: `memory_recall`, `memory_context`, `memory_search`, `memory_stats`,
+`memory_status`, `memory_ingest`. The service is scoped to 1–10 M chunks on this
+box; billions is a later sharded/remote tier. Deja remains until parity and the
+agent upgrade (t10/t11). See [`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
+
 ## 🔒 Superusers and destructive operations
 
 Only panes and names on the superuser allowlist may close a pane/tab/workspace,

@@ -129,6 +129,17 @@ SUPERUSER_NAME_PARAM = {
     "type": "string",
     "description": "Name to re-assert (default 'VP of agentry').",
 }
+MEMORY_QUERY_PARAM = {"type": "string", "description": "Memory search text."}
+MEMORY_LIMIT_PARAM = {"type": "integer", "minimum": 1, "maximum": 50,
+                      "description": "Maximum results (default 10)."}
+MEMORY_HARNESS_PARAM = {"type": "string",
+                        "enum": ["claude", "codex", "opencode", "pi", "generic"],
+                        "description": "Only this harness's sessions."}
+MEMORY_PROJECT_PARAM = {"type": "string", "description": "Only this project label."}
+MEMORY_SINCE_PARAM = {"type": "number",
+                      "description": "Only chunks updated at/after this unix timestamp."}
+MEMORY_PATH_PARAM = {"type": "string",
+                     "description": "Session JSONL file or sqlite DB to ingest."}
 
 
 # -- handlers -----------------------------------------------------------------
@@ -414,6 +425,38 @@ def h_task_metrics(flock, args, self_pane_id):
         since=args.get("since"), until=args.get("until"),
         scope=args.get("scope"), bucket=args.get("bucket") or "hour",
         self_pane_id=self_pane_id)
+
+
+def h_memory_recall(flock, args, self_pane_id):
+    return flock.memory_recall(args["query"], limit=int(_opt(args, "limit", 10)),
+                               harness=args.get("harness"),
+                               project=args.get("project"),
+                               since=args.get("since"))
+
+
+def h_memory_context(flock, args, self_pane_id):
+    return flock.memory_context(args["query"],
+                                sessions=int(_opt(args, "sessions", 5)))
+
+
+def h_memory_search(flock, args, self_pane_id):
+    return flock.memory_search(args["query"], limit=int(_opt(args, "limit", 10)),
+                               harness=args.get("harness"),
+                               project=args.get("project"),
+                               since=args.get("since"))
+
+
+def h_memory_stats(flock, args, self_pane_id):
+    return flock.memory_stats()
+
+
+def h_memory_status(flock, args, self_pane_id):
+    return flock.memory_status()
+
+
+def h_memory_ingest(flock, args, self_pane_id):
+    return flock.memory_ingest(args["path"], harness=args.get("harness"),
+                               project=args.get("project"))
 
 
 def h_metrics(flock, args, self_pane_id):
@@ -1116,6 +1159,59 @@ COMMANDS = [
         h_task_reap,
         mcp=False,
     ),
+    # -- memory and recall ---------------------------------------------------
+    Command(
+        "memory_recall",
+        "Ranked snippets from past agent sessions (Claude, Codex, opencode, pi). "
+        "Read-only: a query never reindexes and never waits for the ingest "
+        "worker.",
+        h_memory_recall,
+        params={"query": MEMORY_QUERY_PARAM, "limit": MEMORY_LIMIT_PARAM,
+                "harness": MEMORY_HARNESS_PARAM, "project": MEMORY_PROJECT_PARAM,
+                "since": MEMORY_SINCE_PARAM},
+        required=["query"],
+    ),
+    Command(
+        "memory_context",
+        "A compact digest of relevant past sessions for session start: top "
+        "sessions with a few snippets and metadata.",
+        h_memory_context,
+        params={"query": MEMORY_QUERY_PARAM,
+                "sessions": {"type": "integer", "minimum": 1, "maximum": 20,
+                             "description": "Sessions to return (default 5)."}},
+        required=["query"],
+    ),
+    Command(
+        "memory_search",
+        "Filtered memory search (harness, project, since). Same engine as "
+        "memory_recall.",
+        h_memory_search,
+        params={"query": MEMORY_QUERY_PARAM, "limit": MEMORY_LIMIT_PARAM,
+                "harness": MEMORY_HARNESS_PARAM, "project": MEMORY_PROJECT_PARAM,
+                "since": MEMORY_SINCE_PARAM},
+        required=["query"],
+    ),
+    Command(
+        "memory_stats",
+        "Memory service counts: sources, sessions, chunks by harness, DB bytes, "
+        "ingest queue depth, and query p50/p95/p99.",
+        h_memory_stats,
+    ),
+    Command(
+        "memory_status",
+        "Memory service health: schema version, database, ingest worker, queue "
+        "and latency.",
+        h_memory_status,
+    ),
+    Command(
+        "memory_ingest",
+        "Queue a session log or sqlite DB for asynchronous ingest (superusers "
+        "only). The worker ingests in the background; queries stay responsive.",
+        h_memory_ingest,
+        params={"path": MEMORY_PATH_PARAM, "harness": MEMORY_HARNESS_PARAM,
+                "project": MEMORY_PROJECT_PARAM},
+        required=["path"],
+    ),
     Command(
         "metrics",
         "Read-only operations metrics as JSON: counts by sender, recipient, "
@@ -1337,7 +1433,7 @@ SUPERUSER_ONLY = {
     "add_dunk", "update_dunk", "remove_dunk", "start_dunk", "stop_dunk",
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "create_workspace", "create_tab", "split_pane",
-    "rename", "focus", "close", "herdr", "shutdown",
+    "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
 }
 
 
