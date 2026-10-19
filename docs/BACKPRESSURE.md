@@ -19,7 +19,7 @@ plus a **verbatim tail match**, and neither worked:
   never visible.
 - No evidence was treated as consumed, so the default resolved toward sending.
 
-## The fix (`add23ca`)
+## The fix (`add23ca`, pi/fallback in `2.21.2`)
 
 Consumption is read from the pane's **input box**, not from busyness:
 
@@ -29,9 +29,13 @@ Consumption is read from the pane's **input box**, not from busyness:
 2. `_input_pending` reports pending when the box holds a collapsed-input marker
    (`ctrl+o to expand`, `paste again to expand`, `pasted text`, `[image`) or the
    sent text's whitespace-collapsed prefix.
-3. An unreadable pane or unrecognisable box is **inconclusive**, and for this
-   opt-in feature "not sure" means **skip**: a missed nudge is recoverable next
-   interval, a stack is not.
+3. **pi has no prompt sigil.** Its input is the line(s) between the last two
+   full-width `─` borders, so `_input_area` falls back to that region. An empty
+   box is consumed; queued text is pending.
+4. An unreadable pane or unrecognisable box is **inconclusive**: the send is
+   held up to `MAX_UNKNOWN_SKIPS = 3` times, then sent **once** with
+   `last_error` set (`detector fallback`). A parser gap cannot silently kill
+   the nudge; a genuinely pending box is still skipped indefinitely.
 
 A skip reschedules `next_send_at`, bumps `skip_count`, sets status
 `Skipped (unconsumed)`, and leaves `send_count`, `last_sent_at` and
@@ -46,8 +50,11 @@ is **`o`**). Persisted in `dunks.json`; old files default to `false`.
 - It recognises **our own** queued send, verbatim or collapsed; it does **not**
   recognise arbitrary short text a human left in the box.
 - A short prompt whose echo lingers in the box can hold one extra interval.
-- It assumes an agent pane that draws an input box (Claude/Codex), not a bare
-  shell.
+- It assumes the harness draws an input box (Claude/Codex/pi), not a bare shell.
+- A pi box is read between its last two borders; a renderer change that removes
+  the borders falls back to the 3-skip detector fallback (and surfaces it).
+- A stale `target pane not found` error is cleared by the reaper as soon as the
+  pane is back, and by the next successful send.
 - A turn that starts and finishes entirely between observations is irrelevant
   now: consumption is judged from the box at send time, not sampled.
 
@@ -57,8 +64,10 @@ is **`o`**). Persisted in `dunks.json`; old files default to `false`.
 the four field cases: busy for an unrelated reason; busy processing an earlier
 send; collapsed placeholder; long prompt. The first send, the skip accounting,
 the state round-trip and the old-state default are covered too. A **herdr 0.9.5
-fixture** captured from a real Claude pane (`claude_box_empty_herdr_095`) guards
-the parser against the upgrade.
+fixture** captured from a real Claude pane (`claude_box_empty_herdr_095`) and
+**real pi fixtures** (`pi_box_empty`, `pi_box_working_empty`, `pi_box_pending`)
+guard the parsers; the 3-skip detector fallback and the stale-error clear have
+their own tests.
 
 ```sh
 python3 -m unittest tests.test_dunk_core -q     # 137 tests

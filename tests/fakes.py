@@ -372,6 +372,39 @@ def claude_box_empty_herdr_095():
     ])
 
 
+def pi_box_empty():
+    """Real bottom of a pi TUI pane (herdr 0.9.5, `--source visible`): the
+    input is the blank line between the last two full-width box borders; there
+    is no prompt sigil. Captured 2026-10-19."""
+    rule = "\u2500" * 80
+    return "\n".join([
+        rule, "", rule,
+        "~/workspace/dunkingsheep (main)",
+        "\u21918.8M \u21931.0M R305M CH99.9% $2.857 54.7%/1.0M (auto)   "
+        "deepseek-v4.1-flash \u2022 high",
+    ]) + "\n"
+
+
+def pi_box_pending(text):
+    """The same pi box with queued text on the input line."""
+    rule = "\u2500" * 80
+    return "\n".join([
+        rule, text, rule, "~/workspace/dunkingsheep (main)",
+        "\u2191... deepseek-v4.1-flash \u2022 high",
+    ]) + "\n"
+
+
+def pi_box_working_empty():
+    """Real working-state header: the top border carries the status title."""
+    return "\n".join([
+        "\u2500\u2500 \u2808 Working " + "\u2500" * 66,
+        "",
+        "\u2500" * 80,
+        "~/workspace/dunkingsheep (main)",
+        "\u2191... deepseek-v4.1-flash \u2022 high",
+    ]) + "\n"
+
+
 def claude_box_pending(text):
     """A short send still sitting verbatim in the box."""
     return _claude_frame(["\u276f " + text])

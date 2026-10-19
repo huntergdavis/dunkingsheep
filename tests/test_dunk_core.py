@@ -19,6 +19,7 @@ from fakes import (  # noqa: E402
     claude_box_empty_herdr_095,
     claude_box_empty_ansi, claude_box_hint_ansi, claude_box_pasted_unsubmitted,
     claude_box_pending, claude_box_typing_ansi, codex_box_empty_with_transcript_collapse,
+    pi_box_empty, pi_box_pending, pi_box_working_empty,
     codex_approval_dialog, codex_answered_dialog_in_scrollback,
     codex_box_hint_ansi, codex_box_rotating_hint, codex_box_typing_ansi,
 )
@@ -274,6 +275,36 @@ class FlockTests(unittest.TestCase):
         self.herdr.set_screen("w2:p1", claude_box_empty_herdr_095())
         self.assertTrue(self.flock._previous_send_consumed(d))
 
+    def test_pi_empty_box_reads_as_consumed(self):
+        # pi has no prompt sigil; its empty input box is the blank line between
+        # the last two full-width borders.
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="nudge 1")
+        self.herdr.set_screen("w2:p1", pi_box_empty())
+        self.assertTrue(self.flock._previous_send_consumed(d))
+
+    def test_pi_working_empty_box_reads_as_consumed(self):
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="nudge 1")
+        self.herdr.set_screen("w2:p1", pi_box_working_empty())
+        self.assertTrue(self.flock._previous_send_consumed(d))
+
+    def test_pi_queued_text_reads_as_pending(self):
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="nudge 1")
+        self.herdr.set_screen("w2:p1", pi_box_pending("nudge 1"))
+        self.assertFalse(self.flock._previous_send_consumed(d))
+
+    def test_unrecognised_box_caps_skips_and_sends(self):
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="nudge 1")
+        self.herdr.set_screen("w2:p1", "no recognisable input box here\n")
+        self.assertFalse(self.flock._previous_send_consumed(d))   # 1
+        self.assertFalse(self.flock._previous_send_consumed(d))   # 2
+        self.assertTrue(self.flock._previous_send_consumed(d))    # 3 -> send
+        self.assertTrue(d.detector_fallback)
+        self.assertEqual(0, d.unknown_skips)
+
     def test_codex_transcript_collapse_is_not_mistaken_for_queued_input(self):
         # A collapse chip in the OUTPUT area ("+28 lines (ctrl + t to view
         # transcript)") must not read as pending input; the box is empty.
@@ -338,6 +369,36 @@ class FlockTests(unittest.TestCase):
         self.assertIsNone(state["last_error"], "a skip is not an error")
         self.assertTrue(state["running"])
         self.assertIsNotNone(state["next_send_in_s"], "it reschedules, does not stall")
+
+    def test_pi_box_stacking_is_prevented(self):
+        dunk = self._bp(hold_while_typing=False)
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
+        self.herdr.set_screen("w2:p1", pi_box_pending("nudge 1"))
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["skip_count"] >= 1, 8))
+        self.assertEqual(1, self.flock.get(dunk["id"])["send_count"])
+
+    def test_historical_pane_error_clears_when_the_pane_is_back(self):
+        d = Dunker("d1", target_pane_id="w2:p1", running=True,
+                   last_error="target pane not found")
+        self.flock.dunkers = [d]
+        self.flock._clear_historical_errors({"w2:p1"})
+        self.assertIsNone(d.last_error)
+        d.last_error = "target pane not found"
+        self.flock._clear_historical_errors(set())
+        self.assertEqual("target pane not found", d.last_error)
+
+    def test_a_skip_clears_a_stale_pane_error(self):
+        dunk = self._bp(hold_while_typing=False)
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["send_count"] == 1, 6))
+        with self.flock._lock:
+            self.flock._find(dunk["id"]).last_error = "target pane not found"
+        self.herdr.set_screen("w2:p1", pi_box_pending("nudge 1"))
+        self.assertTrue(wait_until(
+            lambda: self.flock.get(dunk["id"])["skip_count"] >= 1, 8))
+        self.assertIsNone(self.flock.get(dunk["id"])["last_error"])
 
     def test_pane_going_busy_for_an_unrelated_reason_still_skips(self):
         dunk = self._bp()

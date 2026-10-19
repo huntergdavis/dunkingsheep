@@ -1,4 +1,4 @@
-# Dunking Sheep 2.21.1 guide
+# Dunking Sheep 2.21.2 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -49,21 +49,21 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
   one-shot delayed nudge ("in 30 minutes, tell me to check CI").
 - skip_if_unconsumed = true: backpressure. Before each send the daemon reads
   the target's visible input box and skips the send if the previous one is
-  still sitting there unread: either the sent text verbatim, or the
-  collapsed-paste placeholder Claude Code shows for a long queued input
-  ('Pasted text', '+N lines (ctrl+o to expand)'). A skip is a no-op:
-  send_count unchanged, no error, skip_count +1, status 'Skipped
-  (unconsumed)', next send rescheduled as usual. The first send always
-  goes. It reads the input box, not the agent's busy state, because a pane
-  idling at a prompt with queued input reports idle and a pane busy on an
-  earlier turn says nothing about the newest send. If the box cannot be read
-  or recognised the send is held, since a missed nudge is recoverable next
-  interval but a stacked pile-up is not. Composes with only_when. Turn it on
-  for self-dunks and unattended agents, where several prompts would
-  otherwise queue in the box and flush into one turn. Blind spots: it
-  detects our own queued send (verbatim or its collapsed placeholder) but
-  not arbitrary short text a human left in the box, and it assumes an agent
-  pane that draws an input box (Claude/Codex), not a bare shell.
+  still sitting there unread: the sent text verbatim, or a collapsed-paste
+  placeholder ('Pasted text', '+N lines (ctrl+o to expand)'). A skip is a
+  no-op: send_count unchanged, skip_count +1, status 'Skipped (unconsumed)'
+  or 'Skipped (unrecognised box)', next send rescheduled. The first send
+  always goes. It reads the box, not the agent's busy state: a pane idling
+  at a prompt with queued input reports idle, and a pane busy on an earlier
+  turn says nothing about the newest send. Claude and Codex draw a prompt
+  sigil; pi has none, so its box is read as the region between the last two
+  full-width borders. If a box cannot be read or recognised, the send is
+  held up to three times and then sent once with last_error set ('detector
+  fallback'), so a parser gap cannot silently kill the nudge. Composes with
+  only_when. Turn it on for self-dunks and unattended agents. Blind spots:
+  it detects our own queued send (verbatim or collapsed), not arbitrary
+  short text a human left in the box; it assumes the harness draws an input
+  box (Claude/Codex/pi), not a bare shell.
 - hold_while_typing = true (the default): never type over a human. Before
   each send the daemon reads the target's input box with its styling. Both
   Claude Code and Codex draw their empty-box hints dim and typed text at

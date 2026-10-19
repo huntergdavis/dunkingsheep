@@ -58,7 +58,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.21.1"
+VERSION = "2.21.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -88,6 +88,7 @@ INPUT_BOX_SIGILS = ("\u276f", "\u203a", ">")
 # Substrings an agent shows *inside the input box* when it has collapsed a long
 # or pasted input it has not yet submitted. Matched only within the box region,
 # so transcript-collapse chips ("ctrl + t to view transcript") never count.
+MAX_UNKNOWN_SKIPS = 3
 COLLAPSED_INPUT_MARKERS = (
     "ctrl+o to expand",
     "paste again to expand",
@@ -277,7 +278,7 @@ class Dunker:
         "running", "only_when", "max_sends", "send_count", "created_at",
         "started_at", "last_sent_at", "next_send_at", "last_error",
         "skip_if_unconsumed", "skip_count", "last_skipped_at",
-        "awaiting_consumption", "last_sent_text",
+        "awaiting_consumption", "last_sent_text", "unknown_skips",
         "hold_while_typing", "hold_count", "last_held_at",
     )
 
@@ -311,12 +312,17 @@ class Dunker:
         # True from a successful send until the target is seen consuming it.
         self.awaiting_consumption = bool(kwargs.get("awaiting_consumption", False))
         self.last_sent_text = kwargs.get("last_sent_text")
+        # Consecutive inconclusive box reads; capped so a parser that does not
+        # recognise a harness cannot skip for ever.
+        self.unknown_skips = int(kwargs.get("unknown_skips") or 0)
         # Never type over a human (persisted; old state files default to on).
         self.hold_while_typing = bool(kwargs.get("hold_while_typing", True))
         self.hold_count = int(kwargs.get("hold_count") or 0)
         self.last_held_at = kwargs.get("last_held_at")
         # Volatile (not persisted).
         self.status = kwargs.get("status", "Ready")
+        self.detector_fallback = False
+        self.last_skip_reason = None
         self.stop_event = None
         self.thread = None
 
@@ -1258,12 +1264,33 @@ class Flock:
         for thread in self._task_threads:
             thread.start()
 
+    def _clear_historical_errors(self, panes):
+        """Clear a stale 'target pane not found' once the pane is back.
+
+        A dunk that was skipping on a missing pane can keep the old error for
+        ever if it never reaches a send. The reaper already has the live pane
+        set, so clear it there rather than making an operator edit the state.
+        """
+        if not panes:
+            return
+        changed = False
+        with self._lock:
+            for dunker in self.dunkers:
+                if (dunker.running and dunker.target_pane_id in panes
+                        and dunker.last_error
+                        and "target pane not found" in dunker.last_error):
+                    dunker.last_error = None
+                    changed = True
+        if changed:
+            self._save()
+
     def _task_reaper_loop(self):
         while not self._task_stop.wait(TASK_REAP_S):
             try:
                 pane_list = self.herdr.list_panes()
                 self._snapshot_launches(pane_list)
                 panes = {p["pane_id"] for p in pane_list}
+                self._clear_historical_errors(panes)
             except Exception:
                 panes = None
             try:
@@ -2654,6 +2681,12 @@ class Flock:
                 dunker.last_sent_text = text
                 # Backpressure looks at this text in the pane on the next send.
                 dunker.awaiting_consumption = True
+                dunker.unknown_skips = 0
+                if dunker.detector_fallback:
+                    dunker.last_error = (
+                        "input box not recognised on this pane; sent anyway after "
+                        "repeated skips (detector fallback)")
+                    dunker.detector_fallback = False
                 self.last_message = f"Sent to {dunker.target_label()}"
             else:
                 dunker.last_error = message
@@ -2695,11 +2728,28 @@ class Flock:
         )
         pending = _input_pending(tail, dunker.last_sent_text)
         if pending is None:
-            log.info("%s: could not read %s input box; holding to avoid stacking",
-                     dunker.id, dunker.target_pane_id)
-            return False
-        if not pending:
+            # The pane is unreadable, or this harness's input box is not one we
+            # can parse. Skipping for ever silently kills the nudge, so hold a
+            # bounded number of times, then send once and surface the fallback.
             with self._lock:
+                dunker.unknown_skips += 1
+                count = dunker.unknown_skips
+                dunker.last_skip_reason = "unrecognised"
+            if count < MAX_UNKNOWN_SKIPS:
+                log.info("%s: could not read %s input box (%d/%d); holding",
+                         dunker.id, dunker.target_pane_id, count, MAX_UNKNOWN_SKIPS)
+                return False
+            log.warning("%s: input box on %s still unrecognised after %d skips; "
+                        "sending once (detector fallback)",
+                        dunker.id, dunker.target_pane_id, count)
+            with self._lock:
+                dunker.unknown_skips = 0
+                dunker.detector_fallback = True
+            return True
+        with self._lock:
+            dunker.unknown_skips = 0
+            dunker.last_skip_reason = "unconsumed" if pending else None
+            if not pending:
                 dunker.awaiting_consumption = False
         return not pending
 
@@ -3095,7 +3145,13 @@ class Flock:
                         dunker.next_send_at = time.time() + max(1.0, dunker.interval_minutes * 60)
                         dunker.skip_count += 1
                         dunker.last_skipped_at = time.time()
-                        dunker.status = "Skipped (unconsumed)"
+                        if (dunker.last_error
+                                and "target pane not found" in dunker.last_error):
+                            # The pane is back; the old error is historical.
+                            dunker.last_error = None
+                        dunker.status = ("Skipped (unrecognised box)"
+                                         if dunker.last_skip_reason == "unrecognised"
+                                         else "Skipped (unconsumed)")
                         self.last_message = f"Skipped {dunker.id}: previous send unconsumed"
                         self._save()
                     self.metrics.record("dunk.skipped", pane_id=dunker.target_pane_id,
@@ -3228,6 +3284,31 @@ def _collapse(text):
     return " ".join(str(text).split())
 
 
+def _is_border_line(line):
+    stripped = _strip_ansi(line).strip()
+    return stripped.startswith("\u2500") and stripped.count("\u2500") >= 10
+
+
+def _bordered_input_area(tail):
+    """The pi TUI has no prompt sigil: its input is the line(s) between the
+    last two full-width box borders, with the cwd/model footer below. Return
+    that region (possibly empty) or None if the bottom does not look like a
+    bordered box."""
+    if not tail:
+        return None
+    lines = tail.splitlines()
+    borders = [index for index, line in enumerate(lines) if _is_border_line(line)]
+    if len(borders) < 2:
+        return None
+    bottom = borders[-1]
+    if bottom < len(lines) - 5:  # footer sits below the box
+        return None
+    top = borders[-2]
+    if bottom - top < 1:
+        return None
+    return "\n".join(lines[top + 1:bottom])
+
+
 def _input_area(tail):
     """Return the agent's input-box region: everything from the last prompt
     sigil line (Claude ❯, Codex ›) to the end of the visible screen. None if no
@@ -3243,7 +3324,7 @@ def _input_area(tail):
         if stripped[:1] in INPUT_BOX_SIGILS:
             last = index
     if last is None:
-        return None
+        return _bordered_input_area(tail)
     return "\n".join(lines[last:])
 
 
