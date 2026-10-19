@@ -454,6 +454,11 @@ def h_memory_status(flock, args, self_pane_id):
     return flock.memory_status()
 
 
+def h_memory_backfill(flock, args, self_pane_id):
+    return flock.memory_backfill(action=args.get("action") or "start",
+                                 limit=args.get("limit"))
+
+
 def h_memory_ingest(flock, args, self_pane_id):
     return flock.memory_ingest(args["path"], harness=args.get("harness"),
                                project=args.get("project"))
@@ -1204,6 +1209,16 @@ COMMANDS = [
         h_memory_status,
     ),
     Command(
+        "memory_backfill",
+        "Discover every known session source (Codex/Claude/pi/opencode) and "
+        "enqueue it for the throttled background ingest. action=start|pause|"
+        "resume|status; limit=N for a bounded run. Superusers only.",
+        h_memory_backfill,
+        params={"action": {"type": "string",
+                            "enum": ["start", "pause", "resume", "status"]},
+                "limit": {"type": "integer", "minimum": 1}},
+    ),
+    Command(
         "memory_ingest",
         "Queue a session log or sqlite DB for asynchronous ingest (superusers "
         "only). The worker ingests in the background; queries stay responsive.",
@@ -1434,6 +1449,7 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
+    "memory_backfill",
 }
 
 

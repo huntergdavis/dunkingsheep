@@ -351,6 +351,11 @@ def build_parser():
     q.add_argument("path")
     q.add_argument("--harness", choices=["claude", "codex", "opencode", "pi", "generic"])
     q.add_argument("--project")
+    q = msub.add_parser("backfill", help="discover + enqueue every session source")
+    q.add_argument("--limit", type=int, help="cap the number of sources enqueued")
+    q.add_argument("--pause", action="store_true")
+    q.add_argument("--resume", action="store_true")
+    q.add_argument("--status", action="store_true")
 
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
@@ -729,6 +734,18 @@ def print_memory_context(result):
               f"{item.get('title') or ''} (score {item['score']:.3f})")
         for snippet in item.get("snippets", []):
             print("    " + (snippet["snippet"] or "").replace("\n", " ")[:160])
+
+
+def print_memory_backfill(result):
+    if "enqueued" in result:
+        print(f"queued {result['enqueued']} of {result['discovered']} source(s); "
+              f"paused {result.get('paused')}; throttle "
+              f"{(result.get('status') or {}).get('ingestor', {}).get('throttle_s')}")
+    elif "paused" in result:
+        print(f"backfill paused {result['paused']}")
+    status = result.get("status") or result
+    if status:
+        print_memory_stats(status)
 
 
 def print_memory_stats(result):
@@ -1311,6 +1328,11 @@ def run_client_command(client, args):
             return client.call("memory_ingest", path=args.path,
                                harness=args.harness, project=args.project), \
                 lambda r: print(f"queued {r['path']} ({r['harness']})")
+        if sub == "backfill":
+            action = ("pause" if args.pause else "resume" if args.resume
+                      else "status" if args.status else "start")
+            return client.call("memory_backfill", action=action,
+                               limit=args.limit), print_memory_backfill
     if command == "shutdown":
         return client.call("shutdown", stop_all=args.stop_all), \
             lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))

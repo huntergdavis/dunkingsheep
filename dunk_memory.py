@@ -219,6 +219,31 @@ def make_snippet(text, tokens, max_chars=240):
     return text[start:start + max_chars]
 
 
+def memory_sources():
+    """Known session sources, most recently modified first.
+
+    The full corpus: Codex rollouts (14 GB), Claude projects (975 MB), pi
+    (21 MB), the 2.1 GB Codex thread-history sqlite and the opencode DB.
+    """
+    import glob as _glob
+    home = os.path.expanduser("~")
+    patterns = (
+        os.path.join(home, ".codex/sessions/**/*.jsonl"),
+        os.path.join(home, ".claude/projects/**/*.jsonl"),
+        os.path.join(home, ".pi/agent/sessions/**/*.jsonl"),
+    )
+    sources = []
+    for pattern in patterns:
+        sources.extend(_glob.glob(pattern, recursive=True))
+    for extra in (os.path.join(home, ".codex/thread_history_1.sqlite"),
+                  os.path.join(home, ".local/share/opencode/opencode.db")):
+        if os.path.exists(extra):
+            sources.append(extra)
+    unique = {os.path.abspath(path): path for path in sources if os.path.isfile(path)}
+    ordered = sorted(unique, key=lambda path: os.path.getmtime(path), reverse=True)
+    return ordered
+
+
 def _harness_from_path(path):
     lowered = str(path).lower()
     if "/.codex/" in lowered or "thread_history" in lowered:
@@ -483,18 +508,22 @@ class MemoryStore:
 
     # -- ingestion ----------------------------------------------------------
 
-    def ingest_path(self, path, harness=None, project=None, should_stop=None):
+    def ingest_path(self, path, harness=None, project=None, should_stop=None,
+                    throttle_s=0.0):
         """Parse one source. Returns counts. Never called from a query path."""
         path = os.path.abspath(os.path.expanduser(str(path)))
         harness = harness or _harness_from_path(path)
         lowered = path.lower()
         if lowered.endswith((".jsonl", ".json")):
-            result = self._ingest_jsonl(path, harness, project, should_stop)
+            result = self._ingest_jsonl(path, harness, project, should_stop,
+                                         throttle_s)
         elif lowered.endswith((".sqlite", ".sqlite3", ".db")):
             if "thread_history" in lowered or "codex" in harness:
-                result = self._ingest_codex_history(path, project, should_stop)
+                result = self._ingest_codex_history(path, project, should_stop,
+                                                    throttle_s)
             else:
-                result = self._ingest_opencode(path, project, should_stop)
+                result = self._ingest_opencode(path, project, should_stop,
+                                               throttle_s)
         else:
             raise ValueError(f"unsupported memory source: {path}")
         self._upsert_source_row(path, harness, project)
@@ -562,7 +591,8 @@ class MemoryStore:
                 raise
         return inserted
 
-    def _ingest_jsonl(self, path, harness, project=None, should_stop=None):
+    def _ingest_jsonl(self, path, harness, project=None, should_stop=None,
+                      throttle_s=0.0):
         session_id = os.path.splitext(os.path.basename(path))[0]
         cwd = None
         title = None
@@ -581,6 +611,8 @@ class MemoryStore:
                     session_id, pending, role=pending_role,
                     created_at=pending_at)
                 pending = []
+                if throttle_s:
+                    time.sleep(throttle_s)
 
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -687,7 +719,8 @@ class MemoryStore:
         return {"sessions": len(sessions) or 1, "chunks": chunk_count,
                 "harness": harness}
 
-    def _ingest_codex_history(self, path, project=None, should_stop=None):
+    def _ingest_codex_history(self, path, project=None, should_stop=None,
+                              throttle_s=0.0):
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         chunk_count = 0
@@ -740,7 +773,8 @@ class MemoryStore:
         return {"sessions": len(sessions), "chunks": chunk_count,
                 "harness": "codex"}
 
-    def _ingest_opencode(self, path, project=None, should_stop=None):
+    def _ingest_opencode(self, path, project=None, should_stop=None,
+                         throttle_s=0.0):
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         chunk_count = 0
@@ -997,10 +1031,14 @@ def _event_time(event):
 class MemoryIngestor:
     """The single writer. Queries never touch this thread."""
 
-    def __init__(self, store, poll_s=0.5):
+    def __init__(self, store, poll_s=0.5, throttle_s=None):
         self.store = store
         self.poll_s = poll_s
+        self.throttle_s = (throttle_s if throttle_s is not None else
+                           float(os.environ.get(
+                               "DUNKINGSHEEP_MEMORY_THROTTLE_S", "0.1")))
         self._stop = threading.Event()
+        self._paused = threading.Event()
         self._thread = None
         self._last_error = None
         self._last_result = None
@@ -1014,6 +1052,15 @@ class MemoryIngestor:
                                         daemon=True)
         self._thread.start()
 
+    def pause(self):
+        self._paused.set()
+
+    def resume(self):
+        self._paused.clear()
+
+    def paused(self):
+        return self._paused.is_set()
+
     def stop(self):
         self._stop.set()
         if self._thread:
@@ -1026,11 +1073,15 @@ class MemoryIngestor:
     def status(self):
         with self._lock:
             return {"running": bool(self._thread and self._thread.is_alive()),
+                    "paused": self._paused.is_set(),
+                    "throttle_s": self.throttle_s,
                     "last_error": self._last_error,
                     "last_result": self._last_result}
 
     def _loop(self):
         while not self._stop.wait(self.poll_s):
+            if self._paused.is_set():
+                continue
             try:
                 lease = self.store.claim_next()
             except Exception as error:  # noqa: BLE001 - keep the worker alive
@@ -1043,7 +1094,8 @@ class MemoryIngestor:
                 result = self.store.ingest_path(
                     lease["path"], harness=lease["harness"],
                     project=lease.get("project"),
-                    should_stop=self._stop.is_set)
+                    should_stop=self._stop.is_set,
+                    throttle_s=self.throttle_s)
                 if result.get("stopped"):
                     self.store.finish(lease, False,
                                       error="stopped by operator",

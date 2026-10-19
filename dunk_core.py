@@ -53,12 +53,12 @@ import time
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
-from dunk_memory import MemoryStore, MemoryIngestor
+from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.16.1"
+VERSION = "2.16.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1098,6 +1098,38 @@ class Flock:
         if self.memory_ingestor is not None:
             status["ingestor"] = self.memory_ingestor.status()
         return status
+
+    @_as_dunk_error
+    def memory_backfill(self, action="start", limit=None):
+        """Discover every known session source and enqueue it (throttled,
+        resumable, pausable). Actions: start, pause, resume, status."""
+        ingestor = self.memory_ingestor
+        if ingestor is None or self.memory is None:
+            raise DunkError("memory service is not enabled")
+        action = (action or "start").lower()
+        if action == "pause":
+            ingestor.pause()
+            return {"paused": True, "status": self.memory_status()}
+        if action == "resume":
+            ingestor.resume()
+            return {"paused": False, "status": self.memory_status()}
+        if action == "status":
+            return self.memory_status()
+        sources = memory_sources()
+        enqueued = 0
+        for path in sources:
+            if limit and enqueued >= int(limit):
+                break
+            try:
+                self.memory.enqueue(path)
+                enqueued += 1
+            except ValueError:
+                continue
+        with self._lock:
+            self.last_message = f"Queued {enqueued} memory source(s)"
+        return {"enqueued": enqueued, "discovered": len(sources),
+                "limit": limit, "paused": ingestor.paused(),
+                "status": self.memory_status()}
 
     @_as_dunk_error
     def memory_ingest(self, path, harness=None, project=None):
