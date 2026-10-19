@@ -426,6 +426,37 @@ class MemoryStore:
         return {"source_id": row["id"], "queue_id": queue_id,
                 "path": path, "harness": harness, "project": project}
 
+    def requeue_partial(self):
+        """Resume sources left partial by a deliberate stop (daemon restart).
+
+        A restart marks the in-flight source 'skipped'/'partial' with reason
+        'stopped by operator'. On the next start it is returned to the queue so
+        coverage is not silently missing.
+        """
+        now = time.time()
+        with self._lock:
+            self._begin_write()
+            try:
+                rows = self.db.execute(
+                    "SELECT q.id FROM ingest_queue q JOIN sources s ON s.id=q.source_id "
+                    "WHERE q.state='skipped' AND s.state='partial' "
+                    "AND (q.error LIKE 'stopped%' OR s.error LIKE 'stopped%')"
+                ).fetchall()
+                ids = [row["id"] for row in rows]
+                for queue_id in ids:
+                    self.db.execute(
+                        "UPDATE ingest_queue SET state='queued', next_at=?, "
+                        "error=NULL, lease_until=NULL WHERE id=?", (now, queue_id))
+                if ids:
+                    self.db.execute(
+                        "UPDATE sources SET state='pending', lease_until=NULL "
+                        "WHERE state='partial'")
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return {"requeued": len(ids)}
+
     def recover_leases(self):
         """Requeue ingest leases whose worker died (expired lease).
 
@@ -1073,6 +1104,7 @@ class MemoryIngestor:
             return
         try:
             self.store.recover_leases()
+            self.store.requeue_partial()
         except Exception:  # noqa: BLE001 - start must not fail on recovery
             pass
         self._stop.clear()

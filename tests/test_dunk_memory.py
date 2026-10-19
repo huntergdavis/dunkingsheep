@@ -167,6 +167,14 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertEqual(1, self.store.recover_leases()["requeued"])
         self.assertEqual(1, self.store.stats()["queue"]["queued"])
 
+    def test_recover_requeues_a_partial_source_from_a_stop(self):
+        sample = write_jsonl(os.path.join(self.tmp.name, "partial.jsonl"))
+        self.store.enqueue(sample, harness="generic", project="demo")
+        lease = self.store.claim_next()
+        self.store.finish(lease, False, error="stopped by operator", skipped=True)
+        self.assertEqual(1, self.store.requeue_partial()["requeued"])
+        self.assertEqual(1, self.store.stats()["queue"]["queued"])
+
     def test_recall_never_ingests_or_enqueues(self):
         sample = write_jsonl(os.path.join(self.tmp.name, "r.jsonl"))
         self.store.ingest_path(sample, harness="generic", project="demo")
