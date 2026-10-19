@@ -107,3 +107,12 @@ Full text: [`memory_signoff.md`](memory_signoff.md). Recorded caveats:
   error.
 - The signature does **not** authorise deleting deja or its data. Deja stays
   read-only as a reference ranker and fallback.
+
+## t14 — ground-truth intent set
+
+`tools/memory_parity.py` now carries 24 hand-labelled intent queries with a
+known session (`INTENT_GROUND_TRUTH`) and always prints top-5 overlap next to
+recall@5. Memory recall@5 on that set is **0.9167** (22/24). Deja overlap is
+`skipped` when deja is not queried (its CLI re-scans ~17 GB per call); the last
+measured verbatim overlap is 0.336. Details:
+[`MEMORY_INTENT_SET.md`](MEMORY_INTENT_SET.md).
