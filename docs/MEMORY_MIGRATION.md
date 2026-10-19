@@ -1,9 +1,23 @@
 # Memory migration: agents off deja onto Dunking Sheep memory (t11)
 
-Status: **cutover in progress**. Dunking Sheep memory is the primary recall path;
-deja stays installed, answering, and **read-only** until the bounded parity is
-signed off. Nothing was uninstalled, so every switch is reversible by editing one
-file.
+Status (2026-10-19, VP direction): **memory primary, deja installed read-only,
+no parity claim.** Dunking Sheep memory is the primary recall path for every
+agent. Deja stays installed, answering capped, and **read-only**. We make **no
+parity claim** (the earlier `1.000 vs 0.733` headline is retracted — see the
+correction below). Deja is **not retired** until the reviewer signs a scoped
+statement: **(a)** "memory primary, deja installed read-only, no parity claim"
+or **(b)** "keep deja primary". Nothing was uninstalled, so every switch is
+reversible by editing one file.
+
+## Standing comparison
+
+`python3 tools/memory_parity.py` is the standing comparison: it copies the live
+DB read-only (full corpus, no re-ingest), queries deja live on the same
+sessions, and reports rank agreement plus a hand-written **non-verbatim intent**
+query set. Any deja error fails the gate. Deja queries are capped (`nice -n 10`,
+`GOMAXPROCS=2` via `~/.local/bin/deja`) and each harness query has a timeout.
+Report: [`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md); per-query detail:
+[`memory_parity_detail.json`](memory_parity_detail.json).
 
 ## What each agent now uses
 
@@ -63,6 +77,10 @@ backup. deja is unaffected by anything in that file.
 
 ## Why deja stays live
 
-Bounded parity passed and the full backfill is complete, but sign-off is the
-reviewer's call. Until it lands, deja is the escape hatch: read-only queries
-keep working and no migration step deletes or mutates its index.
+The full backfill is complete and every agent is on memory, but retirement is
+the reviewer's call and no parity is claimed. Until they sign, deja is the
+escape hatch: read-only queries keep working and no migration step deletes or
+mutates its index. A hang here had two causes, both fixed: orphaned `deja mcp`
+servers are now cleared by `deja-health --repair`, and `--repair` rebuilds only
+when the staging dir is stale (it used to rebuild on any problem, so agents
+following the old "run --repair" advice were kicking off full reindexes).
