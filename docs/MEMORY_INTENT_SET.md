@@ -24,6 +24,10 @@ next to top-5 overlap. This set lives in `tools/memory_parity.py` as
   every invocation (minutes per query), so a 24-query deja run is not viable.
   The harness marks overlap `skipped` rather than inventing a number. When deja
   answers, the same table fills both columns.
+- A warm deja MCP `recall` was also tried: it took **134 s** and returned
+  "No prior deja sessions matched", so deja is not a usable reference on
+  this host right now. The harness therefore reports overlap as `skipped`
+  rather than fabricating it; the last measured verbatim overlap stands.
 - Last measured full-corpus **verbatim** overlap: **0.336** (top-1 0.30); the
   reviewer independently measured 0.31 / 0.2667. Those are ranker disagreement,
   not a parity claim.

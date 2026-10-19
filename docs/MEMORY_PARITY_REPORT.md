@@ -22,7 +22,8 @@ a slice; every expected session exists in the live DB; the tests enforce both.
   questions.
 - **deja top-5 overlap: skipped this run.** Deja's CLI re-scans the ~17 GB corpus
   on every invocation (minutes per query), so a 24-query deja run is not viable.
-  The harness marks it `skipped`, never zero-fills it. The last measured
+  The harness marks it `skipped`, never zero-fills it. (A warm deja MCP
+  recall also took 134 s and returned no matches.) The last measured
   full-corpus **verbatim** overlap is **0.336** (top-1 0.30); the reviewer
   independently measured 0.31 / 0.2667.
 - The renderer now always prints **recall@5 and mean top-5 overlap in the same
