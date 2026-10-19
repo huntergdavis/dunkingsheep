@@ -1,4 +1,4 @@
-# Dunking Sheep 2.21.2 guide
+# Dunking Sheep 2.22.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -360,6 +360,20 @@ mail can be left for an agent that has not started. Renaming a pane or
 tab renames its mailbox, so mail already waiting stays under the old name.
 The sender is the raw pane id (e.g. wS:p1), so two panes of the same type
 can never borrow each other's identity.
+
+Ack stamps `read_at` as well as `acked_at`, so a board that counts NULL
+read_at never reports drained mail as unread. A send to a pane id that no
+longer exists fails immediately instead of queueing for ever; queued mail
+whose resolved pane disappears is marked `undeliverable` and counted
+separately. Retire a dead mailbox without deleting it:
+
+```
+dunkingsheep inbox archive <mailbox> [--before DATE] [--state queued,acked]
+```
+
+Archived messages are marked read and counted separately from unread; the
+command never deletes. Use `inbox stats` for unread/archived/undeliverable
+per mailbox.
 
 Every send returns a stable message id. `inbox_status` reports where that
 message is - queued, read, acked or cancelled - with its destination,

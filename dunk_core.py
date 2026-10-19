@@ -58,7 +58,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.21.2"
+VERSION = "2.22.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -68,6 +68,8 @@ LAUNCHES_FILE = os.path.join(CONFIG_DIR, "launches.json")
 
 # Agent states during which an `only_when="idle"` dunk holds its send.
 BUSY_STATUSES = ("working", "blocked")
+_PANE_ID_RE = re.compile(r"^w\d+:p\d+$")
+_TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
 IDLE_POLL_S = 5
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
@@ -710,6 +712,10 @@ class Flock:
         for pane in panes:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return self._mailbox_for_pane(pane)
+        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec):
+            raise DunkError(
+                f"no live pane {spec!r}; a dead pane id is not a mailbox. "
+                "Use a current pane id or a mailbox name.")
         # 2. An exact *name* must identify exactly one pane across every name
         #    field. Two same-type panes can share a label (or one pane's label
         #    can equal another's tab label); picking by field priority delivered
@@ -827,6 +833,12 @@ class Flock:
         return message
 
     @_as_dunk_error
+    @_as_dunk_error
+    def inbox_archive(self, mailbox, before=None, states=None, self_pane_id=None):
+        """Bulk-retire a mailbox: mark messages read and archived, never delete.
+        ``before`` is a unix timestamp; ``states`` defaults to queued+acked."""
+        return self.inbox.archive(mailbox, before=before, states=states)
+
     def _notice_for(self, mailbox, unread, sender, subject):
         return _notice_text(mailbox, unread, sender, subject)
 
@@ -1293,6 +1305,16 @@ class Flock:
                 self._clear_historical_errors(panes)
             except Exception:
                 panes = None
+            if panes is not None:
+                try:
+                    marked = self.inbox.mark_undeliverable(panes)
+                    if marked["undeliverable"]:
+                        log.warning(
+                            "inbox: %d queued message(s) marked undeliverable "
+                            "for dead panes %s", marked["undeliverable"],
+                            ", ".join(str(p) for p in marked["panes"][:5]))
+                except Exception:  # noqa: BLE001 - maintenance must not die
+                    log.exception("inbox undeliverable sweep failed")
             try:
                 requeued = self.tasks.reap(alive_panes=panes)
             except Exception:

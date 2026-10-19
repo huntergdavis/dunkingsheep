@@ -51,6 +51,68 @@ class InboxStoreTests(unittest.TestCase):
         self.assertEqual(["for a"], [m["body"] for m in self.inbox.read("a")])
         self.assertEqual(1, self.inbox.count("b")["unread"])
 
+    # -- ack / archive / undeliverable ------------------------------------
+
+    def test_ack_stamps_read_at(self):
+        sent = self.inbox.send("writer", "handled")
+        self.inbox.ack([sent["message_id"]])
+        status = self.inbox.status(sent["message_id"])
+        self.assertEqual("acked", status["state"])
+        self.assertIsNotNone(status["read_at"], "ack must stamp read_at")
+        self.assertEqual(0, self.inbox.count("writer")["unread"])
+        self.assertEqual(0, self.inbox.stats()[0]["unread"])
+
+    def test_archive_is_bulk_and_never_deletes(self):
+        for n in range(3):
+            self.inbox.send("dead", f"m{n}")
+        result = self.inbox.archive("dead")
+        self.assertEqual(3, result["archived"])
+        count = self.inbox.count("dead")
+        self.assertEqual(0, count["unread"])
+        self.assertEqual(3, count["archived"])
+        self.assertEqual(3, count["total"], "archive must not delete")
+        self.assertEqual(3, len(self.inbox.list("dead", unread_only=False)))
+
+    def test_archive_before_only_touches_older_mail(self):
+        old = self.inbox.send("dead", "old")
+        self.inbox.db.execute("UPDATE messages SET created_at = 1 WHERE id = ?",
+                              (old["message_id"],))
+        self.inbox.db.commit()
+        self.inbox.send("dead", "new")
+        result = self.inbox.archive("dead", before=100)
+        self.assertEqual(1, result["archived"])
+        self.assertEqual(1, self.inbox.count("dead")["unread"])
+
+    def test_a_dead_resolved_pane_marks_mail_undeliverable(self):
+        sent = self.inbox.send("w9:p8", "stuck", pane_id="w9:p8")
+        result = self.inbox.mark_undeliverable({"w2:p1"})
+        self.assertEqual(1, result["undeliverable"])
+        self.assertEqual("undeliverable",
+                         self.inbox.status(sent["message_id"])["state"])
+        count = self.inbox.count("w9:p8")
+        self.assertEqual(0, count["unread"])
+        self.assertEqual(1, count["undeliverable"])
+
+    def test_old_dead_mailbox_without_pane_id_is_marked_undeliverable(self):
+        # Older mail to a dead pane id was stored under the pane id as the
+        # mailbox key with pane_id NULL; it must be swept too.
+        sent = self.inbox.send("w9:p8", "old stuck", pane_id=None)
+        result = self.inbox.mark_undeliverable({"w2:p1"})
+        self.assertEqual(1, result["undeliverable"])
+        self.assertIn("w9:p8", result["mailboxes"])
+        self.assertEqual("undeliverable",
+                         self.inbox.status(sent["message_id"])["state"])
+
+    def test_ack_backfill_stamps_read_at_on_reopen(self):
+        sent = self.inbox.send("writer", "old ack")
+        self.inbox.db.execute(
+            "UPDATE messages SET state = 'acked', acked_at = 123, read_at = NULL "
+            "WHERE id = ?", (sent["message_id"],))
+        self.inbox.db.commit()
+        reopened = Inbox(path=self.inbox.path, blob_dir=self.inbox.blob_dir)
+        self.addCleanup(reopened.close)
+        self.assertEqual(123.0, reopened.status(sent["message_id"])["read_at"])
+
     # -- the owner's status query ------------------------------------------
 
     def test_status_reports_every_state_and_never_the_text(self):
@@ -203,6 +265,23 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(1, self.flock.inbox_count(self_pane_id="w2:p1")["unread"])
         read = self.flock.inbox_read(self_pane_id="w2:p1")
         self.assertEqual(["for codex"], [m["body"] for m in read["messages"]])
+
+    def test_sending_to_a_dead_pane_id_errors(self):
+        with self.assertRaisesRegex(DunkError, "no live pane"):
+            self.flock.resolve_mailbox("w9:p8")
+        with self.assertRaisesRegex(DunkError, "no live pane"):
+            self.flock.inbox_send("w9:p8", "lost")
+        self.assertEqual(0, self.inbox.count("w9:p8")["total"],
+                        "the failed send must not store a message")
+
+    def test_archive_through_the_flock_drains_unread(self):
+        for n in range(2):
+            self.flock.inbox_send("dead-mailbox", f"m{n}", notify=False)
+        result = self.flock.inbox_archive("dead-mailbox")
+        self.assertEqual(2, result["archived"])
+        count = self.flock.inbox_count("dead-mailbox")
+        self.assertEqual(0, count["unread"])
+        self.assertEqual(2, count["archived"])
 
     def test_counting_without_a_mailbox_or_a_caller_is_a_clear_error(self):
         with self.assertRaisesRegex(DunkError, "no mailbox given"):
@@ -382,6 +461,7 @@ class SurfaceParityTests(unittest.TestCase):
             "inbox_read": "read", "inbox_status": "status", "inbox_ack": "ack",
             "inbox_cancel": "cancel", "inbox_delete": "delete",
             "inbox_stats": "stats", "inbox_fetch": "fetch",
+            "inbox_archive": "archive",
             "task_add": "add", "task_list": "list", "task_read": "read",
             "task_update": "update", "task_assign": "assign",
             "task_complete": "complete", "task_block": "block",

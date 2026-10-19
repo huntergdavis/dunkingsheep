@@ -355,6 +355,15 @@ def guide(markdown=False):
       "tab renames its mailbox, so mail already waiting stays under the old name.\n"
       "The sender is the raw pane id (e.g. wS:p1), so two panes of the same type\n"
       "can never borrow each other's identity.\n")
+    w("Ack stamps `read_at` as well as `acked_at`, so a board that counts NULL\n"
+      "read_at never reports drained mail as unread. A send to a pane id that no\n"
+      "longer exists fails immediately instead of queueing for ever; queued mail\n"
+      "whose resolved pane disappears is marked `undeliverable` and counted\n"
+      "separately. Retire a dead mailbox without deleting it:\n")
+    w(code("dunkingsheep inbox archive <mailbox> [--before DATE] [--state queued,acked]"))
+    w("Archived messages are marked read and counted separately from unread; the\n"
+      "command never deletes. Use `inbox stats` for unread/archived/undeliverable\n"
+      "per mailbox.\n")
     w("Every send returns a stable message id. `inbox_status` reports where that\n"
       "message is - queued, read, acked or cancelled - with its destination,\n"
       "sender, timestamps, size, attachment count and any failure reason. It\n"

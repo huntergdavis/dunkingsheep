@@ -201,6 +201,12 @@ def build_parser():
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--limit", "-n", type=int, default=10)
     q.add_argument("--peek", action="store_true", help="do not mark them read")
+    q = isub.add_parser("archive", help="archive a mailbox in bulk (no deletion)")
+    q.add_argument("mailbox")
+    q.add_argument("--before", help="only messages created before this ISO date/time or epoch")
+    q.add_argument("--state", default="queued,acked",
+                   help="comma-separated states to archive (default queued,acked)")
+
     q = isub.add_parser("status", help="state of one message by id")
     q.add_argument("message_id")
     for name, help_text in (("ack", "mark messages handled"),
@@ -635,10 +641,20 @@ def print_panes(result):
         print(f"* = this pane ({result['self_pane_id']})")
 
 
+def print_inbox_archive(result):
+    when = f" before {result['before']}" if result.get("before") else ""
+    print(f"archived {result['archived']} message(s) in {result['mailbox']}"
+          f" (states {','.join(result['states'])}{when})")
+
+
 def print_inbox_count(r):
     line = f"{r['mailbox']}: {r['unread']} unread of {r['total']}"
     if r.get("oldest_unread_s"):
         line += f", oldest waiting {_every(r['oldest_unread_s'] / 60)}"
+    if r.get("archived"):
+        line += f", {r['archived']} archived"
+    if r.get("undeliverable"):
+        line += f", {r['undeliverable']} undeliverable"
     if r.get("attachments_unread"):
         line += f", {r['attachments_unread']} attachment(s)"
     print(line)
@@ -966,10 +982,12 @@ def print_inbox_stats(r):
     if not boxes:
         print("no mailboxes")
         return
-    print(f"{'MAILBOX':<30} {'UNREAD':>7} {'TOTAL':>7} OLDEST")
+    print(f"{'MAILBOX':<30} {'UNREAD':>7} {'ARCH':>6} {'UNDELIV':>8} {'TOTAL':>7} OLDEST")
     for b in boxes:
         oldest = f"{b['oldest_unread_s']}s" if b.get("oldest_unread_s") else "-"
-        print(f"{_clip(b['destination'], 30):<30} {b['unread']:>7} {b['total']:>7} {oldest}")
+        print(f"{_clip(b['destination'], 30):<30} {b['unread']:>7} "
+              f"{b.get('archived', 0):>6} {b.get('undeliverable', 0):>8} "
+              f"{b['total']:>7} {oldest}")
 
 
 def print_message(result):
@@ -1331,6 +1349,10 @@ def run_client_command(client, args):
                 lambda r: print(f"{r.get('state', sub)}: "
                                 f"{', '.join(r.get('changed') or r.get('deleted') or []) or 'nothing'}"
                                 + (f"; unchanged {r['unchanged']}" if r.get("unchanged") else ""))
+        if sub == "archive":
+            return client.call("inbox_archive", mailbox=args.mailbox,
+                               before=args.before, state=args.state), print_inbox_archive
+
         if sub == "stats":
             return client.call("inbox_stats"), print_inbox_stats
         if sub == "fetch":

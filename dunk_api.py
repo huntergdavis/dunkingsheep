@@ -301,6 +301,32 @@ def h_inbox_delete(flock, args, self_pane_id):
     return flock.inbox_delete(_ids(args))
 
 
+def _archive_before(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        raise DunkError(
+            f"before must be an ISO date/time or a unix timestamp: {value!r}") from None
+
+
+def h_inbox_archive(flock, args, self_pane_id):
+    states = args.get("state", args.get("states"))
+    if isinstance(states, str):
+        states = [part.strip() for part in states.split(",") if part.strip()]
+    return flock.inbox_archive(args["mailbox"], before=_archive_before(args.get("before")),
+                               states=states)
+
+
 def h_inbox_stats(flock, args, self_pane_id):
     return flock.inbox_stats()
 
@@ -946,10 +972,26 @@ COMMANDS = [
     Command(
         "inbox_ack",
         "Acknowledge messages: mark them finished with, so they stop showing as "
-        "waiting and the sender can see they were handled.",
+        "waiting and the sender can see they were handled. Ack stamps read_at "
+        "as well, so a board that counts NULL read_at never reports drained "
+        "mail as unread.",
         h_inbox_ack,
         params={"message_ids": MESSAGE_IDS_PARAM},
         required=["message_ids"],
+    ),
+    Command(
+        "inbox_archive",
+        "Archive a mailbox in bulk without deleting anything: marks messages "
+        "read and archived (counted separately from unread) so unread boards "
+        "drop. before=ISO date/time or unix timestamp; state=comma-separated "
+        "queued,read,acked (default queued,acked).",
+        h_inbox_archive,
+        params={"mailbox": MAILBOX_PARAM,
+                "before": {"type": "string",
+                           "description": "Only messages created before this time."},
+                "state": {"type": "string",
+                          "description": "queued,read,acked (default queued,acked)."}},
+        required=["mailbox"],
     ),
     Command(
         "inbox_cancel",
@@ -967,8 +1009,8 @@ COMMANDS = [
     ),
     Command(
         "inbox_stats",
-        "Unread and total counts for every mailbox, busiest first. Use it to "
-        "see which agents have mail piling up.",
+        "Unread, archived, undeliverable and total counts for every mailbox, "
+        "busiest first. Use it to see which agents have mail piling up.",
         h_inbox_stats,
     ),
     Command(
@@ -1497,7 +1539,8 @@ MCP_GROUPS = (
      (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
       ("read", "inbox_read"), ("status", "inbox_status"), ("ack", "inbox_ack"),
       ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),
-      ("stats", "inbox_stats"), ("fetch", "inbox_fetch"))),
+      ("stats", "inbox_stats"), ("fetch", "inbox_fetch"),
+      ("archive", "inbox_archive"))),
     ("task",
      "Deterministic global task queue. action=next ATOMICALLY claims the "
      "highest-priority unblocked task (assigns you + in_progress + a lease); "

@@ -32,6 +32,7 @@ mailbox. Mail can be left for an agent that is not running.
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -55,7 +56,11 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 # Message states. `queued` means sitting unread in the mailbox; the typing
 # pipeline's "delivering/sent" has no analogue here because there is no
 # delivery step to fail - the write either happened or it did not.
-STATES = ("queued", "read", "acked", "cancelled")
+STATES = ("queued", "read", "acked", "cancelled", "archived",
+          "undeliverable")
+# A mailbox key that is itself a pane id (older versions stored
+# dead-pane mail this way, with pane_id NULL).
+PANE_MAILBOX_RE = re.compile(r"^w\d+:p\d+$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -70,6 +75,7 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at    REAL NOT NULL,
     read_at       REAL,
     acked_at      REAL,
+    archived_at   REAL,
     cancelled_at  REAL,
     reason        TEXT,
     notify_state  TEXT,
@@ -77,6 +83,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_by_mailbox
     ON messages (mailbox, state, created_at);
+CREATE INDEX IF NOT EXISTS messages_by_state
+    ON messages (state, pane_id);
 CREATE TABLE IF NOT EXISTS attachments (
     id          TEXT PRIMARY KEY,
     message_id  TEXT NOT NULL,
@@ -115,6 +123,15 @@ class Inbox:
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
+            if "archived_at" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN archived_at REAL")
+            # Acked mail is read mail. Older rows could be acked without a
+            # read_at, which made boards that count NULLs report drained mail
+            # as unread; backfill them once.
+            self.db.execute(
+                "UPDATE messages SET read_at = COALESCE(read_at, acked_at, created_at) "
+                "WHERE state = 'acked' AND read_at IS NULL")
             self.db.commit()
 
     def close(self):
@@ -188,6 +205,8 @@ class Inbox:
             row = self.db.execute(
                 "SELECT COUNT(*) AS total, "
                 "SUM(state = 'queued') AS unread, "
+                "SUM(state = 'archived') AS archived, "
+                "SUM(state = 'undeliverable') AS undeliverable, "
                 "MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest "
                 "FROM messages WHERE mailbox = ? AND state != 'cancelled'",
                 (mailbox,)).fetchone()
@@ -201,6 +220,8 @@ class Inbox:
             "unread": unread,
             "total": int(row["total"] or 0),
             "attachments_unread": int(blobs["n"] or 0),
+            "archived": int(row["archived"] or 0),
+            "undeliverable": int(row["undeliverable"] or 0),
             "oldest_unread_s": int(_now() - row["oldest"]) if row["oldest"] else None,
         }
 
@@ -267,6 +288,7 @@ class Inbox:
             "created_at": row["created_at"],
             "read_at": row["read_at"],
             "acked_at": row["acked_at"],
+            "archived_at": row["archived_at"],
             "cancelled_at": row["cancelled_at"],
             "waiting_s": (int(_now() - row["created_at"])
                           if row["state"] == "queued" else None),
@@ -282,6 +304,8 @@ class Inbox:
             rows = self.db.execute(
                 "SELECT mailbox, mailbox_label, COUNT(*) AS total, "
                 "SUM(state = 'queued') AS unread, "
+                "SUM(state = 'archived') AS archived, "
+                "SUM(state = 'undeliverable') AS undeliverable, "
                 "MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest "
                 "FROM messages WHERE state != 'cancelled' "
                 "GROUP BY mailbox ORDER BY unread DESC, mailbox").fetchall()
@@ -290,20 +314,95 @@ class Inbox:
             "destination": row["mailbox_label"] or row["mailbox"],
             "unread": int(row["unread"] or 0),
             "total": int(row["total"] or 0),
+            "archived": int(row["archived"] or 0),
+            "undeliverable": int(row["undeliverable"] or 0),
             "oldest_unread_s": int(_now() - row["oldest"]) if row["oldest"] else None,
         } for row in rows]
 
     # -- retiring -----------------------------------------------------------
 
     def ack(self, message_ids):
+        # Ack implies read: stamp read_at so a board that counts NULLs as
+        # unread cannot report drained mail as waiting.
         return self._transition(message_ids, "acked", "acked_at",
-                                allowed=("queued", "read"))
+                                allowed=("queued", "read"), read_stamp=True)
 
     def cancel(self, message_ids):
         return self._transition(message_ids, "cancelled", "cancelled_at",
                                 allowed=("queued",))
 
-    def _transition(self, message_ids, state, stamp, allowed):
+    def archive(self, mailbox, before=None, states=None):
+        """Bulk-retire a mailbox without deleting anything: mark messages read
+        and archived (counted separately from unread). Default states are
+        queued and acked; pass read too to drain the whole mailbox."""
+        mailbox = str(mailbox or "").strip()
+        if not mailbox:
+            raise InboxError("a mailbox is required")
+        if states is None:
+            states = ("queued", "acked")
+        if isinstance(states, str):
+            states = [part.strip() for part in states.split(",") if part.strip()]
+        allowed = [state for state in states
+                   if state in STATES and state not in
+                   ("cancelled", "archived", "undeliverable")]
+        if not allowed:
+            raise InboxError("state must be one of queued, read, acked")
+        now = _now()
+        placeholders = ",".join("?" for _ in allowed)
+        sql = (f"UPDATE messages SET state = 'archived', archived_at = ?, "
+               f"read_at = COALESCE(read_at, ?) WHERE mailbox = ? "
+               f"AND state IN ({placeholders})")
+        params = [now, now, mailbox, *allowed]
+        if before is not None:
+            sql += " AND created_at < ?"
+            params.append(float(before))
+        with self._lock:
+            cursor = self.db.execute(sql, params)
+            self.db.commit()
+            archived = cursor.rowcount
+        return {"mailbox": mailbox, "archived": archived,
+                "states": allowed, "before": before}
+
+    def mark_undeliverable(self, live_panes):
+        """A queued message whose resolved pane id no longer exists is
+        undeliverable, not silently queued. Nothing is deleted."""
+        live = {str(pane) for pane in (live_panes or ()) if pane}
+        if not live:
+            return {"undeliverable": 0, "panes": []}
+        changed = 0
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT pane_id FROM messages "
+                "WHERE state = 'queued' AND pane_id IS NOT NULL").fetchall()
+            dead_panes = sorted({row["pane_id"] for row in rows
+                                 if row["pane_id"] not in live})
+            if dead_panes:
+                placeholders = ",".join("?" for _ in dead_panes)
+                cursor = self.db.execute(
+                    f"UPDATE messages SET state = 'undeliverable', reason = ? "
+                    f"WHERE state = 'queued' AND pane_id IN ({placeholders})",
+                    ("target pane no longer exists", *dead_panes))
+                changed += cursor.rowcount
+            # Older mail to a dead pane id was stored under the pane id as the
+            # mailbox key with pane_id NULL; retire those too.
+            rows = self.db.execute(
+                "SELECT DISTINCT mailbox FROM messages WHERE state = 'queued'").fetchall()
+            dead_mailboxes = sorted({
+                row["mailbox"] for row in rows
+                if PANE_MAILBOX_RE.match(str(row["mailbox"] or ""))
+                and row["mailbox"] not in live})
+            if dead_mailboxes:
+                placeholders = ",".join("?" for _ in dead_mailboxes)
+                cursor = self.db.execute(
+                    f"UPDATE messages SET state = 'undeliverable', reason = ? "
+                    f"WHERE state = 'queued' AND mailbox IN ({placeholders})",
+                    ("target pane no longer exists", *dead_mailboxes))
+                changed += cursor.rowcount
+            self.db.commit()
+        return {"undeliverable": changed, "panes": dead_panes,
+                "mailboxes": dead_mailboxes}
+
+    def _transition(self, message_ids, state, stamp, allowed, read_stamp=False):
         ids = [message_ids] if isinstance(message_ids, str) else list(message_ids)
         ids = [str(i).strip() for i in ids if str(i).strip()]
         if not ids:
@@ -318,9 +417,16 @@ class Inbox:
                 if row["state"] not in allowed:
                     skipped.append({"message_id": message_id, "state": row["state"]})
                     continue
-                self.db.execute(
-                    f"UPDATE messages SET state = ?, {stamp} = ? WHERE id = ?",
-                    (state, _now(), message_id))
+                now = _now()
+                if read_stamp:
+                    self.db.execute(
+                        f"UPDATE messages SET state = ?, {stamp} = ?, "
+                        f"read_at = COALESCE(read_at, ?) WHERE id = ?",
+                        (state, now, now, message_id))
+                else:
+                    self.db.execute(
+                        f"UPDATE messages SET state = ?, {stamp} = ? WHERE id = ?",
+                        (state, now, message_id))
                 changed.append(message_id)
             self.db.commit()
         return {"state": state, "changed": changed, "unchanged": skipped}
@@ -350,7 +456,7 @@ class Inbox:
         with self._lock:
             rows = self.db.execute(
                 "SELECT id FROM messages WHERE state != 'queued' AND "
-                "COALESCE(acked_at, cancelled_at, read_at, created_at) < ?",
+                "COALESCE(acked_at, cancelled_at, read_at, archived_at, created_at) < ?",
                 (cutoff,)).fetchall()
             ids = [row["id"] for row in rows]
             if ids:
