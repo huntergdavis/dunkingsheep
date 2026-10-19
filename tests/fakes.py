@@ -354,6 +354,21 @@ def claude_box_empty():
     return _claude_frame(["\u276f "])
 
 
+def claude_box_empty_herdr_095():
+    """Real `herdr pane read --lines 40 --source visible` tail from herdr 0.9.5
+    (Claude Code, empty input box), captured 2026-10-19. Guards the input-box
+    parser against renderer changes after the upgrade."""
+    return "\n".join([
+        "  \u23bf  Settings dialog dismissed",
+        "",
+        "\u2500" * 80,
+        "\u276f",
+        "\u2500" * 80,
+        "  \u23f5\u23f5 bypass permissions on (shift+tab to cycle)",
+        "",
+    ])
+
+
 def claude_box_pending(text):
     """A short send still sitting verbatim in the box."""
     return _claude_frame(["\u276f " + text])

@@ -16,6 +16,7 @@ from dunk_core import (  # noqa: E402
 )
 from fakes import (  # noqa: E402
     FakeHerdr, claude_box_collapsed, claude_box_collapsed_ansi, claude_box_empty,
+    claude_box_empty_herdr_095,
     claude_box_empty_ansi, claude_box_hint_ansi, claude_box_pasted_unsubmitted,
     claude_box_pending, claude_box_typing_ansi, codex_box_empty_with_transcript_collapse,
     codex_approval_dialog, codex_answered_dialog_in_scrollback,
@@ -264,6 +265,14 @@ class FlockTests(unittest.TestCase):
         d.last_sent_text = "keep going please"
         self.herdr.set_screen("w2:p1", claude_box_pending("keep going please"))
         self.assertFalse(self.flock._previous_send_consumed(d))
+
+    def test_herdr_095_empty_box_reads_as_consumed(self):
+        # Captured from a real Claude pane after the herdr 0.9.5 upgrade: the
+        # box is the last sigil line plus a border/footer, and it is empty.
+        d = Dunker("d1", target_pane_id="w2:p1", skip_if_unconsumed=True,
+                   send_count=1, last_sent_text="nudge 1")
+        self.herdr.set_screen("w2:p1", claude_box_empty_herdr_095())
+        self.assertTrue(self.flock._previous_send_consumed(d))
 
     def test_codex_transcript_collapse_is_not_mistaken_for_queued_input(self):
         # A collapse chip in the OUTPUT area ("+28 lines (ctrl + t to view
