@@ -134,11 +134,32 @@ dunkingsheep memory ingest <path>  # superuser; async
 
 MCP tools: `memory_recall`, `memory_context`, `memory_search`, `memory_stats`,
 `memory_status`, `memory_ingest`. The service is scoped to 1–10 M chunks on this
-box; billions is a later sharded/remote tier. Deja remains until parity and the
-agent upgrade (t10/t11). See [`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
+box; billions is a later sharded/remote tier. The pi/Claude/opencode/Codex agents
+now use memory as the primary recall path, with deja kept installed and
+read-only as the fallback; see [`docs/MEMORY_MIGRATION.md`](docs/MEMORY_MIGRATION.md)
+and [`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
 
 Parity harness (bounded backfill, deja top-5 comparison, rollback proof):
 `python3 tools/memory_parity.py`. Acceptance: `python3 tools/memory_acceptance.py`.
+
+## ♻️ Self-sustaining (t12)
+
+systemd owns the daemon (`Restart=always`), and a deterministic
+`dunkingsheep health [--repair] [--deep]` check watches the memory DB, stale
+leases, WAL size and disk space. No model is in the loop: every threshold is a
+constant and every repair is fixed. When the unit is installed the client never
+spawns a second daemon — it asks systemd — so a client auto-start can never race
+the supervisor for the socket.
+
+```bash
+dunkingsheep health              # fast, read-only check
+dunkingsheep health --repair     # requeue stale leases, checkpoint a large WAL
+bash tools/self_heal_test.sh     # kill -9 -> automatic restart -> no data loss
+```
+
+Install the units from [`packaging/systemd/`](packaging/systemd/) (daemon +
+10-minute health timer + weekly deep check). Details:
+[`docs/SELF_SUSTAINING.md`](docs/SELF_SUSTAINING.md).
 
 ## 🔒 Superusers and destructive operations
 
@@ -272,7 +293,9 @@ MCP ─┘
 | `herdr_client.py` | Wrapper around the `herdr` CLI |
 
 Docs: [`docs/GUIDE.md`](docs/GUIDE.md) (generated from `dunkingsheep guide`),
-[`docs/DESIGN.md`](docs/DESIGN.md), [`docs/RESEARCH.md`](docs/RESEARCH.md).
+[`docs/DESIGN.md`](docs/DESIGN.md), [`docs/RESEARCH.md`](docs/RESEARCH.md),
+[`docs/MEMORY_MIGRATION.md`](docs/MEMORY_MIGRATION.md),
+[`docs/SELF_SUSTAINING.md`](docs/SELF_SUSTAINING.md).
 Tests: `python3 -m unittest discover -s tests`.
 
 ## 📋 Requirements

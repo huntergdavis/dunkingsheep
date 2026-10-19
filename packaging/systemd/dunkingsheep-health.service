@@ -1,0 +1,6 @@
+[Unit]
+Description=Dunking Sheep deterministic health self-check + repair
+
+[Service]
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon health --repair --write

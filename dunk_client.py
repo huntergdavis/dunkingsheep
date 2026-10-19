@@ -12,6 +12,7 @@ keeps the client stateless and reconnect-free.
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -24,6 +25,34 @@ from dunk_server import LOG_FILE, SOCKET_PATH
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI_PATH = os.path.join(HERE, "dunkingsheep")
 START_TIMEOUT_S = 8.0
+
+
+SYSTEMD_UNIT = "dunkingsheep.service"
+
+
+UNIT_PATH = os.path.expanduser("~/.config/systemd/user/dunkingsheep.service")
+
+
+def _systemd_installed():
+    """True when the systemd user unit is installed.
+
+    Then the supervisor owns the daemon: a client asks systemd to start it and
+    never spawns a second `serve`, which would race the unit for the socket and
+    leave a restart loop.
+    """
+    return os.path.exists(UNIT_PATH)
+
+
+def _systemctl(*args):
+    """Run systemctl --user, supplying XDG_RUNTIME_DIR when the caller's shell
+    does not have one (agents often do not)."""
+    env = dict(os.environ)
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    if os.path.isdir(runtime):
+        env["XDG_RUNTIME_DIR"] = runtime
+    return subprocess.run(["systemctl", "--user", *args],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          timeout=30, env=env)
 
 
 class DaemonUnavailable(RuntimeError):
@@ -110,7 +139,20 @@ class FlockClient:
         )
 
     def start_daemon(self):
-        """Spawn a detached `dunkingsheep serve` that outlives this process."""
+        """Start the daemon: hand off to systemd when it supervises, else spawn
+        a detached `dunkingsheep serve` that outlives this process."""
+        supervised = (not os.environ.get("DUNKINGSHEEP_SOCKET")
+                      and self.socket_path == SOCKET_PATH)
+        if supervised and _systemd_installed() and shutil.which("systemctl"):
+            try:
+                probe = _systemctl("start", SYSTEMD_UNIT)
+            except (OSError, subprocess.SubprocessError):
+                probe = None
+            if probe is not None and probe.returncode == 0:
+                return
+            raise DaemonUnavailable(
+                "the dunkingsheep.service unit is installed but could not be "
+                "started; run `systemctl --user start dunkingsheep.service`")
         os.makedirs(CONFIG_DIR, exist_ok=True)
         env = dict(os.environ)
         env["DUNKINGSHEEP_SOCKET"] = self.socket_path

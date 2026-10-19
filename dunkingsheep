@@ -345,6 +345,11 @@ def build_parser():
     q = msub.add_parser("context", help="compact session-start digest")
     q.add_argument("query")
     q.add_argument("--sessions", type=int, default=5)
+    q = msub.add_parser("hook-context",
+                        help="Claude SessionStart hook JSON (memory context)")
+    q.add_argument("--query", default=None,
+                   help="defaults to the current directory name")
+    q.add_argument("--sessions", type=int, default=5)
     msub.add_parser("stats", help="counts, DB bytes, queue depth, latency")
     msub.add_parser("status", help="health, schema, ingest worker")
     q = msub.add_parser("ingest", help="queue a session log/sqlite for async ingest")
@@ -356,6 +361,16 @@ def build_parser():
     q.add_argument("--pause", action="store_true")
     q.add_argument("--resume", action="store_true")
     q.add_argument("--status", action="store_true")
+
+    p = sub.add_parser("health",
+                       help="deterministic self-check; --repair fixes leases/WAL")
+    p.add_argument("--repair", action="store_true",
+                   help="apply the fixed repairs (stale leases, large WAL)")
+    p.add_argument("--deep", action="store_true",
+                   help="also run PRAGMA quick_check (slow on a large DB)")
+    p.add_argument("--write", nargs="?", const="", default=None, metavar="PATH",
+                   help="also write the JSON report "
+                        "(default ~/.config/dunkingsheep/health.json)")
 
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
@@ -736,6 +751,21 @@ def print_memory_context(result):
             print("    " + (snippet["snippet"] or "").replace("\n", " ")[:160])
 
 
+def print_memory_hook_context(result):
+    """Claude SessionStart hook output carrying the memory digest."""
+    import json as _json
+    text = result.get("text") or ""
+    if text.strip():
+        text = ("Dunking Sheep memory - relevant past sessions for this "
+                "workspace:\n\n" + text)
+    print(_json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": text,
+        }
+    }))
+
+
 def print_memory_backfill(result):
     if "enqueued" in result:
         print(f"queued {result['enqueued']} of {result['discovered']} source(s); "
@@ -764,6 +794,23 @@ def print_memory_stats(result):
     if result.get("harness"):
         for item in result["harness"]:
             print(f"  {item['harness']}: {item['chunks']} chunks / {item['sessions']} sessions")
+
+
+def print_health(result):
+    state = "ok" if result.get("ok") else "DEGRADED"
+    print(f"health {state}  duration {result.get('duration_ms')} ms")
+    for item in result.get("problems") or []:
+        print(f"  problem: {item}")
+    for item in result.get("repairs") or []:
+        print(f"  repaired: {item}")
+    checks = result.get("checks") or {}
+    memory = checks.get("memory") or {}
+    print(f"  memory ok={memory.get('ok')} sources={memory.get('sources')} "
+          f"sessions={memory.get('sessions')} chunks={memory.get('chunks')} "
+          f"queue={memory.get('queue_depth')}")
+    print(f"  integrity={checks.get('integrity')} "
+          f"stale={checks.get('stale_leases')} wal={checks.get('wal_bytes')} "
+          f"disk_free={checks.get('disk_free_bytes')} tasks={checks.get('tasks')}")
 
 
 def print_superuser(result):
@@ -1051,6 +1098,9 @@ def main(argv=None):
             socket_path=args.socket, self_pane_id=args.self_pane,
             start=not args.no_start_daemon,
         )
+        if command == "health" and getattr(args, "deep", False):
+            # A deep quick_check scans the whole DB; give it room.
+            client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
         result, printer = run_client_command(client, args)
@@ -1320,6 +1370,10 @@ def run_client_command(client, args):
         if sub == "context":
             return client.call("memory_context", query=args.query,
                                sessions=args.sessions), print_memory_context
+        if sub == "hook-context":
+            query = args.query or os.path.basename(os.getcwd())
+            return client.call("memory_context", query=query,
+                               sessions=args.sessions), print_memory_hook_context
         if sub == "stats":
             return client.call("memory_stats"), print_memory_stats
         if sub == "status":
@@ -1333,6 +1387,15 @@ def run_client_command(client, args):
                       else "status" if args.status else "start")
             return client.call("memory_backfill", action=action,
                                limit=args.limit), print_memory_backfill
+    if command == "health":
+        def render_health(result):
+            print_health(result)
+            if args.write is not None:
+                from dunk_health import write_report
+                path = write_report(result, args.write or None)
+                print(f"  report written to {path}")
+        return client.call("health", repair=args.repair,
+                           deep=args.deep), render_health
     if command == "shutdown":
         return client.call("shutdown", stop_all=args.stop_all), \
             lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))

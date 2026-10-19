@@ -426,6 +426,17 @@ class MemoryStore:
         return {"source_id": row["id"], "queue_id": queue_id,
                 "path": path, "harness": harness, "project": project}
 
+    def checkpoint(self):
+        """Best-effort WAL checkpoint. PASSIVE never blocks on a live reader, so
+        a health repair cannot stall the daemon; it consolidates what it can."""
+        with self._lock:
+            # A checkpoint cannot run inside a transaction; stay in autocommit.
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("PRAGMA busy_timeout=5000")
+            row = self.db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        return {"ok": True, "result": tuple(row) if row else None}
+
     def requeue_partial(self):
         """Resume sources left partial by a deliberate stop (daemon restart).
 
@@ -1000,12 +1011,22 @@ class MemoryStore:
                 })
         ordered = sorted(grouped.values(), key=lambda item: item["score"],
                          reverse=True)[:sessions]
+        lines = []
+        for item in ordered:
+            title = (item.get("title") or "").replace("\n", " ").strip()
+            lines.append(f"[{item['harness']}] {item['project'] or '-'}"
+                         + (f" | {title[:120]}" if title else ""))
+            for snippet in item["snippets"]:
+                body = " ".join((snippet["snippet"] or "").split())
+                if body:
+                    lines.append(f"  - {body[:280]}")
         return {
             "query": query,
             "generated_at": time.time(),
             "sessions": ordered,
             "counts": {"sessions": len(ordered),
                        "snippets": sum(len(item["snippets"]) for item in ordered)},
+            "text": "\n".join(lines),
         }
 
     def stats(self):

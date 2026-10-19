@@ -58,7 +58,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.16.4"
+VERSION = "2.18.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1142,6 +1142,12 @@ class Flock:
             self.last_message = f"Queued memory ingest {os.path.basename(path)}"
         return result
 
+    @_as_dunk_error
+    def health(self, repair=False, deep=False):
+        """Deterministic self-check; see dunk_health.run_health."""
+        from dunk_health import run_health
+        return run_health(self, repair=bool(repair), deep=bool(deep))
+
     # -- deterministic task push/reap workers -------------------------------
 
     def _start_task_workers(self):
@@ -1173,6 +1179,14 @@ class Flock:
                         f"Requeued {len(requeued)} task(s) "
                         f"({', '.join(item['task_id'] for item in requeued[:5])})")
                 log.info("requeued task leases: %s", requeued)
+            if self.memory is not None:
+                # Deterministic self-repair: a crashed ingest worker's lease is
+                # returned to the queue on every tick. No model, no human.
+                try:
+                    self.memory.recover_leases()
+                    self.memory.requeue_partial()
+                except Exception:  # noqa: BLE001 - maintenance must not die
+                    log.exception("memory maintenance failed")
             if panes is not None:
                 with self._lock:
                     for pane_id in list(self.task_waiters):

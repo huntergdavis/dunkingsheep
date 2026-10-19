@@ -196,6 +196,15 @@ def configure_logging(to_file=True, level=logging.INFO):
 def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
     """Blocking entry point used by `dunkingsheep serve`."""
     configure_logging(to_file=log_to_file)
+    unit_path = os.path.expanduser("~/.config/systemd/user/dunkingsheep.service")
+    if (socket_path == SOCKET_PATH and not os.environ.get("DUNKINGSHEEP_SOCKET")
+            and not os.environ.get("INVOCATION_ID") and os.path.exists(unit_path)):
+        # systemd owns the default socket now. A direct spawn here would steal
+        # it from the unit and put it in a restart loop.
+        log.error("dunkingsheep.service supervises this daemon; refusing an "
+                  "unsupervised start. Run: systemctl --user start "
+                  "dunkingsheep.service")
+        return 3
     kwargs = {"state_file": state_file} if state_file else {}
     flock = Flock(**kwargs)
     server = FlockServer(flock, socket_path=socket_path)

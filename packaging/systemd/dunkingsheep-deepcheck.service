@@ -1,0 +1,7 @@
+[Unit]
+Description=Dunking Sheep weekly deep integrity check (PRAGMA quick_check)
+
+[Service]
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon health --deep --repair --write
+TimeoutStartSec=600

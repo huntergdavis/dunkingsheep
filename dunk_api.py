@@ -464,6 +464,11 @@ def h_memory_ingest(flock, args, self_pane_id):
                                project=args.get("project"))
 
 
+def h_health(flock, args, self_pane_id):
+    return flock.health(repair=bool(_opt(args, "repair", False)),
+                        deep=bool(_opt(args, "deep", False)))
+
+
 def h_metrics(flock, args, self_pane_id):
     return flock.metrics_summary(window_s=float(_opt(args, "window_s", 3600)),
                                  since=args.get("since"), until=args.get("until"))
@@ -1226,6 +1231,18 @@ COMMANDS = [
         params={"path": MEMORY_PATH_PARAM, "harness": MEMORY_HARNESS_PARAM,
                 "project": MEMORY_PROJECT_PARAM},
         required=["path"],
+    ),
+    Command(
+        "health",
+        "Deterministic self-check: memory DB integrity, stale ingest leases, "
+        "WAL size, free disk space, and task counts. repair=true applies the "
+        "fixed repairs (requeue stale leases, checkpoint a large WAL). No model "
+        "is consulted; every threshold is a constant.",
+        h_health,
+        params={"repair": {"type": "boolean",
+                           "description": "Apply the fixed repairs (default false)."},
+                "deep": {"type": "boolean",
+                         "description": "Also run PRAGMA quick_check (slow)."}},
     ),
     Command(
         "metrics",
