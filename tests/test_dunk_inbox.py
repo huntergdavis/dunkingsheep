@@ -370,7 +370,7 @@ class SurfaceParityTests(unittest.TestCase):
             "memory_search": "search", "memory_stats": "stats",
             "memory_status": "status", "memory_ingest": "ingest",
             "memory_backfill": "backfill",
-            "health": "health",
+            "health": "health", "recover": "recover", "doctor": "doctor",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

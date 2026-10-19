@@ -469,6 +469,15 @@ def h_health(flock, args, self_pane_id):
                         deep=bool(_opt(args, "deep", False)))
 
 
+def h_recover(flock, args, self_pane_id):
+    return flock.recover(apply=bool(_opt(args, "apply", False)),
+                         record=bool(_opt(args, "record", False)))
+
+
+def h_doctor(flock, args, self_pane_id):
+    return flock.doctor()
+
+
 def h_metrics(flock, args, self_pane_id):
     return flock.metrics_summary(window_s=float(_opt(args, "window_s", 3600)),
                                  since=args.get("since"), until=args.get("until"))
@@ -1245,6 +1254,25 @@ COMMANDS = [
                          "description": "Also run PRAGMA quick_check (slow)."}},
     ),
     Command(
+        "doctor",
+        "Read-only post-upgrade doctor: herdr version, pane detection, "
+        "read --source visible, guard status, and dunk target metadata that no "
+        "longer matches the pane. Flags stale target_agent/target_cwd.",
+        h_doctor,
+    ),
+    Command(
+        "recover",
+        "Post-upgrade recovery plan from dunks.json + launches.json + memory "
+        "sessions. apply=true types launches only into panes that are still "
+        "bare shells (never over a live agent); record=true snapshots live "
+        "agent sessions first. A missing session is reported, never invented.",
+        h_recover,
+        params={"apply": {"type": "boolean",
+                          "description": "Type launch commands into empty shells."},
+                "record": {"type": "boolean",
+                           "description": "Snapshot live agent sessions into launches.json."}},
+    ),
+    Command(
         "metrics",
         "Read-only operations metrics as JSON: counts by sender, recipient, "
         "pane and source, duration distributions for queue wait, delivery and "
@@ -1530,9 +1558,10 @@ MCP_GROUPS = (
      "self-check; repair=true fixes stale leases and a large WAL).",
      (("summary", "metrics"), ("status", "status"), ("health", "health"))),
     ("system",
-     "Discovery and the raw escape hatch. action=help (full guide + registry), "
-     "herdr (any herdr subcommand except the typing ones), herdr_help.",
-     (("help", "help"), ("herdr", "herdr"), ("herdr_help", "herdr_help"))),
+     "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), "
+     "herdr (any herdr subcommand except the typing ones), herdr_help, recover, doctor.",
+     (("help", "help"), ("herdr", "herdr"), ("herdr_help", "herdr_help"),
+      ("recover", "recover"), ("doctor", "doctor"))),
 )
 
 

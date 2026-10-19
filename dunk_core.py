@@ -58,12 +58,13 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.20.1"
+VERSION = "2.21.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
 )
 STATE_FILE = os.path.join(CONFIG_DIR, "dunks.json")
+LAUNCHES_FILE = os.path.join(CONFIG_DIR, "launches.json")
 
 # Agent states during which an `only_when="idle"` dunk holds its send.
 BUSY_STATUSES = ("working", "blocked")
@@ -398,12 +399,18 @@ class Message:
 class Flock:
     """Owns every dunker and its timer thread. Thread-safe."""
 
-    def __init__(self, herdr=None, state_file=STATE_FILE, persist=True,
+    def __init__(self, herdr=None, state_file=STATE_FILE,
+                 launches_file=LAUNCHES_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
                  superusers=None, memory=None):
         self.herdr = herdr or HerdrClient()
         self.state_file = state_file
+        self.launches_file = launches_file
+        # pane_id -> {agent, session, session_kind, cwd, argv, command, source}
+        # Exact launch memory for post-upgrade recovery.
+        self.launches = {}
         self.persist_enabled = persist
+        self._load_launches()
         self._lock = threading.RLock()
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
@@ -513,6 +520,77 @@ class Flock:
             os.replace(tmp, self.state_file)
         except OSError as error:
             log.warning("could not save %s: %s", self.state_file, error)
+
+    # -- launch memory (post-upgrade recovery) --------------------------------
+
+    def _load_launches(self):
+        if not self.persist_enabled or not os.path.exists(self.launches_file):
+            return
+        try:
+            with open(self.launches_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as error:
+            log.warning("could not read %s: %s", self.launches_file, error)
+            return
+        panes = payload.get("panes") if isinstance(payload, dict) else None
+        if isinstance(panes, dict):
+            self.launches = {pane_id: dict(entry) for pane_id, entry in panes.items()
+                             if isinstance(entry, dict)}
+
+    def _save_launches(self):
+        if not self.persist_enabled:
+            return
+        with self._lock:
+            payload = {"version": 1, "panes": self.launches}
+        try:
+            os.makedirs(os.path.dirname(self.launches_file), exist_ok=True)
+            temporary = self.launches_file + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.launches_file)
+        except OSError as error:
+            log.warning("could not write %s: %s", self.launches_file, error)
+
+    def _record_launch(self, pane_id, **fields):
+        if not pane_id:
+            return
+        with self._lock:
+            entry = self.launches.setdefault(pane_id, {})
+            for key, value in fields.items():
+                if value is not None:
+                    entry[key] = value
+            entry["recorded_at"] = time.time()
+        self._save_launches()
+
+    def _snapshot_launches(self, panes):
+        """Keep launches.json current from herdr's agent_session metadata."""
+        if not self.persist_enabled:
+            return
+        changed = False
+        with self._lock:
+            for pane in panes or []:
+                session = pane.get("agent_session") or {}
+                agent = pane.get("agent") or session.get("agent")
+                value = session.get("value")
+                if not agent or not value:
+                    continue
+                entry = self.launches.setdefault(pane.get("pane_id"), {})
+                fields = {
+                    "agent": agent,
+                    "session": value,
+                    "session_kind": session.get("kind"),
+                    "cwd": pane.get("cwd") or pane.get("foreground_cwd"),
+                    "terminal_title": pane.get("terminal_title_stripped"),
+                }
+                for key, field in fields.items():
+                    if field is not None and entry.get(key) != field:
+                        entry[key] = field
+                        changed = True
+                if changed and entry.get("source") is None:
+                    entry["source"] = "herdr"
+        if changed:
+            self._save_launches()
 
     # -- lookup ---------------------------------------------------------------
 
@@ -1165,7 +1243,9 @@ class Flock:
     def _task_reaper_loop(self):
         while not self._task_stop.wait(TASK_REAP_S):
             try:
-                panes = {p["pane_id"] for p in self.herdr.list_panes()}
+                pane_list = self.herdr.list_panes()
+                self._snapshot_launches(pane_list)
+                panes = {p["pane_id"] for p in pane_list}
             except Exception:
                 panes = None
             try:
@@ -1637,11 +1717,212 @@ class Flock:
         if not ok:
             raise DunkError(f"herdr could not start agent {name!r}: {result}")
         agent = result.get("agent") or {}
+        session = agent.get("agent_session") or {}
+        self._record_launch(
+            agent.get("pane_id"), agent=name, argv=list(argv),
+            command=shlex.join(argv), cwd=cwd or agent.get("cwd"),
+            session=session.get("value"), session_kind=session.get("kind"),
+            name=name, source="start_agent")
         with self._lock:
             self.last_message = f"Started agent {name}"
         log.info("started agent %s -> %s: %s", name, agent.get("pane_id"), argv)
         return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
                 "argv": result.get("argv") or argv}
+
+    # -- post-upgrade recovery ------------------------------------------------
+
+    @staticmethod
+    def _is_empty_shell(pane):
+        if not pane or pane.get("agent"):
+            return False
+        if (pane.get("agent_status") or "unknown") not in (None, "unknown"):
+            return False
+        title = (pane.get("terminal_title_stripped") or "").strip()
+        return bool(re.match(r"^[^@\s]+@[^:\s]+:", title))
+
+    @staticmethod
+    def _resume_command(agent, session):
+        if not agent or not session:
+            return None
+        if agent == "pi":
+            return f"pi --session {shlex.quote(session)}"
+        if agent == "codex":
+            return f"codex resume {shlex.quote(session)}"
+        if agent == "claude":
+            return f"claude --resume {shlex.quote(session)}"
+        return None  # opencode/unknown: do not invent a command
+
+    def _launch_for(self, pane_id, dunker, entry, cwd):
+        entry = entry or {}
+        argv = entry.get("argv")
+        if argv:
+            command = shlex.join(argv)
+            if any(flag in argv for flag in ("--session", "--resume", "resume")):
+                return command, "recorded-argv"
+        agent = entry.get("agent") or (dunker.target_agent if dunker else None)
+        session = entry.get("session")
+        source = "recorded-session"
+        if not session and agent and cwd and self.memory is not None:
+            harness = agent if agent in ("pi", "codex", "claude", "opencode") else None
+            if harness:
+                row = self.memory.latest_session(harness, cwd)
+                if row:
+                    session = row["id"]
+                    source = "memory-latest"
+        command = self._resume_command(agent, session)
+        if not command and argv:
+            return shlex.join(argv), "recorded-argv"
+        return (command, source) if command else (None, None)
+
+    @staticmethod
+    def _with_cwd(cwd, command):
+        if cwd and command and not command.startswith("cd "):
+            return f"cd {shlex.quote(cwd)} && {command}"
+        return command
+
+    def _doctor_warnings(self, by_id):
+        warnings = []
+        for dunker in self.dunkers:
+            if not dunker.running or not dunker.target_pane_id:
+                continue
+            pane = by_id.get(dunker.target_pane_id)
+            if pane is None:
+                warnings.append({"dunk": dunker.id, "pane_id": dunker.target_pane_id,
+                                 "kind": "pane-missing",
+                                 "detail": "target pane no longer exists"})
+                continue
+            live_agent = pane.get("agent")
+            if dunker.target_agent and live_agent and dunker.target_agent != live_agent:
+                warnings.append({
+                    "dunk": dunker.id, "pane_id": dunker.target_pane_id,
+                    "kind": "agent-mismatch", "target_agent": dunker.target_agent,
+                    "pane_agent": live_agent,
+                    "detail": f"dunk says {dunker.target_agent}, pane is {live_agent}"})
+            live_cwd = pane.get("cwd") or pane.get("foreground_cwd")
+            if (dunker.target_cwd and live_cwd
+                    and os.path.normpath(dunker.target_cwd) != os.path.normpath(live_cwd)):
+                warnings.append({
+                    "dunk": dunker.id, "pane_id": dunker.target_pane_id,
+                    "kind": "cwd-mismatch", "target_cwd": dunker.target_cwd,
+                    "pane_cwd": live_cwd,
+                    "detail": f"dunk says {dunker.target_cwd}, pane is {live_cwd}"})
+        return warnings
+
+    def _guard_status(self):
+        try:
+            from dunk_guard import status
+            return status()
+        except Exception as error:  # noqa: BLE001 - report, never raise
+            return {"error": str(error)}
+
+    def recover(self, apply=False, record=False, self_pane_id=None):
+        """Plan (and optionally apply) post-upgrade agent recovery.
+
+        Sources: launches.json (exact argv/session), herdr's live agent_session,
+        then the memory index's latest session for the dunk's harness+cwd. A
+        missing session is reported, never invented. --apply types only into
+        panes that are still bare shells.
+        """
+        panes = self.herdr.list_panes()
+        by_id = {pane.get("pane_id"): pane for pane in panes}
+        if record:
+            self._snapshot_launches(panes)
+        plan, seen = [], set()
+        for dunker in self.dunkers:
+            if not dunker.running or not dunker.target_pane_id:
+                continue
+            pane_id = dunker.target_pane_id
+            seen.add(pane_id)
+            pane = by_id.get(pane_id)
+            cwd = (pane.get("cwd") if pane else None) or dunker.target_cwd
+            item = {"pane_id": pane_id, "dunk": dunker.id,
+                    "agent": (pane or {}).get("agent") or dunker.target_agent,
+                    "cwd": cwd, "target_agent": dunker.target_agent,
+                    "target_cwd": dunker.target_cwd}
+            if pane is None:
+                item.update(action="pane-missing",
+                            reason="target pane no longer exists")
+            elif pane.get("agent"):
+                item.update(action="already-running",
+                            reason=f"{pane['agent']} is live")
+            elif not self._is_empty_shell(pane):
+                item.update(action="not-empty-shell",
+                            reason="pane is not a bare shell")
+            else:
+                command, source = self._launch_for(
+                    pane_id, dunker, self.launches.get(pane_id), cwd)
+                if command:
+                    item.update(action="launch",
+                                command=self._with_cwd(dunker.target_cwd or cwd, command),
+                                source=source)
+                else:
+                    item.update(action="no-session",
+                                reason="no recorded launch or unique session; start manually")
+            plan.append(item)
+        for pane_id, entry in self.launches.items():
+            if pane_id in seen:
+                continue
+            pane = by_id.get(pane_id)
+            if not pane or not self._is_empty_shell(pane):
+                continue
+            command, source = self._launch_for(pane_id, None, entry, entry.get("cwd"))
+            if command:
+                plan.append({"pane_id": pane_id, "dunk": None,
+                             "agent": entry.get("agent"), "cwd": entry.get("cwd"),
+                             "action": "launch",
+                             "command": self._with_cwd(entry.get("cwd"), command),
+                             "source": source,
+                             "reason": "recorded pane (no running dunk)"})
+        warnings = self._doctor_warnings(by_id)
+        applied = []
+        if apply:
+            for item in plan:
+                if item["action"] != "launch":
+                    continue
+                pane = self.herdr.get_pane(item["pane_id"])
+                if pane is None or pane.get("agent") or not self._is_empty_shell(pane):
+                    item["applied"] = False
+                    item["apply_reason"] = "pane is no longer an empty shell"
+                    continue
+                ok, detail = self.herdr.send_text_and_enter(
+                    item["pane_id"], item["command"])
+                item["applied"] = bool(ok)
+                item["apply_detail"] = detail
+                if ok:
+                    self._record_launch(
+                        item["pane_id"], agent=item.get("agent"),
+                        command=item["command"], cwd=item.get("cwd"),
+                        source="recover", applied_at=time.time())
+                    applied.append(item["pane_id"])
+        return {"ok": bool(not warnings
+                           and all(item["action"] in ("launch", "already-running")
+                                   for item in plan)),
+                "apply": bool(apply), "herdr": self.herdr.version(),
+                "plan": plan, "warnings": warnings, "applied": applied,
+                "launches": len(self.launches)}
+
+    def doctor(self, self_pane_id=None):
+        """Read-only post-upgrade check of the herdr surfaces and dunk metadata."""
+        panes = self.herdr.list_panes()
+        by_id = {pane.get("pane_id"): pane for pane in panes}
+        read_ok = None
+        if panes:
+            read_ok = self.herdr.read_pane(panes[0]["pane_id"], lines=3,
+                                           source="visible") is not None
+        guard = self._guard_status()
+        warnings = self._doctor_warnings(by_id)
+        guard_ok = bool(guard.get("shadowing_herdr") or guard.get("installed"))
+        return {"ok": bool(not warnings and read_ok and guard_ok),
+                "herdr_version": self.herdr.version(),
+                "panes": {"total": len(panes),
+                          "with_agent": sum(1 for pane in panes if pane.get("agent")),
+                          "with_session": sum(1 for pane in panes
+                                              if pane.get("agent_session"))},
+                "surfaces": {"pane_list": bool(panes),
+                             "pane_get": bool(panes) and self.herdr.get_pane(
+                                 panes[0]["pane_id"]) is not None,
+                             "read_visible": read_ok, "guard": guard},
+                "warnings": warnings, "launches": len(self.launches)}
 
     def rename(self, kind, target, label, self_pane_id=None):
         label = str(label or "").strip()

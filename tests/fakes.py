@@ -70,6 +70,9 @@ class FakeHerdr:
         self.lock = threading.Lock()
         self.sent = threading.Event()
 
+    def version(self):
+        return "herdr 0.9.5"
+
     def is_available(self):
         return self.available
 

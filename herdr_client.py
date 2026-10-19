@@ -167,6 +167,16 @@ class HerdrClient:
 
     # -- health ------------------------------------------------------------
 
+    def version(self):
+        """The herdr CLI version string (e.g. 'herdr 0.9.5'), or None."""
+        for args in (["--version"], ["version"]):
+            code, out, err = self._run(args, timeout=5)
+            text = (out or "").strip() or (err or "").strip()
+            if code != 0 or not text:
+                continue
+            return text.splitlines()[-1].strip()
+        return None
+
     def is_available(self):
         """True if the herdr binary exists and the server is reachable."""
         code, out, err = self._run(["status", "server"], timeout=5)

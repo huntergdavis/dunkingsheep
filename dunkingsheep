@@ -372,6 +372,15 @@ def build_parser():
                    help="also write the JSON report "
                         "(default ~/.config/dunkingsheep/health.json)")
 
+    p = sub.add_parser("recover",
+                       help="post-upgrade recovery plan; --apply types into bare shells")
+    p.add_argument("--apply", action="store_true",
+                   help="type the launch commands into panes that are still empty shells")
+    p.add_argument("--record", action="store_true",
+                   help="snapshot live agent sessions into launches.json first")
+    sub.add_parser("doctor",
+                   help="post-upgrade doctor: herdr surfaces + dunk target metadata")
+
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
 
@@ -818,6 +827,39 @@ def print_health(result):
     print(f"  integrity={checks.get('integrity')} "
           f"stale={checks.get('stale_leases')} wal={checks.get('wal_bytes')} "
           f"disk_free={checks.get('disk_free_bytes')} tasks={checks.get('tasks')}")
+
+
+def print_doctor(result):
+    state = "ok" if result.get("ok") else "WARN"
+    print(f"doctor {state}  herdr {result.get('herdr_version')}  "
+          f"launches {result.get('launches')}")
+    panes = result.get("panes") or {}
+    print(f"  panes {panes.get('total')} (agents {panes.get('with_agent')}, "
+          f"sessions {panes.get('with_session')})")
+    for key, value in (result.get("surfaces") or {}).items():
+        if key == "guard" and isinstance(value, dict):
+            print(f"  guard installed={value.get('installed')} "
+                  f"shadowing={value.get('shadowing_herdr')} "
+                  f"active_in_this_shell={value.get('active_in_this_shell')}")
+        else:
+            print(f"  {key} {value}")
+    for warning in result.get("warnings") or []:
+        print(f"  warning {warning.get('kind')}: {warning.get('detail')}")
+
+
+def print_recover(result):
+    mode = "apply" if result.get("apply") else "dry-run"
+    print(f"recover {mode}  herdr {result.get('herdr')}  ok {result.get('ok')}  "
+          f"launches {result.get('launches')}")
+    for item in result.get("plan") or []:
+        agent = item.get("agent") or "-"
+        detail = item.get("command") or item.get("reason") or ""
+        print(f"  {item['pane_id']:<8} {item['action']:<15} {agent:<8} {detail}")
+        if item.get("applied") is not None:
+            print(f"           applied={item['applied']} "
+                  f"{item.get('apply_reason') or item.get('apply_detail') or ''}")
+    for warning in result.get("warnings") or []:
+        print(f"  warning {warning.get('kind')}: {warning.get('detail')}")
 
 
 def print_superuser(result):
@@ -1468,6 +1510,11 @@ def run_client_command(client, args):
                 print(f"  report written to {path}")
         return client.call("health", repair=args.repair,
                            deep=args.deep), render_health
+    if command == "recover":
+        return client.call("recover", apply=args.apply,
+                           record=args.record), print_recover
+    if command == "doctor":
+        return client.call("doctor"), print_doctor
     if command == "shutdown":
         return client.call("shutdown", stop_all=args.stop_all), \
             lambda r: print("daemon shutting down" + (" (all dunks stopped)" if r["stopped_all"] else ""))

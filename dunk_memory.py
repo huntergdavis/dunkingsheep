@@ -994,6 +994,23 @@ class MemoryStore:
         self._record_query((time.perf_counter() - started) * 1000, len(final))
         return [dict(item) for item in final]
 
+    def latest_session(self, harness, cwd=None):
+        """The most recently updated indexed session for a harness and cwd.
+
+        Read-only and exact: it returns a real session id or None. Recovery uses
+        it only when no recorded launch exists; it never invents a session."""
+        if not harness or not cwd:
+            return None
+        conn = self._read_connection()
+        try:
+            row = conn.execute(
+                "SELECT id, harness, cwd, updated_at FROM sessions "
+                "WHERE harness = ? AND cwd = ? "
+                "ORDER BY updated_at DESC LIMIT 1", (harness, cwd)).fetchone()
+            return dict(row) if row else None
+        finally:
+            self._release_connection(conn)
+
     def context(self, query, sessions=5, snippets_per_session=2):
         rows = self.recall(query, limit=max(20, sessions * 4))
         grouped = {}

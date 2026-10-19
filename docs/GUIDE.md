@@ -1,4 +1,4 @@
-# Dunking Sheep 2.20.1 guide
+# Dunking Sheep 2.21.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -501,6 +501,10 @@ memory_status; memory_ingest is superuser-only. `memory_stats` reports
 p50/p95/p99, DB bytes and queue depth. The legacy index is retired:
 only recall path (the legacy index is retired; see
 docs/MEMORY_MIGRATION.md).
+
+## Recovery after a herdr upgrade
+
+An upgrade can restore every pane as a bare shell and lose the agent roster. `dunkingsheep doctor` is the read-only check: herdr version, pane detection, `read --source visible`, the guard, and any dunk whose target_agent or target_cwd no longer matches its pane. `dunkingsheep recover` prints a dry-run plan from dunks.json, launches.json and the memory index: `pi --session ...`, `codex resume ...`, `claude --resume ...`. `--record` snapshots live sessions first; `--apply` types a launch only into a pane that is still a bare shell, never over a live agent. A missing session is reported, never invented.
 
 ## Superusers and destructive operations
 

@@ -466,6 +466,16 @@ def guide(markdown=False):
       "only recall path (the legacy index is retired; see\n"
       "docs/MEMORY_MIGRATION.md).\n")
 
+    w(h(2, "Recovery after a herdr upgrade"))
+    w("An upgrade can restore every pane as a bare shell and lose the agent roster. "
+      "`dunkingsheep doctor` is the read-only check: herdr version, pane detection, "
+      "`read --source visible`, the guard, and any dunk whose target_agent or "
+      "target_cwd no longer matches its pane. `dunkingsheep recover` prints a "
+      "dry-run plan from dunks.json, launches.json and the memory index: "
+      "`pi --session ...`, `codex resume ...`, `claude --resume ...`. `--record` "
+      "snapshots live sessions first; `--apply` types a launch only into a pane "
+      "that is still a bare shell, never over a live agent. A missing session is "
+      "reported, never invented.\n")
     w(h(2, "Superusers and destructive operations"))
     w("Only panes and names on the superuser allowlist may close a pane, tab or\n"
       "workspace, stop the daemon, manage dunks, spawn agents, or use the raw\n"
