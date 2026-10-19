@@ -2,15 +2,14 @@
 """
 Memory v1 parity harness (t10).
 
-Bounded backfill of real sessions into a TEMP memory database (never the live
-one, never deja), a golden query set, and a top-5 session overlap comparison
-against `deja --json`. It makes **no parity claim**: the verbatim golden set is
-near-tautological and only the overlap field is meaningful. Also proves rollback:
-a consistent DB backup, an empty re-open, a restore, and deja still answering.
+Memory comparison harness. By default it is **memory-only** (deja is retired):
+it copies the live DB read-only, runs the verbatim golden set and the hand-
+labelled ground-truth intent set, and proves rollback (backup -> delete ->
+restore). `--compare-deja` enables the archival comparison against a deja binary
+if one is ever restored; deja is never rebuilt or modified.
 
-    python3 tools/memory_parity.py --queries 60
-
-Deja is read-only here; it is never rebuilt or modified.
+    python3 tools/memory_parity.py                 # memory only (default)
+    python3 tools/memory_parity.py --compare-deja  # archival deja comparison
 """
 
 import argparse
@@ -388,12 +387,17 @@ def main(argv=None):
                         help="write per-query detail JSON here")
     parser.add_argument("--markdown", metavar="PATH",
                         help="write the human comparison report here")
+    parser.add_argument("--compare-deja", action="store_true",
+                        help="archival: also query a deja binary for overlap")
     parser.add_argument("--memory-only", action="store_true",
-                        help="skip deja queries (recall only; overlap marked skipped)")
+                        help="compatibility alias; memory-only is the default")
     parser.add_argument("--open-intent", dest="open_intent",
                         action="store_true",
                         help="also run the breadth-only open intent set")
     args = parser.parse_args(argv)
+    # Deja is retired. The default never touches it; --compare-deja is an
+    # explicit archival opt-in.
+    args.memory_only = not args.compare_deja
 
     tmpdir = tempfile.mkdtemp(prefix="memory-parity-")
     db_path = args.db or os.path.join(tmpdir, "memory.db")

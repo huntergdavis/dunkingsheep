@@ -64,8 +64,8 @@ workspace/tab go to the dedicated sandbox workspace, never the caller's tab.
 
 Memory: memory(action=\"recall|context|search|stats|status\") are the deterministic SQLite+FTS5 recall layer. They are
 read-only: a query never reindexes and never waits for ingest. memory(action=\"ingest\")
-(superuser) queues a source. Deja remains installed and read-only (no
-parity claim; scoped sign-off recorded).
+(superuser) queues a source. The legacy memory index is retired: memory
+is the only recall path.
 
 Typical uses: keep another agent moving (dunk(action=\"add\", target=<its pane>)), message
 an agent right now (pane(action=\"send\")), inspect what an agent is doing (pane(action=\"read\")),

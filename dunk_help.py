@@ -462,9 +462,9 @@ def guide(markdown=False):
            "dunkingsheep memory ingest <session.jsonl|history.sqlite> [--harness ...]"))
     w("MCP: memory_recall / memory_context / memory_search / memory_stats /\n"
       "memory_status; memory_ingest is superuser-only. `memory_stats` reports\n"
-      "p50/p95/p99, DB bytes and queue depth. Deja stays installed and\n"
-      "read-only; the scoped sign-off records memory as primary with no parity\n"
-      "claim (see docs/memory_signoff.md).\n")
+      "p50/p95/p99, DB bytes and queue depth. The legacy index is retired:\n"
+      "only recall path (the legacy index is retired; see\n"
+      "docs/MEMORY_MIGRATION.md).\n")
 
     w(h(2, "Superusers and destructive operations"))
     w("Only panes and names on the superuser allowlist may close a pane, tab or\n"

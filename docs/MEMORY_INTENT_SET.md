@@ -1,5 +1,9 @@
 # Ground-truth intent query set (t14)
 
+Deja is retired (owner #913); this set and its recall numbers are the
+standing memory-only evaluation. The deja overlap columns below are historical
+or explicitly `skipped`.
+
 The reviewer asked for a hand-labelled intent set: natural-language questions
 with a **known relevant session**, so recall@5 is meaningful and is published
 next to top-5 overlap. This set lives in `tools/memory_parity.py` as
@@ -20,7 +24,7 @@ next to top-5 overlap. This set lives in `tools/memory_parity.py` as
 
 - **memory recall@5 = 0.9167** (22/24)
 - latency: p50 1928.88 ms, p95 3507.89 ms
-- deja overlap: **skipped this run** — deja's CLI re-scans the ~17 GB corpus on
+- deja overlap: **skipped** — deja is retired and its CLI re-scanned the ~17 GB corpus on
   every invocation (minutes per query), so a 24-query deja run is not viable.
   The harness marks overlap `skipped` rather than inventing a number. When deja
   answers, the same table fills both columns.

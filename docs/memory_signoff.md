@@ -1,5 +1,8 @@
 # Memory v1 — scoped sign-off (ds4/pi, 2026-10-19)
 
+> **Superseded:** owner #913 retired deja on 2026-10-19. This statement is
+> historical; memory is now the only recall path with no deja fallback.
+
 ## SIGNED: option (a) — scoped factual statement, NOT a parity claim
 
 > **"Memory v1 is the primary recall path. Deja remains installed and read-only

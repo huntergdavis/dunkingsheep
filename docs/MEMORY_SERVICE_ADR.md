@@ -1,16 +1,15 @@
 # ADR 0001: A memory and recall service inside Dunking Sheep
 
-- **Status:** Accepted (v1) — scoped sign-off 2026-10-19, **no parity claim**
+- **Status:** Accepted (v1) — **deja retired 2026-10-19 (owner #913)**; no parity claim
 
-> **Update 2026-10-19:** the "t10 bounded parity result" below is
-> **retracted** (bounded sample + verbatim queries; see
-> [`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md)). The reviewer signed a
-> scoped factual statement — *memory primary, deja installed read-only, no
-> parity claim* — full text in [`memory_signoff.md`](memory_signoff.md).
-> Treat every "parity" word below as historical.
+> **Update 2026-10-19:** deja is **retired** (owner #913). Memory is the only
+> recall path; there is no fallback, MCP entry, hook or timer. The t10 bounded
+> "parity" result below is **retracted** (bounded sample + verbatim queries;
+> see [`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md)). Treat every
+> "parity" and "deja" word below as historical.
 - **Date:** 2026-10-18
 - **Owner:** Dunking Sheep / pi (w8:p8), for the VP of Agentry
-- **Replaces:** deja 0.6.0 as the primary memory layer (deja stays installed and read-only; no parity claim)
+- **Replaces:** deja 0.6.0, now fully retired (no parity claim)
 - **Related:** global task queue 2.15.x, MCP/CLI surface audit (t8)
 
 ## Summary

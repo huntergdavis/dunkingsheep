@@ -134,13 +134,14 @@ dunkingsheep memory ingest <path>  # superuser; async
 
 MCP tool: `memory(action=recall|context|search|stats|status|ingest|backfill)`.
 The service is scoped to 1–10 M chunks on this
-box; billions is a later sharded/remote tier. The pi/Claude/opencode/Codex agents
-now use memory as the primary recall path, with deja kept installed and
-read-only as the fallback; see [`docs/MEMORY_MIGRATION.md`](docs/MEMORY_MIGRATION.md)
-and [`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
+box; billions is a later sharded/remote tier. The pi/Claude/opencode/Codex agents now use memory as the **only** recall
+path; the legacy index (deja) is retired. See
+[`docs/MEMORY_MIGRATION.md`](docs/MEMORY_MIGRATION.md) and
+[`docs/MEMORY_SERVICE_ADR.md`](docs/MEMORY_SERVICE_ADR.md).
 
-Parity harness (bounded backfill, deja top-5 comparison, rollback proof):
-`python3 tools/memory_parity.py`. Acceptance: `python3 tools/memory_acceptance.py`.
+Comparison harness (memory-only by default; `--compare-deja` is archival;
+rollback proof): `python3 tools/memory_parity.py`. Deja-free audit:
+`python3 tools/check_deja_free.py`. Acceptance: `python3 tools/memory_acceptance.py`.
 
 ## ♻️ Self-sustaining (t12)
 

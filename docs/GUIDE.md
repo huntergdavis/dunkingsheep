@@ -1,4 +1,4 @@
-# Dunking Sheep 2.19.3 guide
+# Dunking Sheep 2.20.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -498,9 +498,9 @@ dunkingsheep memory ingest <session.jsonl|history.sqlite> [--harness ...]
 
 MCP: memory_recall / memory_context / memory_search / memory_stats /
 memory_status; memory_ingest is superuser-only. `memory_stats` reports
-p50/p95/p99, DB bytes and queue depth. Deja stays installed and
-read-only; the scoped sign-off records memory as primary with no parity
-claim (see docs/memory_signoff.md).
+p50/p95/p99, DB bytes and queue depth. The legacy index is retired:
+only recall path (the legacy index is retired; see
+docs/MEMORY_MIGRATION.md).
 
 ## Superusers and destructive operations
 

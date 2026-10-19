@@ -1,118 +1,75 @@
-# Memory migration: agents off deja onto Dunking Sheep memory (t11)
+# Memory migration: deja retired (t11, owner #913)
 
-Status (2026-10-19, VP direction): **memory primary, deja installed read-only,
-no parity claim.** Dunking Sheep memory is the primary recall path for every
-agent. Deja stays installed, answering capped, and **read-only**. We make **no
-parity claim** (the earlier `1.000 vs 0.733` headline is retracted — see the
-correction below). Deja is **not retired** until the reviewer signs a scoped
-statement: **(a)** "memory primary, deja installed read-only, no parity claim"
-or **(b)** "keep deja primary". Nothing was uninstalled, so every switch is
-reversible by editing one file.
+Status (2026-10-19, owner #913): **deja is fully retired.** Dunking Sheep memory
+is the **only** recall path for every agent. There is no deja fallback, MCP
+entry, startup hook, timer, or binary on `PATH`. Deja's index and data are
+**archived, not deleted** (do not remove them).
 
-## Standing comparison
-
-`python3 tools/memory_parity.py` is the standing comparison: it copies the live
-DB read-only (full corpus, no re-ingest), queries deja live on the same
-sessions, and reports rank agreement plus a hand-written **non-verbatim intent**
-query set. Any deja error fails the gate. Deja queries are capped (`nice -n 10`,
-`GOMAXPROCS=2` via `~/.local/bin/deja`) and each harness query has a timeout.
-Report: [`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md); per-query detail:
-[`memory_parity_detail.json`](memory_parity_detail.json).
+The earlier "memory primary, deja read-only, no parity claim" scoped statement
+is historical; owner #913 superseded it by removing deja from the stack.
 
 ## What each agent now uses
 
-| Agent | Was | Now | Fallback |
-| --- | --- | --- | --- |
-| pi (startup context) | `deja hook-context` in `~/.pi/agent/extensions/deja.ts` | `dunkingsheep memory hook-context --sessions 5`, injected as the hidden `memory-context` message | `deja hook-context` if memory is unreachable or empty |
-| pi (tools) | deja MCP `recall` / `recall_context` (`direct`) | `dunkingsheep` MCP `memory_recall` / `memory_context` / `memory_search` / `memory_stats` / `memory_status` set to `toolExposure: direct` | deja MCP stays registered and `direct` |
-| pi (instructions) | `~/.pi/agent/AGENTS.md` deja section | same file, memory section, deja named as read-only fallback | — |
-| Claude Code (session start) | `~/.claude/settings.json` SessionStart → `deja hook-context` | `dunkingsheep memory hook-context \|\| deja hook-context` | the `\|\|` branch |
-| opencode | `~/.config/opencode/AGENTS.md` deja rule | memory command/tools, deja read-only fallback | — |
-| Codex | `~/.codex/AGENTS.md` deja rule | memory command/tools, deja read-only fallback | — |
+| Agent | Recall path now |
+| --- | --- |
+| pi startup context | `dunkingsheep memory hook-context`, injected as the hidden `memory-context` message (`~/.pi/agent/extensions/memory.ts`) |
+| pi tools | `dunkingsheep` MCP: `inbox`/`task`/`memory`/`metrics` direct; memory actions `recall`/`context`/`search`/`stats`/`status` |
+| Claude Code | SessionStart → `dunkingsheep memory hook-context` (no `\|\|` fallback) |
+| opencode | `AGENTS.md` → `dunkingsheep memory ...` / memory MCP tools |
+| Codex | `AGENTS.md` → `dunkingsheep memory ...` / memory MCP tools |
 
-The daemon side is unchanged: `memory_recall`, `memory_context`, `memory_search`,
-`memory_stats`, `memory_status`, and the gated `memory_ingest` / `memory_backfill`
-/ `memory_backfill` live on the existing `dunkingsheep` MCP server and CLI.
+No agent config lists deja any more: pi `mcp.json`, `~/.claude/settings.json`,
+`~/.codex/config.toml`, `~/.config/opencode/opencode.jsonc`, and the AGENTS
+files are clean.
 
-## Recall quality (bounded parity, `tools/memory_parity.py`)
+## Retirement audit
 
-26-file bounded backfill → 33 sessions / 58,191 chunks; 30 golden queries on
-claude/codex/opencode, deja `--json` restricted to the same sessions.
+`python3 tools/check_deja_free.py` (and `--repo-only` in CI) fails if an active
+surface still references deja: harness configs/hooks/instructions, systemd user
+units, PATH binaries, scheduled dunks, or Dunking Sheep runtime code. Historical
+docs/tests and the archival comparison are reported, not failed.
 
-**Correction (reviewer feedback):** the earlier headline `recall@5 1.000 vs
-deja 0.733` was bounded-sample and near-tautological (golden queries were
-verbatim slices of indexed chunks). On the full corpus with deja live, the
-honest numbers are: memory recall@5 1.000 (sanity check only), deja recall@5
-0.367, mean top-5 overlap 0.336, top-1 0.30; on hand-written non-verbatim
-intent queries deja returns nothing for most queries while memory stays
-on-topic. **No parity claim.** Full methodology and per-query detail:
-[`docs/MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md) and
-[`docs/memory_parity_detail.json`](memory_parity_detail.json).
+Result on 2026-10-19: **ok** — no active references; historical references only
+in docs/tests and the archival comparison harness.
 
-Full corpus after backfill: 488/488 sources, 0 failed, 0 skipped, 326 sessions,
-262,299 chunks, 277.9 MB. Live 20-client recall on the full corpus: 0 errors,
-p50 57 ms, p95 109 ms, p99 144 ms. Acceptance
-(`tools/memory_acceptance.py --duration 60`): p95 123 ms, 23,311 queries,
-0 failures. Rollback was proven: consistent backup → delete → 0 chunks → restore
-→ identical counts, with deja answering throughout.
+## What was removed or archived
 
-## Rollback (any agent, in under a minute)
+- **Configs/hooks:** deja MCP entries removed from pi, Claude, Codex and
+  opencode; the Claude SessionStart `\|\| deja` fallback removed; pi extension
+  renamed `deja.ts` → `memory.ts` and made memory-only.
+- **Timer:** `deja-health.service`/`.timer` and its drop-in moved to
+  `~/.local/share/deja-retired/`; the user timer list has no deja unit.
+- **Binaries:** `deja`, `deja-real` and `deja-health` are no longer on `PATH`
+  (archived by the VP; the wrapper is not installed).
+- **Instructions:** `AGENTS.md` (pi/codex/opencode) says the legacy index is
+  retired and memory is the only recall path.
+- **Data:** `~/.cache/deja/index.db`, the health report and the archived units
+  are kept. Nothing deleted.
 
-Deja never stopped and its index is intact, so rollback is a config edit:
+## Memory covers every recall use
 
-1. **pi context**: in `~/.pi/agent/extensions/deja.ts`, `loadContext` already
-   falls back to deja. To force deja-only, make `loadContext` call
-   `runHookContext(pi, ctx, DEJA_BIN, ["hook-context"])` and return.
-2. **pi tools**: in `~/.pi/agent/mcp.json`, drop `toolExposure` from the
-   `dunkingsheep` entry (memory tools go back to deferred) and keep/raise the
-   `deja` entry to `direct`; `/reload`.
-3. **Claude Code**: in `~/.claude/settings.json`, change the SessionStart
-   command back to `/home/hunter/.local/bin/deja hook-context`.
-4. **opencode / Codex**: restore the deja paragraph in their `AGENTS.md`.
-5. Verify deja independently: `deja "<query>"` and `deja-health`.
+The memory service indexes 488 sources / 326 sessions / 262,299 chunks. The
+hand-labelled ground-truth intent set (24 queries; `INTENT_GROUND_TRUTH`) gives
+**recall@5 = 0.9167 (22/24)** with p50 ~1.5 s / p95 ~3.5 s. The two misses are
+the Claude weekly-allowance/C-porting query and the host-hold/high-PSI query
+(see [`MEMORY_INTENT_SET.md`](MEMORY_INTENT_SET.md)). Those are the only known
+coverage gaps; no query class depends on deja.
 
-Data rollback for memory itself: `dunkingsheep memory status`, then stop the
-daemon and replace `~/.config/dunkingsheep/memory.db` from the pre-migration
-backup. deja is unaffected by anything in that file.
+## Rollback
 
-## Why deja stays live
+Deja rollback is **no longer supported**: the binaries are archived and no
+config points at them. The real rollback is the memory DB itself — a consistent
+SQLite backup can be restored over `~/.config/dunkingsheep/memory.db` (see the
+rollback proof in the comparison harness). If deja ever had to be restored, the
+archived units/binaries are in `~/.local/share/deja-retired/`, but that is an
+archaeology step, not a supported path.
 
-The full backfill is complete and every agent is on memory, but retirement is
-the reviewer's call and no parity is claimed. Until they sign, deja is the
-escape hatch: read-only queries keep working and no migration step deletes or
-mutates its index. A hang here had two causes, both fixed: orphaned `deja mcp`
-servers are now cleared by `deja-health --repair`, and `--repair` rebuilds only
-when the staging dir is stale (it used to rebuild on any problem, so agents
-following the old "run --repair" advice were kicking off full reindexes).
+## Historical appendix
 
-
-## Sign-off (2026-10-19)
-
-Reviewer **ds4/pi** signed **option (a)** as a scoped factual statement, not a
-parity claim:
-
-> **"Memory v1 is the primary recall path. Deja remains installed and read-only
-> as a fallback. No parity claim is made: memory is NOT asserted to match deja's
-> rankings, and the earlier '1.000 vs 0.733' headline is retracted."**
-
-Full text: [`memory_signoff.md`](memory_signoff.md). Recorded caveats:
-
-- The golden set is verbatim slices, so its recall is near-tautological; the
-  intent recalls are 0.0 **by construction** (no expected session) — only the
-  overlap field is meaningful.
-- Deja is handicapped: results are restricted to memory's 326 ingested sessions
-  while deja indexes ~21.7k, so "memory > deja" holds only for this
-  corpus/candidate set.
-- Deja's lower score is ranker disagreement on verbatim queries, not proof of
-  error.
-- The signature does **not** authorise deleting deja or its data. Deja stays
-  read-only as a reference ranker and fallback.
-
-## t14 — ground-truth intent set
-
-`tools/memory_parity.py` now carries 24 hand-labelled intent queries with a
-known session (`INTENT_GROUND_TRUTH`) and always prints top-5 overlap next to
-recall@5. Memory recall@5 on that set is **0.9167** (22/24). Deja overlap is
-`skipped` when deja is not queried (its CLI re-scans ~17 GB per call); the last
-measured verbatim overlap is 0.336. Details:
-[`MEMORY_INTENT_SET.md`](MEMORY_INTENT_SET.md).
+The bounded parity result (`recall@5 1.000 vs deja 0.733`) was **retracted**:
+it was a bounded sample and the golden queries were verbatim slices. The
+reviewer verified rollback and signed a scoped no-parity-claim statement
+([`memory_signoff.md`](memory_signoff.md)); owner #913 then retired deja
+entirely. Full comparison history:
+[`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md) and
+[`memory_parity_detail.json`](memory_parity_detail.json).
