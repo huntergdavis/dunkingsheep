@@ -52,8 +52,18 @@ class FlockClient:
         self._next_id += 1
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
+        # Retry only the connect: a 20-agent burst can overflow a short listen
+        # backlog. Once connected, do not retry (the command may have run).
+        for attempt in range(3):
+            try:
+                sock.connect(self.socket_path)
+                break
+            except (ConnectionRefusedError, ConnectionResetError,
+                    TimeoutError, socket.timeout):
+                if attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
         try:
-            sock.connect(self.socket_path)
             sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
             reader = sock.makefile("rb")
             raw = reader.readline()

@@ -426,6 +426,30 @@ class MemoryStore:
         return {"source_id": row["id"], "queue_id": queue_id,
                 "path": path, "harness": harness, "project": project}
 
+    def recover_leases(self):
+        """Requeue ingest leases whose worker died (expired lease).
+
+        Called when the ingest worker starts, so a daemon restart resumes the
+        source it was processing instead of stranding it in 'leased'.
+        """
+        now = time.time()
+        with self._lock:
+            self._begin_write()
+            try:
+                cursor = self.db.execute(
+                    "UPDATE ingest_queue SET state='queued', lease_until=NULL "
+                    "WHERE state='leased' "
+                    "AND (lease_until IS NULL OR lease_until < ?)", (now,))
+                requeued = cursor.rowcount
+                self.db.execute(
+                    "UPDATE sources SET state='pending', lease_until=NULL "
+                    "WHERE state='ingesting'")
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return {"requeued": requeued}
+
     def claim_next(self, lease_s=120.0):
         now = time.time()
         with self._lock:
@@ -1047,6 +1071,10 @@ class MemoryIngestor:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
+        try:
+            self.store.recover_leases()
+        except Exception:  # noqa: BLE001 - start must not fail on recovery
+            pass
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="memory-ingest",
                                         daemon=True)

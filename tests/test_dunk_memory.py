@@ -159,6 +159,14 @@ class MemoryStoreTests(unittest.TestCase):
         resumed = self.store.enqueue(sample, harness="generic", project="demo")
         self.assertEqual(1, self.store.stats()["queue"]["queued"])
 
+    def test_recover_leases_requeues_an_expired_ingest(self):
+        sample = write_jsonl(os.path.join(self.tmp.name, "lease.jsonl"))
+        self.store.enqueue(sample, harness="generic", project="demo")
+        self.store.claim_next(lease_s=0.01)
+        time.sleep(0.05)
+        self.assertEqual(1, self.store.recover_leases()["requeued"])
+        self.assertEqual(1, self.store.stats()["queue"]["queued"])
+
     def test_recall_never_ingests_or_enqueues(self):
         sample = write_jsonl(os.path.join(self.tmp.name, "r.jsonl"))
         self.store.ingest_path(sample, harness="generic", project="demo")

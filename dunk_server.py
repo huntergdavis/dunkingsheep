@@ -66,7 +66,7 @@ class FlockServer:
             os.unlink(self.socket_path)
             sock.bind(self.socket_path)
         os.chmod(self.socket_path, 0o600)
-        sock.listen(16)
+        sock.listen(128)
         sock.settimeout(0.5)
         self.sock = sock
         log.info("dunkingsheep %s listening on %s (pid %d)", VERSION, self.socket_path, os.getpid())
