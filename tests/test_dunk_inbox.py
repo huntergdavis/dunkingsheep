@@ -189,9 +189,9 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         sent = self.flock.inbox_send("codex", "a very long message " * 500,
                                      subject="big", self_pane_id="w1:p2")
         self.assertTrue(sent["notified"])
-        # The sender is recorded by agent name, not pane id, for the same
-        # reason mailboxes are: names outlive panes.
-        self.assertEqual("Claude Proj",
+        # The sender is the raw pane id: unique, stable, and never a
+        # sibling pane's mailbox label.
+        self.assertEqual("w1:p2",
                          self.flock.inbox.status(sent["message_id"])["sender"])
         nudge = self.flock.list_messages()
         texts = [m["text"] for m in nudge["queued"]] + [m["text"] for m in nudge["recent"]]
@@ -255,6 +255,33 @@ class MailboxIdentityTests(unittest.TestCase):
         by_tab = self.flock.resolve_mailbox("Codex Site")[0]
         by_self = self.flock.resolve_mailbox("self", self_pane_id="w2:p1")[0]
         self.assertEqual({by_id}, {by_tab, by_self})
+
+    def test_a_duplicate_name_is_refused_with_the_candidates(self):
+        for pane in self.herdr.panes:
+            if pane["pane_id"] in ("w1:p2", "w2:p3"):
+                pane["label"] = "codex poolrad"
+        with self.assertRaisesRegex(DunkError, "ambiguous") as raised:
+            self.flock.resolve_mailbox("codex poolrad")
+        message = str(raised.exception)
+        self.assertIn("w1:p2", message)
+        self.assertIn("w2:p3", message)
+        # An exact pane id still wins over the duplicate name.
+        self.assertEqual("w1:p2", self.flock.resolve_mailbox("w1:p2")[2])
+
+    def test_sender_is_the_raw_pane_id_not_a_sibling_label(self):
+        sent = self.flock.inbox_send("w2:p1", "hi", notify=False,
+                                     self_pane_id="wS:p1")
+        self.assertEqual("wS:p1",
+                         self.flock.inbox.status(sent["message_id"])["sender"])
+
+    def test_client_prefers_herdr_pane_current_over_a_stale_env(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
+                mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
+            self.assertEqual("wS:p1", FlockClient().self_pane_id)
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
+                mock.patch("dunk_client._current_pane_id", return_value=None):
+            self.assertEqual("wR:p4", FlockClient().self_pane_id)
 
     def test_an_agent_type_naming_several_panes_is_refused(self):
         with self.assertRaisesRegex(DunkError, "ambiguous"):

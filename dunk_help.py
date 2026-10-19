@@ -344,13 +344,17 @@ def guide(markdown=False):
            "dunkingsheep inbox send reviewer 'PR 12 is ready' -s review -a /tmp/p.diff\n"
            "dunkingsheep inbox status i42 | ack i42 | cancel i42 | delete i42\n"
            "dunkingsheep inbox fetch <attachment-id> -d ."))
-    w("A mailbox identifies one pane: its own label first, since that is a name\n"
-      "someone chose, then its tab label, then its pane id. Whichever is taken\n"
-      "has to belong to exactly one pane. The agent *type* is never a mailbox,\n"
-      "so 'codex' is refused rather than pooling every Codex pane together.\n"
+    w("A mailbox identifies one pane. An exact pane id (or terminal id) always\n"
+      "wins. Otherwise a name must match exactly one pane across its own label,\n"
+      "tab label, workspace label or agent; if the same name matches more than\n"
+      "one live pane the send is refused with the candidate list, never\n"
+      "resolved by label priority. The agent *type* is not an identity: 'codex'\n"
+      "works only when exactly one Codex pane is live; with two it is refused.\n"
       "`self` means your own. A name matching no running pane still works, so\n"
       "mail can be left for an agent that has not started. Renaming a pane or\n"
-      "tab renames its mailbox, so mail already waiting stays under the old name.\n")
+      "tab renames its mailbox, so mail already waiting stays under the old name.\n"
+      "The sender is the raw pane id (e.g. wS:p1), so two panes of the same type\n"
+      "can never borrow each other's identity.\n")
     w("Every send returns a stable message id. `inbox_status` reports where that\n"
       "message is - queued, read, acked or cancelled - with its destination,\n"
       "sender, timestamps, size, attachment count and any failure reason. It\n"

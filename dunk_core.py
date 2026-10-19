@@ -58,7 +58,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.21.0"
+VERSION = "2.21.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -699,6 +699,26 @@ class Flock:
         spec = str(spec or "").strip()
         if not spec:
             raise DunkError("a target mailbox is required")
+        panes = self.herdr.list_panes_grouped()
+        # 1. An exact pane id (or terminal id) is unambiguous and always wins.
+        for pane in panes:
+            if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
+                return self._mailbox_for_pane(pane)
+        # 2. An exact *name* must identify exactly one pane across every name
+        #    field. Two same-type panes can share a label (or one pane's label
+        #    can equal another's tab label); picking by field priority delivered
+        #    mail to the wrong lane on 2026-10-19. Refuse with the candidates.
+        if spec.lower() not in ("self", "me", "here"):
+            needle = spec.lower()
+            exact = [p for p in panes
+                     if any(str(p.get(key) or "").lower() == needle
+                            for key in ("label", "tab_label", "workspace_label",
+                                        "agent"))]
+            if len(exact) > 1:
+                raise AmbiguousTarget(
+                    f"target mailbox {spec!r} is ambiguous: {_describe(exact)}")
+            if len(exact) == 1:
+                return self._mailbox_for_pane(exact[0])
         try:
             pane = self.resolve_target(spec, self_pane_id)
         except AmbiguousTarget:
@@ -755,12 +775,10 @@ class Flock:
         terminal except, when `notify`, a short line telling them they have
         mail - which is the one send short enough to always submit."""
         mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id)
-        sender = None
-        if self_pane_id:
-            try:
-                sender = self._own_mailbox(self_pane_id)
-            except DunkError:
-                sender = self_pane_id
+        # The sender is the raw pane id, never a mailbox label. On 2026-10-19
+        # wS:p1's mail arrived "from codex poolrad" because the label resolved
+        # through a sibling pane; ids are unique and stable.
+        sender = self_pane_id or None
         attachments = [attach] if isinstance(attach, str) else list(attach or ())
         message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
                                   mailbox_label=label, pane_id=pane_id,

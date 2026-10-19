@@ -59,11 +59,36 @@ class DaemonUnavailable(RuntimeError):
     """The daemon is not running and could not be started."""
 
 
+def _current_pane_id():
+    """The pane this process is actually in, per herdr 0.9.5.
+
+    A pane restored by an upgrade can carry a stale HERDR_PANE_ID from the
+    pane it was cloned from; `herdr pane current` uses the controlling
+    terminal and is authoritative. Only consulted inside a tty with a pane id
+    set: outside a pane the command reports the focused pane, which is not us.
+    """
+    if not os.environ.get("HERDR_PANE_ID"):
+        return None
+    if not (os.isatty(0) or os.path.exists("/dev/tty")):
+        return None
+    try:
+        result = subprocess.run(["herdr", "pane", "current"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        payload = json.loads(result.stdout)
+        pane = (payload.get("result") or {}).get("pane") or {}
+        return pane.get("pane_id")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
         self.self_pane_id = (
-            self_pane_id if self_pane_id is not None else os.environ.get("HERDR_PANE_ID")
+            self_pane_id if self_pane_id is not None
+            else (_current_pane_id() or os.environ.get("HERDR_PANE_ID"))
         )
         self.timeout = timeout
         self._next_id = 1

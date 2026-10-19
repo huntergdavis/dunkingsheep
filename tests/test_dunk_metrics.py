@@ -149,7 +149,7 @@ class MetricsEndpointTests(unittest.TestCase):
         self.assertEqual(1, counts["by_kind"]["inbox.sent"])
         self.assertEqual(1, counts["by_kind"]["inbox.read"])
         self.assertEqual(1, counts["by_kind"]["inbox.acked"])
-        self.assertIn("Claude Proj", counts["by_sender"], "sender at mailbox level")
+        self.assertIn("w1:p2", counts["by_sender"], "sender is the raw pane id")
         self.assertIn("Codex Site", counts["by_recipient"], "recipient at mailbox level")
         self.assertIsNotNone(report["durations"]["queue_wait"])
         self.assertIsNotNone(report["durations"]["handling"])
