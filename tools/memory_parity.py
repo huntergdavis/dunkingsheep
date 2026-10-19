@@ -4,8 +4,9 @@ Memory v1 parity harness (t10).
 
 Bounded backfill of real sessions into a TEMP memory database (never the live
 one, never deja), a golden query set, and a top-5 session overlap comparison
-against `deja --json`. Also proves rollback: a consistent DB backup, an empty
-re-open, a restore, and deja still answering.
+against `deja --json`. It makes **no parity claim**: the verbatim golden set is
+near-tautological and only the overlap field is meaningful. Also proves rollback:
+a consistent DB backup, an empty re-open, a restore, and deja still answering.
 
     python3 tools/memory_parity.py --queries 60
 

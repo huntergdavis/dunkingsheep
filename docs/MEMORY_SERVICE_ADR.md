@@ -1,9 +1,16 @@
 # ADR 0001: A memory and recall service inside Dunking Sheep
 
-- **Status:** Proposed (v1)
+- **Status:** Accepted (v1) — scoped sign-off 2026-10-19, **no parity claim**
+
+> **Update 2026-10-19:** the "t10 bounded parity result" below is
+> **retracted** (bounded sample + verbatim queries; see
+> [`MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md)). The reviewer signed a
+> scoped factual statement — *memory primary, deja installed read-only, no
+> parity claim* — full text in [`memory_signoff.md`](memory_signoff.md).
+> Treat every "parity" word below as historical.
 - **Date:** 2026-10-18
 - **Owner:** Dunking Sheep / pi (w8:p8), for the VP of Agentry
-- **Replaces:** deja 0.6.0 as the fleet memory layer (deja stays in place until parity)
+- **Replaces:** deja 0.6.0 as the primary memory layer (deja stays installed and read-only; no parity claim)
 - **Related:** global task queue 2.15.x, MCP/CLI surface audit (t8)
 
 ## Summary
@@ -73,7 +80,7 @@ Measured behaviour:
 - **20 concurrent agents**, reads and ingest at the same time.
 - **p95 < 1 s**, p99 < 2 s, **zero 2-minute stalls**.
 - No query may depend on an ingest completing.
-- Migration is **reversible** until a reviewer signs off parity.
+- Migration is **reversible**; a scoped sign-off (no parity claim) is recorded.
 - No LLM in scheduling, ranking or ingest; deterministic SQL/algorithms.
 
 ## Decision
@@ -289,8 +296,8 @@ Optional later: `embeddings(chunk_id, vector BLOB)` with `sqlite-vec`; not v1.
 - Build `memory.db` by **re-ingesting the source logs**, not by parsing deja's
   gob/bucket index. The source logs are the ground truth and survive deja.
 - Keep deja available read-only during the migration. The daemon can serve both
-  `memory_*` and `deja` tools until parity is signed off.
-- **Parity gate:** a golden set of real queries (≥50, across harnesses and
+  `memory_*` and `deja` tools; deja is read-only and makes no parity claim.
+- **Comparison gate (no parity claim):** a golden set of real queries (≥50, across harnesses and
   projects) is run against deja and memory. Require ≥90% top-5 overlap and the
   expected session in `recall_context`'s top 3, plus equal-or-better p95.
 - **Rollback:** delete/rename `memory.db` and re-enable deja; no deja data was
@@ -303,7 +310,7 @@ Optional later: `embeddings(chunk_id, vector BLOB)` with `sqlite-vec`; not v1.
 
 - Add `memory_recall`, `memory_context`, `memory_search`, `memory_stats`,
   `memory_ingest`, `memory_status` as MCP tools (small, direct exposure).
-- Keep deja's `recall`/`recall_context` during parity; route the pi
+- Keep deja's `recall`/`recall_context` read-only; route the pi
   `deja.ts` extension to `memory_context` after sign-off (or run both and
   compare).
 - Update `AGENTS.md` (pi/opencode/codex), MCP instructions and the VP handoff.
@@ -352,7 +359,7 @@ A script (`tools/memory_acceptance.py`, added with t9) will:
    with `--sample`, without touching deja.
 2. **Golden set:** ≥50 real query strings covering all four harnesses and
    several projects.
-3. **Parity:** for each golden query, run deja and memory; require ≥90% top-5
+3. **Comparison (no parity claim):** for each golden query, run deja and memory; require ≥90% top-5
    session overlap and the expected session in `recall_context` top 3.
 4. **Concurrency:** start ingest (backfill or a large delta) and run **20
    parallel recall clients for 60 s** against the golden set. Record p50/p95/p99,
@@ -381,7 +388,7 @@ The test is the gate for t10 (migration/parity) and t11 (agent upgrade).
 - Embeddings/semantic recall are **deferred** until the lexical baseline is
   measured; `sqlite-vec` or pgvector is the likely v2 path.
 
-## t10 bounded parity result (2026-10-18)
+## t10 bounded comparison (2026-10-18) — parity claim RETRACTED
 
 `tools/memory_parity.py` ingested a bounded 26-file sample (all pi sessions, 4
 Claude, 6 Codex, opencode) into a temp DB — 33 sessions / 58,191 chunks / 64 MB
@@ -400,8 +407,9 @@ session set.
 - Stopped ingest now records `skipped` with a reason and a `partial` source
   (resumable), never a silent `failed`.
 
-The full 17 GB backfill and the agent upgrade remain gated on the reviewer's
-sign-off of this parity result.
+**Retracted 2026-10-19.** The full 17 GB backfill and the agent upgrade are
+complete; the reviewer signed a scoped no-parity-claim statement (see
+[`memory_signoff.md`](memory_signoff.md)).
 
 ## Risks and open questions
 

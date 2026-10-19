@@ -84,3 +84,26 @@ mutates its index. A hang here had two causes, both fixed: orphaned `deja mcp`
 servers are now cleared by `deja-health --repair`, and `--repair` rebuilds only
 when the staging dir is stale (it used to rebuild on any problem, so agents
 following the old "run --repair" advice were kicking off full reindexes).
+
+
+## Sign-off (2026-10-19)
+
+Reviewer **ds4/pi** signed **option (a)** as a scoped factual statement, not a
+parity claim:
+
+> **"Memory v1 is the primary recall path. Deja remains installed and read-only
+> as a fallback. No parity claim is made: memory is NOT asserted to match deja's
+> rankings, and the earlier '1.000 vs 0.733' headline is retracted."**
+
+Full text: [`memory_signoff.md`](memory_signoff.md). Recorded caveats:
+
+- The golden set is verbatim slices, so its recall is near-tautological; the
+  intent recalls are 0.0 **by construction** (no expected session) — only the
+  overlap field is meaningful.
+- Deja is handicapped: results are restricted to memory's 326 ingested sessions
+  while deja indexes ~21.7k, so "memory > deja" holds only for this
+  corpus/candidate set.
+- Deja's lower score is ranker disagreement on verbatim queries, not proof of
+  error.
+- The signature does **not** authorise deleting deja or its data. Deja stays
+  read-only as a reference ranker and fallback.
