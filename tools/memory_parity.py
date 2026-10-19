@@ -42,6 +42,25 @@ STOPWORDS = {
 }
 
 
+# Hand-written intent queries: NOT slices of indexed chunks. They test whether
+# the two engines agree on what is relevant, rather than whether a verbatim
+# phrase is found (which is near-tautological for any substring index).
+INTENT_QUERIES = (
+    "how do we keep memory queries fast while the ingest worker is running",
+    "what happened when the vice president pane was closed by an agent",
+    "how does the task queue assign work to an idle agent",
+    "why does the daemon hold a message while a human is typing",
+    "how is the poolrad printer path verified against the original binary",
+    "what protects destructive pane operations from a non-superuser",
+    "how does a crashed task lease get requeued",
+    "what caused the agent message backpressure bug",
+    "how do we migrate agents from deja to the new memory service",
+    "what is the recipe for a self-removing recurring reminder",
+    "how does the inbox deliver a message without typing over a human",
+    "how are the memory recall results ranked and filtered",
+)
+
+
 def bounded_sources(claude, codex):
     sources = []
     sources += sorted(glob.glob(os.path.join(HOME, ".pi/agent/sessions/**/*.jsonl"),
@@ -91,7 +110,7 @@ def golden_queries(store, count, seed=7):
     return queries
 
 
-def deja_top(query, harness, limit=5, allowed_sessions=None):
+def deja_top(query, harness, limit=5, allowed_sessions=None, timeout=30):
     """Deja's ranked session ids, optionally restricted to the ingested files.
 
     The bounded backfill has a subset of deja's corpus, so the fair parity test
@@ -103,7 +122,7 @@ def deja_top(query, harness, limit=5, allowed_sessions=None):
         cmd += ["--harness", harness]
     cmd.append(query)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -137,13 +156,70 @@ def deja_answers():
 
 
 def backup_db(path, dest):
-    source = sqlite3.connect(path)
+    # Read-only source: the live DB is never opened for writing here.
+    source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     target = sqlite3.connect(dest)
     try:
         source.backup(target)
     finally:
         target.close()
         source.close()
+
+
+def score_queries(store, queries, allowed_sessions, deja_timeout=30):
+    """Compare memory vs deja top-5 for each query. Never silently skips a
+    deja failure: it is counted in deja_errors and fails the gate."""
+    overlaps, latency, details = [], [], []
+    top1 = expected_both = memory_hit = deja_hit = deja_errors = 0
+    for item in queries:
+        started = time.perf_counter()
+        mem_ids = [row["session_id"] for row in
+                   store.recall(item["query"], limit=5,
+                                harness=item.get("harness"))]
+        latency.append((time.perf_counter() - started) * 1000.0)
+        deja_ids = deja_top(item["query"], item.get("harness"),
+                            allowed_sessions=allowed_sessions,
+                            timeout=deja_timeout)
+        if deja_ids is None:
+            deja_errors += 1
+            details.append({**item, "status": "deja-error"})
+            continue
+        inter = set(deja_ids) & set(mem_ids)
+        denom = max(1, min(5, len(deja_ids) or 5, len(mem_ids) or 5))
+        overlaps.append(len(inter) / denom)
+        if deja_ids and mem_ids and deja_ids[0] == mem_ids[0]:
+            top1 += 1
+        expected = item.get("expected")
+        if expected is not None:
+            if expected in deja_ids and expected in mem_ids:
+                expected_both += 1
+            if expected in mem_ids:
+                memory_hit += 1
+            if expected in deja_ids:
+                deja_hit += 1
+        details.append({**item, "deja": deja_ids[:5], "memory": mem_ids[:5],
+                        "overlap": round(len(inter) / denom, 3),
+                        "memory_hit": None if expected is None else expected in mem_ids,
+                        "deja_hit": None if expected is None else expected in deja_ids})
+    scored = len(overlaps)
+    latency.sort()
+    metrics = {
+        "queries": len(queries),
+        "scored": scored,
+        "deja_errors": deja_errors,
+        "mean_top5_overlap": round(sum(overlaps) / scored, 4) if scored else None,
+        "top1_match_rate": round(top1 / scored, 4) if scored else None,
+        "expected_session_in_both_top5": round(expected_both / len(queries), 4)
+        if queries else None,
+        "memory_recall5": round(memory_hit / len(queries), 4) if queries else None,
+        "deja_recall5": round(deja_hit / len(queries), 4) if queries else None,
+        "recall_parity": round(memory_hit / deja_hit, 4) if deja_hit else None,
+        "p50_ms": round(latency[len(latency) // 2], 2) if latency else None,
+        "p95_ms": round(latency[min(len(latency) - 1,
+                                    int(0.95 * (len(latency) - 1)))], 2)
+        if latency else None,
+    }
+    return metrics, details
 
 
 def main(argv=None):
@@ -153,6 +229,18 @@ def main(argv=None):
     parser.add_argument("--queries", type=int, default=60)
     parser.add_argument("--db", help="temp memory DB path")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--bounded", action="store_true",
+                        help="re-ingest the bounded sample (slow) instead of "
+                             "comparing on a copy of the live DB")
+    parser.add_argument("--live-db",
+                        default=os.path.expanduser("~/.config/dunkingsheep/memory.db"),
+                        help="live memory DB to copy for the full-corpus comparison")
+    parser.add_argument("--deja-timeout", type=float, default=30,
+                        help="per-query deja timeout in seconds (default 30)")
+    parser.add_argument("--no-intent", dest="intent", action="store_false",
+                        help="skip the non-verbatim intent query set")
+    parser.add_argument("--detail", metavar="PATH",
+                        help="write per-query detail JSON here")
     args = parser.parse_args(argv)
 
     tmpdir = tempfile.mkdtemp(prefix="memory-parity-")
@@ -160,75 +248,59 @@ def main(argv=None):
     report = {}
     try:
         deja_before = deja_answers()
-        store = MemoryStore(path=db_path)
-        sources = bounded_sources(args.claude, args.codex)
-        ingest = {"files": len(sources), "chunks": 0, "sessions": 0,
-                  "errors": [], "seconds": 0.0}
-        started = time.time()
-        for path in sources:
-            try:
-                counts = store.ingest_path(path)
-                ingest["chunks"] += counts.get("chunks", 0)
-                ingest["sessions"] += counts.get("sessions", 0)
-            except Exception as error:  # noqa: BLE001 - reported as coverage gap
-                ingest["errors"].append({"path": path, "error": str(error)[:300]})
-        ingest["seconds"] = round(time.time() - started, 2)
+        if args.bounded:
+            store = MemoryStore(path=db_path)
+            sources = bounded_sources(args.claude, args.codex)
+            ingest = {"mode": "bounded", "files": len(sources), "chunks": 0,
+                      "sessions": 0, "errors": [], "seconds": 0.0}
+            started = time.time()
+            for path in sources:
+                try:
+                    counts = store.ingest_path(path)
+                    ingest["chunks"] += counts.get("chunks", 0)
+                    ingest["sessions"] += counts.get("sessions", 0)
+                except Exception as error:  # noqa: BLE001 - reported as coverage gap
+                    ingest["errors"].append({"path": path, "error": str(error)[:300]})
+            ingest["seconds"] = round(time.time() - started, 2)
+        else:
+            # Full corpus, no re-ingest: a consistent read-only backup of the
+            # live DB. The live file is never modified; rollback runs on the copy.
+            live = os.path.expanduser(args.live_db)
+            if not os.path.exists(live):
+                raise SystemExit(f"live memory db not found: {live}")
+            started = time.time()
+            backup_db(live, db_path)
+            store = MemoryStore(path=db_path)
+            ingest = {"mode": "live-copy", "source": live, "files": None,
+                      "chunks": None, "sessions": None, "errors": [],
+                      "seconds": round(time.time() - started, 2)}
         stats = store.stats()
 
         allowed_sessions = {row[0] for row in sqlite3.connect(db_path)
                             .execute("SELECT id FROM sessions")}
         queries = golden_queries(store, args.queries)
-        overlaps = []
-        top1 = 0
-        expected_both = 0
-        memory_hit = 0
-        deja_hit = 0
-        latency = []
-        details = []
-        for item in queries:
-            t = time.perf_counter()
-            mem_ids = [row["session_id"] for row in
-                       store.recall(item["query"], limit=5,
-                                    harness=item["harness"])]
-            latency.append((time.perf_counter() - t) * 1000.0)
-            deja_ids = deja_top(item["query"], item["harness"],
-                                 allowed_sessions=allowed_sessions)
-            if deja_ids is None:
-                details.append({**item, "status": "deja-error"})
-                continue
-            inter = set(deja_ids) & set(mem_ids)
-            denom = max(1, min(5, len(deja_ids) or 5, len(mem_ids) or 5))
-            overlaps.append(len(inter) / denom)
-            if deja_ids and mem_ids and deja_ids[0] == mem_ids[0]:
-                top1 += 1
-            if item["expected"] in deja_ids and item["expected"] in mem_ids:
-                expected_both += 1
-            if item["expected"] in mem_ids:
-                memory_hit += 1
-            if item["expected"] in deja_ids:
-                deja_hit += 1
-            details.append({**item, "deja": deja_ids[:5], "memory": mem_ids[:5],
-                            "overlap": round(len(inter) / denom, 3)})
-        scored = len(overlaps)
-        report["parity"] = {
-            "queries": len(queries),
-            "scored": scored,
-            "mean_top5_overlap": round(sum(overlaps) / scored, 4) if scored else None,
-            "top1_match_rate": round(top1 / scored, 4) if scored else None,
-            "expected_session_in_both_top5": round(expected_both / len(queries), 4)
-            if queries else None,
-            "memory_recall5": round(memory_hit / len(queries), 4) if queries else None,
-            "deja_recall5": round(deja_hit / len(queries), 4) if queries else None,
-            "recall_parity": round(memory_hit / deja_hit, 4) if deja_hit else None,
-            "gate": 0.90,
-            "passed": bool(queries and memory_hit / len(queries) >= 0.90),
-        }
-        latency.sort()
-        report["latency_ms"] = {
-            "p50": round(latency[len(latency) // 2], 2) if latency else None,
-            "p95": round(latency[min(len(latency) - 1, int(0.95 * (len(latency) - 1)))], 2)
-            if latency else None,
-        }
+        parity, details = score_queries(store, queries, allowed_sessions,
+                                         deja_timeout=args.deja_timeout)
+        parity["gate"] = 0.90
+        parity["passed"] = bool(
+            queries
+            and parity["deja_errors"] == 0
+            and parity["memory_recall5"] is not None
+            and parity["memory_recall5"] >= 0.90
+            and (parity["mean_top5_overlap"] or 0) >= 0.50)
+        report["parity"] = parity
+        report["details"] = details
+        report["latency_ms"] = {"p50": parity["p50_ms"], "p95": parity["p95_ms"]}
+
+        if args.intent:
+            intent = [{"query": query} for query in INTENT_QUERIES]
+            intent_metrics, intent_details = score_queries(
+                store, intent, allowed_sessions, deja_timeout=args.deja_timeout)
+            intent_metrics["passed"] = bool(
+                intent_metrics["deja_errors"] == 0
+                and (intent_metrics["mean_top5_overlap"] or 0) >= 0.50)
+            report["intent"] = intent_metrics
+            report["intent_details"] = intent_details
         report["counts"] = {"sources": stats["sources"], "sessions": stats["sessions"],
                             "chunks": stats["chunks"],
                             "db_bytes": sum(stats["db_bytes"].values()),
@@ -265,9 +337,20 @@ def main(argv=None):
                        and before_counts == restored_counts
                        and deja_answers()),
         }
+        report["deja_answered"] = bool(deja_before
+                                       and report["rollback"]["deja_answers_after"])
         report["passed"] = bool(report["parity"]["passed"]
                                 and report["rollback"]["passed"]
-                                and not ingest["errors"])
+                                and not ingest["errors"]
+                                and report["deja_answered"]
+                                and (not args.intent or report["intent"]["passed"]))
+        if args.detail:
+            with open(args.detail, "w") as handle:
+                json.dump({"parity": report["parity"],
+                           "details": report["details"],
+                           "intent": report.get("intent"),
+                           "intent_details": report.get("intent_details", [])},
+                          handle, indent=2)
         print(json.dumps(report, indent=2))
         return 0 if report["passed"] else 1
     finally:

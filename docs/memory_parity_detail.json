@@ -1,0 +1,615 @@
+{
+  "parity": {
+    "queries": 30,
+    "scored": 30,
+    "deja_errors": 0,
+    "mean_top5_overlap": 0.3356,
+    "top1_match_rate": 0.3,
+    "expected_session_in_both_top5": 0.3667,
+    "memory_recall5": 1.0,
+    "deja_recall5": 0.3667,
+    "recall_parity": 2.7273,
+    "p50_ms": 17.08,
+    "p95_ms": 46.49,
+    "gate": 0.9,
+    "passed": false
+  },
+  "details": [
+    {
+      "query": "entry under time model docs",
+      "expected": "4d9851e1-f261-48b9-9cfa-5876d1500eb7",
+      "harness": "claude",
+      "deja": [
+        "281c8700-5acc-438b-b93d-c061e28437eb",
+        "4d9851e1-f261-48b9-9cfa-5876d1500eb7",
+        "a3ad1536-abb2-4fb8-af2c-1362b8656678",
+        "9742b6e1-d504-40a0-92b9-7d2536d3f756",
+        "12a7f8ad-6b6c-4d8e-b123-327925860532"
+      ],
+      "memory": [
+        "4d9851e1-f261-48b9-9cfa-5876d1500eb7",
+        "a3ad1536-abb2-4fb8-af2c-1362b8656678",
+        "4d9851e1-f261-48b9-9cfa-5876d1500eb7",
+        "a3ad1536-abb2-4fb8-af2c-1362b8656678",
+        "d3959bc6-1226-4987-bc8b-3aa3b69b6a08"
+      ],
+      "overlap": 0.4,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "thing described capture grounded airborne",
+      "expected": "01a0c04e-eab0-7d32-a056-8bbdb4cee030",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a0c04e-eab0-7d32-a056-8bbdb4cee030",
+        "01a0c04e-eab0-7d32-a056-8bbdb4cee030"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "thing know measure show results",
+      "expected": "7ebecf16-292e-4cc2-9e21-e46368e56231",
+      "harness": "claude",
+      "deja": [
+        "9c7260c9-80f6-4430-916c-27108dac4799",
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "memory": [
+        "9c7260c9-80f6-4430-916c-27108dac4799",
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "still embeds original source path",
+      "expected": "019f486e-41ab-77c2-9e41-98c3ce45f683",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019f486e-41ab-77c2-9e41-98c3ce45f683"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "pipes meshes castShadow ramps meshes",
+      "expected": "9c7260c9-80f6-4430-916c-27108dac4799",
+      "harness": "claude",
+      "deja": [
+        "9c7260c9-80f6-4430-916c-27108dac4799"
+      ],
+      "memory": [
+        "9c7260c9-80f6-4430-916c-27108dac4799"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "priority proposal comes anything gets",
+      "expected": "7ebecf16-292e-4cc2-9e21-e46368e56231",
+      "harness": "claude",
+      "deja": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "memory": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "source tear painted panels leave",
+      "expected": "01a0fe51-5acc-7fe3-9109-5b9308053f66",
+      "harness": "codex",
+      "deja": [
+        "01a0fe51-5acc-7fe3-9109-5b9308053f66"
+      ],
+      "memory": [
+        "01a0fe51-5acc-7fe3-9109-5b9308053f66",
+        "01a0fe51-5acc-7fe3-9109-5b9308053f66"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "timing evaluation tracing dedicated activation",
+      "expected": "01a0c052-bad9-7500-a9f0-7fc762b3e530",
+      "harness": "codex",
+      "deja": [
+        "01a0c052-bad9-7500-a9f0-7fc762b3e530"
+      ],
+      "memory": [
+        "01a0c052-bad9-7500-a9f0-7fc762b3e530",
+        "01a0c052-bad9-7500-a9f0-7fc762b3e530"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "shell process command lines container",
+      "expected": "019fe348-1247-7530-bc25-8a573aaf4252",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019fe348-1247-7530-bc25-8a573aaf4252",
+        "019fe348-1247-7530-bc25-8a573aaf4252",
+        "01a06835-15f2-7e71-a7e7-788ec0f25d5f"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "hash update README compact chart",
+      "expected": "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "repository includes full Apache text",
+      "expected": "01a06835-15f2-7e71-a7e7-788ec0f25d5f",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a06835-15f2-7e71-a7e7-788ec0f25d5f"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "offset unpack expanded_start_image_offset dest expanded_end_image_offset",
+      "expected": "3e3ff494-f865-446a-8777-6a4baca8de94",
+      "harness": "claude",
+      "deja": [
+        "a3ad1536-abb2-4fb8-af2c-1362b8656678",
+        "3e3ff494-f865-446a-8777-6a4baca8de94"
+      ],
+      "memory": [
+        "a3ad1536-abb2-4fb8-af2c-1362b8656678",
+        "3e3ff494-f865-446a-8777-6a4baca8de94",
+        "281c8700-5acc-438b-b93d-c061e28437eb"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "wrong position drawn mirrored Cross",
+      "expected": "7ebecf16-292e-4cc2-9e21-e46368e56231",
+      "harness": "claude",
+      "deja": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231",
+        "9c7260c9-80f6-4430-916c-27108dac4799"
+      ],
+      "memory": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231",
+        "9c7260c9-80f6-4430-916c-27108dac4799"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "service already owns correct Bionic",
+      "expected": "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "dense touching cluster cost step",
+      "expected": "7ebecf16-292e-4cc2-9e21-e46368e56231",
+      "harness": "claude",
+      "deja": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "memory": [
+        "7ebecf16-292e-4cc2-9e21-e46368e56231",
+        "7ebecf16-292e-4cc2-9e21-e46368e56231"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "weekly left full saved game",
+      "expected": "01a12b3e-8cea-7de2-bfd1-ba3a8310754f",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a12b3e-8cea-7de2-bfd1-ba3a8310754f",
+        "01a12b3e-8cea-7de2-bfd1-ba3a8310754f",
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "DXVK decisively both bundled version",
+      "expected": "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "speed Switched higher quality stereo",
+      "expected": "019f486e-41ab-77c2-9e41-98c3ce45f683",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019f486e-41ab-77c2-9e41-98c3ce45f683",
+        "019f486e-41ab-77c2-9e41-98c3ce45f683"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "max_ratio_act arrs never chance import",
+      "expected": "831be719-9849-4a55-8df5-316002aac298",
+      "harness": "claude",
+      "deja": [
+        "831be719-9849-4a55-8df5-316002aac298"
+      ],
+      "memory": [
+        "831be719-9849-4a55-8df5-316002aac298"
+      ],
+      "overlap": 1.0,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "does instantiate narrator client cutaway",
+      "expected": "01a04be4-0962-78b1-9f84-bcd57e933f9f",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a04be4-0962-78b1-9f84-bcd57e933f9f"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "both results i14736 i14740 files",
+      "expected": "01a1386e-bea7-7883-8ddd-06fd2be8db9b",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a1386e-bea7-7883-8ddd-06fd2be8db9b"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "dunk_core File home hunter workspace",
+      "expected": "569a5d0c-d543-43f1-8694-cfd938953cb2",
+      "harness": "claude",
+      "deja": [
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "569a5d0c-d543-43f1-8694-cfd938953cb2",
+        "1d01c279-196b-4165-83cb-2031016bb071"
+      ],
+      "memory": [
+        "569a5d0c-d543-43f1-8694-cfd938953cb2",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b"
+      ],
+      "overlap": 0.667,
+      "memory_hit": true,
+      "deja_hit": true
+    },
+    {
+      "query": "seam catches launches blend steps",
+      "expected": "01a0c04e-eab0-7d32-a056-8bbdb4cee030",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a0c04e-eab0-7d32-a056-8bbdb4cee030"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "whether Proton preserved FEX_APP_CONFIG instead",
+      "expected": "019fe348-1247-7530-bc25-8a573aaf4252",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019fe348-1247-7530-bc25-8a573aaf4252"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "enough speedup claim unsound reproducing",
+      "expected": "01a0c04e-eab0-7d32-a056-8bbdb4cee030",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a0c04e-eab0-7d32-a056-8bbdb4cee030"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "Firefox artifact exists visually shows",
+      "expected": "01a04580-8b1d-7741-9f55-f26280b0e14d",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a04580-8b1d-7741-9f55-f26280b0e14d"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "slice long running quests actually",
+      "expected": "01a04be4-0962-78b1-9f84-bcd57e933f9f",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a04be4-0962-78b1-9f84-bcd57e933f9f",
+        "01a04be4-0962-78b1-9f84-bcd57e933f9f"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "committing seven lane files rebasing",
+      "expected": "01a12855-addb-78d1-ad73-89ae2590dc75",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "01a12855-addb-78d1-ad73-89ae2590dc75",
+        "01a12855-addb-78d1-ad73-89ae2590dc75",
+        "01a13c11-83ce-7db2-8d3c-b8a064c413dc"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "running again memory paged back",
+      "expected": "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    },
+    {
+      "query": "long Proton cache scan Next",
+      "expected": "019fe348-1247-7530-bc25-8a573aaf4252",
+      "harness": "codex",
+      "deja": [],
+      "memory": [
+        "019fe348-1247-7530-bc25-8a573aaf4252"
+      ],
+      "overlap": 0.0,
+      "memory_hit": true,
+      "deja_hit": false
+    }
+  ],
+  "intent": {
+    "queries": 12,
+    "scored": 12,
+    "deja_errors": 0,
+    "mean_top5_overlap": 0.0,
+    "top1_match_rate": 0.0,
+    "expected_session_in_both_top5": 0.0,
+    "memory_recall5": 0.0,
+    "deja_recall5": 0.0,
+    "recall_parity": null,
+    "p50_ms": 2662.51,
+    "p95_ms": 4192.96,
+    "passed": false
+  },
+  "intent_details": [
+    {
+      "query": "how do we keep memory queries fast while the ingest worker is running",
+      "deja": [],
+      "memory": [
+        "019e7fff-4d35-7590-aa19-e1f5279d367e",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "01a1500b-3f47-7499-bbb6-2e16df47c578"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "what happened when the vice president pane was closed by an agent",
+      "deja": [],
+      "memory": [
+        "f341143d-cffd-4df7-b8ba-e6981a4ba419",
+        "01a14a62-2b5e-7123-b77e-dde9dad43205",
+        "01a14a62-2b5e-7123-b77e-dde9dad43205",
+        "7ebecf16-292e-4cc2-9e21-e46368e56231",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how does the task queue assign work to an idle agent",
+      "deja": [],
+      "memory": [
+        "f341143d-cffd-4df7-b8ba-e6981a4ba419",
+        "7ebecf16-292e-4cc2-9e21-e46368e56231",
+        "1d01c279-196b-4165-83cb-2031016bb071",
+        "01a14c46-4d96-7466-b01a-69c117faf8c7",
+        "1d01c279-196b-4165-83cb-2031016bb071"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "why does the daemon hold a message while a human is typing",
+      "deja": [
+        "569a5d0c-d543-43f1-8694-cfd938953cb2"
+      ],
+      "memory": [
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how is the poolrad printer path verified against the original binary",
+      "deja": [],
+      "memory": [
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de",
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de",
+        "01a13c73-c6d0-7540-a0f3-49feb1532032",
+        "019fe348-1247-7530-bc25-8a573aaf4252",
+        "01a12b3e-db20-70e1-95f9-d3fe44b8d309"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "what protects destructive pane operations from a non-superuser",
+      "deja": [],
+      "memory": [
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "01a1500b-3f47-7499-bbb6-2e16df47c578",
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "019e7fff-4d35-7590-aa19-e1f5279d367e",
+        "831be719-9849-4a55-8df5-316002aac298"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how does a crashed task lease get requeued",
+      "deja": [],
+      "memory": [
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "01a14b16-22bb-7257-b3e0-18827b9d7a69",
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "01a14b16-22bb-7257-b3e0-18827b9d7a69",
+        "01a04580-8b1d-7741-9f55-f26280b0e14d"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "what caused the agent message backpressure bug",
+      "deja": [],
+      "memory": [
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "569a5d0c-d543-43f1-8694-cfd938953cb2",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "1d01c279-196b-4165-83cb-2031016bb071",
+        "f341143d-cffd-4df7-b8ba-e6981a4ba419"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how do we migrate agents from deja to the new memory service",
+      "deja": [],
+      "memory": [
+        "ses_eb584d764ffeqb34iU2IyL0ZCT",
+        "ses_eb584d764ffeqb34iU2IyL0ZCT",
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7",
+        "019e7fff-4d35-7590-aa19-e1f5279d367e",
+        "01a14ae4-5c27-7224-ac08-9b7ded0021b7"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "what is the recipe for a self-removing recurring reminder",
+      "deja": [],
+      "memory": [
+        "01a12b3e-8cea-7de2-bfd1-ba3a8310754f",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de",
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de",
+        "01a14a62-2b5e-7123-b77e-dde9dad43205"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how does the inbox deliver a message without typing over a human",
+      "deja": [],
+      "memory": [
+        "f341143d-cffd-4df7-b8ba-e6981a4ba419",
+        "01a1281b-85e3-7e23-bdf6-1ea8af4d69de",
+        "fb4de8d7-2112-41d5-aa5a-e9d84472270b",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    },
+    {
+      "query": "how are the memory recall results ranked and filtered",
+      "deja": [],
+      "memory": [
+        "01a13101-709d-77e1-9fcb-2a6acbff0046",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "019ff310-e8ac-7212-9f2f-5ba9005b97bd",
+        "01a13101-7ee2-70c1-914b-421afef5e33a",
+        "01a1386e-bea7-7883-8ddd-06fd2be8db9b"
+      ],
+      "overlap": 0.0,
+      "memory_hit": null,
+      "deja_hit": null
+    }
+  ]
+}

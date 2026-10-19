@@ -25,12 +25,15 @@ The daemon side is unchanged: `memory_recall`, `memory_context`, `memory_search`
 26-file bounded backfill → 33 sessions / 58,191 chunks; 30 golden queries on
 claude/codex/opencode, deja `--json` restricted to the same sessions.
 
-| Metric | Dunking Sheep memory | deja |
-| --- | --- | --- |
-| recall@5 | **1.000** | 0.733 |
-| exact top-5 set overlap | 0.717 | — |
-| top-1 match | 0.667 | — |
-| p50 / p95 | 6.6 ms / 13.9 ms | — |
+**Correction (reviewer feedback):** the earlier headline `recall@5 1.000 vs
+deja 0.733` was bounded-sample and near-tautological (golden queries were
+verbatim slices of indexed chunks). On the full corpus with deja live, the
+honest numbers are: memory recall@5 1.000 (sanity check only), deja recall@5
+0.367, mean top-5 overlap 0.336, top-1 0.30; on hand-written non-verbatim
+intent queries deja returns nothing for most queries while memory stays
+on-topic. **No parity claim.** Full methodology and per-query detail:
+[`docs/MEMORY_PARITY_REPORT.md`](MEMORY_PARITY_REPORT.md) and
+[`docs/memory_parity_detail.json`](memory_parity_detail.json).
 
 Full corpus after backfill: 488/488 sources, 0 failed, 0 skipped, 326 sessions,
 262,299 chunks, 277.9 MB. Live 20-client recall on the full corpus: 0 errors,
