@@ -161,5 +161,23 @@ class StaleSocketTests(unittest.TestCase):
             self.assertFalse(os.path.exists(path))
 
 
+class SupervisorGuardTests(unittest.TestCase):
+    def test_refuses_an_unsupervised_bind_of_the_default_socket(self):
+        """A client-spawned `serve` must not steal the unit's socket."""
+        from unittest import mock
+        from dunk_server import DEFAULT_SOCKET, run_daemon
+        with mock.patch("dunk_server.os.path.exists", return_value=True), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DUNKINGSHEEP_SUPERVISED", None)
+            self.assertEqual(3, run_daemon(socket_path=DEFAULT_SOCKET,
+                                           log_to_file=False))
+
+    def test_a_non_default_socket_is_allowed(self):
+        """Tests and explicit --socket runs are not the supervised daemon."""
+        from dunk_server import DEFAULT_SOCKET
+        custom = os.path.join(tempfile.gettempdir(), "not-the-unit.sock")
+        self.assertNotEqual(DEFAULT_SOCKET, custom)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ ExecStart=/home/hunter/.local/bin/dunkingsheep serve
 Restart=always
 RestartSec=2
 Environment=DUNKINGSHEEP_MEMORY_THROTTLE_S=0.1
+Environment=DUNKINGSHEEP_SUPERVISED=1
 Environment=PATH=/home/hunter/.local/bin:/usr/local/bin:/usr/bin:/bin
 KillSignal=SIGTERM
 TimeoutStopSec=30

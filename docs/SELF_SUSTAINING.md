@@ -24,8 +24,9 @@ loginctl enable-linger "$USER"   # keep running after logout
 
 **One owner.** When the unit file is installed, the client never spawns a second
 `serve`; `FlockClient.start_daemon` asks `systemctl --user start` instead, and
-`run_daemon` refuses to bind the default socket without systemd's
-`INVOCATION_ID`. Both are deterministic checks, and together they make a
+`run_daemon` refuses to bind the default socket unless the unit sets
+`DUNKINGSHEEP_SUPERVISED=1` (`INVOCATION_ID` is inherited by every child of
+any systemd unit, so it cannot identify this one). Both are deterministic checks, and together they make a
 socket-stealing race impossible. On a machine without the unit, the client
 spawns a detached `serve` exactly as before.
 

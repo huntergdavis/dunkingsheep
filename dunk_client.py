@@ -20,7 +20,7 @@ import time
 
 from dunk_api import COMMANDS_BY_NAME
 from dunk_core import CONFIG_DIR, DunkError
-from dunk_server import LOG_FILE, SOCKET_PATH
+from dunk_server import DEFAULT_SOCKET, LOG_FILE, SOCKET_PATH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI_PATH = os.path.join(HERE, "dunkingsheep")
@@ -141,8 +141,9 @@ class FlockClient:
     def start_daemon(self):
         """Start the daemon: hand off to systemd when it supervises, else spawn
         a detached `dunkingsheep serve` that outlives this process."""
-        supervised = (not os.environ.get("DUNKINGSHEEP_SOCKET")
-                      and self.socket_path == SOCKET_PATH)
+        # The literal default socket belongs to the unit, even when a parent
+        # service exported DUNKINGSHEEP_SOCKET to that same path.
+        supervised = self.socket_path == DEFAULT_SOCKET
         if supervised and _systemd_installed() and shutil.which("systemctl"):
             try:
                 probe = _systemctl("start", SYSTEMD_UNIT)

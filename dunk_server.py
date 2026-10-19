@@ -25,9 +25,8 @@ import threading
 from dunk_api import dispatch
 from dunk_core import CONFIG_DIR, VERSION, DunkError, Flock
 
-SOCKET_PATH = os.environ.get("DUNKINGSHEEP_SOCKET") or os.path.join(
-    CONFIG_DIR, "dunkingsheep.sock"
-)
+DEFAULT_SOCKET = os.path.join(CONFIG_DIR, "dunkingsheep.sock")
+SOCKET_PATH = os.environ.get("DUNKINGSHEEP_SOCKET") or DEFAULT_SOCKET
 LOG_FILE = os.path.join(CONFIG_DIR, "daemon.log")
 
 log = logging.getLogger("dunkingsheep.server")
@@ -197,8 +196,9 @@ def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
     """Blocking entry point used by `dunkingsheep serve`."""
     configure_logging(to_file=log_to_file)
     unit_path = os.path.expanduser("~/.config/systemd/user/dunkingsheep.service")
-    if (socket_path == SOCKET_PATH and not os.environ.get("DUNKINGSHEEP_SOCKET")
-            and not os.environ.get("INVOCATION_ID") and os.path.exists(unit_path)):
+    if (socket_path == DEFAULT_SOCKET
+            and os.environ.get("DUNKINGSHEEP_SUPERVISED") != "1"
+            and os.path.exists(unit_path)):
         # systemd owns the default socket now. A direct spawn here would steal
         # it from the unit and put it in a restart loop.
         log.error("dunkingsheep.service supervises this daemon; refusing an "
