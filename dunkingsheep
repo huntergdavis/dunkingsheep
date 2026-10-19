@@ -473,6 +473,13 @@ def build_parser():
     p = sub.add_parser("commands", help="list the socket/MCP command registry",
                        description="Every command the socket API and MCP server accept. "
                                    "With --json: names, descriptions and JSON schemas.")
+    p = sub.add_parser("mcp-map",
+                       help="OLD flat MCP tool -> NEW grouped tool/action mapping",
+                       description="The t8 audit: the declared MCP surface is now one "
+                                   "namespaced tool per domain with an action argument. "
+                                   "Every old tool is listed with its new home, and each "
+                                   "old name remains callable.")
+    p.add_argument("--markdown", action="store_true", help="render as markdown")
     return parser
 
 
@@ -1009,6 +1016,68 @@ def print_status(result):
 
 # -- main -------------------------------------------------------------------------------
 
+def mcp_map_text(markdown=False):
+    """Render the t8 OLD -> NEW tool map (text or markdown)."""
+    from dunk_api import COMMANDS, grouped_mcp_tools, mcp_commands, mcp_tool_map
+    tool_map = mcp_tool_map()
+    flat = mcp_commands()
+    grouped = grouped_mcp_tools()
+    flat_bytes = len(json.dumps([{"name": c.name, "description": c.description,
+                                  "inputSchema": c.input_schema()} for c in flat]))
+    grouped_bytes = len(json.dumps([{"name": t.name, "description": t.description,
+                                     "inputSchema": t.input_schema()} for t in grouped]))
+    hot = [t for t in grouped if t.name in ("inbox", "task", "memory")]
+    hot_bytes = len(json.dumps([{"name": t.name, "inputSchema": t.input_schema()}
+                                for t in hot]))
+    if not markdown:
+        lines = [
+            f"declared {len(grouped)} grouped tools (was {len(flat)} flat); "
+            f"schema {grouped_bytes} bytes (was {flat_bytes}); "
+            f"hot set (inbox, task, memory) {hot_bytes} bytes",
+            "",
+        ]
+        for tool in grouped:
+            actions = ", ".join(tool.actions)
+            lines.append(f"{tool.name}: {actions}")
+        lines.append("")
+        for command in flat:
+            entry = tool_map[command.name]
+            lines.append(f"{command.name} -> {entry['tool']}(action={entry['action']})")
+        for command in (c for c in COMMANDS if not c.mcp):
+            lines.append(f"{command.name} -> (CLI/socket only)")
+        return "\n".join(lines) + "\n"
+
+    out = [
+        "# MCP tool map (t8 grouping audit)",
+        "",
+        "The declared MCP surface is one namespaced tool per domain, each taking "
+        "an `action`. Nothing was removed: every flat name still resolves, and "
+        "every command stays on the CLI/socket API.",
+        "",
+        f"- declared tools: **{len(grouped)}** grouped (was **{len(flat)}** flat)",
+        f"- grouped schema bytes: **{grouped_bytes}** (was **{flat_bytes}**, "
+        f"-{100 * (1 - grouped_bytes / flat_bytes):.1f}%)",
+        f"- hot set (`inbox`, `task`, `memory`): **{hot_bytes}** bytes "
+        "(target <10 KB)",
+        "",
+        "## Grouped tools",
+        "",
+        "| Tool | Actions |",
+        "| --- | --- |",
+    ]
+    for tool in grouped:
+        out.append(f"| `{tool.name}` | " + ", ".join(f"`{a}`" for a in tool.actions) + " |")
+    out += ["", "## OLD flat tool -> NEW grouped tool", "",
+            "| Old tool | New tool | action |", "| --- | --- | --- |"]
+    for command in flat:
+        entry = tool_map[command.name]
+        out.append(f"| `{command.name}` | `{entry['tool']}` | `{entry['action']}` |")
+    out += ["", "## CLI/socket-only commands (not MCP tools)", "",
+            "| Command | Why |", "| --- | --- |",
+            "| `shutdown` | daemon stop; CLI/socket only |"]
+    return "\n".join(out) + "\n"
+
+
 def main(argv=None):
     parser = build_parser()
     if not (argv if argv is not None else sys.argv[1:]):
@@ -1019,6 +1088,9 @@ def main(argv=None):
 
     if command in ("guide", "help", "docs"):
         sys.stdout.write(guide(markdown=args.markdown))
+        return 0
+    if command == "mcp-map":
+        sys.stdout.write(mcp_map_text(markdown=args.markdown))
         return 0
     if command == "mcp-setup":
         return run_mcp_setup(args)

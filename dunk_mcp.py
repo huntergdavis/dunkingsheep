@@ -20,7 +20,7 @@ import logging
 import os
 import sys
 
-from dunk_api import mcp_commands
+from dunk_api import COMMANDS_BY_NAME, grouped_mcp_tools, mcp_commands
 from dunk_client import DaemonUnavailable, FlockClient
 from dunk_core import VERSION, DunkError
 
@@ -32,24 +32,23 @@ INSTRUCTIONS = """\
 Dunking Sheep sends text (plus Enter) into herdr terminal panes on a schedule.
 Each schedule is a "dunk": target pane, text, interval, running flag. Dunks
 live in a shared daemon, so what you create here also shows in the human's TUI
-and CLI. Call the `help` tool for the full guide.
+and CLI. Call the `system` tool with action="help" for the full guide.
 
-Messaging another agent: prefer the inbox over typing. inbox_send stores a
+Messaging another agent: prefer the inbox over typing. inbox(action=\"send\") stores a
 message for them with no size limit and nudges them with one short line;
-inbox_count and inbox_read are what you call when you have mail. inbox_status
-tracks any message by its id. Typing (send_text) is for humans, or for agents
+inbox(action=\"count\") and inbox(action=\"read\") are what you call when you have mail. inbox(action=\"status\")
+tracks any message by its id. Typing (pane(action=\"send\")) is for humans, or for agents
 without this tooling.
 
 Global task queue: tasks are the fleet's deterministic coordination backbone.
-Use task_next to ATOMICALLY claim the highest-priority unblocked task (the
-same call assigns you and sets in_progress, with a lease); task_heartbeat to
-extend the lease; task_complete when done (global completion: it is done for
-everyone). task_follow asks the daemon to PUSH the next task to you when your
+Use task(action=\"next\") to ATOMICALLY claim the highest-priority unblocked task (the
+same call assigns you and sets in_progress, with a lease); task(action=\"heartbeat\") to
+extend the lease; task(action=\"complete\") when done (global completion: it is done for
+everyone). task(action=\"follow\") asks the daemon to PUSH the next task to you when your
 pane is idle, reusing the dunk idle gate and guarded inbox nudge, so you do not
-poll. task_add/task_list/task_read/task_update/task_assign/task_block/
-task_unblock manage the queue. scope is 'global' (default, fleet-wide) or
+poll. task(action=\"add|list|read|update|assign|block|unblock\") manage the queue. scope is 'global' (default, fleet-wide) or
 'self' (your pane only). inbox_read also returns your global and pane tasks
-after the messages. task_metrics is the timeseries-friendly query endpoint
+after the messages. task(action=\"metrics\") is the timeseries-friendly query endpoint
 (queue depth, status/priority/scope mix, per-assignee load, created/claimed/
 completed throughput in hourly or daily buckets, completion and claim latency)
 for a status board or the CTO. Everything is priority order, dependency
@@ -58,27 +57,24 @@ gating, leases and requeue-on-death in SQL; no model is involved.
 Superuser gate: close, shutdown, dunk management (add/update/remove/start/
 stop/toggle/stop_all/fire), start_agent, the layout creators and the raw herdr
 passthrough require a superuser. The allowlist lives in superusers.json and is
-managed with superuser_status / superuser_add / superuser_remove /
-superuser_recover. Non-superusers use the inbox and task queue and may type
+managed with superuser(action=\"status|add|remove|recover\"). Non-superusers use the inbox and task queue and may type
 only into their own pane. Even a superuser needs close(force=true) to close
 the pane/tab/workspace it runs in. Agents started without an explicit
 workspace/tab go to the dedicated sandbox workspace, never the caller's tab.
 
-Memory: memory_recall / memory_context / memory_search / memory_stats /
-memory_status are the deterministic SQLite+FTS5 recall layer. They are
-read-only: a query never reindexes and never waits for ingest. memory_ingest
+Memory: memory(action=\"recall|context|search|stats|status\") are the deterministic SQLite+FTS5 recall layer. They are
+read-only: a query never reindexes and never waits for ingest. memory(action=\"ingest\")
 (superuser) queues a source. Deja remains until parity is signed off.
 
-Typical uses: keep another agent moving (add_dunk target=<its pane>), message
-an agent right now (send_text), inspect what an agent is doing (read_pane),
-claim the next unit of work (task_next), or schedule a future nudge to
+Typical uses: keep another agent moving (dunk(action=\"add\", target=<its pane>)), message
+an agent right now (pane(action=\"send\")), inspect what an agent is doing (pane(action=\"read\")),
+claim the next unit of work (task(action=\"next\")), or schedule a future nudge to
 yourself (target "self").
 
 Nothing ever types over a human. If someone is composing in the target pane,
 both dunks and direct messages wait until the input box has been clear for a
-second; send_text then returns queued=true with a message_id, and the daemon
-delivers it (in order) when they finish. list_messages, get_message and
-cancel_message manage that queue. send_keys presses keys (Enter, Escape) the
+second; pane(action=\"send\") then returns queued=true with a message_id, and the daemon
+delivers it (in order) when they finish. pane(action=\"messages|get_message|cancel_message\") manage that queue. send_keys presses keys (Enter, Escape) the
 same guarded way. Do NOT reach for the herdr CLI to type into a pane: `herdr
 pane run`, `pane send-text`, `pane send-keys` and `agent send` bypass all of
 this and will land on top of whatever a human is writing, so the `herdr` tool
@@ -90,17 +86,16 @@ cannot silently stick. If it still will not submit you get an error rather
 than a false 'sent'. The same applies to send_keys when the Enter is meant to
 submit text already waiting in the box.
 
-Building the herd: create_workspace / create_tab / split_pane open named
+Building the herd: workspace(action=\"create|create_tab|split\") open named
 spaces, tabs and panes (optionally running a command such as "claude" in the
-new pane); start_agent launches an agent registered with herdr by name; rename,
-focus and close manage them (close refuses your own pane/tab/workspace). The
+new pane); workspace(action=\"start_agent\") launches an agent registered with herdr by name; workspace(action=\"rename|focus|close\") manage them (close refuses your own pane/tab/workspace). The
 `herdr` tool runs any other herdr subcommand ("pane zoom self --on",
 "notification show Done", "api schema --json") and `herdr_help` returns herdr's
 own usage so you can discover what it offers.
 
-Meta-dunking recipe: add_dunk(target="self", interval_minutes=60,
+Meta-dunking recipe: dunk(action=\"add\", target=\"self\", interval_minutes=60,
 only_when="idle", skip_if_unconsumed=true, text="Backlog check #{count}: if
-every backlog item is done, call remove_dunk('{id}') and stop; otherwise
+every backlog item is done, call dunk(action=\"remove\", id='{id}') and stop; otherwise
 implement the next item."). {id} expands to the dunk's own id at send time, so
 the future you knows exactly which dunk to remove. only_when="idle" waits until
 you are not mid-task; skip_if_unconsumed skips a send while the previous one is
@@ -119,7 +114,9 @@ class McpServer:
         self._client_factory = client_factory or self._default_client
         self.stdin = stdin or sys.stdin.buffer
         self.stdout = stdout or sys.stdout.buffer
-        self.tools = mcp_commands()
+        # The declared surface is the grouped tools (t8); flat command
+        # names stay callable inside call_tool so nothing is removed.
+        self.tools = grouped_mcp_tools()
         self.initialized = False
         self.protocol_version = SUPPORTED_PROTOCOLS[0]
 
@@ -231,14 +228,31 @@ class McpServer:
         ]
 
     def call_tool(self, name, arguments):
-        command = next((c for c in self.tools if c.name == name), None)
-        if command is None:
-            return self._tool_error(f"unknown tool {name!r}")
         if not isinstance(arguments, dict):
             return self._tool_error("arguments must be an object")
+        arguments = dict(arguments)
+        tool = next((t for t in self.tools if t.name == name), None)
+        if tool is not None:
+            action = arguments.pop("action", None)
+            command_name = tool.resolve(action)
+            if command_name is None:
+                return self._tool_error(
+                    f"unknown action {action!r} for {name}; expected one of "
+                    f"{', '.join(tool.actions)}")
+        else:
+            # Flat command names keep working: the merge changed the surface,
+            # not the capabilities.
+            command_name = name
+        command = COMMANDS_BY_NAME.get(command_name)
+        if command is None or not command.mcp:
+            return self._tool_error(f"unknown tool {name!r}")
+        missing = [key for key in command.required if arguments.get(key) is None]
+        if missing:
+            return self._tool_error(
+                f"{name}: missing required argument(s): {', '.join(missing)}")
         try:
             client = self._client_factory()
-            result = client.call(name, **arguments)
+            result = client.call(command_name, **arguments)
         except DunkError as error:
             return self._tool_error(str(error))
         except (DaemonUnavailable, OSError) as error:

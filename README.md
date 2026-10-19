@@ -132,8 +132,8 @@ dunkingsheep memory status
 dunkingsheep memory ingest <path>  # superuser; async
 ```
 
-MCP tools: `memory_recall`, `memory_context`, `memory_search`, `memory_stats`,
-`memory_status`, `memory_ingest`. The service is scoped to 1–10 M chunks on this
+MCP tool: `memory(action=recall|context|search|stats|status|ingest|backfill)`.
+The service is scoped to 1–10 M chunks on this
 box; billions is a later sharded/remote tier. The pi/Claude/opencode/Codex agents
 now use memory as the primary recall path, with deja kept installed and
 read-only as the fallback; see [`docs/MEMORY_MIGRATION.md`](docs/MEMORY_MIGRATION.md)
@@ -215,11 +215,16 @@ Stdio transport, protocol 2024-11-05 through 2025-11-25, flat schemas that
 strict validators accept. The harness spawns the server inside the agent's
 pane, so `HERDR_PANE_ID` is inherited and `self` means the agent itself.
 
-Tools: `help` `status` `list_panes` `read_pane` `list_dunks` `get_dunk`
-`add_dunk` `update_dunk` `remove_dunk` `start_dunk` `stop_dunk` `stop_all`
-`fire_dunk` `send_text` `list_messages` `get_message` `cancel_message`, plus
-the herdr control tools. Errors are `isError` results with a plain message;
-`shutdown` is not exposed to agents.
+The declared surface is **one namespaced tool per domain**, each taking an
+`action` (t8): `inbox`, `task`, `dunk`, `pane`, `workspace`, `superuser`,
+`memory`, `metrics`, `system`. That is 70 flat tools merged into 9 (schema
+42,792 → 15,609 bytes, -63.5%); the hot set `inbox`/`task`/`memory` is 5,583
+bytes. **Nothing was removed**: every old flat name still resolves inside the
+server, and every command stays on the CLI and socket API. See the full
+[`docs/MCP_TOOL_MAP.md`](docs/MCP_TOOL_MAP.md) or `dunkingsheep mcp-map`.
+
+Errors are `isError` results with a plain message; `shutdown` is not exposed
+to agents.
 
 ## ⌨️ CLI
 

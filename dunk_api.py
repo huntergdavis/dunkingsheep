@@ -1457,6 +1457,141 @@ def mcp_commands():
     return [command for command in COMMANDS if command.mcp]
 
 
+# -- grouped MCP surface (t8) -------------------------------------------------
+# One namespaced tool per domain, each taking an `action`. This merges the ~70
+# flat tools into a small hot set while keeping every capability: every flat
+# command stays callable by name, and each is reachable through its group.
+MCP_GROUPS = (
+    ("inbox",
+     "Agent-to-agent mailbox. action=send (preferred over typing), count, "
+     "list, read (also returns your tasks), status, ack, cancel, delete, "
+     "stats, fetch. No size limit; a send nudges the recipient with one line.",
+     (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
+      ("read", "inbox_read"), ("status", "inbox_status"), ("ack", "inbox_ack"),
+      ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),
+      ("stats", "inbox_stats"), ("fetch", "inbox_fetch"))),
+    ("task",
+     "Deterministic global task queue. action=next ATOMICALLY claims the "
+     "highest-priority unblocked task (assigns you + in_progress + a lease); "
+     "heartbeat extends it; complete/block/unblock finish it; add/list/read/"
+     "update/assign/cancel/delete manage the queue; follow makes the daemon "
+     "PUSH work when you are idle; stats/metrics report the board. scope is "
+     "'global' (fleet) or 'self' (your pane). All SQL, no model.",
+     (("add", "task_add"), ("list", "task_list"), ("read", "task_read"),
+      ("update", "task_update"), ("assign", "task_assign"),
+      ("complete", "task_complete"), ("block", "task_block"),
+      ("unblock", "task_unblock"), ("cancel", "task_cancel"),
+      ("delete", "task_delete"), ("next", "task_next"),
+      ("heartbeat", "task_heartbeat"), ("release", "task_release"),
+      ("follow", "task_follow"), ("unfollow", "task_unfollow"),
+      ("followers", "task_followers"), ("stats", "task_stats"),
+      ("metrics", "task_metrics"), ("reap", "task_reap"))),
+    ("dunk",
+     "Scheduled text into a pane (a 'dunk'). action=add/list/get/update/"
+     "remove/start/stop/stop_all/fire. Superuser-gated (except list/get). "
+     "{id} in text expands to the dunk's own id at send time.",
+     (("list", "list_dunks"), ("get", "get_dunk"), ("add", "add_dunk"),
+      ("update", "update_dunk"), ("remove", "remove_dunk"),
+      ("start", "start_dunk"), ("stop", "stop_dunk"), ("stop_all", "stop_all"),
+      ("fire", "fire_dunk"))),
+    ("pane",
+     "Inspect and address a pane. action=list/read/send/send_keys/flush/"
+     "messages/get_message/cancel_message. send_text (send) types plus Enter; "
+     "when a human is composing it returns queued=true and is delivered later. "
+     "Prefer the inbox for agents.",
+     (("list", "list_panes"), ("read", "read_pane"), ("send", "send_text"),
+      ("send_keys", "send_keys"), ("flush", "flush_box"),
+      ("messages", "list_messages"), ("get_message", "get_message"),
+      ("cancel_message", "cancel_message"))),
+    ("workspace",
+     "Layout and the herd. action=list/create/create_tab/split/start_agent/"
+     "rename/focus/close. Creators and close are superuser-gated; an agent "
+     "started without a workspace goes to the sandbox, never the caller's tab.",
+     (("list", "list_workspaces"), ("create", "create_workspace"),
+      ("create_tab", "create_tab"), ("split", "split_pane"),
+      ("start_agent", "start_agent"), ("rename", "rename"),
+      ("focus", "focus"), ("close", "close"))),
+    ("superuser",
+     "The superuser allowlist. action=status/add/remove/recover. Destructive "
+     "operations are refused unless the caller is on the list.",
+     (("status", "superuser_status"), ("add", "superuser_add"),
+      ("remove", "superuser_remove"), ("recover", "superuser_recover"))),
+    ("memory",
+     "Deterministic SQLite+FTS5 recall over every agent session. action=recall/"
+     "context/search/stats/status are read-only and never wait on ingest; "
+     "ingest/backfill (superuser) queue sources.",
+     (("recall", "memory_recall"), ("context", "memory_context"),
+      ("search", "memory_search"), ("stats", "memory_stats"),
+      ("status", "memory_status"), ("ingest", "memory_ingest"),
+      ("backfill", "memory_backfill"))),
+    ("metrics",
+     "Operations measurement. action=summary (counts, duration distributions, "
+     "coverage), status (daemon health + counts), health (deterministic "
+     "self-check; repair=true fixes stale leases and a large WAL).",
+     (("summary", "metrics"), ("status", "status"), ("health", "health"))),
+    ("system",
+     "Discovery and the raw escape hatch. action=help (full guide + registry), "
+     "herdr (any herdr subcommand except the typing ones), herdr_help.",
+     (("help", "help"), ("herdr", "herdr"), ("herdr_help", "herdr_help"))),
+)
+
+
+class GroupedTool:
+    """One domain tool: an `action` enum plus the union of its commands' params."""
+
+    def __init__(self, name, description, actions):
+        self.name = name
+        self.description = description
+        self.actions = dict(actions)  # action -> flat command name
+        self.commands = {command: COMMANDS_BY_NAME[command]
+                         for command in self.actions.values()
+                         if command in COMMANDS_BY_NAME}
+
+    def resolve(self, action):
+        return self.actions.get(action)
+
+    def input_schema(self):
+        properties = {
+            "action": {
+                "type": "string",
+                "enum": list(self.actions),
+                "description": "Which operation to run.",
+            }
+        }
+        for command in self.commands.values():
+            for key, value in command.params.items():
+                properties.setdefault(key, dict(value))
+        return {
+            "type": "object",
+            "properties": properties,
+            # Per-action required params are validated by the server before
+            # dispatch, so a single grouped schema stays small and honest.
+            "required": ["action"],
+            "additionalProperties": False,
+        }
+
+
+def grouped_mcp_tools():
+    return [GroupedTool(name, description, actions)
+            for name, description, actions in MCP_GROUPS]
+
+
+def mcp_tool_map():
+    """OLD flat command -> {tool, action, mcp}. Covers every registered command,
+    including the CLI/socket-only ones, so nothing is silently dropped."""
+    grouped = {}
+    for tool in grouped_mcp_tools():
+        for action, command in tool.actions.items():
+            grouped[command] = {"tool": tool.name, "action": action, "mcp": True}
+    for command in COMMANDS:
+        grouped.setdefault(command.name, {"tool": None, "action": None,
+                                          "mcp": command.mcp})
+    return grouped
+
+
+MCP_TOOL_MAP = mcp_tool_map()
+
+
 # Destructive or affecting-others operations. The 2026-10-18 incident: a free
 # model closed the VP's tab (nine panes) through the herdr CLI. Non-superusers
 # keep the inbox, the task queue and read-only tools; everything here needs an
