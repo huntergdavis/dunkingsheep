@@ -1,5 +1,7 @@
 # Exception watchdog
 
+**Review criterion:** the escalation behaviour below is reviewed against [WATCHDOG_ESCALATION_SPEC.md](WATCHDOG_ESCALATION_SPEC.md), written before this implementation. Where the code and the spec disagree, the code changes or the spec is argued in writing.
+
 The watchdog replaces the VP's polling loop with deterministic alerts. It reads
 the stores Dunking Sheep already keeps, applies fixed rules, and sends **one
 deduplicated digest** to the VP inbox. It pages the owner only for a short list
