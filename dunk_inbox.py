@@ -172,11 +172,15 @@ class Inbox:
                 "subject, body, state, created_at) VALUES (?,?,?,?,?,?,?,'queued',?)",
                 (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
                  subject, body, _now()))
-            for blob in stored:
+            for index, blob in enumerate(stored, 1):
+                # The attachment ROW id is per message; the blob itself stays
+                # content-addressed and shared. Re-attaching the same file to
+                # another message used to collide on attachments.id.
+                attachment_id = f"{message_id}-{index}"
                 self.db.execute(
                     "INSERT INTO attachments (id, message_id, filename, media_type, "
                     "size, sha256, created_at) VALUES (?,?,?,?,?,?,?)",
-                    (blob["id"], message_id, blob["filename"], blob["media_type"],
+                    (attachment_id, message_id, blob["filename"], blob["media_type"],
                      blob["size"], blob["sha256"], _now()))
             self.db.commit()
         return self.get(message_id)
@@ -490,8 +494,7 @@ class Inbox:
             if self._blob_bytes() + size > MAX_BLOB_BYTES:
                 raise InboxError("attachment store is full; delete some mail first")
             shutil.copyfile(path, blob_path)
-        return {"id": f"{sha[:16]}-{os.path.basename(path)}", "sha256": sha,
-                "filename": os.path.basename(path), "size": size,
+        return {"sha256": sha, "filename": os.path.basename(path), "size": size,
                 "media_type": _media_type(path)}
 
     def fetch(self, attachment_id, dest_dir):

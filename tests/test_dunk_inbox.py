@@ -53,6 +53,36 @@ class InboxStoreTests(unittest.TestCase):
 
     # -- ack / archive / undeliverable ------------------------------------
 
+    def test_the_same_attachment_can_be_used_by_two_messages(self):
+        path = os.path.join(self.tmp.name, "same.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("same payload\n")
+        first = self.inbox.send("a", "one", attachments=[path])
+        second = self.inbox.send("b", "two", attachments=[path])
+        rows = self.inbox.db.execute(
+            "SELECT id, message_id, sha256 FROM attachments "
+            "ORDER BY created_at").fetchall()
+        self.assertEqual(2, len(rows))
+        self.assertEqual(2, len({row["id"] for row in rows}), "row ids must be unique")
+        self.assertEqual(1, len({row["sha256"] for row in rows}), "blob is shared")
+        self.assertEqual({first["message_id"], second["message_id"]},
+                         {row["message_id"] for row in rows})
+        out = os.path.join(self.tmp.name, "out")
+        for row in rows:
+            written = self.inbox.fetch(row["id"], out)
+            with open(written["path"], "rb") as handle:
+                self.assertEqual(b"same payload\n", handle.read())
+
+    def test_duplicate_attachments_in_one_message_get_distinct_ids(self):
+        path = os.path.join(self.tmp.name, "dup.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("dup\n")
+        sent = self.inbox.send("a", "dup", attachments=[path, path])
+        rows = self.inbox.db.execute(
+            "SELECT id FROM attachments WHERE message_id = ?",
+            (sent["message_id"],)).fetchall()
+        self.assertEqual(2, len({row["id"] for row in rows}))
+
     def test_ack_stamps_read_at(self):
         sent = self.inbox.send("writer", "handled")
         self.inbox.ack([sent["message_id"]])
