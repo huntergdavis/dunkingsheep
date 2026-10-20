@@ -1,0 +1,85 @@
+{
+  "schema": "dunkingsheep-watchdog/1",
+  "enabled": false,
+  "dry_run": true,
+  "cadence_minutes": 10,
+  "max_alerts_per_run": 20,
+  "state_path": "~/.config/dunkingsheep/watchdog_state.json",
+  "heartbeat_path": "~/.config/dunkingsheep/watchdog.heartbeat",
+  "state_retention_days": 14,
+  "stores": {
+    "config_dir": "~/.config/dunkingsheep"
+  },
+  "panes": {
+    "source": "herdr",
+    "pane_id_pattern": "^w[0-9A-Za-z]+:p[0-9A-Za-z]+$"
+  },
+  "escalation": {
+    "vp": {
+      "mailbox": "vp of agentry",
+      "min_severity": "warning"
+    },
+    "owner": {
+      "enabled": false,
+      "mailbox": null,
+      "categories": ["security", "outage", "money"],
+      "min_severity": "critical",
+      "approved_by": null
+    }
+  },
+  "rules": {
+    "task.blocked_stale": {
+      "enabled": true, "severity": "warning", "category": "work", "cooldown_minutes": 1440,
+      "threshold_minutes": 1440
+    },
+    "task.lease_stale": {
+      "enabled": true, "severity": "warning", "category": "work", "cooldown_minutes": 240,
+      "never_renewed_minutes": 30, "lookback_minutes": 1440
+    },
+    "dunk.skip_loop": {
+      "enabled": true, "severity": "warning", "category": "scheduling", "cooldown_minutes": 1440,
+      "consecutive_skips": 10, "lookback_hours": 168
+    },
+    "dunk.overdue": {
+      "enabled": true, "severity": "warning", "category": "scheduling", "cooldown_minutes": 240,
+      "missed_intervals": 3
+    },
+    "inbox.undeliverable": {
+      "enabled": true, "severity": "warning", "category": "delivery", "cooldown_minutes": 1440,
+      "min_messages": 1
+    },
+    "inbox.unread_live": {
+      "enabled": true, "severity": "warning", "category": "delivery", "cooldown_minutes": 240,
+      "age_minutes": 240, "min_messages": 1
+    },
+    "inbox.unread_dead": {
+      "enabled": true, "severity": "warning", "category": "delivery", "cooldown_minutes": 1440,
+      "min_messages": 1
+    },
+    "inbox.ambiguous_sender": {
+      "enabled": true, "severity": "info", "category": "audit", "cooldown_minutes": 10080,
+      "lookback_hours": 168, "sample_ids": 3, "require_live_pane": true
+    },
+    "lane.working_without_task": {
+      "enabled": true, "severity": "info", "category": "work", "cooldown_minutes": 1440,
+      "quiet_minutes": 120
+    },
+    "lane.idle_holding_task": {
+      "enabled": true, "severity": "warning", "category": "work", "cooldown_minutes": 240,
+      "quiet_minutes": 60, "idle_statuses": ["idle"], "holding_statuses": ["in_progress"]
+    },
+    "host.load": {
+      "enabled": true, "severity": "warning", "category": "outage", "cooldown_minutes": 60,
+      "load1_per_cpu": 2.0
+    },
+    "host.tmp": {
+      "enabled": true, "severity": "critical", "category": "outage", "cooldown_minutes": 60,
+      "max_used_fraction": 0.9, "min_free_bytes": 1073741824, "max_inode_fraction": 0.9,
+      "path": "/tmp"
+    },
+    "health.failed": {
+      "enabled": true, "severity": "critical", "category": "outage", "cooldown_minutes": 60,
+      "stale_minutes": 30
+    }
+  }
+}

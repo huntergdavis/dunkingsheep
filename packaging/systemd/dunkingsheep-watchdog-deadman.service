@@ -1,0 +1,8 @@
+[Unit]
+Description=Dunking Sheep watchdog dead-man check (independent of the watchdog)
+
+[Service]
+Type=oneshot
+# Reads only the heartbeat; never the watchdog config or rules. 3 x the
+# watchdog's 10-minute cadence; at most one VP alert per hour while stale.
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon watchdog-deadman --cadence-minutes 10 --multiplier 3 --cooldown-minutes 60 --to "vp of agentry"
