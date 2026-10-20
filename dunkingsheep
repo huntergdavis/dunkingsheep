@@ -407,6 +407,10 @@ def build_parser():
                    help="last-resort record when the socket send AND the direct inbox write fail")
     p.add_argument("--inbox", default="~/.config/dunkingsheep/inbox.db",
                    help="inbox store for the direct-write fallback when the daemon is unreachable")
+    p.add_argument("--socket", dest="daemon_path", default=None,
+                   help="daemon socket (default: $DUNKINGSHEEP_SOCKET or ~/.config/dunkingsheep/dunkingsheep.sock)")
+    p.add_argument("--expected-socket-dir", dest="expected_dir", default=None,
+                   help="the socket must live here; anything else is a CONFIG refusal, not 'daemon down'")
     p.add_argument("--cooldown-minutes", type=float, required=True)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--now", type=float, default=None)
@@ -1263,6 +1267,9 @@ def main(argv=None):
     if command == "watchdog-deadman":
         # Must not import dunk_watchdog: it has to work when the watchdog is broken.
         import dunk_watchdog_deadman
+        from dunk_server import SOCKET_PATH, CONFIG_DIR
+        args.daemon_path = SOCKET_PATH if args.daemon_path is None else os.path.expanduser(args.daemon_path)
+        args.expected_dir = os.path.expanduser(args.expected_dir or CONFIG_DIR)
         return dunk_watchdog_deadman.main(args)
     if command == "serve":
         from dunk_server import SOCKET_PATH, run_daemon

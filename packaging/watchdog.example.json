@@ -62,7 +62,7 @@
     },
     "inbox.ambiguous_sender": {
       "enabled": true, "severity": "info", "class": "ops", "cooldown_minutes": 10080, "must_hold_runs": 1,
-      "lookback_hours": 168, "sample_ids": 12, "require_live_pane": true
+      "lookback_hours": 168, "sample_ids": 30, "require_live_pane": true
     },
     "lane.working_without_task": {
       "enabled": true, "severity": "info", "class": "ops", "cooldown_minutes": 1440, "must_hold_runs": 1,

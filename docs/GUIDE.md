@@ -633,6 +633,8 @@ dunkingsheep watchdog-deadman --cadence-minutes 10 --cooldown-minutes 60 --to "v
 - The dead-man is a separate unit that never reads the watchdog. It alerts VP
   when the heartbeat goes stale. If the daemon is provably down, it writes the
   alert row straight into inbox.db; it never does so around a slow daemon.
+  A missing socket counts as down only when --socket is set and sits in the
+  expected directory; otherwise it is config_bad (status file, exit 2, no row).
 - Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.
 
 ## The herdr guard: agents that shell out

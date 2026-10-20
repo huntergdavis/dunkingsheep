@@ -13,7 +13,9 @@ and the VP's tiers (i19817, i19821):
   inbox fails); system sender; and no model anywhere."""
 
 import ast
+import contextlib
 import copy
+import io
 import json
 import os
 import sqlite3
@@ -743,7 +745,8 @@ class DeadManTests(WatchdogCase):
         sent = []
         args = dict(heartbeat=os.path.join(self.tmp, "heartbeat"), cadence_minutes=10, multiplier=3,
                     to="vp of agentry", state_path=os.path.join(self.tmp, "deadman.json"), cooldown_minutes=60,
-                    now=now, send=lambda *a: sent.append(a))
+                    now=now, send=lambda *a: sent.append(a),
+                    daemon_path=os.path.join(self.tmp, "dunkingsheep.sock"), expected_dir=self.tmp)
         args.update(extra)
         return deadman.check(**args), sent
 
@@ -842,6 +845,67 @@ class DeadManTests(WatchdogCase):
         self.assertEqual(NOW + 60, state["last_alerted"], "cooldown starts only after a confirmed row")
         self.check(NOW + 60 + 3601, send=down, inbox_path=inbox)  # past cooldown, same incident
         self.assertEqual(1, len(self.inbox_rows(inbox)), "never a second row for the same incident")
+
+    # FileNotFoundError is ambiguous (VP i19851, w8:p8 i19854): it is daemon_down
+    # only when the daemon path is configured and sits in the expected, existing
+    # directory. Otherwise config_bad: no send, no direct row, no cooldown.
+
+    def assert_refused(self, cause, **extra):
+        inbox, status = os.path.join(self.tmp, "inbox.db"), os.path.join(self.tmp, "deadman-status.json")
+        report, _ = self.check(NOW, inbox_path=inbox, status_path=status, **extra)
+        self.assertFalse(report["alerted"])
+        self.assertEqual(cause, report["cause"])
+        self.assertEqual(cause, json.loads(read(status))["cause"])
+        self.assertEqual([], self.inbox_rows(inbox), "never a direct row")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "deadman.json")), "no cooldown: next run retries")
+        return report
+
+    def test_missing_socket_in_the_expected_directory_is_daemon_down(self):
+        inbox, status = os.path.join(self.tmp, "inbox.db"), os.path.join(self.tmp, "deadman-status.json")
+        sock = os.path.join(self.tmp, "dunkingsheep.sock")
+        error = FileNotFoundError(2, "No such file or directory", sock)
+        report, _ = self.check(NOW, send=self.raising(error), inbox_path=inbox, status_path=status)
+        self.assertEqual(("direct", 1), (report["delivered_via"], len(self.inbox_rows(inbox))))
+
+    def test_empty_daemon_path_is_config_bad_and_sends_nothing(self):
+        sent = []
+        for empty in ("", "  "):
+            self.assert_refused("config_bad", daemon_path=empty, send=lambda *a: sent.append(a))
+        self.assertEqual([], sent, "a CONFIG refusal is decided before any send")
+
+    def test_missing_parent_is_config_bad(self):
+        report = self.assert_refused("config_bad", daemon_path=os.path.join(self.tmp, "gone", "x.sock"),
+                                     send=self.raising(FileNotFoundError("no socket")))
+        self.assertIn("does not exist", report["delivery_error"])
+
+    def test_unexpected_parent_is_config_bad(self):
+        other = os.path.join(self.tmp, "elsewhere")
+        os.mkdir(other)
+        report = self.assert_refused("config_bad", daemon_path=os.path.join(other, "dunkingsheep.sock"),
+                                     send=self.raising(FileNotFoundError("no socket")))
+        self.assertIn("not the expected directory", report["delivery_error"])
+
+    def test_file_not_found_for_a_different_file_is_config_bad(self):
+        error = FileNotFoundError(2, "No such file or directory", os.path.join(self.tmp, "other.sock"))
+        self.assert_refused("config_bad", send=self.raising(error))
+
+    def test_not_a_directory_is_config_bad(self):
+        self.assert_refused("config_bad", send=self.raising(NotADirectoryError("a component is a file")))
+
+    def test_timeout_and_reply_less_close_are_other(self):
+        for error in (TimeoutError("timed out"), deadman_unavailable(), IsADirectoryError("dir")):
+            self.assert_refused("other", send=self.raising(error))
+
+    def test_cli_exit_codes_by_cause(self):
+        import argparse
+        base = dict(heartbeat=os.path.join(self.tmp, "heartbeat"), cadence_minutes=10, multiplier=3,
+                    to="vp of agentry", state=os.path.join(self.tmp, "deadman.json"), cooldown_minutes=60,
+                    now=NOW, dry_run=False, error_file=os.path.join(self.tmp, "err"),
+                    status=os.path.join(self.tmp, "st.json"), inbox=os.path.join(self.tmp, "inbox.db"),
+                    expected_dir=self.tmp, json=True)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, deadman.main(argparse.Namespace(daemon_path="", **base)))
+        self.assertEqual("config_bad", json.loads(read(base["status"]))["cause"])
 
     def test_watchdog_dry_run_never_touches_the_heartbeat(self):
         self.beat(NOW - HOUR)

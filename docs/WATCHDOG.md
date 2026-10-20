@@ -82,7 +82,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `inbox.undeliverable` | a mailbox's undeliverable backlog is at least N (no age limit) | `min_messages` | warning / ops |
 | `inbox.unread_live` | a live pane's mailbox has at least N queued messages older than the age | `age_minutes`, `min_messages` | warning / ops |
 | `inbox.unread_dead` | queued mail for a pane that no longer exists | `min_messages` | warning / ops |
-| `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 12) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
+| `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 30) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
 | `lane.working_without_task` | a pane is working, holds no task, and has no task event in N min | `quiet_minutes` | info / ops |
 | `lane.idle_holding_task` | a pane holds a task while idle, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / ops |
 | `host.load` | load1 per CPU is at or above the threshold | `load1_per_cpu` | warning / ops |
@@ -175,25 +175,55 @@ imports the watchdog or reads its config.
   present.
 - **Delivery never depends on the daemon it may be reporting** (VP i19837,
   w8:p8 i19841):
-  1. **Daemon first:** `inbox_send` as system sender `watchdog`.
-  2. **Direct inbox row, only when the daemon is provably absent.** The trigger
-     is `ConnectionRefusedError`, or `FileNotFoundError`/`NotADirectoryError` on
-     the socket: nothing was sent, so nothing can duplicate. The dead-man then
-     writes one row straight into `~/.config/dunkingsheep/inbox.db` through
-     `dunk_inbox.Inbox.send` (the same columns the daemon reads; sender
-     `watchdog`, no nudge), and reads it back by id to confirm sender, mailbox
-     and body. The daemon shows the row when it returns; if it never returns, a
-     human finds it with `sqlite3`. There is one row per incident (a given
-     stale heartbeat), and the cooldown starts only after a confirmed row.
-  3. **Never around a slow or live daemon.** A timeout, a reply-less close
-     after the request was sent, or an error reply from a running daemon may
-     mean the alert is already queued. So there is no direct write, and no
-     cooldown; the next run retries.
-  4. **Last resort.** If nothing could be delivered, it writes
-     `watchdog_deadman_status.json` `{at, error, heartbeat, target, attempted}`
-     and a journal line, and exits 1, so the unit shows in
-     `systemctl --user --failed`. No desk banner exists yet; surfacing the
-     status file on the desk is a vp-of-agentry change.
+  1. **Daemon path check, before anything is sent** (VP i19851, w8:p8
+     i19854). A misconfigured path raises the same `FileNotFoundError` as a
+     dead daemon. So `daemon_path_problem()` first requires that the path
+     (`--socket`, resolved like `dunk_client`: `$DUNKINGSHEEP_SOCKET` or
+     `~/.config/dunkingsheep/dunkingsheep.sock`) is non-empty and that its
+     parent exists, is a directory, and is the expected one
+     (`--expected-socket-dir`, default `~/.config/dunkingsheep`). If any of
+     these fails, it is a **CONFIG refusal**: nothing is sent, no direct row is
+     written, the status file records `cause: config_bad`, and the dead-man
+     exits 2.
+     A daemon on a custom socket outside `~/.config/dunkingsheep` needs BOTH
+     `--socket` and `--expected-socket-dir` in the dead-man unit; otherwise the
+     dead-man reports `config_bad` (deliberately: it will not guess).
+  2. **Daemon:** `inbox_send` as system sender `watchdog`.
+  3. **Classify the failure** with `classify_daemon_error()` into
+     `daemon_down`, `config_bad` or `other`:
+     - `ConnectionRefusedError` is `daemon_down`.
+     - `FileNotFoundError` is `daemon_down` only when the path check passed and
+       the error, if it names a file, names the daemon path itself. Otherwise
+       it is `config_bad`.
+     - `NotADirectoryError` is `config_bad`: a component of the path is a file.
+     - Everything else is `other`: a timeout, an error reply from a running
+       daemon, or `IsADirectoryError`.
+  4. **Direct inbox row, only on `daemon_down`.** Nothing was sent, so nothing
+     can duplicate. The dead-man writes one row straight into
+     `~/.config/dunkingsheep/inbox.db` through `dunk_inbox.Inbox.send`. That
+     uses the same columns the daemon reads, sender `watchdog`, and no nudge.
+     It then reads the row back by id to confirm sender, mailbox and body. The
+     daemon shows the row when it returns; if it never returns, a human finds
+     it with `sqlite3`. There is one row per incident (a given stale
+     heartbeat), and the cooldown starts only after a confirmed row.
+  5. **Never around a slow or live daemon (`other`).** It makes no direct
+     write and starts no cooldown; the next run retries.
+  6. **Last resort.** If nothing was delivered, whatever the cause, it writes
+     `watchdog_deadman_status.json`
+     `{at, cause, error, heartbeat, target, daemon_path, attempted, config_error}`
+     and a journal line. It exits 2 on `config_bad` and 1 otherwise, so the
+     unit shows in `systemctl --user --failed`. The `cause` field is how a
+     human tells a dead daemon from a broken config. No desk banner exists
+     yet; surfacing the status file on the desk is a vp-of-agentry change.
+- **Deliberate exclusion: `DaemonUnavailable` never triggers the direct
+  write** (proposed by the implementer, accepted by the VP, i19851).
+  `FlockClient.call` raises it only after `sendall`, when the daemon closes
+  without replying. So the request has already reached a daemon that may have
+  queued the alert before dying. A direct row there could duplicate the alert,
+  and only a failed connect proves that nothing was sent. The cost is one
+  missed cycle: the alert is retried on the next run, by which time a dead
+  daemon is refusing connections (`daemon_down`). A future change must not
+  widen the trigger to include it without a test that proves no duplicate.
 - **Cadence.** The cadence in the dead-man unit is hard-coded deliberately,
   because the dead-man must not read the watchdog config. Change both together.
 

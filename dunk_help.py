@@ -576,6 +576,8 @@ def guide(markdown=False):
       "- The dead-man is a separate unit that never reads the watchdog. It alerts VP\n"
       "  when the heartbeat goes stale. If the daemon is provably down, it writes the\n"
       "  alert row straight into inbox.db; it never does so around a slow daemon.\n"
+      "  A missing socket counts as down only when --socket is set and sits in the\n"
+      "  expected directory; otherwise it is config_bad (status file, exit 2, no row).\n"
       "- Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.\n")
 
     w(h(2, "The herdr guard: agents that shell out"))

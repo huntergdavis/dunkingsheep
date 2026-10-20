@@ -181,7 +181,7 @@ RULE_PARAMS = {
     "inbox.undeliverable": {"min_messages": POSITIVE_INT},
     "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT},
     "inbox.unread_dead": {"min_messages": POSITIVE_INT},
-    "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 20, integer=True),
+    "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 50, integer=True),
                                "require_live_pane": _bool},
     "lane.working_without_task": {"quiet_minutes": POSITIVE},
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
