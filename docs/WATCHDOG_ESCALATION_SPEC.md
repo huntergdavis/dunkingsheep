@@ -27,6 +27,26 @@
 
 **Exception:** if the Telegram bridge itself is the failing service, its outage page goes to VP with a desk banner. It must not be sent through the bridge (see section 5).
 
+### Current coverage (as of PR #1 at `d3462d6`, 2026-10-20)
+
+- **No rule implements the security or money classes.** The 13 rules plus `watchdog.self_error` and `watchdog.deadman` cover work, delivery, scheduling, audit and outage only.
+- So the only rules that could reach OWNER today are the outage-labelled ones: `host.tmp`, `health.failed` and, until it is relabelled, `host.load`.
+- An empty security or money row in this table means **not monitored**. It does not mean nothing happened.
+- Update this paragraph whenever a rule is added or relabelled.
+
+**Gates (VP i19818):**
+- **Tier 1**, before any install:
+  - delivered means confirmed;
+  - nonsensical values (a zero threshold or zero cooldown) are refused;
+  - the dry run prints the threshold and the measured value, and supports `--replay`;
+  - the dead-man has a non-inbox fallback.
+- **Tier 2**, before owner paging is ever enabled:
+  - `host.tmp` and `host.load` move to an `ops` category outside owner eligibility;
+  - the hold condition from section 2;
+  - state-loss suppression;
+  - an independent owner rate cap.
+- Owner paging stays disabled in the shipped config until Tier 2 has landed and been reviewed.
+
 ## 2. Firing rules for owner pages
 
 | Condition | Threshold | Must hold for | Rate limit | Dedupe key |
