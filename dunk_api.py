@@ -260,7 +260,8 @@ def h_inbox_send(flock, args, self_pane_id):
         attach = [p for p in attach.split(",") if p.strip()]
     return flock.inbox_send(args["to"], args["body"], subject=args.get("subject"),
                             attach=attach, notify=_bool(args.get("notify"), True),
-                            self_pane_id=self_pane_id)
+                            self_pane_id=self_pane_id,
+                            system_sender=args.get("system_sender") or None)
 
 
 def h_inbox_count(flock, args, self_pane_id):
@@ -923,6 +924,9 @@ COMMANDS = [
             "subject": {"type": "string", "description": "Optional one-line summary."},
             "attach": {"type": "string",
                        "description": "Optional local file path(s) to attach, comma separated."},
+            "system_sender": {"type": "string",
+                              "description": "Non-agent sender name (\"watchdog\" only); refused "
+                                             "from any caller that has a pane."},
             "notify": {"type": "boolean",
                        "description": "Nudge the recipient's pane that mail arrived (default true)."},
         },

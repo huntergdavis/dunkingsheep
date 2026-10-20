@@ -1,0 +1,8 @@
+[Unit]
+Description=Dunking Sheep exception watchdog (deterministic rules, no model)
+
+[Service]
+Type=oneshot
+# Live only when ~/.config/dunkingsheep/watchdog.json has enabled=true AND
+# dry_run=false; a missing or invalid config exits 2 and touches no heartbeat.
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon watchdog

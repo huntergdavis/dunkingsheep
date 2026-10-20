@@ -378,6 +378,26 @@ def build_parser():
                    help="also write the JSON report "
                         "(default ~/.config/dunkingsheep/health.json)")
 
+    p = sub.add_parser("watchdog",
+                       help="deterministic exception watchdog (no model); --dry-run sends nothing")
+    p.add_argument("--config", default="~/.config/dunkingsheep/watchdog.json",
+                   help="watchdog config (JSON); missing or invalid config refuses to start")
+    p.add_argument("--dry-run", action="store_true",
+                   help="report what would fire; send nothing, write no state or heartbeat")
+    p.add_argument("--now", type=float, default=None,
+                   help="evaluate as of this UNIX time (reproducible runs)")
+
+    p = sub.add_parser("watchdog-deadman",
+                       help="alert the VP if the watchdog heartbeat is stale (independent check)")
+    p.add_argument("--heartbeat", default="~/.config/dunkingsheep/watchdog.heartbeat")
+    p.add_argument("--cadence-minutes", type=float, required=True)
+    p.add_argument("--multiplier", type=float, default=3.0)
+    p.add_argument("--to", required=True, help="VP mailbox")
+    p.add_argument("--state", default="~/.config/dunkingsheep/watchdog_deadman_state.json")
+    p.add_argument("--cooldown-minutes", type=float, required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--now", type=float, default=None)
+
     p = sub.add_parser("recover",
                        help="post-upgrade recovery plan; --apply types into bare shells")
     p.add_argument("--apply", action="store_true",
@@ -1183,6 +1203,24 @@ def main(argv=None):
                       "pick it up." % dunk_guard.GUARD_DIR)
         return 0 if result.get("ok", True) else 1
 
+    if command == "watchdog":
+        # Local and read-only: evaluates the stores directly and never starts
+        # the daemon. Only a live run talks to it, to deliver one digest.
+        import dunk_watchdog
+        try:
+            config = dunk_watchdog.load_config(os.path.expanduser(args.config))
+        except dunk_watchdog.ConfigError as error:
+            print(f"watchdog: refusing to start: config {error}", file=sys.stderr)
+            return 2
+        report = dunk_watchdog.run(config, args.now if args.now is not None else time.time(),
+                                   dry_run_flag=args.dry_run)
+        print(json.dumps(report, indent=2, sort_keys=True) if args.json
+              else dunk_watchdog.render_text(report))
+        return 1 if report["delivery_error"] else 0
+    if command == "watchdog-deadman":
+        # Must not import dunk_watchdog: it has to work when the watchdog is broken.
+        import dunk_watchdog_deadman
+        return dunk_watchdog_deadman.main(args)
     if command == "serve":
         from dunk_server import SOCKET_PATH, run_daemon
         return run_daemon(

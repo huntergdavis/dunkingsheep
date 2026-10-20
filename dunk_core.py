@@ -58,7 +58,7 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from herdr_client import HerdrClient
 
-VERSION = "2.22.0"
+VERSION = "2.23.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -190,6 +190,10 @@ log = logging.getLogger("dunkingsheep")
 
 class _NoticeFolded(Exception):
     """Internal: a notice was merged into one already waiting."""
+
+
+# Non-agent senders that may appear on inbox mail (see Flock.inbox_send).
+SYSTEM_SENDERS = ("watchdog",)
 
 
 class DunkError(ValueError):
@@ -782,15 +786,24 @@ class Flock:
 
     @_as_dunk_error
     def inbox_send(self, to, body, subject=None, attach=None, notify=True,
-                   self_pane_id=None):
+                   self_pane_id=None, system_sender=None):
         """Put a message in another agent's inbox. Nothing is typed into their
         terminal except, when `notify`, a short line telling them they have
-        mail - which is the one send short enough to always submit."""
+        mail - which is the one send short enough to always submit.
+
+        `system_sender` names a non-agent sender (the watchdog). It is accepted
+        only from SYSTEM_SENDERS and only from a caller with no pane (a systemd
+        unit); an agent always runs in a pane, so it cannot claim the name."""
+        if system_sender is not None:
+            if system_sender not in SYSTEM_SENDERS:
+                raise DunkError(f"unknown system sender {system_sender!r}")
+            if self_pane_id:
+                raise DunkError("a system sender cannot be claimed from a pane")
         mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id)
         # The sender is the raw pane id, never a mailbox label. On 2026-10-19
         # wS:p1's mail arrived "from codex poolrad" because the label resolved
         # through a sibling pane; ids are unique and stable.
-        sender = self_pane_id or None
+        sender = system_sender or self_pane_id or None
         attachments = [attach] if isinstance(attach, str) else list(attach or ())
         message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
                                   mailbox_label=label, pane_id=pane_id,
