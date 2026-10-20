@@ -2,44 +2,54 @@
 
 No model is in this loop, and none may be added: every rule is a fixed
 predicate over read-only SQL and JSON reads, and every threshold, window,
-severity, recipient and cooldown comes from one validated config file. The
-same stores, config, state and `now` always produce the same findings in the
-same order. `tests/test_dunk_watchdog.py` fails the build if this module (or
-the dead-man check) imports or names anything model-related.
+severity, recipient, hold, cap and cooldown comes from one validated config
+file. The same stores, config, state and `now` always produce the same findings
+and the same plan, in the same order. `tests/test_dunk_watchdog.py` fails the
+build if this module (or the dead-man check) imports or names anything
+model-related.
 
-This alerts; it does not visualise. Output is text or JSON on stdout, at most
-one digest message per recipient per run through the existing inbox API, and a
-derived count. There is no UI, HTTP server or dashboard: viewing state is the
-metrics collector's job.
+This alerts; it does not visualise. Output is spec-format lines (or JSON) on
+stdout, at most one digest per channel per run, and a derived count. There is
+no UI, HTTP server or dashboard: viewing state is the metrics collector's job.
 
-Inputs (all opened read-only; their schemas are never changed):
-  tasks.db (tasks, task_leases, task_events), inbox.db (messages),
-  metrics.db (events), dunks.json, health.json, a host sample (os.statvfs,
-  os.getloadavg), and optionally a herdr pane snapshot (`herdr pane list`, a
-  local read used only by the lane rules and live/dead mailbox checks).
+The escalation policy is docs/WATCHDOG_ESCALATION_SPEC.md. In short:
 
-Outputs: findings, an alert plan, and (live runs only) one digest per
-recipient, a state file written atomically, and a heartbeat file touched on
-every successful live run. A dry run sends nothing and writes nothing.
+* Channels. VP is the dunkingsheep inbox. OWNER is anything that reaches the
+  owner's phone; today that is a VP desk brief, which the Telegram bridge
+  forwards. OWNER is one channel however it is delivered.
+* Only the classes security, outage and money may page OWNER. ops and project
+  are VP-only, however long they persist. The watchdog's own errors (class
+  self) are VP-only.
+* An owner page needs its rule's hold (`must_hold_runs` consecutive runs, each
+  at least `min_run_spacing_seconds` after the previous counted run). It is
+  limited by `max_pages_per_hour` across all rules and by the per-rule
+  cooldown. A page counts as DELIVERED only when the forwarding path confirms
+  it. Until then it is pending, no cooldown starts, and an unconfirmed or
+  failed page is a watchdog.self_error to VP. Every check happens before
+  anything is posted, because posting is the irrevocable "marked for
+  forwarding" step.
+* Fail toward not paging. A missing or corrupt state file, any rule error and
+  any owner-transport error suppress owner pages for the run and are reported
+  to VP. A bad config refuses to start (see the CLI).
 
-Escalation: the VP inbox first. The owner is paged only when
-`escalation.owner.enabled` is true (which also requires `approved_by`), only
-for the configured categories (security/outage/money) and severity, and never
-for the watchdog's own errors. A failure of the watchdog itself is one
-`watchdog.self_error` finding per run (source `watchdog-self`), VP at most.
+Inputs (read-only; their schemas are never changed): tasks.db, inbox.db and
+metrics.db (sqlite mode=ro), dunks.json, health.json, a host sample, and
+optionally a herdr pane snapshot. Outputs: the watchdog's own state file and
+heartbeat, and the digests.
 """
 
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import time
 
-SCHEMA_ID = "dunkingsheep-watchdog/1"
+SCHEMA_ID = "dunkingsheep-watchdog/2"
 SEVERITIES = ("info", "warning", "critical")
 SEVERITY_RANK = {name: rank for rank, name in enumerate(SEVERITIES)}
-CATEGORIES = ("work", "delivery", "scheduling", "audit", "security", "outage", "money")
-OWNER_CATEGORIES = ("security", "outage", "money")
+CLASSES = ("security", "outage", "money", "ops", "project")
+OWNER_CLASSES = ("security", "outage", "money")
 SOURCE_RULE = "watchdog-rule"
 SOURCE_SELF = "watchdog-self"
 SELF_ERROR_RULE = "watchdog.self_error"
@@ -55,24 +65,36 @@ class ConfigError(Exception):
         self.reason = reason
 
 
+class OwnerChannelUnavailable(Exception):
+    """The owner transport is not configured; fail toward not paging."""
+
+
 # -- config schema -----------------------------------------------------------
 #
 # Every key is required and unknown keys are refused, so nothing runs on a
-# default nobody chose. A spec is (type, check, description); `check` returns
-# an error string or None.
+# default nobody chose. Thresholds, windows, holds, caps and cooldowns must be
+# strictly positive: a zero threshold fires on every run and a zero rate limit
+# is no limit, so both are config bugs that the validator refuses.
 
-def _num(minimum=None, maximum=None, integer=False):
+def _num(minimum=None, maximum=None, integer=False, positive=False):
     def check(value):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return "must be a number"
         if integer and not isinstance(value, int):
             return "must be an integer"
+        if positive and value <= 0:
+            return f"must be > 0, got {value}"
         if minimum is not None and value < minimum:
             return f"must be >= {minimum}, got {value}"
         if maximum is not None and value > maximum:
             return f"must be <= {maximum}, got {value}"
         return None
     return check
+
+
+POSITIVE = _num(positive=True)
+POSITIVE_INT = _num(integer=True, positive=True)
+FRACTION = _num(maximum=1, positive=True)
 
 
 def _bool(value):
@@ -94,14 +116,43 @@ def _enum(*choices):
     return check
 
 
-def _enum_list(*choices):
+def _enum_list(*choices, allow_empty=True):
     def check(value):
         if not isinstance(value, list) or not all(v in choices for v in value):
             return f"must be a list drawn from {list(choices)}"
         if len(set(value)) != len(value):
             return "must not repeat entries"
+        if not allow_empty and not value:
+            return "must not be empty"
         return None
     return check
+
+
+def _str_list(value):
+    if not isinstance(value, list) or not value or not all(isinstance(v, str) and v for v in value):
+        return "must be a non-empty list of non-empty strings"
+    return None
+
+
+def _hex_list(value):
+    if not isinstance(value, list) or not all(isinstance(v, str) and re.match(r"[0-9a-f]{64}\Z", v)
+                                              for v in value):
+        return "must be a list of lowercase sha256 hex digests (may be empty)"
+    return None
+
+
+def _regex_list(value):
+    if not isinstance(value, list) or not value:
+        return "must be a non-empty list of regular expressions"
+    for item in value:
+        problem = _regex(item)
+        if problem:
+            return f"entry {item!r} {problem}"
+    return None
+
+
+def _opt_positive(value):
+    return None if value is None else POSITIVE(value)
 
 
 def _regex(value):
@@ -117,45 +168,53 @@ def _regex(value):
 RULE_COMMON = {
     "enabled": _bool,
     "severity": _enum(*SEVERITIES),
-    "category": _enum(*CATEGORIES),
-    "cooldown_minutes": _num(0),
+    "class": _enum(*CLASSES),
+    "cooldown_minutes": POSITIVE,
+    "must_hold_runs": POSITIVE_INT,
 }
 
 RULE_PARAMS = {
-    "task.blocked_stale": {"threshold_minutes": _num(1)},
-    "task.lease_stale": {"never_renewed_minutes": _num(1), "lookback_minutes": _num(1)},
-    "dunk.skip_loop": {"consecutive_skips": _num(1, integer=True), "lookback_hours": _num(1)},
-    "dunk.overdue": {"missed_intervals": _num(1)},
-    "inbox.undeliverable": {"min_messages": _num(1, integer=True)},
-    "inbox.unread_live": {"age_minutes": _num(1), "min_messages": _num(1, integer=True)},
-    "inbox.unread_dead": {"min_messages": _num(1, integer=True)},
-    "inbox.ambiguous_sender": {"lookback_hours": _num(1), "sample_ids": _num(1, 20, integer=True),
+    "task.blocked_stale": {"threshold_minutes": POSITIVE},
+    "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE},
+    "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE},
+    "dunk.overdue": {"missed_intervals": POSITIVE},
+    "inbox.undeliverable": {"min_messages": POSITIVE_INT},
+    "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT},
+    "inbox.unread_dead": {"min_messages": POSITIVE_INT},
+    "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 20, integer=True),
                                "require_live_pane": _bool},
-    "lane.working_without_task": {"quiet_minutes": _num(1)},
-    "lane.idle_holding_task": {"quiet_minutes": _num(1), "idle_statuses": _enum_list(
-        "idle", "done", "blocked", "unknown"), "holding_statuses": _enum_list(
-        "open", "in_progress", "blocked")},
-    "host.load": {"load1_per_cpu": _num(0)},
-    "host.tmp": {"max_used_fraction": _num(0, 1), "min_free_bytes": _num(0, integer=True),
-                 "max_inode_fraction": _num(0, 1), "path": _str},
-    "health.failed": {"stale_minutes": _num(1)},
+    "lane.working_without_task": {"quiet_minutes": POSITIVE},
+    "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
+        "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
+        "open", "in_progress", "blocked", allow_empty=False)},
+    "host.load": {"load1_per_cpu": POSITIVE},
+    "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
+                 "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
+    "host.heavy_slot_stale": {"directory": _str, "prefix": _str, "max_age_minutes": POSITIVE},
+    "security.secret_text": {"patterns": _regex_list, "allowlist_sha256": _hex_list, "lookback_hours": POSITIVE},
+    "money.spend_projection": {"source": _opt_str, "cap": _opt_positive},
+    "host.disk_full": {"max_used_fraction": FRACTION, "paths": _str_list},
+    "health.failed": {"stale_minutes": POSITIVE},
 }
 
 TOP = {
     "schema": _enum(SCHEMA_ID),
     "enabled": _bool,
     "dry_run": _bool,
-    "cadence_minutes": _num(1),
-    "max_alerts_per_run": _num(1, integer=True),
+    "cadence_minutes": POSITIVE,
+    "min_run_spacing_seconds": POSITIVE,
+    "max_alerts_per_run": POSITIVE_INT,
     "state_path": _str,
     "heartbeat_path": _str,
-    "state_retention_days": _num(1),
+    "state_retention_days": POSITIVE,
     "stores": {"config_dir": _str},
     "panes": {"source": _enum("herdr", "none"), "pane_id_pattern": _regex},
     "escalation": {
         "vp": {"mailbox": _str, "min_severity": _enum(*SEVERITIES)},
-        "owner": {"enabled": _bool, "mailbox": _opt_str, "categories": _enum_list(*OWNER_CATEGORIES),
-                  "min_severity": _enum(*SEVERITIES), "approved_by": _opt_str},
+        "owner": {"enabled": _bool, "channel": _enum("desk-brief"),
+                  "classes": _enum_list(*OWNER_CLASSES), "min_severity": _enum(*SEVERITIES),
+                  "approved_by": _opt_str, "max_pages_per_hour": POSITIVE_INT,
+                  "confirm_within_minutes": POSITIVE, "confirm_path": _str},
     },
     "rules": {rule: dict(RULE_COMMON, **params) for rule, params in RULE_PARAMS.items()},
 }
@@ -163,7 +222,7 @@ TOP = {
 
 def _validate(spec, value, prefix):
     if not isinstance(value, dict):
-        raise ConfigError(prefix or "<root>", "must be an object")
+        raise ConfigError(prefix.rstrip(".") or "<root>", "must be an object")
     for key in sorted(value):
         if key not in spec:
             raise ConfigError(f"{prefix}{key}", "unknown key")
@@ -184,13 +243,23 @@ def validate_config(config):
     _validate(TOP, config, "")
     owner = config["escalation"]["owner"]
     if owner["enabled"]:
-        for key in ("mailbox", "approved_by"):
-            if not owner[key]:
-                raise ConfigError(f"escalation.owner.{key}",
-                                  "required when owner paging is enabled")
-        if not owner["categories"]:
-            raise ConfigError("escalation.owner.categories",
-                              "must name at least one category when owner paging is enabled")
+        if not owner["approved_by"]:
+            raise ConfigError("escalation.owner.approved_by", "required when owner paging is enabled")
+        if not owner["classes"]:
+            raise ConfigError("escalation.owner.classes",
+                              "must name at least one class when owner paging is enabled")
+    tmp = config["rules"]["host.tmp"]
+    if tmp["critical_used_fraction"] < tmp["max_used_fraction"]:
+        raise ConfigError("rules.host.tmp.critical_used_fraction", "must be >= max_used_fraction")
+    money = config["rules"]["money.spend_projection"]
+    if money["enabled"] and (money["source"] is None or money["cap"] is None):
+        raise ConfigError("rules.money.spend_projection.enabled",
+                          "cannot be enabled without both source and cap (no metering source exists; VP i19821)")
+    for rule_id, rule in config["rules"].items():
+        if rule["class"] in OWNER_CLASSES and rule_id not in OWNER_ELIGIBLE_RULES:
+            raise ConfigError(f"rules.{rule_id}.class",
+                              f"{rule['class']!r} is owner-eligible, but {rule_id} is not an approved "
+                              "owner rule (spec section 1); use ops or project")
     return config
 
 
@@ -225,7 +294,8 @@ def _load_json(path):
 class Inputs:
     """Lazily loaded, read-only views of the stores. Each loader raises on an
     unreadable store; the evaluator turns that into a self error for the rules
-    that needed it rather than a silent pass."""
+    that needed it rather than a silent pass. Every time-windowed query is
+    bounded above by `now`, so evaluating at a past `now` never sees the future."""
 
     def __init__(self, config, now, panes_provider=None, host_sampler=None):
         self.config = config
@@ -252,7 +322,7 @@ class Inputs:
                 leases = [dict(r) for r in conn.execute(
                     "SELECT * FROM task_leases ORDER BY task_id, pane_id")]
                 events = [dict(r) for r in conn.execute(
-                    "SELECT * FROM task_events ORDER BY at, id")]
+                    "SELECT * FROM task_events WHERE at<=? ORDER BY at, id", (self.now,))]
             finally:
                 conn.close()
             for task in tasks:
@@ -295,12 +365,12 @@ class Inputs:
                     for p in panes if p.get("pane_id")}
         return self._get("panes", load)
 
-    def host(self):
+    def host(self, path):
         def load():
             if self._host_sampler is not None:
-                return self._host_sampler()
-            return sample_host(self.config["rules"]["host.tmp"]["path"])
-        return self._get("host", load)
+                return self._host_sampler(path)
+            return sample_host(path)
+        return self._get(f"host:{path}", load)
 
     def name_to_pane(self):
         """Mailbox name -> pane id, from the inbox's own routing history (the
@@ -308,8 +378,8 @@ class Inputs:
         def load():
             mapping = {}
             for mailbox, pane in self.inbox(
-                    "SELECT mailbox, pane_id FROM messages WHERE pane_id IS NOT NULL "
-                    "ORDER BY created_at, id"):
+                    "SELECT mailbox, pane_id FROM messages WHERE pane_id IS NOT NULL AND created_at<=? "
+                    "ORDER BY created_at, id", (self.now,)):
                 mapping[mailbox] = pane
             return mapping
         return self._get("name_to_pane", load)
@@ -317,25 +387,25 @@ class Inputs:
 
 def sample_host(path):
     stat = os.statvfs(path)
-    total = stat.f_blocks * stat.f_frsize
     load1, _, _ = os.getloadavg()
     return {
         "load1": load1,
         "cpus": os.cpu_count() or 1,
-        "tmp_used_fraction": ((stat.f_blocks - stat.f_bfree) / stat.f_blocks) if stat.f_blocks else 1.0,
-        "tmp_free_bytes": stat.f_bavail * stat.f_frsize,
-        "tmp_total_bytes": total,
-        "tmp_inode_used_fraction": ((stat.f_files - stat.f_ffree) / stat.f_files) if stat.f_files else 0.0,
+        "used_fraction": ((stat.f_blocks - stat.f_bfree) / stat.f_blocks) if stat.f_blocks else 1.0,
+        "free_bytes": stat.f_bavail * stat.f_frsize,
+        "inode_used_fraction": ((stat.f_files - stat.f_ffree) / stat.f_files) if stat.f_files else 0.0,
     }
 
 
 # -- findings -----------------------------------------------------------------
 
-def finding(rule_id, rule, key, summary, evidence, source=SOURCE_RULE):
+def finding(rule_id, rule, key, summary, threshold, measured, window, evidence, source=SOURCE_RULE):
+    """One finding. `threshold`, `measured` and `window` are value+unit strings
+    printed on every dry-run line (spec section 4)."""
     return {
-        "rule": rule_id, "key": str(key), "severity": rule["severity"],
-        "category": rule["category"], "source": source, "summary": summary,
-        "evidence": evidence,
+        "rule": rule_id, "key": str(key), "severity": rule["severity"], "class": rule["class"],
+        "source": source, "summary": summary, "threshold": threshold, "measured": measured,
+        "window": window, "evidence": evidence,
     }
 
 
@@ -356,10 +426,9 @@ def rule_task_blocked_stale(inputs, rule):
         idle = inputs.now - last
         if idle >= rule["threshold_minutes"] * 60:
             out.append(finding("task.blocked_stale", rule, task["id"],
-                               f"task {task['id']} blocked with no state change or event for "
-                               f"{_minutes(idle)} min",
-                               {"task": task["id"], "minutes_since_activity": _minutes(idle),
-                                "assignees": task["assignees"],
+                               f"task {task['id']} blocked with no state change or event",
+                               f"{rule['threshold_minutes']}min", f"{_minutes(idle)}min", "since last activity",
+                               {"task": task["id"], "assignees": task["assignees"],
                                 "block_reason_set": task["block_reason"] is not None}))
     return out
 
@@ -371,16 +440,16 @@ def rule_task_lease_stale(inputs, rule):
         key = f"{lease['task_id']}@{lease['pane_id']}"
         if lease["expires_at"] <= inputs.now:
             out.append(finding("task.lease_stale", rule, f"expired:{key}",
-                               f"lease {key} expired {_minutes(inputs.now - lease['expires_at'])} min ago "
-                               "and is not yet reaped",
-                               {"task": lease["task_id"], "pane": lease["pane_id"],
-                                "expired_minutes_ago": _minutes(inputs.now - lease["expires_at"])}))
+                               f"lease {key} expired and is not yet reaped",
+                               "expires_at<=now", f"expired {_minutes(inputs.now - lease['expires_at'])}min ago",
+                               "current leases", {"task": lease["task_id"], "pane": lease["pane_id"]}))
         elif (lease["heartbeat_at"] <= lease["claimed_at"]
               and inputs.now - lease["claimed_at"] >= rule["never_renewed_minutes"] * 60):
             out.append(finding("task.lease_stale", rule, f"unrenewed:{key}",
-                               f"lease {key} never renewed in {_minutes(inputs.now - lease['claimed_at'])} min",
-                               {"task": lease["task_id"], "pane": lease["pane_id"],
-                                "claimed_minutes_ago": _minutes(inputs.now - lease["claimed_at"])}))
+                               f"lease {key} never renewed",
+                               f"{rule['never_renewed_minutes']}min",
+                               f"{_minutes(inputs.now - lease['claimed_at'])}min", "since claim",
+                               {"task": lease["task_id"], "pane": lease["pane_id"]}))
     since = inputs.now - rule["lookback_minutes"] * 60
     for event in data["events"]:
         if event["event"] not in ("requeued", "released") or event["at"] < since:
@@ -389,10 +458,10 @@ def rule_task_lease_stale(inputs, rule):
         if meta.get("reason") not in ("expired", "pane_gone"):
             continue
         out.append(finding("task.lease_stale", rule, f"reaped:{event['id']}",
-                           f"task {event['task_id']} lease reaped ({meta['reason']}) and "
-                           f"{event['event']}",
-                           {"task": event["task_id"], "event_id": event["id"],
-                            "reason": meta["reason"], "minutes_ago": _minutes(inputs.now - event["at"])}))
+                           f"task {event['task_id']} lease reaped ({meta['reason']}) and {event['event']}",
+                           "any reap", "1 reap", f"{rule['lookback_minutes']}min lookback",
+                           {"task": event["task_id"], "event_id": event["id"], "reason": meta["reason"],
+                            "minutes_ago": _minutes(inputs.now - event["at"])}))
     return out
 
 
@@ -402,24 +471,27 @@ def rule_dunk_skip_loop(inputs, rule):
     for dunk in sorted(inputs.dunks(), key=lambda d: d["id"]):
         rows = inputs.metrics(
             "SELECT id, at, kind FROM events WHERE source=? AND kind IN "
-            "('dunk.sent','dunk.skipped') AND at>=? ORDER BY at, id", (dunk["id"], since))
+            "('dunk.sent','dunk.skipped') AND at>=? AND at<=? ORDER BY at, id", (dunk["id"], since, inputs.now))
         run = best = 0
         run_start = best_start = best_end = None
         for event_id, at, kind in rows:
             if kind == "dunk.skipped":
                 run += 1
-                run_start = run_start if run > 1 else at
+                run_start = run_start if run > 1 else (event_id, at)
                 if run > best:
                     best, best_start, best_end = run, run_start, (event_id, at)
             else:
                 run, run_start = 0, None
         if best >= rule["consecutive_skips"]:
-            out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_end[0]}",
-                               f"dunk {dunk['id']} skipped {best} times in a row "
-                               f"(window {rule['lookback_hours']} h)",
+            # Keyed by the run's FIRST skip, which stays fixed while the run grows,
+            # so a continuing loop is one incident under its cooldown, not one per skip.
+            out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_start[0]}",
+                               f"dunk {dunk['id']} skipped {best} times in a row",
+                               f"{rule['consecutive_skips']} consecutive skips", f"{best} consecutive skips",
+                               f"{rule['lookback_hours']}h lookback",
                                {"dunk": dunk["id"], "target_pane": dunk.get("target_pane_id"),
-                                "longest_consecutive_skips": best, "current_streak": run,
-                                "run_start_hours_ago": round((inputs.now - best_start) / 3600, 1),
+                                "current_streak": run,
+                                "run_start_hours_ago": round((inputs.now - best_start[1]) / 3600, 1),
                                 "run_end_hours_ago": round((inputs.now - best_end[1]) / 3600, 1),
                                 "cumulative_skip_count": dunk.get("skip_count"),
                                 "skip_if_unconsumed": dunk.get("skip_if_unconsumed")}))
@@ -434,15 +506,14 @@ def rule_dunk_overdue(inputs, rule):
         interval = float(dunk.get("interval_minutes") or 0) * 60
         due = dunk.get("next_send_at")
         if due is None:
-            out.append(finding("dunk.overdue", rule, dunk["id"],
-                               f"dunk {dunk['id']} is running with no scheduled send",
-                               {"dunk": dunk["id"], "next_send_at": None}))
+            out.append(finding("dunk.overdue", rule, dunk["id"], f"dunk {dunk['id']} is running with no scheduled send",
+                               "a scheduled send", "none", "current", {"dunk": dunk["id"]}))
         elif interval > 0 and inputs.now - due >= rule["missed_intervals"] * interval:
             out.append(finding("dunk.overdue", rule, dunk["id"],
-                               f"dunk {dunk['id']} has not fired for {_minutes(inputs.now - due)} min "
-                               "past its scheduled send",
-                               {"dunk": dunk["id"], "overdue_minutes": _minutes(inputs.now - due),
-                                "interval_minutes": dunk.get("interval_minutes")}))
+                               f"dunk {dunk['id']} has not fired past its scheduled send",
+                               f"{rule['missed_intervals']} intervals", f"{round((inputs.now - due) / interval, 2)} intervals",
+                               f"interval {dunk.get('interval_minutes')}min",
+                               {"dunk": dunk["id"], "overdue_minutes": _minutes(inputs.now - due)}))
     return out
 
 
@@ -460,7 +531,7 @@ def _mailbox_groups(rows):
 
 
 def _group_evidence(inputs, mailbox, group, samples=3):
-    return {"mailbox": mailbox, "count": group["count"], "sample_ids": group["ids"][:samples],
+    return {"mailbox": mailbox, "sample_ids": group["ids"][:samples],
             "reasons": dict(sorted(group["reasons"].items())),
             "oldest_hours_ago": round((inputs.now - group["oldest"]) / 3600, 1),
             "newest_hours_ago": round((inputs.now - group["newest"]) / 3600, 1)}
@@ -468,23 +539,21 @@ def _group_evidence(inputs, mailbox, group, samples=3):
 
 def rule_inbox_undeliverable(inputs, rule):
     rows = inputs.inbox("SELECT id, mailbox, created_at, reason FROM messages "
-                        "WHERE state='undeliverable' ORDER BY created_at, id")
+                        "WHERE state='undeliverable' AND created_at<=? ORDER BY created_at, id", (inputs.now,))
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
             out.append(finding("inbox.undeliverable", rule, mailbox,
-                               f"{group['count']} undeliverable message(s) for {mailbox}",
+                               f"undeliverable message backlog for {mailbox}",
+                               f"{rule['min_messages']} msgs", f"{group['count']} msgs", "current backlog",
                                _group_evidence(inputs, mailbox, group)))
     return out
 
 
 def _queued(inputs, older_than=None):
-    sql = "SELECT id, mailbox, created_at, pane_id FROM messages WHERE state='queued'"
-    params = ()
-    if older_than is not None:
-        sql += " AND created_at<=?"
-        params = (older_than,)
-    return inputs.inbox(sql + " ORDER BY created_at, id", params)
+    limit = inputs.now if older_than is None else older_than
+    return inputs.inbox("SELECT id, mailbox, created_at, pane_id FROM messages WHERE state='queued' "
+                        "AND created_at<=? ORDER BY created_at, id", (limit,))
 
 
 def rule_inbox_unread_live(inputs, rule):
@@ -496,22 +565,20 @@ def rule_inbox_unread_live(inputs, rule):
         if group["count"] >= rule["min_messages"]:
             evidence = _group_evidence(inputs, mailbox, group)
             evidence["pane_liveness"] = "unknown (pane source disabled)" if panes is None else "live"
-            out.append(finding("inbox.unread_live", rule, mailbox,
-                               f"{group['count']} message(s) unread for over {rule['age_minutes']} min "
-                               f"in {mailbox}", evidence))
+            out.append(finding("inbox.unread_live", rule, mailbox, f"unread mail in {mailbox}",
+                               f"{rule['min_messages']} msgs older than {rule['age_minutes']}min",
+                               f"{group['count']} msgs", "current", evidence))
     return out
 
 
 def rule_inbox_unread_dead(inputs, rule):
     panes = inputs.panes()
-    if panes is None:
-        return []
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs) if pane and pane not in panes]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
-            out.append(finding("inbox.unread_dead", rule, mailbox,
-                               f"{group['count']} unread message(s) queued for dead pane mailbox {mailbox}",
+            out.append(finding("inbox.unread_dead", rule, mailbox, f"unread mail queued for dead pane mailbox {mailbox}",
+                               f"{rule['min_messages']} msgs", f"{group['count']} msgs", "current",
                                _group_evidence(inputs, mailbox, group)))
     return out
 
@@ -521,22 +588,22 @@ def rule_inbox_ambiguous_sender(inputs, rule):
     names = {name: pane for name, pane in inputs.name_to_pane().items() if not pattern.match(name)}
     panes = inputs.panes() if rule["require_live_pane"] else None
     rows = inputs.inbox("SELECT id, sender, created_at FROM messages WHERE sender IS NOT NULL "
-                        "AND created_at>=? ORDER BY created_at, id",
-                        (inputs.now - rule["lookback_hours"] * 3600,))
+                        "AND created_at>=? AND created_at<=? ORDER BY created_at, id",
+                        (inputs.now - rule["lookback_hours"] * 3600, inputs.now))
     groups = {}
     for message_id, sender, created_at in rows:
         if pattern.match(sender) or sender not in names:
             continue
         if panes is not None and names[sender] not in panes:
             continue
-        groups.setdefault(sender, []).append((message_id, created_at))
+        groups.setdefault(sender, []).append(message_id)
     out = []
-    for sender, items in sorted(groups.items()):
+    for sender, ids in sorted(groups.items()):
         out.append(finding("inbox.ambiguous_sender", rule, sender,
-                           f"{len(items)} message(s) with sender {sender!r}, a mailbox name that "
-                           f"resolves to pane {names[sender]}, not a pane id",
-                           {"sender": sender, "resolves_to_pane": names[sender], "count": len(items),
-                            "sample_ids": [i for i, _ in items[:rule["sample_ids"]]],
+                           f"sender {sender!r} is a mailbox name resolving to pane {names[sender]}, not a pane id",
+                           "1 msg", f"{len(ids)} msgs", f"{rule['lookback_hours']}h lookback",
+                           {"sender": sender, "resolves_to_pane": names[sender],
+                            "sample_ids": ids[:rule["sample_ids"]],
                             "pane_liveness": "unchecked" if panes is None else "live"}))
     return out
 
@@ -548,10 +615,10 @@ def _pane_activity(inputs, since):
         if event["actor"] and event["at"] >= since:
             activity[event["actor"]] = max(activity.get(event["actor"], 0), event["at"])
     for sender, at in inputs.inbox("SELECT sender, MAX(created_at) FROM messages WHERE sender IS NOT NULL "
-                                   "AND created_at>=? GROUP BY sender", (since,)):
+                                   "AND created_at>=? AND created_at<=? GROUP BY sender", (since, inputs.now)):
         activity[sender] = max(activity.get(sender, 0), at)
     for pane, at in inputs.inbox("SELECT pane_id, MAX(read_at) FROM messages WHERE pane_id IS NOT NULL "
-                                 "AND read_at>=? GROUP BY pane_id", (since,)):
+                                 "AND read_at>=? AND read_at<=? GROUP BY pane_id", (since, inputs.now)):
         activity[pane] = max(activity.get(pane, 0), at)
     return activity
 
@@ -577,8 +644,6 @@ def _holders(inputs, statuses):
 
 def rule_lane_working_without_task(inputs, rule):
     panes = inputs.panes()
-    if panes is None:
-        return []
     since = inputs.now - rule["quiet_minutes"] * 60
     task_actors = {e["actor"] for e in inputs.tasks()["events"] if e["actor"] and e["at"] >= since}
     holding = {p for holders in _holders(inputs, ("in_progress",)).values() for p in holders}
@@ -586,16 +651,14 @@ def rule_lane_working_without_task(inputs, rule):
     for pane, status in sorted(panes.items()):
         if status == "working" and pane not in holding and pane not in task_actors:
             out.append(finding("lane.working_without_task", rule, pane,
-                               f"pane {pane} is working with no task held and no task event in "
-                               f"{rule['quiet_minutes']} min",
-                               {"pane": pane, "agent_status": status, "quiet_minutes": rule["quiet_minutes"]}))
+                               f"pane {pane} is working with no task held and no task event",
+                               f"{rule['quiet_minutes']}min quiet", "no task activity", "current",
+                               {"pane": pane, "agent_status": status}))
     return out
 
 
 def rule_lane_idle_holding_task(inputs, rule):
     panes = inputs.panes()
-    if panes is None:
-        return []
     since = inputs.now - rule["quiet_minutes"] * 60
     activity = _pane_activity(inputs, since)
     out = []
@@ -604,40 +667,126 @@ def rule_lane_idle_holding_task(inputs, rule):
             status = panes.get(pane)
             if status in rule["idle_statuses"] and pane not in activity:
                 out.append(finding("lane.idle_holding_task", rule, f"{task_id}@{pane}",
-                                   f"pane {pane} holds task {task_id} while {status} with no activity "
-                                   f"in {rule['quiet_minutes']} min",
+                                   f"pane {pane} holds task {task_id} while {status} with no activity",
+                                   f"{rule['quiet_minutes']}min quiet", f"{status}, no activity", "current",
                                    {"task": task_id, "pane": pane, "agent_status": status}))
     return out
 
 
 def rule_host_load(inputs, rule):
-    host = inputs.host()
+    host = inputs.host("/")
     per_cpu = host["load1"] / max(1, host["cpus"])
     if per_cpu >= rule["load1_per_cpu"]:
-        return [finding("host.load", rule, "load1",
-                        f"load1 {host['load1']:.2f} on {host['cpus']} CPUs ({per_cpu:.2f}/CPU)",
-                        {"load1": round(host["load1"], 2), "cpus": host["cpus"],
-                         "per_cpu": round(per_cpu, 2), "threshold": rule["load1_per_cpu"]})]
+        return [finding("host.load", rule, "load1", f"load1 {host['load1']:.2f} on {host['cpus']} CPUs",
+                        f"{rule['load1_per_cpu']}/cpu", f"{round(per_cpu, 2)}/cpu", "load1 (1 min)",
+                        {"load1": round(host["load1"], 2), "cpus": host["cpus"]})]
     return []
 
 
 def rule_host_tmp(inputs, rule):
-    host = inputs.host()
+    host = inputs.host(rule["path"])
     out = []
     checks = (
-        ("used_fraction", host["tmp_used_fraction"] >= rule["max_used_fraction"],
-         host["tmp_used_fraction"], rule["max_used_fraction"]),
-        ("free_bytes", host["tmp_free_bytes"] <= rule["min_free_bytes"],
-         host["tmp_free_bytes"], rule["min_free_bytes"]),
-        ("inode_fraction", host["tmp_inode_used_fraction"] >= rule["max_inode_fraction"],
-         host["tmp_inode_used_fraction"], rule["max_inode_fraction"]),
+        ("used_fraction", host["used_fraction"] >= rule["max_used_fraction"],
+         host["used_fraction"], rule["max_used_fraction"]),
+        ("free_bytes", host["free_bytes"] <= rule["min_free_bytes"], host["free_bytes"], rule["min_free_bytes"]),
+        ("inode_fraction", host["inode_used_fraction"] >= rule["max_inode_fraction"],
+         host["inode_used_fraction"], rule["max_inode_fraction"]),
     )
     for name, fired, value, threshold in checks:
         if fired:
-            out.append(finding("host.tmp", rule, f"{rule['path']}:{name}",
-                               f"{rule['path']} {name} {round(value, 4)} breaches {threshold}",
-                               {"path": rule["path"], "metric": name, "value": round(value, 4),
-                                "threshold": threshold}))
+            unit = "B" if name == "free_bytes" else ""
+            item = finding("host.tmp", rule, f"{rule['path']}:{name}", f"{rule['path']} {name} breaches its limit",
+                           f"{threshold}{unit}", f"{round(value, 4)}{unit}", "current sample",
+                           {"path": rule["path"], "metric": name})
+            if name == "used_fraction" and value >= rule["critical_used_fraction"]:
+                # The 90-98% band is VP critical (VP i19821); >=98% is host.disk_full's.
+                item["severity"] = "critical"
+                item["threshold"] = f"{rule['critical_used_fraction']} (critical)"
+            out.append(item)
+    return out
+
+
+def rule_host_heavy_slot_stale(inputs, rule):
+    """poolrad-heavy.sh slots are bare mkdir locks with no holder pid, so a dead
+    holder cannot be detected; age is the only signal (the script itself
+    reclaims a slot older than 30 min)."""
+    out = []
+    directory = rule["directory"]
+    for name in sorted(os.listdir(directory)):
+        if not name.startswith(rule["prefix"]):
+            continue
+        age = inputs.now - os.stat(os.path.join(directory, name)).st_mtime
+        if age >= rule["max_age_minutes"] * 60:
+            out.append(finding("host.heavy_slot_stale", rule, name, f"heavy-job slot {name} is stale",
+                               f"{rule['max_age_minutes']}min", f"{_minutes(age)}min", "slot age",
+                               {"slot": os.path.join(directory, name)}))
+    return out
+
+
+class RuleUnavailable(Exception):
+    """A rule that has no input source: reported SKIPPED, never a pass or a page."""
+
+
+def _text_records(inputs, since):
+    """(kind, id, text) for the content the secret scan covers: inbox bodies,
+    task titles/bodies and dunk texts (VP i19821). This is a deliberate widening:
+    the watchdog otherwise never reads message bodies, and it never emits them."""
+    for message_id, body in inputs.inbox("SELECT id, body FROM messages WHERE created_at>=? AND created_at<=? "
+                                         "ORDER BY created_at, id", (since, inputs.now)):
+        yield "inbox", message_id, body or ""
+    for task in inputs.tasks()["tasks"]:
+        yield "task", task["id"], f"{task['title']}\n{task['body']}"
+    for dunk in sorted(inputs.dunks(), key=lambda d: d["id"]):
+        yield "dunk", dunk["id"], dunk.get("text") or ""
+
+
+def _secret_hits(text, patterns, allow):
+    hits = set()
+    for text_line in text.splitlines():
+        if any(p.search(text_line) for p in patterns):
+            digest = hashlib.sha256(text_line.encode("utf-8", "surrogatepass")).hexdigest()
+            if digest not in allow:
+                hits.add(digest)
+    return hits
+
+
+def rule_security_secret_text(inputs, rule):
+    patterns = [re.compile(p) for p in rule["patterns"]]
+    allow = set(rule["allowlist_sha256"])
+    since = inputs.now - rule["lookback_hours"] * 3600
+    first = {(kind, ident, digest) for kind, ident, text in _text_records(inputs, since)
+             for digest in _secret_hits(text, patterns, allow)}
+    if not first:
+        return []
+    # Re-verify on a second, independent read before anything can page (spec section 2).
+    inputs._cache.pop("tasks", None)
+    inputs._cache.pop("dunks", None)
+    second = {(kind, ident, digest) for kind, ident, text in _text_records(inputs, since)
+              for digest in _secret_hits(text, patterns, allow)}
+    out = []
+    for kind, ident, digest in sorted(first & second):
+        out.append(finding("security.secret_text", rule, f"{kind}:{ident}:{digest[:16]}",
+                           f"a credential-shaped line in {kind} {ident}", "1 confirmed match",
+                           "1 match (re-verified)", f"{rule['lookback_hours']}h lookback (inbox)",
+                           {"kind": kind, "id": ident, "sha256": digest}))
+    return out
+
+
+def rule_money_spend_projection(inputs, rule):
+    raise RuleUnavailable("no metering source" if rule["source"] is None or rule["cap"] is None
+                          else f"no metering reader implemented for source {rule['source']!r}")
+
+
+def rule_host_disk_full(inputs, rule):
+    out = []
+    for path in sorted(rule["paths"]):
+        host = inputs.host(path)
+        if host["used_fraction"] >= rule["max_used_fraction"]:
+            out.append(finding("host.disk_full", rule, f"{path}:{rule['max_used_fraction']}",
+                               f"{path} is {round(host['used_fraction'] * 100, 1)}% full",
+                               f"{rule['max_used_fraction']}", f"{round(host['used_fraction'], 4)}", "current sample",
+                               {"path": path}))
     return out
 
 
@@ -646,14 +795,13 @@ def rule_health_failed(inputs, rule):
     out = []
     age = inputs.now - float(health.get("checked_at") or 0)
     if age >= rule["stale_minutes"] * 60:
-        out.append(finding("health.failed", rule, "stale",
-                           f"health.json not refreshed for {_minutes(age)} min",
-                           {"minutes_since_check": _minutes(age)}))
+        out.append(finding("health.failed", rule, "stale", "health.json is not being refreshed",
+                           f"{rule['stale_minutes']}min", f"{_minutes(age)}min", "since last check", {}))
     if not health.get("ok", False) or health.get("problems"):
-        out.append(finding("health.failed", rule, "problems",
-                           f"health check reports ok={health.get('ok')} with "
-                           f"{len(health.get('problems') or [])} problem(s)",
-                           {"ok": health.get("ok"), "problems": list(health.get("problems") or [])}))
+        out.append(finding("health.failed", rule, "problems", "health check reports problems",
+                           "ok=true and no problems", f"ok={health.get('ok')}, "
+                           f"{len(health.get('problems') or [])} problem(s)", "last check",
+                           {"problems": list(health.get("problems") or [])}))
     return out
 
 
@@ -670,53 +818,83 @@ RULES = {
     "lane.idle_holding_task": rule_lane_idle_holding_task,
     "host.load": rule_host_load,
     "host.tmp": rule_host_tmp,
+    "host.disk_full": rule_host_disk_full,
+    "host.heavy_slot_stale": rule_host_heavy_slot_stale,
+    "security.secret_text": rule_security_secret_text,
+    "money.spend_projection": rule_money_spend_projection,
     "health.failed": rule_health_failed,
 }
 assert set(RULES) == set(RULE_PARAMS), "every configurable rule needs exactly one implementation"
 
+# Spec section 1: the only rules that may carry an owner class. Adding one is a
+# VP-approved edit to the spec, then to this tuple.
+OWNER_ELIGIBLE_RULES = ("host.disk_full", "security.secret_text", "money.spend_projection")
 PANE_RULES = ("inbox.unread_dead", "lane.working_without_task", "lane.idle_holding_task")
+# Rules whose inputs are append-only history, so they can be re-evaluated at a
+# past `now`. Every other rule reads a current snapshot and is not replayable.
+REPLAYABLE_RULES = ("dunk.skip_loop", "inbox.ambiguous_sender")
 
 
 def _sort_key(item):
     return (-SEVERITY_RANK.get(item["severity"], -1), item["rule"], item["key"])
 
 
-def evaluate(config, now, panes_provider=None, host_sampler=None):
-    """Run every enabled rule. A rule that raises becomes part of exactly one
-    `watchdog.self_error` finding for the run; the other rules still report."""
+def evaluate(config, now, panes_provider=None, host_sampler=None, only=None):
+    """Run every enabled rule (or only those named). A rule that raises is
+    SKIPPED with its raw error; the errors feed one self error per run."""
     inputs = Inputs(config, now, panes_provider, host_sampler)
     findings, errors, skipped = [], [], []
     for rule_id in sorted(RULES):
         rule = config["rules"][rule_id]
+        if only is not None and rule_id not in only:
+            continue
+        if rule_id == "money.spend_projection" and (rule["source"] is None or rule["cap"] is None):
+            skipped.append({"rule": rule_id, "error": "no metering source"})  # shown even when disabled
+            continue
         if not rule["enabled"]:
             continue
         if rule_id in PANE_RULES and config["panes"]["source"] == "none":
-            skipped.append(rule_id)
+            skipped.append({"rule": rule_id, "error": "pane source disabled (panes.source=none)"})
             continue
         try:
             findings.extend(RULES[rule_id](inputs, rule))
+        except RuleUnavailable as error:
+            skipped.append({"rule": rule_id, "error": str(error)})
         except Exception as error:  # noqa: BLE001 - a failing rule is reported, never raised
             errors.append({"rule": rule_id, "error": f"{type(error).__name__}: {error}"})
     findings.sort(key=_sort_key)
-    if errors:
-        findings.insert(0, {
-            "rule": SELF_ERROR_RULE, "key": "run", "severity": "self", "category": "outage",
-            "source": SOURCE_SELF,
-            "summary": f"watchdog could not evaluate {len(errors)} rule(s); their coverage is missing",
-            "evidence": {"failed_rules": errors},
-        })
-    return {"findings": findings, "skipped_rules": skipped}
+    return {"findings": findings, "errors": errors, "skipped": skipped}
 
 
-# -- planning, state and delivery --------------------------------------------
+def self_error(problems):
+    """Exactly one self finding per run, carrying every raw problem."""
+    return {"rule": SELF_ERROR_RULE, "key": "run", "severity": "self", "class": "self", "source": SOURCE_SELF,
+            "summary": f"watchdog could not do {len(problems)} thing(s); coverage or owner delivery is affected",
+            "threshold": "-", "measured": f"{len(problems)} problem(s)", "window": "this run",
+            "evidence": {"problems": problems}}
+
+
+# -- state --------------------------------------------------------------------
+
+def empty_state():
+    return {"alerts": {}, "streaks": {}, "owner_pages": {}, "owner_page_times": []}
+
 
 def load_state(path):
+    """(state, problem). A missing or corrupt file gives a fresh state AND a
+    problem, which suppresses owner pages for the run (spec section 3)."""
     if not os.path.exists(path):
-        return {"alerts": {}}
-    with open(path, encoding="utf-8") as handle:
-        state = json.load(handle)
-    state.setdefault("alerts", {})
-    return state
+        return empty_state(), f"state {path}: missing (first run, or the dedupe store was lost)"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        if not isinstance(state, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError) as error:
+        return empty_state(), f"state {path}: corrupt ({error})"
+    for key, value in empty_state().items():
+        state.setdefault(key, value)
+    return state, None
 
 
 def save_state(path, state):
@@ -730,82 +908,292 @@ def save_state(path, state):
     os.replace(temp, path)
 
 
-def _cooldown_seconds(config, item):
+def dedupe_key(item):
+    return f"{item['rule']}|{item['key']}"
+
+
+def advance_streaks(config, state, findings, now):
+    """Consecutive-run counts per finding, as they would be after this run. A
+    run counts only if at least min_run_spacing_seconds after the previous
+    counted run; an absent finding resets its streak. Pure: returns a new dict."""
+    spacing = config["min_run_spacing_seconds"]
+    old = state.get("streaks", {})
+    new = {}
+    for item in findings:
+        key = dedupe_key(item)
+        prior = old.get(key)
+        if prior is None:
+            new[key] = {"count": 1, "last_counted": now}
+        elif now - prior["last_counted"] >= spacing:
+            new[key] = {"count": prior["count"] + 1, "last_counted": now}
+        else:
+            new[key] = dict(prior)
+    return new
+
+
+# -- planning -----------------------------------------------------------------
+
+def _cooling(config, state, item, now):
     if item["source"] == SOURCE_SELF:
-        return config["cadence_minutes"] * 60
-    return config["rules"][item["rule"]]["cooldown_minutes"] * 60
+        return False
+    last = state["alerts"].get(dedupe_key(item), {}).get("last_alerted")
+    return last is not None and now - last < config["rules"][item["rule"]]["cooldown_minutes"] * 60
 
 
-def plan(config, findings, state, now):
-    """Which findings would be sent, to whom, and how many were held back.
-    Pure: no I/O. Dedupe key is rule+key; cooldown is per rule."""
-    vp = config["escalation"]["vp"]
+def plan(config, findings, state, streaks, now, owner_blocked=None):
+    """Decide, per finding, VP notify and owner page with the reason for any
+    suppression. Pure: no I/O. `owner_blocked` names a run-wide reason (state
+    loss, rule error, transport) that suppresses every owner page."""
+    vp_rule = config["escalation"]["vp"]
     owner = config["escalation"]["owner"]
-    due, cooling = [], 0
+    hour_ago = now - 3600
+    recent_owner = [t for t in state.get("owner_page_times", []) if t > hour_ago]
+    owner_budget = owner["max_pages_per_hour"] - len(recent_owner)
+    vp_count = 0
+    decisions = []
     for item in findings:
         is_self = item["source"] == SOURCE_SELF
-        if not is_self and SEVERITY_RANK[item["severity"]] < SEVERITY_RANK[vp["min_severity"]]:
+        owner_eligible = (not is_self and item["class"] in OWNER_CLASSES
+                          and item["rule"] in OWNER_ELIGIBLE_RULES)
+        decision = {"finding": item, "vp": None, "owner": None,
+                    "streak": streaks.get(dedupe_key(item), {}).get("count", 1)}
+        # VP
+        if not is_self and SEVERITY_RANK[item["severity"]] < SEVERITY_RANK[vp_rule["min_severity"]]:
+            decision["vp"] = "below-min-severity"
+        elif _cooling(config, state, item, now):
+            decision["vp"] = "dedupe"
+        elif vp_count >= config["max_alerts_per_run"]:
+            decision["vp"] = "rate"
+        else:
+            decision["vp"] = "no"
+            vp_count += 1
+        # OWNER
+        if owner_eligible:
+            rule = config["rules"][item["rule"]]
+            pending = state["owner_pages"].get(dedupe_key(item))
+            if not owner["enabled"] or item["class"] not in owner["classes"]:
+                decision["owner"] = "disabled"
+            elif SEVERITY_RANK[item["severity"]] < SEVERITY_RANK[owner["min_severity"]]:
+                decision["owner"] = "below-min-severity"
+            elif owner_blocked:
+                decision["owner"] = owner_blocked
+            elif decision["streak"] < rule["must_hold_runs"]:
+                decision["owner"] = "hold"
+            elif pending is not None and (pending.get("confirmed_at") is None or
+                                          now - pending["confirmed_at"] < rule["cooldown_minutes"] * 60):
+                # Owner dedupe is its own: a pending page is never re-posted, and a
+                # confirmed one cools down from its confirmation, not from a VP alert.
+                decision["owner"] = "dedupe"
+            elif owner_budget <= 0:
+                decision["owner"] = "global-cap"
+            else:
+                decision["owner"] = "no"
+                owner_budget -= 1
+        decisions.append(decision)
+    return decisions
+
+
+def recoveries(state, findings):
+    """Keys alerted before and absent now: VP recovery lines, plus one owner
+    'resolved' line only for pages the owner actually received."""
+    current = {dedupe_key(item) for item in findings}
+    vp = sorted(key for key, entry in state["alerts"].items()
+                if entry.get("last_alerted") is not None and key not in current)
+    owner = sorted(key for key, page in state["owner_pages"].items()
+                   if page.get("confirmed_at") is not None and key not in current)
+    return {"vp": vp, "owner": owner}
+
+
+# -- output -------------------------------------------------------------------
+
+def _evidence(item):
+    return json.dumps(item["evidence"], sort_keys=True, separators=(",", ":"))
+
+
+def line(prefix, item, suppressed, streak=None, hold=None):
+    window = item["window"] if hold is None else f"{item['window']}; held {streak}/{hold} runs"
+    return (f"{prefix} rule={item['rule']} class={item['class']} severity={item['severity']} "
+            f"source={item['source']} threshold={item['threshold']} measured={item['measured']} "
+            f"window={window} dedupe={dedupe_key(item)} suppressed={suppressed} evidence={_evidence(item)}")
+
+
+def render_lines(config, decisions, skipped, recovered, mode):
+    verb = {"vp": "NOTIFY VP" if mode == "live" else "WOULD-NOTIFY VP",
+            "owner": "PAGE OWNER" if mode == "live" else "WOULD-PAGE OWNER"}
+    out = []
+    for decision in decisions:
+        item = decision["finding"]
+        if decision["owner"] is not None:
+            hold = config["rules"][item["rule"]]["must_hold_runs"]
+            out.append(line(verb["owner"], item, decision["owner"], decision["streak"], hold))
+        out.append(line(verb["vp"], item, decision["vp"]))
+    for entry in skipped:
+        out.append(f"SKIPPED rule={entry['rule']} error={entry['error']}")
+    for key in recovered["vp"]:
+        out.append(f"RESOLVED VP dedupe={key}")
+    for key in recovered["owner"]:
+        out.append(f"RESOLVED OWNER dedupe={key}")
+    return out
+
+
+def digest(title, lines):
+    return "\n".join([f"Watchdog {title}: deterministic rules; no model involved."] + lines)
+
+
+# -- delivery -----------------------------------------------------------------
+
+def inbox_sender(to, subject, body):
+    """VP delivery through the daemon's inbox API as the `watchdog` system
+    sender. Never starts the daemon: if it is down, the run fails and the
+    dead-man check reports the missing heartbeat."""
+    from dunk_client import FlockClient
+    FlockClient(self_pane_id=None).call("inbox_send", to=to, subject=subject, body=body,
+                                        system_sender=SYSTEM_SENDER)
+
+
+class DeskBriefChannel:
+    """OWNER = a VP desk brief, which the Telegram bridge forwards. Delivery is
+    confirmed through the bridge's non-secret status file
+    {"last_brief_id": int, "updated_at": float} (VP i19821/i19822); the watchdog
+    never opens telegram.json, which holds the bot token.
+
+    Posting needs the desk API token, and how the watchdog may hold it is not yet
+    decided, so `post` fails toward not paging: nothing is posted, and the
+    failure is a VP self error."""
+
+    def __init__(self, confirm_path):
+        self.confirm_path = confirm_path
+
+    def post(self, body):
+        raise OwnerChannelUnavailable("desk brief post not wired: desk API token handling awaits VP decision")
+
+    def confirmed_through(self):
+        with open(self.confirm_path, encoding="utf-8") as handle:
+            status = json.load(handle)
+        value = status.get("last_brief_id") if isinstance(status, dict) else None
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"last_brief_id is not an integer: {value!r}")
+        return value
+
+
+def _confirm_pending(config, state, owner_channel, now, problems):
+    """Mark pending owner pages confirmed when the forwarder has passed them;
+    report pages that stay unconfirmed past confirm_within_minutes."""
+    pending = {k: p for k, p in state["owner_pages"].items() if p.get("confirmed_at") is None}
+    if not pending:
+        return
+    try:
+        through = owner_channel.confirmed_through()
+    except Exception as error:  # noqa: BLE001
+        problems.append(f"owner confirmation unreadable: {type(error).__name__}: {error}")
+        return
+    limit = config["escalation"]["owner"]["confirm_within_minutes"] * 60
+    for key, page in sorted(pending.items()):
+        if through is not None and page["brief_id"] <= through:
+            page["confirmed_at"] = now
+        elif now - page["posted_at"] > limit:
+            problems.append(f"owner page {key} (brief {page['brief_id']}) unconfirmed after "
+                            f"{_minutes(now - page['posted_at'])}min; recorded as UNDELIVERED")
+
+
+def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_provider=None,
+        host_sampler=None):
+    """One watchdog run. Live only when config enabled=true AND dry_run=false AND
+    no --dry-run flag. Never raises for rule, state or owner-transport errors."""
+    live = config["enabled"] and not config["dry_run"] and not dry_run_flag
+    mode = "live" if live else "dry-run"
+    owner_channel = owner_channel or DeskBriefChannel(_expand(config["escalation"]["owner"]["confirm_path"]))
+    state_path = _expand(config["state_path"])
+    state, state_problem = load_state(state_path)
+    result = evaluate(config, now, panes_provider, host_sampler)
+    problems = [f"rule {e['rule']} SKIPPED: {e['error']}" for e in result["errors"]]
+    if state_problem:
+        problems.append(state_problem + " - owner pages suppressed this run")
+    if live:
+        _confirm_pending(config, state, owner_channel, now, problems)
+    skipped = result["skipped"] + result["errors"]
+    owner_blocked = "state-loss" if state_problem else ("self-error" if result["errors"] else None)
+    streaks = advance_streaks(config, state, result["findings"], now)
+    decisions = plan(config, result["findings"], state, streaks, now, owner_blocked)
+    recovered = recoveries(state, result["findings"])
+    report = {
+        "mode": mode,
+        "why_not_live": None if live else ("--dry-run flag" if dry_run_flag else
+                                           "config enabled=false" if not config["enabled"] else "config dry_run=true"),
+        "now": now, "findings": result["findings"], "skipped": skipped, "decisions": decisions,
+        "recovered": recovered, "problems": problems, "sent": [], "delivery_error": None,
+    }
+    vp_send = [d for d in decisions if d["vp"] == "no"]
+    owner_send = [d for d in decisions if d["owner"] == "no"]
+    report["counts"] = {"findings": len(result["findings"]), "vp": len(vp_send), "owner": len(owner_send),
+                        "needs_attention": len(vp_send) + sum(d["vp"] == "rate" for d in decisions)}
+    if not live:
+        report["lines"] = render_lines(config, decisions, skipped, recovered, mode)
+        return report
+
+    # Owner first, so a transport failure can ride the VP digest as a self error.
+    page_lines = []
+    for decision in owner_send:
+        item = decision["finding"]
+        body = digest("OWNER page", [line("PAGE OWNER", item, "no")])
+        try:
+            brief_id = owner_channel.post(body)
+        except Exception as error:  # noqa: BLE001 - never recorded as sent
+            problems.append(f"owner page {dedupe_key(item)} not posted: {type(error).__name__}: {error}; "
+                            "recorded as UNDELIVERED")
+            decision["owner"] = "transport-error"
             continue
-        last = state["alerts"].get(f"{item['rule']}|{item['key']}", {}).get("last_alerted")
-        if last is not None and now - last < _cooldown_seconds(config, item):
-            cooling += 1
-            continue
-        due.append(item)
-    cap = config["max_alerts_per_run"]
-    vp_alerts, suppressed = due[:cap], max(0, len(due) - cap)
-    owner_alerts = [item for item in vp_alerts
-                    if owner["enabled"] and item["source"] == SOURCE_RULE
-                    and item["category"] in owner["categories"]
-                    and SEVERITY_RANK[item["severity"]] >= SEVERITY_RANK[owner["min_severity"]]]
-    return {"vp": {"mailbox": vp["mailbox"], "alerts": vp_alerts},
-            "owner": {"mailbox": owner["mailbox"] if owner["enabled"] else None, "alerts": owner_alerts},
-            "suppressed": suppressed, "cooling_down": cooling}
+        state["owner_pages"][dedupe_key(item)] = {"brief_id": brief_id, "posted_at": now, "confirmed_at": None}
+        state["owner_page_times"].append(now)
+        page_lines.append(line("PAGE OWNER (pending confirmation)", item, "no"))
+    for key in recovered["owner"]:
+        try:
+            owner_channel.post(digest("OWNER resolved", [f"RESOLVED {key}"]))
+        except Exception as error:  # noqa: BLE001
+            problems.append(f"owner resolved line {key} not posted: {type(error).__name__}: {error}")
+        state["owner_pages"].pop(key, None)
 
-
-def _line(item):
-    evidence = json.dumps(item["evidence"], sort_keys=True, separators=(",", ":"))
-    return f"[{item['severity']}] {item['rule']} {item['key']} ({item['source']}): {item['summary']} | {evidence}"
-
-
-def digest(alerts, suppressed, audience):
-    lines = [f"Watchdog ({audience}): {len(alerts)} alert(s). Deterministic rules; no model involved."]
-    lines += [_line(item) for item in alerts]
+    vp_lines = []
+    if problems:
+        vp_lines.append(line("NOTIFY VP", self_error(problems), "no"))
+    vp_lines += page_lines
+    vp_lines += [line("NOTIFY VP", d["finding"], "no") for d in vp_send]
+    suppressed = sum(d["vp"] == "rate" for d in decisions)
     if suppressed:
-        lines.append(f"{suppressed} further finding(s) suppressed by max_alerts_per_run; "
-                     "run `dunkingsheep watchdog --dry-run` to see all.")
-    return "\n".join(lines)
+        vp_lines.append(f"{suppressed} further finding(s) suppressed by max_alerts_per_run; "
+                        "run `dunkingsheep watchdog --dry-run` to see all.")
+    vp_lines += [f"RESOLVED VP dedupe={key}" for key in recovered["vp"]]
+    report["lines"] = vp_lines
+    if vp_lines:
+        try:
+            (send or inbox_sender)(config["escalation"]["vp"]["mailbox"],
+                                   f"watchdog: {len(vp_send)} alert(s)" + (" + self-error" if problems else ""),
+                                   digest("VP digest", vp_lines))
+            report["sent"].append("vp")
+        except Exception as error:  # noqa: BLE001 - reported to stderr; never re-sent through the inbox
+            report["delivery_error"] = f"{type(error).__name__}: {error}"
+            return report
 
-
-def deliver(alert_plan, send):
-    """Send at most one digest per recipient. `send(to, subject, body)` raises
-    on failure; the caller reports it to stderr and does NOT retry through the
-    inbox, so a failing channel can never recurse."""
-    sent = []
-    for audience in ("vp", "owner"):
-        target = alert_plan[audience]
-        if not target["alerts"] or not target["mailbox"]:
-            continue
-        has_self = any(a["source"] == SOURCE_SELF for a in target["alerts"])
-        subject = f"watchdog: {len(target['alerts'])} alert(s)" + (" incl. self-error" if has_self else "")
-        suppressed = alert_plan["suppressed"] if audience == "vp" else 0
-        send(target["mailbox"], subject, digest(target["alerts"], suppressed, audience))
-        sent.append(audience)
-    return sent
-
-
-def record(state, findings, alert_plan, now, retention_seconds):
-    alerted = {f"{a['rule']}|{a['key']}" for a in alert_plan["vp"]["alerts"]}
-    for item in findings:
-        key = f"{item['rule']}|{item['key']}"
-        entry = state["alerts"].setdefault(key, {"first_seen": now})
-        entry["last_seen"] = now
-        if key in alerted:
-            entry["last_alerted"] = now
+    for decision in vp_send:
+        state["alerts"].setdefault(dedupe_key(decision["finding"]), {})["last_alerted"] = now
+    for key in recovered["vp"]:
+        state["alerts"].pop(key, None)
+    for key, entry in state["alerts"].items():
+        entry.setdefault("first_seen", now)
+    state["streaks"] = streaks
+    state["owner_page_times"] = [t for t in state["owner_page_times"] if t > now - 3600]
+    retention = config["state_retention_days"] * 86400
+    current = {dedupe_key(item) for item in result["findings"]}
     for key in sorted(state["alerts"]):
-        if now - state["alerts"][key].get("last_seen", now) > retention_seconds:
+        entry = state["alerts"][key]
+        if key in current:
+            entry["last_seen"] = now
+        elif now - entry.get("last_seen", now) > retention:
             del state["alerts"][key]
     state["last_run"] = now
-    return state
+    save_state(state_path, state)
+    touch(_expand(config["heartbeat_path"]), now)
+    return report
 
 
 def touch(path, now):
@@ -816,61 +1204,47 @@ def touch(path, now):
     os.utime(path, (now, now))
 
 
-def inbox_sender(to, subject, body):
-    """Live delivery through the daemon's inbox API as the `watchdog` system
-    sender. Never starts the daemon: if it is down, the run fails and the
-    dead-man check reports the missing heartbeat."""
-    from dunk_client import FlockClient
-    client = FlockClient(self_pane_id=None)
-    client.call("inbox_send", to=to, subject=subject, body=body, system_sender=SYSTEM_SENDER)
-
-
-def run(config, now, dry_run_flag=False, send=None, panes_provider=None, host_sampler=None):
-    """One watchdog run. Live only when config enabled=true AND dry_run=false
-    AND no --dry-run flag. Returns a report dict; never raises for rule errors."""
-    live = config["enabled"] and not config["dry_run"] and not dry_run_flag
-    state_path = _expand(config["state_path"])
-    result = evaluate(config, now, panes_provider, host_sampler)
-    state = load_state(state_path)
-    alert_plan = plan(config, result["findings"], state, now)
-    report = {
-        "mode": "live" if live else "dry-run",
-        "why_not_live": None if live else (
-            "--dry-run flag" if dry_run_flag else
-            "config enabled=false" if not config["enabled"] else "config dry_run=true"),
-        "now": now, "findings": result["findings"], "skipped_rules": result["skipped_rules"],
-        "plan": alert_plan, "sent": [], "delivery_error": None,
-        "counts": {"findings": len(result["findings"]),
-                   "needs_attention": len(alert_plan["vp"]["alerts"]) + alert_plan["suppressed"]},
-    }
-    if not live:
-        return report
-    try:
-        report["sent"] = deliver(alert_plan, send or inbox_sender)
-    except Exception as error:  # noqa: BLE001 - reported, never re-sent through the inbox
-        report["delivery_error"] = f"{type(error).__name__}: {error}"
-        return report
-    save_state(state_path, record(state, result["findings"], alert_plan, now,
-                                  config["state_retention_days"] * 86400))
-    touch(_expand(config["heartbeat_path"]), now)
-    return report
-
-
 def render_text(report):
-    lines = [f"watchdog {report['mode']}" + (f" ({report['why_not_live']})" if report["why_not_live"] else "")
-             + f"  findings {report['counts']['findings']}  needs_attention "
-             f"{report['counts']['needs_attention']}"]
-    for item in report["findings"]:
-        lines.append("  " + _line(item))
-    for rule_id in report["skipped_rules"]:
-        lines.append(f"  [skipped] {rule_id}: pane source disabled (panes.source=none)")
-    vp, owner = report["plan"]["vp"], report["plan"]["owner"]
-    verb = "sent" if report["mode"] == "live" else "would send"
-    lines.append(f"plan: {verb} {len(vp['alerts'])} alert(s) to VP {vp['mailbox']}; "
-                 f"{len(owner['alerts'])} to owner {owner['mailbox'] or '(owner paging disabled)'}; "
-                 f"{report['plan']['suppressed']} suppressed by max_alerts_per_run; "
-                 f"{report['plan']['cooling_down']} in cooldown")
+    head = (f"watchdog {report['mode']}" + (f" ({report['why_not_live']})" if report["why_not_live"] else "")
+            + f"  findings {report['counts']['findings']}  vp {report['counts']['vp']}  owner "
+            f"{report['counts']['owner']}  needs_attention {report['counts']['needs_attention']}")
+    lines = [head] + list(report["lines"])
+    for problem in report["problems"]:
+        if report["mode"] != "live":
+            lines.append(f"SELF source={SOURCE_SELF} {problem}")
     if report["delivery_error"]:
         lines.append(f"DELIVERY FAILED (source={SOURCE_SELF}): {report['delivery_error']}; "
                      "heartbeat not touched, so the dead-man check will report it")
     return "\n".join(lines)
+
+
+# -- replay -------------------------------------------------------------------
+
+def replay(config, start, end, step_minutes, panes_provider=None, host_sampler=None):
+    """Re-evaluate the history-backed rules at each step from `start` to `end`
+    over the current stores, applying each rule's cooldown in memory, and count
+    the VP notifications (and owner pages) each rule would have sent. Snapshot
+    rules are listed as not replayable rather than faked. Reads only."""
+    if step_minutes <= 0 or end < start:
+        raise ValueError("replay needs step > 0 and end >= start")
+    replayable = [r for r in REPLAYABLE_RULES if config["rules"][r]["enabled"]]
+    state = empty_state()
+    counts = {rule: {"vp": 0, "owner": 0} for rule in replayable}
+    errors = []
+    t = start
+    while t <= end:
+        result = evaluate(config, t, panes_provider, host_sampler, only=replayable)
+        errors += [dict(e, at=t) for e in result["errors"]]
+        streaks = advance_streaks(config, state, result["findings"], t)
+        for decision in plan(config, result["findings"], state, streaks, t):
+            item = decision["finding"]
+            if decision["vp"] == "no":
+                counts[item["rule"]]["vp"] += 1
+                state["alerts"].setdefault(dedupe_key(item), {})["last_alerted"] = t
+            if decision["owner"] == "no":
+                counts[item["rule"]]["owner"] += 1
+        state["streaks"] = streaks
+        t += step_minutes * 60
+    not_replayable = sorted(r for r in RULES if config["rules"][r]["enabled"] and r not in replayable)
+    return {"from": start, "to": end, "step_minutes": step_minutes, "counts": counts,
+            "not_replayable": not_replayable, "errors": errors}

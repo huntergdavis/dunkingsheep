@@ -107,3 +107,58 @@ It also accepts `--replay <history dir>`, which re-evaluates past samples and pr
 - **No auto-remediation:** it does not kill, restart or delete.
 - **No paging the owner about the watchdog itself.**
 - **No new owner-paging rule without a VP-approved edit to section 1.**
+
+## 6. VP rulings recorded against this spec (i19821, i19825; 2026-10-20)
+
+Recorded by the implementer at the VP's request, so that the spec and the code
+say the same thing.
+
+- **Owner coverage is nearly empty by design.** An operator must not read it as
+  comprehensive.
+  - **Outage:** `host.disk_full` (/tmp or root at 98% or more, held for 2
+    runs). That is all that exists today.
+  - **Security:** `security.secret_text`, a token-pattern scan over inbox
+    bodies, task titles and bodies, and dunk texts only.
+  - **Money:** not implementable. No metering source and no owner-set cap
+    exist. `money.spend_projection` exists, refuses to be enabled without
+    `source` and `cap`, and always prints `SKIPPED ... no metering source`.
+  - **Not implemented:** secret-file mode changes, VP-desk and bridge service
+    outages, and OOM on a listed unit. Each needs an input the spec does not
+    yet name. Adding them is a section-1 edit.
+- **Deliberate widening.** For the secret scan, the watchdog now reads message,
+  task and dunk text that it previously never read. Evidence carries only
+  `(kind, id, sha256)` and never the matched string. Repositories, commits and
+  PR bodies are out of scope until a source is ruled in.
+- **Start-up config errors.** The watchdog writes the raw refusal
+  (`CONFIG: <key>: <reason>`) to a fixed error file and exits 2, sending
+  nothing. The independent dead-man (its own unit, its own `--to`, its own
+  cooldown) carries that text in its VP alert. There is no second, hard-coded
+  recipient.
+- **The OWNER channel in code.** A page is a VP desk brief. Delivery is
+  confirmed through the bridge's non-secret
+  `vp-of-agentry/data/telegram-status.json`
+  `{"last_brief_id": int, "updated_at": float}`, written after forwarding
+  (bridge 55829f2). DELIVERED means `last_brief_id >= posted id`. A null value
+  is pending; an unparseable file is unconfirmed plus a self error. The
+  watchdog never opens `telegram.json`.
+  - Posting needs the desk API token, and how the watchdog may hold it is
+    undecided. Until then the post fails toward not paging.
+- **Every desk 'vp' brief reaches the owner's phone.** The dunkingsheep inbox is
+  therefore the only VP-only channel, and nothing addressed to VP goes through
+  the desk.
+- **Bridge-down and inbox-down fallbacks.** No desk banner exists. The interim
+  is the dunkingsheep inbox first; if that send fails, a status file
+  (`watchdog_deadman_status.json`), a journal line and a non-zero exit, so the
+  unit shows in `systemctl --user --failed`.
+- **Replay.** `--replay --from T --to T --step M` re-evaluates the store-backed
+  rules (`dunk.skip_loop`, `inbox.ambiguous_sender`) at past `now` values over
+  the current stores, applying cooldowns in memory. Snapshot rules print
+  `not replayable`. No history directory exists, and these two words are
+  better than a fake result.
+- **Unassigned rows.**
+  - Heavy-job semaphore staleness is `host.heavy_slot_stale`, by age over
+    30 min, VP-only. The lock records no holder pid.
+  - The 90–98% /tmp band is VP critical (`host.tmp.critical_used_fraction`).
+  - CI and pin checks are deferred. The accounting pin check **is** runnable
+    locally without network (`tools/overlay/function_queue_audit.py` in
+    poolrad-decomp exits 2 on drift).

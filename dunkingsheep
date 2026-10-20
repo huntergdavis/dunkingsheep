@@ -386,6 +386,13 @@ def build_parser():
                    help="report what would fire; send nothing, write no state or heartbeat")
     p.add_argument("--now", type=float, default=None,
                    help="evaluate as of this UNIX time (reproducible runs)")
+    p.add_argument("--error-file", default="~/.config/dunkingsheep/watchdog.config-error",
+                   help="where a config refusal is written for the dead-man to carry to the VP")
+    p.add_argument("--replay", action="store_true",
+                   help="re-evaluate the history-backed rules from --from to --to; reads only")
+    p.add_argument("--from", dest="replay_from", type=float, help="replay start (UNIX time)")
+    p.add_argument("--to", dest="replay_to", type=float, help="replay end (UNIX time, default now)")
+    p.add_argument("--step", dest="replay_step", type=float, help="replay step in minutes")
 
     p = sub.add_parser("watchdog-deadman",
                        help="alert the VP if the watchdog heartbeat is stale (independent check)")
@@ -394,6 +401,12 @@ def build_parser():
     p.add_argument("--multiplier", type=float, default=3.0)
     p.add_argument("--to", required=True, help="VP mailbox")
     p.add_argument("--state", default="~/.config/dunkingsheep/watchdog_deadman_state.json")
+    p.add_argument("--error-file", default="~/.config/dunkingsheep/watchdog.config-error",
+                   help="raw watchdog config refusal to include in the alert")
+    p.add_argument("--status", default="~/.config/dunkingsheep/watchdog_deadman_status.json",
+                   help="last-resort record when the socket send AND the direct inbox write fail")
+    p.add_argument("--inbox", default="~/.config/dunkingsheep/inbox.db",
+                   help="inbox store for the direct-write fallback when the daemon is unreachable")
     p.add_argument("--cooldown-minutes", type=float, required=True)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--now", type=float, default=None)
@@ -1207,14 +1220,44 @@ def main(argv=None):
         # Local and read-only: evaluates the stores directly and never starts
         # the daemon. Only a live run talks to it, to deliver one digest.
         import dunk_watchdog
+        error_file = os.path.expanduser(args.error_file)
         try:
             config = dunk_watchdog.load_config(os.path.expanduser(args.config))
         except dunk_watchdog.ConfigError as error:
-            print(f"watchdog: refusing to start: config {error}", file=sys.stderr)
+            message = f"CONFIG: {error}"
+            print(f"watchdog: refusing to start: {message}", file=sys.stderr)
+            if not args.dry_run and not args.replay:
+                # The dead-man carries this text to the VP; nothing is sent from here.
+                os.makedirs(os.path.dirname(error_file) or ".", exist_ok=True)
+                with open(error_file, "w", encoding="utf-8") as handle:
+                    handle.write(message + "\n")
             return 2
-        report = dunk_watchdog.run(config, args.now if args.now is not None else time.time(),
-                                   dry_run_flag=args.dry_run)
-        print(json.dumps(report, indent=2, sort_keys=True) if args.json
+        if os.path.exists(error_file) and not args.dry_run and not args.replay:
+            os.remove(error_file)
+        live = config["enabled"] and not config["dry_run"] and not args.dry_run and not args.replay
+        if live and args.now is not None:
+            # A live run stamps state and the heartbeat with `now`; a backdated one
+            # would make the dead-man fire falsely (or stay silent). Refuse it.
+            print("watchdog: refusing --now on a live run (use --dry-run or --replay)", file=sys.stderr)
+            return 2
+        now = args.now if args.now is not None else time.time()
+        if args.replay:
+            if args.replay_from is None or not args.replay_step:
+                print("watchdog: --replay needs --from and --step", file=sys.stderr)
+                return 2
+            result = dunk_watchdog.replay(config, args.replay_from, args.replay_to or now, args.replay_step)
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                for rule_id, count in sorted(result["counts"].items()):
+                    print(f"REPLAY rule={rule_id} would_notify_vp={count['vp']} would_page_owner={count['owner']}")
+                for rule_id in result["not_replayable"]:
+                    print(f"REPLAY rule={rule_id} not replayable")
+                for entry in result["errors"]:
+                    print(f"SKIPPED rule={entry['rule']} at={entry['at']} error={entry['error']}")
+            return 0
+        report = dunk_watchdog.run(config, now, dry_run_flag=args.dry_run)
+        print(json.dumps(report, indent=2, sort_keys=True, default=str) if args.json
               else dunk_watchdog.render_text(report))
         return 1 if report["delivery_error"] else 0
     if command == "watchdog-deadman":

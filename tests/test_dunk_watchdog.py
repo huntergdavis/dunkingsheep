@@ -1,7 +1,16 @@
-"""Exception watchdog (no model): rules fire at and stay silent below their
-boundary, config is refused rather than defaulted, alerts are capped, deduped
-and cooled down across restarts, self errors never page the owner or recurse,
-the dead-man check is independent, and nothing model-related is imported."""
+"""Exception watchdog (no model), tested against docs/WATCHDOG_ESCALATION_SPEC.md
+and the VP's tiers (i19817, i19821):
+
+* every rule fires at its boundary and stays silent below it;
+* config is refused (named) rather than defaulted, including zero thresholds,
+  zero rate limits and owner classes on rules the spec does not allow;
+* fail toward not paging: config errors, missing or corrupt state and rule
+  errors leave the OWNER queue unchanged and tell VP once;
+* an owner page needs its hold, respects the 3-per-hour cap, is DELIVERED only
+  when the forwarder confirms it, and a failed post is one VP self error;
+* VP-only classes never reach OWNER; recovery lines; dry-run line contract;
+  replay; dead-man (independent, carries the config error, falls back when the
+  inbox fails); system sender; and no model anywhere."""
 
 import ast
 import copy
@@ -11,7 +20,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,8 +37,14 @@ NOW = 1_800_000_000.0
 MIN = 60.0
 HOUR = 3600.0
 
-with open(os.path.join(ROOT, "packaging", "watchdog.example.json"), encoding="utf-8") as _handle:
-    EXAMPLE = json.load(_handle)
+
+def read(path):
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+EXAMPLE = json.loads(read(os.path.join(ROOT, "packaging", "watchdog.example.json")))
+FAKE_TOKEN = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # synthetic: matches the pattern, is no credential
 
 SCHEMA = {
     "tasks.db": [
@@ -61,19 +75,32 @@ SCHEMA = {
     ],
 }
 
-def read(path):
-    with open(path, encoding="utf-8") as handle:
-        return handle.read()
+HOST_OK = {"load1": 1.0, "cpus": 8, "used_fraction": 0.1, "free_bytes": 50 * 2**30, "inode_used_fraction": 0.1}
 
 
-HOST_OK = {"load1": 1.0, "cpus": 8, "tmp_used_fraction": 0.1, "tmp_free_bytes": 50 * 2**30,
-           "tmp_total_bytes": 60 * 2**30, "tmp_inode_used_fraction": 0.1}
+class FakeOwner:
+    """The OWNER queue: records every post; confirms through `through`."""
+
+    def __init__(self, through=None, fail=None):
+        self.posts = []
+        self.through = through
+        self.fail = fail
+
+    def post(self, body):
+        if self.fail:
+            raise self.fail
+        self.posts.append(body)
+        return 100 + len(self.posts)
+
+    def confirmed_through(self):
+        return self.through
 
 
 class Fleet:
     """A throwaway config dir with the real store schemas, filled per test."""
 
     def __init__(self, tmp):
+        self.tmp = tmp
         self.dir = os.path.join(tmp, "store")
         os.makedirs(self.dir)
         for name, statements in SCHEMA.items():
@@ -85,9 +112,12 @@ class Fleet:
         self.dunks = []
         self.health = {"checked_at": NOW, "ok": True, "problems": []}
         self.panes = []
-        self.host = dict(HOST_OK)
+        self.hosts = {}
         self.write_json()
         self.msg_seq = 0
+
+    def host(self, path):
+        return dict(HOST_OK, **self.hosts.get(path, {}))
 
     def sql(self, db, statement, params=()):
         conn = sqlite3.connect(os.path.join(self.dir, db))
@@ -101,10 +131,10 @@ class Fleet:
         with open(os.path.join(self.dir, "health.json"), "w") as handle:
             json.dump(self.health, handle)
 
-    def task(self, task_id, status, updated_at, assignees=()):
-        self.sql("tasks.db", "INSERT INTO tasks (id, scope, title, status, assignees, created_at, updated_at) "
-                 "VALUES (?, 'global', 't', ?, ?, ?, ?)", (task_id, status, json.dumps(list(assignees)),
-                                                          updated_at, updated_at))
+    def task(self, task_id, status, updated_at, assignees=(), title="t", body=""):
+        self.sql("tasks.db", "INSERT INTO tasks (id, scope, title, body, status, assignees, created_at, updated_at) "
+                 "VALUES (?, 'global', ?, ?, ?, ?, ?, ?)", (task_id, title, body, status,
+                                                           json.dumps(list(assignees)), updated_at, updated_at))
 
     def task_event(self, task_id, event, at, actor=None, meta=None):
         self.sql("tasks.db", "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
@@ -114,23 +144,23 @@ class Fleet:
         self.sql("tasks.db", "INSERT INTO task_leases VALUES (?,?,?,?,?)", (task_id, pane, claimed, heartbeat,
                                                                            expires))
 
-    def message(self, mailbox, state, created_at, pane_id=None, sender=None, reason=None, read_at=None):
+    def message(self, mailbox, state, created_at, pane_id=None, sender=None, reason=None, read_at=None,
+                body="BODY-NEVER-REPORTED"):
         self.msg_seq += 1
         message_id = f"i{self.msg_seq}"
         self.sql("inbox.db", "INSERT INTO messages (id, mailbox, pane_id, sender, body, state, created_at, "
                  "reason, read_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                 (message_id, mailbox, pane_id, sender, "BODY-NEVER-REPORTED", state, created_at, reason,
-                  read_at))
+                 (message_id, mailbox, pane_id, sender, body, state, created_at, reason, read_at))
         return message_id
 
     def metric(self, kind, source, at):
         self.sql("metrics.db", "INSERT INTO events (at, kind, source) VALUES (?,?,?)", (at, kind, source))
 
-    def config(self, tmp, **rules):
+    def config(self, **rules):
         config = copy.deepcopy(EXAMPLE)
         config["stores"]["config_dir"] = self.dir
-        config["state_path"] = os.path.join(tmp, "state.json")
-        config["heartbeat_path"] = os.path.join(tmp, "heartbeat")
+        config["state_path"] = os.path.join(self.tmp, "state.json")
+        config["heartbeat_path"] = os.path.join(self.tmp, "heartbeat")
         for rule_id in config["rules"]:
             config["rules"][rule_id]["enabled"] = False
         for rule_id, overrides in rules.items():
@@ -138,8 +168,16 @@ class Fleet:
         return wd.validate_config(config)
 
     def evaluate(self, config, now=NOW):
-        return wd.evaluate(config, now, panes_provider=lambda: list(self.panes),
-                           host_sampler=lambda: dict(self.host))["findings"]
+        result = wd.evaluate(config, now, panes_provider=lambda: list(self.panes), host_sampler=self.host)
+        assert not result["errors"], result["errors"]
+        return result["findings"]
+
+    def run(self, config, now=NOW, owner=None, dry=False, sent=None):
+        sent = [] if sent is None else sent
+        report = wd.run(config, now, dry_run_flag=dry, send=lambda *a: sent.append(a),
+                        owner_channel=owner or FakeOwner(), panes_provider=lambda: list(self.panes),
+                        host_sampler=self.host)
+        return report, sent
 
 
 class WatchdogCase(unittest.TestCase):
@@ -154,57 +192,65 @@ class WatchdogCase(unittest.TestCase):
     def keys(self, findings, rule=None):
         return [(f["rule"], f["key"]) for f in findings if rule is None or f["rule"] == rule]
 
+    def live(self, config, **owner):
+        config.update(enabled=True, dry_run=False)
+        if owner:
+            config["escalation"]["owner"].update(enabled=True, approved_by="VP i19821", **owner)
+        return config
+
+    def seed_state(self, config, state=None):
+        wd.save_state(config["state_path"], state or wd.empty_state())
+
 
 class RuleBoundaryTests(WatchdogCase):
     """Each rule: one case that fires exactly at its threshold, one just below."""
 
     def test_task_blocked_stale(self):
-        cfg = self.fleet.config(self.tmp, task__blocked_stale={"threshold_minutes": 60})
+        cfg = self.fleet.config(task__blocked_stale={"threshold_minutes": 60})
         self.fleet.task("t1", "blocked", NOW - 60 * MIN)
         self.fleet.task("t2", "blocked", NOW - 60 * MIN + 1)
         self.fleet.task("t3", "blocked", NOW - 120 * MIN)
-        self.fleet.task_event("t3", "status", NOW - 10 * MIN)  # a state change resets the clock
+        self.fleet.task_event("t3", "status", NOW - 10 * MIN)
         self.assertEqual([("task.blocked_stale", "t1")], self.keys(self.fleet.evaluate(cfg)))
 
     def test_task_lease_expired_unrenewed_and_reaped(self):
-        cfg = self.fleet.config(self.tmp, task__lease_stale={"never_renewed_minutes": 30,
-                                                             "lookback_minutes": 60})
-        self.fleet.lease("a", "w1:p1", NOW - 99 * MIN, NOW - 50 * MIN, NOW)  # expires_at == now: expired
-        self.fleet.lease("b", "w1:p1", NOW - 30 * MIN, NOW - 30 * MIN, NOW + HOUR)  # never renewed, 30 min
-        self.fleet.lease("c", "w1:p1", NOW - 29 * MIN, NOW - 29 * MIN, NOW + HOUR)  # 29 min: silent
-        self.fleet.lease("d", "w1:p1", NOW - 99 * MIN, NOW - 1 * MIN, NOW + HOUR)  # renewed: silent
+        cfg = self.fleet.config(task__lease_stale={"never_renewed_minutes": 30, "lookback_minutes": 60})
+        self.fleet.lease("a", "w1:p1", NOW - 99 * MIN, NOW - 50 * MIN, NOW)
+        self.fleet.lease("b", "w1:p1", NOW - 30 * MIN, NOW - 30 * MIN, NOW + HOUR)
+        self.fleet.lease("c", "w1:p1", NOW - 29 * MIN, NOW - 29 * MIN, NOW + HOUR)
+        self.fleet.lease("d", "w1:p1", NOW - 99 * MIN, NOW - 1 * MIN, NOW + HOUR)
         self.fleet.task_event("e", "requeued", NOW - 60 * MIN, meta={"reason": "expired"})
-        self.fleet.task_event("f", "requeued", NOW - 61 * MIN, meta={"reason": "expired"})  # outside lookback
-        self.fleet.task_event("g", "released", NOW - 5 * MIN, meta={"reason": "manual"})  # not a reap
+        self.fleet.task_event("f", "requeued", NOW - 61 * MIN, meta={"reason": "expired"})
+        self.fleet.task_event("g", "released", NOW - 5 * MIN, meta={"reason": "manual"})
         self.assertEqual([("task.lease_stale", "expired:a@w1:p1"), ("task.lease_stale", "reaped:1"),
                           ("task.lease_stale", "unrenewed:b@w1:p1")], self.keys(self.fleet.evaluate(cfg)))
 
-    def test_dunk_skip_loop_uses_lookback_not_recency(self):
-        cfg = self.fleet.config(self.tmp, dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 168})
+    def test_dunk_skip_loop_uses_lookback_not_recency_and_a_stable_key(self):
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 168})
         self.fleet.dunks = [{"id": "d1", "running": True}, {"id": "d2", "running": True}]
         self.fleet.write_json()
-        for n in range(3):  # three in a row, two days ago, then a send: still reported
+        for n in range(3):
             self.fleet.metric("dunk.skipped", "d1", NOW - 48 * HOUR + n)
+        first = self.fleet.evaluate(cfg)
+        self.fleet.metric("dunk.skipped", "d1", NOW - 47.5 * HOUR)  # the run grows
+        grown = self.fleet.evaluate(cfg)
+        self.assertEqual(self.keys(first), self.keys(grown), "a growing loop keeps its key (one incident)")
         self.fleet.metric("dunk.sent", "d1", NOW - 47 * HOUR)
-        for n in range(2):  # only two in a row: silent
+        for n in range(2):
             self.fleet.metric("dunk.skipped", "d2", NOW - HOUR + n)
-        self.fleet.metric("dunk.sent", "d2", NOW - 1)
-        self.fleet.metric("dunk.skipped", "d2", NOW)
-        found = self.fleet.evaluate(cfg)
-        self.assertEqual(["dunk.skip_loop"], [f["rule"] for f in found])
-        self.assertEqual(3, found[0]["evidence"]["longest_consecutive_skips"])
-        self.assertEqual(0, found[0]["evidence"]["current_streak"])
+        self.assertEqual(["d1"], [f["evidence"]["dunk"] for f in self.fleet.evaluate(cfg)])
+        self.assertEqual("4 consecutive skips", self.fleet.evaluate(cfg)[0]["measured"])
 
-    def test_dunk_skip_loop_outside_lookback_is_silent(self):
-        cfg = self.fleet.config(self.tmp, dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 24})
+    def test_events_after_now_are_never_seen(self):
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 168})
         self.fleet.dunks = [{"id": "d1", "running": True}]
         self.fleet.write_json()
         for n in range(5):
-            self.fleet.metric("dunk.skipped", "d1", NOW - 25 * HOUR + n)
+            self.fleet.metric("dunk.skipped", "d1", NOW + 1 + n)
         self.assertEqual([], self.fleet.evaluate(cfg))
 
     def test_dunk_overdue(self):
-        cfg = self.fleet.config(self.tmp, dunk__overdue={"missed_intervals": 3})
+        cfg = self.fleet.config(dunk__overdue={"missed_intervals": 3})
         self.fleet.dunks = [
             {"id": "d1", "running": True, "interval_minutes": 10, "next_send_at": NOW - 30 * MIN},
             {"id": "d2", "running": True, "interval_minutes": 10, "next_send_at": NOW - 30 * MIN + 1},
@@ -215,67 +261,88 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertEqual([("dunk.overdue", "d1"), ("dunk.overdue", "d4")], self.keys(self.fleet.evaluate(cfg)))
 
     def test_inbox_undeliverable_backlog_has_no_age_limit(self):
-        cfg = self.fleet.config(self.tmp, inbox__undeliverable={"min_messages": 2})
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 2})
         for _ in range(2):
             self.fleet.message("w9:p8", "undeliverable", NOW - 30 * 24 * HOUR, reason="target pane no longer exists")
-        self.fleet.message("w9:p7", "undeliverable", NOW - HOUR, reason="target pane no longer exists")
+        self.fleet.message("w9:p7", "undeliverable", NOW - HOUR)
         found = self.fleet.evaluate(cfg)
         self.assertEqual([("inbox.undeliverable", "w9:p8")], self.keys(found))
         self.assertNotIn("BODY-NEVER-REPORTED", json.dumps(found))
 
     def test_inbox_unread_live_and_dead(self):
-        cfg = self.fleet.config(self.tmp, inbox__unread_live={"age_minutes": 60, "min_messages": 1},
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1},
                                 inbox__unread_dead={"min_messages": 1})
         self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]
-        self.fleet.message("alive", "queued", NOW - 60 * MIN, pane_id="w1:p1")       # live, at age: fires
-        self.fleet.message("alive2", "queued", NOW - 60 * MIN + 1, pane_id="w1:p1")  # just under: silent
-        self.fleet.message("gone", "queued", NOW - 1, pane_id="w9:p9")              # dead pane: fires
+        self.fleet.message("alive", "queued", NOW - 60 * MIN, pane_id="w1:p1")
+        self.fleet.message("alive2", "queued", NOW - 60 * MIN + 1, pane_id="w1:p1")
+        self.fleet.message("gone", "queued", NOW - 1, pane_id="w9:p9")
         self.assertEqual([("inbox.unread_dead", "gone"), ("inbox.unread_live", "alive")],
                          self.keys(self.fleet.evaluate(cfg)))
 
     def test_inbox_ambiguous_sender_names_only_pane_resolving_labels(self):
-        cfg = self.fleet.config(self.tmp, inbox__ambiguous_sender={"lookback_hours": 24, "sample_ids": 2,
-                                                                   "require_live_pane": True})
+        cfg = self.fleet.config(inbox__ambiguous_sender={"lookback_hours": 24, "sample_ids": 2,
+                                                         "require_live_pane": True})
         self.fleet.panes = [{"pane_id": "wR:p4", "agent_status": "idle"}]
-        self.fleet.message("codex poolrad", "read", NOW - 48 * HOUR, pane_id="wR:p4")  # routing history
+        self.fleet.message("codex poolrad", "read", NOW - 48 * HOUR, pane_id="wR:p4")
         self.fleet.message("dead lane", "read", NOW - 48 * HOUR, pane_id="w9:p9")
         ids = [self.fleet.message("x", "read", NOW - HOUR, sender="codex poolrad") for _ in range(3)]
-        self.fleet.message("x", "read", NOW - HOUR, sender="dead lane")      # pane not live: silent
-        self.fleet.message("x", "read", NOW - HOUR, sender="legacy-name")    # not a pane label: silent
-        self.fleet.message("x", "read", NOW - HOUR, sender="wR:p4")          # a pane id: silent
+        self.fleet.message("x", "read", NOW - HOUR, sender="dead lane")
+        self.fleet.message("x", "read", NOW - HOUR, sender="legacy-name")
+        self.fleet.message("x", "read", NOW - HOUR, sender="wR:p4")
         found = self.fleet.evaluate(cfg)
         self.assertEqual([("inbox.ambiguous_sender", "codex poolrad")], self.keys(found))
         self.assertEqual(ids[:2], found[0]["evidence"]["sample_ids"])
-        self.assertEqual("info", found[0]["severity"])
 
     def test_lane_rules(self):
-        cfg = self.fleet.config(self.tmp, lane__working_without_task={"quiet_minutes": 60},
+        cfg = self.fleet.config(lane__working_without_task={"quiet_minutes": 60},
                                 lane__idle_holding_task={"quiet_minutes": 60, "idle_statuses": ["idle"],
                                                          "holding_statuses": ["in_progress"]})
         self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "working"},
                             {"pane_id": "w1:p2", "agent_status": "working"},
                             {"pane_id": "w1:p3", "agent_status": "idle"},
                             {"pane_id": "w1:p4", "agent_status": "idle"}]
-        self.fleet.task_event("tx", "status", NOW - 59 * MIN, actor="w1:p2")  # recent task activity: silent
-        self.fleet.task("t3", "in_progress", NOW - 99 * MIN, assignees=["w1:p3"])  # idle holder, quiet: fires
+        self.fleet.task_event("tx", "status", NOW - 59 * MIN, actor="w1:p2")
+        self.fleet.task("t3", "in_progress", NOW - 99 * MIN, assignees=["w1:p3"])
         self.fleet.task("t4", "in_progress", NOW - 99 * MIN, assignees=["w1:p4"])
-        self.fleet.message("x", "read", NOW - 59 * MIN, sender="w1:p4")  # recent activity: silent
+        self.fleet.message("x", "read", NOW - 59 * MIN, sender="w1:p4")
         self.assertEqual([("lane.idle_holding_task", "t3@w1:p3"), ("lane.working_without_task", "w1:p1")],
                          sorted(self.keys(self.fleet.evaluate(cfg))))
 
-    def test_host_rules(self):
-        cfg = self.fleet.config(self.tmp, host__load={"load1_per_cpu": 2.0},
-                                host__tmp={"max_used_fraction": 0.9, "min_free_bytes": 100,
-                                           "max_inode_fraction": 0.9, "path": "/tmp"})
-        self.fleet.host.update(load1=16.0, cpus=8, tmp_used_fraction=0.9, tmp_free_bytes=101,
-                               tmp_inode_used_fraction=0.89)
-        self.assertEqual([("host.tmp", "/tmp:used_fraction"), ("host.load", "load1")],
-                         self.keys(self.fleet.evaluate(cfg)))
-        self.fleet.host.update(load1=15.99, tmp_used_fraction=0.89)
+    def test_host_load_and_tmp_bands(self):
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 2.0},
+                                host__tmp={"max_used_fraction": 0.7, "critical_used_fraction": 0.9,
+                                           "min_free_bytes": 100, "max_inode_fraction": 0.9, "path": "/tmp"})
+        self.fleet.hosts = {"/": {"load1": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
+        found = self.fleet.evaluate(cfg)
+        self.assertEqual({("host.load", "load1"): "warning", ("host.tmp", "/tmp:used_fraction"): "warning"},
+                         {(f["rule"], f["key"]): f["severity"] for f in found})
+        self.fleet.hosts["/tmp"] = {"used_fraction": 0.95}
+        self.assertEqual("critical", self.keys and [f for f in self.fleet.evaluate(cfg)
+                                                    if f["rule"] == "host.tmp"][0]["severity"])
+        self.fleet.hosts = {"/": {"load1": 15.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
         self.assertEqual([], self.fleet.evaluate(cfg))
 
+    def test_host_disk_full(self):
+        cfg = self.fleet.config(host__disk_full={"max_used_fraction": 0.98, "paths": ["/tmp", "/"]})
+        self.fleet.hosts = {"/": {"used_fraction": 0.98}, "/tmp": {"used_fraction": 0.979}}
+        found = self.fleet.evaluate(cfg)
+        self.assertEqual([("host.disk_full", "/:0.98")], self.keys(found))
+        self.assertEqual("outage", found[0]["class"])
+
+    def test_heavy_slot_stale_by_age(self):
+        slots = os.path.join(self.tmp, "slots")
+        os.makedirs(os.path.join(slots, "poolrad-heavy.1"))
+        os.makedirs(os.path.join(slots, "poolrad-heavy.2"))
+        os.makedirs(os.path.join(slots, "other"))
+        os.utime(os.path.join(slots, "poolrad-heavy.1"), (NOW - 30 * MIN, NOW - 30 * MIN))
+        os.utime(os.path.join(slots, "poolrad-heavy.2"), (NOW - 29 * MIN, NOW - 29 * MIN))
+        os.utime(os.path.join(slots, "other"), (NOW - 99 * MIN, NOW - 99 * MIN))
+        cfg = self.fleet.config(host__heavy_slot_stale={"directory": slots, "prefix": "poolrad-heavy.",
+                                                        "max_age_minutes": 30})
+        self.assertEqual([("host.heavy_slot_stale", "poolrad-heavy.1")], self.keys(self.fleet.evaluate(cfg)))
+
     def test_health_failed(self):
-        cfg = self.fleet.config(self.tmp, health__failed={"stale_minutes": 30})
+        cfg = self.fleet.config(health__failed={"stale_minutes": 30})
         self.fleet.health = {"checked_at": NOW - 30 * MIN + 1, "ok": True, "problems": []}
         self.fleet.write_json()
         self.assertEqual([], self.fleet.evaluate(cfg))
@@ -284,15 +351,31 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertEqual([("health.failed", "problems"), ("health.failed", "stale")],
                          self.keys(self.fleet.evaluate(cfg)))
 
-    def test_pane_rules_skip_visibly_without_a_pane_source(self):
-        cfg = self.fleet.config(self.tmp, lane__working_without_task={"quiet_minutes": 60})
-        cfg["panes"]["source"] = "none"
+    def test_secret_scan_reports_hashes_only_and_honours_the_allowlist(self):
+        cfg = self.fleet.config(security__secret_text={"lookback_hours": 24})
+        self.fleet.message("x", "read", NOW - HOUR, body=f"here it is\n{FAKE_TOKEN}\nthanks")
+        self.fleet.message("x", "read", NOW - 25 * HOUR, body=FAKE_TOKEN)  # outside lookback
+        self.fleet.task("t1", "open", NOW, body=f"token: {FAKE_TOKEN}")
+        found = self.fleet.evaluate(cfg)
+        self.assertEqual(["inbox", "task"], [f["evidence"]["kind"] for f in found])
+        self.assertNotIn(FAKE_TOKEN, json.dumps(found), "evidence is (kind, id, sha256), never the match")
+        self.assertEqual("security", found[0]["class"])
+        allow = sorted({f["evidence"]["sha256"] for f in found})
+        cfg["rules"]["security.secret_text"]["allowlist_sha256"] = allow
+        self.assertEqual([], self.fleet.evaluate(cfg))
+
+    def test_money_is_skipped_without_a_metering_source(self):
+        cfg = self.fleet.config()
         result = wd.evaluate(cfg, NOW)
-        self.assertEqual(["lane.working_without_task"], result["skipped_rules"])
+        self.assertIn({"rule": "money.spend_projection", "error": "no metering source"}, result["skipped"])
+
+    def test_pane_rules_skip_visibly_without_a_pane_source(self):
+        cfg = self.fleet.config(lane__working_without_task={"quiet_minutes": 60})
+        cfg["panes"]["source"] = "none"
+        self.assertIn("lane.working_without_task", [s["rule"] for s in wd.evaluate(cfg, NOW)["skipped"]])
 
     def test_output_is_deterministic(self):
-        cfg = self.fleet.config(self.tmp, inbox__undeliverable={"min_messages": 1},
-                                task__blocked_stale={"threshold_minutes": 1})
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 1}, task__blocked_stale={"threshold_minutes": 1})
         for mailbox in ("b", "a", "c"):
             self.fleet.message(mailbox, "undeliverable", NOW - HOUR)
         self.fleet.task("t9", "blocked", NOW - HOUR)
@@ -301,12 +384,6 @@ class RuleBoundaryTests(WatchdogCase):
 
 
 class ConfigTests(WatchdogCase):
-    def test_example_config_is_valid_and_quiet(self):
-        config = wd.validate_config(copy.deepcopy(EXAMPLE))
-        self.assertFalse(config["enabled"])
-        self.assertTrue(config["dry_run"])
-        self.assertFalse(config["escalation"]["owner"]["enabled"])
-
     def assertNamed(self, mutate, key):
         config = copy.deepcopy(EXAMPLE)
         mutate(config)
@@ -314,167 +391,351 @@ class ConfigTests(WatchdogCase):
             wd.validate_config(config)
         self.assertEqual(key, caught.exception.key)
 
+    def test_example_config_is_valid_and_quiet(self):
+        config = wd.validate_config(copy.deepcopy(EXAMPLE))
+        self.assertFalse(config["enabled"])
+        self.assertTrue(config["dry_run"])
+        self.assertFalse(config["escalation"]["owner"]["enabled"])
+
     def test_missing_enabled_or_dry_run_is_an_error_not_a_default(self):
         self.assertNamed(lambda c: c.pop("enabled"), "enabled")
         self.assertNamed(lambda c: c.pop("dry_run"), "dry_run")
 
+    def test_zero_and_negative_values_are_refused(self):
+        self.assertNamed(lambda c: c["rules"]["host.load"].update(load1_per_cpu=0), "rules.host.load.load1_per_cpu")
+        self.assertNamed(lambda c: c["rules"]["dunk.overdue"].update(cooldown_minutes=0),
+                         "rules.dunk.overdue.cooldown_minutes")
+        self.assertNamed(lambda c: c["escalation"]["owner"].update(max_pages_per_hour=0),
+                         "escalation.owner.max_pages_per_hour")
+        self.assertNamed(lambda c: c["rules"]["task.blocked_stale"].update(threshold_minutes=-5),
+                         "rules.task.blocked_stale.threshold_minutes")
+        self.assertNamed(lambda c: c["rules"]["host.disk_full"].update(must_hold_runs=0),
+                         "rules.host.disk_full.must_hold_runs")
+
     def test_named_errors(self):
-        self.assertNamed(lambda c: c.update(surprise=1), "surprise")
-        self.assertNamed(lambda c: c["rules"]["dunk.skip_loop"].update(consecutive_skips=0),
-                         "rules.dunk.skip_loop.consecutive_skips")
+        self.assertNamed(lambda c: c.update(pagethreshold=1), "pagethreshold")
         self.assertNamed(lambda c: c["rules"]["host.tmp"].update(max_used_fraction="high"),
                          "rules.host.tmp.max_used_fraction")
         self.assertNamed(lambda c: c["rules"].pop("host.load"), "rules.host.load")
-        self.assertNamed(lambda c: c["escalation"]["vp"].update(min_severity="loud"),
-                         "escalation.vp.min_severity")
         self.assertNamed(lambda c: c["panes"].update(pane_id_pattern="("), "panes.pane_id_pattern")
+        self.assertNamed(lambda c: c["rules"]["security.secret_text"].update(allowlist_sha256=["xyz"]),
+                         "rules.security.secret_text.allowlist_sha256")
+
+    def test_ops_rules_cannot_be_given_an_owner_class(self):
+        self.assertNamed(lambda c: c["rules"]["host.tmp"].update({"class": "outage"}), "rules.host.tmp.class")
+        self.assertNamed(lambda c: c["rules"]["host.load"].update({"class": "money"}), "rules.host.load.class")
+
+    def test_money_cannot_be_enabled_without_source_and_cap(self):
+        self.assertNamed(lambda c: c["rules"]["money.spend_projection"].update(enabled=True),
+                         "rules.money.spend_projection.enabled")
 
     def test_owner_paging_requires_an_approver(self):
-        def enable(config):
-            config["escalation"]["owner"].update(enabled=True, mailbox="owner")
-        self.assertNamed(enable, "escalation.owner.approved_by")
+        self.assertNamed(lambda c: c["escalation"]["owner"].update(enabled=True), "escalation.owner.approved_by")
 
-    def test_cli_refuses_missing_and_invalid_config_without_alerting(self):
-        bad = os.path.join(self.tmp, "bad.json")
-        with open(bad, "w") as handle:
-            json.dump({"schema": wd.SCHEMA_ID}, handle)
-        for path, needle in ((os.path.join(self.tmp, "none.json"), "not found"), (bad, "enabled: missing")):
-            proc = subprocess.run([sys.executable, os.path.join(ROOT, "dunkingsheep"), "watchdog",
-                                   "--config", path], capture_output=True, text=True, timeout=60)
+    def test_cli_refuses_bad_config_names_it_and_leaves_the_error_for_the_deadman(self):
+        cases = {"truncated.json": '{"schema": "dunkingsheep-watchdog/2", "enabled": tr',
+                 "unknown.json": json.dumps(dict(copy.deepcopy(EXAMPLE), pagethreshold=1)),
+                 "zero.json": json.dumps(EXAMPLE).replace('"load1_per_cpu": 2.0', '"load1_per_cpu": 0')}
+        for name, text in cases.items():
+            path, error_file = os.path.join(self.tmp, name), os.path.join(self.tmp, name + ".err")
+            with open(path, "w") as handle:
+                handle.write(text)
+            proc = subprocess.run([sys.executable, os.path.join(ROOT, "dunkingsheep"), "watchdog", "--config", path,
+                                   "--error-file", error_file], capture_output=True, text=True, timeout=60)
             self.assertEqual(2, proc.returncode, proc.stderr)
-            self.assertIn("refusing to start", proc.stderr)
-            self.assertIn(needle, proc.stderr)
-            self.assertEqual("", proc.stdout)
+            self.assertIn("refusing to start: CONFIG:", proc.stderr)
+            self.assertEqual("", proc.stdout, "nothing evaluated, nothing sent")
+            self.assertIn("CONFIG:", read(error_file))
 
 
-class QuietStartAndDeliveryTests(WatchdogCase):
-    def live_config(self, **extra):
-        cfg = self.fleet.config(self.tmp, inbox__undeliverable={"min_messages": 1, "cooldown_minutes": 60})
-        cfg.update(enabled=True, dry_run=False, **extra)
+class LiveNowRefusalTests(WatchdogCase):
+    def test_now_is_refused_on_a_live_run_and_allowed_on_a_dry_run(self):
+        cfg = self.fleet.config()
+        cfg.update(enabled=True, dry_run=False)
+        path = os.path.join(self.tmp, "live.json")
+        with open(path, "w") as handle:
+            json.dump(cfg, handle)
+        base = [sys.executable, os.path.join(ROOT, "dunkingsheep"), "watchdog", "--config", path,
+                "--error-file", os.path.join(self.tmp, "err"), "--now", str(NOW)]
+        proc = subprocess.run(base, capture_output=True, text=True, timeout=60)
+        self.assertEqual(2, proc.returncode)
+        self.assertIn("refusing --now on a live run", proc.stderr)
+        self.assertFalse(os.path.exists(cfg["heartbeat_path"]))
+        proc = subprocess.run(base + ["--dry-run"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, proc.returncode, proc.stderr)
+
+
+class FailTowardNotPagingTests(WatchdogCase):
+    """Spec section 3: none of these may touch the OWNER queue."""
+
+    def disk_config(self, **owner):
+        cfg = self.fleet.config(host__disk_full={"max_used_fraction": 0.98, "paths": ["/"], "must_hold_runs": 1})
+        self.fleet.hosts = {"/": {"used_fraction": 0.99}}
+        return self.live(cfg, **owner) if owner is not None else cfg
+
+    def test_missing_state_suppresses_owner_pages_and_tells_vp_naming_the_state_path(self):
+        cfg = self.disk_config(classes=["outage"])
+        owner = FakeOwner()
+        report, sent = self.fleet.run(cfg, owner=owner)
+        self.assertEqual([], owner.posts)
+        self.assertEqual("state-loss", report["decisions"][0]["owner"])
+        self.assertIn(cfg["state_path"], sent[0][2])
+        self.assertIn("missing", sent[0][2])
+
+    def test_corrupt_state_suppresses_owner_pages(self):
+        cfg = self.disk_config(classes=["outage"])
+        with open(cfg["state_path"], "w") as handle:
+            handle.write("{ truncated")
+        owner = FakeOwner()
+        report, sent = self.fleet.run(cfg, owner=owner)
+        self.assertEqual([], owner.posts)
+        self.assertIn("corrupt", sent[0][2])
+        self.assertNotIn("config", sent[0][2].split("corrupt")[0].lower().split("state")[0])
+
+    def test_a_rule_error_suppresses_owner_pages_for_the_run(self):
+        cfg = self.disk_config(classes=["outage"])
+        cfg["rules"]["host.load"]["enabled"] = True
+        self.seed_state(cfg)
+        original = dict(wd.RULES)
+        wd.RULES["host.load"] = lambda inputs, rule: 1 / 0
+        try:
+            owner = FakeOwner()
+            report, sent = self.fleet.run(cfg, owner=owner)
+        finally:
+            wd.RULES.clear()
+            wd.RULES.update(original)
+        self.assertEqual([], owner.posts)
+        self.assertEqual(1, sent[0][2].count("rule=" + wd.SELF_ERROR_RULE), "exactly one self error")
+        self.assertIn("host.load SKIPPED: ZeroDivisionError", sent[0][2])
+
+    def test_dry_run_never_posts_writes_state_or_beats(self):
+        cfg = self.disk_config(classes=["outage"])
+        self.seed_state(cfg)
+        before = read(cfg["state_path"])
+        owner = FakeOwner()
+        report, sent = self.fleet.run(cfg, owner=owner, dry=True)
+        self.assertEqual(([], []), (owner.posts, sent))
+        self.assertEqual(before, read(cfg["state_path"]))
+        self.assertFalse(os.path.exists(cfg["heartbeat_path"]))
+        self.assertTrue(any(line.startswith("WOULD-PAGE OWNER rule=host.disk_full") for line in report["lines"]))
+
+
+class OwnerPagingTests(WatchdogCase):
+    def disk_config(self, hold=2, paths=("/",)):
+        cfg = self.fleet.config(host__disk_full={"max_used_fraction": 0.98, "paths": list(paths),
+                                                 "must_hold_runs": hold})
+        self.fleet.hosts = {path: {"used_fraction": 0.99} for path in paths}
+        cfg = self.live(cfg, classes=["outage"])
+        self.seed_state(cfg)
         return cfg
 
-    def run_once(self, cfg, now=NOW, dry=False):
+    def test_hold_needs_consecutive_spaced_runs(self):
+        cfg = self.disk_config(hold=2)
+        owner = FakeOwner()
+        report, _ = self.fleet.run(cfg, owner=owner)
+        self.assertEqual("hold", report["decisions"][0]["owner"])
+        report, _ = self.fleet.run(cfg, now=NOW + 59, owner=owner)  # too soon: does not count
+        self.assertEqual("hold", report["decisions"][0]["owner"])
+        report, _ = self.fleet.run(cfg, now=NOW + 60, owner=owner)
+        self.assertEqual("no", report["decisions"][0]["owner"])
+        self.assertEqual(1, len(owner.posts))
+
+    def test_streak_resets_when_the_condition_clears(self):
+        cfg = self.disk_config(hold=2)
+        owner = FakeOwner()
+        self.fleet.run(cfg, owner=owner)
+        self.fleet.hosts = {"/": {"used_fraction": 0.5}}
+        self.fleet.run(cfg, now=NOW + 60, owner=owner)
+        self.fleet.hosts = {"/": {"used_fraction": 0.99}}
+        report, _ = self.fleet.run(cfg, now=NOW + 120, owner=owner)
+        self.assertEqual("hold", report["decisions"][0]["owner"])
+
+    def test_owner_cap_is_three_per_rolling_hour(self):
+        cfg = self.disk_config(hold=1, paths=("/a", "/b", "/c", "/d", "/e"))
+        owner = FakeOwner()
+        report, sent = self.fleet.run(cfg, owner=owner)
+        self.assertEqual(3, len(owner.posts))
+        self.assertEqual(2, sum(d["owner"] == "global-cap" for d in report["decisions"]))
+        report, _ = self.fleet.run(cfg, now=NOW + 30 * MIN, owner=owner)
+        self.assertEqual(3, len(owner.posts), "still inside the rolling hour")
+
+    def test_delivered_only_when_confirmed(self):
+        cfg = self.disk_config(hold=1)
+        owner = FakeOwner(through=None)
+        self.fleet.run(cfg, owner=owner)
+        state, _ = wd.load_state(cfg["state_path"])
+        page = state["owner_pages"]["host.disk_full|/:0.98"]
+        self.assertIsNone(page["confirmed_at"], "posted is not delivered")
+        self.fleet.run(cfg, now=NOW + 60, owner=owner)
+        self.assertEqual(1, len(owner.posts), "a pending page is never re-posted")
+        owner.through = page["brief_id"]
+        self.fleet.run(cfg, now=NOW + 120, owner=owner)
+        state, _ = wd.load_state(cfg["state_path"])
+        self.assertEqual(NOW + 120, state["owner_pages"]["host.disk_full|/:0.98"]["confirmed_at"])
+
+    def test_unconfirmed_page_becomes_a_vp_self_error_and_stays_undelivered(self):
+        cfg = self.disk_config(hold=1)
+        owner = FakeOwner(through=None)
+        self.fleet.run(cfg, owner=owner)
+        limit = cfg["escalation"]["owner"]["confirm_within_minutes"] * MIN
+        _, sent = self.fleet.run(cfg, now=NOW + limit + 1, owner=owner)
+        self.assertIn("UNDELIVERED", sent[0][2])
+        state, _ = wd.load_state(cfg["state_path"])
+        self.assertIsNone(state["owner_pages"]["host.disk_full|/:0.98"]["confirmed_at"])
+
+    def test_failed_post_is_one_vp_self_error_and_nothing_is_recorded(self):
+        cfg = self.disk_config(hold=1)
+        owner = FakeOwner(fail=ConnectionError("desk down"))
+        report, sent = self.fleet.run(cfg, owner=owner)
+        self.assertEqual(1, sent[0][2].count("rule=" + wd.SELF_ERROR_RULE))
+        self.assertIn("desk down", sent[0][2])
+        state, _ = wd.load_state(cfg["state_path"])
+        self.assertEqual({}, state["owner_pages"])
+        self.assertEqual([], state["owner_page_times"])
+
+    def test_the_default_owner_channel_fails_toward_not_paging(self):
+        cfg = self.disk_config(hold=1)
         sent = []
-        report = wd.run(cfg, now, dry_run_flag=dry, send=lambda *a: sent.append(a),
-                        panes_provider=lambda: [], host_sampler=lambda: dict(HOST_OK))
-        return report, sent
+        wd.run(cfg, NOW, send=lambda *a: sent.append(a), host_sampler=self.fleet.host,
+               panes_provider=lambda: [])
+        self.assertIn("desk brief post not wired", sent[0][2])
+
+    def test_vp_only_classes_never_page_even_with_owner_enabled(self):
+        cfg = self.fleet.config(host__tmp={"max_used_fraction": 0.5, "critical_used_fraction": 0.5,
+                                           "min_free_bytes": 1, "max_inode_fraction": 0.9, "path": "/tmp"},
+                                inbox__undeliverable={"min_messages": 1})
+        cfg = self.live(cfg, classes=["security", "outage", "money"], min_severity="info")
+        self.seed_state(cfg)
+        self.fleet.hosts = {"/tmp": {"used_fraction": 0.97}}
+        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        owner = FakeOwner()
+        report, _ = self.fleet.run(cfg, owner=owner)
+        self.assertEqual([], owner.posts)
+        self.assertTrue(all(d["owner"] is None for d in report["decisions"]))
+
+    def test_resolved_owner_line_only_for_a_confirmed_page(self):
+        cfg = self.disk_config(hold=1)
+        owner = FakeOwner(through=None)
+        self.fleet.run(cfg, owner=owner)
+        owner.through = 999
+        self.fleet.run(cfg, now=NOW + 60, owner=owner)
+        self.fleet.hosts = {"/": {"used_fraction": 0.5}}
+        _, sent = self.fleet.run(cfg, now=NOW + 120, owner=owner)
+        self.assertEqual(2, len(owner.posts))
+        self.assertIn("RESOLVED host.disk_full|/:0.98", owner.posts[1])
+        self.assertIn("RESOLVED VP dedupe=host.disk_full|/:0.98", sent[-1][2])
+
+
+class DeskBriefChannelTests(WatchdogCase):
+    """The agreed bridge status contract: {"last_brief_id": int, "updated_at": float} (VP i19825)."""
+
+    def channel(self, text):
+        path = os.path.join(self.tmp, "telegram-status.json")
+        if text is not None:
+            with open(path, "w") as handle:
+                handle.write(text)
+        return wd.DeskBriefChannel(path)
+
+    def test_reads_last_brief_id_and_treats_null_as_unconfirmed(self):
+        self.assertEqual(1065, self.channel('{"last_brief_id": 1065, "updated_at": 1.5}').confirmed_through())
+        self.assertIsNone(self.channel('{"last_brief_id": null, "updated_at": 1.5}').confirmed_through())
+
+    def test_unparseable_or_missing_status_is_an_error_never_delivered(self):
+        for text in ("{ trunc", '{"last_brief_id": "1065"}', '{"last_brief_id": true}', None):
+            with self.assertRaises((ValueError, OSError)):
+                self.channel(text).confirmed_through()
+
+    def test_post_fails_toward_not_paging(self):
+        with self.assertRaises(wd.OwnerChannelUnavailable):
+            self.channel(None).post("page")
+
+
+class VpDeliveryTests(WatchdogCase):
+    def vp_config(self, **extra):
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 1, "cooldown_minutes": 60})
+        cfg.update(enabled=True, dry_run=False, **extra)
+        self.seed_state(cfg)
+        return cfg
 
     def test_enabled_false_or_dry_run_true_sends_nothing(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
         for overrides in ({"enabled": False}, {"dry_run": True}):
-            cfg = self.live_config()
+            cfg = self.vp_config()
             cfg.update(overrides)
-            report, sent = self.run_once(cfg)
+            report, sent = self.fleet.run(cfg)
             self.assertEqual("dry-run", report["mode"])
             self.assertEqual([], sent)
-            self.assertEqual(1, len(report["plan"]["vp"]["alerts"]), "the plan still shows what would fire")
 
-    def test_dry_run_writes_no_state_and_no_heartbeat(self):
+    def test_dry_run_lines_carry_threshold_measured_and_window(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
-        cfg = self.live_config()
-        _, sent = self.run_once(cfg, dry=True)
-        self.assertEqual([], sent)
-        self.assertFalse(os.path.exists(cfg["state_path"]))
-        self.assertFalse(os.path.exists(cfg["heartbeat_path"]))
+        report, _ = self.fleet.run(self.vp_config(), dry=True)
+        vp = [line for line in report["lines"] if line.startswith("WOULD-NOTIFY VP")]
+        self.assertEqual(1, len(vp))
+        for part in ("rule=inbox.undeliverable", "class=ops", "threshold=1 msgs", "measured=1 msgs",
+                     "window=current backlog", "dedupe=inbox.undeliverable|dead", "suppressed=no", "evidence="):
+            self.assertIn(part, vp[0])
+        self.assertIn("SKIPPED rule=money.spend_projection error=no metering source", report["lines"])
 
     def test_live_run_sends_one_digest_and_touches_heartbeat(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
-        cfg = self.live_config()
-        report, sent = self.run_once(cfg)
+        cfg = self.vp_config()
+        report, sent = self.fleet.run(cfg)
         self.assertEqual(["vp"], report["sent"])
         self.assertEqual(1, len(sent))
-        self.assertEqual("vp of agentry", sent[0][0])
         self.assertNotIn("BODY-NEVER-REPORTED", sent[0][2])
         self.assertEqual(NOW, os.stat(cfg["heartbeat_path"]).st_mtime)
 
     def test_cap_sends_exactly_max_and_says_how_many_were_suppressed(self):
         for n in range(5):
             self.fleet.message(f"dead{n}", "undeliverable", NOW - HOUR)
-        cfg = self.live_config(max_alerts_per_run=3)
-        report, sent = self.run_once(cfg)
-        self.assertEqual(3, len(report["plan"]["vp"]["alerts"]))
-        self.assertEqual(2, report["plan"]["suppressed"])
+        report, sent = self.fleet.run(self.vp_config(max_alerts_per_run=3))
+        self.assertEqual(3, report["counts"]["vp"])
         self.assertIn("2 further finding(s) suppressed", sent[0][2])
 
     def test_cooldown_dedupes_and_persists_across_restart(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
-        cfg = self.live_config()
-        self.assertEqual(1, len(self.run_once(cfg)[1]))
-        # A new run reloads state from disk: the same as a restarted process.
-        self.assertEqual([], self.run_once(cfg, now=NOW + 59 * MIN)[1], "inside cooldown: no duplicate")
-        self.assertEqual(1, len(self.run_once(cfg, now=NOW + 60 * MIN)[1]), "after cooldown: re-alert")
+        cfg = self.vp_config()
+        self.assertEqual(1, len(self.fleet.run(cfg)[1]))
+        self.assertEqual([], self.fleet.run(cfg, now=NOW + 59 * MIN)[1])
+        self.assertEqual(1, len(self.fleet.run(cfg, now=NOW + 60 * MIN)[1]))
 
-    def test_owner_paged_only_when_enabled_for_category(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)  # category delivery
-        self.fleet.host.update(tmp_used_fraction=0.99)
-        cfg = self.fleet.config(self.tmp, inbox__undeliverable={"min_messages": 1},
-                                host__tmp={"severity": "critical"})
-        cfg.update(enabled=True, dry_run=False)
-        cfg["escalation"]["owner"].update(enabled=True, mailbox="owner", approved_by="VP i19781")
-        sent = []
-        wd.run(cfg, NOW, send=lambda *a: sent.append(a), panes_provider=lambda: [],
-               host_sampler=lambda: dict(self.fleet.host))
-        by_target = {to: body for to, _, body in sent}
-        self.assertIn("host.tmp", by_target["owner"])
-        self.assertNotIn("inbox.undeliverable", by_target["owner"])
-        self.assertIn("inbox.undeliverable", by_target["vp of agentry"])
-
-
-class SelfErrorTests(WatchdogCase):
-    def owner_live_config(self):
-        cfg = self.fleet.config(self.tmp, inbox__undeliverable={"min_messages": 1},
-                                task__blocked_stale={"threshold_minutes": 1})
-        cfg.update(enabled=True, dry_run=False)
-        cfg["escalation"]["owner"].update(enabled=True, mailbox="owner", approved_by="VP", min_severity="info",
-                                          categories=["outage", "security", "money"])
-        return cfg
-
-    def test_rule_exception_is_one_self_error_to_vp_never_owner(self):
+    def test_vp_send_failure_is_reported_never_recursed(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
-        cfg = self.owner_live_config()
-        cfg["rules"]["host.load"]["enabled"] = True
-        broken = dict(wd.RULES)
-        broken["host.load"] = lambda inputs, rule: 1 / 0
-        broken["task.blocked_stale"] = lambda inputs, rule: [][1]
-        original, wd.RULES = wd.RULES, broken
-        try:
-            sent = []
-            report = wd.run(cfg, NOW, send=lambda *a: sent.append(a), panes_provider=lambda: [],
-                            host_sampler=lambda: dict(HOST_OK))
-        finally:
-            wd.RULES = original
-        selfs = [f for f in report["findings"] if f["rule"] == wd.SELF_ERROR_RULE]
-        self.assertEqual(1, len(selfs), "one self error per run, however many rules failed")
-        self.assertEqual(wd.SOURCE_SELF, selfs[0]["source"])
-        self.assertEqual(["host.load", "task.blocked_stale"],
-                         [e["rule"] for e in selfs[0]["evidence"]["failed_rules"]])
-        self.assertIn("inbox.undeliverable", [f["rule"] for f in report["findings"]], "other rules still run")
-        targets = [to for to, _, _ in sent]
-        self.assertEqual(["vp of agentry"], targets, "never the owner, even with owner paging on")
-        self.assertIn("(watchdog-self)", sent[0][2])
-
-    def test_unreadable_store_becomes_a_self_error(self):
-        with open(os.path.join(self.fleet.dir, "tasks.db"), "wb") as handle:
-            handle.write(b"not a database")
-        cfg = self.owner_live_config()
-        found = wd.evaluate(cfg, NOW)["findings"]
-        self.assertEqual(wd.SELF_ERROR_RULE, found[0]["rule"])
-        self.assertEqual(["task.blocked_stale"], [e["rule"] for e in found[0]["evidence"]["failed_rules"]])
-
-    def test_delivery_failure_does_not_recurse_or_beat(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
-        cfg = self.owner_live_config()
+        cfg = self.vp_config()
         calls = []
 
         def failing(*args):
             calls.append(args)
             raise ConnectionError("daemon down")
-        report = wd.run(cfg, NOW, send=failing, panes_provider=lambda: [], host_sampler=lambda: dict(HOST_OK))
-        self.assertEqual(1, len(calls), "no retry through the failing channel")
+        report = wd.run(cfg, NOW, send=failing, owner_channel=FakeOwner(), panes_provider=lambda: [],
+                        host_sampler=self.fleet.host)
+        self.assertEqual(1, len(calls))
         self.assertIn("daemon down", report["delivery_error"])
-        self.assertFalse(os.path.exists(cfg["heartbeat_path"]), "no heartbeat: the dead-man will report it")
-        self.assertFalse(os.path.exists(cfg["state_path"]))
+        self.assertFalse(os.path.exists(cfg["heartbeat_path"]))
         self.assertIn("DELIVERY FAILED (source=watchdog-self)", wd.render_text(report))
+
+    def test_recovery_line_goes_to_vp(self):
+        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        cfg = self.vp_config()
+        self.fleet.run(cfg)
+        self.fleet.sql("inbox.db", "UPDATE messages SET state='archived'")
+        _, sent = self.fleet.run(cfg, now=NOW + 60)
+        self.assertIn("RESOLVED VP dedupe=inbox.undeliverable|dead", sent[0][2])
+
+
+class ReplayTests(WatchdogCase):
+    def test_replay_counts_history_backed_rules_and_names_the_rest(self):
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 24, "cooldown_minutes": 600},
+                                inbox__undeliverable={"min_messages": 1})
+        self.fleet.dunks = [{"id": "d1", "running": True}]
+        self.fleet.write_json()
+        for n in range(4):
+            self.fleet.metric("dunk.skipped", "d1", NOW - 10 * HOUR + n * MIN)
+        result = wd.replay(cfg, NOW - 12 * HOUR, NOW, 60)
+        self.assertEqual({"dunk.skip_loop": {"vp": 1, "owner": 0}}, result["counts"],
+                         "one incident under its cooldown, not one per step")
+        self.assertIn("inbox.undeliverable", result["not_replayable"])
+        self.assertFalse(os.path.exists(cfg["state_path"]))
 
 
 class DeadManTests(WatchdogCase):
@@ -494,27 +755,99 @@ class DeadManTests(WatchdogCase):
 
     def test_fresh_heartbeat_is_silent_and_aged_one_alerts_once(self):
         self.beat(NOW - 30 * MIN)
-        report, sent = self.check(NOW)
-        self.assertFalse(report["stale"])
-        self.assertEqual([], sent)
+        self.assertEqual([], self.check(NOW)[1])
         report, sent = self.check(NOW + 1)
         self.assertTrue(report["alerted"])
-        self.assertEqual(1, len(sent))
         self.assertIn(deadman.RULE_ID, sent[0][2])
         self.assertEqual([], self.check(NOW + 2)[1], "cooldown: one alert, not one per check")
 
-    def test_missing_heartbeat_alerts_even_with_watchdog_disabled_or_broken(self):
-        with open(os.path.join(self.tmp, "watchdog.json"), "w") as handle:
-            handle.write("{ not json")  # an invalid watchdog config is irrelevant to the dead-man
-        report, sent = self.check(NOW)
-        self.assertTrue(report["alerted"])
-        self.assertIn("missing", sent[0][2])
+    def test_it_carries_the_watchdogs_raw_config_error(self):
+        error_file = os.path.join(self.tmp, "watchdog.config-error")
+        with open(error_file, "w") as handle:
+            handle.write('CONFIG: pagethreshold: unknown key\n')
+        _, sent = self.check(NOW, error_file=error_file)
+        self.assertIn("pagethreshold: unknown key", sent[0][2])
+
+    # The six fallback cases (w8:p8 i19841, VP i19837): socket first; a direct
+    # inbox row ONLY when the daemon is provably absent; never around a slow or
+    # live-but-failing daemon; a status file when nothing could be delivered.
+
+    def raising(self, error):
+        def send(*args):
+            raise error
+        return send
+
+    def inbox_rows(self, path):
+        if not os.path.exists(path):
+            return []
+        conn = sqlite3.connect(path)
+        try:
+            return conn.execute("SELECT id, mailbox, sender, body FROM messages").fetchall()
+        finally:
+            conn.close()
+
+    def test_1_daemon_down_writes_one_verified_direct_row(self):
+        inbox = os.path.join(self.tmp, "inbox.db")
+        for error in (ConnectionRefusedError("refused"), FileNotFoundError("no socket")):
+            report, _ = self.check(NOW, send=self.raising(error), inbox_path=inbox,
+                                   state_path=os.path.join(self.tmp, f"s-{type(error).__name__}.json"))
+            self.assertTrue(report["alerted"])
+            self.assertEqual("direct", report["delivered_via"])
+        rows = self.inbox_rows(inbox)
+        self.assertEqual(2, len(rows), "one row per independent state (two separate dead-men here)")
+        self.assertEqual({("vp of agentry", "watchdog")}, {(r[1], r[2]) for r in rows})
+        self.assertIn(deadman.RULE_ID, rows[0][3])
+
+    def test_2_daemon_down_and_store_unwritable_records_status_and_no_row(self):
+        blocker = os.path.join(self.tmp, "not-a-dir")
+        with open(blocker, "w") as handle:
+            handle.write("x")
+        status = os.path.join(self.tmp, "deadman-status.json")
+        report, _ = self.check(NOW, send=self.raising(ConnectionRefusedError("refused")),
+                               inbox_path=os.path.join(blocker, "inbox.db"), status_path=status)
+        self.assertFalse(report["alerted"])
+        recorded = json.loads(read(status))
+        self.assertEqual("direct", recorded["attempted"])
+        self.assertIn("direct write failed", recorded["error"])
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "deadman.json")), "no cooldown started")
+
+    def test_3_daemon_up_but_failing_never_writes_directly(self):
+        inbox, status = os.path.join(self.tmp, "inbox.db"), os.path.join(self.tmp, "deadman-status.json")
+        report, _ = self.check(NOW, send=self.raising(DunkError("unknown mailbox")), inbox_path=inbox,
+                               status_path=status)
+        self.assertFalse(report["alerted"])
+        self.assertEqual([], self.inbox_rows(inbox))
+        self.assertEqual("daemon", json.loads(read(status))["attempted"])
+
+    def test_4_slow_daemon_never_writes_directly_and_retries_next_run(self):
+        inbox, status = os.path.join(self.tmp, "inbox.db"), os.path.join(self.tmp, "deadman-status.json")
+        for error in (TimeoutError("timed out"), deadman_unavailable()):
+            report, _ = self.check(NOW, send=self.raising(error), inbox_path=inbox, status_path=status)
+            self.assertFalse(report["alerted"])
+        self.assertEqual([], self.inbox_rows(inbox))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "deadman.json")), "no cooldown: next run retries")
+        report, sent = self.check(NOW + 60, inbox_path=inbox)
+        self.assertEqual(("daemon", 1), (report["delivered_via"], len(sent)))
+
+    def test_5_retry_after_a_failed_direct_write_makes_exactly_one_row(self):
+        blocker = os.path.join(self.tmp, "late-dir")
+        with open(blocker, "w") as handle:
+            handle.write("x")
+        inbox = os.path.join(blocker, "inbox.db")
+        down = self.raising(ConnectionRefusedError("refused"))
+        self.assertFalse(self.check(NOW, send=down, inbox_path=inbox)[0]["alerted"])
+        os.remove(blocker)  # the store becomes writable
+        self.assertTrue(self.check(NOW + 60, send=down, inbox_path=inbox)[0]["alerted"])
+        state = json.loads(read(os.path.join(self.tmp, "deadman.json")))
+        self.assertEqual(NOW + 60, state["last_alerted"], "cooldown starts only after a confirmed row")
+        self.check(NOW + 60 + 3601, send=down, inbox_path=inbox)  # past cooldown, same incident
+        self.assertEqual(1, len(self.inbox_rows(inbox)), "never a second row for the same incident")
 
     def test_watchdog_dry_run_never_touches_the_heartbeat(self):
         self.beat(NOW - HOUR)
-        cfg = self.fleet.config(self.tmp)
+        cfg = self.fleet.config()
         cfg["heartbeat_path"] = os.path.join(self.tmp, "heartbeat")
-        wd.run(cfg, NOW, dry_run_flag=True, panes_provider=lambda: [], host_sampler=lambda: dict(HOST_OK))
+        self.fleet.run(cfg, dry=True)
         self.assertEqual(NOW - HOUR, os.stat(cfg["heartbeat_path"]).st_mtime)
         self.assertTrue(self.check(NOW)[0]["alerted"], "a dry run is not coverage")
 
@@ -524,6 +857,11 @@ class DeadManTests(WatchdogCase):
                     for alias in node.names} | {node.module for node in ast.walk(tree)
                                                 if isinstance(node, ast.ImportFrom)}
         self.assertNotIn("dunk_watchdog", imported)
+
+
+def deadman_unavailable():
+    from dunk_client import DaemonUnavailable
+    return DaemonUnavailable("daemon closed the connection without replying")
 
 
 class SystemSenderTests(unittest.TestCase):
@@ -547,8 +885,7 @@ class SystemSenderTests(unittest.TestCase):
             conn.close()
         self.assertEqual("watchdog", sender)
         with self.assertRaises(DunkError):
-            self.flock.inbox_send("codex", "spoof", notify=False, self_pane_id="w1:p2",
-                                  system_sender="watchdog")
+            self.flock.inbox_send("codex", "spoof", notify=False, self_pane_id="w1:p2", system_sender="watchdog")
         with self.assertRaises(DunkError):
             self.flock.inbox_send("codex", "spoof", notify=False, system_sender="owner")
 
@@ -556,7 +893,8 @@ class SystemSenderTests(unittest.TestCase):
 class NoModelTests(unittest.TestCase):
     """The owner's constraint: nothing at runtime may consult a model."""
 
-    ALLOWED_IMPORTS = {"json", "os", "re", "sqlite3", "time", "herdr_client", "dunk_client"}
+    ALLOWED_IMPORTS = {"hashlib", "json", "os", "re", "sqlite3", "sys", "time", "herdr_client", "dunk_client",
+                       "dunk_inbox"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -571,8 +909,7 @@ class NoModelTests(unittest.TestCase):
         found = [f"import {name}" for name in sorted(imported - self.ALLOWED_IMPORTS)]
         docstrings = {id(node.body[0].value) for node in ast.walk(tree)
                       if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) and node.body
-                      and isinstance(node.body[0], ast.Expr)
-                      and isinstance(node.body[0].value, ast.Constant)}
+                      and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant)}
         for node in ast.walk(tree):
             texts = []
             if isinstance(node, ast.Name):

@@ -1,160 +1,216 @@
 # Exception watchdog
 
-**Review criterion:** the escalation behaviour below is reviewed against [WATCHDOG_ESCALATION_SPEC.md](WATCHDOG_ESCALATION_SPEC.md), written before this implementation. Where the code and the spec disagree, the code changes or the spec is argued in writing.
+**Review criterion:** the escalation behaviour below is reviewed against [WATCHDOG_ESCALATION_SPEC.md](WATCHDOG_ESCALATION_SPEC.md), written before this implementation. Where the code and the spec disagree, the code changes or the spec is argued in writing. Section 6 of the spec records the VP's rulings.
 
 The watchdog replaces the VP's polling loop with deterministic alerts. It reads
 the stores Dunking Sheep already keeps, applies fixed rules, and sends **one
-deduplicated digest** to the VP inbox. It pages the owner only for a short list
-of categories, and only once owner paging has been explicitly approved.
+digest per run** to the VP inbox. It pages the owner only for security, outage
+and money, only after a hold, and a page counts only once the forwarding path
+confirms it. Owner paging ships **disabled**, and stays disabled until the
+Tier 2 re-review (VP i19817).
 
 ## Hard constraints (owner, VP i19781)
 
-1. **Deterministic and configurable.** Every rule is a fixed predicate over
-   read-only SQL and JSON reads. Every threshold, window, severity, recipient
-   and cooldown lives in one config file. The same stores, config, state and
-   `--now` always produce the same findings in the same order.
-2. **No LLM at runtime, ever.** No model calls, no generated summaries, no
-   "ask an agent". `tests/test_dunk_watchdog.py::NoModelTests` fails the build
-   if `dunk_watchdog.py` or `dunk_watchdog_deadman.py` imports anything outside
-   a short allowlist, shells out, or names a model vendor or tool. A test also
-   proves that the guard catches such a call.
-3. **Not a dashboard.** It alerts. Output is text or JSON on stdout, at most one
-   inbox digest per recipient per run, and a derived `needs_attention` count.
-   There is no UI, no HTTP server and no web page. Visualising state is the
-   metrics collector's job.
+1. **Deterministic and configurable.**
+   - Every rule is a fixed predicate over read-only SQL and JSON reads.
+   - Every threshold, window, severity, class, hold, cap, cooldown and recipient
+     lives in one config file.
+   - The same stores, config, state and `--now` produce the same findings in the
+     same order. Every time-windowed query is bounded above by `now`, so a past
+     `--now` never sees the future.
+2. **No LLM at runtime, ever.** `tests/test_dunk_watchdog.py::NoModelTests` fails
+   the build on any import outside a short allowlist, any shell-out, or any model
+   vendor or tool name. A second test proves the guard catches such a call.
+3. **Not a dashboard.** Output is spec-format lines (or JSON), the inbox digest,
+   and a derived `needs_attention` count. There is no UI, no HTTP server and no
+   web page; visualising is the metrics collector's job.
+
+## Channels
+
+- **VP** is the dunkingsheep inbox. It is the **only** VP-only channel. Alerts
+  arrive from sender `watchdog` (see below).
+- **OWNER** is anything that reaches the owner's phone. Today that is a VP desk
+  brief (`POST /api/brief`), which `telegram_bridge.send_briefs` forwards.
+  **Every desk 'vp' brief reaches the owner**, so nothing meant for VP alone may
+  go through the desk.
+- **Delivery.** A page is DELIVERED only when the bridge's non-secret status
+  file `vp-of-agentry/data/telegram-status.json`
+  `{"last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
+  posted brief id`. Until then the page is pending: it is never re-posted and no
+  cooldown starts.
+  - A page still unconfirmed after `confirm_within_minutes` is reported to VP as
+    UNDELIVERED.
+  - The watchdog never opens `telegram.json`, which holds the bot token.
+- **Posting is not wired.** Posting the brief needs the desk API token, and how
+  the watchdog may hold it is undecided. `post` therefore fails toward not
+  paging: nothing is posted, and VP gets a self error.
 
 ## Inputs (read-only; no schema changes)
 
 | Store | Used by |
 | --- | --- |
-| `tasks.db` (`tasks`, `task_leases`, `task_events`) | task and lane rules |
-| `inbox.db` (`messages`) | inbox rules, pane-name routing history, pane activity |
-| `metrics.db` (`events`, `dunk.sent` / `dunk.skipped` by dunk id) | skip-loop rule |
-| `dunks.json`, `health.json` | dunk and health rules |
-| host sample (`os.statvfs`, `os.getloadavg`) | host rules (replaces vp-of-agentry's `host_watch` warnings) |
-| herdr pane snapshot (`herdr pane list`, local, read-only) | `inbox.unread_dead`, the two lane rules, and `require_live_pane` |
+| `tasks.db` (`tasks`, `task_leases`, `task_events`) | task and lane rules; task text for the secret scan |
+| `inbox.db` (`messages`) | inbox rules, routing history, pane activity; message bodies **only** for the secret scan |
+| `metrics.db` (`events`) | skip-loop rule |
+| `dunks.json`, `health.json` | dunk rules (and dunk text for the secret scan), health rule |
+| host sample (`os.statvfs`, `os.getloadavg`) | host rules |
+| herdr pane snapshot (`herdr pane list`) | `inbox.unread_dead`, the lane rules, `require_live_pane` |
+| `/tmp/poolrad-heavy.*` slot mtimes | `host.heavy_slot_stale` |
+| `telegram-status.json` | owner delivery confirmation only |
 
-SQLite stores are opened with `mode=ro`. Message bodies are never read into
-evidence; findings carry ids, counts and ages.
-
-**Pane status is not in any store.** `agent_status` (idle, working, blocked or
-unknown) exists only in herdr's live registry. That is why the lane rules use
-the herdr snapshot. Set `panes.source` to `"none"` and those rules are reported
-as `[skipped]`, never silently passed.
+Evidence carries ids, counts, ages and hashes. It never carries message or task
+text.
 
 ## Rules
 
-Every rule has `enabled`, `severity` (`info`, `warning` or `critical`),
-`category` and `cooldown_minutes`, plus the parameters below. The severity and
-category values shown are from the shipped sample.
+Every rule has these keys, plus the parameters in the table below:
+- `enabled`;
+- `severity` (`info`, `warning` or `critical`);
+- `class` (`security`, `outage`, `money`, `ops` or `project`);
+- `cooldown_minutes` (> 0);
+- `must_hold_runs` (>= 1, applied to owner pages only).
 
-| Rule id | Fires when | Parameters | Sample |
+The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
+(spec section 1).
+
+| Rule id | Fires when | Parameters | Shipped |
 | --- | --- | --- | --- |
-| `task.blocked_stale` | a `blocked` task has had no update and no `task_event` for at least the threshold | `threshold_minutes` | warning / work |
-| `task.lease_stale` | a lease has `expires_at <= now` (not yet reaped); or it was never renewed (`heartbeat_at <= claimed_at`) for at least N min; or a `requeued`/`released` event with reason `expired` or `pane_gone` falls inside the lookback, so a silent reap becomes an alert | `never_renewed_minutes`, `lookback_minutes` | warning / work |
-| `dunk.skip_loop` | the longest run of consecutive `dunk.skipped` events for one dunk inside the lookback is at least N. This is a run inside a window, not "skipping right now", so a loop that ended a day ago is still reported | `consecutive_skips`, `lookback_hours` | warning / scheduling |
-| `dunk.overdue` | a running dunk is at least N intervals past `next_send_at`, or is running with no scheduled send | `missed_intervals` | warning / scheduling |
-| `inbox.undeliverable` | a mailbox has at least N messages in state `undeliverable`. This is the standing backlog, with no age limit | `min_messages` | warning / delivery |
-| `inbox.unread_live` | a mailbox has at least N `queued` messages older than the age limit for a live pane (liveness reported as unknown if the pane source is off) | `age_minutes`, `min_messages` | warning / delivery |
-| `inbox.unread_dead` | a mailbox has `queued` messages whose pane is not in the snapshot | `min_messages` | warning / delivery |
-| `inbox.ambiguous_sender` | a message's sender is not a pane id but is a mailbox name that the inbox routes to a pane (optionally a live one). This is a historical audit, so the shipped severity is `info` | `lookback_hours`, `sample_ids`, `require_live_pane` | info / audit |
-| `lane.working_without_task` | a pane is `working`, holds no `in_progress` task, and has no task event in N min | `quiet_minutes` | info / work |
-| `lane.idle_holding_task` | a pane holds a task in a `holding_statuses` state (by lease, or by an assignee that resolves to it) while in an `idle_statuses` state, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / work |
-| `host.load` | load1 per CPU is at or above the threshold | `load1_per_cpu` | warning / outage |
-| `host.tmp` | used fraction, free bytes or inode fraction breaches its limit | `max_used_fraction`, `min_free_bytes`, `max_inode_fraction`, `path` | critical / outage |
-| `health.failed` | `health.json` is older than N min, or reports `ok=false` or problems | `stale_minutes` | critical / outage |
-| `watchdog.self_error` | one or more rules raised (for example, an unreadable store) | (none) | `self` / VP only |
-| `watchdog.deadman` | the heartbeat is missing or older than `multiplier x cadence` (separate process) | CLI flags | critical / VP only |
+| `task.blocked_stale` | a blocked task has had no update or event for at least the threshold | `threshold_minutes` | warning / ops |
+| `task.lease_stale` | a lease is expired but not yet reaped, or was never renewed for at least N min, or a reap event (`expired`/`pane_gone`) falls in the lookback | `never_renewed_minutes`, `lookback_minutes` | warning / ops |
+| `dunk.skip_loop` | the longest consecutive run of `dunk.skipped` in the lookback is at least N. Keyed by the run's first skip, so a growing loop is one incident | `consecutive_skips`, `lookback_hours` | warning / ops |
+| `dunk.overdue` | a running dunk is at least N intervals past `next_send_at`, or has no scheduled send | `missed_intervals` | warning / ops |
+| `inbox.undeliverable` | a mailbox's undeliverable backlog is at least N (no age limit) | `min_messages` | warning / ops |
+| `inbox.unread_live` | a live pane's mailbox has at least N queued messages older than the age | `age_minutes`, `min_messages` | warning / ops |
+| `inbox.unread_dead` | queued mail for a pane that no longer exists | `min_messages` | warning / ops |
+| `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 12) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
+| `lane.working_without_task` | a pane is working, holds no task, and has no task event in N min | `quiet_minutes` | info / ops |
+| `lane.idle_holding_task` | a pane holds a task while idle, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / ops |
+| `host.load` | load1 per CPU is at or above the threshold | `load1_per_cpu` | warning / ops |
+| `host.tmp` | used fraction is at least 0.70 (warning) or at least 0.90 (critical), free bytes are at or below the floor, or the inode fraction is at or above the limit | `max_used_fraction`, `critical_used_fraction`, `min_free_bytes`, `max_inode_fraction`, `path` | warning / ops |
+| `host.disk_full` | /tmp or / is at least 98% full | `max_used_fraction`, `paths` | **critical / outage, hold 2** |
+| `host.heavy_slot_stale` | a heavy-job semaphore slot is older than N min (no holder pid exists) | `directory`, `prefix`, `max_age_minutes` | warning / ops |
+| `security.secret_text` | a credential-shaped line appears in inbox, task or dunk text, re-verified on a second read; allowlisted line hashes are skipped | `patterns`, `allowlist_sha256`, `lookback_hours` | **critical / security** |
+| `money.spend_projection` | never: there is no metering source. It cannot be enabled without `source` and `cap`, and always prints SKIPPED | `source`, `cap` | disabled / money |
+| `health.failed` | `health.json` is stale, or reports problems | `stale_minutes` | critical / ops |
+| `watchdog.self_error` | anything the watchdog could not do this run: a rule error, missing or corrupt state, or an owner post or confirmation problem. One finding per run | (none) | VP only |
+| `watchdog.deadman` | the heartbeat is missing or older than 3x the cadence (separate process) | CLI flags | VP only |
 
 ## Config (`~/.config/dunkingsheep/watchdog.json`)
 
-The schema is `dunkingsheep-watchdog/1`. **Every key is required and unknown
-keys are refused.** A missing or invalid file stops the watchdog with
-`refusing to start: config <dotted.key>: <reason>`, exit code 2, and sends
-nothing. Nothing ever runs on a default nobody chose.
+The schema is `dunkingsheep-watchdog/2`. **Every key is required, unknown keys
+are refused, and thresholds, windows, holds, caps and cooldowns must be > 0.**
+A missing or invalid file:
+- exits 2 with `refusing to start: CONFIG: <dotted.key>: <reason>`;
+- writes the same text to `--error-file` for the dead-man to carry to the VP;
+- sends nothing.
+
 `packaging/watchdog.example.json` is the full sample. It ships quiet:
-`enabled: false`, `dry_run: true`, owner paging off.
+`enabled: false`, `dry_run: true`, owner disabled.
 
 ```text
-schema                "dunkingsheep-watchdog/1"
-enabled, dry_run      bool. Live alerts need enabled=true AND dry_run=false AND no --dry-run flag
-cadence_minutes       > 0. Also the self-error cooldown, and the dead-man unit uses 3x it
-max_alerts_per_run    int >= 1. Extra findings become one "N further finding(s) suppressed" line
-state_path            dedupe/cooldown state, JSON, written atomically (tmp + fsync + rename)
-heartbeat_path        touched after every successful LIVE run, never by a dry run
-state_retention_days  forget dedupe keys not seen for this long
-stores.config_dir     where tasks.db / inbox.db / metrics.db / dunks.json / health.json live
-panes.source          "herdr" | "none"
-panes.pane_id_pattern regex for a pane id (separates pane ids from mailbox names)
-escalation.vp         {mailbox, min_severity}
-escalation.owner      {enabled, mailbox, categories ⊆ [security, outage, money], min_severity,
-                       approved_by}. When enabled, mailbox, approved_by and >= 1 category are required
-rules.<id>            {enabled, severity, category, cooldown_minutes, ...rule parameters}
+schema, enabled, dry_run          live alerts need enabled=true AND dry_run=false AND no --dry-run flag;
+                                  --now is refused on a live run (it would backdate state and the heartbeat)
+cadence_minutes                   > 0; the dead-man unit uses 3x it
+min_run_spacing_seconds           > 0; a run closer than this to the last counted one does not advance a hold
+max_alerts_per_run                VP cap; the overflow is one "N further finding(s) suppressed" line
+state_path, heartbeat_path        own files, written atomically; the heartbeat only after a successful live run
+state_retention_days              forget dedupe keys unseen for this long
+stores.config_dir                 tasks.db / inbox.db / metrics.db / dunks.json / health.json
+panes.source, pane_id_pattern     "herdr" | "none"; the regex that separates pane ids from mailbox names
+escalation.vp                     {mailbox, min_severity}
+escalation.owner                  {enabled, channel "desk-brief", classes ⊆ security/outage/money, min_severity,
+                                   approved_by (required when enabled), max_pages_per_hour (3),
+                                   confirm_within_minutes, confirm_path}
+rules.<id>                        {enabled, severity, class, cooldown_minutes, must_hold_runs, ...parameters}
 ```
 
-## Escalation, dedupe, cooldown, cap
+## Fail toward not paging (spec section 3)
 
-- **VP first.** Findings at or above `escalation.vp.min_severity` go into one
-  digest to the VP mailbox. `info` findings stay in the dry-run and JSON report
-  unless the VP lowers the minimum.
-- **Owner only on purpose.** An alert also goes to the owner only when owner
-  paging is enabled with a named approver, its category is in the owner list,
-  and its severity meets the owner minimum. The VP's rule is that this is
-  switched on only after the stream has proven trustworthy. Self errors and
-  dead-man alerts **never** reach the owner.
-- **Dedupe key** is `rule|key`. A finding is re-sent only after its rule's
-  `cooldown_minutes`. Cooldown state lives in the state file, so it survives a
-  restart.
-- **Cap.** At most `max_alerts_per_run` alerts per run, ordered by severity,
-  then rule, then key. The overflow is one visible suppression line, never
-  silence.
+Each of the following leaves the OWNER queue untouched and tells VP once:
+- a bad config (the process never runs);
+- missing or corrupt state (the whole run's owner pages are suppressed, and the
+  message names the **state path**);
+- any rule error (owner pages suppressed for the run);
+- an owner post or confirmation error (nothing is recorded as sent).
 
-## The watchdog's own failure modes
+Every suppression check runs **before** anything is posted, because posting a
+brief is the irrevocable "marked for forwarding" step. If the VP digest itself
+cannot be delivered, the run prints `DELIVERY FAILED (source=watchdog-self)`,
+exits 1, and writes no state or heartbeat, so the dead-man reports it. It never
+retries through the inbox.
 
-- **Self errors.** A rule that raises is caught. All failures in one run become
-  **one** `watchdog.self_error` finding with `source=watchdog-self`. Rule
-  findings carry `source=watchdog-rule`, so the two are visibly distinct in
-  text, JSON and the digest. The other rules still run. The self error goes to
-  the VP only.
-- **No self-paging loop.** If delivering the digest fails (for example, the
-  daemon is down), the run prints `DELIVERY FAILED (source=watchdog-self)` to
-  stdout and exits 1. It does **not** retry through the inbox, does not write
-  state, and does not touch the heartbeat, so the dead-man check reports it
-  instead.
-- **Dead man (quis custodiet).** `dunk_watchdog_deadman.py` runs in its own
-  systemd unit and timer. It does not import the watchdog, read its config or
-  evaluate any rule. Its only input is the heartbeat file's mtime. If the file
-  is missing or older than `multiplier x cadence`, it sends one
-  `watchdog.deadman` alert to the VP, at most once per its own cooldown, which
-  is tracked in its own state file. It therefore still alerts when the
-  watchdog is disabled, misconfigured, crashing or never installed. A dry run
-  never touches the heartbeat: a dry run is not coverage.
-- **Sender identity.** Alerts arrive from sender `watchdog`, not from a fake
-  agent. `inbox_send` gained a `system_sender` argument. It accepts only names
-  in `dunk_core.SYSTEM_SENDERS` (`watchdog`), and only from a caller with **no
-  pane**: a systemd unit. An agent always runs in a pane, so it cannot claim
-  the name. That reasoning assumes every agent has `HERDR_PANE_ID` set.
+## Dry-run contract (spec section 4)
+
+```text
+WOULD-PAGE OWNER rule=<id> class=<c> severity=<s> source=<watchdog-rule> threshold=<v> measured=<v>
+                 window=<w; held k/N runs> dedupe=<rule|key>
+                 suppressed=<no|hold|dedupe|global-cap|state-loss|self-error|disabled|below-min-severity>
+                 evidence=<json>
+WOULD-NOTIFY VP  ... suppressed=<no|dedupe|rate|below-min-severity> ...
+SKIPPED rule=<id> error=<raw>
+RESOLVED VP|OWNER dedupe=<rule|key>
+SELF source=watchdog-self <problem>
+```
 
 ## Commands
 
 ```sh
 dunkingsheep watchdog --dry-run [--json] [--config PATH] [--now UNIX_TIME]
-dunkingsheep watchdog                        # live, only if the config allows it
+dunkingsheep watchdog --replay --from T [--to T] --step MINUTES [--json]   # history-backed rules only
+dunkingsheep watchdog                                       # live, only if the config allows it
 dunkingsheep watchdog-deadman --cadence-minutes 10 --multiplier 3 --cooldown-minutes 60 \
-    --to "vp of agentry" [--heartbeat PATH] [--state PATH] [--dry-run] [--json]
+    --to "vp of agentry" [--heartbeat P] [--state P] [--error-file P] [--status P] [--dry-run] [--json]
 ```
 
 Both are local commands. They read the stores directly and never start the
-daemon. Only a live send talks to it.
+daemon; only a live send talks to it.
 
-## Install (after VP approval; not done by this change)
+## Dead man (quis custodiet)
+
+`dunk_watchdog_deadman.py` runs in its own systemd unit and timer, and never
+imports the watchdog or reads its config.
+- **Alert.** If the heartbeat is missing or older than `multiplier x cadence`,
+  it sends one `watchdog.deadman` alert to the VP, once per its own cooldown.
+  The alert includes the raw config refusal from the error file, if one is
+  present.
+- **Delivery never depends on the daemon it may be reporting** (VP i19837,
+  w8:p8 i19841):
+  1. **Daemon first:** `inbox_send` as system sender `watchdog`.
+  2. **Direct inbox row, only when the daemon is provably absent.** The trigger
+     is `ConnectionRefusedError`, or `FileNotFoundError`/`NotADirectoryError` on
+     the socket: nothing was sent, so nothing can duplicate. The dead-man then
+     writes one row straight into `~/.config/dunkingsheep/inbox.db` through
+     `dunk_inbox.Inbox.send` (the same columns the daemon reads; sender
+     `watchdog`, no nudge), and reads it back by id to confirm sender, mailbox
+     and body. The daemon shows the row when it returns; if it never returns, a
+     human finds it with `sqlite3`. There is one row per incident (a given
+     stale heartbeat), and the cooldown starts only after a confirmed row.
+  3. **Never around a slow or live daemon.** A timeout, a reply-less close
+     after the request was sent, or an error reply from a running daemon may
+     mean the alert is already queued. So there is no direct write, and no
+     cooldown; the next run retries.
+  4. **Last resort.** If nothing could be delivered, it writes
+     `watchdog_deadman_status.json` `{at, error, heartbeat, target, attempted}`
+     and a journal line, and exits 1, so the unit shows in
+     `systemctl --user --failed`. No desk banner exists yet; surfacing the
+     status file on the desk is a vp-of-agentry change.
+- **Cadence.** The cadence in the dead-man unit is hard-coded deliberately,
+  because the dead-man must not read the watchdog config. Change both together.
+
+## Sender identity
+
+`inbox_send(system_sender="watchdog")` is accepted only for names in
+`dunk_core.SYSTEM_SENDERS`, and only from a caller with no pane (a systemd
+unit). This assumes every agent runs with `HERDR_PANE_ID` set.
+
+## Install (by the VP, after Tier 1 review; not done by this change)
 
 ```sh
-cp packaging/watchdog.example.json ~/.config/dunkingsheep/watchdog.json   # then tune
+cp packaging/watchdog.example.json ~/.config/dunkingsheep/watchdog.json   # tune, then enabled=true, dry_run=false
 cp packaging/systemd/dunkingsheep-watchdog{,-deadman}.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dunkingsheep-watchdog-deadman.timer dunkingsheep-watchdog.timer
 ```
 
-The daemon must be restarted to pick up the `system_sender` argument before
-the first live send.
+The daemon must be restarted to pick up `system_sender` before the first live
+send.
