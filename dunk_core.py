@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.27.5"
+VERSION = "2.28.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -89,6 +89,12 @@ TURN_TTL_S = float(os.environ.get("DUNKINGSHEEP_TURN_TTL_S", "1800"))
 # every time; that walk is the ~2-4 s cost, not the inbox SQL. Cache only the
 # self->mailbox mapping, briefly.
 MAILBOX_CACHE_S = float(os.environ.get("DUNKINGSHEEP_MAILBOX_CACHE_S", "30"))
+# Daemon-side view cache for the poll-shaped commands. Derived from: the dunk
+# list, poll_status, and the caller's inbox count. Invalidated by every dunk /
+# inbox / task mutation (they all call _save or inbox/task writes); max
+# staleness is this TTL past the last invalidation. `fresh=True` bypasses it
+# for a send/ack/claim that needs certainty.
+VIEW_CACHE_S = float(os.environ.get("DUNKINGSHEEP_VIEW_CACHE_S", "5"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -441,6 +447,7 @@ class Flock:
         self.claude_status = ClaudeStatus()
         # self pane -> (mailbox key, resolved_at); bounded by MAILBOX_CACHE_S.
         self._own_mailbox_cache = {}
+        self._view_cache = {"at": 0.0, "pane": None, "data": None}
         # pane_id -> {started_at, expires_at, ttl_s, source, caller}
         self.turns = {}
         # One lock per pane, not one for the whole flock. A send holds its
@@ -532,6 +539,7 @@ class Flock:
         log.info("restored %d dunk(s) from %s", len(self.dunkers), self.state_file)
 
     def _save(self):
+        self._invalidate_view()
         if not self.persist_enabled:
             return
         with self._lock:
@@ -818,6 +826,36 @@ class Flock:
         if label != pane["pane_id"]:
             label = f"{label} ({pane['pane_id']})"
         return str(key), label, pane["pane_id"]
+
+    def view(self, self_pane_id=None, fresh=False):
+        """Cheap view for the poll-shaped commands: status + dunks + inbox count.
+
+        Derived from poll_status, the in-memory dunk list and Inbox.count. A
+        mutation (add/update/remove/start/stop, inbox send/ack/read, task
+        change) bumps `_view_cache["at"]=0`, so the next read rebuilds; the TTL
+        bounds staleness for external writers. `fresh=True` rebuilds now.
+        """
+        now = time.time()
+        cached = self._view_cache
+        if (not fresh and cached["data"] is not None
+                and cached["pane"] == self_pane_id
+                and now - cached["at"] < VIEW_CACHE_S):
+            return cached["data"]
+        status = self.poll_status()
+        status["self_pane_id"] = self_pane_id
+        data = {"status": status, "dunks": self.list()}
+        if self_pane_id:
+            try:
+                data["inbox_count"] = self.inbox_count(None,
+                                                       self_pane_id=self_pane_id)
+            except Exception as error:  # noqa: BLE001 - a view never breaks
+                data["inbox_error"] = str(error)
+        self._view_cache = {"at": now, "pane": self_pane_id, "data": data}
+        return data
+
+    def _invalidate_view(self):
+        self._view_cache["at"] = 0.0
+        self._view_cache["data"] = None
 
     def _own_mailbox(self, self_pane_id):
         """The caller's mailbox key, briefly cached.

@@ -182,7 +182,8 @@ class FlockTests(unittest.TestCase):
                 ])
                 stderr = ""
             return P()
-        with mock.patch("dunk_claude.subprocess.run", side_effect=run):
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_CLAUDE_STATUS": "1"}), \
+                mock.patch("dunk_claude.subprocess.run", side_effect=run):
             status = ClaudeStatus(ttl=60)
             self.assertEqual("busy", status.status_for_pane({"cwd": "/work/a"}))
             self.assertEqual("idle", status.status_for_pane({"cwd": "/work/b"}))

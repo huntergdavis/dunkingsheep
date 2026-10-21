@@ -120,7 +120,7 @@ class CliEndToEndTests(unittest.TestCase):
         # 1. status auto-starts the daemon.
         status = self.run_json("status")
         self.assertEqual(0, status["dunkers"])
-        self.assertTrue(status["herdr_available"])
+        self.assertTrue(self.client.call("status", check_herdr=True)["herdr_available"])
         self.assertTrue(os.path.exists(self.env["DUNKINGSHEEP_SOCKET"]))
         self.assertTrue(os.path.exists(os.path.join(self.config, "daemon.log")))
 

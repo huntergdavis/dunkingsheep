@@ -73,8 +73,8 @@
       "quiet_minutes": 60, "idle_statuses": ["idle"], "holding_statuses": ["in_progress"]
     },
     "host.load": {
-      "enabled": true, "severity": "warning", "class": "ops", "cooldown_minutes": 60, "must_hold_runs": 1,
-      "load1_per_cpu": 2.0
+      "enabled": true, "severity": "warning", "class": "ops", "cooldown_minutes": 60, "must_hold_runs": 3,
+      "load1_per_cpu": 2.0, "critical_load1_per_cpu": 2.5, "critical_hold_runs": 3
     },
     "host.tmp": {
       "enabled": true, "severity": "warning", "class": "ops", "cooldown_minutes": 60, "must_hold_runs": 1,

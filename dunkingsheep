@@ -1235,7 +1235,8 @@ def _be_nice():
         pass
 
 
-_POLL_COMMANDS = ("status", "list", "ls", "inbox", "poll")
+_POLL_COMMANDS = ("status", "list", "ls", "poll")
+_INBOX_POLLS = ("count", "list", "ls", "stats")
 
 
 def _coalesce(argv):
@@ -1251,9 +1252,16 @@ def _coalesce(argv):
     if minimum <= 0:
         return
     words = [word for word in argv if not word.startswith("-")]
-    if not words or words[0] not in _POLL_COMMANDS:
+    if not words:
         return
-    key = "-".join(words[:2]) if words[0] == "inbox" else words[0]
+    if words[0] == "inbox":
+        if len(words) < 2 or words[1] not in _INBOX_POLLS:
+            return
+        key = "inbox-" + words[1]
+    elif words[0] in _POLL_COMMANDS:
+        key = words[0]
+    else:
+        return
     path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
     now = time.time()
     try:

@@ -188,7 +188,8 @@ RULE_PARAMS = {
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
         "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
         "open", "in_progress", "blocked", allow_empty=False)},
-    "host.load": {"load1_per_cpu": POSITIVE},
+    "host.load": {"load1_per_cpu": POSITIVE, "critical_load1_per_cpu": POSITIVE,
+                  "critical_hold_runs": POSITIVE_INT},
     "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
                  "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
     "host.heavy_slot_stale": {"directory": _str, "prefix": _str, "max_age_minutes": POSITIVE},
@@ -694,11 +695,24 @@ def rule_lane_idle_holding_task(inputs, rule):
 def rule_host_load(inputs, rule):
     host = inputs.host("/")
     per_cpu = host["load1"] / max(1, host["cpus"])
-    if per_cpu >= rule["load1_per_cpu"]:
-        return [finding("host.load", rule, "load1", f"load1 {host['load1']:.2f} on {host['cpus']} CPUs",
-                        f"{rule['load1_per_cpu']}/cpu", f"{round(per_cpu, 2)}/cpu", "load1 (1 min)",
-                        {"load1": round(host["load1"], 2), "cpus": host["cpus"]})]
-    return []
+    if per_cpu < rule["load1_per_cpu"]:
+        return []
+    item = finding("host.load", rule, "load1",
+                   f"load1 {host['load1']:.2f} on {host['cpus']} CPUs "
+                   f"(intended band for this fleet: "
+                   f"{rule['critical_load1_per_cpu']}/cpu at 10 lanes on 8 cores)",
+                   f"{rule['load1_per_cpu']}/cpu", f"{round(per_cpu, 2)}/cpu",
+                   "load1 (1 min)",
+                   {"load1": round(host["load1"], 2), "cpus": host["cpus"],
+                    "per_cpu": round(per_cpu, 2)})
+    # Critical needs the high band SUSTAINED; one compile spike is not an
+    # incident. The plan's streak count is applied below via must_hold_runs,
+    # which the config sets higher for this rule.
+    if per_cpu >= rule["critical_load1_per_cpu"]:
+        item["severity"] = "critical"
+        item["threshold"] = (f"{rule['critical_load1_per_cpu']}/cpu "
+                             f"(sustained {rule['critical_hold_runs']} runs)")
+    return [item]
 
 
 def rule_host_tmp(inputs, rule):

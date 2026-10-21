@@ -344,7 +344,7 @@ class RuleBoundaryTests(WatchdogCase):
                          sorted(self.keys(self.fleet.evaluate(cfg))))
 
     def test_host_load_and_tmp_bands(self):
-        cfg = self.fleet.config(host__load={"load1_per_cpu": 2.0},
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 2.0, "critical_load1_per_cpu": 2.5, "critical_hold_runs": 3, "must_hold_runs": 1},
                                 host__tmp={"max_used_fraction": 0.7, "critical_used_fraction": 0.9,
                                            "min_free_bytes": 100, "max_inode_fraction": 0.9, "path": "/tmp"})
         self.fleet.hosts = {"/": {"load1": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}

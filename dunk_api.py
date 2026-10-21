@@ -145,6 +145,14 @@ MEMORY_PATH_PARAM = {"type": "string",
 # -- handlers -----------------------------------------------------------------
 
 def h_status(flock, args, self_pane_id):
+    # The cheap top of status is the cached view; the expensive availability
+    # probe stays opt-in (check_herdr) and `full=true` keeps the old answer.
+    if not _bool(args.get("full"), False):
+        view = flock.view(self_pane_id, fresh=_bool(args.get("fresh"), False))
+        result = dict(view["status"])
+        if _bool(args.get("check_herdr"), False):
+            result["herdr_available"] = flock.herdr.is_available()
+        return result
     result = flock.status()
     result["self_pane_id"] = self_pane_id
     return result
@@ -163,7 +171,8 @@ def h_turn_end(flock, args, self_pane_id):
 
 
 def h_list_dunks(flock, args, self_pane_id):
-    return {"dunks": flock.list()}
+    return {"dunks": flock.view(self_pane_id,
+                                fresh=_bool(args.get("fresh"), False))["dunks"]}
 
 
 def h_poll(flock, args, self_pane_id):
@@ -310,7 +319,12 @@ def h_inbox_send(flock, args, self_pane_id):
 
 
 def h_inbox_count(flock, args, self_pane_id):
-    return flock.inbox_count(args.get("mailbox"), self_pane_id=self_pane_id)
+    if args.get("mailbox"):
+        return flock.inbox_count(args.get("mailbox"), self_pane_id=self_pane_id)
+    view = flock.view(self_pane_id, fresh=_bool(args.get("fresh"), False))
+    if "inbox_count" in view:
+        return view["inbox_count"]
+    return flock.inbox_count(None, self_pane_id=self_pane_id)
 
 
 def h_inbox_list(flock, args, self_pane_id):
