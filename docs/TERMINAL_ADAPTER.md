@@ -254,6 +254,25 @@ comparable to Claude (~2-4 hours), same missed-Stop TTL problem.
 `agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
 external hook trust. Same TTL/reconciliation rule for a crashed turn.
 
+**Implemented after this pricing (2.27.0):**
+
+* **pi — DONE.** The `dunkingsheep` extension emits `agent_start` /
+  `agent_settled` to the daemon (`turn start` / `turn end`). A real busy pi
+  turn holds sends; the TTL releases a crashed turn.
+* **claude — DONE.** `~/.claude/hooks/dunkingsheep-turn.sh` is wired to
+  `UserPromptSubmit` (start) and `Stop`/`SubagentStop` (end); the hook calls
+  the same daemon turn state with the pane id. Live proof: a 40-second claude
+  turn held a second send (`queued=true`, `holds=1`), then `Stop` ended it.
+* **codex — herdr REQUIRED.** Codex 0.162.1 exposes `SessionStart` only; there
+  is no turn boundary to wire. This is a named vendor limit, not an incomplete
+  adapter. Herdr is required for codex until a Codex release exposes one.
+
+**TTL:** `turn_start` stores `started_at`/`expires_at`/the caller;
+`turn_expire()` in the daemon reaper releases the hold, records `turn.expired`
+with `reason=ttl`, and reconciles the caller pid. The explicit test kills a turn
+mid-flight and asserts delivery after the TTL with the logged event. Do not
+remove the TTL as a guard rail: it is the feature that makes the hold safe.
+
 **Cheapest honest path:** pi first (smallest, fully controlled), then Claude if
 the hold on tmux is worth 2-4 hours; codex stays on herdr until its hook surface
 gains a turn boundary. Do not build screen heuristics.
