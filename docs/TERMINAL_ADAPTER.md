@@ -273,6 +273,23 @@ were ruled out. The supported gate is **pairing**:
 `pair` fails with `remote control pairing requires remote control to be
 enabled`. Authenticate/pair before expecting `initialize` to be accepted.
 
+**Pairing result on this host (time-boxed, 2026-10-21):** `remote-control start`
+did enable remote control (the pair error changed from "requires remote control
+to be enabled"), but `pair --json` then performs **server enrollment** at
+`https://chatgpt.com/backend-api/wham/remote/control/server/enroll` and returns
+**HTTP 403 Forbidden `{"detail":"Multi-factor authentication required"}`**. The
+gate is the **account's MFA**, not the client's framing. The pairing code was
+never printed or stored; only the enrollment shape/result was recorded.
+
+**Stable fact: herdr is required for codex.** The app-server surface is
+experimental, the daemon and CLI are different versions (CLI 0.162.1,
+app-server 0.163.0), and a steer cannot be exercised without account MFA
+enrollment (403). This is a documented fact with a reason, not an open todo.
+Revisit only if the owner completes the MFA/pairing and the app-server stabilises.
+The failed experiment left no change: `remote-control stop` restored the daemon
+to stopped, five loopback codex listeners remain (zero non-loopback), and the
+live codex lanes (wS:p2, wR:p4, w8:pE) were confirmed working afterwards.
+
 **Pi: YES today, cheapest.** The pi extension already receives
 `agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
 external hook trust. Same TTL/reconciliation rule for a crashed turn.
