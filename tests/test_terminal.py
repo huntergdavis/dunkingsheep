@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest import mock
 
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_terminal import HerdrBackend, TerminalBackend, TmuxBackend, get_backend
 
 

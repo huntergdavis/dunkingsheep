@@ -6,6 +6,7 @@ import time
 import unittest
 from unittest import mock
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_guard
 import dunk_tmux_guard
 from dunk_terminal import TmuxBackend

@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_memory import (MemoryIngestor, MemoryStore, chunk_text,  # noqa: E402
                          fts_query, redact)
 

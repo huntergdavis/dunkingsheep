@@ -9,6 +9,9 @@ import threading
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _bootstrap  # noqa: F401,E402  (isolate live state)
+
 ROOT = Path(__file__).resolve().parent.parent
 POLL_PATH = ROOT / "tools" / "dunk_poll.py"
 

@@ -30,6 +30,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, ROOT)
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_watchdog as wd  # noqa: E402
 import dunk_watchdog_deadman as deadman  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402

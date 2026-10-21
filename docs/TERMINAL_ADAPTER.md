@@ -162,8 +162,11 @@ time is the liveness check.
   The daemon stores `caller_pid`, `caller_start` and `caller_name` on the task
   lease. `task_reap` and the daemon reaper check `/proc/<pid>` and its start
   time, so a crashed agent's lease is requeued **even when its shell pane still
-  exists**. The pane id remains the registry key; the name is only a label, so
-  two panes cannot claim one task through a stale name / reused pid.
+  exists**. A vanished pane is **not** evidence on its own: only the lease
+  deadline or a dead `/proc` caller requeues, so a live agent behind a lagging
+  pane reading keeps its claim, and an unattributable/legacy lease is not
+  guessed dead. The pane id remains the registry key; the name is only a label,
+  so two panes cannot claim one task through a stale name / reused pid.
 
 ## Sidebar poll
 

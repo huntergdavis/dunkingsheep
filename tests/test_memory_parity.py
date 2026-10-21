@@ -1,3 +1,4 @@
+import _bootstrap  # noqa: F401  (isolate live state)
 """t14: the ground-truth intent set and side-by-side recall/overlap reporting."""
 
 import os

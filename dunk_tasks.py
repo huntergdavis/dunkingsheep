@@ -801,10 +801,14 @@ class Tasks:
         """Return expired, dead-pane or dead-caller leases to the queue.
 
         ``alive_panes`` is the set of pane ids the terminal backend currently
-        knows about. ``caller_alive(pid, start)`` is the process check: a lease
-        whose stable agent process is gone is requeued even when its shell pane
-        still exists (the crashed-lane case). Expiry covers a stalled agent; a
-        task with another live claimant stays in progress for that claimant.
+        knows about. ``caller_alive(pid, start)`` is the process check.
+
+        Only the explicit lease deadline or a dead /proc caller requeues a
+        claim. A vanished pane is recorded in the event but is **not** evidence
+        by itself: the pane reader can lag, a live agent may still own the
+        work, and a legacy lease with no caller identity is unattributable
+        rather than dead. A task with another live claimant stays in progress
+        for that claimant.
         """
         now = _now() if now is None else now
         requeued = []
@@ -816,15 +820,19 @@ class Tasks:
                 leases = self.db.execute("SELECT * FROM task_leases").fetchall()
                 for lease in leases:
                     expired = lease["expires_at"] <= now
-                    gone = alive_panes is not None and lease["pane_id"] not in alive_panes
+                    gone = (alive_panes is not None
+                            and lease["pane_id"] not in alive_panes)
                     dead_caller = bool(
                         caller_alive is not None and lease["caller_pid"]
                         and not caller_alive(lease["caller_pid"],
                                              lease["caller_start"]))
-                    if not (expired or gone or dead_caller):
+                    # BOTH-condition rule: a live agent behind a vanished pane
+                    # is not a dead claim; an unattributable lease is not
+                    # guessed dead. Only the lease deadline or /proc caller
+                    # death are reasons.
+                    if not (expired or dead_caller):
                         continue
-                    reason = ("pane_gone" if gone else
-                              "caller_dead" if dead_caller else "expired")
+                    reason = "caller_dead" if dead_caller else "expired"
                     self.db.execute(
                         "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
                         (lease["task_id"], lease["pane_id"]),
@@ -846,7 +854,7 @@ class Tasks:
                         actor=lease["pane_id"], scope=row["scope"],
                         priority=row["priority"], status_from=row["status"],
                         status_to=resulting,
-                        meta={"reason": reason,
+                        meta={"reason": reason, "pane_gone": gone,
                               "caller_pid": lease["caller_pid"],
                               "caller_name": lease["caller_name"]})
                     # Only a task that actually reopened is a requeue. A

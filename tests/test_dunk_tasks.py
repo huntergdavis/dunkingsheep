@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
@@ -124,11 +125,25 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual("open", self.store.get(task["id"])["status"])
         self.assertEqual([], self.store.get(task["id"])["assignees"])
 
-    def test_dead_pane_requeues_immediately(self):
+    def test_pane_gone_alone_does_not_requeue(self):
         task = self.store.add(GLOBAL, "work")
+        # Legacy lease: no caller identity -> unattributable, not dead.
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
-        requeued = self.store.reap(alive_panes={"w2:p2"})
-        self.assertEqual([(task["id"], "pane_gone")],
+        self.assertEqual([], self.store.reap(alive_panes={"w2:p2"}))
+        # A live agent behind a vanished pane is still a live claim.
+        self.store.release(task["id"], "w1:p1")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                              caller={"pid": 42, "start": "42", "name": "pi"})
+        self.assertEqual([], self.store.reap(
+            alive_panes={"w2:p2"}, caller_alive=lambda pid, start: True))
+
+    def test_pane_gone_with_a_dead_caller_requeues(self):
+        task = self.store.add(GLOBAL, "work")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                              caller={"pid": 42, "start": "42", "name": "pi"})
+        requeued = self.store.reap(
+            alive_panes={"w2:p2"}, caller_alive=lambda pid, start: False)
+        self.assertEqual([(task["id"], "caller_dead")],
                          [(item["task_id"], item["reason"]) for item in requeued])
 
     def test_heartbeat_extends_and_requires_a_lease(self):

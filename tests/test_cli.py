@@ -14,6 +14,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "dunkingsheep")
 sys.path.insert(0, ROOT)
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_core import VERSION  # noqa: E402
 
 FAKE_HERDR = r'''#!/usr/bin/env python3

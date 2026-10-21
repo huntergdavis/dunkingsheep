@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 import dunk_metrics  # noqa: E402
 from dunk_core import Flock  # noqa: E402

@@ -462,9 +462,11 @@ def guide(markdown=False):
       "pane, such as the human CLI outside herdr, may inspect any pane. Each\n"
       "claim stores the pane id plus the stable agent process pid and kernel\n"
       "start time; the reaper checks /proc liveness, so a crashed agent's task\n"
-      "returns to the queue even if its shell pane remains. The name is only a\n"
-      "label. Use `task_reap` to requeue immediately; the daemon also runs it on\n"
-      "a timer.\n")
+      "returns to the queue even if its shell pane remains. A vanished pane is\n"
+      "NOT evidence by itself: only the lease deadline or a dead caller\n"
+      "requeues, so a live agent behind a stale pane reading keeps its claim.\n"
+      "The name is only a label. Use `task_reap` to requeue immediately; the\n"
+      "daemon also runs it on a timer.\n")
     w(h(2, "Memory and recall"))
     w("A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions\n"
       "in the background through one writer, and answers recall from read-only\n"

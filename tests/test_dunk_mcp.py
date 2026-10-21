@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_api import (COMMANDS_BY_NAME, dispatch, grouped_mcp_tools,  # noqa: E402
                       mcp_commands, mcp_tool_map)
 from dunk_core import Flock  # noqa: E402

@@ -10,6 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_core  # noqa: E402
 from dunk_core import (  # noqa: E402
     DunkError, Dunker, Flock, expand_template, format_interval, parse_interval,
@@ -94,6 +95,7 @@ class FlockTests(unittest.TestCase):
 
     def test_task_claim_carries_the_request_caller_for_proc_liveness(self):
         from dunk_callers import process_start
+        self.flock.tasks.add("global", "caller test")
         caller = {"pid": os.getpid(), "start": process_start(os.getpid()),
                   "name": "pi"}
         self.flock.set_caller(caller)
@@ -108,6 +110,7 @@ class FlockTests(unittest.TestCase):
         self.assertEqual("pi", lease["caller_name"])
 
     def test_task_reap_uses_proc_liveness_when_the_pane_survives(self):
+        self.flock.tasks.add("global", "caller reap test")
         caller = {"pid": os.getpid(), "start": "not-the-real-start",
                   "name": "pi"}
         self.flock.set_caller(caller)

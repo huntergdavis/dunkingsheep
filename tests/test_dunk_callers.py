@@ -1,6 +1,7 @@
 import os
 import unittest
 
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_callers import (
     agent_name,
     caller_alive,

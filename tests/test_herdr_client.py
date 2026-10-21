@@ -4,6 +4,7 @@ import subprocess
 import unittest
 from unittest import mock
 
+import _bootstrap  # noqa: F401  (isolate live state)
 from herdr_client import (
     AGENT_KINDS,
     HerdrClient,
