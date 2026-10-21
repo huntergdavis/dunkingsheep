@@ -321,7 +321,11 @@ class TmuxBackend(TerminalBackend):
              session_name, window_name, window_index, session_index,
              pane_pid) = fields[:12]
             kind = _agent_kind(command, title)
-            label = title.strip() or window_name
+            record = data["panes"].get(pane_id) or {}
+            # tmux does not expose pane titles through #{pane_title} on every
+            # config; the registry name we recorded at start_agent is the
+            # stable, human-chosen label the inbox resolves by.
+            label = record.get("name") or title.strip() or window_name
             try:
                 number = int(window_index)
                 workspace_number = int(session_index)

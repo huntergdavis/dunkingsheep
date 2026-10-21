@@ -218,7 +218,7 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertEqual([("task.blocked_stale", "t1")], self.keys(self.fleet.evaluate(cfg)))
 
     def test_task_lease_expired_unrenewed_and_reaped(self):
-        cfg = self.fleet.config(task__lease_stale={"never_renewed_minutes": 30, "lookback_minutes": 60})
+        cfg = self.fleet.config(task__lease_stale={"never_renewed_minutes": 30, "lookback_minutes": 60, "fresh_minutes": 60})
         self.fleet.lease("a", "w1:p1", NOW - 99 * MIN, NOW - 50 * MIN, NOW)
         self.fleet.lease("b", "w1:p1", NOW - 30 * MIN, NOW - 30 * MIN, NOW + HOUR)
         self.fleet.lease("c", "w1:p1", NOW - 29 * MIN, NOW - 29 * MIN, NOW + HOUR)
@@ -228,6 +228,37 @@ class RuleBoundaryTests(WatchdogCase):
         self.fleet.task_event("g", "released", NOW - 5 * MIN, meta={"reason": "manual"})
         self.assertEqual([("task.lease_stale", "expired:a@w1:p1"), ("task.lease_stale", "reaped:1"),
                           ("task.lease_stale", "unrenewed:b@w1:p1")], self.keys(self.fleet.evaluate(cfg)))
+
+    def test_old_reap_ages_out_of_the_fresh_window(self):
+        cfg = self.fleet.config(task__lease_stale={
+            "never_renewed_minutes": 30, "lookback_minutes": 1440,
+            "fresh_minutes": 60})
+        self.fleet.task_event("e", "requeued", NOW - 90 * MIN,
+                              meta={"reason": "expired"})
+        self.assertEqual([], self.fleet.evaluate(cfg),
+                         "a 90-minute-old reap is history, not news")
+
+    def test_a_reaped_event_is_reported_once_ever_not_again_after_cooldown(self):
+        cfg = self.fleet.config(task__lease_stale={
+            "never_renewed_minutes": 30, "lookback_minutes": 1440,
+            "fresh_minutes": 1440})
+        self.fleet.task_event("e", "requeued", NOW - 1 * MIN,
+                              meta={"reason": "expired"})
+        findings = self.fleet.evaluate(cfg)
+        self.assertEqual(1, len(findings))
+        self.assertTrue(findings[0].get("once"))
+        state = wd.empty_state()
+        first = wd.plan(cfg, findings,
+                        state, wd.advance_streaks(cfg, state, findings, NOW), NOW)
+        self.assertEqual("no", first[0]["vp"])
+        # `run` records this after a send; simulate four hours later, past the
+        # 240-minute cooldown, with the event still inside the fresh window.
+        state["alerts"][wd.dedupe_key(findings[0])] = {"last_alerted": NOW}
+        later = NOW + 4 * HOUR
+        later_findings = [dict(findings[0], measured="241min old")]
+        again = wd.plan(cfg, later_findings, state,
+                        wd.advance_streaks(cfg, state, later_findings, later), later)
+        self.assertEqual("dedupe", again[0]["vp"])
 
     def test_dunk_skip_loop_uses_lookback_not_recency_and_a_stable_key(self):
         cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 168})

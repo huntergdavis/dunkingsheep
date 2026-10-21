@@ -1,10 +1,14 @@
 # Terminal adapter: herdr and tmux
 
-Status: 2.25.0. The tmux backend is implemented and live-tested behind the seam.
-**herdr remains the default.** Nothing about herdr is removed until the tmux
-close guard (below) has been demonstrated with the VP's own pane as the subject
-— by policy evaluation plus a same-level decoy, not a live kill (the VP's
-ruling). That is the 2026-10-18 lesson and it is not negotiable.
+Status: 2.26.3. The tmux backend is implemented and live-tested behind the
+seam. **DECISION (t35, 2026-10-21): herdr remains the default and nothing is
+removed.** The live tmux trial failed gate 2 (idle hold): on tmux the input box
+is empty while an agent is mid-turn, the backend honestly reports
+`agent_status=unknown`, and a send was typed into a working claude pane and
+submitted (`status=sent, queued=false, holds=0`). That is the exact corruption
+the hold exists to prevent, so tmux is not a supported default. Identity,
+screen, typing, the three-way close rail, and recovery passed or passed with
+notes; details below.
 
 ## Why a seam
 
@@ -209,8 +213,9 @@ disables the external read (tests do).
 3. Close protection with the VP's own pane as the subject — done by the VP's
    ruling without a live kill: the real `w9:pH` decision is REFUSED, a
    same-level live decoy is refused and survives, and a positive-control kill
-   proves the live path. Herdr is still **not** demoted; live tmux lanes and the
-   backend switch remain.
+   proves the live path. **The live tmux trial (t35) then failed gate 2 (idle
+   hold), so herdr remains the default and nothing is removed.** Live tmux lanes
+   and the backend switch are closed as a decision, not deferred.
 4. Stdlib-only poll client — done.
 
 ## Environment
@@ -225,6 +230,36 @@ disables the external read (tests do).
 | `DUNKINGSHEEP_VERIFY_SELF=1` | opt-in `pane current` reconciliation |
 | `DUNKINGSHEEP_POLL_BIN` | sidebar poll client path |
 | `VP_PROVIDER_USAGE=0` | disable the ops dashboard usage read |
+
+## Busy/idle signal: why tmux cannot hold today
+
+The tmux trial's gate-2 failure is a **missing signal**, not a backend bug:
+herdr supplies an exact agent status; tmux does not. The three candidate routes,
+as they stand for claude, codex and pi:
+
+1. **Per-harness screen signature** (spinner/working line). Works today for all
+   three in the narrow sense that their output is visible, but it is fragile:
+   claude cycles spinners ("Hyperspacing…", "Unfurling…"), codex uses an
+   approval/dialog line, pi has its own. Cost: hours per harness, breaks on any
+   output change. Not acceptable for the hold.
+2. **Process-side signal**. The tmux pane pid is the **agent process itself**
+   (`claude`/`codex`/`pi`), not a shell — but the process shape does not encode
+   a turn: claude holds a long-lived `dunkingsheep mcp` child even when idle, so
+   children are false positives; `pane_current_command` is the agent name
+   always. A turn can spawn a tool child, but the absence of children is not
+   idle. Deterministic only if a harness exposes a lock/child shape; today it
+   does not for all three.
+3. **Explicit declaration** over the existing socket. **pi can do this today**
+   via its extension events (`agent_start`/`agent_end`); claude currently has
+   only a `SessionStart` hook configured, and codex has hooks enabled but no
+   turn-start/end hook wired to dunkingsheep. This is the most reliable route,
+   but it works only for harnesses we can wrap. Cost: pi is cheap (an existing
+   extension event); claude/codex need hooks installed and tested.
+
+Cheapest honest path: for pi, emit turn-start/turn-end from the extension and
+carry it on the pane record; for claude/codex, either install explicit hooks or
+keep herdr. Do not build screen heuristics into the hold. If only herdr can
+supply the signal for a harness, that harness stays on herdr.
 
 ## Not done / next
 

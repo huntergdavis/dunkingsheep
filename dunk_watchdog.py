@@ -175,7 +175,8 @@ RULE_COMMON = {
 
 RULE_PARAMS = {
     "task.blocked_stale": {"threshold_minutes": POSITIVE},
-    "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE},
+    "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE,
+                         "fresh_minutes": POSITIVE},
     "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE},
     "dunk.overdue": {"missed_intervals": POSITIVE},
     "inbox.undeliverable": {"min_messages": POSITIVE_INT},
@@ -399,14 +400,23 @@ def sample_host(path):
 
 # -- findings -----------------------------------------------------------------
 
-def finding(rule_id, rule, key, summary, threshold, measured, window, evidence, source=SOURCE_RULE):
+def finding(rule_id, rule, key, summary, threshold, measured, window, evidence,
+            source=SOURCE_RULE, once=False):
     """One finding. `threshold`, `measured` and `window` are value+unit strings
-    printed on every dry-run line (spec section 4)."""
-    return {
+    printed on every dry-run line (spec section 4).
+
+    `once=True` marks an immutable event: it is reported once ever, not again
+    after a cooldown. A cooldown is for a continuing condition; a historical
+    reap is not news four hours later.
+    """
+    item = {
         "rule": rule_id, "key": str(key), "severity": rule["severity"], "class": rule["class"],
         "source": source, "summary": summary, "threshold": threshold, "measured": measured,
         "window": window, "evidence": evidence,
     }
+    if once:
+        item["once"] = True
+    return item
 
 
 def _minutes(seconds):
@@ -450,7 +460,12 @@ def rule_task_lease_stale(inputs, rule):
                                f"{rule['never_renewed_minutes']}min",
                                f"{_minutes(inputs.now - lease['claimed_at'])}min", "since claim",
                                {"task": lease["task_id"], "pane": lease["pane_id"]}))
-    since = inputs.now - rule["lookback_minutes"] * 60
+    # A reaped event is history, not a current state: only fresh reaps are
+    # news, and each event is reported once (finding once=True). The wider
+    # lookback is for the current leases, not for resurrecting old events.
+    fresh = rule.get("fresh_minutes", rule["lookback_minutes"]) * 60
+    since = max(inputs.now - rule["lookback_minutes"] * 60,
+                inputs.now - fresh)
     for event in data["events"]:
         if event["event"] not in ("requeued", "released") or event["at"] < since:
             continue
@@ -458,10 +473,13 @@ def rule_task_lease_stale(inputs, rule):
         if meta.get("reason") not in ("expired", "pane_gone"):
             continue
         out.append(finding("task.lease_stale", rule, f"reaped:{event['id']}",
-                           f"task {event['task_id']} lease reaped ({meta['reason']}) and {event['event']}",
-                           "any reap", "1 reap", f"{rule['lookback_minutes']}min lookback",
+                           f"task {event['task_id']} lease reaped ({meta['reason']}) "
+                           f"{_minutes(inputs.now - event['at'])}min ago and {event['event']}",
+                           "any reap", f"{_minutes(inputs.now - event['at'])}min old",
+                           f"{rule['fresh_minutes']}min fresh window",
                            {"task": event["task_id"], "event_id": event["id"], "reason": meta["reason"],
-                            "minutes_ago": _minutes(inputs.now - event["at"])}))
+                            "minutes_ago": _minutes(inputs.now - event["at"])},
+                           once=True))
     return out
 
 
@@ -936,8 +954,14 @@ def advance_streaks(config, state, findings, now):
 def _cooling(config, state, item, now):
     if item["source"] == SOURCE_SELF:
         return False
-    last = state["alerts"].get(dedupe_key(item), {}).get("last_alerted")
-    return last is not None and now - last < config["rules"][item["rule"]]["cooldown_minutes"] * 60
+    entry = state["alerts"].get(dedupe_key(item), {})
+    last = entry.get("last_alerted")
+    if last is None:
+        return False
+    if item.get("once"):
+        # Immutable event: said once, never re-alerted after a cooldown.
+        return True
+    return now - last < config["rules"][item["rule"]]["cooldown_minutes"] * 60
 
 
 def plan(config, findings, state, streaks, now, owner_blocked=None):

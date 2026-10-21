@@ -38,7 +38,7 @@
     },
     "task.lease_stale": {
       "enabled": true, "severity": "warning", "class": "ops", "cooldown_minutes": 240, "must_hold_runs": 1,
-      "never_renewed_minutes": 30, "lookback_minutes": 1440
+      "never_renewed_minutes": 30, "lookback_minutes": 1440, "fresh_minutes": 60
     },
     "dunk.skip_loop": {
       "enabled": true, "severity": "warning", "class": "ops", "cooldown_minutes": 1440, "must_hold_runs": 1,

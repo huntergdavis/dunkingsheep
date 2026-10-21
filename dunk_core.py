@@ -59,7 +59,7 @@ import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
 
-VERSION = "2.26.2"
+VERSION = "2.26.4"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"

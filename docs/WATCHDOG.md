@@ -76,7 +76,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | Rule id | Fires when | Parameters | Shipped |
 | --- | --- | --- | --- |
 | `task.blocked_stale` | a blocked task has had no update or event for at least the threshold | `threshold_minutes` | warning / ops |
-| `task.lease_stale` | a lease is expired but not yet reaped, or was never renewed for at least N min, or a reap event (`expired`/`pane_gone`) falls in the lookback | `never_renewed_minutes`, `lookback_minutes` | warning / ops |
+| `task.lease_stale` | a lease is expired but not yet reaped, or was never renewed for at least N min, or a **fresh** reap event (`expired`/`pane_gone`) falls in the fresh window. A reap event is reported once ever (`once=True`), not again after a cooldown: history is not news. | `never_renewed_minutes`, `lookback_minutes`, `fresh_minutes` | warning / ops |
 | `dunk.skip_loop` | the longest consecutive run of `dunk.skipped` in the lookback is at least N. Keyed by the run's first skip, so a growing loop is one incident | `consecutive_skips`, `lookback_hours` | warning / ops |
 | `dunk.overdue` | a running dunk is at least N intervals past `next_send_at`, or has no scheduled send | `missed_intervals` | warning / ops |
 | `inbox.undeliverable` | a mailbox's undeliverable backlog is at least N (no age limit) | `min_messages` | warning / ops |
