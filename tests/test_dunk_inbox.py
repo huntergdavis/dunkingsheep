@@ -384,6 +384,15 @@ class MailboxIdentityTests(unittest.TestCase):
         self.assertEqual("wS:p1",
                          self.flock.inbox.status(sent["message_id"])["sender"])
 
+    def test_client_refuses_to_auto_start_a_partial_tmux_backend(self):
+        from dunk_client import DaemonUnavailable, FlockClient
+        env = {"DUNKINGSHEEP_TERMINAL_BACKEND": "tmux"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("DUNKINGSHEEP_TMUX_SOCKET", None)
+            with self.assertRaisesRegex(DaemonUnavailable,
+                                        "refusing to auto-start a tmux daemon"):
+                FlockClient(socket_path="/tmp/no-such-dsh-partial.sock").start_daemon()
+
     def test_client_uses_the_exported_pane_id_without_asking_herdr(self):
         from dunk_client import FlockClient
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"},
@@ -531,6 +540,7 @@ class SurfaceParityTests(unittest.TestCase):
             "memory_backfill": "backfill",
             "health": "health", "recover": "recover", "doctor": "doctor",
             "poll": "poll",
+            "turn_start": "turn", "turn_end": "turn",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

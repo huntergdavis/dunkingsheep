@@ -93,6 +93,37 @@ class FlockTests(unittest.TestCase):
         self.assertIsNone(status["herdr_available"])
         self.assertIsNone(status["herdr_hint"])
 
+    def test_a_declared_turn_holds_sends_until_turn_end(self):
+        self.flock.turn_start("w1:p2", ttl_s=60, source="test")
+        self.assertTrue(self.flock.turn_active("w1:p2"))
+        held = self.flock.send_now("w1:p2", "GATE-turn-hold", wait_s=0)
+        self.assertTrue(held.get("queued"), f"the active turn must hold: {held}")
+        self.assertTrue(self.flock.turn_active("w1:p2"))
+        self.flock.turn_end("w1:p2")
+        self.assertFalse(self.flock.turn_active("w1:p2"))
+        # The turn no longer blocks; the pane's own box may still queue, which
+        # is the ordinary hold path, not the turn hold.
+        after = self.flock.send_now("w1:p2", "GATE-turn-after", wait_s=0)
+        self.assertIn(after.get("status"), ("queued", "sent"), after)
+        rows = [dict(row) for row in self.flock.metrics.db.execute(
+            "SELECT kind FROM events WHERE kind='turn.end'")]
+        self.assertTrue(rows)
+
+    def test_a_crashed_turn_releases_after_ttl_and_logs_the_reason(self):
+        self.flock.turn_start("w1:p2", ttl_s=0.05, source="test-crash")
+        held = self.flock.send_now("w1:p2", "GATE-crash-held", wait_s=0)
+        self.assertTrue(held.get("queued"))
+        time.sleep(0.08)
+        # No turn_end arrives: the TTL must release the hold, not hold forever.
+        released = self.flock.turn_expire()
+        self.assertEqual("ttl", released[0]["reason"])
+        self.assertFalse(self.flock.turn_active("w1:p2"))
+        after = self.flock.send_now("w1:p2", "GATE-crash-delivered", wait_s=0)
+        self.assertIn(after.get("status"), ("queued", "sent"), after)
+        rows = [dict(row) for row in self.flock.metrics.db.execute(
+            "SELECT kind, reason, outcome FROM events WHERE kind='turn.expired'")]
+        self.assertTrue(rows and rows[-1]["reason"] == "ttl", rows)
+
     def test_task_claim_carries_the_request_caller_for_proc_liveness(self):
         from dunk_callers import process_start
         self.flock.tasks.add("global", "caller test")

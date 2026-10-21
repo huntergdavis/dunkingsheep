@@ -175,7 +175,20 @@ class FlockClient:
 
     def start_daemon(self):
         """Start the daemon: hand off to systemd when it supervises, else spawn
-        a detached `dunkingsheep serve` that outlives this process."""
+        a detached `dunkingsheep serve` that outlives this process.
+
+        Refuse a partial backend environment: a client that auto-starts with
+        only DUNKINGSHEEP_DIR/SOCKET once started a tmux trial daemon on the
+        herdr backend, where it silently saw the wrong panes. A component that
+        guesses its environment produces a plausible wrong answer.
+        """
+        backend = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND")
+                   or "herdr").strip().lower()
+        if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
+            raise DaemonUnavailable(
+                "refusing to auto-start a tmux daemon without "
+                "DUNKINGSHEEP_TMUX_SOCKET; start it explicitly with the full "
+                "backend environment")
         # The literal default socket belongs to the unit, even when a parent
         # service exported DUNKINGSHEEP_SOCKET to that same path.
         supervised = self.socket_path == DEFAULT_SOCKET

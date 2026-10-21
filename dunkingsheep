@@ -61,6 +61,16 @@ def build_parser():
     sub.required = True
 
     sub.add_parser("status", help="daemon health and counts")
+    p = sub.add_parser("turn", help="declare a busy turn (pi/claude hooks)")
+    tsub = p.add_subparsers(dest="turn_command", metavar="<start|end>")
+    tsub.required = True
+    q = tsub.add_parser("start", help="mark the pane busy until turn end")
+    q.add_argument("--pane", help="pane id (default: the caller's)")
+    q.add_argument("--ttl-s", type=float)
+    q.add_argument("--source")
+    q = tsub.add_parser("end", help="end the busy turn and release the hold")
+    q.add_argument("--pane", help="pane id (default: the caller's)")
+    q.add_argument("--reason")
     p = sub.add_parser("poll", help="one batched read for sidebars: status + inbox + dunks",
                        description="Read-only batch used by the sidebar poller. "
                                    "It does not mark mail read; panes/tasks are opt-in.")
@@ -1397,6 +1407,14 @@ def run_client_command(client, args):
     command = args.command
     if command == "status":
         return client.call("status"), print_status
+    if command == "turn":
+        if args.turn_command == "start":
+            return client.call("turn_start", pane=args.pane, ttl_s=args.ttl_s,
+                               source=args.source), \
+                lambda r: print(f"turn start {r['pane_id']} ttl {r['ttl_s']}s")
+        return client.call("turn_end", pane=args.pane,
+                           reason=args.reason), \
+            lambda r: print(f"turn end {r['pane_id']} (ended={r['ended']})")
     if command == "poll":
         payload = {"limit": args.limit, "panes": args.panes, "tasks": args.tasks,
                    "include_done": args.include_done,

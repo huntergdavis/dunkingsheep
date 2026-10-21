@@ -150,6 +150,18 @@ def h_status(flock, args, self_pane_id):
     return result
 
 
+def h_turn_start(flock, args, self_pane_id):
+    return flock.turn_start(args.get("pane"), ttl_s=args.get("ttl_s"),
+                            source=args.get("source"),
+                            self_pane_id=self_pane_id)
+
+
+def h_turn_end(flock, args, self_pane_id):
+    return flock.turn_end(args.get("pane"),
+                          reason=args.get("reason") or "turn_end",
+                          self_pane_id=self_pane_id)
+
+
 def h_list_dunks(flock, args, self_pane_id):
     return {"dunks": flock.list()}
 
@@ -774,6 +786,30 @@ COMMANDS = [
         "status",
         "Daemon health: version, dunk counts, and whether herdr is reachable.",
         h_status,
+    ),
+    Command(
+        "turn_start",
+        "Declare a busy turn for a pane (pi/claude hooks). Holds sends until "
+        "turn_end; the TTL releases the hold and records turn.expired if the "
+        "turn-end never arrives.",
+        h_turn_start,
+        params={"pane": {"type": "string",
+                         "description": "Pane id; defaults to the caller's."},
+                "ttl_s": {"type": "number",
+                          "description": "Override the turn TTL in seconds."},
+                "source": {"type": "string",
+                           "description": "Hook/extension that declared it."}},
+        mcp=False,
+    ),
+    Command(
+        "turn_end",
+        "End a declared busy turn and release the hold.",
+        h_turn_end,
+        params={"pane": {"type": "string",
+                         "description": "Pane id; defaults to the caller's."},
+                "reason": {"type": "string",
+                           "description": "Why the turn ended."}},
+        mcp=False,
     ),
     Command(
         "poll",

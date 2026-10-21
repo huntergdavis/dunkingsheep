@@ -243,11 +243,12 @@ missed `Stop` on crash/force-quit leaves the lane marked working forever and the
 hold would hold mail until a lease/max-age or the caller-pid liveness clears it
 — so the turn state must carry a TTL and be reconciled with the pane pid.
 
-**Codex: NO today.** Codex 0.162.1's hook surface, as installed, exposes only
-`SessionStart` (`~/.codex/hooks.json`); there is no documented turn-boundary
-hook. It cannot be wired the same way without a Codex release that exposes one.
-Price if it appears: comparable to Claude (~2-4 hours), same missed-Stop TTL
-problem. Until then herdr is required for codex.
+**Codex: NO today — a named vendor limit.** Codex 0.162.1's hook surface, as
+installed, exposes only `SessionStart` (`~/.codex/hooks.json`); there is no
+documented turn-boundary hook. It cannot be wired the same way without a Codex
+release that exposes one. **Herdr is required for codex** until that changes —
+a fact about the vendor, not an incomplete adapter. Price if it appears:
+comparable to Claude (~2-4 hours), same missed-Stop TTL problem.
 
 **Pi: YES today, cheapest.** The pi extension already receives
 `agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
@@ -256,6 +257,16 @@ external hook trust. Same TTL/reconciliation rule for a crashed turn.
 **Cheapest honest path:** pi first (smallest, fully controlled), then Claude if
 the hold on tmux is worth 2-4 hours; codex stays on herdr until its hook surface
 gains a turn boundary. Do not build screen heuristics.
+
+### The TTL and reconciliation are the feature
+
+A declared turn holds sends, but a missed `Stop` on a crash or force-quit must
+never hold mail forever. `turn_start` stores `started_at`, `expires_at`, the
+TTL and the caller; `turn_expire()` (run by the daemon reaper) releases the
+hold, records `turn.expired` with `reason=ttl`, and reconciles the caller pid
+(recorded, not used to extend the hold). The test kills a turn mid-flight and
+asserts the hold releases after the TTL with the logged event. Do not remove
+this TTL as a "guard rail": it is what makes the hold safe to ship.
 
 ## Environment
 

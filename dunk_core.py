@@ -59,7 +59,7 @@ import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
 
-VERSION = "2.26.4"
+VERSION = "2.27.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -80,6 +80,10 @@ ONLY_WHEN_CHOICES = (None, "idle")
 # Deterministic task coordination cadence. The reaper requeues expired/dead
 # claims; the pusher feeds idle followers without any agent polling.
 TASK_REAP_S = float(os.environ.get("DUNKINGSHEEP_REAP_S", "15"))
+# A turn declared by a harness (pi/claude) holds sends until turn-end. A missed
+# turn-end (crash/force-quit) must never hold mail forever: the state expires,
+# the hold releases, and turn.expired is recorded with the reason.
+TURN_TTL_S = float(os.environ.get("DUNKINGSHEEP_TURN_TTL_S", "1800"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -428,6 +432,8 @@ class Flock:
         # Per-request caller identity (pane id + stable agent pid/start). The
         # server sets it from SO_PEERCRED; direct callers leave it empty.
         self._caller_state = threading.local()
+        # pane_id -> {started_at, expires_at, ttl_s, source, caller}
+        self.turns = {}
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
         # seconds when an agent will not take Enter. With a single lock that
@@ -1102,6 +1108,83 @@ class Flock:
         """Append an explanatory event (e.g. why a task was removed)."""
         return self.tasks.note(task_id, event=event, actor=self_pane_id,
                                meta={"reason": reason} if reason else {})
+
+    def turn_start(self, pane_id=None, ttl_s=None, source=None,
+                   self_pane_id=None):
+        """Declare a busy turn for `pane_id` (pi/claude hook or extension).
+
+        The turn holds sends until turn_end, but carries a TTL so a crashed or
+        force-quit agent cannot hold mail forever. The expiry is recorded and
+        reconciled by turn_expire().
+        """
+        pane_id = pane_id or self_pane_id
+        if not pane_id:
+            raise DunkError("turn start requires a pane")
+        ttl = float(ttl_s or TURN_TTL_S)
+        if ttl <= 0:
+            raise DunkError("ttl_s must be positive")
+        now = time.time()
+        state = {"started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
+                 "source": source, "caller": self.current_caller()}
+        with self._lock:
+            self.turns[pane_id] = state
+        self.metrics.record("turn.start", pane_id=pane_id, source=source,
+                            outcome="ok", at=now)
+        return {"pane_id": pane_id, "started_at": now,
+                "expires_at": now + ttl, "ttl_s": ttl, "source": source}
+
+    def turn_end(self, pane_id=None, reason="turn_end", self_pane_id=None):
+        pane_id = pane_id or self_pane_id
+        if not pane_id:
+            raise DunkError("turn end requires a pane")
+        with self._lock:
+            state = self.turns.pop(pane_id, None)
+        now = time.time()
+        duration = int((now - state["started_at"]) * 1000) if state else None
+        self.metrics.record("turn.end", pane_id=pane_id, reason=reason,
+                            outcome="ok" if state else "unknown", at=now,
+                            duration_ms=duration)
+        return {"pane_id": pane_id, "ended": bool(state), "reason": reason}
+
+    def turn_active(self, pane_id):
+        """True only for an unexpired declared turn. Expiry is the safety."""
+        with self._lock:
+            state = self.turns.get(pane_id)
+            if not state:
+                return False
+            return state["expires_at"] > time.time()
+
+    def turn_expire(self, now=None):
+        """Release expired turns: record the reason, reconcile the caller pid.
+
+        This is the crashed-turn path: no turn_end arrived, so the TTL fires,
+        mail is released, and the event says why. Reconciliation is recorded,
+        not used to extend the hold: a live pid does not prove the turn is
+        still running after the declared deadline.
+        """
+        now = now or time.time()
+        released = []
+        with self._lock:
+            for pane_id, state in list(self.turns.items()):
+                if state["expires_at"] > now:
+                    continue
+                self.turns.pop(pane_id, None)
+                released.append((pane_id, state))
+        for pane_id, state in released:
+            caller = state.get("caller") or {}
+            alive = bool(caller.get("pid") and process_alive(
+                caller.get("pid"), caller.get("start")))
+            log.warning(
+                "turn expired on %s after %.0fs (ttl %.0fs); releasing hold "
+                "(caller pid %s alive=%s)",
+                pane_id, now - state["started_at"], state["ttl_s"],
+                caller.get("pid"), alive)
+            self.metrics.record(
+                "turn.expired", pane_id=pane_id, reason="ttl",
+                outcome="released", at=now,
+                duration_ms=int((now - state["started_at"]) * 1000))
+        return [{"pane_id": pane_id, "ttl_s": state["ttl_s"],
+                 "reason": "ttl"} for pane_id, state in released]
 
     def set_caller(self, caller):
         self._caller_state.value = caller
@@ -2876,11 +2959,14 @@ class Flock:
         # to wait behind; `_ensure_box_clear` flushes it before the next send.
         return not self._looks_like_ours(pane_id, typed)
 
-    def _clear_to_send(self, pane_id, last_sent_text=None, awaiting_consumption=False,
-                       stop_event=None):
+    def _clear_to_send(self, pane_id, last_sent_text=None,
+                       awaiting_consumption=False, stop_event=None):
         """True once the box has read clear on two checks TYPING_SETTLE_S
         apart, so a pause between thoughts is not mistaken for being done.
-        False as soon as either check sees typing (or the wait is stopped)."""
+        False as soon as either check sees typing, a declared turn is active,
+        or the wait is stopped."""
+        if self.turn_active(pane_id):
+            return False
         if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
             return False
         if stop_event is not None:
@@ -3099,7 +3185,11 @@ class Flock:
 
     def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
-        failed submit is flushed with Enter; a human's draft is left alone."""
+        failed submit is flushed with Enter; a human's draft is left alone; a
+        declared active turn holds the send."""
+        if self.turn_active(pane_id):
+            self._last_block_reason[pane_id] = "working"
+            return False
         screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
                                       source="visible", ansi=True)
         if screen is None:
