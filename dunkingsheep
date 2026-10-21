@@ -1226,12 +1226,60 @@ def mcp_map_text(markdown=False):
     return "\n".join(out) + "\n"
 
 
+def _be_nice():
+    """A poller must not outrank an interactive agent. Courtesy, not a fix."""
+    try:
+        if os.environ.get("DUNKINGSHEEP_NICE") != "0":
+            os.nice(int(os.environ.get("DUNKINGSHEEP_NICE", "5")))
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+_POLL_COMMANDS = ("status", "list", "ls", "inbox", "poll")
+
+
+def _coalesce(argv):
+    """Refuse an identical poll command inside the minimum interval.
+
+    Ten lanes polling faster than they can act is pure overhead. A cheap
+    timestamp file per command name; the *spawn* is what we are avoiding.
+    """
+    try:
+        minimum = float(os.environ.get("DUNKINGSHEEP_MIN_POLL_S", "2"))
+    except ValueError:
+        minimum = 2.0
+    if minimum <= 0:
+        return
+    words = [word for word in argv if not word.startswith("-")]
+    if not words or words[0] not in _POLL_COMMANDS:
+        return
+    key = "-".join(words[:2]) if words[0] == "inbox" else words[0]
+    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
+    now = time.time()
+    try:
+        last = os.path.getmtime(path)
+    except OSError:
+        last = 0.0
+    if last and now - last < minimum:
+        print(json.dumps({"coalesced": True, "interval_s": minimum,
+                          "command": key}), file=sys.stderr)
+        sys.exit(0)
+    try:
+        open(path, "a").close()
+        os.utime(path, (now, now))
+    except OSError:
+        return
+
+
 def main(argv=None):
     parser = build_parser()
-    if not (argv if argv is not None else sys.argv[1:]):
+    words = list(argv if argv is not None else sys.argv[1:])
+    if not words:
         parser.print_help()
         return 0
-    args = parser.parse_args(argv)
+    _be_nice()
+    _coalesce(words)
+    args = parser.parse_args(words)
     command = args.command
 
     if command in ("guide", "help", "docs"):

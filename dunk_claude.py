@@ -27,6 +27,8 @@ class ClaudeStatus:
 
     def agents(self, fresh=False):
         """The live session list, cached for `ttl`; None when unavailable."""
+        if os.environ.get("DUNKINGSHEEP_CLAUDE_STATUS") == "0":
+            return None
         now = time.time()
         if not fresh and self._agents is not None and now - self._cached_at < self.ttl:
             return self._agents

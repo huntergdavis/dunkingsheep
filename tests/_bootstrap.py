@@ -11,3 +11,6 @@ import tempfile
 _TMP = tempfile.mkdtemp(prefix="dunkingsheep-tests-")
 os.environ.setdefault("DUNKINGSHEEP_DIR", _TMP)
 os.environ.setdefault("DUNKINGSHEEP_SOCKET", os.path.join(_TMP, "test.sock"))
+
+# Tests must not shell out to `claude agents --json` (2.9 s per call).
+os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")

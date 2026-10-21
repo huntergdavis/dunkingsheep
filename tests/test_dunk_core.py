@@ -78,6 +78,11 @@ class FlockTests(unittest.TestCase):
         self.state = os.path.join(self.tmp.name, "dunks.json")
         self.herdr = FakeHerdr()
         self.flock = Flock(herdr=self.herdr, state_file=self.state)
+        # The real `claude agents --json` is 2.9 s; tests must never run it.
+        class _NoClaude:
+            def status_for_pane(self, pane, fresh=False):
+                return None
+        self.flock.claude_status = _NoClaude()
 
     def tearDown(self):
         self.flock.close()
