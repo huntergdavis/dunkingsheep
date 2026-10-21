@@ -58,6 +58,17 @@ class ServerRoundTripTests(unittest.TestCase):
         self.client.remove_dunk(id=dunk["id"])
         self.assertEqual([], self.client.list_dunks()["dunks"])
 
+    def test_task_claims_carry_the_socket_peer_agent_identity(self):
+        from dunk_callers import caller_alive
+        self.client.call("task_add", title="caller identity")
+        claimed = self.client.call("task_next", scope="global")
+        self.assertIsNotNone(claimed["task"])
+        lease = self.flock.tasks.leases_for(claimed["task"]["id"])[0]
+        self.assertIsNotNone(lease["caller_pid"])
+        self.assertIsNotNone(lease["caller_start"])
+        self.assertTrue(caller_alive({"pid": lease["caller_pid"],
+                                      "start": lease["caller_start"]}))
+
     def test_errors_are_reported_not_raised_by_the_daemon(self):
         with self.assertRaisesRegex(DunkError, "no dunk with id"):
             self.client.get_dunk(id="d99")

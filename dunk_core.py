@@ -57,8 +57,9 @@ from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from dunk_terminal import get_backend
+from dunk_callers import process_alive
 
-VERSION = "2.25.0"
+VERSION = "2.26.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -424,6 +425,9 @@ class Flock:
         self.persist_enabled = persist
         self._load_launches()
         self._lock = threading.RLock()
+        # Per-request caller identity (pane id + stable agent pid/start). The
+        # server sets it from SO_PEERCRED; direct callers leave it empty.
+        self._caller_state = threading.local()
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
         # seconds when an agent will not take Enter. With a single lock that
@@ -1093,6 +1097,15 @@ class Flock:
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         return self.tasks.delete(task_id)
 
+    def set_caller(self, caller):
+        self._caller_state.value = caller
+
+    def current_caller(self):
+        return getattr(self._caller_state, "value", None)
+
+    def clear_caller(self):
+        self._caller_state.value = None
+
     @_as_dunk_error
     def task_next(self, scope=None, lease_seconds=None, self_pane_id=None):
         """Atomically claim the next task; subscribe if the queue is empty.
@@ -1101,6 +1114,7 @@ class Flock:
         daemon pushes the next task when this pane next goes idle instead of
         the agent polling.
         """
+        caller = self.current_caller()
         value = "" if scope is None else str(scope).strip()
         follow_scope = TASK_GLOBAL
         if value in ("", "global"):
@@ -1115,7 +1129,8 @@ class Flock:
             if self_pane_id:
                 local = self.tasks.claim_next(scope=self_pane_id,
                                               pane_id=self_pane_id,
-                                              lease_seconds=lease_seconds)
+                                              lease_seconds=lease_seconds,
+                                              caller=caller)
                 if local.get("task"):
                     return local
         else:
@@ -1123,7 +1138,8 @@ class Flock:
             follow_scope = target
 
         result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
-                                       lease_seconds=lease_seconds)
+                                       lease_seconds=lease_seconds,
+                                       caller=caller)
         if not result.get("task") and self_pane_id:
             with self._lock:
                 self.task_waiters[self_pane_id] = follow_scope
@@ -1165,7 +1181,8 @@ class Flock:
             raise DunkError("task heartbeat requires a known caller pane")
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         return self.tasks.heartbeat(task_id, self_pane_id,
-                                    lease_seconds=lease_seconds)
+                                    lease_seconds=lease_seconds,
+                                    caller=self.current_caller())
 
     @_as_dunk_error
     def task_release(self, task_id, self_pane_id=None):
@@ -1180,7 +1197,8 @@ class Flock:
             panes = {p["pane_id"] for p in self.herdr.list_panes()}
         except Exception:
             panes = None
-        return {"requeued": self.tasks.reap(alive_panes=panes)}
+        return {"requeued": self.tasks.reap(alive_panes=panes,
+                                            caller_alive=process_alive)}
 
     @_as_dunk_error
     def task_stats(self, scope=None, self_pane_id=None):
@@ -1356,7 +1374,8 @@ class Flock:
                 except Exception:  # noqa: BLE001 - maintenance must not die
                     log.exception("inbox undeliverable sweep failed")
             try:
-                requeued = self.tasks.reap(alive_panes=panes)
+                requeued = self.tasks.reap(alive_panes=panes,
+                                           caller_alive=process_alive)
             except Exception:
                 log.exception("task reaper failed")
                 continue

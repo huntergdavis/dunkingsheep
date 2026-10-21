@@ -459,9 +459,12 @@ def guide(markdown=False):
            "task_metrics(window_s=3600, scope=\"global\", bucket=\"hour\")"))
     w("Per-pane privacy is enforced by the daemon: an agent may add, list, read\n"
       "or claim only its own pane's tasks (plus global tasks). A caller with no\n"
-      "pane, such as the human CLI outside herdr, may inspect any pane. Use\n"
-      "`task_reap` to requeue expired or dead-pane leases immediately; the daemon\n"
-      "also does it on a timer.\n")
+      "pane, such as the human CLI outside herdr, may inspect any pane. Each\n"
+      "claim stores the pane id plus the stable agent process pid and kernel\n"
+      "start time; the reaper checks /proc liveness, so a crashed agent's task\n"
+      "returns to the queue even if its shell pane remains. The name is only a\n"
+      "label. Use `task_reap` to requeue immediately; the daemon also runs it on\n"
+      "a timer.\n")
     w(h(2, "Memory and recall"))
     w("A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions\n"
       "in the background through one writer, and answers recall from read-only\n"

@@ -19,10 +19,12 @@ import logging
 import os
 import signal
 import socket
+import struct
 import sys
 import threading
 
 from dunk_api import dispatch
+from dunk_callers import caller_from_peer
 from dunk_core import CONFIG_DIR, VERSION, DunkError, Flock
 
 DEFAULT_SOCKET = os.path.join(CONFIG_DIR, "dunkingsheep.sock")
@@ -113,12 +115,13 @@ class FlockServer:
             self._connections.add(conn)
         try:
             conn.settimeout(None)
+            peer_pid = self._peer_pid(conn)
             reader = conn.makefile("rb")
             for raw in reader:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
-                response, stop_after = self.handle_line(line)
+                response, stop_after = self.handle_line(line, peer_pid=peer_pid)
                 conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
                 if stop_after:
                     self.shutdown()
@@ -135,8 +138,24 @@ class FlockServer:
             except OSError:
                 pass
 
-    def handle_line(self, line):
-        """Return (response dict, stop_after)."""
+    @staticmethod
+    def _peer_pid(conn):
+        """The connecting process, from SO_PEERCRED (Linux); None elsewhere."""
+        try:
+            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            pid, _uid, _gid = struct.unpack("3i", raw)
+            return pid or None
+        except (AttributeError, OSError, struct.error):
+            return None
+
+    def handle_line(self, line, peer_pid=None):
+        """Return (response dict, stop_after).
+
+        The socket peer is the short-lived CLI; the caller identity is its
+        nearest agent ancestor (or session leader), resolved by dunk_callers
+        and attached to task leases for `/proc` liveness.
+        """
         try:
             request = json.loads(line)
         except ValueError:
@@ -149,13 +168,20 @@ class FlockServer:
         self_pane_id = request.get("self_pane_id")
         if not isinstance(args, dict):
             return {"id": req_id, "ok": False, "error": "args must be an object"}, False
+        caller = caller_from_peer(peer_pid, self_pane_id) if peer_pid else None
+        self.flock.set_caller(caller)
         try:
-            result = dispatch(self.flock, name, args, self_pane_id=self_pane_id)
-        except DunkError as error:
-            return {"id": req_id, "ok": False, "error": str(error)}, False
-        except Exception as error:  # noqa: BLE001
-            log.exception("command %s failed", name)
-            return {"id": req_id, "ok": False, "error": f"internal error: {error}"}, False
+            try:
+                result = dispatch(self.flock, name, args,
+                                  self_pane_id=self_pane_id)
+            except DunkError as error:
+                return {"id": req_id, "ok": False, "error": str(error)}, False
+            except Exception as error:  # noqa: BLE001
+                log.exception("command %s failed", name)
+                return {"id": req_id, "ok": False,
+                        "error": f"internal error: {error}"}, False
+        finally:
+            self.flock.clear_caller()
         return {"id": req_id, "ok": True, "result": result}, name == "shutdown"
 
 

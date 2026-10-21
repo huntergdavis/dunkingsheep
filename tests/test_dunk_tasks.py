@@ -367,3 +367,75 @@ class FlockTaskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CallerLivenessTests(unittest.TestCase):
+    """A task lease is keyed by pane, liveness-checked by pid + start."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+        self.task = self.store.add(GLOBAL, "caller-liveness")
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_claim_records_the_caller_pid_and_start(self):
+        caller = {"pid": os.getpid(), "start": "12345", "name": "pi"}
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=60, caller=caller)
+        lease = self.store.leases_for(self.task["id"])[0]
+        self.assertEqual(os.getpid(), lease["caller_pid"])
+        self.assertEqual("12345", lease["caller_start"])
+        self.assertEqual("pi", lease["caller_name"])
+
+    def test_heartbeat_refreshes_the_caller_identity(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=30,
+                              caller={"pid": 1, "start": "1", "name": "old"})
+        self.store.heartbeat(self.task["id"], "w1:p1", lease_seconds=60,
+                             caller={"pid": 2, "start": "2", "name": "new"})
+        lease = self.store.leases_for(self.task["id"])[0]
+        self.assertEqual(2, lease["caller_pid"])
+        self.assertEqual("new", lease["caller_name"])
+
+    def test_reap_requeues_a_dead_caller_even_with_a_live_pane(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600,
+                              caller={"pid": os.getpid(), "start": "1",
+                                      "name": "pi"})
+        requeued = self.store.reap(
+            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False)
+        self.assertEqual(1, len(requeued))
+        self.assertEqual("caller_dead", requeued[0]["reason"])
+        self.assertEqual("open", self.store.get(self.task["id"])["status"])
+        self.assertEqual([], self.store.leases_for(self.task["id"]))
+
+    def test_reap_keeps_a_live_caller(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600,
+                              caller={"pid": os.getpid(), "start": "1",
+                                      "name": "pi"})
+        self.assertEqual([], self.store.reap(
+            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: True))
+        self.assertEqual("in_progress", self.store.get(self.task["id"])["status"])
+
+    def test_reap_does_not_guess_for_a_legacy_lease_without_a_caller(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600)
+        self.assertEqual([], self.store.reap(
+            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False))
+
+    def test_old_lease_table_is_migrated_in_place(self):
+        import sqlite3
+        path = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE task_leases (task_id TEXT NOT NULL, "
+                     "pane_id TEXT NOT NULL, claimed_at REAL NOT NULL, "
+                     "heartbeat_at REAL NOT NULL, expires_at REAL NOT NULL, "
+                     "PRIMARY KEY (task_id, pane_id))")
+        conn.commit()
+        conn.close()
+        old = Tasks(path)
+        try:
+            columns = {row["name"] for row in old.db.execute(
+                "PRAGMA table_info(task_leases)")}
+            self.assertTrue({"caller_pid", "caller_start", "caller_name"} <= columns)
+        finally:
+            old.close()
+

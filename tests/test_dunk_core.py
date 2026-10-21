@@ -92,6 +92,33 @@ class FlockTests(unittest.TestCase):
         self.assertIsNone(status["herdr_available"])
         self.assertIsNone(status["herdr_hint"])
 
+    def test_task_claim_carries_the_request_caller_for_proc_liveness(self):
+        from dunk_callers import process_start
+        caller = {"pid": os.getpid(), "start": process_start(os.getpid()),
+                  "name": "pi"}
+        self.flock.set_caller(caller)
+        try:
+            claimed = self.flock.task_next(scope="global", lease_seconds=60,
+                                           self_pane_id="w1:p2")
+        finally:
+            self.flock.clear_caller()
+        self.assertIsNotNone(claimed["task"])
+        lease = self.flock.tasks.leases_for(claimed["task"]["id"])[0]
+        self.assertEqual(os.getpid(), lease["caller_pid"])
+        self.assertEqual("pi", lease["caller_name"])
+
+    def test_task_reap_uses_proc_liveness_when_the_pane_survives(self):
+        caller = {"pid": os.getpid(), "start": "not-the-real-start",
+                  "name": "pi"}
+        self.flock.set_caller(caller)
+        try:
+            self.flock.task_next(scope="global", lease_seconds=600,
+                                 self_pane_id="w1:p2")
+        finally:
+            self.flock.clear_caller()
+        result = self.flock.task_reap(self_pane_id="w1:p2")
+        self.assertEqual("caller_dead", result["requeued"][0]["reason"])
+
     def test_poll_batches_status_inbox_and_dunks_without_marking_read(self):
         from dunk_api import h_poll
         sent = self.flock.inbox_send("w1:p2", "hello", self_pane_id="w2:p1",

@@ -1,4 +1,4 @@
-# Dunking Sheep 2.25.0 guide
+# Dunking Sheep 2.26.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -494,9 +494,12 @@ task_metrics(window_s=3600, scope="global", bucket="hour")
 
 Per-pane privacy is enforced by the daemon: an agent may add, list, read
 or claim only its own pane's tasks (plus global tasks). A caller with no
-pane, such as the human CLI outside herdr, may inspect any pane. Use
-`task_reap` to requeue expired or dead-pane leases immediately; the daemon
-also does it on a timer.
+pane, such as the human CLI outside herdr, may inspect any pane. Each
+claim stores the pane id plus the stable agent process pid and kernel
+start time; the reaper checks /proc liveness, so a crashed agent's task
+returns to the queue even if its shell pane remains. The name is only a
+label. Use `task_reap` to requeue immediately; the daemon also runs it on
+a timer.
 
 ## Memory and recall
 

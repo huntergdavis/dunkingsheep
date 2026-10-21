@@ -156,15 +156,14 @@ time is the liveness check.
   The CLI trusts it and does **not** call `pane current`; `pane current` is
   opt-in (`DUNKINGSHEEP_VERIFY_SELF=1`) for reconciling a stale post-restore
   env. This removes the 1-2 s cost from every CLI call.
-* **PID**: the tmux backend exposes `pane_pid` (`#{pane_pid}`), so a caller's
-  liveness can be checked against `/proc/<pid>` plus its start time without
-  asking herdr or tmux.
-* **Status**: task leases and the daemon's reaper currently key on the pane id
-  and the backend's pane list. The next slice is to carry `caller_pid` +
-  `caller_start` on the lease and let `task_reap` treat a dead `/proc` entry as
-  a dead caller even if the shell pane still exists; a registered name is only
-  a label, never the key, so two panes cannot claim one task through a stale
-  name. `TmuxBackend.pane_pid` is the hook.
+* **PID + start (implemented, t32)**: `dunk_callers.py` walks from the socket
+  peer (the short-lived CLI) to its nearest **agent ancestor** — claude, codex,
+  pi, opencode, ... — and falls back to the session leader for a human shell.
+  The daemon stores `caller_pid`, `caller_start` and `caller_name` on the task
+  lease. `task_reap` and the daemon reaper check `/proc/<pid>` and its start
+  time, so a crashed agent's lease is requeued **even when its shell pane still
+  exists**. The pane id remains the registry key; the name is only a label, so
+  two panes cannot claim one task through a stale name / reused pid.
 
 ## Sidebar poll
 
@@ -224,8 +223,6 @@ disables the external read (tests do).
 
 ## Not done / next
 
-* Carry `caller_pid`/`caller_start` on task leases and use `/proc` liveness;
-  name is a label only.
 * Switch a live DS daemon to tmux for real lanes; only then consider demoting
   herdr (the VP-pane refusal is already proven by the decision + decoy tests).
 * Add live tmux lanes (the herdr lanes remain the production fleet).
