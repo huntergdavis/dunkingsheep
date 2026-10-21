@@ -479,6 +479,17 @@ def guide(markdown=False):
       "only recall path (the legacy index is retired; see\n"
       "docs/MEMORY_MIGRATION.md).\n")
 
+    w(h(2, "Real provider usage"))
+    w("`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json\n"
+      "(sample: packaging/usage.example.json), which maps each provider to a\n"
+      "command line, timeout and parse spec. The command prints canonical JSON;\n"
+      "a failure or unavailable endpoint is UNKNOWN with the command's stderr,\n"
+      "never a cached percentage. Claude: five-hour and weekly percent USED from\n"
+      "the live OAuth usage endpoint. Codex: weekly percent USED from the latest\n"
+      "rollout snapshot; older than max_age_s is UNKNOWN (no live endpoint).\n"
+      "Pi: local session cost/tokens, not the OpenCode Go plan quota. OpenCode Go:\n"
+      "`opencode stats` is local token/cost; no documented account usage endpoint,\n"
+      "so the plan is UNKNOWN.\n")
     w(h(2, "Recovery after a herdr upgrade"))
     w("An upgrade can restore every pane as a bare shell and lose the agent roster. "
       "`dunkingsheep doctor` is the read-only check: herdr version, pane detection, "

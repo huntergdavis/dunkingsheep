@@ -1,4 +1,4 @@
-# Dunking Sheep 2.23.0 guide
+# Dunking Sheep 2.24.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -519,6 +519,19 @@ memory_status; memory_ingest is superuser-only. `memory_stats` reports
 p50/p95/p99, DB bytes and queue depth. The legacy index is retired:
 only recall path (the legacy index is retired; see
 docs/MEMORY_MIGRATION.md).
+
+## Real provider usage
+
+`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json
+(sample: packaging/usage.example.json), which maps each provider to a
+command line, timeout and parse spec. The command prints canonical JSON;
+a failure or unavailable endpoint is UNKNOWN with the command's stderr,
+never a cached percentage. Claude: five-hour and weekly percent USED from
+the live OAuth usage endpoint. Codex: weekly percent USED from the latest
+rollout snapshot; older than max_age_s is UNKNOWN (no live endpoint).
+Pi: local session cost/tokens, not the OpenCode Go plan quota. OpenCode Go:
+`opencode stats` is local token/cost; no documented account usage endpoint,
+so the plan is UNKNOWN.
 
 ## Recovery after a herdr upgrade
 

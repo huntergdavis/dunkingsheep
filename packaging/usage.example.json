@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "providers": {
+    "claude": {
+      "command": "python3 /home/hunter/workspace/dunkingsheep/tools/usage_providers.py claude",
+      "timeout_s": 30,
+      "max_age_s": 120,
+      "parse": {"windows": "windows", "meaning": "meaning", "measured_at": "measured_at"}
+    },
+    "codex": {
+      "command": "python3 /home/hunter/workspace/dunkingsheep/tools/usage_providers.py codex",
+      "timeout_s": 180,
+      "max_age_s": 3600,
+      "parse": {"windows": "windows", "meaning": "meaning", "measured_at": "measured_at"}
+    },
+    "pi": {
+      "command": "python3 /home/hunter/workspace/dunkingsheep/tools/usage_providers.py pi",
+      "timeout_s": 120,
+      "max_age_s": 3600,
+      "parse": {"meaning": "meaning", "measured_at": "measured_at",
+                "session_cost_usd": "session_cost_usd"}
+    },
+    "opencode-go": {
+      "command": "python3 /home/hunter/workspace/dunkingsheep/tools/usage_providers.py opencode",
+      "timeout_s": 60,
+      "max_age_s": 300,
+      "parse": {"meaning": "meaning", "measured_at": "measured_at", "reason": "reason"}
+    }
+  }
+}

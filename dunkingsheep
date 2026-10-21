@@ -415,6 +415,14 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--now", type=float, default=None)
 
+    p = sub.add_parser("usage",
+                       help="real provider usage from configurable commands")
+    p.add_argument("provider", nargs="?")
+    p.add_argument("--config", default="~/.config/dunkingsheep/usage.json",
+                   help="usage config mapping providers to commands")
+    p.add_argument("--max-age", type=float, default=None,
+                   help="provider snapshot max age in seconds")
+
     p = sub.add_parser("recover",
                        help="post-upgrade recovery plan; --apply types into bare shells")
     p.add_argument("--apply", action="store_true",
@@ -1264,6 +1272,17 @@ def main(argv=None):
         print(json.dumps(report, indent=2, sort_keys=True, default=str) if args.json
               else dunk_watchdog.render_text(report))
         return 1 if report["delivery_error"] else 0
+    if command == "usage":
+        import dunk_usage
+        try:
+            config = dunk_usage.load_config(os.path.expanduser(args.config))
+            results = dunk_usage.run(config, only=args.provider, max_age=args.max_age)
+        except dunk_usage.UsageError as error:
+            print(f"usage: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(results, indent=2, sort_keys=True) if args.json
+              else dunk_usage.render_text(results))
+        return 1 if any(item.get("status") == "error" for item in results) else 0
     if command == "watchdog-deadman":
         # Must not import dunk_watchdog: it has to work when the watchdog is broken.
         import dunk_watchdog_deadman
