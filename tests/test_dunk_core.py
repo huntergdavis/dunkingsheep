@@ -146,6 +146,47 @@ class FlockTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "alive_source|fixture"):
             self.flock.task_reap(self_pane_id="w1:p2")
 
+    def test_claude_busy_holds_and_idle_accepts(self):
+        from dunk_claude import ClaudeStatus
+        class FakeStatus:
+            def __init__(self, status): self.status = status; self.calls = 0
+            def status_for_pane(self, pane, fresh=False):
+                self.calls += 1
+                return self.status
+        self.flock.claude_status = FakeStatus("busy")
+        # w1:p2 is the claude pane in the fixture.
+        busy = self.flock.send_now("w1:p2", "GATE-claude-busy", wait_s=0)
+        self.assertTrue(busy.get("queued"), busy)
+        self.flock.claude_status = FakeStatus("idle")
+        idle = self.flock.send_now("w1:p2", "GATE-claude-idle", wait_s=0)
+        self.assertIn(idle.get("status"), ("queued", "sent"), idle)
+        self.flock.claude_status = FakeStatus(None)
+        unknown = self.flock.send_now("w1:p2", "GATE-claude-unknown", wait_s=0)
+        self.assertIn(unknown.get("status"), ("queued", "sent"), unknown)
+
+    def test_claude_status_maps_by_cwd_and_reports_unknown_honestly(self):
+        from dunk_claude import ClaudeStatus
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            class P:
+                returncode = 0
+                stdout = json.dumps([
+                    {"pid": 1, "cwd": "/work/a", "status": "busy", "name": "a"},
+                    {"pid": 2, "cwd": "/work/b", "status": "idle", "name": "b"},
+                ])
+                stderr = ""
+            return P()
+        with mock.patch("dunk_claude.subprocess.run", side_effect=run):
+            status = ClaudeStatus(ttl=60)
+            self.assertEqual("busy", status.status_for_pane({"cwd": "/work/a"}))
+            self.assertEqual("idle", status.status_for_pane({"cwd": "/work/b"}))
+            self.assertIsNone(status.status_for_pane({"cwd": "/work/unknown"}))
+            self.assertEqual("busy", status.status_for_pane({"cwd": "/work/a"}))
+            self.assertEqual(1, len(calls), "the agents list is cached")
+            status.status_for_pane({"cwd": "/work/a"}, fresh=True)
+            self.assertEqual(2, len(calls), "fresh bypasses the cache")
+
     def test_own_mailbox_is_cached_for_the_poll(self):
         calls = []
         original = self.herdr.list_panes_grouped

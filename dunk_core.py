@@ -58,8 +58,9 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
+from dunk_claude import ClaudeStatus
 
-VERSION = "2.27.3"
+VERSION = "2.27.4"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -436,6 +437,8 @@ class Flock:
         # Per-request caller identity (pane id + stable agent pid/start). The
         # server sets it from SO_PEERCRED; direct callers leave it empty.
         self._caller_state = threading.local()
+        # Claude session status comes from `claude agents --json`, cached.
+        self.claude_status = ClaudeStatus()
         # self pane -> (mailbox key, resolved_at); bounded by MAILBOX_CACHE_S.
         self._own_mailbox_cache = {}
         # pane_id -> {started_at, expires_at, ttl_s, source, caller}
@@ -2984,6 +2987,8 @@ class Flock:
         or the wait is stopped."""
         if self.turn_active(pane_id):
             return False
+        if self._claude_busy(pane_id):
+            return False
         if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
             return False
         if stop_event is not None:
@@ -3207,6 +3212,9 @@ class Flock:
         if self.turn_active(pane_id):
             self._last_block_reason[pane_id] = "working"
             return False
+        if self._claude_busy(pane_id):
+            self._last_block_reason[pane_id] = "working"
+            return False
         screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
                                       source="visible", ansi=True)
         if screen is None:
@@ -3268,6 +3276,23 @@ class Flock:
             except Exception as error:  # noqa: BLE001 - report, never crash a caller
                 return True, False, str(error)
             return True, ok, detail
+
+    def _claude_busy(self, pane_id):
+        """True only when Claude's own session reports status=busy.
+
+        Unknown/unavailable is not busy: the screen/typing detector and the
+        declared-turn TTL remain the fallbacks. This is the tmux gate-2 signal.
+        """
+        try:
+            pane = self.herdr.get_pane(pane_id)
+        except Exception:  # noqa: BLE001 - never break a send on a status probe
+            return False
+        if not pane or str(pane.get("agent") or "").lower() != "claude":
+            return False
+        try:
+            return self.claude_status.status_for_pane(pane) == "busy"
+        except Exception:  # noqa: BLE001
+            return False
 
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right

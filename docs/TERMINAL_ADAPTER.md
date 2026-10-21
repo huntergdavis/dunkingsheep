@@ -306,6 +306,15 @@ The missing step is the owner signing in once in a pi session; after that a pi
 lane can select an Anthropic/Claude model with `--provider anthropic --model
 ...`. This is not a code change.
 
+**Claude status signal (closes tmux gate 2):** `claude agents --json` returns
+one object per live session with pid/cwd/kind/startedAt/sessionId/name and
+**status: idle|busy**. `dunk_claude.ClaudeStatus` maps a pane to its session by
+cwd and caches the list for 20 s (`fresh=True` bypasses). The hold refuses to
+type into a busy claude session and accepts an idle one; an UNKNOWN status (no
+match, command unavailable) falls back to the screen/typing detector and the
+declared-turn TTL, never a guess. Live proof: busy `wW:p2` → queued/holds=1;
+idle `wW:p1` → sent. This is the signal tmux lacks, from the tool itself.
+
 **Implemented after this pricing (2.27.0):**
 
 * **pi — DONE.** The `dunkingsheep` extension emits `agent_start` /
