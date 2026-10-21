@@ -2,8 +2,9 @@
 
 Status: 2.25.0. The tmux backend is implemented and live-tested behind the seam.
 **herdr remains the default.** Nothing about herdr is removed until the tmux
-close guard (below) has been demonstrated on real lanes with the VP's own pane
-as the test subject — that is the 2026-10-18 lesson and it is not negotiable.
+close guard (below) has been demonstrated with the VP's own pane as the subject
+— by policy evaluation plus a same-level decoy, not a live kill (the VP's
+ruling). That is the 2026-10-18 lesson and it is not negotiable.
 
 ## Why a seam
 
@@ -56,9 +57,15 @@ existing tests and the herdr path are unchanged.
 | agent status / session | exact | **unknown / none** (no API) |
 | close guard | wrapper + daemon | backend registry + wrapper + daemon |
 
-The tmux backend does not pretend to know working/idle: `agent_status` is
-`"unknown"` and `agent_session` is `None`. Policies that need exact status
-degrade rather than guess.
+### Status is our data, not the terminal's
+
+tmux has no agent-status/session API. That is a design position, not a gap to
+be guessed around: working/idle/blocked and session identity are **our** data,
+maintained by the daemon (the store, the lease, the recorded launch), not the
+terminal tool's opinion. The backend reports only what it can observe (the
+foreground command and pane title) and says `unknown` otherwise. Policy never
+treats `unknown` as `idle`; the backend is never asked to invent a status it
+does not have.
 
 ### Grammar that now lives in the backend
 
@@ -111,7 +118,31 @@ directory first on the PATH of the agent panes it starts (both `-e PATH=` and a
 command). The user's own shell keeps the real tmux. The guard's real binary is
 beside it as `tmux-real`.
 
-Live tests (`tests/test_dunk_tmux_guard.py`) start a real tmux server on a
+The guard's decision is a **pure function**,
+`close_decision(kind, target, *, panes, protected, managed, caller_pane)`. It
+answers "would this close be allowed?" without touching tmux or the daemon, so
+it can be evaluated with the VP's real pane id. `main()` calls it before
+`route_close()`; the daemon then applies its own superuser/self/registry checks
+as defence in depth.
+
+### The VP pane: policy evaluation + same-level decoy, never a live kill
+
+The VP ruled against a live kill of their pane: the failure mode of that test
+is the 2026-10-18 incident itself, and a test whose failure costs the thing it
+protects is a gamble, not a test. Protection is proven two other ways:
+
+1. **Decision-level test with the real VP id.** The test loads the live
+   `superusers.json`, whose `panes` contains `w9:pH`, and asserts
+   `close_decision` refuses the pane, its workspace `w9`, and its tab
+   `w9:t9` — no tmux command is issued.
+2. **Live decoy at the same protection level.** A throwaway pane is put in a
+   temporary superuser state and registry; the real guard is invoked with the
+   private tmux socket; the kill is refused and the decoy survives. The
+   positive control kills a managed, non-protected decoy for real, proving the
+   close path works and the refusal above is a policy decision, not a broken
+   close.
+
+Live tests (`tests/test_dunk_tmux_guard.py`) also start a real tmux server on a
 private socket, start an agent whose PATH has the guard, and have that agent run
 `tmux kill-server`, `tmux kill-pane -t $TMUX_PANE`, and `tmux send-keys`. All
 three are refused; the server and pane survive.
@@ -152,6 +183,12 @@ dunks + unread messages (read-only; does not mark read)
 (`~/.pi/agent/extensions/dunkingsheep.ts`) calls it and keeps the full CLI only
 as a fallback before it is installed. `dunkingsheep poll` is the human view.
 
+The remaining ~2.4 s is **not** the inbox query: `messages_by_mailbox
+(mailbox, state, created_at)` is a covering index, and the count plus attachment
+count are 0.1-0.3 ms. It is `resolve_mailbox` asking herdr for the pane list to
+map the self pane to its mailbox label. The next step is caching that mapping
+for the poll (t34), not adding an index.
+
 ## Provider usage
 
 `dunkingsheep --json usage` is the machine interface. The VP ops dashboard
@@ -165,10 +202,11 @@ disables the external read (tests do).
    `--json usage`); the watchdog itself is not a usage rule because usage is not
    a health failure.
 2. tmux adapter behind the seam, herdr kept — done and live-tested.
-3. Close protection demonstrated on real lanes with the VP's pane as the test
-   subject — the guard and backend are implemented and live-tested against an
-   isolated server; the *VP-pane* live demonstration is still to do. Herdr is
-   **not** demoted before it.
+3. Close protection with the VP's own pane as the subject — done by the VP's
+   ruling without a live kill: the real `w9:pH` decision is REFUSED, a
+   same-level live decoy is refused and survives, and a positive-control kill
+   proves the live path. Herdr is still **not** demoted; live tmux lanes and the
+   backend switch remain.
 4. Stdlib-only poll client — done.
 
 ## Environment
@@ -188,8 +226,8 @@ disables the external read (tests do).
 
 * Carry `caller_pid`/`caller_start` on task leases and use `/proc` liveness;
   name is a label only.
-* Switch a live DS daemon to tmux and demonstrate the VP-pane refusal on real
-  lanes; only then consider demoting herdr.
+* Switch a live DS daemon to tmux for real lanes; only then consider demoting
+  herdr (the VP-pane refusal is already proven by the decision + decoy tests).
 * Add live tmux lanes (the herdr lanes remain the production fleet).
 * tmux has no agent-session API, so post-upgrade recovery there relies on the
   recorded argv/launch memory, not `codex resume`/`claude --resume` detection.

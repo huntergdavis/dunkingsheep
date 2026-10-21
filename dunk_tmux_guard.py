@@ -48,6 +48,100 @@ GLOBAL_WITH_ARG = {"-L", "-S", "-f", "-T"}
 GLOBAL_FLAGS = {"-2", "-C", "-D", "-l", "-N", "-q", "-u", "-v", "-V"}
 
 
+class Decision:
+    """A pure close-policy decision: no tmux, no daemon, no side effects."""
+
+    __slots__ = ("allowed", "reason")
+
+    def __init__(self, allowed, reason):
+        self.allowed = bool(allowed)
+        self.reason = reason
+
+    def __repr__(self):
+        return f"Decision(allowed={self.allowed!r}, reason={self.reason!r})"
+
+
+def config_dir():
+    return (os.environ.get("DUNKINGSHEEP_DIR")
+            or os.path.expanduser("~/.config/dunkingsheep"))
+
+
+def load_protected(path=None):
+    """Pane ids the daemon treats as superusers (the VP/owner)."""
+    path = path or os.path.join(config_dir(), "superusers.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    return {str(pane) for pane in (data.get("panes") or [])}
+
+
+def load_managed(path=None):
+    """Pane ids the tmux backend recorded as created by Dunking Sheep."""
+    path = path or os.environ.get("DUNKINGSHEEP_TMUX_REGISTRY") or os.path.join(
+        config_dir(), "tmux-panes.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    return set((data.get("panes") or {}).keys())
+
+
+def tmux_panes(globals_=()):
+    """Read-only pane inventory for the policy inputs (never a mutation)."""
+    try:
+        proc = subprocess.run(
+            [real_tmux(), *globals_, "list-panes", "-a", "-F",
+             "#{pane_id}\t#{session_id}\t#{window_id}"],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    panes = []
+    for line in proc.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 3:
+            panes.append({"pane_id": fields[0], "workspace_id": fields[1],
+                          "tab_id": fields[2]})
+    return panes
+
+
+def _target_panes(kind, target, panes):
+    if kind == "pane":
+        return [pane for pane in panes if pane.get("pane_id") == target]
+    field = "tab_id" if kind == "tab" else "workspace_id"
+    return [pane for pane in panes if pane.get(field) == target]
+
+
+def close_decision(kind, target, *, panes=(), protected=(), managed=(),
+                   caller_pane=None):
+    """Decide a kill-pane/kill-window/kill-session without performing it.
+
+    This is deliberately pure so the decision can be tested with the VP's real
+    pane id: a guard whose decision cannot be evaluated without acting is a
+    guard nobody can test.
+    """
+    target_panes = _target_panes(kind, target, panes)
+    target_ids = [pane.get("pane_id") for pane in target_panes]
+    if any(pane_id in protected for pane_id in target_ids):
+        return Decision(False, "refusing to close a superuser pane/container")
+    if caller_pane:
+        own = next((pane for pane in panes
+                    if pane.get("pane_id") == caller_pane), None)
+        field = {"pane": "pane_id", "tab": "tab_id",
+                 "workspace": "workspace_id"}[kind]
+        if own and own.get(field) == target:
+            return Decision(False, "refusing to close the caller's own "
+                                   f"{kind} ({target})")
+    if not target_panes or any(pane_id not in managed for pane_id in target_ids):
+        return Decision(False, "refusing to close something Dunking Sheep did "
+                               "not create")
+    return Decision(True, "allowed")
+
+
 def is_guard(path):
     try:
         with open(path, "rb") as handle:
@@ -180,6 +274,11 @@ def main(argv):
         target = option_value(rest)
         if not target:
             target = current_target(kind, os.environ.get("TMUX_PANE"), globals_)
+        decision = close_decision(
+            kind, target, panes=tmux_panes(globals_), protected=load_protected(),
+            managed=load_managed(), caller_pane=os.environ.get("TMUX_PANE"))
+        if not decision.allowed:
+            return refuse(command, decision.reason)
         return route_close(kind, target, globals_)
     if command == "kill-server":
         return refuse(command, "killing the tmux server would take every pane "

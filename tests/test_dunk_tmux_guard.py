@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -23,15 +24,62 @@ class GuardClassificationTests(unittest.TestCase):
         self.assertEqual("%2", dunk_tmux_guard.option_value(["-t%2"]))
         self.assertIsNone(dunk_tmux_guard.option_value(["-a"]))
 
-    def test_kill_pane_routes_through_the_daemon(self):
-        with mock.patch.object(dunk_tmux_guard, "route_close",
-                               return_value=0) as route:
+    def test_the_real_vp_pane_and_its_containers_are_refused_by_policy(self):
+        protected = dunk_tmux_guard.load_protected()
+        if "w9:pH" not in protected:
+            self.skipTest("the live superuser state does not contain w9:pH")
+        panes = [{"pane_id": "w9:pH", "workspace_id": "w9", "tab_id": "w9:t9"},
+                 {"pane_id": "w8:p8", "workspace_id": "w8", "tab_id": "w8:t7"}]
+        for kind, target in (("pane", "w9:pH"), ("tab", "w9:t9"),
+                             ("workspace", "w9")):
+            decision = dunk_tmux_guard.close_decision(
+                kind, target, panes=panes, protected=protected, managed=set(),
+                caller_pane="w8:p8")
+            self.assertFalse(decision.allowed, (kind, target))
+            self.assertIn("superuser", decision.reason)
+
+    def test_a_same_level_protected_decoy_is_refused_by_the_same_policy(self):
+        panes = [{"pane_id": "%42", "workspace_id": "$4", "tab_id": "@4"}]
+        decision = dunk_tmux_guard.close_decision(
+            "pane", "%42", panes=panes, protected={"%42"}, managed={"%42"},
+            caller_pane="%1")
+        self.assertFalse(decision.allowed)
+        self.assertIn("superuser", decision.reason)
+
+    def test_kill_pane_routes_through_the_daemon_when_policy_allows(self):
+        with mock.patch.object(dunk_tmux_guard, "tmux_panes",
+                               return_value=[{"pane_id": "%3", "workspace_id": "$1",
+                                              "tab_id": "@1"}]), \
+                mock.patch.object(dunk_tmux_guard, "load_protected",
+                                  return_value=set()), \
+                mock.patch.object(dunk_tmux_guard, "load_managed",
+                                  return_value={"%3"}), \
+                mock.patch.object(dunk_tmux_guard, "route_close",
+                                  return_value=0) as route:
             self.assertEqual(0, dunk_tmux_guard.main(["kill-pane", "-t", "%3"]))
             route.assert_called_once_with("pane", "%3", [])
 
+    def test_kill_pane_is_refused_before_the_daemon_when_policy_says_no(self):
+        with mock.patch.object(dunk_tmux_guard, "tmux_panes",
+                               return_value=[{"pane_id": "%3", "workspace_id": "$1",
+                                              "tab_id": "@1"}]), \
+                mock.patch.object(dunk_tmux_guard, "load_protected",
+                                  return_value={"%3"}), \
+                mock.patch.object(dunk_tmux_guard, "load_managed",
+                                  return_value={"%3"}), \
+                mock.patch.object(dunk_tmux_guard, "route_close") as route:
+            self.assertEqual(2, dunk_tmux_guard.main(["kill-pane", "-t", "%3"]))
+            route.assert_not_called()
+
     def test_kill_window_and_session_map_to_tab_and_workspace(self):
-        with mock.patch.object(dunk_tmux_guard, "route_close",
-                               return_value=0) as route:
+        panes = [{"pane_id": "%1", "workspace_id": "$5", "tab_id": "@4"}]
+        with mock.patch.object(dunk_tmux_guard, "tmux_panes", return_value=panes), \
+                mock.patch.object(dunk_tmux_guard, "load_protected",
+                                  return_value=set()), \
+                mock.patch.object(dunk_tmux_guard, "load_managed",
+                                  return_value={"%1"}), \
+                mock.patch.object(dunk_tmux_guard, "route_close",
+                                  return_value=0) as route:
             dunk_tmux_guard.main(["kill-window", "-t", "@4"])
             dunk_tmux_guard.main(["kill-session", "-t", "$5"])
         self.assertEqual([mock.call("tab", "@4", []),
@@ -41,6 +89,14 @@ class GuardClassificationTests(unittest.TestCase):
     def test_kill_window_without_target_uses_the_current_window(self):
         with mock.patch.object(dunk_tmux_guard, "current_target",
                                return_value="@9") as current, \
+                mock.patch.object(dunk_tmux_guard, "tmux_panes",
+                                  return_value=[{"pane_id": "%1",
+                                                 "workspace_id": "$1",
+                                                 "tab_id": "@9"}]), \
+                mock.patch.object(dunk_tmux_guard, "load_protected",
+                                  return_value=set()), \
+                mock.patch.object(dunk_tmux_guard, "load_managed",
+                                  return_value={"%1"}), \
                 mock.patch.object(dunk_tmux_guard, "route_close",
                                   return_value=0) as route:
             dunk_tmux_guard.main(["kill-window"])
@@ -160,6 +216,11 @@ class LiveGuardTests(unittest.TestCase):
             pass
         self.tmp.cleanup()
 
+    def _workspace(self, label):
+        ok, result = self.backend.create_workspace(label, cwd=self.tmp.name)
+        self.assertTrue(ok, result)
+        return result
+
     def _wait_text(self, pane_id, needle, timeout=8):
         text = ""
         deadline = time.time() + timeout
@@ -169,6 +230,42 @@ class LiveGuardTests(unittest.TestCase):
                 return text
             time.sleep(0.1)
         return text
+
+    def test_live_protected_decoy_is_refused_and_survives(self):
+        # Same protection level as the VP pane (a superuser entry), but a
+        # throwaway: the live guard path is exercised and the pane survives.
+        created = self._workspace("guarded-decoy")
+        decoy = created["root_pane"]["pane_id"]
+        config = os.path.join(self.tmp.name, "protected-config")
+        os.makedirs(config, exist_ok=True)
+        with open(os.path.join(config, "superusers.json"), "w", encoding="utf-8") as handle:
+            json.dump({"panes": [decoy], "names": ["decoy"]}, handle)
+        registry = {
+            "panes": {decoy: {"at": 1, "agent": "decoy"}},
+            "tabs": {created["tab"]["tab_id"]: {"at": 1}},
+            "workspaces": {created["workspace"]["workspace_id"]: {"at": 1}},
+        }
+        with open(os.path.join(config, "tmux-panes.json"), "w", encoding="utf-8") as handle:
+            json.dump(registry, handle)
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DIR": config}):
+            code = dunk_tmux_guard.main(
+                ["-L", self.socket, "kill-pane", "-t", decoy])
+        self.assertEqual(2, code)
+        self.assertIsNotNone(self.backend.get_pane(decoy))
+
+    def test_live_managed_decoy_is_actually_killed(self):
+        # Positive control: the same live close path does kill a managed,
+        # non-protected throwaway, so the refusal above is a policy decision,
+        # not a broken close.
+        created = self._workspace("close-positive")
+        panes = [created["root_pane"]["pane_id"]]
+        ok, tabbed = self.backend.create_tab(
+            workspace_id=created["workspace"]["workspace_id"], label="victim")
+        self.assertTrue(ok, tabbed)
+        victim = tabbed["root_pane"]["pane_id"]
+        self.assertTrue(self.backend.close("pane", victim)[0])
+        self.assertIsNone(self.backend.get_pane(victim))
+        self.assertIsNotNone(self.backend.get_pane(panes[0]))
 
     def test_agent_cannot_kill_its_pane_or_server_through_raw_tmux(self):
         ok, created = self.backend.create_workspace("guarded", cwd=self.tmp.name)
