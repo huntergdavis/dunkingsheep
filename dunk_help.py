@@ -554,6 +554,32 @@ def guide(markdown=False):
       "separate database from the inbox, so it can be pruned or deleted without\n"
       "touching mail anyone is waiting to read.\n")
 
+    w(h(2, "Exception watchdog (no model)"))
+    w("The watchdog turns the VP's polling into deterministic alerts: fixed rules\n"
+      "over the stores above (blocked tasks, stale or reaped leases, dunk skip loops\n"
+      "and overdue sends, undeliverable and unread mail, ambiguous senders, idle\n"
+      "lanes holding work, host load, /tmp and disk, stale heavy-job slots,\n"
+      "credential-shaped text, health). It reads them read-only and sends one digest\n"
+      "per run to the VP inbox as sender `watchdog`. No model is ever consulted. It\n"
+      "alerts; it is not a dashboard.\n")
+    w(code("dunkingsheep watchdog --dry-run [--json]      # what would fire; sends and writes nothing\n"
+           "dunkingsheep watchdog --replay --from T --step 60   # tune thresholds on history\n"
+           "dunkingsheep watchdog                        # live, only if the config allows it\n"
+           "dunkingsheep watchdog-deadman --cadence-minutes 10 --cooldown-minutes 60 --to \"vp of agentry\""))
+    w("- Config: ~/.config/dunkingsheep/watchdog.json (sample in\n"
+      "  packaging/watchdog.example.json). Every key is required; a missing or\n"
+      "  invalid file refuses to start with a named error (exit 2). Live alerts need\n"
+      "  enabled=true AND dry_run=false; --now is refused on a live run.\n"
+      "- Owner paging (security, outage and money only) ships disabled. A page needs\n"
+      "  its hold, is capped at 3 per rolling hour, and counts as delivered only when\n"
+      "  the Telegram bridge confirms it.\n"
+      "- The dead-man is a separate unit that never reads the watchdog. It alerts VP\n"
+      "  when the heartbeat goes stale. If the daemon is provably down, it writes the\n"
+      "  alert row straight into inbox.db; it never does so around a slow daemon.\n"
+      "  A missing socket counts as down only when --socket is set and sits in the\n"
+      "  expected directory; otherwise it is config_bad (status file, exit 2, no row).\n"
+      "- Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.\n")
+
     w(h(2, "The herdr guard: agents that shell out"))
     w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"
       "<pane> \"...\"` types straight into a terminal with no idea anyone is writing\n"

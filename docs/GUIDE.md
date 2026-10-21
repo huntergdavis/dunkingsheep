@@ -1,4 +1,4 @@
-# Dunking Sheep 2.22.0 guide
+# Dunking Sheep 2.23.0 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -605,6 +605,37 @@ run from each schedule's creation and are not a rate.
 Events are kept for thirty days and pruned on daemon start. The store is a
 separate database from the inbox, so it can be pruned or deleted without
 touching mail anyone is waiting to read.
+
+## Exception watchdog (no model)
+
+The watchdog turns the VP's polling into deterministic alerts: fixed rules
+over the stores above (blocked tasks, stale or reaped leases, dunk skip loops
+and overdue sends, undeliverable and unread mail, ambiguous senders, idle
+lanes holding work, host load, /tmp and disk, stale heavy-job slots,
+credential-shaped text, health). It reads them read-only and sends one digest
+per run to the VP inbox as sender `watchdog`. No model is ever consulted. It
+alerts; it is not a dashboard.
+
+```
+dunkingsheep watchdog --dry-run [--json]      # what would fire; sends and writes nothing
+dunkingsheep watchdog --replay --from T --step 60   # tune thresholds on history
+dunkingsheep watchdog                        # live, only if the config allows it
+dunkingsheep watchdog-deadman --cadence-minutes 10 --cooldown-minutes 60 --to "vp of agentry"
+```
+
+- Config: ~/.config/dunkingsheep/watchdog.json (sample in
+  packaging/watchdog.example.json). Every key is required; a missing or
+  invalid file refuses to start with a named error (exit 2). Live alerts need
+  enabled=true AND dry_run=false; --now is refused on a live run.
+- Owner paging (security, outage and money only) ships disabled. A page needs
+  its hold, is capped at 3 per rolling hour, and counts as delivered only when
+  the Telegram bridge confirms it.
+- The dead-man is a separate unit that never reads the watchdog. It alerts VP
+  when the heartbeat goes stale. If the daemon is provably down, it writes the
+  alert row straight into inbox.db; it never does so around a slow daemon.
+  A missing socket counts as down only when --socket is set and sits in the
+  expected directory; otherwise it is config_bad (status file, exit 2, no row).
+- Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.
 
 ## The herdr guard: agents that shell out
 
