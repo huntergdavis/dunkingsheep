@@ -259,13 +259,33 @@ turn. The fallback for `review`/`compact` turns is: hold until
 `turn/completed`, then `turn/start`. The app-server is **experimental** — a
 stability risk, not nonexistence. **Herdr remains required for codex** until the
 steer path is accepted by the running daemon on a real busy lane; the schema
-alone is not proof. The daemon (0.163.0) is live at
-`~/.codex/app-server-control/app-server-control.sock`; the protocol handshake is
-still being worked out.
+alone is not proof.
+
+**The handshake facts (from live probing):** the app-server daemon is a
+**different version than the CLI** — CLI 0.162.1, managed app-server 0.163.0 at
+`~/.codex/packages/app-server-daemon/current/bin/codex`, socket
+`~/.codex/app-server-control/app-server-control.sock`. A direct unauthenticated
+connect succeeds, sends no greeting, and **closes on `initialize`** (a
+reject-and-close, not a dead socket). Framing, `clientInfo` and `capabilities`
+were ruled out. The supported gate is **pairing**:
+`codex remote-control start` (enable remote control), then
+`codex remote-control pair --json` for a short-lived manual pairing code. A bare
+`pair` fails with `remote control pairing requires remote control to be
+enabled`. Authenticate/pair before expecting `initialize` to be accepted.
 
 **Pi: YES today, cheapest.** The pi extension already receives
 `agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
 external hook trust. Same TTL/reconciliation rule for a crashed turn.
+
+**Pi with a Claude subscription: possible, needs the owner's `/login anthropic`.**
+`pi auth check --provider anthropic` = `not_ready` means **no credential is
+stored**, not that pi cannot do it. pi's own providers docs: `/login [provider]`
+shows the provider's supported methods (including OAuth browser/device flows),
+credentials land in `auth.json`, and Anthropic also accepts
+`ANTHROPIC_OAUTH_TOKEN` (API credential) and `ANTHROPIC_AUTH_TOKEN` (bearer).
+The missing step is the owner signing in once in a pi session; after that a pi
+lane can select an Anthropic/Claude model with `--provider anthropic --model
+...`. This is not a code change.
 
 **Implemented after this pricing (2.27.0):**
 
