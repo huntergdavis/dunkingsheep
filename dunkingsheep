@@ -1555,6 +1555,10 @@ def run_client_command(client, args):
         if sub == "delete":
             return client.call("task_delete", id=args.id), \
                 lambda r: print(f"deleted {r['deleted']}")
+        if sub == "note":
+            return client.call("task_note", id=args.id, event=args.event,
+                               reason=args.reason), \
+                lambda r: print(f"noted {r['noted']}: {r['event']}")
         if sub == "next":
             return client.call("task_next", scope=args.scope,
                                lease_seconds=args.lease), print_task_next
