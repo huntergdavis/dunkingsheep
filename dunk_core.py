@@ -652,6 +652,29 @@ class Flock:
             "message": self.last_message,
         }
 
+    def poll_status(self):
+        """The cheap half of status: counts only, no global inbox/task scans.
+
+        The sidebar poll must not pay for `inbox.stats()` and `tasks.stats()`
+        (they scan the whole stores); those are for the human `status` command.
+        """
+        with self._lock:
+            running = sum(1 for d in self.dunkers if d.running)
+            total = len(self.dunkers)
+            queued = sum(len(queue) for queue in self.outbox.values())
+            message = self.last_message
+        return {
+            "version": VERSION,
+            "pid": os.getpid(),
+            "dunkers": total,
+            "running": running,
+            "queued_messages": queued,
+            "message": message,
+            "herdr_available": None,
+            "herdr_hint": None,
+            "uptime_s": int(time.time() - self.started_at),
+        }
+
     def summary(self):
         with self._lock:
             n = len(self.dunkers)

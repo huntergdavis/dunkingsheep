@@ -162,7 +162,7 @@ def h_poll(flock, args, self_pane_id):
     needs them. A missing self pane is reported in `error`, not raised, so the
     status/dunks half still renders.
     """
-    status = flock.status(check_herdr=_bool(args.get("check_herdr"), False))
+    status = flock.poll_status()
     status["self_pane_id"] = self_pane_id
     result = {"status": status}
     try:
