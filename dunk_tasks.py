@@ -534,6 +534,15 @@ class Tasks:
                 raise
         return {"deleted": task_id}
 
+    def note(self, task_id, event="note", actor=None, meta=None):
+        """Append a history event without changing the task row (or needing it)."""
+        with self._lock:
+            self._record(str(task_id), event, at=_now(), actor=actor,
+                         meta=meta or {})
+            self.db.commit()
+        return {"noted": str(task_id), "event": event, "actor": actor,
+                "meta": meta or {}}
+
     # -- reading ------------------------------------------------------------
 
     def get(self, task_id, pane_id=None):
@@ -797,7 +806,8 @@ class Tasks:
                 raise
         return self.get(task_id)
 
-    def reap(self, alive_panes=None, caller_alive=None, now=None):
+    def reap(self, alive_panes=None, caller_alive=None, now=None,
+             alive_source=None):
         """Return expired, dead-pane or dead-caller leases to the queue.
 
         ``alive_panes`` is the set of pane ids the terminal backend currently
@@ -810,6 +820,10 @@ class Tasks:
         rather than dead. A task with another live claimant stays in progress
         for that claimant.
         """
+        if alive_panes is not None and alive_source != "live":
+            raise TaskError(
+                "alive_panes must be tagged alive_source='live'; a fixture "
+                "pane list must never move real work")
         now = _now() if now is None else now
         requeued = []
         with self._lock:

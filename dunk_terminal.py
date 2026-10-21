@@ -52,6 +52,9 @@ class TerminalBackend:
     """
 
     name = "base"
+    # False for test doubles/fixtures; the task reaper refuses a pane list
+    # from a non-live backend, so a fixture cannot move real work.
+    live = False
 
     def capabilities(self):
         return frozenset()
@@ -106,6 +109,7 @@ class HerdrBackend(TerminalBackend):
 
     def __init__(self, client=None):
         self._client = client if client is not None else HerdrClient()
+        self.live = client is None or isinstance(client, HerdrClient)
 
     @property
     def client(self):
@@ -183,6 +187,7 @@ class TmuxBackend(TerminalBackend):
     """
 
     name = "tmux"
+    live = True
     PANE_SEP = "\x1f"
     PANE_FORMAT = PANE_SEP.join([
         "#{pane_id}", "#{session_id}", "#{window_id}", "#{pane_current_path}",

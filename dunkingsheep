@@ -299,6 +299,11 @@ def build_parser():
     q = tsub.add_parser("delete", help="delete a task")
     q.add_argument("id")
 
+    q = tsub.add_parser("note", help="append an event to a task's history")
+    q.add_argument("id")
+    q.add_argument("--event", default="note")
+    q.add_argument("--reason")
+
     q = tsub.add_parser("next", help="atomically claim the next task")
     q.add_argument("scope", nargs="?",
                    help="'global' (default), 'self', 'auto' or a pane id")

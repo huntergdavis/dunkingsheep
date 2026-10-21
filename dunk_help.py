@@ -465,8 +465,10 @@ def guide(markdown=False):
       "returns to the queue even if its shell pane remains. A vanished pane is\n"
       "NOT evidence by itself: only the lease deadline or a dead caller\n"
       "requeues, so a live agent behind a stale pane reading keeps its claim.\n"
-      "The name is only a label. Use `task_reap` to requeue immediately; the\n"
-      "daemon also runs it on a timer.\n")
+      "The name is only a label. The pane list is source-tagged; the reaper\n"
+      "refuses a fixture/untagged list, so a test double cannot move real\n"
+      "work. Use `task_reap` to requeue immediately; the daemon also runs it on\n"
+      "a timer. `task note` appends an explanatory event to the history.\n")
     w(h(2, "Memory and recall"))
     w("A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions\n"
       "in the background through one writer, and answers recall from read-only\n"

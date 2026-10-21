@@ -59,7 +59,7 @@ import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
 
-VERSION = "2.26.1"
+VERSION = "2.26.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1097,6 +1097,12 @@ class Flock:
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         return self.tasks.delete(task_id)
 
+    @_as_dunk_error
+    def task_note(self, task_id, event="note", reason=None, self_pane_id=None):
+        """Append an explanatory event (e.g. why a task was removed)."""
+        return self.tasks.note(task_id, event=event, actor=self_pane_id,
+                               meta={"reason": reason} if reason else {})
+
     def set_caller(self, caller):
         self._caller_state.value = caller
 
@@ -1197,7 +1203,9 @@ class Flock:
             panes = {p["pane_id"] for p in self.herdr.list_panes()}
         except Exception:
             panes = None
+        source = "live" if getattr(self.herdr, "live", False) else "fixture"
         return {"requeued": self.tasks.reap(alive_panes=panes,
+                                            alive_source=source,
                                             caller_alive=process_alive)}
 
     @_as_dunk_error
@@ -1374,7 +1382,10 @@ class Flock:
                 except Exception:  # noqa: BLE001 - maintenance must not die
                     log.exception("inbox undeliverable sweep failed")
             try:
+                source = ("live" if getattr(self.herdr, "live", False)
+                          else "fixture")
                 requeued = self.tasks.reap(alive_panes=panes,
+                                           alive_source=source,
                                            caller_alive=process_alive)
             except Exception:
                 log.exception("task reaper failed")

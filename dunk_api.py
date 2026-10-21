@@ -444,6 +444,12 @@ def h_task_delete(flock, args, self_pane_id):
     return flock.task_delete(args["id"], self_pane_id=self_pane_id)
 
 
+def h_task_note(flock, args, self_pane_id):
+    return flock.task_note(args["id"], event=args.get("event") or "note",
+                           reason=args.get("reason"),
+                           self_pane_id=self_pane_id)
+
+
 def h_task_next(flock, args, self_pane_id):
     return flock.task_next(scope=args.get("scope"),
                            lease_seconds=args.get("lease_seconds"),
@@ -1208,6 +1214,18 @@ COMMANDS = [
         required=["id"],
     ),
     Command(
+        "task_note",
+        "Append an explanatory event to a task's history, including after the "
+        "task row was deleted; the board's history explains its own gaps.",
+        h_task_note,
+        params={"id": TASK_ID_PARAM,
+                "event": {"type": "string",
+                          "description": "Event name (default 'note')."},
+                "reason": {"type": "string",
+                           "description": "Human rationale stored in meta.reason."}},
+        required=["id"],
+    ),
+    Command(
         "task_next",
         "ATOMIC CLAIM: take the highest-priority unblocked task the caller may "
         "work on, assign it to the caller and set it in_progress in one SQLite "
@@ -1616,7 +1634,7 @@ MCP_GROUPS = (
       ("update", "task_update"), ("assign", "task_assign"),
       ("complete", "task_complete"), ("block", "task_block"),
       ("unblock", "task_unblock"), ("cancel", "task_cancel"),
-      ("delete", "task_delete"), ("next", "task_next"),
+      ("delete", "task_delete"), ("note", "task_note"), ("next", "task_next"),
       ("heartbeat", "task_heartbeat"), ("release", "task_release"),
       ("follow", "task_follow"), ("unfollow", "task_unfollow"),
       ("followers", "task_followers"), ("stats", "task_stats"),

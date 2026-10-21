@@ -1,4 +1,4 @@
-# Dunking Sheep 2.26.1 guide
+# Dunking Sheep 2.26.2 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -500,8 +500,10 @@ start time; the reaper checks /proc liveness, so a crashed agent's task
 returns to the queue even if its shell pane remains. A vanished pane is
 NOT evidence by itself: only the lease deadline or a dead caller
 requeues, so a live agent behind a stale pane reading keeps its claim.
-The name is only a label. Use `task_reap` to requeue immediately; the
-daemon also runs it on a timer.
+The name is only a label. The pane list is source-tagged; the reaper
+refuses a fixture/untagged list, so a test double cannot move real
+work. Use `task_reap` to requeue immediately; the daemon also runs it on
+a timer. `task note` appends an explanatory event to the history.
 
 ## Memory and recall
 

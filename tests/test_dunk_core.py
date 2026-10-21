@@ -109,18 +109,11 @@ class FlockTests(unittest.TestCase):
         self.assertEqual(os.getpid(), lease["caller_pid"])
         self.assertEqual("pi", lease["caller_name"])
 
-    def test_task_reap_uses_proc_liveness_when_the_pane_survives(self):
-        self.flock.tasks.add("global", "caller reap test")
-        caller = {"pid": os.getpid(), "start": "not-the-real-start",
-                  "name": "pi"}
-        self.flock.set_caller(caller)
-        try:
-            self.flock.task_next(scope="global", lease_seconds=600,
-                                 self_pane_id="w1:p2")
-        finally:
-            self.flock.clear_caller()
-        result = self.flock.task_reap(self_pane_id="w1:p2")
-        self.assertEqual("caller_dead", result["requeued"][0]["reason"])
+    def test_task_reap_refuses_a_fixture_pane_list(self):
+        # A fixture pane list must fail loudly, never move real work.
+        self.flock.tasks.add("global", "fixture reap")
+        with self.assertRaisesRegex(DunkError, "alive_source|fixture"):
+            self.flock.task_reap(self_pane_id="w1:p2")
 
     def test_poll_batches_status_inbox_and_dunks_without_marking_read(self):
         from dunk_api import h_poll

@@ -165,8 +165,10 @@ time is the liveness check.
   exists**. A vanished pane is **not** evidence on its own: only the lease
   deadline or a dead `/proc` caller requeues, so a live agent behind a lagging
   pane reading keeps its claim, and an unattributable/legacy lease is not
-  guessed dead. The pane id remains the registry key; the name is only a label,
-  so two panes cannot claim one task through a stale name / reused pid.
+  guessed dead. The pane list carries a **source tag** (`live` / `fixture`);
+  the store refuses an untagged or fixture list, so a test double can never
+  move real work. The pane id remains the registry key; the name is only a
+  label, so two panes cannot claim one task through a stale name / reused pid.
 
 ## Sidebar poll
 

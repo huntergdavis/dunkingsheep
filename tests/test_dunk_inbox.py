@@ -518,7 +518,7 @@ class SurfaceParityTests(unittest.TestCase):
             "task_update": "update", "task_assign": "assign",
             "task_complete": "complete", "task_block": "block",
             "task_unblock": "unblock", "task_cancel": "cancel",
-            "task_delete": "delete", "task_next": "next",
+            "task_delete": "delete", "task_note": "note", "task_next": "next",
             "task_heartbeat": "heartbeat", "task_release": "release",
             "task_follow": "follow", "task_unfollow": "unfollow",
             "task_followers": "followers", "task_stats": "stats",

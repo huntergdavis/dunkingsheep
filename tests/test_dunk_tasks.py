@@ -116,10 +116,10 @@ class TaskStoreTests(unittest.TestCase):
     def test_lease_expiry_requeues(self):
         task = self.store.add(GLOBAL, "work")
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
-        self.assertEqual([], self.store.reap(alive_panes={"w1:p1"}))
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w1:p1"}))
         import time
         time.sleep(0.1)
-        requeued = self.store.reap(alive_panes={"w1:p1"})
+        requeued = self.store.reap(alive_source="live", alive_panes={"w1:p1"})
         self.assertEqual([(task["id"], "expired")],
                          [(item["task_id"], item["reason"]) for item in requeued])
         self.assertEqual("open", self.store.get(task["id"])["status"])
@@ -129,20 +129,20 @@ class TaskStoreTests(unittest.TestCase):
         task = self.store.add(GLOBAL, "work")
         # Legacy lease: no caller identity -> unattributable, not dead.
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
-        self.assertEqual([], self.store.reap(alive_panes={"w2:p2"}))
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w2:p2"}))
         # A live agent behind a vanished pane is still a live claim.
         self.store.release(task["id"], "w1:p1")
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
                               caller={"pid": 42, "start": "42", "name": "pi"})
         self.assertEqual([], self.store.reap(
-            alive_panes={"w2:p2"}, caller_alive=lambda pid, start: True))
+            alive_source="live", alive_panes={"w2:p2"}, caller_alive=lambda pid, start: True))
 
     def test_pane_gone_with_a_dead_caller_requeues(self):
         task = self.store.add(GLOBAL, "work")
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
                               caller={"pid": 42, "start": "42", "name": "pi"})
         requeued = self.store.reap(
-            alive_panes={"w2:p2"}, caller_alive=lambda pid, start: False)
+            alive_source="live", alive_panes={"w2:p2"}, caller_alive=lambda pid, start: False)
         self.assertEqual([(task["id"], "caller_dead")],
                          [(item["task_id"], item["reason"]) for item in requeued])
 
@@ -162,7 +162,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(task["id"], two["id"])
         self.assertEqual(["w1:p1", "w2:p2"], two["assignees"])
         # Both leases are live, so neither is reaped.
-        self.assertEqual([], self.store.reap(alive_panes={"w1:p1", "w2:p2"}))
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w1:p1", "w2:p2"}))
 
     def test_claim_requires_a_pane(self):
         self.store.add(GLOBAL, "work")
@@ -245,7 +245,7 @@ class TaskStoreTests(unittest.TestCase):
         self.store.claim_next(GLOBAL, "w2:p2", lease_seconds=300)
         import time as _time
         _time.sleep(0.1)
-        reaped = self.store.reap(alive_panes={"w1:p1", "w2:p2"})
+        reaped = self.store.reap(alive_source="live", alive_panes={"w1:p1", "w2:p2"})
         self.assertEqual([], reaped,
                          "the task was not requeued; another lease lives")
         self.assertEqual(["w2:p2"],
@@ -417,7 +417,7 @@ class CallerLivenessTests(unittest.TestCase):
                               caller={"pid": os.getpid(), "start": "1",
                                       "name": "pi"})
         requeued = self.store.reap(
-            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False)
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False)
         self.assertEqual(1, len(requeued))
         self.assertEqual("caller_dead", requeued[0]["reason"])
         self.assertEqual("open", self.store.get(self.task["id"])["status"])
@@ -428,13 +428,13 @@ class CallerLivenessTests(unittest.TestCase):
                               caller={"pid": os.getpid(), "start": "1",
                                       "name": "pi"})
         self.assertEqual([], self.store.reap(
-            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: True))
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: True))
         self.assertEqual("in_progress", self.store.get(self.task["id"])["status"])
 
     def test_reap_does_not_guess_for_a_legacy_lease_without_a_caller(self):
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600)
         self.assertEqual([], self.store.reap(
-            alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False))
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False))
 
     def test_old_lease_table_is_migrated_in_place(self):
         import sqlite3
