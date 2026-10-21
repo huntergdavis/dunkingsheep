@@ -364,17 +364,28 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertEqual([("host.disk_full", "/:0.98")], self.keys(found))
         self.assertEqual("outage", found[0]["class"])
 
-    def test_heavy_slot_stale_by_age(self):
+    def test_heavy_slot_stale_uses_holder_liveness_not_age(self):
         slots = os.path.join(self.tmp, "slots")
         os.makedirs(os.path.join(slots, "poolrad-heavy.1"))
         os.makedirs(os.path.join(slots, "poolrad-heavy.2"))
+        os.makedirs(os.path.join(slots, "poolrad-heavy.3"))
         os.makedirs(os.path.join(slots, "other"))
-        os.utime(os.path.join(slots, "poolrad-heavy.1"), (NOW - 30 * MIN, NOW - 30 * MIN))
-        os.utime(os.path.join(slots, "poolrad-heavy.2"), (NOW - 29 * MIN, NOW - 29 * MIN))
+        # 1: old but the holder is alive -> a legitimate long job, no finding.
+        with open(os.path.join(slots, "poolrad-heavy.1", "pid"), "w") as h:
+            h.write(str(os.getpid()))
+        os.utime(os.path.join(slots, "poolrad-heavy.1"), (NOW - 60 * MIN, NOW - 60 * MIN))
+        # 2: old and the holder is gone -> stale.
+        with open(os.path.join(slots, "poolrad-heavy.2", "pid"), "w") as h:
+            h.write("99999999")
+        os.utime(os.path.join(slots, "poolrad-heavy.2"), (NOW - 60 * MIN, NOW - 60 * MIN))
+        # 3: legacy slot with no pid, old -> stale.
+        os.utime(os.path.join(slots, "poolrad-heavy.3"), (NOW - 60 * MIN, NOW - 60 * MIN))
         os.utime(os.path.join(slots, "other"), (NOW - 99 * MIN, NOW - 99 * MIN))
         cfg = self.fleet.config(host__heavy_slot_stale={"directory": slots, "prefix": "poolrad-heavy.",
                                                         "max_age_minutes": 30})
-        self.assertEqual([("host.heavy_slot_stale", "poolrad-heavy.1")], self.keys(self.fleet.evaluate(cfg)))
+        self.assertEqual([("host.heavy_slot_stale", "poolrad-heavy.2"),
+                          ("host.heavy_slot_stale", "poolrad-heavy.3")],
+                         self.keys(self.fleet.evaluate(cfg)))
 
     def test_health_failed(self):
         cfg = self.fleet.config(health__failed={"stale_minutes": 30})

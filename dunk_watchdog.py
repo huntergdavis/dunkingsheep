@@ -725,20 +725,55 @@ def rule_host_tmp(inputs, rule):
     return out
 
 
+def _slot_holder_alive(slot):
+    """True if the slot records a live holder pid; None for a legacy slot."""
+    try:
+        with open(os.path.join(slot, "pid"), encoding="utf-8") as handle:
+            raw = handle.read().strip()
+    except OSError:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours
+    return True
+
+
 def rule_host_heavy_slot_stale(inputs, rule):
-    """poolrad-heavy.sh slots are bare mkdir locks with no holder pid, so a dead
-    holder cannot be detected; age is the only signal (the script itself
-    reclaims a slot older than 30 min)."""
+    """A poolrad-heavy slot is stale only when its holder is gone.
+
+    poolrad-heavy.sh records the holder pid in the slot. Age alone is not
+    staleness: a legitimate >30min compile kept its slot and the watchdog woke
+    the VP for a healthy job (t31). Legacy slots with no pid file fall back to
+    the age threshold for one migration.
+    """
     out = []
     directory = rule["directory"]
     for name in sorted(os.listdir(directory)):
         if not name.startswith(rule["prefix"]):
             continue
-        age = inputs.now - os.stat(os.path.join(directory, name)).st_mtime
-        if age >= rule["max_age_minutes"] * 60:
-            out.append(finding("host.heavy_slot_stale", rule, name, f"heavy-job slot {name} is stale",
-                               f"{rule['max_age_minutes']}min", f"{_minutes(age)}min", "slot age",
-                               {"slot": os.path.join(directory, name)}))
+        slot = os.path.join(directory, name)
+        age = inputs.now - os.stat(slot).st_mtime
+        holder = _slot_holder_alive(slot)
+        if holder is True:
+            continue
+        if holder is None and age < rule["max_age_minutes"] * 60:
+            continue
+        detail = ("holder gone" if holder is False else
+                  f"legacy slot, age {_minutes(age)}min")
+        out.append(finding("host.heavy_slot_stale", rule, name,
+                           f"heavy-job slot {name} is stale",
+                           f"holder alive or <{rule['max_age_minutes']}min",
+                           detail, "holder liveness",
+                           {"slot": slot, "holder": holder}))
     return out
 
 
