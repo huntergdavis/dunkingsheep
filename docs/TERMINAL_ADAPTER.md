@@ -243,12 +243,25 @@ missed `Stop` on crash/force-quit leaves the lane marked working forever and the
 hold would hold mail until a lease/max-age or the caller-pid liveness clears it
 — so the turn state must carry a TTL and be reconciled with the pane pid.
 
-**Codex: NO today — a named vendor limit.** Codex 0.162.1's hook surface, as
-installed, exposes only `SessionStart` (`~/.codex/hooks.json`); there is no
-documented turn-boundary hook. It cannot be wired the same way without a Codex
-release that exposes one. **Herdr is required for codex** until that changes —
-a fact about the vendor, not an incomplete adapter. Price if it appears:
-comparable to Claude (~2-4 hours), same missed-Stop TTL problem.
+**Codex: the hooks gap is real; the app-server is a different surface.**
+Codex 0.162.1's hook surface, as installed, exposes only `SessionStart`
+(`~/.codex/hooks.json`) — no turn boundary there. But the installed binary also
+exposes an **experimental app-server** (`codex app-server`, marked
+`[experimental]`): its generated v2 schema contains `turn/steer` with required
+`threadId`, `expectedTurnId`, `input[]` and optional `clientUserMessageId`;
+`turn/start`, `turn/interrupt`, `thread/resume`, `thread/turns/list`;
+`turn/started`/`turn/completed` notifications; and
+`NonSteerableTurnKind` = exactly `["review","compact"]`.
+
+`expectedTurnId` is the safety property: the request **fails** when it does not
+match the currently active turn, so a stale steer cannot interrupt another
+turn. The fallback for `review`/`compact` turns is: hold until
+`turn/completed`, then `turn/start`. The app-server is **experimental** — a
+stability risk, not nonexistence. **Herdr remains required for codex** until the
+steer path is accepted by the running daemon on a real busy lane; the schema
+alone is not proof. The daemon (0.163.0) is live at
+`~/.codex/app-server-control/app-server-control.sock`; the protocol handshake is
+still being worked out.
 
 **Pi: YES today, cheapest.** The pi extension already receives
 `agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
