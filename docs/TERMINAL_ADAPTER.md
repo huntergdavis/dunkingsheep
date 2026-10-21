@@ -218,6 +218,45 @@ disables the external read (tests do).
    and the backend switch are closed as a decision, not deferred.
 4. Stdlib-only poll client — done.
 
+## Daemon environment
+
+The daemon must be started with the **full backend environment**. A client
+auto-start may carry only `DUNKINGSHEEP_DIR` and `DUNKINGSHEEP_SOCKET`; it then
+comes up on the default backend and silently sees the wrong pane set. This is
+exactly what produced the first gate-5 PARTIAL in the t35 trial: the client
+auto-started the trial daemon without `DUNKINGSHEEP_TERMINAL_BACKEND=tmux` /
+`TMUX_SOCKET`, so it listed herdr panes and saw no tmux panes. Start
+`dunkingsheep serve` explicitly with the backend environment, or make the client
+refuse to auto-start when the backend environment is partial.
+
+## Turn wiring price (claude, codex, pi)
+
+The explicit route is the only one that survives the hold's requirements.
+
+**Claude: YES — worth doing.** Claude Code exposes `UserPromptSubmit` (turn
+start), `Stop` / `SubagentStop` (turn end), plus tool hooks; the current settings
+only wire `SessionStart`. A `TurnStart`/`TurnEnd` hook can call a small
+`dunkingsheep turn ...` command with `DUNKINGSHEEP_TMUX_PANE`/`HERDR_PANE_ID`.
+Price: **~2-4 hours** (hook script, a turn-state field on the pane record, the
+two settings entries, and tests with a real claude turn). Failure mode: a
+missed `Stop` on crash/force-quit leaves the lane marked working forever and the
+hold would hold mail until a lease/max-age or the caller-pid liveness clears it
+— so the turn state must carry a TTL and be reconciled with the pane pid.
+
+**Codex: NO today.** Codex 0.162.1's hook surface, as installed, exposes only
+`SessionStart` (`~/.codex/hooks.json`); there is no documented turn-boundary
+hook. It cannot be wired the same way without a Codex release that exposes one.
+Price if it appears: comparable to Claude (~2-4 hours), same missed-Stop TTL
+problem. Until then herdr is required for codex.
+
+**Pi: YES today, cheapest.** The pi extension already receives
+`agent_start`/`agent_end`; emitting turn state is **~1-2 hours** and needs no
+external hook trust. Same TTL/reconciliation rule for a crashed turn.
+
+**Cheapest honest path:** pi first (smallest, fully controlled), then Claude if
+the hold on tmux is worth 2-4 hours; codex stays on herdr until its hook surface
+gains a turn boundary. Do not build screen heuristics.
+
 ## Environment
 
 | variable | meaning |
