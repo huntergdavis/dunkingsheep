@@ -398,3 +398,15 @@ supply the signal for a harness, that harness stays on herdr.
 * Add live tmux lanes (the herdr lanes remain the production fleet).
 * tmux has no agent-session API, so post-upgrade recovery there relies on the
   recorded argv/launch memory, not `codex resume`/`claude --resume` detection.
+
+
+## Read routing (one socket batch, writes strict)
+
+`dunk-poll` returns the **same view** as `dunkingsheep status`, `list` and
+`inbox count`: the status fields are byte-for-byte the CLI status fields
+(verified empty key/value diff), the dunks list is the same list, and the
+inbox count is the same object. It returns **only** those (plus unread messages)
+and is read-only; `--panes`/`--tasks` are explicit extras. Panes and tasks are
+NOT included by default. All writes (inbox read/send/ack, task next/heartbeat/
+complete, send, close, start-agent) stay on the full guarded CLI; the batch is
+never a write bypass. Lanes should poll `dunk-poll`, not spawn the CLI.
