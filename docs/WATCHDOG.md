@@ -248,6 +248,11 @@ imports the watchdog or reads its config.
     so no heartbeat oddity can page the owner at any severity.
   - **Keep the units in step anyway:** the unit's `--cadence-minutes` is the
     floor and the basis of the clamp.
+  - **Known residual (par-a, accepted by the VP as not a blocker):** the
+    recorded cadence is the config's claim, not the timer's measured
+    interval. A config saying 10 with a timer that fires every 60 minutes
+    still raises a false alarm. Catching that would need the dead-man to
+    compare successive mtimes.
 
 ## Sender identity
 
