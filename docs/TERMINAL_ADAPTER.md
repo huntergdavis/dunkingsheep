@@ -191,11 +191,13 @@ dunks + unread messages (read-only; does not mark read)
 (`~/.pi/agent/extensions/dunkingsheep.ts`) calls it and keeps the full CLI only
 as a fallback before it is installed. `dunkingsheep poll` is the human view.
 
-The remaining ~2.4 s is **not** the inbox query: `messages_by_mailbox
+The ~2.4 s was **not** the inbox query: `messages_by_mailbox
 (mailbox, state, created_at)` is a covering index, and the count plus attachment
-count are 0.1-0.3 ms. It is `resolve_mailbox` asking herdr for the pane list to
-map the self pane to its mailbox label. The next step is caching that mapping
-for the poll (t34), not adding an index.
+count are 0.1-0.3 ms. It was `resolve_mailbox` walking the pane list to map the
+self pane to its mailbox label. `_own_mailbox` now caches that mapping for
+`MAILBOX_CACHE_S` (30 s, `DUNKINGSHEEP_MAILBOX_CACHE_S`); explicit targets still
+resolve fresh. Measured poll: **0.31-0.40 s warm** (was 3.6-3.9 s). The cache
+test asserts the second poll adds no pane walk and that the entry expires.
 
 ## Provider usage
 

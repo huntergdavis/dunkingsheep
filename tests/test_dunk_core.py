@@ -146,6 +146,32 @@ class FlockTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "alive_source|fixture"):
             self.flock.task_reap(self_pane_id="w1:p2")
 
+    def test_own_mailbox_is_cached_for_the_poll(self):
+        calls = []
+        original = self.herdr.list_panes_grouped
+        self.herdr.list_panes_grouped = lambda: (calls.append(1), original())[1]
+        first = self.flock.inbox_count(None, self_pane_id="w1:p2")
+        after_first = len(calls)
+        self.assertGreater(after_first, 0)
+        second = self.flock.inbox_count(None, self_pane_id="w1:p2")
+        self.assertEqual(first, second)
+        self.assertEqual(after_first, len(calls),
+                         "the second self poll must add no pane walk")
+        # An explicit target still resolves fresh.
+        self.flock.inbox_count("w2:p1", self_pane_id="w1:p2")
+        self.assertGreater(len(calls), after_first)
+
+    def test_own_mailbox_cache_expires(self):
+        calls = []
+        original = self.herdr.list_panes_grouped
+        self.herdr.list_panes_grouped = lambda: (calls.append(1), original())[1]
+        with mock.patch("dunk_core.MAILBOX_CACHE_S", 0.01):
+            self.flock.inbox_count(None, self_pane_id="w1:p2")
+            before = len(calls)
+            time.sleep(0.02)
+            self.flock.inbox_count(None, self_pane_id="w1:p2")
+        self.assertGreater(len(calls), before)
+
     def test_poll_batches_status_inbox_and_dunks_without_marking_read(self):
         from dunk_api import h_poll
         sent = self.flock.inbox_send("w1:p2", "hello", self_pane_id="w2:p1",

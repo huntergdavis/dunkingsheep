@@ -59,7 +59,7 @@ import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
 
-VERSION = "2.27.1"
+VERSION = "2.27.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -84,6 +84,10 @@ TASK_REAP_S = float(os.environ.get("DUNKINGSHEEP_REAP_S", "15"))
 # turn-end (crash/force-quit) must never hold mail forever: the state expires,
 # the hold releases, and turn.expired is recorded with the reason.
 TURN_TTL_S = float(os.environ.get("DUNKINGSHEEP_TURN_TTL_S", "1800"))
+# The sidebar poll resolves the caller's own mailbox by walking the pane list
+# every time; that walk is the ~2-4 s cost, not the inbox SQL. Cache only the
+# self->mailbox mapping, briefly.
+MAILBOX_CACHE_S = float(os.environ.get("DUNKINGSHEEP_MAILBOX_CACHE_S", "30"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -432,6 +436,8 @@ class Flock:
         # Per-request caller identity (pane id + stable agent pid/start). The
         # server sets it from SO_PEERCRED; direct callers leave it empty.
         self._caller_state = threading.local()
+        # self pane -> (mailbox key, resolved_at); bounded by MAILBOX_CACHE_S.
+        self._own_mailbox_cache = {}
         # pane_id -> {started_at, expires_at, ttl_s, source, caller}
         self.turns = {}
         # One lock per pane, not one for the whole flock. A send holds its
@@ -811,7 +817,18 @@ class Flock:
         return str(key), label, pane["pane_id"]
 
     def _own_mailbox(self, self_pane_id):
+        """The caller's mailbox key, briefly cached.
+
+        Resolving it walks the pane list; on a busy herdr that is 2-4 s per
+        poll, while the inbox query itself is sub-millisecond. Only the
+        self-default is cached; an explicit target still resolves fresh.
+        """
+        now = time.time()
+        cached = self._own_mailbox_cache.get(self_pane_id)
+        if cached and now - cached[1] < MAILBOX_CACHE_S:
+            return cached[0]
         key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+        self._own_mailbox_cache[self_pane_id] = (key, now)
         return key
 
     def _mailbox_or_self(self, spec, self_pane_id):
