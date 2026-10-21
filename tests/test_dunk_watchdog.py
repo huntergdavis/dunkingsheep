@@ -15,6 +15,7 @@ and the VP's tiers (i19817, i19821):
 import ast
 import contextlib
 import copy
+import inspect
 import io
 import json
 import os
@@ -678,6 +679,15 @@ class VpDeliveryTests(WatchdogCase):
             self.assertIn(part, vp[0])
         self.assertIn("SKIPPED rule=money.spend_projection error=no metering source", report["lines"])
 
+    def test_live_watchdog_run_records_its_cadence_in_the_heartbeat(self):
+        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        cfg = self.vp_config(cadence_minutes=15)
+        self.assertEqual(["vp"], self.fleet.run(cfg)[0]["sent"])
+        self.assertEqual({"schema": 1, "cadence_minutes": 15, "at": NOW},
+                         json.loads(read(cfg["heartbeat_path"])))
+        self.assertEqual(NOW, os.stat(cfg["heartbeat_path"]).st_mtime)
+        self.assertEqual((15, None), deadman.recorded_cadence(cfg["heartbeat_path"]))
+
     def test_live_run_sends_one_digest_and_touches_heartbeat(self):
         self.fleet.message("dead", "undeliverable", NOW - HOUR)
         cfg = self.vp_config()
@@ -906,6 +916,102 @@ class DeadManTests(WatchdogCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(2, deadman.main(argparse.Namespace(daemon_path="", **base)))
         self.assertEqual("config_bad", json.loads(read(base["status"]))["cause"])
+
+    # The heartbeat records the watchdog's cadence (VP i19870, i19872, i19874):
+    # limit = multiplier x max(unit, recorded), recorded clamped to 6 x unit.
+
+    def beat_with(self, at, body):
+        path = os.path.join(self.tmp, "heartbeat")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.utime(path, (at, at))
+
+    def quiet_check(self, now, **extra):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            report, sent = self.check(now, **extra)
+        return report, sent, err.getvalue()
+
+    def test_fresh_legacy_empty_heartbeat_uses_the_unit_value_and_stays_silent(self):
+        self.beat_with(NOW - 29 * MIN, "")
+        report, sent, err = self.quiet_check(NOW)
+        self.assertEqual((False, [], "", []), (report["stale"], sent, err, report["notes"]))
+        self.assertEqual((10, None, 30.0), (report["effective_cadence_minutes"], report["recorded_cadence_minutes"],
+                                            report["limit_minutes"]))
+
+    def test_legacy_empty_heartbeat_alerts_with_no_problem_line(self):
+        self.beat_with(NOW - 31 * MIN, "")
+        report, sent, _ = self.quiet_check(NOW)
+        self.assertTrue(report["alerted"])
+        self.assertNotIn("heartbeat " + os.path.join(self.tmp, "heartbeat") + ":", sent[0][2])
+
+    def test_a_longer_recorded_cadence_widens_the_limit(self):
+        self.beat_with(NOW - 31 * MIN, json.dumps({"schema": 1, "cadence_minutes": 15, "at": NOW - 31 * MIN}))
+        report, sent, _ = self.quiet_check(NOW)
+        self.assertEqual((False, [], 45.0), (report["stale"], sent, report["limit_minutes"]),
+                         "a 15-min watchdog against a 10-min unit is not dead at 31 min")
+        self.beat_with(NOW - 46 * MIN, json.dumps({"cadence_minutes": 15}))
+        self.assertTrue(self.quiet_check(NOW)[0]["alerted"])
+
+    def test_a_shorter_recorded_cadence_never_narrows_the_limit(self):
+        self.beat_with(NOW - 29 * MIN, json.dumps({"cadence_minutes": 5}))
+        report, sent, _ = self.quiet_check(NOW)
+        self.assertEqual((False, [], 30.0), (report["stale"], sent, report["limit_minutes"]))
+
+    def test_an_unparseable_heartbeat_uses_the_unit_value_and_names_the_problem(self):
+        for index, body in enumerate(("garbage", "[1]", '{"cadence_minutes": 0}', '{"cadence_minutes": true}',
+                                      '{"cadence_minutes": "15"}')):
+            self.beat_with(NOW - 31 * MIN, body)
+            report, sent, _ = self.quiet_check(NOW, state_path=os.path.join(self.tmp, f"s-{index}.json"))
+            self.assertEqual(30.0, report["limit_minutes"], body)
+            self.assertTrue(report["alerted"], body)
+            self.assertEqual(1, sum(line.startswith("heartbeat ") for line in sent[0][2].splitlines()), body)
+        self.beat_with(NOW - 5 * MIN, "garbage")
+        report, sent, err = self.quiet_check(NOW)
+        self.assertEqual(([], 1), (sent, err.count("not JSON")), "fresh: journal only, never the inbox")
+
+    def test_a_huge_recorded_cadence_is_clamped_to_six_times_the_unit(self):
+        huge = json.dumps({"cadence_minutes": 1440})
+        self.beat_with(NOW - 100 * MIN, huge)
+        report, sent, err = self.quiet_check(NOW)
+        self.assertEqual((False, [], True, 1440, 60, 180.0),
+                         (report["stale"], sent, report["clamped"], report["recorded_cadence_minutes"],
+                          report["effective_cadence_minutes"], report["limit_minutes"]))
+        self.assertIn("clamped to 60 min", err, "fresh and clamped: a journal line, no inbox message")
+        self.beat_with(NOW - 181 * MIN, huge)
+        report, sent, _ = self.quiet_check(NOW)
+        self.assertTrue(report["alerted"], "never more than 6 x late")
+        self.assertIn("clamped to 60 min", sent[0][2])
+
+    def test_cli_fresh_and_clamped_exits_zero_with_json_fields(self):
+        import argparse
+        self.beat_with(NOW - 100 * MIN, json.dumps({"cadence_minutes": 1440}))
+        args = argparse.Namespace(
+            heartbeat=os.path.join(self.tmp, "heartbeat"), cadence_minutes=10, multiplier=3, to="vp of agentry",
+            state=os.path.join(self.tmp, "deadman.json"), cooldown_minutes=60, now=NOW, dry_run=False,
+            error_file=os.path.join(self.tmp, "err"), status=os.path.join(self.tmp, "st.json"),
+            inbox=os.path.join(self.tmp, "inbox.db"), daemon_path=os.path.join(self.tmp, "dunkingsheep.sock"),
+            expected_dir=self.tmp, json=True)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(0, deadman.main(args))
+        report = json.loads(out.getvalue())
+        self.assertEqual((True, 1440, False), (report["clamped"], report["recorded_cadence_minutes"],
+                                               report["alerted"]))
+        self.assertFalse(os.path.exists(args.inbox))
+
+    def test_the_deadman_has_exactly_one_recipient(self):
+        """'Cannot page the owner at any severity' holds because every path,
+        daemon or direct, delivers only to --to."""
+        self.beat_with(NOW - 300 * MIN, json.dumps({"cadence_minutes": 1440}))
+        _, sent, _ = self.quiet_check(NOW, to="vp of agentry")
+        self.assertEqual(["vp of agentry"], [target for target, _, _ in sent])
+        inbox = os.path.join(self.tmp, "inbox.db")
+        self.quiet_check(NOW, to="vp of agentry", send=self.raising(ConnectionRefusedError("refused")),
+                         inbox_path=inbox, state_path=os.path.join(self.tmp, "s2.json"))
+        self.assertEqual({"vp of agentry"}, {row[1] for row in self.inbox_rows(inbox)})
+        params = list(inspect.signature(deadman.check).parameters)
+        self.assertEqual(["to"], [name for name in params if name in ("to", "owner", "cc", "recipients", "page")])
 
     def test_watchdog_dry_run_never_touches_the_heartbeat(self):
         self.beat(NOW - HOUR)

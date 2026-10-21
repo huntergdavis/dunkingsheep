@@ -1192,16 +1192,22 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
             del state["alerts"][key]
     state["last_run"] = now
     save_state(state_path, state)
-    touch(_expand(config["heartbeat_path"]), now)
+    write_heartbeat(_expand(config["heartbeat_path"]), now, config["cadence_minutes"])
     return report
 
 
-def touch(path, now):
+def write_heartbeat(path, now, cadence_minutes):
+    """The heartbeat records the effective cadence, so the dead-man can widen
+    (never narrow) its limit when the two units disagree (VP i19870). Written
+    atomically: the dead-man never sees half a file. Its mtime is still the
+    signal; `at` is informational."""
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
-    with open(path, "a", encoding="utf-8"):
-        pass
-    os.utime(path, (now, now))
+    temp = f"{path}.tmp.{os.getpid()}"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump({"schema": 1, "cadence_minutes": cadence_minutes, "at": now}, handle, sort_keys=True)
+    os.utime(temp, (now, now))
+    os.replace(temp, path)
 
 
 def render_text(report):
