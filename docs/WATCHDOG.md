@@ -224,8 +224,30 @@ imports the watchdog or reads its config.
   missed cycle: the alert is retried on the next run, by which time a dead
   daemon is refusing connections (`daemon_down`). A future change must not
   widen the trigger to include it without a test that proves no duplicate.
-- **Cadence.** The cadence in the dead-man unit is hard-coded deliberately,
-  because the dead-man must not read the watchdog config. Change both together.
+- **Cadence** (VP i19870, i19872, i19874). The dead-man still never reads the
+  watchdog config. Instead, each successful live watchdog run writes its
+  effective cadence into the heartbeat it already touches, atomically:
+  `{"schema": 1, "cadence_minutes": N, "at": T}`. Age is still the file's
+  mtime, so a stale `at` cannot keep the dead-man quiet. The dead-man's limit
+  is `multiplier x max(--cadence-minutes, recorded)`, with `recorded` clamped
+  to 6 x `--cadence-minutes`. A mismatch between the two units can only make
+  the dead-man more tolerant, never raise a false "dead" alarm, and never more
+  than 6x late.
+  - **Empty heartbeat** (the legacy touched file): no recorded cadence. The
+    unit value is used silently.
+  - **Non-empty but unparseable**, or no positive `cadence_minutes`: the unit
+    value is used, plus one line naming the problem.
+  - **Clamped:** one line naming the recorded value and the clamp.
+  - **Where those lines go:** in a stale alert, they are part of the alert
+    body. On a fresh heartbeat there is no alert, so they go to stderr (the
+    journal) and to the `--json` report (`clamped`,
+    `recorded_cadence_minutes`, `effective_cadence_minutes`,
+    `heartbeat_problem`, `notes`). Never to the inbox. Exit 0.
+  - **No owner path:** the dead-man has exactly one recipient, its `--to` VP
+    mailbox, on both the daemon and the direct-write path. A test asserts this,
+    so no heartbeat oddity can page the owner at any severity.
+  - **Keep the units in step anyway:** the unit's `--cadence-minutes` is the
+    floor and the basis of the clamp.
 
 ## Sender identity
 

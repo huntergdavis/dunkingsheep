@@ -7,6 +7,8 @@ heartbeat file the watchdog touches after every successful LIVE run, and its
 parameters come from its own command line (set in its own systemd unit).
 
 If now - mtime(heartbeat) > multiplier * cadence (or the file is missing),
+where cadence = max(--cadence-minutes, the cadence the watchdog recorded in the
+heartbeat), the recorded value clamped to CLAMP_FACTOR x the unit value,
 it sends one `watchdog.deadman` alert to the VP inbox, at most once per
 cooldown, tracked in its own small state file. No model is involved.
 
@@ -36,6 +38,10 @@ import time
 
 RULE_ID = "watchdog.deadman"
 SYSTEM_SENDER = "watchdog"
+# The heartbeat's recorded cadence may widen the limit, but never by more than
+# this factor over the unit value (VP i19872): a mistyped cadence must not make
+# the dead-man a day late.
+CLAMP_FACTOR = 6
 CAUSES = ("daemon_down", "config_bad", "other")
 
 
@@ -88,6 +94,40 @@ def heartbeat_age(path, now):
         return now - os.stat(path).st_mtime
     except FileNotFoundError:
         return None
+
+
+def recorded_cadence(path):
+    """(cadence_minutes or None, problem or None) from the heartbeat body.
+
+    Empty (the legacy touched file) is no recorded cadence and no problem
+    (VP i19872). Anything else that is not {"cadence_minutes": positive number}
+    is a problem, and the unit value is used."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read(4096)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, UnicodeDecodeError) as error:
+        return None, f"unreadable ({type(error).__name__}: {error})"
+    if not text.strip():
+        return None, None
+    try:
+        data = json.loads(text)
+    except ValueError as error:
+        return None, f"not JSON ({error})"
+    value = data.get("cadence_minutes") if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+        return None, f"no positive cadence_minutes (got {value!r})"
+    return value, None
+
+
+def effective_cadence(unit, recorded):
+    """max(unit, recorded), clamped to CLAMP_FACTOR x unit. (minutes, clamped)."""
+    if recorded is None:
+        return unit, False
+    if recorded > CLAMP_FACTOR * unit:
+        return CLAMP_FACTOR * unit, True
+    return max(unit, recorded), False
 
 
 def _load(path):
@@ -143,13 +183,29 @@ def check(heartbeat, cadence_minutes, multiplier, to, state_path, cooldown_minut
     """Return a report; send at most one alert. `send(to, subject, body)`."""
     if cadence_minutes <= 0 or multiplier <= 0 or cooldown_minutes < 0:
         raise ValueError("cadence_minutes and multiplier must be > 0, cooldown_minutes >= 0")
-    limit = multiplier * cadence_minutes * 60
     age = heartbeat_age(heartbeat, now)
+    recorded, problem = recorded_cadence(heartbeat) if age is not None else (None, None)
+    cadence, clamped = effective_cadence(cadence_minutes, recorded)
+    limit = multiplier * cadence * 60
     stale = age is None or age > limit
+    notes = []
+    if problem:
+        notes.append(f"heartbeat {heartbeat}: {problem}; using the unit cadence {cadence_minutes} min.")
+    if clamped:
+        notes.append(f"heartbeat {heartbeat} records cadence {recorded} min, more than {CLAMP_FACTOR} x the unit "
+                     f"cadence {cadence_minutes} min; clamped to {cadence} min. Check the watchdog config "
+                     "and the dead-man unit agree.")
     report = {"rule": RULE_ID, "heartbeat": heartbeat, "age_minutes": None if age is None else round(age / 60, 1),
               "limit_minutes": round(limit / 60, 1), "stale": stale, "alerted": False,
-              "reason": None, "mode": "dry-run" if dry_run else "live"}
+              "reason": None, "mode": "dry-run" if dry_run else "live",
+              "unit_cadence_minutes": cadence_minutes, "recorded_cadence_minutes": recorded,
+              "effective_cadence_minutes": cadence, "clamped": clamped, "heartbeat_problem": problem,
+              "notes": notes}
     if not stale:
+        # Fresh is silent by definition: an oddity goes to the journal and the
+        # JSON report only, never to the inbox (VP i19874).
+        for note in notes:
+            print(f"{RULE_ID}: {note}", file=sys.stderr)
         return report
     state = _load(state_path)
     last = state.get("last_alerted")
@@ -157,7 +213,7 @@ def check(heartbeat, cadence_minutes, multiplier, to, state_path, cooldown_minut
         report["reason"] = "cooldown"
         return report
     what = "is missing (the watchdog has never completed a live run)" if age is None else \
-        f"is {round(age / 60, 1)} min old (limit {round(limit / 60, 1)} min = {multiplier} x cadence)"
+        f"is {round(age / 60, 1)} min old (limit {round(limit / 60, 1)} min = {multiplier} x cadence {cadence} min)"
     config_error = _read_error(error_file) if error_file else None
     report["config_error"] = config_error
     body = (f"[critical] {RULE_ID}: the watchdog heartbeat {heartbeat} {what}. Fleet exceptions are "
@@ -165,6 +221,8 @@ def check(heartbeat, cadence_minutes, multiplier, to, state_path, cooldown_minut
             "dunkingsheep-watchdog.timer` and `dunkingsheep watchdog --dry-run`.")
     if config_error:
         body += f"\nThe watchdog refused to start with this raw config error:\n{config_error}"
+    for note in notes:
+        body += f"\n{note}"
     if dry_run:
         report["reason"] = "would alert (dry run)"
         return report
