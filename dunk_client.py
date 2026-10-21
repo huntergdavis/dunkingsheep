@@ -60,12 +60,14 @@ class DaemonUnavailable(RuntimeError):
 
 
 def _current_pane_id():
-    """The pane this process is actually in, per herdr 0.9.5.
+    """The herdr pane this process is actually in, per herdr 0.9.5.
 
-    A pane restored by an upgrade can carry a stale HERDR_PANE_ID from the
-    pane it was cloned from; `herdr pane current` uses the controlling
-    terminal and is authoritative. Only consulted inside a tty with a pane id
-    set: outside a pane the command reports the focused pane, which is not us.
+    This is an *opt-in verification* (`DUNKINGSHEEP_VERIFY_SELF=1`), not the
+    normal identity path. The normal path trusts the pane id the terminal
+    exports (HERDR_PANE_ID / TMUX_PANE), which costs nothing; asking herdr for
+    `pane current` costs 1-2 s and is only useful after a restore may have
+    cloned a stale env. Only consulted inside a tty with a pane id set:
+    outside a pane the command reports the focused pane, which is not us.
     """
     if not os.environ.get("HERDR_PANE_ID"):
         return None
@@ -86,10 +88,18 @@ def _current_pane_id():
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
+        explicit = self_pane_id is not None
         self.self_pane_id = (
-            self_pane_id if self_pane_id is not None
-            else (_current_pane_id() or os.environ.get("HERDR_PANE_ID"))
+            self_pane_id if explicit
+            else os.environ.get("HERDR_PANE_ID") or os.environ.get("TMUX_PANE")
         )
+        # The terminal already exported our identity. Only pay for a
+        # `pane current` round-trip when asked to verify a possibly-stale env.
+        if not explicit and (
+            self.self_pane_id is None
+            or os.environ.get("DUNKINGSHEEP_VERIFY_SELF") == "1"
+        ):
+            self.self_pane_id = _current_pane_id() or self.self_pane_id
         self.timeout = timeout
         self._next_id = 1
 

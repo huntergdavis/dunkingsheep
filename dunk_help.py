@@ -479,6 +479,32 @@ def guide(markdown=False):
       "only recall path (the legacy index is retired; see\n"
       "docs/MEMORY_MIGRATION.md).\n")
 
+    w(h(2, "Terminal backends: herdr and tmux"))
+    w("Everything above the adapter asks for placements, panes, screen text and\n"
+      "sends; the backend owns the tool's grammar. DUNKINGSHEEP_TERMINAL_BACKEND\n"
+      "selects herdr (default) or tmux. herdr 0.9.5 starts an agent only in an\n"
+      "existing shell pane, so start-agent creates/locates the pane first and\n"
+      "then calls `agent start NAME --kind KIND --pane ID`; the tmux backend\n"
+      "creates a window/split running the command. In tmux a session is a\n"
+      "workspace, a window is a tab, and panes keep tmux's %N ids (also exported\n"
+      "as TMUX_PANE). Tmux has no agent-status API, so that capability is\n"
+      "honestly 'unknown' there.\n")
+    w("The tmux backend refuses to close a pane/window/session Dunking Sheep did\n"
+      "not create. `dunkingsheep guard install-tmux` installs a tmux wrapper that\n"
+      "is put first on PATH only for agent panes the backend starts (never the\n"
+      "user's shell): kill-pane/kill-window/kill-session go through the daemon's\n"
+      "superuser/self policy, kill-server and `-a` are refused, and raw\n"
+      "send-keys/layout mutation is refused with a pointer at the daemon. herdr\n"
+      "stays the default until this guard is demonstrated on live lanes; see\n"
+      "docs/TERMINAL_ADAPTER.md.\n")
+    w(h(2, "Sidebar poll (dunk-poll)"))
+    w("`dunk-poll` is a stdlib-only client: one socket request returns status +\n"
+      "inbox count + unread messages + dunks (optionally panes/tasks). It\n"
+      "replaces three full CLI startups per sidebar poll (the owner's CPU note)\n"
+      "and never asks the terminal for `pane current`; identity comes from\n"
+      "HERDR_PANE_ID/TMUX_PANE. `dunkingsheep poll` is the same batch for a\n"
+      "human, and `dunkingsheep install` writes ~/.local/bin/dunk-poll. The\n"
+      "status half skips the terminal probe unless --check-herdr is given.\n")
     w(h(2, "Real provider usage"))
     w("`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json\n"
       "(sample: packaging/usage.example.json), which maps each provider to a\n"
@@ -489,7 +515,9 @@ def guide(markdown=False):
       "rollout snapshot; older than max_age_s is UNKNOWN (no live endpoint).\n"
       "Pi: local session cost/tokens, not the OpenCode Go plan quota. OpenCode Go:\n"
       "`opencode stats` is local token/cost; no documented account usage endpoint,\n"
-      "so the plan is UNKNOWN.\n")
+      "so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine\n"
+      "interface; the VP ops dashboard stores age-labelled provider_usage\n"
+      "snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).\n")
     w(h(2, "Recovery after a herdr upgrade"))
     w("An upgrade can restore every pane as a bare shell and lose the agent roster. "
       "`dunkingsheep doctor` is the read-only check: herdr version, pane detection, "

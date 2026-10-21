@@ -154,6 +154,39 @@ def h_list_dunks(flock, args, self_pane_id):
     return {"dunks": flock.list()}
 
 
+def h_poll(flock, args, self_pane_id):
+    """One batched read for sidebars: status + inbox + dunks.
+
+    Read-only: it does not mark mail read. `panes`/`tasks` are opt-in because
+    listing panes is the expensive part; the client asks for them only when it
+    needs them. A missing self pane is reported in `error`, not raised, so the
+    status/dunks half still renders.
+    """
+    status = flock.status(check_herdr=_bool(args.get("check_herdr"), False))
+    status["self_pane_id"] = self_pane_id
+    result = {"status": status}
+    try:
+        result["inbox_count"] = flock.inbox_count(
+            args.get("mailbox"), self_pane_id=self_pane_id)
+        listed = flock.inbox_list(
+            args.get("mailbox"), unread_only=True,
+            limit=int(_opt(args, "limit", 5)), self_pane_id=self_pane_id)
+        result["dunks"] = {"dunks": flock.list(),
+                           "mailbox": listed["mailbox"],
+                           "messages": listed["messages"]}
+    except DunkError as error:
+        result["error"] = str(error)
+        result["dunks"] = {"dunks": flock.list(), "messages": []}
+    if _bool(args.get("panes"), False):
+        result["panes"] = h_list_panes(flock, args, self_pane_id)
+    if _bool(args.get("tasks"), False):
+        result["tasks"] = flock.task_list(
+            scope=args.get("task_scope"), assignee=args.get("assignee"),
+            include_done=_bool(args.get("include_done"), False),
+            limit=int(_opt(args, "task_limit", 50)), self_pane_id=self_pane_id)
+    return result
+
+
 def h_get_dunk(flock, args, self_pane_id):
     return flock.get(args["id"])
 
@@ -735,6 +768,33 @@ COMMANDS = [
         "status",
         "Daemon health: version, dunk counts, and whether herdr is reachable.",
         h_status,
+    ),
+    Command(
+        "poll",
+        "One cheap read for sidebars: status + inbox count + unread messages + "
+        "dunks. Read-only (does not mark mail read). panes/tasks are opt-in.",
+        h_poll,
+        params={
+            "mailbox": {"type": "string",
+                        "description": "Mailbox to poll; defaults to the caller's."},
+            "limit": {"type": "integer", "minimum": 1,
+                      "description": "Unread messages to return (default 5)."},
+            "panes": {"type": "boolean",
+                      "description": "Include the pane list (expensive; startup only)."},
+            "tasks": {"type": "boolean",
+                      "description": "Include the caller's task queue."},
+            "task_scope": {"type": "string", "enum": ["global", "self"],
+                           "description": "Task scope when tasks=true."},
+            "assignee": {"type": "string",
+                         "description": "Only tasks assigned to this pane/agent."},
+            "include_done": {"type": "boolean",
+                             "description": "Include completed tasks (default false)."},
+            "task_limit": {"type": "integer", "minimum": 1,
+                           "description": "Maximum tasks (default 50)."},
+            "check_herdr": {"type": "boolean",
+                            "description": "Probe the terminal backend (default false; slow)."},
+        },
+        mcp=False,
     ),
     Command(
         "list_dunks",

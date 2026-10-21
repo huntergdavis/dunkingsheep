@@ -84,6 +84,34 @@ class FlockTests(unittest.TestCase):
 
     # -- CRUD -----------------------------------------------------------------
 
+    def test_status_can_skip_the_terminal_probe_for_the_sidebar(self):
+        with mock.patch.object(self.flock.herdr, "is_available",
+                               return_value=True) as probe:
+            status = self.flock.status(check_herdr=False)
+            probe.assert_not_called()
+        self.assertIsNone(status["herdr_available"])
+        self.assertIsNone(status["herdr_hint"])
+
+    def test_poll_batches_status_inbox_and_dunks_without_marking_read(self):
+        from dunk_api import h_poll
+        sent = self.flock.inbox_send("w1:p2", "hello", self_pane_id="w2:p1",
+                                     notify=False)
+        before = self.flock.inbox_count("w1:p2")["unread"]
+        result = h_poll(self.flock, {"limit": 5}, "w1:p2")
+        self.assertEqual("w1:p2", result["status"]["self_pane_id"])
+        self.assertIsNone(result["status"]["herdr_available"])
+        self.assertEqual(before, result["inbox_count"]["unread"])
+        self.assertEqual(before, self.flock.inbox_count("w1:p2")["unread"])
+        ids = [message["message_id"] for message in result["dunks"]["messages"]]
+        self.assertIn(sent["message_id"], ids)
+        self.assertIn("dunks", result["dunks"])
+
+    def test_poll_reports_a_dead_mailbox_as_an_error_but_still_shows_dunks(self):
+        from dunk_api import h_poll
+        result = h_poll(self.flock, {}, "wZ:p9")
+        self.assertIn("error", result)
+        self.assertIn("dunks", result["dunks"])
+
     def test_add_assigns_ids_and_resolves_target_labels(self):
         dunk = self.flock.add(target="w1:p2", text="go", interval_minutes=5)
         self.assertEqual("d1", dunk["id"])

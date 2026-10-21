@@ -21,6 +21,7 @@ resolving herdr for the daemon itself.
 """
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -31,6 +32,9 @@ CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
 )
 GUARD_DIR = os.path.join(CONFIG_DIR, "bin")
 GUARD_PATH = os.path.join(GUARD_DIR, "herdr")
+TMUX_GUARD_DIR = os.path.join(CONFIG_DIR, "tmux-guard")
+TMUX_WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "dunk_tmux_guard.py")
 BASHRC = os.path.expanduser("~/.bashrc")
 MARKER = "# dunkingsheep herdr guard"
 
@@ -75,14 +79,74 @@ def install_launcher(bin_dir=None):
     with open(target, "w", encoding="utf-8") as handle:
         handle.write(LAUNCHER.format(python=_sys.executable, cli=_cli_path()))
     os.chmod(target, 0o755)
+    # The sidebar poller is deliberately a tiny stdlib script, not the CLI:
+    # three CLI startups per poll were the CPU cost the owner flagged.
+    poll_target = os.path.join(bin_dir, "dunk-poll")
+    with open(poll_target, "w", encoding="utf-8") as handle:
+        handle.write("#!/bin/sh\nexec %s %s \"$@\"\n" % (
+            shlex.quote(_sys.executable), shlex.quote(_poll_path())))
+    os.chmod(poll_target, 0o755)
     on_path = any(os.path.realpath(d) == os.path.realpath(bin_dir)
                   for d in os.environ.get("PATH", "").split(os.pathsep) if d)
-    return {"launcher": target, "runs": _cli_path(), "on_path_here": on_path,
-            "resolves_to": shutil.which("dunkingsheep")}
+    return {"launcher": target, "poll_launcher": poll_target,
+            "runs": _cli_path(), "poll_runs": _poll_path(),
+            "on_path_here": on_path,
+            "resolves_to": shutil.which("dunkingsheep"),
+            "poll_resolves_to": shutil.which("dunk-poll")}
 
 
 def _cli_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "dunkingsheep")
+
+
+def _poll_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools",
+                        "dunk_poll.py")
+
+
+def tmux_status():
+    """What the tmux guard looks like right now."""
+    wrapper = os.path.join(TMUX_GUARD_DIR, "tmux")
+    real = os.path.join(TMUX_GUARD_DIR, "tmux-real")
+    return {
+        "installed": os.path.exists(wrapper),
+        "wrapper": wrapper if os.path.exists(wrapper) else None,
+        "real_tmux": real if os.path.exists(real) else None,
+        "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched",
+    }
+
+
+def install_tmux():
+    """Install the tmux close/typing guard for the agent panes we start.
+
+    Unlike the herdr guard this is deliberately *not* added to ~/.bashrc: it
+    must never wrap the user's own tmux. `TmuxBackend.start_agent` puts this
+    directory first on the agent pane's PATH.
+    """
+    real = shutil.which("tmux")
+    if not real:
+        raise RuntimeError("tmux is not installed; cannot install the tmux guard")
+    os.makedirs(TMUX_GUARD_DIR, exist_ok=True)
+    link = os.path.join(TMUX_GUARD_DIR, "tmux-real")
+    if os.path.lexists(link):
+        os.remove(link)
+    try:
+        os.symlink(real, link)
+    except OSError:
+        shutil.copy2(real, link)
+    with open(TMUX_WRAPPER_PATH, "r", encoding="utf-8") as handle:
+        source = handle.read()
+    source = source.replace(
+        'os.path.expanduser(\n    "~/.local/bin/dunkingsheep")',
+        repr(_cli_path()))
+    target = os.path.join(TMUX_GUARD_DIR, "tmux")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    os.chmod(target, 0o755)
+    return {"ok": True, "wrapper": target, "real_tmux": real,
+            "guard_dir": TMUX_GUARD_DIR,
+            "note": "agent panes started by the tmux backend get this first on "
+                    "PATH; the user's shell is untouched"}
 
 
 def status():
@@ -113,6 +177,7 @@ def status():
             "pane split/rename/focus", "tab create/rename/focus",
             "workspace create/rename/focus", "agent start",
         ],
+        "tmux_guard": tmux_status(),
     }
 
 

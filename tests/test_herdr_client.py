@@ -1,7 +1,11 @@
+import os
+import shutil
+import subprocess
 import unittest
 from unittest import mock
 
 from herdr_client import (
+    AGENT_KINDS,
     HerdrClient,
     SEND_TEXT_CHUNK_CHARS,
     SEND_TEXT_CHUNK_DELAY_S,
@@ -107,6 +111,130 @@ class SendTextAndEnterTests(unittest.TestCase):
         self.assertEqual((False, "second chunk failed"), result)
         self.assertEqual(2, client._run.call_count)
         sleep.assert_called_once_with(SEND_TEXT_CHUNK_DELAY_S)
+
+
+class StartAgentShapeTests(unittest.TestCase):
+    """The grammar `herdr agent start` actually accepts, not the old shape.
+
+    The old client sent --workspace/--tab/--split/--cwd directly to `agent
+    start`; herdr 0.9.5 rejects all of them. These tests pin both halves: the
+    installed help text, and the argv our client sends.
+    """
+
+    @staticmethod
+    def _installed_herdr():
+        for candidate in (shutil.which("herdr-real"),
+                          os.path.expanduser("~/.local/bin/herdr-real")):
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return None
+
+    def test_installed_help_says_kind_and_pane_not_workspace(self):
+        binary = self._installed_herdr()
+        if not binary:
+            self.skipTest("herdr-real is not installed")
+        proc = subprocess.run([binary, "agent", "start", "--help"],
+                              capture_output=True, text=True, timeout=15)
+        help_text = proc.stdout + proc.stderr
+        self.assertEqual(0, proc.returncode, help_text)
+        for flag in ("--kind", "--pane"):
+            self.assertIn(flag, help_text)
+        for flag in ("--workspace", "--tab", "--split", "--cwd"):
+            self.assertNotIn(flag, help_text,
+                             f"installed herdr now accepts {flag}; update start_agent")
+
+    def test_tab_placement_splits_then_calls_agent_start_in_the_new_pane(self):
+        client = HerdrClient(binary="herdr")
+        client.list_panes = lambda: [{"pane_id": "w1:p1", "tab_id": "w1:t1"}]
+        calls = []
+
+        def run(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["pane", "split"]:
+                return True, {"pane": {"pane_id": "w1:p2"}}
+            if args[:2] == ["agent", "start"]:
+                return True, {"agent": {"pane_id": "w1:p2",
+                                         "cwd": "/work"}}
+            return True, {}
+
+        client._run_result = run
+        ok, result = client.start_agent(
+            "writer", ["claude", "--model", "opus"], tab_id="w1:t1",
+            cwd="/work")
+
+        self.assertTrue(ok)
+        self.assertEqual("w1:p2", result["pane_id"])
+        split = next(args for args in calls if args[:2] == ["pane", "split"])
+        self.assertEqual("w1:p1", split[2])
+        self.assertIn("right", split)
+        agent = next(args for args in calls if args[:2] == ["agent", "start"])
+        self.assertEqual(
+            ["agent", "start", "writer", "--kind", "claude", "--pane"],
+            agent[:6])
+        self.assertEqual("w1:p2", agent[6])
+        self.assertIn("--timeout", agent)
+        for flag in ("--workspace", "--tab", "--split", "--cwd"):
+            self.assertNotIn(flag, agent)
+        self.assertEqual(["--model", "opus"], agent[agent.index("--") + 1:])
+        self.assertTrue(any(args[:3] == ["pane", "rename", "w1:p2"]
+                            for args in calls))
+
+    def test_workspace_placement_creates_a_tab_then_starts_there(self):
+        client = HerdrClient(binary="herdr")
+        calls = []
+
+        def run(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["tab", "create"]:
+                return True, {"root_pane": {"pane_id": "w1:p9"}}
+            if args[:2] == ["agent", "start"]:
+                return True, {"agent": {"pane_id": "w1:p9"}}
+            return True, {}
+
+        client._run_result = run
+        ok, result = client.start_agent("helper", ["codex"], workspace_id="w1")
+
+        self.assertTrue(ok)
+        tab = next(args for args in calls if args[:2] == ["tab", "create"])
+        self.assertIn("--workspace", tab)
+        self.assertIn("w1", tab)
+        agent = next(args for args in calls if args[:2] == ["agent", "start"])
+        self.assertEqual("w1:p9", agent[6])
+        self.assertEqual([], agent[agent.index("--") + 1:])
+
+    def test_unknown_kind_is_refused_before_creating_anything(self):
+        client = HerdrClient(binary="herdr")
+        calls = []
+        client._run_result = lambda args, timeout=None: (calls.append(args), (True, {}))[1]
+        ok, message = client.start_agent("x", ["bash", "-lc", "claude"])
+        self.assertFalse(ok)
+        self.assertIn("unsupported agent kind", message)
+        self.assertEqual([], calls)
+
+    def test_agent_start_failure_closes_the_shell_it_created(self):
+        client = HerdrClient(binary="herdr")
+        client.list_panes = lambda: [{"pane_id": "w1:p1", "tab_id": "w1:t1"}]
+        calls = []
+
+        def run(args, timeout=None):
+            calls.append(list(args))
+            if args[:2] == ["pane", "split"]:
+                return True, {"pane": {"pane_id": "w1:p2"}}
+            if args[:2] == ["agent", "start"]:
+                return False, "herdr refused"
+            return True, {}
+
+        client._run_result = run
+        ok, message = client.start_agent("writer", ["claude"], tab_id="w1:t1")
+        self.assertFalse(ok)
+        self.assertEqual("herdr refused", message)
+        self.assertTrue(any(args == ["pane", "close", "w1:p2"] for args in calls))
+
+    def test_every_documented_kind_is_accepted_by_the_client(self):
+        self.assertIn("claude", AGENT_KINDS)
+        self.assertIn("codex", AGENT_KINDS)
+        self.assertIn("pi", AGENT_KINDS)
+        self.assertIn("opencode", AGENT_KINDS)
 
 
 if __name__ == "__main__":

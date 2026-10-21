@@ -383,14 +383,35 @@ class MailboxIdentityTests(unittest.TestCase):
         self.assertEqual("wS:p1",
                          self.flock.inbox.status(sent["message_id"])["sender"])
 
-    def test_client_prefers_herdr_pane_current_over_a_stale_env(self):
+    def test_client_uses_the_exported_pane_id_without_asking_herdr(self):
         from dunk_client import FlockClient
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
+        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"},
+                             clear=False), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("wR:p4", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_client_uses_tmux_pane_when_herdr_is_absent(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}, clear=True), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("%3", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_opt_in_verify_reconciles_a_stale_exported_pane(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(
+                os.environ,
+                {"HERDR_PANE_ID": "wR:p4", "DUNKINGSHEEP_VERIFY_SELF": "1"},
+                clear=False), \
                 mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
             self.assertEqual("wS:p1", FlockClient().self_pane_id)
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
-                mock.patch("dunk_client._current_pane_id", return_value=None):
-            self.assertEqual("wR:p4", FlockClient().self_pane_id)
+
+    def test_no_exported_pane_falls_back_to_detection(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
+            self.assertEqual("wS:p1", FlockClient().self_pane_id)
 
     def test_an_agent_type_naming_several_panes_is_refused(self):
         with self.assertRaisesRegex(DunkError, "ambiguous"):
@@ -508,6 +529,7 @@ class SurfaceParityTests(unittest.TestCase):
             "memory_status": "status", "memory_ingest": "ingest",
             "memory_backfill": "backfill",
             "health": "health", "recover": "recover", "doctor": "doctor",
+            "poll": "poll",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

@@ -25,6 +25,15 @@ SEND_TEXT_CHUNK_DELAY_S = 0.05
 # Cross that window with margin before sending the submit key.
 SEND_TEXT_SETTLE_DELAY_S = 0.2
 
+# The agent kinds `herdr agent start --kind` accepts (0.9.5). The command in a
+# start_agent request is the agent itself; its basename must be one of these.
+AGENT_KINDS = frozenset({
+    "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
+    "omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
+    "amp", "grok", "hermes", "kilo", "qodercli", "qwen", "letta", "maki",
+    "muse",
+})
+
 
 def _text_chunks(text, max_chars=SEND_TEXT_CHUNK_CHARS):
     """Yield non-empty character chunks without splitting a CRLF pair."""
@@ -297,17 +306,68 @@ class HerdrClient:
 
     def start_agent(self, name, argv, workspace_id=None, tab_id=None, split=None,
                     cwd=None, focus=False, env=None):
-        """`herdr agent start`: open a pane running `argv` and register it as
-        agent `name`, so herdr tracks it by that name."""
-        args = ["agent", "start", str(name)]
-        if workspace_id:
-            args += ["--workspace", workspace_id]
+        """Start agent `name` in a new shell pane.
+
+        herdr 0.9.5's grammar is
+
+            herdr agent start <NAME> --kind <KIND> --pane <ID> [OPTIONS] [-- ARG...]
+
+        It starts an agent in an *existing* pane at a shell prompt; it has no
+        `--workspace`, `--tab`, `--split` or `--cwd`. So create/locate the pane
+        first (a split inside `tab_id`, otherwise a new tab in `workspace_id`),
+        then call that exact shape. Keeping this grammar here, below the
+        terminal-adapter seam, is the point of the seam: callers ask for a
+        placement, not for herdr flags.
+        """
+        argv = [str(part) for part in argv]
+        if not argv:
+            return False, "command is required"
+        kind = os.path.basename(argv[0])
+        if kind not in AGENT_KINDS:
+            return False, (
+                f"unsupported agent kind {kind!r}; create the pane and start it "
+                "yourself, or use one of: " + ", ".join(sorted(AGENT_KINDS))
+            )
+
+        pane_id = None
         if tab_id:
-            args += ["--tab", tab_id]
-        if split:
-            args += ["--split", split]
-        args += self._placement(cwd, None, focus, env)
-        return self._run_result(args + ["--", *argv], timeout=20)
+            panes = [pane for pane in self.list_panes()
+                     if pane.get("tab_id") == tab_id]
+            if not panes:
+                return False, f"tab {tab_id} has no pane to split"
+            ok, result = self.split_pane(
+                panes[0]["pane_id"], direction=split or "right", cwd=cwd,
+                focus=focus, env=env)
+            if not ok:
+                return ok, result
+            pane_id = (result.get("pane") or {}).get("pane_id")
+        elif workspace_id:
+            ok, result = self.create_tab(
+                workspace_id=workspace_id, label=name, cwd=cwd, focus=focus,
+                env=env)
+            if not ok:
+                return ok, result
+            pane_id = (result.get("root_pane") or {}).get("pane_id")
+        else:
+            return False, "workspace or tab is required"
+        if not pane_id:
+            return False, "herdr did not return the new pane's id"
+
+        args = ["agent", "start", str(name), "--kind", kind,
+                "--pane", pane_id, "--timeout", "120000", "--", *argv[1:]]
+        ok, result = self._run_result(args, timeout=150)
+        if not ok:
+            # Do not leave the shell we just created behind as an orphan.
+            self.close("pane", pane_id)
+            return ok, result
+        agent = dict((result or {}).get("agent") or {})
+        agent.setdefault("pane_id", pane_id)
+        agent.setdefault("name", str(name))
+        # A unique pane label makes the new agent addressable by name (the
+        # inbox resolves exact labels before agent kinds). Best effort: the
+        # agent is already running even if the rename is refused.
+        self.rename("pane", pane_id, name)
+        return True, {"agent": agent, "argv": argv, "pane_id": pane_id}
 
     def rename(self, kind, target_id, label):
         return self._run_result([kind, "rename", target_id, str(label)])

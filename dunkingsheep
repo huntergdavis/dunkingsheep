@@ -61,6 +61,17 @@ def build_parser():
     sub.required = True
 
     sub.add_parser("status", help="daemon health and counts")
+    p = sub.add_parser("poll", help="one batched read for sidebars: status + inbox + dunks",
+                       description="Read-only batch used by the sidebar poller. "
+                                   "It does not mark mail read; panes/tasks are opt-in.")
+    p.add_argument("--mailbox", help="mailbox to poll (default: the caller's)")
+    p.add_argument("--limit", type=int, default=5, help="unread messages to return (default 5)")
+    p.add_argument("--panes", action="store_true", help="include the pane list (slow; startup only)")
+    p.add_argument("--tasks", action="store_true", help="include the caller's task queue")
+    p.add_argument("--task-scope", choices=["global", "self"], default=None)
+    p.add_argument("--include-done", action="store_true")
+    p.add_argument("--check-herdr", action="store_true",
+                   help="probe the terminal backend (slow; default off)")
     p = sub.add_parser("list", aliases=["ls"], help="list all dunks",
                        description="List every dunk: id, running, live status, target, "
                                    "interval, sends (done/max), idle gate, text.")
@@ -169,7 +180,7 @@ def build_parser():
                                    "daemon instead. Every other herdr command is untouched.",
                        epilog="new shells pick it up; existing panes need a fresh shell")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "install", "uninstall", "check", "shadow", "unshadow"])
+                   choices=["status", "install", "install-tmux", "uninstall", "check", "shadow", "unshadow"])
     p.add_argument("--no-shadow", action="store_true",
                    help="install the PATH wrapper only; do not take herdr's own place "
                         "(agents herdr starts itself will not be covered)")
@@ -1112,6 +1123,23 @@ def print_herdr(result):
         sys.stdout.write(result["text"] if result["text"].endswith("\n") else result["text"] + "\n")
 
 
+def print_poll(result):
+    status = result.get("status") or {}
+    count = result.get("inbox_count") or {}
+    print(f"self {status.get('self_pane_id') or '?'}  v{status.get('version')}  "
+          f"dunks {status.get('running', 0)}/{status.get('dunkers', 0)} running  "
+          f"inbox {count.get('unread', 0)} unread / {count.get('total', 0)}")
+    if result.get("error"):
+        print(f"  note: {result['error']}")
+    for message in (result.get("dunks") or {}).get("messages", [])[:5]:
+        print(f"  #{message.get('message_id')} {message.get('sender')}: "
+              f"{message.get('subject') or '(no subject)'}")
+    for dunk in (result.get("dunks") or {}).get("dunks", [])[:10]:
+        state = "running" if dunk.get("running") else "stopped"
+        print(f"  {dunk.get('id')} {state} every {dunk.get('interval_minutes')}m "
+              f"-> {dunk.get('target_label') or dunk.get('target_pane_id')}")
+
+
 def print_status(result):
     for key in ("version", "pid", "dunkers", "running", "herdr_available",
                 "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
@@ -1216,6 +1244,8 @@ def main(argv=None):
         import dunk_guard
         if args.action == "install":
             result = dunk_guard.install(shadow_binary=not args.no_shadow)
+        elif args.action == "install-tmux":
+            result = dunk_guard.install_tmux()
         else:
             result = getattr(dunk_guard, args.action)()
         if getattr(args, "json", False):
@@ -1362,6 +1392,15 @@ def run_client_command(client, args):
     command = args.command
     if command == "status":
         return client.call("status"), print_status
+    if command == "poll":
+        payload = {"limit": args.limit, "panes": args.panes, "tasks": args.tasks,
+                   "include_done": args.include_done,
+                   "check_herdr": args.check_herdr}
+        if args.mailbox:
+            payload["mailbox"] = args.mailbox
+        if args.task_scope:
+            payload["task_scope"] = args.task_scope
+        return client.call("poll", **payload), print_poll
     if command in ("list", "ls"):
         return client.call("list_dunks"), lambda r: print_dunks(r["dunks"])
     if command == "get":

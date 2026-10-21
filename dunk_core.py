@@ -56,9 +56,9 @@ from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
 from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
-from herdr_client import HerdrClient
+from dunk_terminal import get_backend
 
-VERSION = "2.24.0"
+VERSION = "2.25.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -415,7 +415,7 @@ class Flock:
                  launches_file=LAUNCHES_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
                  superusers=None, memory=None):
-        self.herdr = herdr or HerdrClient()
+        self.herdr = get_backend(herdr)
         self.state_file = state_file
         self.launches_file = launches_file
         # pane_id -> {agent, session, session_kind, cwd, argv, command, source}
@@ -626,18 +626,22 @@ class Flock:
         with self._lock:
             return [d.to_dict() for d in self.dunkers]
 
-    def status(self):
+    def status(self, check_herdr=True):
         with self._lock:
             running = sum(1 for d in self.dunkers if d.running)
             total = len(self.dunkers)
-        available = self.herdr.is_available()
+        # The sidebar poll runs often; asking the terminal backend for
+        # availability spawns a subprocess. `check_herdr=False` keeps that out
+        # of the hot path and leaves the field None (not "down").
+        available = self.herdr.is_available() if check_herdr else None
         return {
             "version": VERSION,
             "pid": os.getpid(),
             "dunkers": total,
             "running": running,
             "herdr_available": available,
-            "herdr_hint": None if available else self.herdr.server_error_hint(),
+            "herdr_hint": (None if available is not False
+                           else self.herdr.server_error_hint()),
             "state_file": self.state_file if self.persist_enabled else None,
             "uptime_s": int(time.time() - self.started_at),
             "queued_messages": sum(len(q) for q in self.outbox.values()),
@@ -2085,6 +2089,11 @@ class Flock:
         ids here, not labels; the typed commands above resolve labels. Returns
         {"ok", "result" (parsed JSON when herdr printed JSON, else None),
         "text" (raw stdout), "error" (herdr's message, if any)}."""
+        if getattr(self.herdr, "name", "herdr") != "herdr":
+            raise DunkError(
+                "the herdr passthrough is not available with the "
+                f"{getattr(self.herdr, 'name', 'unknown')} terminal backend; "
+                "use the dedicated workspace/tab/pane commands instead")
         argv = shlex.split(str(command or "")) if not isinstance(command, list) \
             else [str(a) for a in command]
         if argv and argv[0] == "herdr":
@@ -2139,6 +2148,10 @@ class Flock:
         'wait', 'notification', ...). This is how an agent discovers what the
         `herdr` passthrough can do; `herdr api schema --json` has the full
         machine-readable schema."""
+        if getattr(self.herdr, "name", "herdr") != "herdr":
+            raise DunkError(
+                "herdr help is not available with the "
+                f"{getattr(self.herdr, 'name', 'unknown')} terminal backend")
         topic = str(topic or "").strip().split()
         argv = topic[:1] if topic else ["--help"]
         code, out, err = self.herdr._run(argv, timeout=10)
