@@ -1111,6 +1111,17 @@ class ConfirmedSubmitTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "a long message")], self.herdr.sends)
         self.assertEqual(2, len(self.herdr.keys))
 
+    def test_a_dead_agent_session_is_refused_before_any_enter(self):
+        # wR:p4's codex session died and still showed an editable composer; four
+        # Enter presses reported "did not submit". The pane's own words are the
+        # signal, and this must refuse before pressing anything.
+        self.herdr.screens["w2:p1"] = ("■ Server connection could not be restored\n"
+                                       "• Reconnect failed - check the endpoint, then relaunch")
+        ok, detail = self.flock.submit_text("w2:p1", "a message")
+        self.assertFalse(ok)
+        self.assertIn("agent session is dead", detail)
+        self.assertEqual([], self.herdr.keys)
+
     def test_a_box_that_reads_clear_then_fills_again_is_not_counted_as_sent(self):
         # What stranded a message in the VP pane: the box read empty for an
         # instant mid-redraw, the send was declared done, and the text that

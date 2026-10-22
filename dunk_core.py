@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.33.2"
+VERSION = "2.33.3"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -183,6 +183,16 @@ MODAL_WAIT_S = 30.0
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
+# A pane whose agent session died still shows an editable composer and still
+# accepts typed text; Enter can never submit because there is no server. Pressing
+# Enter four times reports "did not submit", which looks like a dunk problem.
+# These markers are the pane's own words, checked BEFORE any key is pressed.
+DEAD_SESSION_MARKERS = (
+    "server connection could not be restored",
+    "automatic reconnect could not restore this session",
+    "reconnect failed",
+    "session expired",
+)
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -3164,10 +3174,27 @@ class Flock:
             return False
         return _is_our_send(shown, text, True)
 
+    def _dead_session(self, pane_id):
+        """Return the dead-session marker the screen shows, or None."""
+        try:
+            screen = self.herdr.read_pane(pane_id, lines=40, ansi=True)
+        except Exception:  # noqa: BLE001 - an unreadable pane is not this check
+            return None
+        text = (screen or "").lower()
+        for marker in DEAD_SESSION_MARKERS:
+            if marker in text:
+                return marker
+        return None
+
     def _press_until_submitted(self, pane_id, text):
         """Press Enter until `text` has left the input box. Returns
         (ok, detail). Only ever presses again while our own text is still
         there, so it can never submit something a human typed afterwards."""
+        dead = self._dead_session(pane_id)
+        if dead:
+            # One honest refusal naming the pane's own state, instead of four
+            # Enter presses into a dead composer and a misleading "did not submit".
+            return False, f"agent session is dead ({dead}); not submitting into a dead composer"
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
             if gap:
