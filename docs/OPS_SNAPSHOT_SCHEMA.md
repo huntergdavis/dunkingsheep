@@ -26,6 +26,13 @@ Every number carries `as_of`; a number that cannot be computed is `null` with a
     "crackdown":{"status": "ok",       "as_of": "2026-10-21T19:52:10Z"},
     "freemodel":{"status": "nulled",   "as_of": null, "reason": "par-d tally not published yet"}
   },
+  "reply_latency": {
+    "p50_s": 71, "p90_s": 462, "max_s": 2606, "n": 80,
+    "window": "last 80 answered owner messages, ordered by message id desc",
+    "unanswered": 0, "as_of": "2026-10-21T19:52:09Z",
+    "source": "vp-of-agentry/data/messages.sqlite3 (created_at -> answered_at)"
+  },
+  "agents_unattributed": [],
   "agents": [ ... ],
   "types": [ ... ],
   "projects": [ ... ]
@@ -72,10 +79,17 @@ non-null is invalid.
 - `type` is one of `claude`, `codex`, `pi`, `opencode`, `free-model`.
 - `free_model` is `null` for non-free-model agents, and the four cells otherwise
   (all null with a reason until par-d publishes its tally).
-- `merged_prs` attribution: one `gh pr list` call for the window, then the PR
-  list is attributed by **the same rule the board already uses** (title/label
-  agent token, else author). If a PR cannot be attributed it is counted in
-  `agents_unattributed` (below) and *not* guessed onto a pane.
+- `merged_prs` attribution, **approved rule**: branch name first -> a known lane
+  token in the branch (`claude/par-c-0411`, `checker-batch-1`,
+  `hybrid-glue-...`); else a `[lane]` token in the title; else
+  `agents_unattributed`. **Never by author** (one account authors them all).
+  Forward rule: every agent PR carries the lane in the branch from now on - the
+  cheapest convention to keep. `agents_unattributed` is a top-level list of
+  `{number, branch, title, reason}` so an unattributed PR is visible, not lost.
+- `merged_prs` source: **one paginated `gh pr list`** with an explicit window,
+  because the PR list is the thing you can verify by opening it. Keep
+  `operations.sqlite3 pr_latest` as the **fallback**, and the snapshot records
+  `"pr_source": "gh" | "pr_latest"` so a reader knows which was used.
 
 ## Types (one row per agent TYPE, aggregated from agents)
 
@@ -90,6 +104,18 @@ non-null is invalid.
 Aggregation is a sum of the per-agent cells, and a type cell is null (with the
 reason "N agent cells are null") if any member cell is null — a type total that
 silently omits an unreachable agent is a guess.
+
+## Reply latency (how fast the VP answers the owner)
+
+`reply_latency` is the meta statistic from `messages.sqlite3`: for owner
+messages with `answered_at`, the latency is `answered_at - created_at`. The
+snapshot records `{p50_s, p90_s, max_s, n, window, unanswered, as_of, source}`;
+`window` states the exact cut, because 62/596 and 71/462 are both correct for
+different cuts (the VP measured "just now" over a slightly different window).
+The page shows it next to the freshness clock, so an answer getting slower is
+visible before the owner feels it. `unanswered` is the current count of owner
+messages with no link yet; it should be 0 and is the same number the desk's
+badge shows.
 
 ## Projects (one bar per big project)
 
