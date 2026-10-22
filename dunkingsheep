@@ -1359,7 +1359,7 @@ _INBOX_POLLS = ("count", "list", "ls", "stats")
 
 
 def _coalesce(argv):
-    """Return the cache path when this poll command may reuse a recent answer.
+    """Return (cache path, hit) for a poll command; path is None when uncacheable.
 
     Ten lanes polling faster than they can act is pure overhead, but a
     suppressed call must not lose the ANSWER: an interactive caller that asks
@@ -1368,24 +1368,24 @@ def _coalesce(argv):
     bypasses the cache for a caller that needs certainty.
     """
     if os.environ.get("DUNKINGSHEEP_FRESH") == "1":
-        return None
+        return None, False
     try:
         minimum = float(os.environ.get("DUNKINGSHEEP_MIN_POLL_S", "2"))
     except ValueError:
         minimum = 2.0
     if minimum <= 0:
-        return None
+        return None, False
     words = [word for word in argv if not word.startswith("-")]
     if not words:
-        return None
+        return None, False
     if words[0] == "inbox":
         if len(words) < 2 or words[1] not in _INBOX_POLLS:
-            return None
+            return None, False
         key = "inbox-" + words[1]
     elif words[0] in _POLL_COMMANDS:
         key = words[0]
     else:
-        return None
+        return None, False
     path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
     now = time.time()
     try:
@@ -1393,15 +1393,15 @@ def _coalesce(argv):
     except OSError:
         last = 0.0
     if last and now - last < minimum:
-        return path
+        return path, True
     try:
         open(path, "a").close()
         os.utime(path, (now, now))
     except OSError:
-        return None
+        return None, False
     # Return the path even on creation: _run writes the fresh stdout there so
     # the next call inside the interval can replay it instead of a stub.
-    return path
+    return path, False
 
 
 def _run(argv):
@@ -1410,9 +1410,14 @@ def _run(argv):
     A cache hit replays the previous stdout (same fields) and writes a
     {"coalesced": true, "cached": true} marker to stderr; the caller parses the
     same answer it would have parsed fresh.
+
+    Replay happens ONLY on a hit. Replaying whenever a `.out` exists pinned the
+    first answer forever: a 16-hour-old `status` (version 2.28.0, pid long dead)
+    was still being served because the fresh path returned before it could
+    overwrite the file. A cache that cannot expire is a stale answer generator.
     """
-    path = _coalesce(argv)
-    if path:
+    path, hit = _coalesce(argv)
+    if path and hit:
         try:
             with open(path + ".out", encoding="utf-8") as handle:
                 cached = handle.read()

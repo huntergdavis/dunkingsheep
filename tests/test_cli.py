@@ -263,6 +263,33 @@ class CliEndToEndTests(unittest.TestCase):
             try: os.remove(path)
             except OSError: pass
 
+    def test_an_expired_poll_cache_recomputes_instead_of_replaying(self):
+        # The bug this covers: .out was replayed whenever it existed, so the very
+        # first answer for a key was served forever (a 16h-old `status` still
+        # reporting a dead daemon's version and pid). A stale .out past the
+        # interval must be overwritten, never replayed.
+        import os, subprocess, sys
+        base = [sys.executable, CLI, "--json", "inbox", "count"]
+        env = dict(os.environ, DUNKINGSHEEP_MIN_POLL_S="60", DUNKINGSHEEP_FRESH="0")
+        marker = f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count"
+        out = marker + ".out"
+        try:
+            with open(out, "w", encoding="utf-8") as handle:
+                handle.write('{"total": -1, "stale": true}\n')
+            os.utime(marker, (0, 0)) if os.path.exists(marker) else open(marker, "a").close()
+            os.utime(marker, (0, 0))  # an hour-old marker: the cache has expired
+            result = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("cached", result.stderr, "an expired cache must recompute")
+            self.assertNotIn("-1", result.stdout, "the stale answer was replayed")
+            self.assertIn("total", result.stdout)
+            with open(out, encoding="utf-8") as handle:
+                self.assertNotIn("-1", handle.read(), "the cache file was not refreshed")
+        finally:
+            for path in (marker, out):
+                try: os.remove(path)
+                except OSError: pass
+
     def test_commands_listing_and_version(self):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)
