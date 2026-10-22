@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +106,28 @@ class ClearBoxTests(unittest.TestCase):
         self.assertIn("before", result)
         self.assertIn("after", result)
         self.assertEqual("test", result["reason"])
+
+    def test_the_clear_outcome_prints_without_a_label(self):
+        # The live crash: two lanes had no 'target_label', the CLI printer
+        # indexed it, and the one command that unblocks a lane could not run.
+        from importlib.machinery import SourceFileLoader
+        cli = SourceFileLoader(
+            "dunkcli_print", str(Path(__file__).resolve().parent.parent / "dunkingsheep")).load_module()
+        result = {"pane_id": "wW:p1", "flushed": True, "reason": "context full",
+                  "before": {"state": "blocked", "reason": "context full"},
+                  "after": {"state": "ready", "reason": None}}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli.print_clear(result)
+        self.assertIn("cleared wW:p1", buffer.getvalue())
+        self.assertIn("blocked -> ready", buffer.getvalue())
+        self.assertIn("context full", buffer.getvalue())
+
+    def test_a_pane_record_without_a_label_falls_back_to_the_pane_id(self):
+        self.herdr.screens["w1:p9"] = DEAD
+        self.herdr.statuses["w1:p9"] = "idle"
+        result = self.flock.clear_box({"pane_id": "w1:p9"}, self_pane_id="w1:p1", reason="probe")
+        self.assertEqual("w1:p9", result["target_label"])
 
     def test_a_working_lane_is_not_interrupted_by_a_clear(self):
         self.herdr.screens["w1:p2"] = "│ ✻ Working"

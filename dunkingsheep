@@ -1205,6 +1205,22 @@ def print_message(result):
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
 
 
+def print_clear(result):
+    """A clear is not a message: it reports the state it found and the state it left.
+
+    Using print_message here raised KeyError 'target_label' and made the one
+    command that unblocks a lane the one command that could not run.
+    """
+    label = result.get("target_label") or result.get("pane_id")
+    before = (result.get("before") or {}).get("state")
+    if result.get("flushed"):
+        after = (result.get("after") or {}).get("state")
+        print(f"cleared {label} ({result.get('pane_id')}): {before} -> {after}"
+              + (f" [{result['reason']}]" if result.get("reason") else ""))
+    else:
+        print(f"nothing cleared on {label} ({result.get('pane_id')}): {result.get('reason')}")
+
+
 def print_messages(result):
     queued, recent = result.get("queued", []), result.get("recent", [])
     if not queued and not recent:
@@ -2097,7 +2113,7 @@ def run_client_command(client, args):
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
     if command == "clear-box":
-        return client.call("clear_box", target=args.target, reason=args.reason), print_message
+        return client.call("clear_box", target=args.target, reason=args.reason), print_clear
     if command == "delivery":
         return client.call("delivery", target=args.target, status=args.status), \
             lambda r: print(f"{args.target}: {r['state']}" + (f" - {r['reason']}" if r.get('reason') else ""))

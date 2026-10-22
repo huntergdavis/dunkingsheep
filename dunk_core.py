@@ -3418,7 +3418,7 @@ class Flock:
         state, reason = classify_delivery(screen, status, typed=typed)
         return {"state": state, "reason": reason}
 
-    def clear_box(self, pane_id, self_pane_id=None, reason=None):
+    def clear_box(self, target, self_pane_id=None, reason=None):
         """CLEAR an unsubmitted draft (Ctrl-U, Escape). The destructive pair to
         `flush_box`, which submits what is there.
 
@@ -3430,14 +3430,23 @@ class Flock:
         submitting anything. Every flush is logged: clearing someone's draft is a
         destructive act even when the draft is our own text.
         """
-        self.require_superuser(self_pane_id, "flush")
+        self.require_superuser(self_pane_id, "clear_box")
+        pane = self.resolve_target(target, self_pane_id)
+        pane_id = pane["pane_id"]
+        # A pane record may carry tab_label, label, name or none of them; two
+        # spellings of the same lane have already bitten the ack path, so the
+        # label is looked up rather than assumed.
+        label = (pane.get("tab_label") or pane.get("label") or pane.get("name")
+                 or pane.get("agent_name") or pane_id)
         before = self.delivery_state(pane_id)
         if before["state"] == "ready":
-            return {"pane_id": pane_id, "flushed": False, "before": before,
-                    "reason": "nothing to flush: the input box is already clear"}
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "before": before,
+                    "reason": "nothing to clear: the input box is already clear"}
         if before["state"] == "working":
-            return {"pane_id": pane_id, "flushed": False, "before": before,
-                    "reason": "the lane is working; a flush would interrupt it"}
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "before": before,
+                    "reason": "the lane is working; a clear would interrupt it"}
         try:
             self.herdr.send_keys(pane_id, "C-u")
             self.herdr.send_keys(pane_id, "Escape")
@@ -3446,8 +3455,8 @@ class Flock:
         after = self.delivery_state(pane_id)
         log.warning("flushed pane %s by %s (%s): %s -> %s", pane_id, self_pane_id,
                     reason or "no reason given", before["state"], after["state"])
-        return {"pane_id": pane_id, "flushed": True, "before": before, "after": after,
-                "by": self_pane_id, "reason": reason}
+        return {"pane_id": pane_id, "target_label": label, "flushed": True,
+                "before": before, "after": after, "by": self_pane_id, "reason": reason}
 
     def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
