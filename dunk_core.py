@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.37.2"
+VERSION = "2.37.3"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -3501,7 +3501,14 @@ class Flock:
                     if remaining <= 0:
                         break
                     minutes, seconds = divmod(int(remaining + 0.999), 60)
-                    dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
+                    # Write the countdown under the lock and only while the dunk
+                    # is still live. A closed dunk's thread used to write one
+                    # more "Next: 60:00" after close_target set "Target closed",
+                    # so a stopped dunk could report itself as scheduled again.
+                    with self._lock:
+                        if stop_event.is_set() or not dunker.running:
+                            return
+                        dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
                     if stop_event.wait(min(1.0, remaining)):
                         return
 

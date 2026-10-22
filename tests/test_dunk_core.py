@@ -1995,6 +1995,16 @@ class LayoutControlTests(unittest.TestCase):
                          self.flock.focus("tab", "Other"))
         self.assertEqual(("focus", "tab", "w2:t3"), self.herdr.layout_calls[-1])
 
+    def test_a_closed_dunk_never_reports_itself_as_scheduled_again(self):
+        # The countdown thread writes dunker.status every second. Close the dunk
+        # immediately after starting it: the thread's first tick used to land
+        # afterwards and overwrite "Target closed" with "Next: 60:00", so a
+        # stopped dunk reported itself as scheduled again.
+        dunk = self.flock.add(target="w2:p3", text="go", interval_minutes=60, start=True)
+        self.flock.close_target("tab", "Other", self_pane_id="w1:p2")
+        time.sleep(1.5)
+        self.assertEqual("Target closed", self.flock.get(dunk["id"])["status"])
+
     def test_close_stops_dunks_aimed_inside_and_refuses_own_container(self):
         dunk = self.flock.add(target="w2:p3", text="go", interval_minutes=60, start=True)
         bystander = self.flock.add(target="w1:p2", text="go", interval_minutes=60, start=True)
