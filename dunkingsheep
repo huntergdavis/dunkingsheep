@@ -242,6 +242,11 @@ def build_parser():
     q.add_argument("attachment_id")
     q.add_argument("--dest", "-d", default=".")
 
+    # -- per-caller load -------------------------------------------------------
+    load = sub.add_parser("load", help="per-caller CPU from /proc (pid+starttime guarded, process tree)",
+                          description="Sample registered callers' CPU from /proc. Identity is pid+starttime; "
+                                      "a reused pid produces no sample. GPU is null with a reason on this hardware.")
+
     # -- project PMs -----------------------------------------------------------
     pm = sub.add_parser("pm", help="project PMs: lane routing and the one-per-project digest",
                         description="A PM publishes ONE digest per project per window "
@@ -734,6 +739,21 @@ def print_inbox_archive(result):
     when = f" before {result['before']}" if result.get("before") else ""
     print(f"archived {result['archived']} message(s) in {result['mailbox']}"
           f" (states {','.join(result['states'])}{when})")
+
+
+def print_load(r):
+    print(f"window {r.get('elapsed_s')}s | host load1 {r.get('host_load1')} "
+          f"| attributed {r.get('attributed_cores')} cores | "
+          f"unattributed {r.get('unattributed_cores')} cores")
+    if not r.get("callers"):
+        print("no registered callers with pid+starttime (nothing is assumed)")
+    for row in r.get("callers", []):
+        gpu = row.get("gpu_pct") or {}
+        gpu_text = f"{gpu['value']}%" if gpu.get("value") is not None else f"null ({gpu.get('reason')})"
+        print(f"  {row['name']:<24} {str(row.get('cpu_pct')):>6}%  peak {row.get('peak_cpu_pct')}%"
+              f"  rss {row.get('rss_mb')}MB  procs {row.get('process_count')}  gpu {gpu_text}")
+    for skip in r.get("skipped", []):
+        print(f"  {skip['name']:<24} skipped: {skip['reason']}")
 
 
 def print_pm_digest(r):
@@ -1668,6 +1688,15 @@ def run_client_command(client, args):
             return client.call("inbox_fetch", attachment_id=args.attachment_id,
                                dest=args.dest), \
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
+    if command == "load":
+        tasks = client.call("task_list", limit=500).get("tasks") or []
+        callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
+                    "caller_name": t.get("caller_name")} for t in tasks]
+        import dunk_load
+        result = dunk_load.collect(dunk_load.registered_callers(callers))
+        if args.json:
+            return result, None
+        return result, print_load
     if command == "pm":
         sub = args.pm_command
         if sub == "digest":
