@@ -695,48 +695,84 @@ def rule_lane_idle_holding_task(inputs, rule):
     return out
 
 
-def rule_host_load(inputs, rule):
-    """Load is judged against the fleet's expected band, not a fixed 2.0.
+def _heavy_jobs(inputs):
+    """Heavy slot holders plus free-model slots currently running.
 
-    Warning = lanes * load1_per_lane / cpus, critical = lanes *
-    critical_load1_per_lane / cpus, each clamped to a floor so a quiet fleet
-    still alerts early. Load 20 with 10 working lanes is a busy machine doing
-    its job; load 20 with 2 lanes is an incident. The key carries the level so
-    a warning->critical change is a new finding (the cooldown never hides an
-    escalation).
+    This is the number that tells a reader whether the load is lanes doing
+    light work or a few jobs eating the machine. Best effort: an unreadable
+    slot directory reports 0 rather than breaking the rule.
+    """
+    count = 0
+    try:
+        slots = inputs.host("/").get("heavy_slots")
+    except Exception:  # noqa: BLE001
+        slots = None
+    if isinstance(slots, int):
+        return slots
+    try:
+        directory = "/tmp"
+        for name in os.listdir(directory):
+            if name.startswith("poolrad-heavy."):
+                holder = os.path.join(directory, name, "pid")
+                try:
+                    pid = int(open(holder, encoding="utf-8").read().strip())
+                except (OSError, ValueError):
+                    count += 1  # legacy/unreadable slot: still one heavy job
+                    continue
+                try:
+                    os.kill(pid, 0)
+                    count += 1
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
+def rule_host_load(inputs, rule):
+    """The band rises with the live lane count: more lanes is more work.
+
+    warning = max(floor, lane_reserve*lanes/cpus, lanes*load1_per_lane/cpus);
+    critical = max(min_critical, warning+0.35, lanes*critical_load1_per_lane/
+    cpus). The per-lane quantities are per-CPU shares; 19 lanes must warn at a
+    higher load than 2, and the floor protects a quiet fleet. The alert states
+    the band, the lane count and the number of heavy jobs, so a reader can
+    tell light lane load from a few jobs eating the machine. The key carries
+    the level so an escalation is a new finding and the cooldown never hides
+    it.
     """
     host = inputs.host("/")
     cpus = max(1, host["cpus"])
     panes = inputs.panes() or {}
     lanes = sum(1 for status in panes.values()
                 if status and str(status).lower() != "unknown")
-    # A floor alone was too low once the fleet grew: 19 lanes * 0.25 / 8 =
-    # 0.59, clamped to 1.0, so a normal 2.5/cpu load read critical. Add a
-    # lane-scaled reserve before the clamp: each live lane is expected to keep
-    # roughly `lane_reserve_per_lane` of CPU busy, and the band must sit above
-    # that. The floor still protects a quiet fleet.
-    reserve = lanes * rule["lane_reserve_per_lane"] / cpus
-    warning = max(rule["min_load1_per_cpu"], reserve,
+    warning = max(rule["min_load1_per_cpu"],
+                  rule["lane_reserve_per_lane"] * lanes / cpus,
                   lanes * rule["load1_per_lane"] / cpus)
     critical = max(rule["min_critical_load1_per_cpu"], warning + 0.35,
                    lanes * rule["critical_load1_per_lane"] / cpus)
+    heavy = _heavy_jobs(inputs)
     per_cpu = host["load1"] / cpus
     if per_cpu < warning:
         return []
     level = "critical" if per_cpu >= critical else "warning"
     item = finding("host.load", rule, f"load1:{level}",
-                   f"load1 {host['load1']:.2f} = {per_cpu:.1f}/cpu, "
-                   f"band {warning:.1f}-{critical:.1f}/cpu for {lanes} lanes",
-                   f"{warning:.1f}/cpu (load {warning * cpus:.1f})",
-                   f"{per_cpu:.1f}/cpu (load {host['load1']:.1f})",
+                   f"load {host['load1']:.1f} = {per_cpu:.2f}/cpu, "
+                   f"band {warning:.2f}-{critical:.2f} for {lanes} lanes, "
+                   f"{heavy} heavy",
+                   f"{warning:.2f}/cpu (load {warning * cpus:.1f})",
+                   f"{per_cpu:.2f}/cpu (load {host['load1']:.1f})",
                    "load1 (1 min)",
                    {"load1": round(host["load1"], 2), "cpus": cpus,
                     "per_cpu": round(per_cpu, 2), "lanes": lanes,
+                    "heavy": heavy,
                     "warning_per_cpu": round(warning, 2),
                     "critical_per_cpu": round(critical, 2)})
     if level == "critical":
         item["severity"] = "critical"
-        item["threshold"] = (f"{critical:.1f}/cpu "
+        item["threshold"] = (f"{critical:.2f}/cpu "
                              f"(sustained {rule['critical_hold_runs']} runs)")
     return [item]
 
