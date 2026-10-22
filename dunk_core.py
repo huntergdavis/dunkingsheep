@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.33.3"
+VERSION = "2.33.4"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -3177,7 +3177,7 @@ class Flock:
     def _dead_session(self, pane_id):
         """Return the dead-session marker the screen shows, or None."""
         try:
-            screen = self.herdr.read_pane(pane_id, lines=40, ansi=True)
+            screen = self.herdr.read_pane(pane_id, lines=40, source="visible")
         except Exception:  # noqa: BLE001 - an unreadable pane is not this check
             return None
         text = (screen or "").lower()
