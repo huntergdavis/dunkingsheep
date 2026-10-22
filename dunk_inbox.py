@@ -97,8 +97,6 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments (message_id);
-CREATE UNIQUE INDEX IF NOT EXISTS messages_by_digest
-    ON messages (digest_id) WHERE digest_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 
@@ -134,6 +132,15 @@ class Inbox:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
             if "digest_updated_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
+            # Created after the migration: on an existing DB the column is new,
+            # and a CREATE INDEX inside SCHEMA ran before ALTER TABLE.
+            try:
+                self.db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS messages_by_digest "
+                    "ON messages (digest_id) WHERE digest_id IS NOT NULL")
+            except sqlite3.OperationalError as exc:
+                if "digest_id" not in str(exc):
+                    raise
             # Acked mail is read mail. Older rows could be acked without a
             # read_at, which made boards that count NULLs report drained mail
             # as unread; backfill them once.

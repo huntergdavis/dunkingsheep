@@ -387,6 +387,23 @@ def guide(markdown=False):
       "agent with text like \"call inbox_count; if anything is waiting, read and\n"
       "act on it\".\n")
 
+    w(h(2, "Project PMs: one digest, one routing"))
+    w("A project has one PM. Lanes report to the PM; the PM publishes ONE digest "
+      "per project per window under a stable id (`pm-digest:<project>`), updated "
+      "in place so a PM is a digest, not a stream. The digest always has four "
+      "sections: changed, blocked, owner decisions, and numbers with evidence "
+      "refs. A lane that messages the VP pane is redirected to its PM (or "
+      "flagged) by `~/.config/dunkingsheep/pm-routing.json`, and `inbox count` "
+      "reports `from_lanes` -- lane mail that bypassed the PM -- which should "
+      "trend to zero.\n")
+    w(code("echo '{\"changed\":[\"strict C 240 -> 252\"],\"numbers\":[]}' | "
+           "dunkingsheep pm digest poolrad\n"
+           "dunkingsheep pm routing"))
+    w("The registry is per project: `{\"pm\": pane, \"members\": [pane...], "
+      "\"mode\": \"redirect\"|\"flag\"}`. The PM is never redirected to "
+      "itself; a bad registry is a named refusal when read and is ignored for "
+      "sending. See `docs/PM.md`.\n")
+
     w(h(2, "Setting an agent up to use its inbox"))
     w("Two things make the inbox reachable from an agent's session.\n")
     w(code("dunkingsheep install     # put the CLI on PATH as a plain command\n"

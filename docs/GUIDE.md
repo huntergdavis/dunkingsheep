@@ -402,6 +402,17 @@ A standing dunk is the easy way to get an agent checking: point one at the
 agent with text like "call inbox_count; if anything is waiting, read and
 act on it".
 
+## Project PMs: one digest, one routing
+
+A project has one PM. Lanes report to the PM; the PM publishes ONE digest per project per window under a stable id (`pm-digest:<project>`), updated in place so a PM is a digest, not a stream. The digest always has four sections: changed, blocked, owner decisions, and numbers with evidence refs. A lane that messages the VP pane is redirected to its PM (or flagged) by `~/.config/dunkingsheep/pm-routing.json`, and `inbox count` reports `from_lanes` -- lane mail that bypassed the PM -- which should trend to zero.
+
+```
+echo '{"changed":["strict C 240 -> 252"],"numbers":[]}' | dunkingsheep pm digest poolrad
+dunkingsheep pm routing
+```
+
+The registry is per project: `{"pm": pane, "members": [pane...], "mode": "redirect"|"flag"}`. The PM is never redirected to itself; a bad registry is a named refusal when read and is ignored for sending. See `docs/PM.md`.
+
 ## Setting an agent up to use its inbox
 
 Two things make the inbox reachable from an agent's session.

@@ -757,6 +757,8 @@ def print_inbox_count(r):
         line += f", {r['archived']} archived"
     if r.get("undeliverable"):
         line += f", {r['undeliverable']} undeliverable"
+    if r.get("from_lanes"):
+        line += f", {r['from_lanes']} from lanes (bypassed a PM)"
     if r.get("attachments_unread"):
         line += f", {r['attachments_unread']} attachment(s)"
     print(line)
