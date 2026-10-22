@@ -188,11 +188,8 @@ RULE_PARAMS = {
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
         "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
         "open", "in_progress", "blocked", allow_empty=False)},
-    "host.load": {"load1_per_lane": POSITIVE, "critical_load1_per_lane": POSITIVE,
-                  "lane_reserve_per_lane": POSITIVE,
-                  "min_load1_per_cpu": POSITIVE,
-                  "min_critical_load1_per_cpu": POSITIVE,
-                  "critical_hold_runs": POSITIVE_INT},
+    "host.load": {"load1_per_cpu": POSITIVE, "critical_load1_per_cpu": POSITIVE,
+                  "interim": _bool, "critical_hold_runs": POSITIVE_INT},
     "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
                  "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
     "host.heavy_slot_stale": {"directory": _str, "prefix": _str, "max_age_minutes": POSITIVE},
@@ -698,26 +695,19 @@ def rule_lane_idle_holding_task(inputs, rule):
 def _heavy_jobs(inputs):
     """Heavy slot holders plus free-model slots currently running.
 
-    This is the number that tells a reader whether the load is lanes doing
-    light work or a few jobs eating the machine. Best effort: an unreadable
-    slot directory reports 0 rather than breaking the rule.
+    Best effort: an unreadable slot directory reports 0 rather than breaking
+    the rule. `live`/`busy` come from the same host sample once the recorder
+    writes them; until then they are derived from the pane source.
     """
     count = 0
     try:
-        slots = inputs.host("/").get("heavy_slots")
-    except Exception:  # noqa: BLE001
-        slots = None
-    if isinstance(slots, int):
-        return slots
-    try:
-        directory = "/tmp"
-        for name in os.listdir(directory):
+        for name in os.listdir("/tmp"):
             if name.startswith("poolrad-heavy."):
-                holder = os.path.join(directory, name, "pid")
+                holder = os.path.join("/tmp", name, "pid")
                 try:
                     pid = int(open(holder, encoding="utf-8").read().strip())
                 except (OSError, ValueError):
-                    count += 1  # legacy/unreadable slot: still one heavy job
+                    count += 1
                     continue
                 try:
                     os.kill(pid, 0)
@@ -732,48 +722,43 @@ def _heavy_jobs(inputs):
 
 
 def rule_host_load(inputs, rule):
-    """The band rises with the live lane count: more lanes is more work.
+    """INTERIM fixed band (warning 2.0/cpu, critical 2.6/cpu, sustained 3 runs).
 
-    warning = max(floor, lane_reserve*lanes/cpus, lanes*load1_per_lane/cpus);
-    critical = max(min_critical, warning+0.35, lanes*critical_load1_per_lane/
-    cpus). The per-lane quantities are per-CPU shares; 19 lanes must warn at a
-    higher load than 2, and the floor protects a quiet fleet. The alert states
-    the band, the lane count and the number of heavy jobs, so a reader can
-    tell light lane load from a few jobs eating the machine. The key carries
-    the level so an escalation is a new finding and the cooldown never hides
-    it.
+    It is not calibrated: the 0.55/lane shape under-predicted the fleet and the
+    history is not yet recorded with busy-lane/heavy counts. The alert keeps
+    lanes, busy, heavy, band and measured so the text remains diagnostic, and
+    the config marks `interim: true`. The next change is the fit from recorded
+    samples, not another guess.
     """
     host = inputs.host("/")
     cpus = max(1, host["cpus"])
     panes = inputs.panes() or {}
-    lanes = sum(1 for status in panes.values()
-                if status and str(status).lower() != "unknown")
-    warning = max(rule["min_load1_per_cpu"],
-                  rule["lane_reserve_per_lane"] * lanes / cpus,
-                  lanes * rule["load1_per_lane"] / cpus)
-    critical = max(rule["min_critical_load1_per_cpu"], warning + 0.35,
-                   lanes * rule["critical_load1_per_lane"] / cpus)
+    live = len(panes)
+    busy = sum(1 for status in panes.values()
+               if str(status or "").lower() == "working")
     heavy = _heavy_jobs(inputs)
+    warning = rule["load1_per_cpu"]
+    critical = rule["critical_load1_per_cpu"]
     per_cpu = host["load1"] / cpus
     if per_cpu < warning:
         return []
     level = "critical" if per_cpu >= critical else "warning"
     item = finding("host.load", rule, f"load1:{level}",
                    f"load {host['load1']:.1f} = {per_cpu:.2f}/cpu, "
-                   f"band {warning:.2f}-{critical:.2f} for {lanes} lanes, "
-                   f"{heavy} heavy",
-                   f"{warning:.2f}/cpu (load {warning * cpus:.1f})",
+                   f"interim band {warning:.1f}-{critical:.1f}, "
+                   f"{live} live / {busy} busy / {heavy} heavy",
+                   f"{warning:.1f}/cpu (load {warning * cpus:.1f})",
                    f"{per_cpu:.2f}/cpu (load {host['load1']:.1f})",
                    "load1 (1 min)",
                    {"load1": round(host["load1"], 2), "cpus": cpus,
-                    "per_cpu": round(per_cpu, 2), "lanes": lanes,
-                    "heavy": heavy,
-                    "warning_per_cpu": round(warning, 2),
-                    "critical_per_cpu": round(critical, 2)})
+                    "per_cpu": round(per_cpu, 2), "live": live,
+                    "busy": busy, "heavy": heavy, "interim": True,
+                    "warning_per_cpu": warning,
+                    "critical_per_cpu": critical})
     if level == "critical":
         item["severity"] = "critical"
-        item["threshold"] = (f"{critical:.2f}/cpu "
-                             f"(sustained {rule['critical_hold_runs']} runs)")
+        item["threshold"] = (f"{critical:.1f}/cpu "
+                             f"(sustained {rule['critical_hold_runs']} runs, interim)")
     return [item]
 
 

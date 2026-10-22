@@ -344,21 +344,20 @@ class RuleBoundaryTests(WatchdogCase):
                          sorted(self.keys(self.fleet.evaluate(cfg))))
 
     def test_host_load_and_tmp_bands(self):
-        cfg = self.fleet.config(host__load={"load1_per_lane": 0.25, "critical_load1_per_lane": 0.35, "lane_reserve_per_lane": 0.55, "min_load1_per_cpu": 1.0, "min_critical_load1_per_cpu": 1.4, "critical_hold_runs": 3, "must_hold_runs": 1},
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 2.0, "critical_load1_per_cpu": 2.6, "interim": True, "critical_hold_runs": 3, "must_hold_runs": 1},
                                 host__tmp={"max_used_fraction": 0.7, "critical_used_fraction": 0.9,
                                            "min_free_bytes": 100, "max_inode_fraction": 0.9, "path": "/tmp"})
-        # 10 lanes: warning max(1.0, .55*10/8, .25*10/8) = 1.0;
-        # critical max(1.4, 1.35, .35*10/8) = 1.4. 10.0/8 = 1.25 -> warning.
+        # INTERIM fixed: warning 2.0/cpu, critical 2.6/cpu. 16.0/8=2.0 -> warning.
         self.fleet.panes = [{"pane_id": f"w1:p{i}", "agent_status": "working"}
                             for i in range(10)]
-        self.fleet.hosts = {"/": {"load1": 10.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
+        self.fleet.hosts = {"/": {"load1": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
         found = self.fleet.evaluate(cfg)
         self.assertEqual({("host.load", "load1:warning"): "warning", ("host.tmp", "/tmp:used_fraction"): "warning"},
                          {(f["rule"], f["key"]): f["severity"] for f in found})
         self.fleet.hosts["/tmp"] = {"used_fraction": 0.95}
         self.assertEqual("critical", self.keys and [f for f in self.fleet.evaluate(cfg)
                                                     if f["rule"] == "host.tmp"][0]["severity"])
-        self.fleet.hosts = {"/": {"load1": 7.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
+        self.fleet.hosts = {"/": {"load1": 15.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
         self.assertEqual([], self.fleet.evaluate(cfg))
 
     def test_host_disk_full(self):
@@ -485,7 +484,7 @@ class ConfigTests(WatchdogCase):
     def test_cli_refuses_bad_config_names_it_and_leaves_the_error_for_the_deadman(self):
         cases = {"truncated.json": '{"schema": "dunkingsheep-watchdog/2", "enabled": tr',
                  "unknown.json": json.dumps(dict(copy.deepcopy(EXAMPLE), pagethreshold=1)),
-                 "zero.json": json.dumps(EXAMPLE).replace('"load1_per_lane": 0.25', '"load1_per_lane": 0')}
+                 "zero.json": json.dumps(EXAMPLE).replace('"load1_per_cpu": 2.0', '"load1_per_cpu": 0')}
         for name, text in cases.items():
             path, error_file = os.path.join(self.tmp, name), os.path.join(self.tmp, name + ".err")
             with open(path, "w") as handle:

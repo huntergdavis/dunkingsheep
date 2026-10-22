@@ -85,7 +85,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 30) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
 | `lane.working_without_task` | a pane is working, holds no task, and has no task event in N min | `quiet_minutes` | info / ops |
 | `lane.idle_holding_task` | a pane holds a task while idle, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / ops |
-| `host.load` | load1 per CPU is at or above the threshold | `load1_per_cpu` | warning / ops |
+| `host.load` | load1 per CPU is at or above the **interim** fixed band (2.0/cpu warning, 2.6/cpu critical, sustained 3 runs). **Not calibrated** - see below | `load1_per_cpu`, `critical_load1_per_cpu`, `interim` | warning / ops |
 | `host.tmp` | used fraction is at least 0.70 (warning) or at least 0.90 (critical), free bytes are at or below the floor, or the inode fraction is at or above the limit | `max_used_fraction`, `critical_used_fraction`, `min_free_bytes`, `max_inode_fraction`, `path` | warning / ops |
 | `host.disk_full` | /tmp or / is at least 98% full | `max_used_fraction`, `paths` | **critical / outage, hold 2** |
 | `host.heavy_slot_stale` | a heavy-job semaphore slot is older than N min (no holder pid exists) | `directory`, `prefix`, `max_age_minutes` | warning / ops |
@@ -94,6 +94,36 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `health.failed` | `health.json` is stale, or reports problems | `stale_minutes` | critical / ops |
 | `watchdog.self_error` | anything the watchdog could not do this run: a rule error, missing or corrupt state, or an owner post or confirmation problem. One finding per run | (none) | VP only |
 | `watchdog.deadman` | the heartbeat is missing or older than 3x the cadence (separate process) | CLI flags | VP only |
+
+## `host.load`: an INTERIM band, explicitly labelled
+
+`host.load` is currently a **fixed interim band**: warning at **2.0/cpu**,
+critical at **2.6/cpu** sustained 3 runs. It is honest-until-calibrated, not
+derived. The config carries `"interim": true` and every alert says `interim
+band` so nobody mistakes the constant for a fitted number.
+
+Why it is interim: the previous lane-reserve shape (`0.55 CPU/lane`) under-
+predicted the fleet. One heavy job with the caps respected still measured
+1.74/cpu against a 1.31-1.66 band, so it paged on a normal operating point.
+The fix is a fit from our own history, and the history was not recorded: the
+host-watch state held 3 load samples and the VP ops `pane_samples` covers only
+the poolrad project (1 busy lane) while 16-25 panes were live. Fitting three
+points produced "load per busy lane ~12" - the unrecorded lanes' work, not a
+per-lane cost.
+
+`host_watch.py` now writes `live`, `busy` (all panes with `agent_status
+working`, not just poolrad) and `heavy` (live slot holders) into the **same
+host sample row**. After ~30-60 samples, fit `load = base + a*busy + b*heavy`
+by least squares, set warning = fit + 1 sigma and critical = fit + 2 sigma,
+and print `observed load per busy lane = X, per heavy job = Y, over N
+samples`. That is the last band change; until then the interim number stands.
+
+The alert text keeps all five ingredients - `live`, `busy`, `heavy`, band,
+measured - so an alert is diagnosable from the message alone:
+
+```text
+load 20.1 = 2.51/cpu, interim band 2.0-2.6, 25 live / 4 busy / 0 heavy
+```
 
 ## Config (`~/.config/dunkingsheep/watchdog.json`)
 
