@@ -72,6 +72,36 @@ class ContextTests(unittest.TestCase):
         self.assertEqual("measured once", self.store.find(entry["slug"])["body"])
         self.assertIn("STALE", self.store.digest())
 
+    def test_get_and_search_find_a_global_truth_from_a_project(self):
+        from dunk_context import select_stores
+        global_store = Store(global_store=True)
+        global_store.ensure()
+        if global_store.find("rule-global") is None:
+            global_store.add("a global rule", cls="ground-truth", subject="rule-global",
+                             type_="principle", authority="owner", source="owner")
+        self.store.add("a project fact", cls="fact", subject="project-fact", type_="measurement",
+                       authority="measured", recheck_after="30d")
+        stores = select_stores(self.store.root)
+        found = {name: t.find("rule-global") for name, t in stores.items()}
+        self.assertIsNotNone(found["global"])
+        self.assertIsNone(found["project"])
+
+    def test_delivery_is_recorded_separately_from_reading(self):
+        # "nobody reads it" and "nobody was ever told it" are different failures.
+        from dunk_context import digest_both
+        self.store.add("rule a", cls="ground-truth", subject="rule-a", type_="principle",
+                       authority="owner", source="owner")
+        before = self.store.stats()
+        self.assertEqual(0, before["injected_7d"])
+        self.assertEqual(1, before["never_delivered_count"])
+        digest_both(self.store.root, which="project")
+        after = self.store.stats()
+        self.assertEqual(1, after["injected_7d"])
+        self.assertEqual(0, after["never_delivered_count"])
+        self.assertEqual(1, after["never_read_count"])   # delivered, not opened
+        self.store.log_access(self.store.find("rule-a")["slug"])   # what `context get` does
+        self.assertEqual(0, self.store.stats()["never_read_count"])
+
     def test_digest_from_a_project_includes_the_global_ground_truths(self):
         from dunk_context import digest_both
         self.store.add("project fact", cls="fact", subject="p", type_="measurement",

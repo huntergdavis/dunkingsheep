@@ -1782,15 +1782,26 @@ def run_client_command(client, args):
             return store.supersede(args.slug, body), lambda r: print(f"superseded by {r['slug']}")
         if sub == "retire":
             return store.retire(args.slug, args.reason), lambda r: print(f"retired {r['slug']}")
-        if sub == "get":
-            entry = store.find(args.key)
-            if entry is None:
-                raise SystemExit(f"no entry {args.key!r}")
-            store.log_access(entry["slug"])
-            return entry, lambda r: print(f"# {r['slug']} ({r['class']}, {r['authority']})\n\n{r['body']}")
-        if sub == "search":
-            return store.search(args.query, cls=args.cls, scope=args.scope), \
-                lambda rows: [print(f"{r['class']:<13} {r['slug']:<40} {r['subject']}") for r in rows] and None
+        if sub in ("get", "search"):
+            # The same scope rule as stats/check/digest: a lookup must find a
+            # global ground truth from inside a project, or the rules are write-only.
+            which = ("global" if getattr(args, "global_store", False)
+                     else "project" if getattr(args, "project", False) else None)
+            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+            if sub == "get":
+                for name, target in stores.items():
+                    entry = target.find(args.key)
+                    if entry is not None:
+                        target.log_access(entry["slug"])
+                        return entry, lambda r: print(
+                            f"# {r['slug']} ({r['class']}, {r['authority']}, {name})\n\n{r['body']}")
+                raise SystemExit(f"no entry {args.key!r} in {', '.join(stores) or 'any store'}")
+            rows = []
+            for name, target in stores.items():
+                for row in target.search(args.query, cls=args.cls, scope=args.scope):
+                    rows.append(dict(row, store=name))
+            return rows, lambda rs: [print(f"{r['store']:<8} {r['class']:<13} {r['slug']:<40} {r['subject']}")
+                                     for r in rs] and None
         if sub == "digest":
             which = ("global" if getattr(args, "global_store", False)
                      else "project" if getattr(args, "project", False) else None)
@@ -1813,15 +1824,19 @@ def run_client_command(client, args):
                     result = target.stats()
                     out[name] = {"path": str(target.root), "counts": result["counts"],
                                  "reads_7d": result["reads_7d"],
+                                 "injected_7d": result["injected_7d"],
                                  "never_read_count": result["never_read_count"],
-                                 "never_read": result["never_read"]}
+                                 "never_read": result["never_read"],
+                                 "never_delivered_count": result["never_delivered_count"]}
             if sub == "index":
                 return out, lambda r: [print(f"{name}: indexed {v['result']['indexed']} -> {v['result']['path']}")
                                        for name, v in r.items()] and None
             if sub == "check":
                 return out, lambda r: [print(f"{name} ({v['path']}): entries {v['entries']}, refusals {v['refusals']}, stale {v['stale']}")
                                        for name, v in r.items()] and None
-            return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, reads_7d {v['reads_7d']}, "
+            return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, "
+                                        f"injected_7d {v['injected_7d']}, reads_7d {v['reads_7d']}, "
+                                        f"never_delivered {v['never_delivered_count']}, "
                                         f"never_read {v['never_read_count']}") for name, v in r.items()] and None
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []

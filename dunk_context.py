@@ -126,6 +126,7 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
                 truths.append((name, entry))
             elif subject is None or entry.get("subject") == subject:
                 relevant.append((name, entry))
+    included = [(name, e) for name, e in truths]
     lines = [f"## Ground truths ({len(truths)})"]
     lines += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for _n, e in truths] or ["- none"]
     lines += ["", "## Relevant"]
@@ -146,10 +147,14 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
             omitted += 1
             continue
         lines.append(line + stale)
+        included.append((name, entry))
         used += size
     if omitted:
         lines.append(f"omitted: {omitted} entries over the {max_bytes}-byte cap")
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    for name, entry in included:
+        stores[name].log_access(entry["slug"], kind="injected")
+    return text
 
 
 def report(project_path=None, *, which=None):
@@ -329,11 +334,16 @@ class Store:
     def access_path(self):
         return self.root / "access.jsonl"
 
-    def log_access(self, slug, by=None):
+    def log_access(self, slug, by=None, kind="read"):
+        """kind='read' when someone opened an article, 'injected' when it was delivered.
+
+        Delivery and reading are different facts and a store that conflates them
+        cannot say whether it is unused or merely unread.
+        """
         if not slug:
             return
         with open(self.access_path(), "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"slug": slug, "at": time.time(),
+            handle.write(json.dumps({"slug": slug, "at": time.time(), "kind": kind,
                                      "by": by or os.environ.get("DUNKINGSHEEP_SELF") or "unknown"}) + "\n")
 
     def reads(self):
@@ -350,14 +360,23 @@ class Store:
         def pct(values, q):
             return values[min(len(values) - 1, int(round(q * (len(values) - 1))))] if values else None
         reads = self.reads()
-        recent = [r for r in reads if r.get("at", 0) >= time.time() - 7 * 86400]
-        seen = {r.get("slug") for r in reads}
+        for record in reads:  # back-compat: records written before kinds existed are reads
+            record.setdefault("kind", "read")
+        now = time.time()
+        recent = [r for r in reads if r.get("at", 0) >= now - 7 * 86400 and r["kind"] == "read"]
+        injected = [r for r in reads if r.get("at", 0) >= now - 7 * 86400 and r["kind"] == "injected"]
+        seen = {r.get("slug") for r in reads if r["kind"] == "read"}
+        delivered = {r.get("slug") for r in reads}
         return {"counts": counts,
                 "age_days": {name: {"median": pct(ages[name], 0.5), "p90": pct(ages[name], 0.9)}
                              for name in CLASSES},
                 "reads_7d": len(recent), "reads_total": len(reads),
+                "injected_7d": len(injected), "injected_total": len(reads) - sum(
+                    1 for r in reads if r["kind"] == "read"),
                 "never_read": sorted(e["slug"] for e in entries if e["slug"] not in seen),
-                "never_read_count": sum(1 for e in entries if e["slug"] not in seen)}
+                "never_read_count": sum(1 for e in entries if e["slug"] not in seen),
+                "never_delivered": sorted(e["slug"] for e in entries if e["slug"] not in delivered),
+                "never_delivered_count": sum(1 for e in entries if e["slug"] not in delivered)}
 
     # -- digest -----------------------------------------------------------
     def digest(self, *, max_bytes=DEFAULT_CAP, subject=None):
@@ -365,6 +384,7 @@ class Store:
         truths = [e for e in entries if e["class"] == "ground-truth"]
         others = [e for e in entries if e["class"] != "ground-truth"
                   and (subject is None or e.get("subject") == subject)]
+        included = list(truths)
         parts = [f"## Ground truths ({len(truths)})"]
         parts += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for e in truths] or ["- none"]
         parts.append("")
@@ -386,7 +406,11 @@ class Store:
                 omitted += 1
                 continue
             parts.append(line + stale)
+            included.append(entry)
             used += size + len(stale.encode("utf-8"))
         if omitted:
             parts.append(f"omitted: {omitted} entries over the {max_bytes}-byte cap")
-        return "\n".join(parts) + "\n"
+        text = "\n".join(parts) + "\n"
+        for entry in included:
+            self.log_access(entry["slug"], kind="injected")
+        return text
