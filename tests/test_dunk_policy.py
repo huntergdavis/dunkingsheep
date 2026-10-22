@@ -36,6 +36,10 @@ class EvaluateTests(unittest.TestCase):
         findings = dunk_policy.evaluate(sample(), {"wall_minutes_over": 90})
         self.assertEqual("wall", findings[0]["rule"])
 
+    def test_wall_exempt_skips_the_wall_rule(self):
+        policy = {"wall_minutes_over": 90, "wall_exempt": True}
+        self.assertEqual([], dunk_policy.evaluate(sample(wall_minutes=300), policy))
+
     def test_below_threshold_does_not_trip(self):
         self.assertEqual([], dunk_policy.evaluate(sample(cpu_pct=10), {"cpu_pct_over": 300, "cpu_window_s": 60}))
 

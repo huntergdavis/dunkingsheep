@@ -11,8 +11,14 @@ A per-agent policy names thresholds and the window each must hold over:
 ```json
 {"cpu_pct_over": 300, "cpu_window_s": 600,
  "rss_mb_over": 1500, "rss_window_s": 300,
- "wall_minutes_over": 90}
+ "wall_minutes_over": 90, "wall_exempt": false}
 ```
+
+**Wall minutes are for lanes that are STUCK, not lanes that are SLOW.** A
+legitimate multi-hour compile or a long DOSBox run crosses any wall threshold
+and must not be killed for it. Exempt a lane with `"wall_exempt": true`, or
+simply omit `wall_minutes_over` from that lane's policy. The default is not
+exempt, so a lane gets wall-kill only if someone chose it.
 
 A threshold without its window is a **policy error**, not a guess. On breach:
 one finding, one inbox line, one digest row, with a per agent+rule cooldown.
@@ -26,9 +32,12 @@ Every clause is load-bearing:
    registered; a bare process name or an unrecorded pid is refused.
 3. **TERM, grace (30 s), then KILL**, and both the decision and the outcome are
    logged with the triggering sample.
-4. **Dry run first, for at least a day.** A `dry_run` policy logs
-   `would-kill <agent> (pid N, 412% cpu)` and signals nothing. The act is
-   enabled only after the dry-run output has been reviewed.
+4. **Dry run first, for at least a day, and dry run is the default.** Every
+   policy starts with `dry_run: true`; it logs
+   `would-kill <agent> (pid N, 412% cpu for 14m)` and signals nothing. The
+   would-kill lines go into the digest, so a real day of them can be read
+   before any policy has `kill: true`. If a lane trips it while doing work we
+   asked for, the threshold is wrong - that is what the dry run buys.
 5. **Deny list wins.** The VP pane, the owner's shell, the daemon, systemd
    services, and anything whose cwd is not a workspace are refused by
    evaluation, not by luck.

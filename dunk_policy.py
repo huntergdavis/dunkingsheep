@@ -68,7 +68,10 @@ def evaluate(sample, policy, *, now=None):
                         "measured": sample["rss_mb"], "threshold": rss,
                         "window": window, "pid": sample["pid"]})
     wall = _num(policy, "wall_minutes_over")
-    if wall is not None and (sample.get("wall_minutes") or 0) >= wall:
+    # A legitimate multi-hour compile or DOSBox run crosses any wall threshold.
+    # Wall-kill is for lanes that are STUCK, not lanes that are SLOW: a lane
+    # opts out with wall_exempt (or a per-lane policy that omits the wall rule).
+    if wall is not None and not policy.get("wall_exempt") and (sample.get("wall_minutes") or 0) >= wall:
         out.append({"rule": "wall", "agent": sample["name"],
                     "measured": sample["wall_minutes"], "threshold": wall,
                     "window": None, "pid": sample["pid"]})
