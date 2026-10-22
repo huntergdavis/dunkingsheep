@@ -60,7 +60,9 @@ def build_parser():
                                     parents=[common], **kw))
     sub.required = True
 
-    sub.add_parser("status", help="daemon health and counts")
+    p = sub.add_parser("status", help="daemon health and counts")
+    p.add_argument("--check-herdr", action="store_true",
+                   help="probe the terminal backend (slow; default off)")
     p = sub.add_parser("turn", help="declare a busy turn (pi/claude hooks)")
     tsub = p.add_subparsers(dest="turn_command", metavar="<start|end>")
     tsub.required = True
@@ -1310,8 +1312,13 @@ def _run(argv):
     import contextlib
     import io
     buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        code = main(argv)
+    try:
+        with contextlib.redirect_stdout(buffer):
+            code = main(argv)
+    except SystemExit as exc:
+        # argparse --version/--help print inside the capture and then exit;
+        # the captured text must still reach stdout.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     output = buffer.getvalue()
     if path:
         try:
@@ -1506,7 +1513,7 @@ def run_client_command(client, args):
     """Map CLI args onto a registry command; return (result, human printer)."""
     command = args.command
     if command == "status":
-        return client.call("status"), print_status
+        return client.call("status", check_herdr=args.check_herdr), print_status
     if command == "turn":
         if args.turn_command == "start":
             return client.call("turn_start", pane=args.pane, ttl_s=args.ttl_s,

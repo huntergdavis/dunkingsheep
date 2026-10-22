@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.28.1"
+VERSION = "2.28.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1522,6 +1522,16 @@ class Flock:
                             ", ".join(str(p) for p in marked["panes"][:5]))
                 except Exception:  # noqa: BLE001 - maintenance must not die
                     log.exception("inbox undeliverable sweep failed")
+                try:
+                    archived = self.inbox.auto_archive_undeliverable()
+                    if archived:
+                        self.metrics.record("inbox.archived", pane_id=None,
+                                            source="inbox", outcome="ok",
+                                            reason="undeliverable_24h")
+                        log.info("inbox: auto-archived %d undeliverable message(s) "
+                                 "older than 24h", archived)
+                except Exception:  # noqa: BLE001
+                    log.exception("inbox auto-archive failed")
             try:
                 source = ("live" if getattr(self.herdr, "live", False)
                           else "fixture")

@@ -384,6 +384,26 @@ class MailboxIdentityTests(unittest.TestCase):
         self.assertEqual("wS:p1",
                          self.flock.inbox.status(sent["message_id"])["sender"])
 
+    def test_undeliverable_mail_older_than_24h_is_auto_archived(self):
+        import time
+        now = time.time()
+        old = self.inbox.send("w1:p2", "old")
+        new = self.inbox.send("w1:p2", "new")
+        with self.inbox._lock:
+            self.inbox.db.execute("UPDATE messages SET state='undeliverable', "
+                                  "reason='target pane no longer exists', created_at=? "
+                                  "WHERE id=?", (now - 25 * 3600, old["message_id"]))
+            self.inbox.db.execute("UPDATE messages SET state='undeliverable', "
+                                  "reason='target pane no longer exists', created_at=? "
+                                  "WHERE id=?", (now - 2 * 3600, new["message_id"]))
+            self.inbox.db.commit()
+        self.assertEqual(1, self.inbox.auto_archive_undeliverable(now=now))
+        old_row = self.inbox.status(old["message_id"])
+        new_row = self.inbox.status(new["message_id"])
+        self.assertEqual("archived", old_row["state"])
+        self.assertEqual("undeliverable", new_row["state"])
+        self.assertEqual("target pane no longer exists", old_row["reason"])
+
     def test_client_refuses_to_auto_start_a_partial_tmux_backend(self):
         from dunk_client import DaemonUnavailable, FlockClient
         env = {"DUNKINGSHEEP_TERMINAL_BACKEND": "tmux"}

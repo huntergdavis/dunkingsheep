@@ -406,6 +406,26 @@ class Inbox:
         return {"undeliverable": changed, "panes": dead_panes,
                 "mailboxes": dead_mailboxes}
 
+    def auto_archive_undeliverable(self, age_s=86400, now=None):
+        """Archive undeliverable mail whose target has been gone for `age_s`.
+
+        Undeliverable mail can never be delivered and pages the watchdog until
+        someone archives it by hand. After 24 h the reason is recorded and the
+        state moves to archived; the watchdog's digest counts it daily instead
+        of alerting per mailbox.
+        """
+        now = time.time() if now is None else float(now)
+        cutoff = now - float(age_s)
+        with self._lock:
+            cursor = self.db.execute(
+                "UPDATE messages SET state = 'archived', archived_at = ?, "
+                "reason = COALESCE(reason, 'undeliverable older than 24h') "
+                "WHERE state = 'undeliverable' AND created_at < ? "
+                "AND archived_at IS NULL",
+                (now, cutoff))
+            self.db.commit()
+        return int(cursor.rowcount or 0)
+
     def _transition(self, message_ids, state, stamp, allowed, read_stamp=False):
         ids = [message_ids] if isinstance(message_ids, str) else list(message_ids)
         ids = [str(i).strip() for i in ids if str(i).strip()]

@@ -800,6 +800,12 @@ COMMANDS = [
         "status",
         "Daemon health: version, dunk counts, and whether herdr is reachable.",
         h_status,
+        params={"check_herdr": {"type": "boolean",
+                                "description": "Probe the terminal backend (slow; default off)."},
+                "full": {"type": "boolean",
+                         "description": "Use the full status rather than the cached view."},
+                "fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
     ),
     Command(
         "turn_start",
@@ -857,6 +863,8 @@ COMMANDS = [
         "List every dunk with its target, text, interval, running state, "
         "live status, send count, skip count and seconds until the next send.",
         h_list_dunks,
+        params={"fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
     ),
     Command(
         "get_dunk",
@@ -1053,7 +1061,9 @@ COMMANDS = [
         "How many messages are waiting: unread, total, and how long the oldest "
         "unread has waited. Cheap enough to poll. Defaults to your own inbox.",
         h_inbox_count,
-        params={"mailbox": MAILBOX_PARAM},
+        params={"mailbox": MAILBOX_PARAM,
+                "fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
     ),
     Command(
         "inbox_list",
