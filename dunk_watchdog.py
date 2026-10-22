@@ -188,7 +188,10 @@ RULE_PARAMS = {
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
         "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
         "open", "in_progress", "blocked", allow_empty=False)},
-    "host.load": {"load1_per_cpu": POSITIVE, "critical_load1_per_cpu": POSITIVE,
+    "host.load": {"load1_per_lane": POSITIVE, "critical_load1_per_lane": POSITIVE,
+                  "lane_reserve_per_lane": POSITIVE,
+                  "min_load1_per_cpu": POSITIVE,
+                  "min_critical_load1_per_cpu": POSITIVE,
                   "critical_hold_runs": POSITIVE_INT},
     "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
                  "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
@@ -693,24 +696,47 @@ def rule_lane_idle_holding_task(inputs, rule):
 
 
 def rule_host_load(inputs, rule):
+    """Load is judged against the fleet's expected band, not a fixed 2.0.
+
+    Warning = lanes * load1_per_lane / cpus, critical = lanes *
+    critical_load1_per_lane / cpus, each clamped to a floor so a quiet fleet
+    still alerts early. Load 20 with 10 working lanes is a busy machine doing
+    its job; load 20 with 2 lanes is an incident. The key carries the level so
+    a warning->critical change is a new finding (the cooldown never hides an
+    escalation).
+    """
     host = inputs.host("/")
-    per_cpu = host["load1"] / max(1, host["cpus"])
-    if per_cpu < rule["load1_per_cpu"]:
+    cpus = max(1, host["cpus"])
+    panes = inputs.panes() or {}
+    lanes = sum(1 for status in panes.values()
+                if status and str(status).lower() != "unknown")
+    # A floor alone was too low once the fleet grew: 19 lanes * 0.25 / 8 =
+    # 0.59, clamped to 1.0, so a normal 2.5/cpu load read critical. Add a
+    # lane-scaled reserve before the clamp: each live lane is expected to keep
+    # roughly `lane_reserve_per_lane` of CPU busy, and the band must sit above
+    # that. The floor still protects a quiet fleet.
+    reserve = lanes * rule["lane_reserve_per_lane"] / cpus
+    warning = max(rule["min_load1_per_cpu"], reserve,
+                  lanes * rule["load1_per_lane"] / cpus)
+    critical = max(rule["min_critical_load1_per_cpu"], warning + 0.35,
+                   lanes * rule["critical_load1_per_lane"] / cpus)
+    per_cpu = host["load1"] / cpus
+    if per_cpu < warning:
         return []
-    item = finding("host.load", rule, "load1",
-                   f"load1 {host['load1']:.2f} on {host['cpus']} CPUs "
-                   f"(intended band for this fleet: "
-                   f"{rule['critical_load1_per_cpu']}/cpu at 10 lanes on 8 cores)",
-                   f"{rule['load1_per_cpu']}/cpu", f"{round(per_cpu, 2)}/cpu",
+    level = "critical" if per_cpu >= critical else "warning"
+    item = finding("host.load", rule, f"load1:{level}",
+                   f"load1 {host['load1']:.2f} = {per_cpu:.1f}/cpu, "
+                   f"band {warning:.1f}-{critical:.1f}/cpu for {lanes} lanes",
+                   f"{warning:.1f}/cpu (load {warning * cpus:.1f})",
+                   f"{per_cpu:.1f}/cpu (load {host['load1']:.1f})",
                    "load1 (1 min)",
-                   {"load1": round(host["load1"], 2), "cpus": host["cpus"],
-                    "per_cpu": round(per_cpu, 2)})
-    # Critical needs the high band SUSTAINED; one compile spike is not an
-    # incident. The plan's streak count is applied below via must_hold_runs,
-    # which the config sets higher for this rule.
-    if per_cpu >= rule["critical_load1_per_cpu"]:
+                   {"load1": round(host["load1"], 2), "cpus": cpus,
+                    "per_cpu": round(per_cpu, 2), "lanes": lanes,
+                    "warning_per_cpu": round(warning, 2),
+                    "critical_per_cpu": round(critical, 2)})
+    if level == "critical":
         item["severity"] = "critical"
-        item["threshold"] = (f"{rule['critical_load1_per_cpu']}/cpu "
+        item["threshold"] = (f"{critical:.1f}/cpu "
                              f"(sustained {rule['critical_hold_runs']} runs)")
     return [item]
 
