@@ -316,17 +316,32 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertEqual([("dunk.overdue", "d1"), ("dunk.overdue", "d4")], self.keys(self.fleet.evaluate(cfg)))
 
     def test_inbox_undeliverable_backlog_has_no_age_limit(self):
-        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 2})
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 2, "min_age_hours": 0.01})
         for _ in range(2):
             self.fleet.message("w9:p8", "undeliverable", NOW - 30 * 24 * HOUR, reason="target pane no longer exists")
-        self.fleet.message("w9:p7", "undeliverable", NOW - HOUR)
+        self.fleet.message("w9:p7", "undeliverable", NOW - 30 * HOUR)
         found = self.fleet.evaluate(cfg)
         self.assertEqual([("inbox.undeliverable", "w9:p8")], self.keys(found))
         self.assertNotIn("BODY-NEVER-REPORTED", json.dumps(found))
 
+    def test_inbox_undeliverable_pages_only_above_the_auto_archive_age(self):
+        # The auto-archive clears undeliverable mail at 24h, so a page inside that
+        # window describes mail that is about to disappear on its own. The floor
+        # sits above it: a page must mean the archive did not catch this.
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 2, "min_age_hours": 26})
+        for _ in range(3):
+            self.fleet.message("young", "undeliverable", NOW - 3 * HOUR,
+                               reason="target pane no longer exists")
+        self.assertEqual([], self.keys(self.fleet.evaluate(cfg)))
+        for _ in range(3):
+            self.fleet.message("stuck", "undeliverable", NOW - 30 * HOUR,
+                               reason="target pane no longer exists")
+        self.assertEqual([("inbox.undeliverable", "stuck")], self.keys(self.fleet.evaluate(cfg)))
+
     def test_inbox_unread_live_and_dead(self):
         cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1},
-                                inbox__unread_dead={"min_messages": 1})
+                                inbox__unread_dead={"min_messages": 1},
+                                inbox__undeliverable={"min_messages": 99, "min_age_hours": 0.01})
         self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]
         self.fleet.message("alive", "queued", NOW - 60 * MIN, pane_id="w1:p1")
         self.fleet.message("alive2", "queued", NOW - 60 * MIN + 1, pane_id="w1:p1")
@@ -444,9 +459,9 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertIn("lane.working_without_task", [s["rule"] for s in wd.evaluate(cfg, NOW)["skipped"]])
 
     def test_output_is_deterministic(self):
-        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 1}, task__blocked_stale={"threshold_minutes": 1})
+        cfg = self.fleet.config(inbox__undeliverable={"min_messages": 1, "min_age_hours": 0.01}, task__blocked_stale={"threshold_minutes": 1})
         for mailbox in ("b", "a", "c"):
-            self.fleet.message(mailbox, "undeliverable", NOW - HOUR)
+            self.fleet.message(mailbox, "undeliverable", NOW - 30 * HOUR)
         self.fleet.task("t9", "blocked", NOW - HOUR)
         self.assertEqual(self.fleet.evaluate(cfg), self.fleet.evaluate(cfg))
         self.assertEqual(["a", "b", "c", "t9"], [f["key"] for f in self.fleet.evaluate(cfg)])
@@ -672,11 +687,11 @@ class OwnerPagingTests(WatchdogCase):
     def test_vp_only_classes_never_page_even_with_owner_enabled(self):
         cfg = self.fleet.config(host__tmp={"max_used_fraction": 0.5, "critical_used_fraction": 0.5,
                                            "min_free_bytes": 1, "max_inode_fraction": 0.9, "path": "/tmp"},
-                                inbox__undeliverable={"min_messages": 1})
+                                inbox__undeliverable={"min_messages": 1, "min_age_hours": 0.01})
         cfg = self.live(cfg, classes=["security", "outage", "money"], min_severity="info")
         self.seed_state(cfg)
         self.fleet.hosts = {"/tmp": {"used_fraction": 0.97}}
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         owner = FakeOwner()
         report, _ = self.fleet.run(cfg, owner=owner)
         self.assertEqual([], owner.posts)
@@ -727,7 +742,7 @@ class VpDeliveryTests(WatchdogCase):
         return cfg
 
     def test_enabled_false_or_dry_run_true_sends_nothing(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         for overrides in ({"enabled": False}, {"dry_run": True}):
             cfg = self.vp_config()
             cfg.update(overrides)
@@ -736,7 +751,7 @@ class VpDeliveryTests(WatchdogCase):
             self.assertEqual([], sent)
 
     def test_dry_run_lines_carry_threshold_measured_and_window(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         report, _ = self.fleet.run(self.vp_config(), dry=True)
         vp = [line for line in report["lines"] if line.startswith("WOULD-NOTIFY VP")]
         self.assertEqual(1, len(vp))
@@ -746,7 +761,7 @@ class VpDeliveryTests(WatchdogCase):
         self.assertIn("SKIPPED rule=money.spend_projection error=no metering source", report["lines"])
 
     def test_live_watchdog_run_records_its_cadence_in_the_heartbeat(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         cfg = self.vp_config(cadence_minutes=15)
         self.assertEqual(["vp"], self.fleet.run(cfg)[0]["sent"])
         self.assertEqual({"schema": 1, "cadence_minutes": 15, "at": NOW},
@@ -755,7 +770,7 @@ class VpDeliveryTests(WatchdogCase):
         self.assertEqual((15, None), deadman.recorded_cadence(cfg["heartbeat_path"]))
 
     def test_live_run_sends_one_digest_and_touches_heartbeat(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         cfg = self.vp_config()
         report, sent = self.fleet.run(cfg)
         self.assertEqual(["vp"], report["sent"])
@@ -765,20 +780,20 @@ class VpDeliveryTests(WatchdogCase):
 
     def test_cap_sends_exactly_max_and_says_how_many_were_suppressed(self):
         for n in range(5):
-            self.fleet.message(f"dead{n}", "undeliverable", NOW - HOUR)
+            self.fleet.message(f"dead{n}", "undeliverable", NOW - 30 * HOUR)
         report, sent = self.fleet.run(self.vp_config(max_alerts_per_run=3))
         self.assertEqual(3, report["counts"]["vp"])
         self.assertIn("2 further finding(s) suppressed", sent[0][2])
 
     def test_cooldown_dedupes_and_persists_across_restart(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         cfg = self.vp_config()
         self.assertEqual(1, len(self.fleet.run(cfg)[1]))
         self.assertEqual([], self.fleet.run(cfg, now=NOW + 59 * MIN)[1])
         self.assertEqual(1, len(self.fleet.run(cfg, now=NOW + 60 * MIN)[1]))
 
     def test_vp_send_failure_is_reported_never_recursed(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         cfg = self.vp_config()
         calls = []
 
@@ -793,7 +808,7 @@ class VpDeliveryTests(WatchdogCase):
         self.assertIn("DELIVERY FAILED (source=watchdog-self)", wd.render_text(report))
 
     def test_recovery_line_goes_to_vp(self):
-        self.fleet.message("dead", "undeliverable", NOW - HOUR)
+        self.fleet.message("dead", "undeliverable", NOW - 30 * HOUR)
         cfg = self.vp_config()
         self.fleet.run(cfg)
         self.fleet.sql("inbox.db", "UPDATE messages SET state='archived'")
@@ -804,7 +819,7 @@ class VpDeliveryTests(WatchdogCase):
 class ReplayTests(WatchdogCase):
     def test_replay_counts_history_backed_rules_and_names_the_rest(self):
         cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 24, "cooldown_minutes": 600},
-                                inbox__undeliverable={"min_messages": 1})
+                                inbox__undeliverable={"min_messages": 1, "min_age_hours": 0.01})
         self.fleet.dunks = [{"id": "d1", "running": True}]
         self.fleet.write_json()
         for n in range(4):

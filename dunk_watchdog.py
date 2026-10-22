@@ -179,7 +179,9 @@ RULE_PARAMS = {
                          "fresh_minutes": POSITIVE},
     "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE},
     "dunk.overdue": {"missed_intervals": POSITIVE},
-    "inbox.undeliverable": {"min_messages": POSITIVE_INT},
+    # Above the 24h auto-archive: a page must mean "the archive did not catch
+    # this", not "the archive is about to catch this".
+    "inbox.undeliverable": {"min_messages": POSITIVE_INT, "min_age_hours": POSITIVE},
     "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT},
     "inbox.unread_dead": {"min_messages": POSITIVE_INT},
     "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 50, integer=True),
@@ -584,10 +586,12 @@ def rule_inbox_undeliverable(inputs, rule):
                         "WHERE state='undeliverable' AND created_at<=? ORDER BY created_at, id", (inputs.now,))
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
-        if group["count"] >= rule["min_messages"]:
+        age_hours = (inputs.now - group["oldest"]) / 3600
+        if group["count"] >= rule["min_messages"] and age_hours >= rule["min_age_hours"]:
             out.append(finding("inbox.undeliverable", rule, mailbox,
                                f"undeliverable message backlog for {mailbox}",
-                               f"{rule['min_messages']} msgs", f"{group['count']} msgs", "current backlog",
+                               f"{rule['min_messages']} msgs older than {rule['min_age_hours']}h",
+                               f"{group['count']} msgs, oldest {age_hours:.1f}h", "current backlog",
                                _group_evidence(inputs, mailbox, group)))
     return out
 
