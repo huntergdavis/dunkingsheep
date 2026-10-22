@@ -253,8 +253,9 @@ def build_parser():
     q = csub.add_parser("init", help="create the store layout")
     q.add_argument("--global", dest="global_store", action="store_true")
     q.add_argument("--path")
-    q = csub.add_parser("add", help="add an entry (body from a file or stdin)")
+    q = csub.add_parser("add", help="add an entry (body from --text, stdin or a file)")
     q.add_argument("file", nargs="?", default="-")
+    q.add_argument("--text", help="the body inline (otherwise stdin or the file argument)")
     q.add_argument("--class", dest="cls", required=True)
     q.add_argument("--subject", required=True)
     q.add_argument("--type", dest="type_", default="reference")
@@ -1446,8 +1447,14 @@ def _run(argv):
             code = main(argv)
     except SystemExit as exc:
         # argparse --version/--help print inside the capture and then exit;
-        # the captured text must still reach stdout.
-        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        # the captured text must still reach stdout. A STRING code is a named
+        # refusal ("no entry 'x'"): it belongs on stderr with a failing exit,
+        # and dropping it made refusals exit 1 with no message at all.
+        if isinstance(exc.code, str):
+            sys.stderr.write(f"error: {exc.code}\n")
+            code = 2
+        else:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     output = buffer.getvalue()
     if path:
         try:
@@ -1649,6 +1656,122 @@ def main(argv=None):
     return 0
 
 
+def run_context_command(dunk_context, args):
+    """The context store commands. Local files only: no socket, no daemon."""
+    sub = args.context_command
+    store = dunk_context.Store(args.path if getattr(args, "path", None) else None,
+                               global_store=bool(getattr(args, "global_store", False)))
+    if sub == "init":
+        return {"root": str(store.ensure())}, lambda r: print(f"store at {r['root']}")
+    if sub == "add":
+        if getattr(args, "text", None):
+            body = args.text
+        elif args.file == "-":
+            body = sys.stdin.read()
+        else:
+            try:
+                body = open(args.file).read()
+            except FileNotFoundError:
+                raise SystemExit(
+                    f"no such file: {args.file!r} - the body comes from --text, stdin or a "
+                    f"file; for text inline use: dunkingsheep context add --text "
+                    f"'<claim>' --class ... --subject ...")
+        return store.add(body, cls=args.cls, subject=args.subject, type_=args.type_,
+                         authority=args.authority, source=args.source, stated=args.stated,
+                         recheck_after=args.recheck_after, supersedes=args.supersedes), \
+            lambda r: print(f"added {r['class']}/{r['slug']}")
+    if sub == "promote":
+        entry = store.find(args.slug)
+        if entry is None:
+            raise SystemExit(1)
+        if os.environ.get("DUNKINGSHEEP_SUPERUSER") != "1":
+            raise SystemExit("refused: only an owner act promotes a ground truth")
+        return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
+                         type_=entry.get("type") or "principle", authority="owner",
+                         source=entry.get("source") or "",
+                         supersedes=entry["slug"]), lambda r: print(f"promoted {r['slug']}")
+    if sub == "supersede":
+        body = sys.stdin.read() if args.file == "-" else open(args.file).read()
+        return store.supersede(args.slug, body), lambda r: print(f"superseded by {r['slug']}")
+    if sub == "retire":
+        return store.retire(args.slug, args.reason), lambda r: print(f"retired {r['slug']}")
+    if sub in ("get", "search"):
+        # The same scope rule as stats/check/digest: a lookup must find a
+        # global ground truth from inside a project, or the rules are write-only.
+        which = ("global" if getattr(args, "global_store", False)
+                 else "project" if getattr(args, "project", False) else None)
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        if sub == "get":
+            for name, target in stores.items():
+                entry = target.find(args.key)
+                if entry is not None:
+                    target.log_access(entry["slug"])
+                    return entry, lambda r: print(
+                        f"# {r['slug']} ({r['class']}, {r['authority']}, {name})\n\n{r['body']}")
+            raise SystemExit(f"no entry {args.key!r} in {', '.join(stores) or 'any store'}")
+        rows = []
+        for name, target in stores.items():
+            for row in target.search(args.query, cls=args.cls, scope=args.scope):
+                rows.append(dict(row, store=name))
+        return rows, lambda rs: [print(f"{r['store']:<8} {r['class']:<13} {r['slug']:<40} {r['subject']}")
+                                 for r in rs] and None
+    if sub == "digest":
+        which = ("global" if getattr(args, "global_store", False)
+                 else "project" if getattr(args, "project", False) else None)
+        return dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                        max_bytes=args.max_bytes, subject=args.subject), print
+    which = ("global" if getattr(args, "global_store", False)
+             else "project" if getattr(args, "project", False) else None)
+    if sub == "snapshot":
+        import json as _json
+        # One deterministic call for the dashboard: the digest exactly as an
+        # agent receives it, plus per-article delivery and read counts.
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        data = {"schema": "context-snapshot/1", "as_of": int(time.time()),
+                "digest": dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                                   record=False),
+                "stores": {}}
+        for name, target in stores.items():
+            stats = target.stats()
+            data["stores"][name] = {
+                "status": "ok" if target.exists() else "absent",
+                "path": str(target.root), "counts": stats["counts"],
+                "reads_7d": stats["reads_7d"], "injected_7d": stats["injected_7d"],
+                "never_read_count": stats["never_read_count"],
+                "never_delivered_count": stats["never_delivered_count"],
+                "entries": target.entry_stats()}
+        return data, lambda d: print(_json.dumps(d, indent=2))
+    if sub in ("check", "index", "stats"):
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        out = {}
+        for name, target in stores.items():
+            if sub == "index":
+                out[name] = {"path": str(target.root), "result": target.index()}
+            elif sub == "check":
+                result = target.check()
+                out[name] = {"path": str(target.root), "counts": result["counts"],
+                             "refusals": len(result["refusals"]), "stale": len(result["stale"]),
+                             "entries": sum(result["counts"].values())}
+            else:
+                result = target.stats()
+                out[name] = {"path": str(target.root), "counts": result["counts"],
+                             "reads_7d": result["reads_7d"],
+                             "injected_7d": result["injected_7d"],
+                             "never_read_count": result["never_read_count"],
+                             "never_read": result["never_read"],
+                             "never_delivered_count": result["never_delivered_count"]}
+        if sub == "index":
+            return out, lambda r: [print(f"{name}: indexed {v['result']['indexed']} -> {v['result']['path']}")
+                                   for name, v in r.items()] and None
+        if sub == "check":
+            return out, lambda r: [print(f"{name} ({v['path']}): entries {v['entries']}, refusals {v['refusals']}, stale {v['stale']}")
+                                   for name, v in r.items()] and None
+        return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, "
+                                    f"injected_7d {v['injected_7d']}, reads_7d {v['reads_7d']}, "
+                                    f"never_delivered {v['never_delivered_count']}, "
+                                    f"never_read {v['never_read_count']}") for name, v in r.items()] and None
+
+
 def run_client_command(client, args):
     """Map CLI args onto a registry command; return (result, human printer)."""
     command = args.command
@@ -1779,107 +1902,10 @@ def run_client_command(client, args):
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
     if command == "context":
         import dunk_context
-        sub = args.context_command
-        store = dunk_context.Store(args.path if getattr(args, "path", None) else None,
-                                   global_store=bool(getattr(args, "global_store", False)))
-        if sub == "init":
-            return {"root": str(store.ensure())}, lambda r: print(f"store at {r['root']}")
-        if sub == "add":
-            body = sys.stdin.read() if args.file == "-" else open(args.file).read()
-            return store.add(body, cls=args.cls, subject=args.subject, type_=args.type_,
-                             authority=args.authority, source=args.source, stated=args.stated,
-                             recheck_after=args.recheck_after, supersedes=args.supersedes), \
-                lambda r: print(f"added {r['class']}/{r['slug']}")
-        if sub == "promote":
-            entry = store.find(args.slug)
-            if entry is None:
-                raise SystemExit(1)
-            if os.environ.get("DUNKINGSHEEP_SUPERUSER") != "1":
-                raise SystemExit("refused: only an owner act promotes a ground truth")
-            return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
-                             type_=entry.get("type") or "principle", authority="owner",
-                             source=entry.get("source") or "",
-                             supersedes=entry["slug"]), lambda r: print(f"promoted {r['slug']}")
-        if sub == "supersede":
-            body = sys.stdin.read() if args.file == "-" else open(args.file).read()
-            return store.supersede(args.slug, body), lambda r: print(f"superseded by {r['slug']}")
-        if sub == "retire":
-            return store.retire(args.slug, args.reason), lambda r: print(f"retired {r['slug']}")
-        if sub in ("get", "search"):
-            # The same scope rule as stats/check/digest: a lookup must find a
-            # global ground truth from inside a project, or the rules are write-only.
-            which = ("global" if getattr(args, "global_store", False)
-                     else "project" if getattr(args, "project", False) else None)
-            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
-            if sub == "get":
-                for name, target in stores.items():
-                    entry = target.find(args.key)
-                    if entry is not None:
-                        target.log_access(entry["slug"])
-                        return entry, lambda r: print(
-                            f"# {r['slug']} ({r['class']}, {r['authority']}, {name})\n\n{r['body']}")
-                raise SystemExit(f"no entry {args.key!r} in {', '.join(stores) or 'any store'}")
-            rows = []
-            for name, target in stores.items():
-                for row in target.search(args.query, cls=args.cls, scope=args.scope):
-                    rows.append(dict(row, store=name))
-            return rows, lambda rs: [print(f"{r['store']:<8} {r['class']:<13} {r['slug']:<40} {r['subject']}")
-                                     for r in rs] and None
-        if sub == "digest":
-            which = ("global" if getattr(args, "global_store", False)
-                     else "project" if getattr(args, "project", False) else None)
-            return dunk_context.digest_both(getattr(args, "path", None), which=which,
-                                            max_bytes=args.max_bytes, subject=args.subject), print
-        which = ("global" if getattr(args, "global_store", False)
-                 else "project" if getattr(args, "project", False) else None)
-        if sub == "snapshot":
-            import json as _json
-            # One deterministic call for the dashboard: the digest exactly as an
-            # agent receives it, plus per-article delivery and read counts.
-            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
-            data = {"schema": "context-snapshot/1", "as_of": int(time.time()),
-                    "digest": dunk_context.digest_both(getattr(args, "path", None), which=which,
-                                                       record=False),
-                    "stores": {}}
-            for name, target in stores.items():
-                stats = target.stats()
-                data["stores"][name] = {
-                    "status": "ok" if target.exists() else "absent",
-                    "path": str(target.root), "counts": stats["counts"],
-                    "reads_7d": stats["reads_7d"], "injected_7d": stats["injected_7d"],
-                    "never_read_count": stats["never_read_count"],
-                    "never_delivered_count": stats["never_delivered_count"],
-                    "entries": target.entry_stats()}
-            return data, lambda d: print(_json.dumps(d, indent=2))
-        if sub in ("check", "index", "stats"):
-            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
-            out = {}
-            for name, target in stores.items():
-                if sub == "index":
-                    out[name] = {"path": str(target.root), "result": target.index()}
-                elif sub == "check":
-                    result = target.check()
-                    out[name] = {"path": str(target.root), "counts": result["counts"],
-                                 "refusals": len(result["refusals"]), "stale": len(result["stale"]),
-                                 "entries": sum(result["counts"].values())}
-                else:
-                    result = target.stats()
-                    out[name] = {"path": str(target.root), "counts": result["counts"],
-                                 "reads_7d": result["reads_7d"],
-                                 "injected_7d": result["injected_7d"],
-                                 "never_read_count": result["never_read_count"],
-                                 "never_read": result["never_read"],
-                                 "never_delivered_count": result["never_delivered_count"]}
-            if sub == "index":
-                return out, lambda r: [print(f"{name}: indexed {v['result']['indexed']} -> {v['result']['path']}")
-                                       for name, v in r.items()] and None
-            if sub == "check":
-                return out, lambda r: [print(f"{name} ({v['path']}): entries {v['entries']}, refusals {v['refusals']}, stale {v['stale']}")
-                                       for name, v in r.items()] and None
-            return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, "
-                                        f"injected_7d {v['injected_7d']}, reads_7d {v['reads_7d']}, "
-                                        f"never_delivered {v['never_delivered_count']}, "
-                                        f"never_read {v['never_read_count']}") for name, v in r.items()] and None
+        try:
+            return run_context_command(dunk_context, args)
+        except dunk_context.ContextError as error:
+            raise SystemExit(f"context: {error}")
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),

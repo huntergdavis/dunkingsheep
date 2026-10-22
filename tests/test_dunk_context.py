@@ -153,3 +153,41 @@ class ContextTests(unittest.TestCase):
         stats = self.store.stats()
         self.assertEqual(1, stats["reads_total"])
         self.assertEqual(1, stats["never_read_count"])
+
+
+class ContextCliTests(unittest.TestCase):
+    """The CLI surface an agent actually types: a wrong shape must teach, not traceback."""
+
+    def setUp(self):
+        import os, subprocess, sys
+        self._mods = (os, subprocess, sys)
+        self.tmp = __import__("tempfile").TemporaryDirectory()
+        self.env = dict(os.environ, DUNKINGSHEEP_DIR=self.tmp.name)
+        self.cli = str(Path(__file__).resolve().parent.parent / "dunkingsheep")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *args):
+        os, subprocess, sys = self._mods
+        return subprocess.run([sys.executable, self.cli, *args], capture_output=True,
+                              text=True, timeout=120, env=self.env, cwd=self.tmp.name)
+
+    def test_text_adds_inline_and_a_bare_sentence_is_a_named_refusal(self):
+        added = self.run_cli("context", "add", "--text", "a claim", "--class", "fact",
+                             "--subject", "inline", "--authority", "agent")
+        self.assertEqual(0, added.returncode, added.stderr)
+        self.assertIn("added fact/", added.stdout)
+        bare = self.run_cli("context", "add", "a bare sentence", "--class", "fact",
+                            "--subject", "x")
+        self.assertEqual(2, bare.returncode)
+        self.assertIn("no such file", bare.stderr)
+        self.assertIn("--text", bare.stderr, "the refusal must name the form that works")
+        self.assertNotIn("Traceback", bare.stderr)
+
+    def test_a_bad_enum_is_a_named_refusal_not_a_traceback(self):
+        bad = self.run_cli("context", "add", "--text", "x", "--class", "fact",
+                           "--subject", "y", "--authority", "stated")
+        self.assertEqual(2, bad.returncode)
+        self.assertIn("authority must be one of", bad.stderr)
+        self.assertNotIn("Traceback", bad.stderr)

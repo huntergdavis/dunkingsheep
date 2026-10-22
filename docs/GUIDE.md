@@ -1,4 +1,4 @@
-# Dunking Sheep 2.37.3 guide
+# Dunking Sheep 2.37.4 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
