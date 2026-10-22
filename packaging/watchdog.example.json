@@ -218,6 +218,13 @@
       "policies_path": "/etc/dunkingsheep/load-policies.json",
       "state_path": "/var/lib/dunkingsheep/would-kill-state.json",
       "require_task": true
+    },
+    "pane.retired": {
+      "enabled": true,
+      "severity": "info",
+      "class": "ops",
+      "cooldown_minutes": 720,
+      "must_hold_runs": 1
     }
   }
 }

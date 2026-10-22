@@ -294,6 +294,36 @@ def h_flush_box(flock, args, self_pane_id):
     return flock.flush_box(args["target"], self_pane_id=self_pane_id)
 
 
+def h_retire_pane(flock, args, self_pane_id):
+    """Retire a pane: stop feeding it, stop paging about it, keep its mail.
+
+    Superuser-gated because it silences an alert, and the reason is required
+    because an unexplained silence is how an alert dies without anyone learning.
+    """
+    import dunk_panes
+    action = args.get("action") or "list"
+    if action == "list":
+        retired = dunk_panes.all_retired()
+        return {"retired": retired, "count": len(retired)}
+    if action == "unretire":
+        return dunk_panes.unretire(args["pane"])
+    if action != "retire":
+        raise ValueError("retire action must be retire, unretire or list")
+    flock.require_superuser(self_pane_id, "retire_pane")
+    labels = []
+    try:
+        pane = flock.resolve_target(args["pane"], self_pane_id)
+        labels = [value for value in (pane.get("tab_label"), pane.get("agent_name"),
+                                      pane.get("label"), pane.get("name")) if value]
+        pane_id = pane["pane_id"]
+    except Exception:                       # a pane that is already gone is still recordable
+        pane_id = str(args["pane"])
+    record = dunk_panes.retire(pane_id, args["reason"], by=self_pane_id, labels=labels)
+    # The mail is evidence: report how much is now quiet, and keep every row.
+    waiting = (flock.inbox.count(pane_id) or {}).get("unread") if getattr(flock, "inbox", None) else None
+    return dict(record, unread_kept=waiting)
+
+
 def h_dispatch(flock, args, self_pane_id):
     """The deterministic feeder: standby queue + a tick that fills idle lanes.
 
@@ -316,19 +346,23 @@ def h_dispatch(flock, args, self_pane_id):
                 "pending": len(queue.items())}
     if action != "tick":
         raise ValueError("dispatch action must be add, list, remove, tick or status")
+    import dunk_panes
     panes = [pane for pane in flock.resolve_lanes()
-             if (pane.get("agent_status") not in (None, "unknown"))]
+             if (pane.get("agent_status") not in (None, "unknown"))
+             and not dunk_panes.is_retired(pane["pane_id"])]
     inbox = flock.inbox
 
     def send(pane_id, text):
         result = inbox.send(pane_id, text, subject="standby", sender=self_pane_id)
         return result.get("message_id")
 
-    return dunk_dispatch.tick(
+    state = dunk_dispatch.tick(
         queue, panes,
         delivery=lambda pane: flock.delivery_state(pane["pane_id"], pane.get("agent_status")),
         unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
         send=send, dry_run=bool(args.get("dry_run")))
+    state["retired"] = len(dunk_panes.all_retired())
+    return state
 
 
 def h_clear_box(flock, args, self_pane_id):
@@ -847,6 +881,17 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "retire_pane",
+        "Retire a pane we deliberately stopped feeding (superseded, or its job "
+        "moved to the dispatcher): it stops paging inbox.unread_live and stops "
+        "counting as idle/ready, while its mail rows stay as the record. "
+        "action=retire/unretire/list. Superuser-gated; a reason is required.",
+        h_retire_pane,
+        params={"action": {"type": "string", "description": "retire (default), unretire or list."},
+                "pane": {"type": "string", "description": "Pane id or name."},
+                "reason": {"type": "string",
+                           "description": "Why it is retired, e.g. superseded-by:wW:p7."}}),
     Command(
         "dispatch",
         "Deterministic feeding, no model: a standby queue plus a tick that sends "
@@ -1825,7 +1870,8 @@ MCP_GROUPS = (
      "idle lanes. action=add/list/remove/tick/status. A lane is fed only when it "
      "is ready AND has no unread mail; the tick reports idle lanes, dispatched "
      "this hour, and blocked lanes with reasons.",
-     (("dispatch", "dispatch"),)),
+     (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
+      ("retired", "retire_pane"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "

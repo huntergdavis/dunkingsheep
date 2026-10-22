@@ -343,6 +343,30 @@ class RuleBoundaryTests(WatchdogCase):
                                reason="target pane no longer exists")
         self.assertEqual([("inbox.undeliverable", "stuck")], self.keys(self.fleet.evaluate(cfg)))
 
+    def test_a_retired_pane_is_reported_not_paged(self):
+        """The VP's refinement: a superseded pane's mail is evidence, not an alarm."""
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1})
+        self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]
+        self.fleet.message("alive", "queued", NOW - 120 * MIN, pane_id="w1:p1")
+        self.fleet.message("retired", "queued", NOW - 120 * MIN, pane_id="w9:p9")
+        with open(os.path.join(self.fleet.dir, "retired-panes.json"), "w") as handle:
+            json.dump({"w9:p9": {"pane_id": "w9:p9", "reason": "superseded-by:w9:p10",
+                                 "labels": [], "retired_at": NOW}}, handle)
+        keys = [k for k in self.keys(self.fleet.evaluate(cfg))]
+        self.assertIn(("inbox.unread_live", "alive"), keys)
+        self.assertNotIn(("inbox.unread_live", "retired"), keys,
+                         "a retired pane must not page")
+
+    def test_retired_panes_appear_in_the_digest_as_a_count(self):
+        cfg = self.fleet.config(pane__retired={})
+        with open(os.path.join(self.fleet.dir, "retired-panes.json"), "w") as handle:
+            json.dump({"wW:p4": {"pane_id": "wW:p4", "reason": "superseded-by:wW:p7",
+                                 "labels": ["par-d"], "retired_at": NOW}}, handle)
+        found = [f for f in self.fleet.evaluate(cfg) if f["rule"] == "pane.retired"]
+        self.assertEqual(1, len(found))
+        self.assertIn("retired panes: 1 (wW:p4)", found[0]["summary"])
+        self.assertEqual("info", found[0]["severity"])
+
     def test_inbox_unread_live_and_dead(self):
         cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1},
                                 inbox__unread_dead={"min_messages": 1},
@@ -1226,7 +1250,8 @@ class NoModelTests(unittest.TestCase):
     # allowed because the would-kill rule must see the same samples the load
     # sampler sees; neither spawns a process nor opens a socket (checked below).
     ALLOWED_IMPORTS = {"__future__", "hashlib", "json", "os", "re", "sqlite3", "sys", "time", "pathlib",
-                       "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy"}
+                       "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy",
+                       "dunk_panes"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -1262,7 +1287,7 @@ class NoModelTests(unittest.TestCase):
         no network - because it legitimately imports `signal` to send TERM.
         """
         INERT_FORBIDDEN = {"subprocess", "urllib", "requests", "http", "socket", "ssl"}
-        for name in ("dunk_load.py", "dunk_policy.py"):
+        for name in ("dunk_load.py", "dunk_policy.py", "dunk_panes.py"):
             tree = ast.parse(read(os.path.join(ROOT, name)))
             imported = set()
             for node in ast.walk(tree):

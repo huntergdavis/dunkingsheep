@@ -552,6 +552,14 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
+    rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
+    q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
+    q.add_argument("pane")
+    q.add_argument("--reason", required=True, help="why, e.g. superseded-by:wW:p7")
+    q = rsub.add_parser("unretire", help="bring a pane back")
+    q.add_argument("pane")
+    q = rsub.add_parser("list", help="the retired panes")
     p = sub.add_parser("dispatch", help="standby queue + a deterministic tick that fills idle lanes",
                        epilog="examples: dispatch add t6 'advance strict C to 250' / dispatch tick")
     dsub = p.add_subparsers(dest="dispatch_command", metavar="<action>")
@@ -1216,6 +1224,25 @@ def print_message(result):
         print(f"sent to {result['target_label']} ({result['pane_id']})")
     else:
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
+
+
+def print_retired(result):
+    if "retired" in result:
+        records = result["retired"]
+        if not records:
+            print("no retired panes")
+            return
+        print(f"{'PANE':<10} {'RETIRED':<20} REASON")
+        for record in records:
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(record.get("retired_at") or 0))
+            print(f"{record['pane_id']:<10} {stamp:<20} {record.get('reason')}")
+        return
+    if "unread_kept" in result:
+        print(f"retired {result['pane_id']} ({result['reason']})"
+              + (f"; {result['unread_kept']} unread message(s) kept as the record"
+                 if result.get("unread_kept") is not None else ""))
+        return
+    print(f"unretired {result.get('pane_id')}")
 
 
 def print_dispatch(result):
@@ -2157,6 +2184,10 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "retired":
+        return client.call("retire_pane", action=args.retire_command,
+                           pane=getattr(args, "pane", None),
+                           reason=getattr(args, "reason", None)), print_retired
     if command == "dispatch":
         payload = {"action": args.dispatch_command}
         if getattr(args, "brief", None):

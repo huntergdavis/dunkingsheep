@@ -76,3 +76,33 @@ dunkingsheep dispatch status             # the last tick's numbers
 
 A brief is one line. The lane is sent `[standby t6] advance strict C from 240 to
 250 bodies`, so its reply can cite the task without guessing.
+
+## Retired panes: silence with a reason
+
+A pane can be superseded (`par-d2` started in `wW:p7` because `wW:p4` is stuck on a
+full context) or replaced by machinery (the dispatcher took over the PM's feeding
+job). Its mailbox then holds mail nobody will read, and paging about it every four
+hours is an alarm that cannot be satisfied.
+
+```bash
+dunkingsheep retired retire wW:p4 --reason superseded-by:wW:p7     # superuser
+dunkingsheep retired list
+dunkingsheep retired unretire wW:p4
+```
+
+Retiring:
+
+- **stops the page**: `inbox.unread_live` and `inbox.unread_dead` skip the mailbox,
+  matched however the row spells it (`wW:p4`, `par-d (wW:p4)`, `par-d`);
+- **stops the feeding**: the pane is excluded from the dispatcher's ready/idle
+  counts;
+- **keeps every message row** - the mail is the record of what was tried, and
+  deleting it would destroy the evidence;
+- **is still reported**: the watchdog emits an info digest line
+  `retired panes: 1 (wW:p4)` every run, so a lane cannot vanish from the fleet
+  unnoticed. Retired is a *state to report*, the same way dead is - not a
+  condition to page about.
+
+Both the reason and the actor are recorded; a retirement without a reason is
+refused, because an unexplained silence is how an alert dies without anyone
+learning. Unretiring is deliberate and reversible.

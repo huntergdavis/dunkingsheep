@@ -204,6 +204,8 @@ RULE_PARAMS = {
     # tripped a limit while doing the work it was given.
     "resource.would_kill": {"policies_path": _str, "state_path": _str,
                             "require_task": _bool},
+    # A retired pane is a STATE we report, never a condition we page about.
+    "pane.retired": {},
 }
 
 TOP = {
@@ -566,6 +568,19 @@ def rule_dunk_overdue(inputs, rule):
     return out
 
 
+def _retired_mailbox(inputs, mailbox):
+    """A retired pane's mail is the record of what was tried, not a condition.
+
+    Retiring is how a superseded pane stops paging without deleting evidence -
+    the same shape as 'dead': a state to report, not an alarm to raise.
+    """
+    try:
+        import dunk_panes
+    except ImportError:                     # the watchdog runs without the rest of the package
+        return False
+    return dunk_panes.mailbox_retired(mailbox, path=inputs.path("retired-panes.json"))
+
+
 def _mailbox_groups(rows):
     groups = {}
     for message_id, mailbox, created_at, reason in rows:
@@ -611,6 +626,7 @@ def rule_inbox_unread_live(inputs, rule):
     panes = inputs.panes()
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs, inputs.now - rule["age_minutes"] * 60)
             if panes is None or (pane in panes)]
+    rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
@@ -625,6 +641,7 @@ def rule_inbox_unread_live(inputs, rule):
 def rule_inbox_unread_dead(inputs, rule):
     panes = inputs.panes()
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs) if pane and pane not in panes]
+    rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
@@ -852,6 +869,33 @@ def _slot_holder_alive(slot):
     return True
 
 
+def rule_pane_retired(inputs, rule):
+    """Report how many panes are retired, in the info digest.
+
+    Retiring a pane stops it paging (its mail is the record of what was tried),
+    but a silence nobody sees is how a lane vanishes from the fleet unnoticed. So
+    the count is stated every digest: 'retired panes: 2 (wW:p4, wW:p1)'.
+    """
+    try:
+        import dunk_panes
+    except ImportError:
+        return []
+    records = dunk_panes.all_retired(path=inputs.path("retired-panes.json"))
+    if not records:
+        return []
+    names = ", ".join(record["pane_id"] for record in records)
+    reasons = "; ".join(f"{record['pane_id']}: {record.get('reason')}" for record in records)
+    item = finding("pane.retired", rule, "count",
+                   f"retired panes: {len(records)} ({names})",
+                   "informational", f"{len(records)} retired", "current",
+                   {"panes": [record["pane_id"] for record in records],
+                    "reasons": {record["pane_id"]: record.get("reason") for record in records}},
+                   source="digest")
+    item["severity"] = "info"
+    item["measured"] = reasons
+    return [item]
+
+
 def rule_resource_would_kill(inputs, rule):
     """Report a lane that would trip a resource policy while it is doing its job.
 
@@ -1039,6 +1083,7 @@ RULES = {
     "host.disk_full": rule_host_disk_full,
     "host.heavy_slot_stale": rule_host_heavy_slot_stale,
     "resource.would_kill": rule_resource_would_kill,
+    "pane.retired": rule_pane_retired,
     "security.secret_text": rule_security_secret_text,
     "money.spend_projection": rule_money_spend_projection,
     "health.failed": rule_health_failed,
