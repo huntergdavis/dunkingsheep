@@ -91,6 +91,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `host.heavy_slot_stale` | a heavy-job semaphore slot is older than N min (no holder pid exists) | `directory`, `prefix`, `max_age_minutes` | warning / ops |
 | `security.secret_text` | a credential-shaped line appears in inbox, task or dunk text, re-verified on a second read; allowlisted line hashes are skipped | `patterns`, `allowlist_sha256`, `lookback_hours` | **critical / security** |
 | `money.spend_projection` | never: there is no metering source. It cannot be enabled without `source` and `cap`, and always prints SKIPPED | `source`, `cap` | disabled / money |
+| `resource.would_kill` | one info line per lane that would trip a **resource policy** while holding a leased task. Never signals; the point is that our threshold is probably wrong, not the lane | `policies_path`, `state_path`, `require_task` | info / ops |
 | `health.failed` | `health.json` is stale, or reports problems | `stale_minutes` | critical / ops |
 | `watchdog.self_error` | anything the watchdog could not do this run: a rule error, missing or corrupt state, or an owner post or confirmation problem. One finding per run | (none) | VP only |
 | `watchdog.deadman` | the heartbeat is missing or older than 3x the cadence (separate process) | CLI flags | VP only |
@@ -200,6 +201,33 @@ load5 26.4 = 3.30/cpu, band 3.0-3.5/cpu (fitted 2026-10-22), 27 live / 5 busy / 
 The config keys are still named `load1_per_cpu` / `critical_load1_per_cpu` for
 compatibility with existing config files; the number they hold is per-CPU
 **load5**.
+
+## `resource.would_kill`: the threshold-wrong signal, in the digest
+
+A resource policy is a guess until a lane that is legitimately working crosses
+one. This rule reports exactly that, and nothing else:
+
+- It samples the same way `dunkingsheep load --policies` does, from the caller
+  identity recorded on each task lease, but keeps **its own state file**, so the
+  watchdog and the CLI never corrupt each other's sample window.
+- It **never signals**. `dry_run` and `kill` are recorded in the evidence; the
+  finding says what *would* have happened.
+- It fires **only for a lane holding an in-progress lease** (`require_task`). An
+  idle lane crossing a cpu limit is not evidence that the limit is wrong; a lane
+  that is busy on t6 and crosses it is.
+- No policies file means no findings, not an error: there is nothing to cross.
+  An unreadable policies file raises a config error, which is a self error, not
+  a silent pass.
+
+The line reads like this:
+
+```text
+w8:p8 would be flagged by resource policy while working on t6: advance strict C toward the 815-body ceiling
+  threshold=policy limits  measured=cpu_pct_over 96.0% > 80% 60s  window=sample window
+```
+
+Severity is **info** on purpose: the owner asked for this in the digest, because
+a lane being expensive is a fact about our thresholds until proven otherwise.
 
 ## Before you model a number, check the recorder
 

@@ -172,24 +172,30 @@ def gpu():
     return {"value": None, "reason": "no per-process GPU counter on this hardware (Intel UHD 620)"}
 
 
-def _load_state():
+def _load_state(path=None):
     try:
-        return json.loads(STATE.read_text())
+        return json.loads(Path(path or STATE).read_text())
     except (OSError, ValueError):
         return {}
 
 
-def _save_state(state):
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = STATE.with_suffix(".json.tmp")
+def _save_state(state, path=None):
+    target = Path(path or STATE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(state))
-    os.replace(temporary, STATE)
+    os.replace(temporary, target)
 
 
-def collect(callers, now=None, policies=None):
-    """Sample and turn ticks into a window percentage of one core."""
+def collect(callers, now=None, policies=None, state_path=None):
+    """Sample and turn ticks into a window percentage of one core.
+
+    `state_path` lets a second reader (the watchdog) keep its own sample window
+    instead of advancing this one: two callers of the same sampler must not
+    corrupt each other's elapsed time.
+    """
     now = now if now is not None else time.time()
-    state = _load_state()
+    state = _load_state(state_path)
     previous = state.get("last") or {}
     previous_at = state.get("at")
     current = sample(callers, now=now)
@@ -215,7 +221,7 @@ def collect(callers, now=None, policies=None):
         "cpu_ticks": r["cpu_ticks"],
         "peak_cpu_pct": next((x["peak_cpu_pct"] for x in rows
                               if x["pid"] == r["pid"]), 0.0)} for r in current["callers"]}}
-    _save_state(state_now)
+    _save_state(state_now, state_path)
     # The honest remainder: host load minus what we attributed (in cores).
     try:
         load1 = os.getloadavg()[0]

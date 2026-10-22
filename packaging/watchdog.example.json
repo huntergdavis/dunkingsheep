@@ -208,6 +208,16 @@
       "cooldown_minutes": 60,
       "must_hold_runs": 1,
       "stale_minutes": 30
+    },
+    "resource.would_kill": {
+      "enabled": true,
+      "severity": "info",
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "must_hold_runs": 1,
+      "policies_path": "/etc/dunkingsheep/load-policies.json",
+      "state_path": "/var/lib/dunkingsheep/would-kill-state.json",
+      "require_task": true
     }
   }
 }

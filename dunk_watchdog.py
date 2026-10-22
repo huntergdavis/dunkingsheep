@@ -200,6 +200,10 @@ RULE_PARAMS = {
     "money.spend_projection": {"source": _opt_str, "cap": _opt_positive},
     "host.disk_full": {"max_used_fraction": FRACTION, "paths": _str_list},
     "health.failed": {"stale_minutes": POSITIVE},
+    # A would-kill is a THRESHOLD-wrong signal, not an incident: our own lane
+    # tripped a limit while doing the work it was given.
+    "resource.would_kill": {"policies_path": _str, "state_path": _str,
+                            "require_task": _bool},
 }
 
 TOP = {
@@ -848,6 +852,66 @@ def _slot_holder_alive(slot):
     return True
 
 
+def rule_resource_would_kill(inputs, rule):
+    """Report a lane that would trip a resource policy while it is doing its job.
+
+    This is the signal that a threshold is wrong rather than a lane: the limits in
+    the policy file are guesses until a lane that is legitimately working crosses
+    one. It never signals anything - the sampler is asked for `would_kill` and the
+    policy is evaluated with the caller's own dry_run/kill flags recorded, so the
+    finding says what WOULD happen, not what happened.
+
+    The rule lives in the info band on purpose: a lane being expensive is a fact
+    about our thresholds until proven otherwise, and the owner asked for it in the
+    digest, not as a page.
+    """
+    path = _expand(rule["policies_path"])
+    if not os.path.exists(path):
+        return []            # no policies configured: there is nothing to cross
+    try:
+        with open(path, encoding="utf-8") as handle:
+            policies = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"resource.would_kill: cannot read {path}: {exc}")
+    tasks = inputs.tasks()
+    leased = {}
+    for lease in tasks["leases"]:
+        task = next((t for t in tasks["tasks"] if t["id"] == lease["task_id"]), None)
+        if task and task.get("status") == "in_progress":
+            leased[str(lease.get("pane_id"))] = task
+    callers, names = [], {}
+    for lease in tasks["leases"]:
+        if not lease.get("caller_pid"):
+            continue
+        names[str(lease["caller_pid"])] = lease.get("caller_name") or lease.get("pane_id")
+        callers.append({"caller_pid": lease["caller_pid"], "caller_start": lease.get("caller_start"),
+                        "caller_name": lease.get("caller_name") or lease.get("pane_id")})
+    if not callers:
+        return []
+    import dunk_load
+    result = dunk_load.collect(callers, now=inputs.now, policies=policies,
+                               state_path=_expand(rule["state_path"]))
+    out = []
+    for item in result["would_kill"]:
+        agent = item["agent"]
+        task = leased.get(str(agent))
+        if rule["require_task"] and task is None:
+            continue        # an idle lane crossing a limit is not a threshold problem
+        doing = (f"while working on {task['id']}: {task['title']}" if task
+                 else "with no leased task")
+        measured = ", ".join(f"{f['rule']} {f['measured']} > {f['threshold']} {f['window']}"
+                             for f in item["findings"] if f.get("measured"))
+        out.append(finding("resource.would_kill", rule, f"{agent}:{item['pid']}",
+                           f"{agent} would be {('killed' if item['kill'] and not item['dry_run'] else 'flagged')} "
+                           f"by resource policy {doing}",
+                           "policy limits", measured or "no measured finding",
+                           "sample window", {"agent": agent, "pid": item["pid"],
+                                             "task": task["id"] if task else None,
+                                             "kill": item["kill"], "dry_run": item["dry_run"],
+                                             "findings": item["findings"]}))
+    return out
+
+
 def rule_host_heavy_slot_stale(inputs, rule):
     """A poolrad-heavy slot is stale only when its holder is gone.
 
@@ -974,6 +1038,7 @@ RULES = {
     "host.tmp": rule_host_tmp,
     "host.disk_full": rule_host_disk_full,
     "host.heavy_slot_stale": rule_host_heavy_slot_stale,
+    "resource.would_kill": rule_resource_would_kill,
     "security.secret_text": rule_security_secret_text,
     "money.spend_projection": rule_money_spend_projection,
     "health.failed": rule_health_failed,

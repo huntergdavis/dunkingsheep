@@ -59,8 +59,11 @@ SCHEMA = {
            assignees TEXT NOT NULL DEFAULT '[]', depends_on TEXT NOT NULL DEFAULT '[]',
            created_at REAL NOT NULL, updated_at REAL NOT NULL, created_by TEXT,
            completed_by TEXT, completed_at REAL, cancelled_at REAL, block_reason TEXT)""",
+        # Caller identity is part of the real schema (2.26.0); a fixture that
+        # omits it cannot exercise any rule that reads a lease's caller.
         """CREATE TABLE task_leases (task_id TEXT NOT NULL, pane_id TEXT NOT NULL,
            claimed_at REAL NOT NULL, heartbeat_at REAL NOT NULL, expires_at REAL NOT NULL,
+           caller_pid INTEGER, caller_start TEXT, caller_name TEXT,
            PRIMARY KEY (task_id, pane_id))""",
         """CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
            event TEXT NOT NULL, at REAL NOT NULL, actor TEXT, scope TEXT, priority TEXT,
@@ -145,9 +148,11 @@ class Fleet:
         self.sql("tasks.db", "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
                  (task_id, event, at, actor, json.dumps(meta) if meta else None))
 
-    def lease(self, task_id, pane, claimed, heartbeat, expires):
-        self.sql("tasks.db", "INSERT INTO task_leases VALUES (?,?,?,?,?)", (task_id, pane, claimed, heartbeat,
-                                                                           expires))
+    def lease(self, task_id, pane, claimed, heartbeat, expires, caller=None):
+        caller = caller or {}
+        self.sql("tasks.db", "INSERT INTO task_leases VALUES (?,?,?,?,?,?,?,?)",
+                 (task_id, pane, claimed, heartbeat, expires,
+                  caller.get("pid"), caller.get("start"), caller.get("name")))
 
     def message(self, mailbox, state, created_at, pane_id=None, sender=None, reason=None, read_at=None,
                 body="BODY-NEVER-REPORTED"):
@@ -422,6 +427,56 @@ class RuleBoundaryTests(WatchdogCase):
         found = self.fleet.evaluate(cfg)
         self.assertEqual([("host.disk_full", "/:0.98")], self.keys(found))
         self.assertEqual("outage", found[0]["class"])
+
+    def test_a_would_kill_names_the_lane_and_the_task_it_was_doing(self):
+        """The threshold-wrong signal: our own lane trips a policy while working.
+
+        The rule never signals. It reports what WOULD have happened, names the
+        task the lane held, and only fires for a lane that has one - an idle lane
+        crossing a cpu limit is not evidence that the limit is wrong.
+        """
+        from unittest import mock
+        policies = os.path.join(self.tmp, "policies.json")
+        with open(policies, "w") as handle:
+            json.dump({"w8:p8": {"cpu_pct_over": 80, "cpu_window_s": 60, "dry_run": True}}, handle)
+        self.fleet.task("t6", "in_progress", NOW - 30 * MIN, assignees=["w8:p8"],
+                        title="advance strict C toward the ceiling")
+        self.fleet.lease("t6", "w8:p8", NOW - 30 * MIN, NOW - MIN, NOW + 30 * MIN,
+                         caller={"pid": os.getpid(), "start": "1", "name": "w8:p8"})
+        self.fleet.task("t9", "in_progress", NOW - 30 * MIN, assignees=["w9:pM"],
+                        title="parked work")
+        self.fleet.lease("t9", "w9:pM", NOW - 30 * MIN, NOW - MIN, NOW + 30 * MIN,
+                         caller={"pid": 4000001, "start": "2", "name": "w9:pM"})
+        canned = {"would_kill": [
+            {"agent": "w8:p8", "pid": os.getpid(), "line": "would-kill w8:p8",
+             "findings": [{"rule": "cpu_pct_over", "measured": "96.0%", "threshold": "80%",
+                           "window": "60s"}], "kill": False, "dry_run": True},
+            {"agent": "w9:pM", "pid": 4000001, "line": "would-kill w9:pM",
+             "findings": [{"rule": "cpu_pct_over", "measured": "99.0%", "threshold": "80%",
+                           "window": "60s"}], "kill": False, "dry_run": True}]}
+        cfg = self.fleet.config(resource__would_kill={
+            "policies_path": policies, "state_path": os.path.join(self.tmp, "wk.json"),
+            "require_task": True})
+        with mock.patch("dunk_load.collect", return_value=canned):
+            found = self.fleet.evaluate(cfg)
+        keys = [k for k in self.keys(found) if k[0] == "resource.would_kill"]
+        # w9:pM holds a lease but its task is not matched to the lease lookup by
+        # pane only when in_progress - both are, so both report; the point is the
+        # TEXT names the task.
+        self.assertTrue(keys)
+        text = " ".join(str(f) for f in found if f["rule"] == "resource.would_kill")
+        self.assertIn("t6", text)
+        self.assertIn("advance strict C toward the ceiling", text)
+        self.assertIn("96.0%", text)
+        self.assertEqual("info", [f["severity"] for f in found
+                                  if f["rule"] == "resource.would_kill"][0])
+
+    def test_no_policies_file_means_no_findings_not_an_error(self):
+        cfg = self.fleet.config(resource__would_kill={
+            "policies_path": os.path.join(self.tmp, "absent.json"),
+            "state_path": os.path.join(self.tmp, "wk.json"), "require_task": True})
+        self.assertEqual([], [k for k in self.keys(self.fleet.evaluate(cfg))
+                              if k[0] == "resource.would_kill"])
 
     def test_heavy_slot_stale_uses_holder_liveness_not_age(self):
         slots = os.path.join(self.tmp, "slots")
@@ -1167,8 +1222,11 @@ class SystemSenderTests(unittest.TestCase):
 class NoModelTests(unittest.TestCase):
     """The owner's constraint: nothing at runtime may consult a model."""
 
-    ALLOWED_IMPORTS = {"hashlib", "json", "os", "re", "sqlite3", "sys", "time", "herdr_client", "dunk_client",
-                       "dunk_inbox"}
+    # dunk_load and dunk_policy are pure: /proc, arithmetic, and json. They are
+    # allowed because the would-kill rule must see the same samples the load
+    # sampler sees; neither spawns a process nor opens a socket (checked below).
+    ALLOWED_IMPORTS = {"__future__", "hashlib", "json", "os", "re", "sqlite3", "sys", "time", "pathlib",
+                       "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -1195,6 +1253,29 @@ class NoModelTests(unittest.TestCase):
             found += [f"{text!r} mentions {word!r}" for text in texts for word in self.FORBIDDEN
                       if word in text.lower()]
         return found
+
+    def test_the_sampler_the_watchdog_imports_stays_inert(self):
+        """A rule may import the sampler only while the sampler stays inert.
+
+        The strict allowlist above applies to the watchdog's own modules. The
+        sampler is judged on the property that matters - no model, no process,
+        no network - because it legitimately imports `signal` to send TERM.
+        """
+        INERT_FORBIDDEN = {"subprocess", "urllib", "requests", "http", "socket", "ssl"}
+        for name in ("dunk_load.py", "dunk_policy.py"):
+            tree = ast.parse(read(os.path.join(ROOT, name)))
+            imported = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported |= {alias.name.split(".")[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".")[0])
+            bad = sorted((imported & INERT_FORBIDDEN) | {
+                word for word in self.FORBIDDEN
+                if any(word in (n.id if isinstance(n, ast.Name) else
+                                n.attr if isinstance(n, ast.Attribute) else "")
+                       for n in ast.walk(tree))})
+            self.assertEqual([], bad, name)
 
     def test_watchdog_modules_import_and_name_nothing_model_related(self):
         for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py"):
