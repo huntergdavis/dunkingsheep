@@ -105,6 +105,26 @@ Aggregation is a sum of the per-agent cells, and a type cell is null (with the
 reason "N agent cells are null") if any member cell is null — a type total that
 silently omits an unreachable agent is a guess.
 
+## Backlog (the dunkies feature queue, owner #1235)
+
+`backlog` is computed from `tasks.db` with no new collection: `open`,
+`in_progress`, `blocked` counts, the `top` 5 by priority (urgent > high > medium >
+low, then oldest), each with `age_s`, and `oldest_open` with its `age_s`. **Age is
+the number**, not the count: an oldest open item that is a week old is a
+graveyard. Live: 7 open / 2 in progress / 3 blocked, oldest open `t6` at ~3.6
+days.
+
+## Context store (owner #1235)
+
+The store is **v0 and not built**, so every cell is `null` with the reason
+`context store not yet initialised` - no placeholder numbers. The section exists
+so the day v0 lands it becomes real without a schema change: articles, facts,
+oldest fact, and `never_read` (entries never opened since creation - the number
+that says an article is wrong, unknown, or in the wrong place). Access logging is
+specified in the store's own `docs/CONTEXT_STORE.md` (every read appends
+`{slug, at, by}` to a derived access log; a write is not an access; a digest
+build is not an access of every entry).
+
 ## Reply latency (how fast the VP answers the owner)
 
 `reply_latency` is the meta statistic from `messages.sqlite3`: for owner
