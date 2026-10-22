@@ -210,12 +210,16 @@ def build_parser():
     q = isub.add_parser("send", help="put a message in an agent's inbox",
                         epilog="example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'")
     q.add_argument("to")
-    q.add_argument("body", nargs="+")
+    q.add_argument("body", nargs="*")   # may come from --body-file instead
     q.add_argument("--subject", "-s")
     q.add_argument("--attach", "-a", action="append", metavar="PATH",
                    help="attach a local file (repeatable)")
     q.add_argument("--no-notify", action="store_true",
                    help="do not nudge the recipient's pane")
+    q.add_argument("--literal", action="store_true",
+                   help="send body text that contains shell-substitution syntax ($( ${ or a backtick)")
+    q.add_argument("--body-file", metavar="PATH",
+                   help="read the body from a file ('-' for stdin): immune to shell substitution")
     q = isub.add_parser("list", help="summaries of waiting messages")
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--all", action="store_true", help="include messages already read")
@@ -1616,6 +1620,8 @@ def main(argv=None):
             print(f"{cmd.name}({params}){flag}\n    {cmd.description}")
         return 0
 
+    _check_send_body(args)
+
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
     # gets no standing rules exactly when the daemon is down.
@@ -1772,6 +1778,57 @@ def run_context_command(dunk_context, args):
                                     f"never_read {v['never_read_count']}") for name, v in r.items()] and None
 
 
+SHELL_SUBSTITUTION = ("`", "$(", "${")
+
+
+def _check_send_body(args):
+    """Guard the send path before anything else happens.
+
+    Runs before the socket: a refusal that needs the daemon is a refusal that
+    fails open when the daemon is down.
+    """
+    if getattr(args, "command", None) != "inbox" or getattr(args, "inbox_command", None) != "send":
+        return
+    from_file = getattr(args, "body_file", None)
+    if from_file:
+        return                      # read from a file: never passed through a shell
+    _refuse_shell_substitution(" ".join(getattr(args, "body", []) or []),
+                               getattr(args, "subject", None),
+                               literal=bool(getattr(args, "literal", False)))
+
+
+def _refuse_shell_substitution(body, subject=None, *, literal=False):
+    """Refuse a body the sending shell was free to rewrite.
+
+    A backtick in an unquoted shell argument is executed before this program
+    runs, so the word between the backticks disappears and the message arrives
+    with a hole in it that only the reader can see. The failure is silent at the
+    sending end, which is why it is worth a refusal.
+
+    The honest limit: this guard CANNOT see what the shell already removed. It
+    catches bodies where the syntax survived (double quotes, a heredoc that was
+    not expanded), and it does that by refusing rather than guessing. For a body
+    that must contain these characters, pass --literal; for a body that must
+    never be touched by a shell, pass --body-file.
+    """
+    if literal:                      # the caller said "these characters are text"
+        return
+    for label, text in (("body", body), ("subject", subject)):
+        if not text:
+            continue
+        for fragment in SHELL_SUBSTITUTION:
+            index = text.find(fragment)
+            if index < 0:
+                continue
+            around = text[max(0, index - 30):index + 30].replace("\n", " ")
+            raise SystemExit(
+                f"inbox send: the {label} contains shell-substitution syntax {fragment!r} "
+                f"(...{around}...). An unquoted shell may have already rewritten it, and a "
+                f"backtick pair deletes the word between them before this command runs. "
+                f"Use single quotes, or pass --literal to send these characters as text, "
+                f"or --body-file PATH to bypass the shell entirely.")
+
+
 def run_client_command(client, args):
     """Map CLI args onto a registry command; return (result, human printer)."""
     command = args.command
@@ -1871,7 +1928,12 @@ def run_client_command(client, args):
         if sub == "count":
             return client.call("inbox_count", mailbox=args.mailbox), print_inbox_count
         if sub == "send":
-            return client.call("inbox_send", to=args.to, body=" ".join(args.body),
+            body = " ".join(args.body)
+            if getattr(args, "body_file", None):
+                if args.body:
+                    raise SystemExit("inbox send: pass a body or --body-file, not both")
+                body = sys.stdin.read() if args.body_file == "-" else open(args.body_file).read()
+            return client.call("inbox_send", to=args.to, body=body,
                                subject=args.subject,
                                attach=",".join(args.attach) if args.attach else None,
                                notify=not args.no_notify), print_inbox_sent

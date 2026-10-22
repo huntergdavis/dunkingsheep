@@ -122,19 +122,44 @@ of load, not a count of our work, so a threshold on it would page on a symptom
 we already measure directly. It is recorded here because a future reader should
 know the fitted shape is only half the story.
 
-### What normal looks like (check these against a reading in front of you)
+### What normal looks like (compare a reading in front of you; no arithmetic)
 
-| busy lanes | heavy jobs | samples | median load5/cpu | p90 | max |
-|---|---|---|---|---|---|
-| 0 | 0 | 196 | 0.35 | 0.53 | 1.77 |
-| 1-2 | 0 | 209 | 0.78 | 1.33 | 2.46 |
-| 4 | 1 | 2 | 2.31 | 2.69 | 2.69 |
-| >= 4 | any | 27 | 1.93 | 2.50 | **2.79** |
+**Predicted** is the model, so nobody has to compute it. **Observed** is what the
+machine actually did in that regime; where the two differ, the model is the
+lower bound of what to expect.
 
-That table is worth more than the coefficients: anyone can compare it to the
-number in front of them. The machine reached **2.79/cpu** while doing assigned
-work - two compiles, an assembler and an objdump - so any threshold at or below
-2.8 pages on our own productivity.
+| busy lanes | heavy jobs | predicted load5/cpu | predicted load5 (8 cpus) | observed median | p90 | max | samples |
+|---|---|---|---|---|---|---|---|
+| 0 | 0 | **0.49** | 3.9 | 0.35 | 0.53 | 1.77 | 196 |
+| 1 | 0 | **0.68** | 5.4 | 0.76 | 1.58 | 2.46 | 91 |
+| 2 | 0 | **0.87** | 7.0 | 0.80 | 1.31 | 2.46 | 124 |
+| 4 | 1 | **1.59** | 12.7 | 2.31 | 2.69 | 2.69 | 2 |
+| 5 | 2 | **2.11** | 16.9 | 2.20 | 2.76 | 2.76 | 6 |
+| >= 4 | any | 1.59 - 2.11 | 12.7 - 16.9 | 1.93 | 2.50 | **2.79** | 27 |
+
+Read it like this: four lanes plus a compile *predicts* 1.59/cpu and actually
+measured 2.31-2.69, i.e. the model understates the top of the range by about
+0.7/cpu - roughly two fit residuals. That is why the band is set from the
+observed envelope and not from the prediction: a threshold derived from the model
+alone would sit at 1.6 and page on every compile. The machine reached
+**2.79/cpu** while doing assigned work (two compiles, an assembler and an
+objdump), so any threshold at or below 2.8 pages on our own productivity.
+
+### Finding: per-lane cost is not measurable while the lane count is constant
+
+`live` was 27 in all 461 samples, so the design matrix is **singular**: the
+coefficient on `live` does not exist as an estimate, it is not merely imprecise.
+Consequence, stated plainly because it cost a week of guessing:
+
+> **Per-lane cost is not measurable while the lane count is constant. The model
+> uses busy lanes and heavy jobs only.**
+
+The earlier lane-reserve shape (`0.55 CPU/lane`, `warning = lane_reserve *
+lanes / cpus`) could never have been estimated from this history by any method -
+the data contains no variation in the lane count. Estimating a per-lane cost
+needs a day in which panes are opened and closed, or a deliberate experiment that
+varies them. Until then `live` stays out of the model, and any future proposal to
+tune a per-lane constant should be answered with this paragraph.
 
 ### Why the band is not a quantile
 
