@@ -186,7 +186,7 @@ def _save_state(state):
     os.replace(temporary, STATE)
 
 
-def collect(callers, now=None):
+def collect(callers, now=None, policies=None):
     """Sample and turn ticks into a window percentage of one core."""
     now = now if now is not None else time.time()
     state = _load_state()
@@ -223,7 +223,26 @@ def collect(callers, now=None):
         load1 = None
     attributed = round(sum((row["cpu_pct"] or 0.0) for row in rows) / 100.0, 2)
     unattributed = round(max(0.0, (load1 or 0.0) - attributed), 2) if load1 is not None else None
+    would_kill = []
+    if policies:
+        import dunk_policy
+        for row in rows:
+            policy = policies.get(row["name"]) or policies.get(row["pid"])
+            if not policy:
+                continue
+            try:
+                findings = dunk_policy.evaluate(row, policy)
+            except dunk_policy.PolicyError as exc:
+                findings = [{"rule": "policy", "reason": str(exc)}]
+            if findings:
+                reason = ", ".join(
+                    f"{f.get('rule')} {f.get('measured')} (limit {f.get('threshold')})"
+                    for f in findings if "measured" in f)
+                would_kill.append({"agent": row["name"], "pid": row["pid"],
+                                   "line": f"would-kill {row['name']} (pid {row['pid']}, {reason})",
+                                   "findings": findings, "kill": bool(policy.get("kill")),
+                                   "dry_run": policy.get("dry_run", True)})
     return {"at": now, "elapsed_s": round(elapsed, 1) if elapsed else None,
             "callers": rows, "skipped": current["skipped"],
             "host_load1": load1, "attributed_cores": attributed,
-            "unattributed_cores": unattributed}
+            "unattributed_cores": unattributed, "would_kill": would_kill}

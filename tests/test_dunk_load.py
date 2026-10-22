@@ -51,6 +51,23 @@ class GuardTests(unittest.TestCase):
             self.skipTest("this host exposes a per-process GPU counter")
         self.assertTrue(gpu["reason"])
 
+    def test_a_policy_produces_a_would_kill_line_without_killing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = dunk_load.STATE
+            dunk_load.STATE = Path(tmp) / "load-state.json"
+            try:
+                me = os.getpid()
+                start = dunk_load._stat(me)["starttime"]
+                first = dunk_load.collect([("lane", me, start)], now=1000.0)
+                second = dunk_load.collect([("lane", me, start)], now=1030.0,
+                                           policies={"lane": {"rss_mb_over": 0.001, "rss_window_s": 1}})
+            finally:
+                dunk_load.STATE = original
+        self.assertTrue(second["would_kill"])
+        self.assertFalse(second["would_kill"][0]["kill"])
+        self.assertTrue(second["would_kill"][0]["dry_run"])
+        self.assertIn("would-kill", second["would_kill"][0]["line"])
+
     def test_unattributed_is_reported_not_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "load-state.json"

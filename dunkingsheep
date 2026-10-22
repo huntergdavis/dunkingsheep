@@ -246,6 +246,8 @@ def build_parser():
     load = sub.add_parser("load", help="per-caller CPU from /proc (pid+starttime guarded, process tree)",
                           description="Sample registered callers' CPU from /proc. Identity is pid+starttime; "
                                       "a reused pid produces no sample. GPU is null with a reason on this hardware.")
+    load.add_argument("--policies", metavar="PATH",
+                      help="JSON {agent: policy}; adds dry-run would-kill lines (default: load-policies.json)")
 
     # -- project PMs -----------------------------------------------------------
     pm = sub.add_parser("pm", help="project PMs: lane routing and the one-per-project digest",
@@ -752,6 +754,8 @@ def print_load(r):
         gpu_text = f"{gpu['value']}%" if gpu.get("value") is not None else f"null ({gpu.get('reason')})"
         print(f"  {row['name']:<24} {str(row.get('cpu_pct')):>6}%  peak {row.get('peak_cpu_pct')}%"
               f"  rss {row.get('rss_mb')}MB  procs {row.get('process_count')}  gpu {gpu_text}")
+    for item in r.get("would_kill", []):
+        print(f"  {item['line']}{'' if item['kill'] else ' [alert-only]'}")
     for skip in r.get("skipped", []):
         print(f"  {skip['name']:<24} skipped: {skip['reason']}")
 
@@ -1692,8 +1696,15 @@ def run_client_command(client, args):
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
                     "caller_name": t.get("caller_name")} for t in tasks]
-        import dunk_load
-        result = dunk_load.collect(dunk_load.registered_callers(callers))
+        import dunk_load, json, os
+        policies = None
+        policy_path = args.policies or os.path.expanduser("~/.config/dunkingsheep/load-policies.json")
+        try:
+            with open(policy_path) as handle:
+                policies = json.load(handle).get("agents") or json.load(handle)
+        except (OSError, ValueError):
+            policies = None
+        result = dunk_load.collect(dunk_load.registered_callers(callers), policies=policies)
         if args.json:
             return result, None
         return result, print_load
