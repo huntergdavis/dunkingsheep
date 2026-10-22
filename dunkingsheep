@@ -244,6 +244,56 @@ def build_parser():
     q.add_argument("attachment_id")
     q.add_argument("--dest", "-d", default=".")
 
+    # -- context store ---------------------------------------------------------
+    context = sub.add_parser("context", help="declarative context store: files are truth, index is a cache",
+                             description=".dunkingsheep/ per project plus one global. Ground truths never "
+                                         "expire; only the owner promotes one; supersede keeps both entries linked.")
+    csub = context.add_subparsers(dest="context_command", metavar="<subcommand>")
+    csub.required = True
+    q = csub.add_parser("init", help="create the store layout")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("add", help="add an entry (body from a file or stdin)")
+    q.add_argument("file", nargs="?", default="-")
+    q.add_argument("--class", dest="cls", required=True)
+    q.add_argument("--subject", required=True)
+    q.add_argument("--type", dest="type_", default="reference")
+    q.add_argument("--authority", default="agent")
+    q.add_argument("--source", default="")
+    q.add_argument("--stated")
+    q.add_argument("--recheck-after")
+    q.add_argument("--supersedes")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("promote", help="owner-only: promote an entry to ground truth")
+    q.add_argument("slug")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("supersede", help="replace an entry, keeping both linked")
+    q.add_argument("slug")
+    q.add_argument("file", nargs="?", default="-")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("retire", help="append a retirement note (history kept)")
+    q.add_argument("slug")
+    q.add_argument("--reason", default="")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("get", help="show an entry by subject or slug")
+    q.add_argument("key")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("search", help="FTS5 search over the disposable index")
+    q.add_argument("query")
+    q.add_argument("--class", dest="cls")
+    q.add_argument("--scope")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("digest", help="bounded session digest")
+    q.add_argument("--subject")
+    q.add_argument("--max-bytes", type=int, default=8192)
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("check", help="schema, refusals and stale facts")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("index", help="rebuild the disposable FTS index")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("stats", help="counts, ages, reads and never-read entries")
+    q.add_argument("--global", dest="global_store", action="store_true")
+
     # -- per-caller load -------------------------------------------------------
     load = sub.add_parser("load", help="per-caller CPU from /proc (pid+starttime guarded, process tree)",
                           description="Sample registered callers' CPU from /proc. Identity is pid+starttime; "
@@ -1684,6 +1734,7 @@ def run_client_command(client, args):
                                **({"mailbox": args.mailbox} if getattr(args, "mailbox", None) else {})), \
                 lambda r: print(f"{r.get('state', sub)}: "
                                 f"{', '.join(r.get('changed') or r.get('deleted') or []) or 'nothing'}"
+                                + (f" in mailbox {r['acked_in']!r}" if r.get("acked_in") else "")
                                 + (f"; unchanged {r['unchanged']}" if r.get("unchanged") else ""))
         if sub == "archive":
             return client.call("inbox_archive", mailbox=args.mailbox,
@@ -1695,6 +1746,54 @@ def run_client_command(client, args):
             return client.call("inbox_fetch", attachment_id=args.attachment_id,
                                dest=args.dest), \
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
+    if command == "context":
+        import dunk_context
+        sub = args.context_command
+        store = dunk_context.Store(args.path if getattr(args, "path", None) else None,
+                                   global_store=bool(getattr(args, "global_store", False)))
+        if sub == "init":
+            return {"root": str(store.ensure())}, lambda r: print(f"store at {r['root']}")
+        if sub == "add":
+            body = sys.stdin.read() if args.file == "-" else open(args.file).read()
+            return store.add(body, cls=args.cls, subject=args.subject, type_=args.type_,
+                             authority=args.authority, source=args.source, stated=args.stated,
+                             recheck_after=args.recheck_after, supersedes=args.supersedes), \
+                lambda r: print(f"added {r['class']}/{r['slug']}")
+        if sub == "promote":
+            entry = store.find(args.slug)
+            if entry is None:
+                raise SystemExit(1)
+            if os.environ.get("DUNKINGSHEEP_SUPERUSER") != "1":
+                raise SystemExit("refused: only an owner act promotes a ground truth")
+            return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
+                             type_=entry.get("type") or "principle", authority="owner",
+                             source=entry.get("source") or "",
+                             supersedes=entry["slug"]), lambda r: print(f"promoted {r['slug']}")
+        if sub == "supersede":
+            body = sys.stdin.read() if args.file == "-" else open(args.file).read()
+            return store.supersede(args.slug, body), lambda r: print(f"superseded by {r['slug']}")
+        if sub == "retire":
+            return store.retire(args.slug, args.reason), lambda r: print(f"retired {r['slug']}")
+        if sub == "get":
+            entry = store.find(args.key)
+            if entry is None:
+                raise SystemExit(f"no entry {args.key!r}")
+            store.log_access(entry["slug"])
+            return entry, lambda r: print(f"# {r['slug']} ({r['class']}, {r['authority']})\n\n{r['body']}")
+        if sub == "search":
+            return store.search(args.query, cls=args.cls, scope=args.scope), \
+                lambda rows: [print(f"{r['class']:<13} {r['slug']:<40} {r['subject']}") for r in rows] and None
+        if sub == "digest":
+            return store.digest(max_bytes=args.max_bytes, subject=args.subject), print
+        if sub == "check":
+            return store.check(), \
+                lambda r: print(f"counts {r['counts']}; refusals {len(r['refusals'])}; stale {len(r['stale'])}")
+        if sub == "index":
+            return store.index(), lambda r: print(f"indexed {r['indexed']} -> {r['path']}")
+        if sub == "stats":
+            return store.stats(), \
+                lambda r: print(f"counts {r['counts']}; reads_7d {r['reads_7d']}; "
+                                f"never_read {r['never_read_count']}: {', '.join(r['never_read'][:8])}")
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),

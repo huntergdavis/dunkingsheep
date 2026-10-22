@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.34.1"
+VERSION = "2.35.0"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1106,6 +1106,10 @@ class Flock:
 
     @_as_dunk_error
     def inbox_ack(self, message_ids, mailbox=None, self_pane_id=None):
+        """Ack only messages in the caller's own mailbox. Sender is irrelevant;
+        an id from another mailbox is refused, never marked read there. The
+        internal no-mailbox call (tests, in-process) keeps the old behaviour."""
+        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
         before = {}
         for message_id in ([message_ids] if isinstance(message_ids, str)
                            else list(message_ids)):
@@ -1113,19 +1117,15 @@ class Flock:
                 before[message_id] = self.inbox.status(message_id)
             except InboxError:
                 pass
-        # Scope only when we know whose mailbox it is; a caller with neither an
-        # explicit mailbox nor a pane keeps the old unscoped behaviour (and the
-        # daemon always supplies the pane, so that is the rare internal case).
-        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
         result = self.inbox.ack(message_ids, mailbox=key)
+        result["acked_in"] = key
         for message_id in result.get("changed", []):
             was = before.get(message_id) or {}
             started = was.get("read_at") or was.get("created_at")
-            # How long the recipient held it after picking it up.
-            self.metrics.record(
-                "inbox.acked", pane_id=was.get("pane_id"), mailbox=was.get("mailbox"),
-                sender=was.get("sender"), source="inbox", outcome="ok",
-                duration_ms=int((time.time() - started) * 1000) if started else None)
+            self.metrics.record("inbox.acked", pane_id=was.get("pane_id"), mailbox=key,
+                                sender=was.get("sender"), source="inbox", outcome="ok",
+                                duration_ms=int((self.inbox.get(message_id)["read_at"] - started) * 1000)
+                                if started else None)
         return result
 
     @_as_dunk_error
