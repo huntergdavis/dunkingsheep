@@ -552,6 +552,19 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("dispatch", help="standby queue + a deterministic tick that fills idle lanes",
+                       epilog="examples: dispatch add t6 'advance strict C to 250' / dispatch tick")
+    dsub = p.add_subparsers(dest="dispatch_command", metavar="<action>")
+    q = dsub.add_parser("add", help="queue a one-line assignment")
+    q.add_argument("brief", nargs="+")
+    q.add_argument("--task-id", "-t", help="the task this assignment advances")
+    q.add_argument("--lane", help="reserve it for one lane (pane id or name)")
+    q = dsub.add_parser("list", help="the standby queue, in order")
+    q = dsub.add_parser("remove", help="drop an item")
+    q.add_argument("id", type=int)
+    q = dsub.add_parser("tick", help="fill every ready lane that has no mail (run on a timer)")
+    q.add_argument("--dry-run", action="store_true")
+    q = dsub.add_parser("status", help="the last tick's numbers")
     p = sub.add_parser("clear-box", help="DESTRUCTIVE, superuser: clear an unsubmitted draft (Ctrl-U)")
     p.add_argument("target")
     p.add_argument("--reason", help="why the draft is being destroyed (it is logged)")
@@ -1203,6 +1216,38 @@ def print_message(result):
         print(f"sent to {result['target_label']} ({result['pane_id']})")
     else:
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
+
+
+def print_dispatch(result):
+    """One line per number. A tick says what it did; a status says what it knows."""
+    if "summary" in result:
+        print(result["summary"])
+        print(f"standby queue: {result.get('pending')} pending")
+        return
+    if "items" in result:
+        items = result["items"]
+        if not items:
+            print("standby queue is empty")
+            return
+        print(f"{'ID':<5} {'TASK':<7} {'LANE':<10} BRIEF")
+        for item in items:
+            print(f"{item['id']:<5} {str(item.get('task_id') or '-'):<7} "
+                  f"{str(item.get('lane') or 'any'):<10} {_clip(item['brief'], 70)}")
+        return
+    if "removed" in result:
+        print(f"removed standby item {result['removed']}")
+        return
+    if "brief" in result and "id" in result:
+        print(f"added standby item {result['id']}"
+              + (f" for {result['task_id']}" if result.get("task_id") else "")
+              + (f" (reserved for {result['lane']})" if result.get("lane") else ""))
+        return
+    import dunk_dispatch
+    print(dunk_dispatch.summary(result))
+    for record in result.get("dispatched") or []:
+        state = "sent" if record.get("sent") else ("DRY RUN" if not record.get("error") else "FAILED")
+        print(f"  {state} {record['pane_id']}: {record['text']}"
+              + (f" [{record['error']}]" if record.get("error") else ""))
 
 
 def print_clear(result):
@@ -2112,6 +2157,16 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "dispatch":
+        payload = {"action": args.dispatch_command}
+        if getattr(args, "brief", None):
+            payload["brief"] = " ".join(args.brief)
+        for key in ("task_id", "lane", "id"):
+            if getattr(args, key, None) is not None:
+                payload[key] = getattr(args, key)
+        if getattr(args, "dry_run", False):
+            payload["dry_run"] = True
+        return client.call("dispatch", **payload), print_dispatch
     if command == "clear-box":
         return client.call("clear_box", target=args.target, reason=args.reason), print_clear
     if command == "delivery":

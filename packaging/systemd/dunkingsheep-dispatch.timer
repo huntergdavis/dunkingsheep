@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Dunking Sheep dispatcher every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+# A missed tick is not worth a burst: the queue survives, lanes are re-read.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

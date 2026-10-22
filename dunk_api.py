@@ -294,6 +294,43 @@ def h_flush_box(flock, args, self_pane_id):
     return flock.flush_box(args["target"], self_pane_id=self_pane_id)
 
 
+def h_dispatch(flock, args, self_pane_id):
+    """The deterministic feeder: standby queue + a tick that fills idle lanes.
+
+    action=add/list/remove/tick/status. Nothing here consults a model: the gate
+    is `delivery_state` plus an empty mailbox, and the send goes through the same
+    guarded nudge a human would use.
+    """
+    import dunk_dispatch
+    action = args.get("action") or "status"
+    queue = dunk_dispatch.Queue()
+    if action == "add":
+        return queue.add(args["brief"], task_id=args.get("task_id"), lane=args.get("lane"))
+    if action == "list":
+        return {"items": queue.items(), "pending": len(queue.items())}
+    if action == "remove":
+        return queue.remove(args["id"])
+    if action == "status":
+        state = dunk_dispatch._load_state()
+        return {"state": state, "summary": dunk_dispatch.summary(state) if state else "no tick yet",
+                "pending": len(queue.items())}
+    if action != "tick":
+        raise ValueError("dispatch action must be add, list, remove, tick or status")
+    panes = [pane for pane in flock.resolve_lanes()
+             if (pane.get("agent_status") not in (None, "unknown"))]
+    inbox = flock.inbox
+
+    def send(pane_id, text):
+        result = inbox.send(pane_id, text, subject="standby", sender=self_pane_id)
+        return result.get("message_id")
+
+    return dunk_dispatch.tick(
+        queue, panes,
+        delivery=lambda pane: flock.delivery_state(pane["pane_id"], pane.get("agent_status")),
+        unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
+        send=send, dry_run=bool(args.get("dry_run")))
+
+
 def h_clear_box(flock, args, self_pane_id):
     """Destroy an unsubmitted draft. Superuser only, and every use is logged."""
     return flock.clear_box(args["target"], self_pane_id=self_pane_id,
@@ -810,6 +847,20 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "dispatch",
+        "Deterministic feeding, no model: a standby queue plus a tick that sends "
+        "the next item to a lane that is READY and has no unread mail. "
+        "action=add/list/remove/tick/status. tick reports idle lanes, dispatched "
+        "this hour, and blocked lanes with reasons.",
+        h_dispatch,
+        params={"action": {"type": "string",
+                           "description": "add, list, remove, tick or status (default status)."},
+                "brief": {"type": "string", "description": "One-line assignment (add)."},
+                "task_id": {"type": "string", "description": "Task this assignment advances (add)."},
+                "lane": {"type": "string", "description": "Reserve the item for one lane (add)."},
+                "id": {"type": "integer", "description": "Standby item id (remove)."},
+                "dry_run": {"type": "boolean", "description": "Plan the tick, send nothing."}}),
     Command(
         "clear_box",
         "DESTRUCTIVE, superuser only: clear (Ctrl-U, Escape) an unsubmitted draft "

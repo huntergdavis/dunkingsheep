@@ -3401,6 +3401,27 @@ class Flock:
             return None
         return _typed_text(screen) or None
 
+    def resolve_lanes(self):
+        """Every pane that has an agent in it: the set the dispatcher may feed.
+
+        A bare shell has no agent_status and is not a lane. `list_panes_grouped`
+        carries the labels, so a dispatch line can name the lane it fed.
+        """
+        try:
+            panes = self.herdr.list_panes_grouped()
+        except Exception as exc:                # noqa: BLE001 - a backend outage is a refusal
+            raise DunkError(f"cannot list panes: {exc}")
+        lanes = []
+        for pane in panes:
+            if not pane.get("pane_id"):
+                continue
+            lanes.append({"pane_id": pane["pane_id"],
+                          "agent_name": (pane.get("agent_name") or pane.get("tab_label")
+                                         or pane.get("label") or pane["pane_id"]),
+                          "tab_label": pane.get("tab_label"),
+                          "agent_status": pane.get("agent_status")})
+        return lanes
+
     def delivery_state(self, pane_id, status=None):
         """Classify whether this pane can receive a message, and why not.
 
