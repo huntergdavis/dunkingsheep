@@ -362,7 +362,7 @@ def _ids(args):
 
 
 def h_inbox_ack(flock, args, self_pane_id):
-    return flock.inbox_ack(_ids(args))
+    return flock.inbox_ack(_ids(args), mailbox=args.get("mailbox"), self_pane_id=self_pane_id)
 
 
 def h_inbox_cancel(flock, args, self_pane_id):
@@ -1140,7 +1140,8 @@ COMMANDS = [
         "as well, so a board that counts NULL read_at never reports drained "
         "mail as unread.",
         h_inbox_ack,
-        params={"message_ids": MESSAGE_IDS_PARAM},
+        params={"message_ids": MESSAGE_IDS_PARAM,
+                "mailbox": MAILBOX_PARAM},
         required=["message_ids"],
     ),
     Command(

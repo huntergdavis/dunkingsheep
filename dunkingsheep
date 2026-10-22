@@ -237,6 +237,8 @@ def build_parser():
                             ("delete", "delete messages and their attachments")):
         q = isub.add_parser(name, help=help_text)
         q.add_argument("message_ids", nargs="+")
+        if name == "ack":
+            q.add_argument("--mailbox", help="only ack this mailbox (default: your own)")
     isub.add_parser("stats", help="unread counts for every mailbox")
     q = isub.add_parser("fetch", help="write an attachment to a local directory")
     q.add_argument("attachment_id")
@@ -1678,7 +1680,8 @@ def run_client_command(client, args):
         if sub == "status":
             return client.call("inbox_status", message_id=args.message_id), print_inbox_status
         if sub in ("ack", "cancel", "delete"):
-            return client.call(f"inbox_{sub}", message_ids=",".join(args.message_ids)), \
+            return client.call(f"inbox_{sub}", message_ids=",".join(args.message_ids),
+                               **({"mailbox": args.mailbox} if getattr(args, "mailbox", None) else {})), \
                 lambda r: print(f"{r.get('state', sub)}: "
                                 f"{', '.join(r.get('changed') or r.get('deleted') or []) or 'nothing'}"
                                 + (f"; unchanged {r['unchanged']}" if r.get("unchanged") else ""))

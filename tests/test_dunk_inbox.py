@@ -84,6 +84,17 @@ class InboxStoreTests(unittest.TestCase):
             (sent["message_id"],)).fetchall()
         self.assertEqual(2, len({row["id"] for row in rows}))
 
+    def test_an_ack_is_scoped_to_the_callers_mailbox(self):
+        # The VP acked a list that included his SENT copies; the recipient lane
+        # lost its unread. An ack must never write another mailbox.
+        self.inbox.send("bob", "from alice", sender="w1:p1")
+        message_id = self.inbox.list("bob")[0]["message_id"]
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
+        self.inbox.ack([message_id], mailbox="bob")
+        self.assertEqual(0, self.inbox.count("bob")["unread"])
+
     def test_ack_stamps_read_at(self):
         sent = self.inbox.send("writer", "handled")
         self.inbox.ack([sent["message_id"]])

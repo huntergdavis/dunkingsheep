@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.34.0"
+VERSION = "2.34.1"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1105,7 +1105,7 @@ class Flock:
         return self.inbox.status(message_id)
 
     @_as_dunk_error
-    def inbox_ack(self, message_ids):
+    def inbox_ack(self, message_ids, mailbox=None, self_pane_id=None):
         before = {}
         for message_id in ([message_ids] if isinstance(message_ids, str)
                            else list(message_ids)):
@@ -1113,7 +1113,11 @@ class Flock:
                 before[message_id] = self.inbox.status(message_id)
             except InboxError:
                 pass
-        result = self.inbox.ack(message_ids)
+        # Scope only when we know whose mailbox it is; a caller with neither an
+        # explicit mailbox nor a pane keeps the old unscoped behaviour (and the
+        # daemon always supplies the pane, so that is the rare internal case).
+        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
+        result = self.inbox.ack(message_ids, mailbox=key)
         for message_id in result.get("changed", []):
             was = before.get(message_id) or {}
             started = was.get("read_at") or was.get("created_at")

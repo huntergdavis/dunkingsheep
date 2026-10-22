@@ -384,11 +384,14 @@ class Inbox:
 
     # -- retiring -----------------------------------------------------------
 
-    def ack(self, message_ids):
+    def ack(self, message_ids, mailbox=None):
         # Ack implies read: stamp read_at so a board that counts NULLs as
-        # unread cannot report drained mail as waiting.
+        # unread cannot report drained mail as waiting. It is scoped to the
+        # caller's mailbox: an id from another mailbox is refused, never
+        # silently marked read in that mailbox by someone else's ack.
         return self._transition(message_ids, "acked", "acked_at",
-                                allowed=("queued", "read"), read_stamp=True)
+                                allowed=("queued", "read"), read_stamp=True,
+                                mailbox=mailbox)
 
     def cancel(self, message_ids):
         return self._transition(message_ids, "cancelled", "cancelled_at",
@@ -485,7 +488,8 @@ class Inbox:
             self.db.commit()
         return int(cursor.rowcount or 0)
 
-    def _transition(self, message_ids, state, stamp, allowed, read_stamp=False):
+    def _transition(self, message_ids, state, stamp, allowed, read_stamp=False,
+                    mailbox=None):
         ids = [message_ids] if isinstance(message_ids, str) else list(message_ids)
         ids = [str(i).strip() for i in ids if str(i).strip()]
         if not ids:
@@ -494,9 +498,15 @@ class Inbox:
         with self._lock:
             for message_id in ids:
                 row = self.db.execute(
-                    "SELECT state FROM messages WHERE id = ?", (message_id,)).fetchone()
+                    "SELECT state, mailbox FROM messages WHERE id = ?", (message_id,)).fetchone()
                 if row is None:
                     raise InboxError(f"no message with id {message_id!r}")
+                if mailbox and row["mailbox"] != mailbox:
+                    # A write not scoped to its owner is a blast radius: the VP
+                    # acked a sent copy and the recipient lane lost its unread.
+                    raise InboxError(
+                        f"message {message_id} is not in mailbox {mailbox!r}; "
+                        "an ack only applies to the caller's own mailbox")
                 if row["state"] not in allowed:
                     skipped.append({"message_id": message_id, "state": row["state"]})
                     continue
