@@ -1378,6 +1378,12 @@ def _coalesce(argv):
     once must still get the count. The cache stores stdout under the key; a
     coalesced caller replays it and marks stderr as cached. DUNKINGSHEEP_FRESH=1
     bypasses the cache for a caller that needs certainty.
+
+    The key includes the SOCKET (and so the store behind it). Without it, two
+    different stores share one entry and a caller can be handed another store's
+    answer: a test asserting `total: 0` from its own temp daemon was handed
+    `total: 163` from the live mailbox, and the same collision could report the
+    live inbox to a sandboxed agent.
     """
     if os.environ.get("DUNKINGSHEEP_FRESH") == "1":
         return None, False
@@ -1398,7 +1404,10 @@ def _coalesce(argv):
         key = words[0]
     else:
         return None, False
-    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
+    import hashlib
+    scope = os.environ.get("DUNKINGSHEEP_SOCKET") or os.environ.get("DUNKINGSHEEP_DIR") or "default"
+    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:12]
+    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + digest + "-" + key)
     now = time.time()
     try:
         last = os.path.getmtime(path)

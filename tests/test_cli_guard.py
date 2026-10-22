@@ -72,3 +72,43 @@ class SubstitutionRefusalCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PollCacheScopeTests(unittest.TestCase):
+    """Two stores must never share one cached answer.
+
+    Found from a flaky test: its temp daemon reported total 0, and a second call
+    was handed total 163 from the LIVE mailbox, because the cache key was the
+    command name alone. The same collision could hand a sandboxed agent the live
+    inbox.
+    """
+
+    def setUp(self):
+        self.mod = load_cli()
+
+    def path_for(self, socket, command=("inbox", "count")):
+        import os
+        saved = {k: os.environ.get(k) for k in ("DUNKINGSHEEP_SOCKET", "DUNKINGSHEEP_MIN_POLL_S",
+                                                "DUNKINGSHEEP_FRESH")}
+        os.environ["DUNKINGSHEEP_SOCKET"] = socket
+        os.environ["DUNKINGSHEEP_MIN_POLL_S"] = "60"
+        os.environ.pop("DUNKINGSHEEP_FRESH", None)
+        try:
+            path, _hit = self.mod._coalesce(list(command))
+            return path
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_each_store_gets_its_own_cache_entry(self):
+        temp = self.path_for("/tmp/dunkingsheep-tests-abc/test.sock")
+        live = self.path_for("/home/hunter/.config/dunkingsheep/dunkingsheep.sock")
+        self.assertNotEqual(temp, live, "two stores shared one poll cache entry")
+
+    def test_the_same_store_reuses_its_entry(self):
+        first = self.path_for("/tmp/x/test.sock")
+        second = self.path_for("/tmp/x/test.sock")
+        self.assertEqual(first, second)
