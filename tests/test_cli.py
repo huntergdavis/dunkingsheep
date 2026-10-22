@@ -268,15 +268,31 @@ class CliEndToEndTests(unittest.TestCase):
         # first answer for a key was served forever (a 16h-old `status` still
         # reporting a dead daemon's version and pid). A stale .out past the
         # interval must be overwritten, never replayed.
+        #
+        # The cache path is asked from the CLI itself: hard-coding it made this
+        # test break when the key gained the store hash, which is a test that
+        # fails for a reason unrelated to what it checks.
         import os, subprocess, sys
-        base = [sys.executable, CLI, "--json", "inbox", "count"]
+        from importlib.machinery import SourceFileLoader
         env = dict(os.environ, DUNKINGSHEEP_MIN_POLL_S="60", DUNKINGSHEEP_FRESH="0")
-        marker = f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count"
+        module = SourceFileLoader("dunkcli_cache", CLI).load_module()
+        saved = {k: os.environ.get(k) for k in ("DUNKINGSHEEP_MIN_POLL_S", "DUNKINGSHEEP_FRESH")}
+        os.environ["DUNKINGSHEEP_MIN_POLL_S"] = "60"
+        os.environ.pop("DUNKINGSHEEP_FRESH", None)
+        try:
+            marker, _hit = module._coalesce(["inbox", "count"])
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         out = marker + ".out"
+        base = [sys.executable, CLI, "--json", "inbox", "count"]
         try:
             with open(out, "w", encoding="utf-8") as handle:
                 handle.write('{"total": -1, "stale": true}\n')
-            os.utime(marker, (0, 0)) if os.path.exists(marker) else open(marker, "a").close()
+            open(marker, "a").close()
             os.utime(marker, (0, 0))  # an hour-old marker: the cache has expired
             result = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
             self.assertEqual(0, result.returncode, result.stderr)
