@@ -424,23 +424,45 @@ def _minutes(seconds):
     return round(seconds / 60.0, 1)
 
 
+# A DECLARED marker, not prose inference: a blocked task whose reason starts
+# with this is parked on the owner, not stale. The digest still counts it.
+HELD_OWNER_MARKER = "HELD FOR OWNER DECISION"
+
+
+def _is_held(task):
+    return (task.get("block_reason") or "").strip().upper().startswith(HELD_OWNER_MARKER)
+
+
 def rule_task_blocked_stale(inputs, rule):
     data = inputs.tasks()
     last_event = {}
     for event in data["events"]:
         last_event[event["task_id"]] = max(last_event.get(event["task_id"], 0), event["at"])
     out = []
+    held = []
     for task in data["tasks"]:
         if task["status"] != "blocked":
             continue
         last = max(task["updated_at"], last_event.get(task["id"], 0))
         idle = inputs.now - last
+        if _is_held(task):
+            held.append((task, idle))
+            continue
         if idle >= rule["threshold_minutes"] * 60:
             out.append(finding("task.blocked_stale", rule, task["id"],
                                f"task {task['id']} blocked with no state change or event",
                                f"{rule['threshold_minutes']}min", f"{_minutes(idle)}min", "since last activity",
                                {"task": task["id"], "assignees": task["assignees"],
                                 "block_reason_set": task["block_reason"] is not None}))
+    if held:
+        oldest = max(idle for _task, idle in held) / 86400
+        out.append(finding("task.blocked_stale", rule, "held-owner",
+                           f"{len(held)} task(s) held on owner decisions (oldest {oldest:.1f}d)",
+                           f"{rule['threshold_minutes']}min", f"{oldest:.1f}d", "held by declared marker",
+                           {"held": [task["id"] for task, _idle in held],
+                            "oldest_days": round(oldest, 1)},
+                           source="digest"))
+        out[-1]["severity"] = "info"
     return out
 
 

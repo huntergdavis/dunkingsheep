@@ -135,10 +135,11 @@ class Fleet:
         with open(os.path.join(self.dir, "health.json"), "w") as handle:
             json.dump(self.health, handle)
 
-    def task(self, task_id, status, updated_at, assignees=(), title="t", body=""):
-        self.sql("tasks.db", "INSERT INTO tasks (id, scope, title, body, status, assignees, created_at, updated_at) "
-                 "VALUES (?, 'global', ?, ?, ?, ?, ?, ?)", (task_id, title, body, status,
-                                                           json.dumps(list(assignees)), updated_at, updated_at))
+    def task(self, task_id, status, updated_at, assignees=(), title="t", body="", block_reason=None):
+        self.sql("tasks.db", "INSERT INTO tasks (id, scope, title, body, status, assignees, created_at, "
+                 "updated_at, block_reason) VALUES (?, 'global', ?, ?, ?, ?, ?, ?, ?)",
+                 (task_id, title, body, status, json.dumps(list(assignees)), updated_at,
+                  updated_at, block_reason))
 
     def task_event(self, task_id, event, at, actor=None, meta=None):
         self.sql("tasks.db", "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
@@ -208,6 +209,25 @@ class WatchdogCase(unittest.TestCase):
 
 class RuleBoundaryTests(WatchdogCase):
     """Each rule: one case that fires exactly at its threshold, one just below."""
+
+    def test_a_task_held_for_the_owner_does_not_page_but_is_counted(self):
+        cfg = self.fleet.config(task__blocked_stale={"threshold_minutes": 60})
+        self.fleet.task("held", "blocked", NOW - 5 * 24 * HOUR,
+                        block_reason="HELD FOR OWNER DECISION: A2 needs 3-7 days of funding")
+        self.fleet.task("stale", "blocked", NOW - 2 * HOUR)
+        findings = self.fleet.evaluate(cfg)
+        paged = [f for f in findings if f["key"] != "held-owner"]
+        self.assertEqual(["stale"], [f["key"] for f in paged])
+        digest = [f for f in findings if f["key"] == "held-owner"]
+        self.assertEqual(1, len(digest))
+        self.assertIn("1 task(s) held on owner decisions", digest[0]["summary"])
+
+    def test_the_hold_marker_is_declared_not_prose(self):
+        cfg = self.fleet.config(task__blocked_stale={"threshold_minutes": 60})
+        self.fleet.task("prose", "blocked", NOW - 2 * HOUR,
+                        block_reason="waiting for the owner to decide")  # no declared marker
+        self.assertEqual([("task.blocked_stale", "prose")],
+                         [(f["rule"], f["key"]) for f in self.fleet.evaluate(cfg)])
 
     def test_task_blocked_stale(self):
         cfg = self.fleet.config(task__blocked_stale={"threshold_minutes": 60})
