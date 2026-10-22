@@ -92,8 +92,40 @@ class InboxStoreTests(unittest.TestCase):
         with self.assertRaises(InboxError):
             self.inbox.ack([message_id], mailbox="alice")
         self.assertEqual(1, self.inbox.count("bob")["unread"])
+        # Sender identity grants nothing: the VP could not ack mail he wrote.
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
         self.inbox.ack([message_id], mailbox="bob")
         self.assertEqual(0, self.inbox.count("bob")["unread"])
+
+    def test_a_pane_suffixed_mailbox_is_the_same_mailbox(self):
+        """The VP's own mail was refused: mailbox 'X (w9:pH)', caller 'X'.
+
+        Both spellings exist in the table (a channel that resolves with its pane
+        id appends it), so the comparison has to be on the MAILBOX, not on the
+        string. Same for counting: an owner must see one inbox, not two.
+        """
+        message_id = self.inbox.send("alice", "hello", sender="w1:p1")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET mailbox = ? WHERE id = ?",
+                              ("alice (w9:pH)", message_id))
+        self.inbox.db.commit()
+        self.assertEqual(1, self.inbox.count("alice")["unread"],
+                         "the plain name must see the suffixed row")
+        self.assertEqual(1, self.inbox.count("alice (w9:pH)")["unread"])
+        self.inbox.ack([message_id], mailbox="alice")     # the owner, plain name
+        self.assertEqual(0, self.inbox.count("alice")["unread"])
+        self.assertEqual(0, self.inbox.count("alice (w9:pH)")["unread"])
+
+    def test_a_foreign_mailbox_with_a_pane_suffix_is_still_refused(self):
+        """Normalisation must not become a way to clear someone else's mail."""
+        message_id = self.inbox.send("bob", "hello", sender="w1:p1")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET mailbox = ? WHERE id = ?",
+                              ("bob (w9:pH)", message_id))
+        self.inbox.db.commit()
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
 
     def test_ack_stamps_read_at(self):
         sent = self.inbox.send("writer", "handled")

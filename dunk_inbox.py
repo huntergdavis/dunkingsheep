@@ -101,6 +101,34 @@ CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NU
 """
 
 
+_PANE_SUFFIX = re.compile(r"\s*\(\s*[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+\s*\)\s*$")
+
+
+def normalise_mailbox(name):
+    """'vp of agentry (w9:pH)' and 'vp of agentry' are ONE mailbox.
+
+    The table carries both spellings: a channel that resolves with its pane id
+    appends it, and the same mailbox addressed by name does not. Comparing the
+    raw strings made the ack guard refuse the VP's own mail - a guard that
+    refuses valid writes teaches people to work around it, which is worse than
+    the bug it prevents. Only a trailing pane-id parenthetical is stripped:
+    a label that merely contains brackets stays intact.
+    """
+    if name is None:
+        return None
+    text = str(name).strip()
+    stripped = _PANE_SUFFIX.sub("", text).strip()
+    return stripped or text
+
+
+def mailbox_where(mailbox, column="mailbox"):
+    """SQL that matches either spelling the table may hold for one mailbox."""
+    plain = normalise_mailbox(mailbox)
+    escaped = plain.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return (f"({column} = ? OR {column} LIKE ? ESCAPE '\\')",
+            [plain, escaped + " (%"])
+
+
 class InboxError(ValueError):
     """A caller mistake (unknown id, missing file, too big). Safe to show."""
 
@@ -257,6 +285,7 @@ class Inbox:
     # -- reading ------------------------------------------------------------
 
     def count(self, mailbox, lane_panes=None):
+        where, params = mailbox_where(mailbox)
         with self._lock:
             row = self.db.execute(
                 "SELECT COUNT(*) AS total, "
@@ -264,18 +293,19 @@ class Inbox:
                 "SUM(state = 'archived') AS archived, "
                 "SUM(state = 'undeliverable') AS undeliverable, "
                 "MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest "
-                "FROM messages WHERE mailbox = ? AND state != 'cancelled'",
-                (mailbox,)).fetchone()
+                f"FROM messages WHERE {where} AND state != 'cancelled'",
+                params).fetchone()
             blobs = self.db.execute(
                 "SELECT COUNT(*) AS n FROM attachments a JOIN messages m "
-                "ON m.id = a.message_id WHERE m.mailbox = ? AND m.state = 'queued'",
-                (mailbox,)).fetchone()
+                f"ON m.id = a.message_id WHERE m.mailbox IN "
+                f"(SELECT mailbox FROM messages WHERE {where}) AND m.state = 'queued'",
+                params).fetchone()
             from_lanes = 0
             if lane_panes:
                 marks = ",".join("?" for _ in lane_panes)
                 from_lanes = self.db.execute(
-                    f"SELECT COUNT(*) FROM messages WHERE mailbox = ? AND state = 'queued' "
-                    f"AND sender IN ({marks})", (mailbox, *lane_panes)).fetchone()[0]
+                    f"SELECT COUNT(*) FROM messages WHERE {where} AND state = 'queued' "
+                    f"AND sender IN ({marks})", (*params, *lane_panes)).fetchone()[0]
         unread = int(row["unread"] or 0)
         return {
             "mailbox": mailbox,
@@ -290,8 +320,8 @@ class Inbox:
 
     def list(self, mailbox, unread_only=True, limit=50):
         """Summaries, oldest first. No bodies."""
-        where = "mailbox = ? AND state != 'cancelled'"
-        params = [mailbox]
+        condition, params = mailbox_where(mailbox)
+        where = f"{condition} AND state != 'cancelled'"
         if unread_only:
             where += " AND state = 'queued'"
         with self._lock:
@@ -415,10 +445,11 @@ class Inbox:
             raise InboxError("state must be one of queued, read, acked")
         now = _now()
         placeholders = ",".join("?" for _ in allowed)
+        condition, box_params = mailbox_where(mailbox)
         sql = (f"UPDATE messages SET state = 'archived', archived_at = ?, "
-               f"read_at = COALESCE(read_at, ?) WHERE mailbox = ? "
+               f"read_at = COALESCE(read_at, ?) WHERE {condition} "
                f"AND state IN ({placeholders})")
-        params = [now, now, mailbox, *allowed]
+        params = [now, now, *box_params, *allowed]
         if before is not None:
             sql += " AND created_at < ?"
             params.append(float(before))
@@ -501,7 +532,7 @@ class Inbox:
                     "SELECT state, mailbox FROM messages WHERE id = ?", (message_id,)).fetchone()
                 if row is None:
                     raise InboxError(f"no message with id {message_id!r}")
-                if mailbox and row["mailbox"] != mailbox:
+                if mailbox and normalise_mailbox(row["mailbox"]) != normalise_mailbox(mailbox):
                     # A write not scoped to its owner is a blast radius: the VP
                     # acked a sent copy and the recipient lane lost its unread.
                     raise InboxError(
