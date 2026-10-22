@@ -72,6 +72,20 @@ class ContextTests(unittest.TestCase):
         self.assertEqual("measured once", self.store.find(entry["slug"])["body"])
         self.assertIn("STALE", self.store.digest())
 
+    def test_digest_from_a_project_includes_the_global_ground_truths(self):
+        from dunk_context import digest_both
+        self.store.add("project fact", cls="fact", subject="p", type_="measurement",
+                       authority="measured", recheck_after="30d")
+        global_store = Store(global_store=True)
+        global_store.ensure()
+        if global_store.find("rule-one") is None:
+            global_store.add("global rule one", cls="ground-truth", subject="rule-one",
+                             type_="principle", authority="owner", source="owner")
+        digest = digest_both(self.store.root)
+        self.assertIn("Ground truths (", digest)
+        self.assertIn("global rule one", digest)
+        self.assertIn("project fact", digest)
+
     def test_report_shows_both_stores_separately(self):
         from dunk_context import report
         self.store.add("project entry", cls="fact", subject="p", type_="measurement",

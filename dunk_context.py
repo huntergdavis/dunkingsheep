@@ -108,6 +108,50 @@ def select_stores(project_path=None, *, which=None, cwd=None):
     return {"global": Store(global_store=True)}
 
 
+def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject=None):
+    """The session digest. Global ground truths are ALWAYS included.
+
+    A digest scoped to the working directory is correct-looking and wrong: a
+    fresh agent in a project would be told there are zero rules. Global truths
+    never expire, so they are never omitted by scope; project facts are selected
+    by subject under the byte cap.
+    """
+    stores = select_stores(project_path, which=which)
+    truths, relevant = [], []
+    for name, store in stores.items():
+        for entry in store.entries():
+            if entry.get("error"):
+                continue
+            if entry["class"] == "ground-truth":
+                truths.append((name, entry))
+            elif subject is None or entry.get("subject") == subject:
+                relevant.append((name, entry))
+    lines = [f"## Ground truths ({len(truths)})"]
+    lines += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for _n, e in truths] or ["- none"]
+    lines += ["", "## Relevant"]
+    used = len("\n".join(lines).encode("utf-8"))
+    omitted = 0
+    for name, entry in relevant:
+        line = f"- [{name}/{entry['class']}/{entry['subject']}] {entry['body'].splitlines()[0]}"
+        stale = ""
+        if entry["class"] != "ground-truth" and _days(entry.get("recheck_after")):
+            try:
+                horizon = datetime.fromisoformat(str(entry["stated"])) + timedelta(days=_days(entry["recheck_after"]))
+                if datetime.now() > horizon:
+                    stale = " (STALE - re-check before trusting)"
+            except ValueError:
+                pass
+        size = len((line + stale + "\n").encode("utf-8"))
+        if used + size > max_bytes:
+            omitted += 1
+            continue
+        lines.append(line + stale)
+        used += size
+    if omitted:
+        lines.append(f"omitted: {omitted} entries over the {max_bytes}-byte cap")
+    return "\n".join(lines) + "\n"
+
+
 def report(project_path=None, *, which=None):
     """stats/check/index over every selected store, always labelled."""
     out = {}

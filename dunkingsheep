@@ -283,10 +283,12 @@ def build_parser():
     q.add_argument("--class", dest="cls")
     q.add_argument("--scope")
     q.add_argument("--global", dest="global_store", action="store_true")
-    q = csub.add_parser("digest", help="bounded session digest")
+    q = csub.add_parser("digest", help="bounded session digest (global truths always included)")
     q.add_argument("--subject")
     q.add_argument("--max-bytes", type=int, default=8192)
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
     q = csub.add_parser("check", help="schema, refusals and stale facts (both stores by default)")
     q.add_argument("--global", dest="global_store", action="store_true")
     q.add_argument("--project", action="store_true")
@@ -1790,7 +1792,10 @@ def run_client_command(client, args):
             return store.search(args.query, cls=args.cls, scope=args.scope), \
                 lambda rows: [print(f"{r['class']:<13} {r['slug']:<40} {r['subject']}") for r in rows] and None
         if sub == "digest":
-            return store.digest(max_bytes=args.max_bytes, subject=args.subject), print
+            which = ("global" if getattr(args, "global_store", False)
+                     else "project" if getattr(args, "project", False) else None)
+            return dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                            max_bytes=args.max_bytes, subject=args.subject), print
         which = ("global" if getattr(args, "global_store", False)
                  else "project" if getattr(args, "project", False) else None)
         if sub in ("check", "index", "stats"):
