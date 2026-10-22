@@ -818,8 +818,7 @@ COMMANDS = [
         "to SUBMIT text that simply never went in.",
         h_clear_box,
         params={"target": {"type": "string", "description": "Pane id, name or label."},
-                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}},
-        mcp=False),
+                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}}),
     Command(
         "delivery",
         "Can this lane receive a message, and if not why: ready / working / "
@@ -1771,12 +1770,16 @@ MCP_GROUPS = (
       ("start", "start_dunk"), ("stop", "stop_dunk"), ("stop_all", "stop_all"),
       ("fire", "fire_dunk"))),
     ("pane",
-     "Inspect and address a pane. action=list/read/send/send_keys/flush/"
-     "messages/get_message/cancel_message. send_text (send) types plus Enter; "
-     "when a human is composing it returns queued=true and is delivered later. "
-     "Prefer the inbox for agents.",
-     (("list", "list_panes"), ("read", "read_pane"), ("send", "send_text"),
+     "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
+     "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
+     "a lane can receive anything and why not (ready/working/blocked/dead). "
+     "send_text (send) types plus Enter; when a human is composing it returns "
+     "queued=true and is delivered later. flush submits a stranded draft; "
+     "clear_box DESTROYS one (superuser only). Prefer the inbox for agents.",
+     (("list", "list_panes"), ("read", "read_pane"), ("delivery", "delivery"),
+      ("send", "send_text"),
       ("send_keys", "send_keys"), ("flush", "flush_box"),
+      ("clear_box", "clear_box"),
       ("messages", "list_messages"), ("get_message", "get_message"),
       ("cancel_message", "cancel_message"))),
     ("workspace",

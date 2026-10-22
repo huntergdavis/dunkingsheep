@@ -3929,7 +3929,8 @@ def delivery_rows(screen):
     glyph alone left '\x1b[31m■ Server connection...' unparsed and the dead pane
     was classified by its draft instead of its banner.
     """
-    return [row.rstrip() for row in (_strip_ansi(screen) or "").splitlines() if row.strip()]
+    plain = _strip_ansi(screen) if screen else ""
+    return [row.rstrip() for row in plain.splitlines() if row.strip()]
 
 
 def delivery_tail(screen, lines=DELIVERY_TAIL_LINES):
