@@ -36,9 +36,12 @@ PAUSED = """\
 │ GPT-6-Astra high · ~/workspace/crackdown-switch · Port Crackdown   Goal paused (/goal resume)
 """
 
+# A REAL full-context banner. The hint the harness shows beside an empty box
+# ("new task? /clear to save ...") is NOT this, and reading it as this was the
+# bug that made a healthy lane permanently unreachable.
 CONTEXT_FULL = """\
 │ ✻ Working
-│ › new task? /clear to save 497.4k tokens
+│ Context limit reached. Run /clear to continue.
 """
 
 
@@ -76,6 +79,40 @@ class ClassifyDeliveryTests(unittest.TestCase):
     def test_working_is_not_ready_and_not_blocked(self):
         self.assertEqual(("working", "working"),
                          dunk_core.classify_delivery("│ ✻ Working", "working"))
+
+
+# The harness's empty-box hint, in the two ways it is drawn: Claude renders it in
+# grey RGB (not SGR 2), so "is it dim?" alone cannot tell it from a banner.
+HINT_GREY_RGB = ("\x1b[38;2;153;153;153mnew task? \x1b[0m"
+                 "\x1b[38;2;177;185;249m/clear\x1b[0m"
+                 "\x1b[38;2;153;153;153m to save 497.4k tokens\x1b[0m")
+HINT_DIM = "\x1b[2mnew task? /clear to save 497.4k tokens\x1b[0m"
+
+
+class PlaceholderTests(unittest.TestCase):
+    def test_the_hint_is_not_a_state_however_it_is_drawn(self):
+        for label, screen in (("grey rgb", HINT_GREY_RGB), ("dim", HINT_DIM)):
+            self.assertEqual(("ready", None),
+                             dunk_core.classify_delivery(f"❯\u00a0\n{screen}\n", "idle"), label)
+
+    def test_the_hint_does_not_mask_a_real_draft(self):
+        # A lane with an actual unsent draft is still blocked; the hint sitting
+        # beside it must not launder that into 'ready'.
+        screen = f"❯ half a sentence\n{HINT_GREY_RGB}\n"
+        state, reason = dunk_core.classify_delivery(screen, "idle", typed="half a sentence")
+        self.assertEqual("blocked", state)
+        self.assertIn("unsubmitted draft", reason)
+
+    def test_a_real_full_context_banner_still_blocks(self):
+        state, reason = dunk_core.classify_delivery("│ Context limit reached. Run /clear to continue\n", "idle")
+        self.assertEqual("blocked", state)
+        self.assertIn("/clear", reason)
+
+    def test_the_hint_grammar(self):
+        self.assertTrue(dunk_core._is_placeholder("new task? /clear to save 497.4k tokens"))
+        self.assertTrue(dunk_core._is_placeholder("  new task? /clear to save 1.2M tokens  "))
+        self.assertFalse(dunk_core._is_placeholder("Context limit reached"))
+        self.assertTrue(dunk_core._is_placeholder("type your request"))
 
 
 class ClearBoxTests(unittest.TestCase):

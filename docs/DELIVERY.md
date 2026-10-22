@@ -25,6 +25,14 @@ wW:p1   blocked - context full (/clear to save) - needs a /clear first
 | `dead` | the agent session is gone; Enter can never submit | reconnect or replace the pane |
 | `unknown` | the pane could not be read | find out; do not assume ready |
 
+A **placeholder is not a state**. Claude shows `new task? /clear to save 497.4k
+tokens` beside an empty composer, and it is drawn grey (not dim), so neither
+colour nor position tells it from a real banner. Reading it as "context full"
+made a healthy lane permanently unreachable while the dashboard showed it
+present. The discriminator is the hint's own grammar (`new task? /clear to save
+<n> tokens`, `type your request`): a hint never blocks, and a real draft sitting
+next to the hint still does.
+
 `blocked` reasons, each named because "busy" hides them:
 
 - `unsubmitted draft in the input box` - the nudge that would not take

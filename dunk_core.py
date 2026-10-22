@@ -206,6 +206,14 @@ STATUS_TAIL_LINES = 3
 
 PAUSED_GOAL_MARKERS = ("goal paused", "paused (/goal resume)", "/goal resume")
 CONTEXT_FULL_MARKERS = ("/clear to save", "context is full", "context limit reached")
+# The harness's empty-box HINT, not a state. Claude draws it next to an empty
+# composer ("new task? /clear to save 497.4k tokens") and colours it grey, not
+# dim, so colour alone cannot tell it from a banner. Reading it as "context full"
+# made a healthy lane permanently unreachable while it looked alive.
+PLACEHOLDER_PATTERNS = (
+    re.compile(r"new task\?\s*/clear to save [\d.,]+[km]? tokens?", re.I),
+    re.compile(r"^\s*(new task\?|type your (request|message)\b)", re.I),
+)
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -3918,15 +3926,32 @@ def _banner_marker(screen, markers):
     return None
 
 
-def _status_marker(screen, markers, lines=STATUS_TAIL_LINES):
+def _is_placeholder(text):
+    """True when a line is the harness's empty-box hint rather than a state."""
+    plain = _strip_ansi(text or "").strip()
+    return any(pattern.search(plain) for pattern in PLACEHOLDER_PATTERNS)
+
+
+def _status_marker(screen, markers, lines=STATUS_TAIL_LINES, *, placeholder_safe=False):
     """A status decoration on the composer line: '... · Goal paused (/goal resume)'.
 
     Only the last few non-blank lines count, because the composer is at the very
-    bottom. A transcript quote further up is not the pane's current state.
+    bottom, and only NON-DIM text counts: Claude draws its empty-box hint dim
+    ("new task? /clear to save 497.4k tokens"), so a marker found in dim text is
+    a placeholder, not a state. Reading the placeholder as a state made a healthy
+    lane permanently unreachable while it looked alive - the third variant of
+    that failure in one night.
     """
-    tail = "\n".join(delivery_rows(screen)[-lines:]).lower()
+    # Raw rows, NOT delivery_rows: those have the ANSI stripped, and the dim/not-dim
+    # distinction is carried by the escapes.
+    raw = [row for row in (screen or "").splitlines() if _strip_ansi(row).strip()]
     for marker in markers:
-        if marker in tail:
+        for row in raw[-lines:]:
+            plain = _strip_ansi(_bright_text(row)).lower()   # non-dim text only
+            if marker not in plain:
+                continue
+            if placeholder_safe and _is_placeholder(row):
+                continue
             return marker
     return None
 
@@ -3966,10 +3991,10 @@ def classify_delivery(screen, status=None, *, typed=None, our_text=None,
     marker = _banner_marker(screen, DEAD_SESSION_MARKERS)
     if marker:
         return "dead", f"dead session ({marker})"
-    marker = _status_marker(screen, PAUSED_GOAL_MARKERS)
+    marker = _status_marker(screen, PAUSED_GOAL_MARKERS, placeholder_safe=False)
     if marker:
         return "blocked", f"paused goal ({marker}) - it will not act on a message"
-    marker = _status_marker(screen, CONTEXT_FULL_MARKERS)
+    marker = _status_marker(screen, CONTEXT_FULL_MARKERS, placeholder_safe=True)
     if marker:
         return "blocked", f"context full ({marker}) - needs a /clear first"
     if typed and not _is_our_send(typed, our_text, awaiting_consumption):
