@@ -135,9 +135,8 @@
       "class": "ops",
       "cooldown_minutes": 30,
       "must_hold_runs": 3,
-      "load1_per_cpu": 2.0,
-      "critical_load1_per_cpu": 2.6,
-      "interim": true,
+      "load1_per_cpu": 3.0,
+      "critical_load1_per_cpu": 3.5,
       "critical_hold_runs": 3
     },
     "host.tmp": {

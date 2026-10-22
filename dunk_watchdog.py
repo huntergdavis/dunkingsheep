@@ -190,8 +190,9 @@ RULE_PARAMS = {
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
         "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
         "open", "in_progress", "blocked", allow_empty=False)},
+    # load1_* names are kept for config compatibility; the rule judges load5/cpu.
     "host.load": {"load1_per_cpu": POSITIVE, "critical_load1_per_cpu": POSITIVE,
-                  "interim": _bool, "critical_hold_runs": POSITIVE_INT},
+                  "critical_hold_runs": POSITIVE_INT},
     "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
                  "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
     "host.heavy_slot_stale": {"directory": _str, "prefix": _str, "max_age_minutes": POSITIVE},
@@ -749,13 +750,19 @@ def _heavy_jobs(inputs):
 
 
 def rule_host_load(inputs, rule):
-    """INTERIM fixed band (warning 2.0/cpu, critical 2.6/cpu, sustained 3 runs).
+    """A band fitted to our own recorded work (2026-10-22), not to a guess.
 
-    It is not calibrated: the 0.55/lane shape under-predicted the fleet and the
-    history is not yet recorded with busy-lane/heavy counts. The alert keeps
-    lanes, busy, heavy, band and measured so the text remains diagnostic, and
-    the config marks `interim: true`. The next change is the fit from recorded
-    samples, not another guess.
+    Fit over 461 samples / 8.3 h of host-watch history, on load5/cpu:
+
+        load5/cpu = 0.49 + 0.190*busy + 0.336*heavy     R2 0.52, RMS 0.33
+
+    `live` was 27 in every sample (nobody closed a pane all night), so its
+    coefficient is unidentifiable from this data - which is also why the earlier
+    lane-reserve shape could never be estimated. The band is set from the
+    observed envelope of legitimate work, not from the point prediction: the
+    machine reached 2.79/cpu with four lanes and a heavy job, so a threshold of
+    2.0/2.6 paged on our own productivity. warning 3.0/cpu, critical 3.5/cpu
+    (2 sigma of the fit residual above the observed maximum).
     """
     host = inputs.host("/")
     cpus = max(1, host["cpus"])
@@ -766,11 +773,11 @@ def rule_host_load(inputs, rule):
     heavy = _heavy_jobs(inputs)
     warning = rule["load1_per_cpu"]
     critical = rule["critical_load1_per_cpu"]
-    # Judge on load5, not load1: tonight a CRITICAL fired at load1 30.5 with
-    # busy 1 / heavy 0 and load1 was 18.9 a minute later. A one-minute spike is
-    # the wrong measurement; load5 plus must_hold_runs (consecutive spaced runs)
-    # is a persisted condition. A window change is a correctness fix, not a
-    # calibration, so the interim constants stay INTERIM.
+    # Judge on load5, not load1: a CRITICAL fired at load1 30.5 with busy 1 /
+    # heavy 0 and load1 was 18.9 a minute later. A one-minute spike is the wrong
+    # measurement; load5 plus must_hold_runs (consecutive spaced runs) is a
+    # persisted condition. The config keys still say load1_* for compatibility;
+    # the value they hold is per-cpu load5.
     load5 = host.get("load5", host["load1"])
     per_cpu = load5 / cpus
     if per_cpu < warning:
@@ -778,20 +785,20 @@ def rule_host_load(inputs, rule):
     level = "critical" if per_cpu >= critical else "warning"
     item = finding("host.load", rule, f"load5:{level}",
                    f"load5 {load5:.1f} = {per_cpu:.2f}/cpu, "
-                   f"interim band {warning:.1f}-{critical:.1f}, "
+                   f"band {warning:.1f}-{critical:.1f}/cpu (fitted 2026-10-22), "
                    f"{live} live / {busy} busy / {heavy} heavy",
                    f"{warning:.1f}/cpu (load5 {warning * cpus:.1f})",
                    f"{per_cpu:.2f}/cpu (load5 {load5:.1f})",
                    "load5 (5 min)",
                    {"load1": round(host["load1"], 2), "load5": round(load5, 2),
                     "cpus": cpus, "per_cpu": round(per_cpu, 2), "live": live,
-                    "busy": busy, "heavy": heavy, "interim": True,
+                    "busy": busy, "heavy": heavy,
                     "warning_per_cpu": warning,
                     "critical_per_cpu": critical})
     if level == "critical":
         item["severity"] = "critical"
         item["threshold"] = (f"{critical:.1f}/cpu "
-                             f"(sustained {rule['critical_hold_runs']} runs, interim)")
+                             f"(sustained {rule['critical_hold_runs']} runs)")
     return [item]
 
 

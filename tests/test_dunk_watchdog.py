@@ -379,21 +379,42 @@ class RuleBoundaryTests(WatchdogCase):
                          sorted(self.keys(self.fleet.evaluate(cfg))))
 
     def test_host_load_and_tmp_bands(self):
-        cfg = self.fleet.config(host__load={"load1_per_cpu": 2.0, "critical_load1_per_cpu": 2.6, "interim": True, "critical_hold_runs": 3, "must_hold_runs": 1},
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 3.0, "critical_load1_per_cpu": 3.5, "critical_hold_runs": 3, "must_hold_runs": 1},
                                 host__tmp={"max_used_fraction": 0.7, "critical_used_fraction": 0.9,
                                            "min_free_bytes": 100, "max_inode_fraction": 0.9, "path": "/tmp"})
-        # INTERIM fixed: warning 2.0/cpu, critical 2.6/cpu. 16.0/8=2.0 -> warning.
+        # Fitted band: warning 3.0/cpu, critical 3.5/cpu. 24.0/8=3.0 -> warning.
         self.fleet.panes = [{"pane_id": f"w1:p{i}", "agent_status": "working"}
                             for i in range(10)]
-        self.fleet.hosts = {"/": {"load1": 16.0, "load5": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
+        self.fleet.hosts = {"/": {"load1": 24.0, "load5": 24.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
         found = self.fleet.evaluate(cfg)
         self.assertEqual({("host.load", "load5:warning"): "warning", ("host.tmp", "/tmp:used_fraction"): "warning"},
                          {(f["rule"], f["key"]): f["severity"] for f in found})
         self.fleet.hosts["/tmp"] = {"used_fraction": 0.95}
         self.assertEqual("critical", self.keys and [f for f in self.fleet.evaluate(cfg)
                                                     if f["rule"] == "host.tmp"][0]["severity"])
-        self.fleet.hosts = {"/": {"load1": 15.99, "load5": 15.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
+        self.fleet.hosts = {"/": {"load1": 23.99, "load5": 23.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
         self.assertEqual([], self.fleet.evaluate(cfg))
+
+    def test_the_fitted_band_does_not_page_on_our_own_productive_work(self):
+        """4 working lanes + a compile reached 2.65/cpu and paged CRITICAL at the
+        interim 2.6. The fitted band must call that normal: the recorded maximum
+        while doing assigned work was 2.79/cpu."""
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 3.0, "critical_load1_per_cpu": 3.5,
+                                            "critical_hold_runs": 3, "must_hold_runs": 1})
+        self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "working"},
+                            {"pane_id": "w1:p2", "agent_status": "working"},
+                            {"pane_id": "w1:p3", "agent_status": "working"},
+                            {"pane_id": "w1:p4", "agent_status": "working"}] + \
+                           [{"pane_id": f"w1:p{i}", "agent_status": "idle"} for i in range(5, 28)]
+        # The reading the VP checked by hand: a compile, an assembler, an objdump.
+        self.fleet.hosts = {"/": {"load1": 21.2, "load5": 21.2, "cpus": 8}, "/tmp": {"used_fraction": 0.5}}
+        self.assertEqual([], self.fleet.evaluate(cfg))
+        # A genuine runaway still pages, and still only at critical once sustained.
+        self.fleet.hosts = {"/": {"load1": 40.0, "load5": 40.0, "cpus": 8}, "/tmp": {"used_fraction": 0.5}}
+        found = self.fleet.evaluate(cfg)
+        self.assertEqual([("host.load", "load5:critical")], self.keys(found))
+        self.assertIn("3.5/cpu", found[0]["threshold"])
+        self.assertNotIn("interim", str(found[0]).lower())
 
     def test_host_disk_full(self):
         cfg = self.fleet.config(host__disk_full={"max_used_fraction": 0.98, "paths": ["/tmp", "/"]})
@@ -517,9 +538,11 @@ class ConfigTests(WatchdogCase):
         self.assertNamed(lambda c: c["escalation"]["owner"].update(enabled=True), "escalation.owner.approved_by")
 
     def test_cli_refuses_bad_config_names_it_and_leaves_the_error_for_the_deadman(self):
+        zero = copy.deepcopy(EXAMPLE)
+        zero["rules"]["host.load"]["load1_per_cpu"] = 0   # built, not string-replaced:
         cases = {"truncated.json": '{"schema": "dunkingsheep-watchdog/2", "enabled": tr',
                  "unknown.json": json.dumps(dict(copy.deepcopy(EXAMPLE), pagethreshold=1)),
-                 "zero.json": json.dumps(EXAMPLE).replace('"load1_per_cpu": 2.0', '"load1_per_cpu": 0')}
+                 "zero.json": json.dumps(zero)}             # a literal grep breaks on a band change
         for name, text in cases.items():
             path, error_file = os.path.join(self.tmp, name), os.path.join(self.tmp, name + ".err")
             with open(path, "w") as handle:

@@ -85,7 +85,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 30) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
 | `lane.working_without_task` | a pane is working, holds no task, and has no task event in N min | `quiet_minutes` | info / ops |
 | `lane.idle_holding_task` | a pane holds a task while idle, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / ops |
-| `host.load` | load1 per CPU is at or above the **interim** fixed band (2.0/cpu warning, 2.6/cpu critical, sustained 3 runs). **Not calibrated** - see below | `load1_per_cpu`, `critical_load1_per_cpu`, `interim` | warning / ops |
+| `host.load` | per-CPU **load5** at or above a band fitted to our own history (3.0/cpu warning, 3.5/cpu critical, sustained 3 runs). The keys are named `load1_*` for compatibility; the value is load5 | `load1_per_cpu`, `critical_load1_per_cpu`, `critical_hold_runs` | warning / ops |
 | `host.tmp` | used fraction is at least 0.70 (warning) or at least 0.90 (critical), free bytes are at or below the floor, or the inode fraction is at or above the limit | `max_used_fraction`, `critical_used_fraction`, `min_free_bytes`, `max_inode_fraction`, `path` | warning / ops |
 | `host.disk_full` | /tmp or / is at least 98% full | `max_used_fraction`, `paths` | **critical / outage, hold 2** |
 | `host.heavy_slot_stale` | a heavy-job semaphore slot is older than N min (no holder pid exists) | `directory`, `prefix`, `max_age_minutes` | warning / ops |
@@ -95,40 +95,86 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `watchdog.self_error` | anything the watchdog could not do this run: a rule error, missing or corrupt state, or an owner post or confirmation problem. One finding per run | (none) | VP only |
 | `watchdog.deadman` | the heartbeat is missing or older than 3x the cadence (separate process) | CLI flags | VP only |
 
-## `host.load`: an INTERIM band, explicitly labelled
+## `host.load`: a band fitted to our own history (2026-10-22)
 
-`host.load` is currently a **fixed interim band**: warning at **2.0/cpu**,
-critical at **2.6/cpu** sustained 3 runs. **It is judged on `load5`, not
-`load1`**: a one-minute spike is the wrong measurement (a CRITICAL fired at
-load1 30.5 with busy 1 / heavy 0 and load1 was 18.9 a minute later). The window
-change is a correctness fix, not a calibration, so the constants stay INTERIM.
-The alert text names the window it judged: `load5 20.1 = 2.51/cpu, interim band
-2.0-2.6, 25 live / 4 busy / 1 heavy`. It is honest-until-calibrated, not
-derived. The config carries `"interim": true` and every alert says `interim
-band` so nobody mistakes the constant for a fitted number.
+`host.load` warns at **3.0/cpu** and is critical at **3.5/cpu**, judged on
+**`load5`**, sustained 3 runs. The number now comes from 461 recorded samples
+over 8.3 hours of this machine doing the work we assigned it, not from a guess.
 
-Why it is interim: the previous lane-reserve shape (`0.55 CPU/lane`) under-
-predicted the fleet. One heavy job with the caps respected still measured
-1.74/cpu against a 1.31-1.66 band, so it paged on a normal operating point.
-The fix is a fit from our own history, and the history was not recorded: the
-host-watch state held 3 load samples and the VP ops `pane_samples` covers only
-the poolrad project (1 busy lane) while 16-25 panes were live. Fitting three
-points produced "load per busy lane ~12" - the unrecorded lanes' work, not a
-per-lane cost.
+### The fit
 
-`host_watch.py` now writes `live`, `busy` (all panes with `agent_status
-working`, not just poolrad) and `heavy` (live slot holders) into the **same
-host sample row**. After ~30-60 samples, fit `load = base + a*busy + b*heavy`
-by least squares, set warning = fit + 1 sigma and critical = fit + 2 sigma,
-and print `observed load per busy lane = X, per heavy job = Y, over N
-samples`. That is the last band change; until then the interim number stands.
-
-The alert text keeps all five ingredients - `live`, `busy`, `heavy`, band,
-measured - so an alert is diagnosable from the message alone:
+Ordinary least squares on `load5 / cpus`:
 
 ```text
-load 20.1 = 2.51/cpu, interim band 2.0-2.6, 25 live / 4 busy / 0 heavy
+load5/cpu = 0.49 + 0.190*busy + 0.336*heavy          n = 461, R2 = 0.52, RMS = 0.33 load/cpu
+load5/cpu = 0.45 + 0.240*busy                        n = 461, R2 = 0.49, RMS = 0.34
+load5/cpu = 0.40 + 0.095*busy + 0.007*heavy + 0.022*psi60   n = 461, R2 = 0.76, RMS = 0.24
 ```
+
+`busy` = panes with `agent_status working`, `heavy` = live heavy-slot holders,
+`psi60` = CPU pressure stall over 60 s. **`live` is not in the model**: it was
+27 in every one of the 461 samples, so its coefficient is unidentifiable from
+this data - the matrix is singular. That is also why the earlier lane-reserve
+shape (`0.55 CPU/lane`) could never have been estimated from a week of samples.
+
+The third model fits best but was not adopted: pressure stall is a *consequence*
+of load, not a count of our work, so a threshold on it would page on a symptom
+we already measure directly. It is recorded here because a future reader should
+know the fitted shape is only half the story.
+
+### What normal looks like (check these against a reading in front of you)
+
+| busy lanes | heavy jobs | samples | median load5/cpu | p90 | max |
+|---|---|---|---|---|---|
+| 0 | 0 | 196 | 0.35 | 0.53 | 1.77 |
+| 1-2 | 0 | 209 | 0.78 | 1.33 | 2.46 |
+| 4 | 1 | 2 | 2.31 | 2.69 | 2.69 |
+| >= 4 | any | 27 | 1.93 | 2.50 | **2.79** |
+
+That table is worth more than the coefficients: anyone can compare it to the
+number in front of them. The machine reached **2.79/cpu** while doing assigned
+work - two compiles, an assembler and an objdump - so any threshold at or below
+2.8 pages on our own productivity.
+
+### Why the band is not a quantile
+
+Percentiles do not help here: p95 was 1.84 and p99 was 2.46, yet a *legitimate*
+reading of 2.65 fired CRITICAL at the old 2.6. A quantile of a mostly-idle
+history is below the peak of a working day. The band is therefore set from the
+**observed maximum of legitimate work plus a margin**:
+
+```text
+warning  3.0/cpu  = observed maximum 2.79 + 0.21   (~0.6 sigma)
+critical 3.5/cpu  = warning + 0.5                  (~1.5 sigma, and 2 sigma above the maximum)
+```
+
+Zero of the 461 samples reached 3.0. The first warning is therefore genuinely
+novel, which is the property a pager needs; the cost is that a runaway sitting
+between 2.8 and 3.0 will not page. With `must_hold_runs: 3` and a 30-minute
+cooldown, a sustained runaway climbs well past 3.5 within minutes of starting,
+so that gap is small in practice.
+
+### What the fit cannot tell you
+
+- **`load5` is a five-minute average; `busy`/`heavy` are instantaneous.** The
+  residual (RMS 0.33/cpu) is largely that mismatch. A lane that starts and
+  finishes inside the window barely moves load5; four lanes that run for an
+  hour move it a lot. This is why the model explains 52% of the variance and
+  why the band is set from the envelope rather than the prediction.
+- **Only 27 samples had 4+ busy lanes** and only 2 had exactly 4 busy + 1 heavy.
+  The top of the table is a small-sample claim and should be treated as such.
+- **`live` was constant.** A day where panes are opened and closed would allow a
+  per-pane term; until then it stays out of the model.
+
+The alert keeps every ingredient, so it is diagnosable from the message alone:
+
+```text
+load5 26.4 = 3.30/cpu, band 3.0-3.5/cpu (fitted 2026-10-22), 27 live / 5 busy / 2 heavy
+```
+
+The config keys are still named `load1_per_cpu` / `critical_load1_per_cpu` for
+compatibility with existing config files; the number they hold is per-CPU
+**load5**.
 
 ## Before you model a number, check the recorder
 
