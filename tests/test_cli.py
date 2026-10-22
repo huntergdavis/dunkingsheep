@@ -239,6 +239,30 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertIn("no dunkingsheep daemon", proc.stderr)
         self.assertEqual(0, self.run_json("status")["dunkers"])
 
+    def test_a_coalesced_call_returns_the_cached_answer_with_a_marker(self):
+        import os, subprocess, sys
+        base = [sys.executable, CLI, "--json", "inbox", "count"]
+        env = dict(os.environ, DUNKINGSHEEP_MIN_POLL_S="10", DUNKINGSHEEP_FRESH="0")
+        for path in (f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count",
+                     f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count.out"):
+            try: os.remove(path)
+            except OSError: pass
+        first = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+        second = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual(first.stdout, second.stdout,
+                         "a coalesced call must return the same fields, not a stub")
+        self.assertIn('"coalesced": true', second.stderr)
+        self.assertIn('"cached": true', second.stderr)
+        fresh = subprocess.run(base, capture_output=True, text=True,
+                               env=dict(env, DUNKINGSHEEP_FRESH="1"), timeout=60)
+        self.assertNotIn("coalesced", fresh.stderr)
+        self.assertEqual(first.stdout, fresh.stdout)
+        for path in (f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count",
+                     f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count.out"):
+            try: os.remove(path)
+            except OSError: pass
+
     def test_commands_listing_and_version(self):
         out = self.run_cli("commands").stdout
         self.assertIn("add_dunk(", out)

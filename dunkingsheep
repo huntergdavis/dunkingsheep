@@ -1240,28 +1240,33 @@ _INBOX_POLLS = ("count", "list", "ls", "stats")
 
 
 def _coalesce(argv):
-    """Refuse an identical poll command inside the minimum interval.
+    """Return the cache path when this poll command may reuse a recent answer.
 
-    Ten lanes polling faster than they can act is pure overhead. A cheap
-    timestamp file per command name; the *spawn* is what we are avoiding.
+    Ten lanes polling faster than they can act is pure overhead, but a
+    suppressed call must not lose the ANSWER: an interactive caller that asks
+    once must still get the count. The cache stores stdout under the key; a
+    coalesced caller replays it and marks stderr as cached. DUNKINGSHEEP_FRESH=1
+    bypasses the cache for a caller that needs certainty.
     """
+    if os.environ.get("DUNKINGSHEEP_FRESH") == "1":
+        return None
     try:
         minimum = float(os.environ.get("DUNKINGSHEEP_MIN_POLL_S", "2"))
     except ValueError:
         minimum = 2.0
     if minimum <= 0:
-        return
+        return None
     words = [word for word in argv if not word.startswith("-")]
     if not words:
-        return
+        return None
     if words[0] == "inbox":
         if len(words) < 2 or words[1] not in _INBOX_POLLS:
-            return
+            return None
         key = "inbox-" + words[1]
     elif words[0] in _POLL_COMMANDS:
         key = words[0]
     else:
-        return
+        return None
     path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
     now = time.time()
     try:
@@ -1269,14 +1274,53 @@ def _coalesce(argv):
     except OSError:
         last = 0.0
     if last and now - last < minimum:
-        print(json.dumps({"coalesced": True, "interval_s": minimum,
-                          "command": key}), file=sys.stderr)
-        sys.exit(0)
+        return path
     try:
         open(path, "a").close()
         os.utime(path, (now, now))
     except OSError:
-        return
+        return None
+    # Return the path even on creation: _run writes the fresh stdout there so
+    # the next call inside the interval can replay it instead of a stub.
+    return path
+
+
+def _run(argv):
+    """Run main(), caching the stdout of a coalescable command.
+
+    A cache hit replays the previous stdout (same fields) and writes a
+    {"coalesced": true, "cached": true} marker to stderr; the caller parses the
+    same answer it would have parsed fresh.
+    """
+    path = _coalesce(argv)
+    if path:
+        try:
+            with open(path + ".out", encoding="utf-8") as handle:
+                cached = handle.read()
+        except OSError:
+            cached = ""
+        if cached:
+            sys.stdout.write(cached)
+            print(json.dumps({"coalesced": True, "cached": True,
+                              "interval_s": float(os.environ.get(
+                                  "DUNKINGSHEEP_MIN_POLL_S", "2"))}),
+                  file=sys.stderr)
+            return 0
+        # No cached answer yet: run fresh rather than return a silent stub.
+    import contextlib
+    import io
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = main(argv)
+    output = buffer.getvalue()
+    if path:
+        try:
+            with open(path + ".out", "w", encoding="utf-8") as handle:
+                handle.write(output)
+        except OSError:
+            pass
+    sys.stdout.write(output)
+    return code
 
 
 def main(argv=None):
@@ -1773,4 +1817,4 @@ def run_client_command(client, args):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run(sys.argv[1:]))
