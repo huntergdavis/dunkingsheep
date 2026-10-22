@@ -899,10 +899,36 @@ class Flock:
         # wS:p1's mail arrived "from codex poolrad" because the label resolved
         # through a sibling pane; ids are unique and stable.
         sender = system_sender or self_pane_id or None
+        # PM routing: a lane that messages the VP out of habit is redirected
+        # to its project PM (or flagged). The VP reads PM digests, not lane
+        # reports; this is the "routing is wrong" count's other half.
+        redirected = None
+        try:
+            import dunk_pm
+            routing = dunk_pm.load_routing()
+            project = None
+            for name, entry in routing.items():
+                if pane_id and entry["vp_pane"] == pane_id and self_pane_id in entry["members"]:
+                    project = name
+                    break
+            if project:
+                pm_pane, _, mode = dunk_pm.redirect(self_pane_id, routing)
+                if pm_pane:
+                    if mode == "redirect":
+                        mailbox, label, pane_id = self.resolve_mailbox(pm_pane, self_pane_id)
+                        body = f"[redirected from the VP to the {project} PM]\n\n{body}"
+                        redirected = {"from": "vp", "to": pm_pane, "project": project}
+                    else:
+                        subject = f"[lane mail to VP: {project}] {subject or ''}".strip()
+                        redirected = {"flag": project}
+        except Exception:  # noqa: BLE001 - routing must never block a send
+            redirected = None
         attachments = [attach] if isinstance(attach, str) else list(attach or ())
         message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
                                   mailbox_label=label, pane_id=pane_id,
                                   attachments=attachments)
+        if redirected:
+            message["redirected"] = redirected
         message["notified"] = False
         if notify and pane_id:
             unread = self.inbox.count(mailbox)["unread"]
@@ -967,7 +993,15 @@ class Flock:
         return None
 
     def inbox_count(self, mailbox=None, self_pane_id=None):
-        return self.inbox.count(self._mailbox_or_self(mailbox, self_pane_id))
+        key = self._mailbox_or_self(mailbox, self_pane_id)
+        lane_panes = []
+        try:
+            import dunk_pm
+            for entry in dunk_pm.load_routing().values():
+                lane_panes.extend(entry["members"])
+        except Exception:  # noqa: BLE001 - a bad routing file must not break counts
+            lane_panes = []
+        return self.inbox.count(key, lane_panes=sorted(set(lane_panes)))
 
     @_as_dunk_error
     def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):

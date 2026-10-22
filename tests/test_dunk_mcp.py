@@ -65,7 +65,7 @@ class McpServerTests(unittest.TestCase):
         tools = self.rpc("tools/list")["result"]["tools"]
         names = [tool["name"] for tool in tools]
         self.assertEqual([t.name for t in grouped_mcp_tools()], names)
-        self.assertEqual(9, len(names))
+        self.assertEqual(10, len(names))
         # The flat names are merged, not declared; shutdown was never a tool.
         self.assertNotIn("add_dunk", names)
         self.assertNotIn("task_next", names)

@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS messages (
     cancelled_at  REAL,
     reason        TEXT,
     notify_state  TEXT,
-    notify_reason TEXT
+    notify_reason TEXT,
+    digest_id     TEXT,
+    digest_updated_at REAL
 );
 CREATE INDEX IF NOT EXISTS messages_by_mailbox
     ON messages (mailbox, state, created_at);
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments (message_id);
+CREATE UNIQUE INDEX IF NOT EXISTS messages_by_digest
+    ON messages (digest_id) WHERE digest_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 
@@ -126,6 +130,10 @@ class Inbox:
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
             if "archived_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN archived_at REAL")
+            if "digest_id" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
+            if "digest_updated_at" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
             # Acked mail is read mail. Older rows could be acked without a
             # read_at, which made boards that count NULLs report drained mail
             # as unread; backfill them once.
@@ -185,6 +193,43 @@ class Inbox:
             self.db.commit()
         return self.get(message_id)
 
+    def upsert_digest(self, mailbox, digest_id, body, subject=None, sender=None,
+                      mailbox_label=None, pane_id=None):
+        """One message per digest id, updated in place.
+
+        A PM publishes a digest every window; it must not become a stream. The
+        stable id means the VP's inbox holds one row per project: unread again
+        after an update, with the previous body replaced.
+        """
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise InboxError("a digest needs a body")
+        if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+            raise InboxError(f"body is larger than {MAX_BODY_BYTES} bytes")
+        with self._lock:
+            existing = self.db.execute(
+                "SELECT * FROM messages WHERE digest_id = ?", (digest_id,)).fetchone()
+            if existing is not None:
+                self.db.execute(
+                    "UPDATE messages SET mailbox=?, mailbox_label=?, pane_id=?, "
+                    "sender=?, subject=?, body=?, state='queued', read_at=NULL, "
+                    "acked_at=NULL, archived_at=NULL, cancelled_at=NULL, reason=NULL, "
+                    "notify_state=NULL, notify_reason=NULL, digest_updated_at=? "
+                    "WHERE digest_id=?",
+                    (mailbox, mailbox_label or mailbox, pane_id, sender, subject, body,
+                     _now(), digest_id))
+                self.db.commit()
+                return self.get(existing["id"])
+            message_id = self._next_id()
+            self.db.execute(
+                "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, "
+                "subject, body, state, created_at, digest_id, digest_updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'queued',?,?,?)",
+                (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
+                 subject, body, _now(), digest_id, _now()))
+            self.db.commit()
+        return self.get(message_id)
+
     def rename_mailbox(self, old, new):
         """Move every message from one mailbox key to another. Returns how
         many moved. Used to retire a mailbox that turned out to be shared."""
@@ -204,7 +249,7 @@ class Inbox:
 
     # -- reading ------------------------------------------------------------
 
-    def count(self, mailbox):
+    def count(self, mailbox, lane_panes=None):
         with self._lock:
             row = self.db.execute(
                 "SELECT COUNT(*) AS total, "
@@ -218,6 +263,12 @@ class Inbox:
                 "SELECT COUNT(*) AS n FROM attachments a JOIN messages m "
                 "ON m.id = a.message_id WHERE m.mailbox = ? AND m.state = 'queued'",
                 (mailbox,)).fetchone()
+            from_lanes = 0
+            if lane_panes:
+                marks = ",".join("?" for _ in lane_panes)
+                from_lanes = self.db.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE mailbox = ? AND state = 'queued' "
+                    f"AND sender IN ({marks})", (mailbox, *lane_panes)).fetchone()[0]
         unread = int(row["unread"] or 0)
         return {
             "mailbox": mailbox,
@@ -227,6 +278,7 @@ class Inbox:
             "archived": int(row["archived"] or 0),
             "undeliverable": int(row["undeliverable"] or 0),
             "oldest_unread_s": int(_now() - row["oldest"]) if row["oldest"] else None,
+            "from_lanes": int(from_lanes),
         }
 
     def list(self, mailbox, unread_only=True, limit=50):
@@ -577,6 +629,7 @@ class Inbox:
             "waiting_s": (int(_now() - row["created_at"])
                           if row["state"] == "queued" else None),
             "body_bytes": len((row["body"] or "").encode("utf-8")),
+            "digest_id": row["digest_id"] if "digest_id" in row.keys() else None,
             "attachments": blobs,
         }
 

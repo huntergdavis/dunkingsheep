@@ -522,7 +522,10 @@ class SurfaceParityTests(unittest.TestCase):
         memory_help = subprocess.run(
             [sys.executable, os.path.join(ROOT, "dunkingsheep"), "memory", "--help"],
             capture_output=True, text=True, timeout=60).stdout
-        blob = help_text + inbox_help + task_help + superuser_help + memory_help
+        pm_help = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dunkingsheep"), "pm", "--help"],
+            capture_output=True, text=True, timeout=60).stdout
+        blob = help_text + inbox_help + task_help + superuser_help + memory_help + pm_help
         # The CLI spells commands as subcommands, sometimes grouped or renamed;
         # this maps each registry command to the words that must appear.
         spelled = {
@@ -561,6 +564,7 @@ class SurfaceParityTests(unittest.TestCase):
             "health": "health", "recover": "recover", "doctor": "doctor",
             "poll": "poll",
             "turn_start": "turn", "turn_end": "turn",
+            "pm_digest": "digest", "pm_routing": "routing",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

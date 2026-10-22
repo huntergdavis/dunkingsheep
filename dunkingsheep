@@ -242,6 +242,20 @@ def build_parser():
     q.add_argument("attachment_id")
     q.add_argument("--dest", "-d", default=".")
 
+    # -- project PMs -----------------------------------------------------------
+    pm = sub.add_parser("pm", help="project PMs: lane routing and the one-per-project digest",
+                        description="A PM publishes ONE digest per project per window "
+                                    "under a stable id, and lanes report to their PM "
+                                    "instead of the VP.")
+    psub = pm.add_subparsers(dest="pm_command", metavar="<subcommand>")
+    psub.required = True
+    q = psub.add_parser("digest", help="publish/update one project digest",
+                        epilog="example: echo '{\"changed\":[\"t6 240/286\"],\"numbers\":[]}' | "
+                               "dunkingsheep pm digest poolrad")
+    q.add_argument("project")
+    q.add_argument("--to", help="VP pane (default from routing / DUNKINGSHEEP_VP_PANE)")
+    q = psub.add_parser("routing", help="show the lane->PM routing registry")
+
     # -- tasks ----------------------------------------------------------------
     task = sub.add_parser(
         "task", help="global and per-pane tasks: the coordination queue",
@@ -718,6 +732,21 @@ def print_inbox_archive(result):
     when = f" before {result['before']}" if result.get("before") else ""
     print(f"archived {result['archived']} message(s) in {result['mailbox']}"
           f" (states {','.join(result['states'])}{when})")
+
+
+def print_pm_digest(r):
+    print(f"{r.get('action', 'updated')} {r.get('digest_id')} -> {r.get('destination')} "
+          f"({r.get('state')}, {r.get('body_bytes')} bytes)")
+
+
+def print_pm_routing(r):
+    routing = r.get("routing") or {}
+    if not routing:
+        print(f"no PM routing configured at {r.get('registry')}")
+        return
+    for project, entry in sorted(routing.items()):
+        members = ", ".join(entry.get("members") or []) or "-"
+        print(f"{project}: pm {entry['pm']}  mode {entry['mode']}  lanes {members}")
 
 
 def print_inbox_count(r):
@@ -1635,6 +1664,13 @@ def run_client_command(client, args):
             return client.call("inbox_fetch", attachment_id=args.attachment_id,
                                dest=args.dest), \
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
+    if command == "pm":
+        sub = args.pm_command
+        if sub == "digest":
+            return client.call("pm_digest", project=args.project,
+                               payload=sys.stdin.read(), to=args.to), print_pm_digest
+        if sub == "routing":
+            return client.call("pm_routing"), print_pm_routing
     if command == "task":
         sub = args.task_command
         if sub == "add":

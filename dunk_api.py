@@ -327,6 +327,18 @@ def h_inbox_count(flock, args, self_pane_id):
     return flock.inbox_count(None, self_pane_id=self_pane_id)
 
 
+def h_pm_digest(flock, args, self_pane_id):
+    return flock.pm_digest(args["project"], args.get("payload") or "",
+                           to=args.get("to"), self_pane_id=self_pane_id)
+
+
+def h_pm_routing(flock, args, self_pane_id):
+    import dunk_pm
+    return {"routing": dunk_pm.load_routing(),
+            "registry": str(dunk_pm.ROUTING),
+            "vp_pane": dunk_pm.DEFAULT_VP_PANE}
+
+
 def h_inbox_list(flock, args, self_pane_id):
     return flock.inbox_list(args.get("mailbox"),
                             unread_only=_bool(args.get("unread_only"), True),
@@ -1066,6 +1078,28 @@ COMMANDS = [
                           "description": "Rebuild the cached view before answering."}},
     ),
     Command(
+        "pm_digest",
+        "Publish or update ONE digest for a project under a stable id "
+        "(pm-digest:<project>) so a PM never becomes a stream. The payload is "
+        "JSON with changed/blocked/owner_decisions/numbers, or plain text. The "
+        "row is updated in place and becomes unread again.",
+        h_pm_digest,
+        params={
+            "project": {"type": "string", "description": "Project name, e.g. poolrad."},
+            "payload": {"type": "string",
+                        "description": "JSON digest payload or plain text body."},
+            "to": {"type": "string", "description": "VP pane (default from routing)."},
+        },
+        required=["project", "payload"],
+    ),
+    Command(
+        "pm_routing",
+        "Show the lane->PM routing registry: which project each lane reports to, "
+        "its PM pane, and whether a stray VP message is redirected or flagged.",
+        h_pm_routing,
+        params={},
+    ),
+    Command(
         "inbox_list",
         "Summaries of the messages in a mailbox, oldest first: sender, subject, "
         "size, attachments and state. Does not mark anything read.",
@@ -1742,6 +1776,12 @@ MCP_GROUPS = (
      "coverage), status (daemon health + counts), health (deterministic "
      "self-check; repair=true fixes stale leases and a large WAL).",
      (("summary", "metrics"), ("status", "status"), ("health", "health"))),
+    ("pm",
+     "Project PMs. action=digest publishes or updates ONE digest per project "
+     "under a stable id (pm-digest:<project>) with changed/blocked/"
+     "owner_decisions/numbers so a PM is a digest, not a stream; routing shows "
+     "the lane->PM registry and whether stray VP mail is redirected or flagged.",
+     (("digest", "pm_digest"), ("routing", "pm_routing"))),
     ("system",
      "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), "
      "herdr (any herdr subcommand except the typing ones), herdr_help, recover, doctor.",
