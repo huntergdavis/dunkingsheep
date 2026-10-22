@@ -294,6 +294,17 @@ def h_flush_box(flock, args, self_pane_id):
     return flock.flush_box(args["target"], self_pane_id=self_pane_id)
 
 
+def h_clear_box(flock, args, self_pane_id):
+    """Destroy an unsubmitted draft. Superuser only, and every use is logged."""
+    return flock.clear_box(args["target"], self_pane_id=self_pane_id,
+                           reason=args.get("reason"))
+
+
+def h_delivery(flock, args, self_pane_id):
+    pane = flock.resolve_target(args["target"], self_pane_id)
+    return flock.delivery_state(pane["pane_id"], args.get("status"))
+
+
 def h_list_messages(flock, args, self_pane_id):
     return flock.list_messages()
 
@@ -799,6 +810,23 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "clear_box",
+        "DESTRUCTIVE, superuser only: clear (Ctrl-U, Escape) an unsubmitted draft "
+        "in a pane's input box. Use when a send could not be submitted - a draft "
+        "that stays there blocks every later message to that lane. Use flush_box "
+        "to SUBMIT text that simply never went in.",
+        h_clear_box,
+        params={"target": {"type": "string", "description": "Pane id, name or label."},
+                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}},
+        mcp=False),
+    Command(
+        "delivery",
+        "Can this lane receive a message, and if not why: ready / working / "
+        "blocked (dead session, paused goal, full context, unsubmitted draft) / unknown.",
+        h_delivery,
+        params={"target": {"type": "string", "description": "Pane id, name or label."},
+                "status": {"type": "string", "description": "The pane's reported status, if known."}}),
     Command(
         "help",
         "Explain Dunking Sheep: concepts, placeholders, the meta-dunking recipe, "

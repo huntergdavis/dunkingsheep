@@ -552,6 +552,12 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("clear-box", help="DESTRUCTIVE, superuser: clear an unsubmitted draft (Ctrl-U)")
+    p.add_argument("target")
+    p.add_argument("--reason", help="why the draft is being destroyed (it is logged)")
+    p = sub.add_parser("delivery", help="can this lane receive a message, and if not why")
+    p.add_argument("target")
+    p.add_argument("--status", help="the pane's reported status, if known")
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
 
@@ -2090,6 +2096,11 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "clear-box":
+        return client.call("clear_box", target=args.target, reason=args.reason), print_message
+    if command == "delivery":
+        return client.call("delivery", target=args.target, status=args.status), \
+            lambda r: print(f"{args.target}: {r['state']}" + (f" - {r['reason']}" if r.get('reason') else ""))
     if command == "flush":
         return client.call("flush_box", target=args.target), lambda r: print(
             f"{r['target_label']} ({r['pane_id']}): {r['message']}"

@@ -193,6 +193,19 @@ DEAD_SESSION_MARKERS = (
     "reconnect failed",
     "session expired",
 )
+# A pane can be alive, have unread mail, and still be unreachable: its input box
+# holds something that was never submitted, so every later send is held as "a
+# human is typing" and the lane silently starves. These are the states that block
+# delivery, and each one has a name because "busy" hides them.
+# These banners sit at the BOTTOM of a pane: that is where an agent prints its
+# connection error, its goal state and its input box. Scanning the whole visible
+# screen made a pane look dead because its own transcript quoted the phrase -
+# including the pane that had just written the string into a file.
+DELIVERY_TAIL_LINES = 12
+STATUS_TAIL_LINES = 3
+
+PAUSED_GOAL_MARKERS = ("goal paused", "paused (/goal resume)", "/goal resume")
+CONTEXT_FULL_MARKERS = ("/clear to save", "context is full", "context limit reached")
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -3179,16 +3192,16 @@ class Flock:
         return _is_our_send(shown, text, True)
 
     def _dead_session(self, pane_id):
-        """Return the dead-session marker the screen shows, or None."""
+        """Return the dead-session marker showing at the BOTTOM of the pane, or None.
+
+        Only the tail counts: a live pane whose transcript quotes the phrase is
+        not dead, and refusing it would make the guard the outage.
+        """
         try:
             screen = self.herdr.read_pane(pane_id, lines=40, source="visible")
         except Exception:  # noqa: BLE001 - an unreadable pane is not this check
             return None
-        text = (screen or "").lower()
-        for marker in DEAD_SESSION_MARKERS:
-            if marker in text:
-                return marker
-        return None
+        return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
     def _press_until_submitted(self, pane_id, text):
         """Press Enter until `text` has left the input box. Returns
@@ -3379,6 +3392,62 @@ class Flock:
         if screen is None or _modal_open(screen):
             return None
         return _typed_text(screen) or None
+
+    def delivery_state(self, pane_id, status=None):
+        """Classify whether this pane can receive a message, and why not.
+
+        `status` comes from the pane list (working/idle). The screen decides the
+        blocked states: a dead session, a paused goal, a full context, or a draft
+        sitting unsubmitted in the box. None of those are "working", and all of
+        them starve a lane silently if a dispatcher treats them as idle.
+        """
+        if status is None:
+            # The pane's own report beats our guess: a lane that says it is
+            # working is working even if its screen has no composer to read.
+            try:
+                status = self.herdr.agent_status(pane_id)
+            except Exception:                   # noqa: BLE001 - status is optional
+                status = None
+        screen = None
+        try:
+            screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
+                                          source="visible", ansi=True)
+        except Exception:                       # an unreadable pane is unknown, not ready
+            return {"state": "unknown", "reason": "pane unreadable"}
+        typed = None if _modal_open(screen) else _typed_text(screen)
+        state, reason = classify_delivery(screen, status, typed=typed)
+        return {"state": state, "reason": reason}
+
+    def clear_box(self, pane_id, self_pane_id=None, reason=None):
+        """CLEAR an unsubmitted draft (Ctrl-U, Escape). The destructive pair to
+        `flush_box`, which submits what is there.
+
+        Use this when submit has failed - the nudge that would not take - because
+        submitting is what we wanted and it did not work. Use `flush_box` when the
+        text simply never went in.
+
+        Ctrl-U clears the input line, then Escape leaves any open modal without
+        submitting anything. Every flush is logged: clearing someone's draft is a
+        destructive act even when the draft is our own text.
+        """
+        self.require_superuser(self_pane_id, "flush")
+        before = self.delivery_state(pane_id)
+        if before["state"] == "ready":
+            return {"pane_id": pane_id, "flushed": False, "before": before,
+                    "reason": "nothing to flush: the input box is already clear"}
+        if before["state"] == "working":
+            return {"pane_id": pane_id, "flushed": False, "before": before,
+                    "reason": "the lane is working; a flush would interrupt it"}
+        try:
+            self.herdr.send_keys(pane_id, "C-u")
+            self.herdr.send_keys(pane_id, "Escape")
+        except Exception as exc:
+            raise DunkError(f"flush failed for {pane_id}: {exc}")
+        after = self.delivery_state(pane_id)
+        log.warning("flushed pane %s by %s (%s): %s -> %s", pane_id, self_pane_id,
+                    reason or "no reason given", before["state"], after["state"])
+        return {"pane_id": pane_id, "flushed": True, "before": before, "after": after,
+                "by": self_pane_id, "reason": reason}
 
     def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
@@ -3822,6 +3891,84 @@ def _notice_text(mailbox, unread, sender=None, subject=None):
     if subject:
         head += f": {str(subject).strip()[:60]}"
     return f"{head}. Read it with: dunkingsheep inbox read"
+
+
+def _banner_marker(screen, markers):
+    """A marker that starts its own line is a banner; one mid-sentence is prose.
+
+    A dead pane prints `■ Server connection could not be restored` as a status
+    line. A live pane that merely wrote those words into a message shows them
+    inside a sentence. Matching anywhere in the scrollback classified the live
+    pane as dead - which is a guard that becomes the outage.
+    """
+    for row in delivery_rows(screen):
+        stripped = row.lstrip(" \t\u2500\u2502\u25a0\u25cf\u2022*\u00b7-\u2014>|#~[]").lower()
+        for marker in markers:
+            if stripped.startswith(marker):
+                return marker
+    return None
+
+
+def _status_marker(screen, markers, lines=STATUS_TAIL_LINES):
+    """A status decoration on the composer line: '... · Goal paused (/goal resume)'.
+
+    Only the last few non-blank lines count, because the composer is at the very
+    bottom. A transcript quote further up is not the pane's current state.
+    """
+    tail = "\n".join(delivery_rows(screen)[-lines:]).lower()
+    for marker in markers:
+        if marker in tail:
+            return marker
+    return None
+
+
+def delivery_rows(screen):
+    """Non-blank rows with colour codes removed.
+
+    A banner starts with an escape sequence before its glyph, so stripping the
+    glyph alone left '\x1b[31m■ Server connection...' unparsed and the dead pane
+    was classified by its draft instead of its banner.
+    """
+    return [row.rstrip() for row in (_strip_ansi(screen) or "").splitlines() if row.strip()]
+
+
+def delivery_tail(screen, lines=DELIVERY_TAIL_LINES):
+    """The last non-blank lines of a pane, lowercased: where state banners live.
+
+    A marker anywhere in the scrollback is not a state. The pane that wrote the
+    string "server connection could not be restored" into a file then re-read its
+    own transcript was classified dead while it was working.
+    """
+    rows = [row for row in (screen or "").splitlines() if row.strip()]
+    return "\n".join(rows[-lines:]).lower()
+
+
+def classify_delivery(screen, status=None, *, typed=None, our_text=None,
+                      awaiting_consumption=False):
+    """Why a pane can or cannot receive a message, as (state, reason).
+
+    States: dead, blocked, working, ready. `blocked` is the one that matters:
+    the pane is alive and idle but a send would be held, so a dispatcher must
+    count it as unavailable and say why rather than queue behind it.
+
+    Pure so a test can assert on a canned screen without a terminal.
+    """
+    marker = _banner_marker(screen, DEAD_SESSION_MARKERS)
+    if marker:
+        return "dead", f"dead session ({marker})"
+    marker = _status_marker(screen, PAUSED_GOAL_MARKERS)
+    if marker:
+        return "blocked", f"paused goal ({marker}) - it will not act on a message"
+    marker = _status_marker(screen, CONTEXT_FULL_MARKERS)
+    if marker:
+        return "blocked", f"context full ({marker}) - needs a /clear first"
+    if typed and not _is_our_send(typed, our_text, awaiting_consumption):
+        clipped = " ".join(str(typed).split())[:60]
+        return "blocked", f"unsubmitted draft in the input box ({clipped!r})"
+    status_text = str(status or "").lower()
+    if status_text in ("working", "thinking", "running", "busy"):
+        return "working", status_text
+    return "ready", None
 
 
 def _modal_open(screen):
