@@ -78,6 +78,42 @@ def redirect(pane_id, routing, *, vp_pane=None):
     return entry["pm"], project, entry["mode"]
 
 
+POOLRAD_CHECKPOINT = Path(os.environ.get(
+    "POOLRAD_CHECKPOINT",
+    "~/workspace/poolrad-decomp/docs/re/function_accounting_checkpoint.json")).expanduser()
+
+
+def checkpoint_numbers(project, path=None):
+    """Read the project's numbers AT PUBLISH TIME. None = no source for this project.
+
+    A digest is read instead of the reports, so a remembered number is a
+    confident wrong answer with a source attached. On a failed read the number
+    is 'unavailable', never yesterday's value.
+    """
+    if project != "poolrad":
+        return None
+    path = Path(path or POOLRAD_CHECKPOINT).expanduser()
+    try:
+        data = json.loads(path.read_text())
+        bodies = int(data["strict_full_c_originals"])
+        total = int(data["verified_game_identities"])
+        commit = (data.get("reviewed_change") or {}).get("reviewed_commit") or "unknown"
+        import datetime
+        # Local wall-clock, readable in the digest: "as of 2026-10-21 19:40".
+        as_of = datetime.datetime.fromtimestamp(
+            path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        ref = f"{path} (reviewed_commit {commit})"
+        return [
+            {"name": "strict C bodies", "value": bodies, "unit": f"/{total}",
+             "evidence_ref": ref, "as_of": as_of},
+            {"name": "verified game identities", "value": total, "unit": "",
+             "evidence_ref": ref, "as_of": as_of},
+        ]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [{"name": "strict C bodies", "value": "unavailable", "unit": "",
+                 "evidence_ref": f"{path}: {exc}", "as_of": None}]
+
+
 def render_digest(project, *, changed=(), blocked=(), owner_decisions=(),
                   numbers=(), window="30 min", note=None):
     """Render the four-section digest. Empty sections say so, never vanish."""
@@ -88,6 +124,9 @@ def render_digest(project, *, changed=(), blocked=(), owner_decisions=(),
     lines += [f"- {item}" for item in changed] or ["- nothing"]
     lines += ["", "## Blocked"]
     lines += [f"- {item}" for item in blocked] or ["- nothing"]
+    if len(blocked) > 6:
+        lines.append(f"- PM note: {len(blocked)} blocked items; past six this is "
+                     "no longer a digest - split the project or escalate one owner decision.")
     lines += ["", "## Owner decisions"]
     lines += [f"- {item}" for item in owner_decisions] or ["- nothing"]
     lines += ["", "## Numbers"]
@@ -97,7 +136,9 @@ def render_digest(project, *, changed=(), blocked=(), owner_decisions=(),
             value = item.get("value", "?")
             unit = item.get("unit", "")
             ref = item.get("evidence_ref") or "no evidence ref"
-            lines.append(f"- {name}: {value} {unit}".rstrip() + f" (evidence: {ref})")
+            as_of = item.get("as_of")
+            suffix = f" (evidence: {ref}" + (f"; as of {as_of}" if as_of else "") + ")"
+            lines.append(f"- {name}: {value} {unit}".rstrip() + suffix)
         else:
             lines.append(f"- {item}")
     if not numbers:

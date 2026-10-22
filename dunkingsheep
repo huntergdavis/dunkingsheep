@@ -254,6 +254,8 @@ def build_parser():
                                "dunkingsheep pm digest poolrad")
     q.add_argument("project")
     q.add_argument("--to", help="VP pane (default from routing / DUNKINGSHEEP_VP_PANE)")
+    q.add_argument("--demo", action="store_true",
+                   help="label the subject DEMO (a shape demo carries live numbers, not template ones)")
     q = psub.add_parser("routing", help="show the lane->PM routing registry")
 
     # -- tasks ----------------------------------------------------------------
@@ -1669,8 +1671,17 @@ def run_client_command(client, args):
     if command == "pm":
         sub = args.pm_command
         if sub == "digest":
+            raw = sys.stdin.read()
+            if args.demo:
+                import json as _json
+                try:
+                    payload = _json.loads(raw) if raw.strip().startswith("{") else {"note": raw}
+                except ValueError:
+                    payload = {"note": raw}
+                payload["demo"] = True
+                raw = _json.dumps(payload)
             return client.call("pm_digest", project=args.project,
-                               payload=sys.stdin.read(), to=args.to), print_pm_digest
+                               payload=raw, to=args.to), print_pm_digest
         if sub == "routing":
             return client.call("pm_routing"), print_pm_routing
     if command == "task":

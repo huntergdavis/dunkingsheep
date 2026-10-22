@@ -72,6 +72,29 @@ class DigestTests(unittest.TestCase):
             self.assertIn(heading, body)
         self.assertIn("build log line 41", body)
 
+    def test_poolrad_numbers_are_read_at_publish_time_and_carry_as_of(self):
+        checkpoint = self.root / "checkpoint.json"
+        checkpoint.write_text(json.dumps({
+            "strict_full_c_originals": 280, "verified_game_identities": 325,
+            "reviewed_change": {"reviewed_commit": "df9ca4e0"}}))
+        numbers = dunk_pm.checkpoint_numbers("poolrad", checkpoint)
+        self.assertEqual(280, numbers[0]["value"])
+        self.assertEqual("/325", numbers[0]["unit"])
+        self.assertIn("df9ca4e0", numbers[0]["evidence_ref"])
+        self.assertRegex(numbers[0]["as_of"], r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+        body = dunk_pm.render_digest("poolrad", numbers=numbers)
+        self.assertIn("280 /325", body)
+        self.assertIn("as of", body)
+
+    def test_a_failed_checkpoint_read_says_unavailable_not_yesterday(self):
+        numbers = dunk_pm.checkpoint_numbers("poolrad", self.root / "absent.json")
+        self.assertEqual("unavailable", numbers[0]["value"])
+        self.assertIsNone(numbers[0]["as_of"])
+
+    def test_seven_blocked_items_get_a_pm_note(self):
+        body = dunk_pm.render_digest("poolrad", blocked=[f"b{i}" for i in range(7)])
+        self.assertIn("past six this is no longer a digest", body)
+
     def test_one_digest_row_per_project_updated_in_place(self):
         first = self.inbox.upsert_digest("w9:pH", "pm-digest:poolrad", "v1",
                                          subject="PM digest: poolrad", sender="w1:p1")

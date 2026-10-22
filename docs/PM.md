@@ -33,6 +33,24 @@ The CLI renders the four sections; a plain-text body is stored as-is (for a
 digest that is genuinely free-form). `pm digest` nudges the VP's pane once, like
 any inbox message, but the row is the digest.
 
+### Three rules that make a digest trustworthy
+
+1. **Numbers are read at publish time**, from the project's checkpoint file
+   (poolrad: `poolrad-decomp/docs/re/function_accounting_checkpoint.json`), never
+   copied from a template or remembered. A failed read prints `unavailable`,
+   never yesterday's value. `strict C bodies` is `strict_full_c_originals /
+   verified_game_identities` (280/325 at the pinned commit).
+2. **A shape demo is labelled `DEMO` in the subject** (`PM digest (DEMO):
+   poolrad`), because the subject is what the VP scans. It carries live numbers
+   or none, never a template's.
+3. **Every number carries its evidence ref and its as-of time**, shown as local
+   wall-clock (`280/325 as of 2026-10-21 19:40`). Two digests an hour apart with
+   the same number look the same; two with different numbers show why.
+
+4. **The blocked list stays short.** Three lines is right; each names its
+   blocker. Past six lines it is no longer a digest (the render adds a PM note),
+   and something that is not the PM's job has crept into it.
+
 ## Routing
 
 `~/.config/dunkingsheep/pm-routing.json` (example:

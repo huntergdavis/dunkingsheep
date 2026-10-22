@@ -60,7 +60,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.30.1"
+VERSION = "2.30.2"
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -746,6 +746,68 @@ class Flock:
                             "wrong agent; moved to 'unrouted:%s' for review",
                             count, mailbox, mailbox)
         return moved
+
+    def pm_digest(self, project, payload, to=None, *, window="30 min", self_pane_id=None):
+        """Publish ONE digest per project under a stable id.
+
+        The row is updated in place (unread again after an update), so the VP
+        reads a single message per project rather than a stream. Returns the
+        row plus whether it was created or updated.
+        """
+        import dunk_pm
+        did = dunk_pm.digest_id(project)
+        if isinstance(payload, str):
+            # The socket carries the payload as a string; render it, do not
+            # store it verbatim. JSON object -> structured digest; text -> note.
+            text = payload.strip()
+            if text.startswith("{"):
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    payload = {"note": text}
+            else:
+                payload = {"note": text}
+        demo = bool(payload.get("demo")) if isinstance(payload, dict) else False
+        if isinstance(payload, dict):
+            # Numbers are read at publish time from the checkpoint, never from
+            # the caller's template: a stale digest number is worse than none.
+            live = dunk_pm.checkpoint_numbers(project)
+            numbers = live if live is not None else payload.get("numbers", ())
+            body = dunk_pm.render_digest(project, window=window,
+                                         changed=payload.get("changed", ()),
+                                         blocked=payload.get("blocked", ()),
+                                         owner_decisions=payload.get("owner_decisions", ()),
+                                         numbers=numbers,
+                                         note=payload.get("note"))
+        else:
+            body = str(payload)
+        vp_pane = to or os.environ.get("DUNKINGSHEEP_VP_PANE", dunk_pm.DEFAULT_VP_PANE)
+        mailbox, label, pane_id = self.resolve_mailbox(vp_pane, self_pane_id)
+        existing = None
+        try:
+            with self.inbox._lock:
+                existing = self.inbox.db.execute(
+                    "SELECT 1 FROM messages WHERE digest_id=?", (did,)).fetchone()
+        except Exception:  # noqa: BLE001
+            existing = None
+        subject = f"PM digest (DEMO): {project}" if demo else f"PM digest: {project}"
+        message = self.inbox.upsert_digest(mailbox, did, body,
+                                           subject=subject,
+                                           sender=self_pane_id,
+                                           mailbox_label=label, pane_id=pane_id)
+        message["digest_id"] = did
+        message["action"] = "updated" if existing else "created"
+        message["body"] = body
+        try:
+            if pane_id:
+                unread = self.inbox.count(mailbox)["unread"]
+                text = _notice_text(mailbox, unread, self_pane_id,
+                                    f"PM digest: {project}")
+                self.send_now(pane_id, text, wait_s=0)
+                message["notified"] = True
+        except Exception:  # noqa: BLE001 - the digest is stored even if the nudge fails
+            message["notified"] = False
+        return message
 
     def resolve_mailbox(self, spec, self_pane_id=None):
         """Turn a target into (mailbox key, label, pane id).
