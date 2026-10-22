@@ -79,7 +79,7 @@ SCHEMA = {
     ],
 }
 
-HOST_OK = {"load1": 1.0, "cpus": 8, "used_fraction": 0.1, "free_bytes": 50 * 2**30, "inode_used_fraction": 0.1}
+HOST_OK = {"load1": 1.0, "load5": 1.0, "cpus": 8, "used_fraction": 0.1, "free_bytes": 50 * 2**30, "inode_used_fraction": 0.1}
 
 
 class FakeOwner:
@@ -370,14 +370,14 @@ class RuleBoundaryTests(WatchdogCase):
         # INTERIM fixed: warning 2.0/cpu, critical 2.6/cpu. 16.0/8=2.0 -> warning.
         self.fleet.panes = [{"pane_id": f"w1:p{i}", "agent_status": "working"}
                             for i in range(10)]
-        self.fleet.hosts = {"/": {"load1": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
+        self.fleet.hosts = {"/": {"load1": 16.0, "load5": 16.0, "cpus": 8}, "/tmp": {"used_fraction": 0.7}}
         found = self.fleet.evaluate(cfg)
-        self.assertEqual({("host.load", "load1:warning"): "warning", ("host.tmp", "/tmp:used_fraction"): "warning"},
+        self.assertEqual({("host.load", "load5:warning"): "warning", ("host.tmp", "/tmp:used_fraction"): "warning"},
                          {(f["rule"], f["key"]): f["severity"] for f in found})
         self.fleet.hosts["/tmp"] = {"used_fraction": 0.95}
         self.assertEqual("critical", self.keys and [f for f in self.fleet.evaluate(cfg)
                                                     if f["rule"] == "host.tmp"][0]["severity"])
-        self.fleet.hosts = {"/": {"load1": 15.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
+        self.fleet.hosts = {"/": {"load1": 15.99, "load5": 15.99, "cpus": 8}, "/tmp": {"used_fraction": 0.69}}
         self.assertEqual([], self.fleet.evaluate(cfg))
 
     def test_host_disk_full(self):

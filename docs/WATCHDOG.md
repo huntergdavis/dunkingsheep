@@ -98,7 +98,12 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 ## `host.load`: an INTERIM band, explicitly labelled
 
 `host.load` is currently a **fixed interim band**: warning at **2.0/cpu**,
-critical at **2.6/cpu** sustained 3 runs. It is honest-until-calibrated, not
+critical at **2.6/cpu** sustained 3 runs. **It is judged on `load5`, not
+`load1`**: a one-minute spike is the wrong measurement (a CRITICAL fired at
+load1 30.5 with busy 1 / heavy 0 and load1 was 18.9 a minute later). The window
+change is a correctness fix, not a calibration, so the constants stay INTERIM.
+The alert text names the window it judged: `load5 20.1 = 2.51/cpu, interim band
+2.0-2.6, 25 live / 4 busy / 1 heavy`. It is honest-until-calibrated, not
 derived. The config carries `"interim": true` and every alert says `interim
 band` so nobody mistakes the constant for a fitted number.
 
@@ -124,6 +129,17 @@ measured - so an alert is diagnosable from the message alone:
 ```text
 load 20.1 = 2.51/cpu, interim band 2.0-2.6, 25 live / 4 busy / 0 heavy
 ```
+
+## Before you model a number, check the recorder
+
+Three recorders threw data away tonight: `pane_samples` only recorded the
+poolrad lanes, the host-watch history kept only two samples (`history[-2:]`),
+and a case-sensitive grep "proved" absence while the word sat in a subtitle
+with a capital letter. Two samples were enough for the load LEVEL and useless
+for a FIT; the recorder now keeps a bounded 10-day history. A fit also needs a
+minimum sample count (30) across at least two heavy/busy regimes, and must
+report the residual error - otherwise it is the "load per busy lane ~12" guess
+again.
 
 ## Config (`~/.config/dunkingsheep/watchdog.json`)
 

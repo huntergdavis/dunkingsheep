@@ -389,9 +389,10 @@ class Inputs:
 
 def sample_host(path):
     stat = os.statvfs(path)
-    load1, _, _ = os.getloadavg()
+    load1, load5, _ = os.getloadavg()
     return {
         "load1": load1,
+        "load5": load5,
         "cpus": os.cpu_count() or 1,
         "used_fraction": ((stat.f_blocks - stat.f_bfree) / stat.f_blocks) if stat.f_blocks else 1.0,
         "free_bytes": stat.f_bavail * stat.f_frsize,
@@ -761,19 +762,25 @@ def rule_host_load(inputs, rule):
     heavy = _heavy_jobs(inputs)
     warning = rule["load1_per_cpu"]
     critical = rule["critical_load1_per_cpu"]
-    per_cpu = host["load1"] / cpus
+    # Judge on load5, not load1: tonight a CRITICAL fired at load1 30.5 with
+    # busy 1 / heavy 0 and load1 was 18.9 a minute later. A one-minute spike is
+    # the wrong measurement; load5 plus must_hold_runs (consecutive spaced runs)
+    # is a persisted condition. A window change is a correctness fix, not a
+    # calibration, so the interim constants stay INTERIM.
+    load5 = host.get("load5", host["load1"])
+    per_cpu = load5 / cpus
     if per_cpu < warning:
         return []
     level = "critical" if per_cpu >= critical else "warning"
-    item = finding("host.load", rule, f"load1:{level}",
-                   f"load {host['load1']:.1f} = {per_cpu:.2f}/cpu, "
+    item = finding("host.load", rule, f"load5:{level}",
+                   f"load5 {load5:.1f} = {per_cpu:.2f}/cpu, "
                    f"interim band {warning:.1f}-{critical:.1f}, "
                    f"{live} live / {busy} busy / {heavy} heavy",
-                   f"{warning:.1f}/cpu (load {warning * cpus:.1f})",
-                   f"{per_cpu:.2f}/cpu (load {host['load1']:.1f})",
-                   "load1 (1 min)",
-                   {"load1": round(host["load1"], 2), "cpus": cpus,
-                    "per_cpu": round(per_cpu, 2), "live": live,
+                   f"{warning:.1f}/cpu (load5 {warning * cpus:.1f})",
+                   f"{per_cpu:.2f}/cpu (load5 {load5:.1f})",
+                   "load5 (5 min)",
+                   {"load1": round(host["load1"], 2), "load5": round(load5, 2),
+                    "cpus": cpus, "per_cpu": round(per_cpu, 2), "live": live,
                     "busy": busy, "heavy": heavy, "interim": True,
                     "warning_per_cpu": warning,
                     "critical_per_cpu": critical})
