@@ -108,7 +108,7 @@ def select_stores(project_path=None, *, which=None, cwd=None):
     return {"global": Store(global_store=True)}
 
 
-def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject=None):
+def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject=None, record=True):
     """The session digest. Global ground truths are ALWAYS included.
 
     A digest scoped to the working directory is correct-looking and wrong: a
@@ -152,8 +152,11 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     if omitted:
         lines.append(f"omitted: {omitted} entries over the {max_bytes}-byte cap")
     text = "\n".join(lines) + "\n"
-    for name, entry in included:
-        stores[name].log_access(entry["slug"], kind="injected")
+    if record:
+        # A dashboard rendering the digest is a VIEW of what agents receive, not a
+        # delivery to an agent. Recording it would make injected_7d count polls.
+        for name, entry in included:
+            stores[name].log_access(entry["slug"], kind="injected")
     return text
 
 
@@ -181,6 +184,16 @@ class Store:
         if not readme.exists():
             readme.write_text("# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n")
         return self.root
+
+    def exists(self):
+        """A store exists when it has a root with any class directory or README.
+
+        An absent store is not an empty one: reporting '0 articles' for a path
+        with no store is a zero where the truth is 'initialise it'.
+        """
+        if not self.root.is_dir():
+            return False
+        return any((self.root / name).is_dir() for name in CLASSES) or (self.root / "README.md").is_file()
 
     def entries(self):
         out = []
@@ -377,6 +390,42 @@ class Store:
                 "never_read_count": sum(1 for e in entries if e["slug"] not in seen),
                 "never_delivered": sorted(e["slug"] for e in entries if e["slug"] not in delivered),
                 "never_delivered_count": sum(1 for e in entries if e["slug"] not in delivered)}
+
+    def entry_stats(self):
+        """Per-article access counts: what was delivered, what was opened, when.
+
+        'never read' at the store level hides the interesting case - one article
+        read forty times and eight never delivered - so the counts are per article.
+        """
+        reads = self.reads()
+        for record in reads:
+            record.setdefault("kind", "read")
+        counters = {}
+        for record in reads:
+            slug = record.get("slug")
+            if not slug:
+                continue
+            slot = counters.setdefault(slug, {"reads": 0, "injected": 0,
+                                              "last_read": None, "last_injected": None})
+            kind = record["kind"] if record["kind"] in ("read", "injected") else "read"
+            slot["reads" if kind == "read" else "injected"] += 1
+            key = "last_read" if kind == "read" else "last_injected"
+            at = record.get("at")
+            if at and (slot[key] is None or at > slot[key]):
+                slot[key] = at
+        rows = []
+        for entry in self.entries():
+            if entry.get("error"):
+                continue
+            slot = counters.get(entry["slug"], {})
+            rows.append({"slug": entry["slug"], "class": entry["class"],
+                         "subject": entry.get("subject"), "authority": entry.get("authority"),
+                         "stated": entry.get("stated"),
+                         "reads": slot.get("reads", 0), "injected": slot.get("injected", 0),
+                         "last_read": slot.get("last_read"),
+                         "last_injected": slot.get("last_injected"),
+                         "stale": entry["slug"] in {e["slug"] for e in self.check()["stale"]}})
+        return rows
 
     # -- digest -----------------------------------------------------------
     def digest(self, *, max_bytes=DEFAULT_CAP, subject=None):

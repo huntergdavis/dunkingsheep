@@ -289,6 +289,10 @@ def build_parser():
     q.add_argument("--global", dest="global_store", action="store_true")
     q.add_argument("--project", action="store_true")
     q.add_argument("--path")
+    q = csub.add_parser("snapshot", help="digest + per-article access counts, for the dashboard")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
     q = csub.add_parser("check", help="schema, refusals and stale facts (both stores by default)")
     q.add_argument("--global", dest="global_store", action="store_true")
     q.add_argument("--project", action="store_true")
@@ -1354,6 +1358,9 @@ def _be_nice():
         pass
 
 
+# Read only local files; never open a socket.
+LOCAL_ONLY_COMMANDS = ("context",)
+
 _POLL_COMMANDS = ("status", "list", "ls", "poll")
 _INBOX_POLLS = ("count", "list", "ls", "stats")
 
@@ -1602,6 +1609,17 @@ def main(argv=None):
             print(f"{cmd.name}({params}){flag}\n    {cmd.description}")
         return 0
 
+    # Commands that read local files must not depend on the daemon. The digest is
+    # injected at session start; making it wait for a socket would mean an agent
+    # gets no standing rules exactly when the daemon is down.
+    if command in LOCAL_ONLY_COMMANDS:
+        result, printer = run_client_command(None, args)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            printer(result)
+        return 0
+
     try:
         # A send may ask the daemon to block for --wait seconds; the socket read
         # has to outlast that or the CLI reports a timeout for a send that is
@@ -1814,6 +1832,25 @@ def run_client_command(client, args):
                                             max_bytes=args.max_bytes, subject=args.subject), print
         which = ("global" if getattr(args, "global_store", False)
                  else "project" if getattr(args, "project", False) else None)
+        if sub == "snapshot":
+            import json as _json
+            # One deterministic call for the dashboard: the digest exactly as an
+            # agent receives it, plus per-article delivery and read counts.
+            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+            data = {"schema": "context-snapshot/1", "as_of": int(time.time()),
+                    "digest": dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                                       record=False),
+                    "stores": {}}
+            for name, target in stores.items():
+                stats = target.stats()
+                data["stores"][name] = {
+                    "status": "ok" if target.exists() else "absent",
+                    "path": str(target.root), "counts": stats["counts"],
+                    "reads_7d": stats["reads_7d"], "injected_7d": stats["injected_7d"],
+                    "never_read_count": stats["never_read_count"],
+                    "never_delivered_count": stats["never_delivered_count"],
+                    "entries": target.entry_stats()}
+            return data, lambda d: print(_json.dumps(d, indent=2))
         if sub in ("check", "index", "stats"):
             stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
             out = {}
