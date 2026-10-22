@@ -608,7 +608,7 @@ class SurfaceParityTests(unittest.TestCase):
             "poll": "poll",
             "turn_start": "turn", "turn_end": "turn",
             "pm_digest": "digest", "pm_routing": "routing",
-            "clear_box": "clear-box", "delivery": "delivery",
+            "clear_box": "clear-box", "delivery": "delivery", "dispatch": "dispatch",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

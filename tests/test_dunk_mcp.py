@@ -65,7 +65,10 @@ class McpServerTests(unittest.TestCase):
         tools = self.rpc("tools/list")["result"]["tools"]
         names = [tool["name"] for tool in tools]
         self.assertEqual([t.name for t in grouped_mcp_tools()], names)
-        self.assertEqual(10, len(names))
+        # The surface is deliberately small: one tool per domain. 11 = inbox,
+        # task, dunk, pane, workspace, memory, metrics, superuser, pm, dispatch,
+        # help. A new group is a decision, so this number changes only with one.
+        self.assertEqual(11, len(names))
         # The flat names are merged, not declared; shutdown was never a tool.
         self.assertNotIn("add_dunk", names)
         self.assertNotIn("task_next", names)

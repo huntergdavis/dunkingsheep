@@ -1820,6 +1820,12 @@ MCP_GROUPS = (
       ("update", "update_dunk"), ("remove", "remove_dunk"),
       ("start", "start_dunk"), ("stop", "stop_dunk"), ("stop_all", "stop_all"),
       ("fire", "fire_dunk"))),
+    ("dispatch",
+     "Deterministic feeding, no model: the standby queue and the tick that fills "
+     "idle lanes. action=add/list/remove/tick/status. A lane is fed only when it "
+     "is ready AND has no unread mail; the tick reports idle lanes, dispatched "
+     "this hour, and blocked lanes with reasons.",
+     (("dispatch", "dispatch"),)),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
