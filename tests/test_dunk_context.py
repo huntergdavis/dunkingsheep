@@ -72,6 +72,34 @@ class ContextTests(unittest.TestCase):
         self.assertEqual("measured once", self.store.find(entry["slug"])["body"])
         self.assertIn("STALE", self.store.digest())
 
+    def test_report_shows_both_stores_separately(self):
+        from dunk_context import report
+        self.store.add("project entry", cls="fact", subject="p", type_="measurement",
+                       authority="measured", recheck_after="30d")
+        global_store = Store(global_store=True)
+        global_store.ensure()
+        if global_store.find("g1") is None:
+            global_store.add("global entry", cls="fact", subject="g1", type_="measurement",
+                             authority="measured", recheck_after="30d")
+        out = report(self.store.root, which=None)
+        self.assertEqual({"global", "project"}, set(out))
+        self.assertEqual(1, out["project"]["stats"]["counts"]["fact"])
+        self.assertGreaterEqual(out["global"]["stats"]["counts"]["fact"], 1)
+        only_global = report(self.store.root, which="global")
+        self.assertEqual({"global"}, set(only_global))
+
+    def test_each_store_has_its_own_disposable_index(self):
+        self.store.add("project alpha", cls="fact", subject="p", type_="measurement",
+                       authority="measured", recheck_after="30d")
+        global_store = Store(global_store=True)
+        global_store.ensure()
+        self.store.index(); global_store.index()
+        self.assertNotEqual(self.store.index_path(), global_store.index_path())
+        p1 = self.store.search("alpha"); g1 = global_store.search("alpha")
+        self.store.index_path().unlink(); global_store.index_path().unlink()
+        self.assertEqual(p1, self.store.search("alpha"))
+        self.assertEqual(g1, global_store.search("alpha"))
+
     def test_access_logging_and_never_read(self):
         read = self.store.add("read me", cls="fact", subject="r", type_="measurement",
                               authority="measured", recheck_after="30d")

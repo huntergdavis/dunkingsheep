@@ -92,6 +92,32 @@ def _days(value):
     return int(match.group(1)) if match else None
 
 
+def select_stores(project_path=None, *, which=None, cwd=None):
+    """The stores a command should report on, each labelled.
+
+    `which` is 'global', 'project' or None. None is honest: if a project store
+    exists at cwd, report BOTH; otherwise report global only (and say so).
+    """
+    project = Path(project_path or ".dunkingsheep").expanduser()
+    if which == "global":
+        return {"global": Store(global_store=True)}
+    if which == "project":
+        return {"project": Store(project)}
+    if project.is_dir():
+        return {"global": Store(global_store=True), "project": Store(project)}
+    return {"global": Store(global_store=True)}
+
+
+def report(project_path=None, *, which=None):
+    """stats/check/index over every selected store, always labelled."""
+    out = {}
+    for name, store in select_stores(project_path, which=which).items():
+        out[name] = {"path": str(store.root),
+                     "stats": store.stats(), "check": store.check(),
+                     "entries": len([e for e in store.entries() if not e.get("error")])}
+    return out
+
+
 class Store:
     def __init__(self, path=None, *, global_store=False):
         self.root = store_root(path, global_store=global_store)

@@ -287,12 +287,18 @@ def build_parser():
     q.add_argument("--subject")
     q.add_argument("--max-bytes", type=int, default=8192)
     q.add_argument("--global", dest="global_store", action="store_true")
-    q = csub.add_parser("check", help="schema, refusals and stale facts")
+    q = csub.add_parser("check", help="schema, refusals and stale facts (both stores by default)")
     q.add_argument("--global", dest="global_store", action="store_true")
-    q = csub.add_parser("index", help="rebuild the disposable FTS index")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("index", help="rebuild the disposable FTS index (both stores by default)")
     q.add_argument("--global", dest="global_store", action="store_true")
-    q = csub.add_parser("stats", help="counts, ages, reads and never-read entries")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("stats", help="counts, ages, reads and never-read entries (both stores by default)")
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
 
     # -- per-caller load -------------------------------------------------------
     load = sub.add_parser("load", help="per-caller CPU from /proc (pid+starttime guarded, process tree)",
@@ -1785,15 +1791,33 @@ def run_client_command(client, args):
                 lambda rows: [print(f"{r['class']:<13} {r['slug']:<40} {r['subject']}") for r in rows] and None
         if sub == "digest":
             return store.digest(max_bytes=args.max_bytes, subject=args.subject), print
-        if sub == "check":
-            return store.check(), \
-                lambda r: print(f"counts {r['counts']}; refusals {len(r['refusals'])}; stale {len(r['stale'])}")
-        if sub == "index":
-            return store.index(), lambda r: print(f"indexed {r['indexed']} -> {r['path']}")
-        if sub == "stats":
-            return store.stats(), \
-                lambda r: print(f"counts {r['counts']}; reads_7d {r['reads_7d']}; "
-                                f"never_read {r['never_read_count']}: {', '.join(r['never_read'][:8])}")
+        which = ("global" if getattr(args, "global_store", False)
+                 else "project" if getattr(args, "project", False) else None)
+        if sub in ("check", "index", "stats"):
+            stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+            out = {}
+            for name, target in stores.items():
+                if sub == "index":
+                    out[name] = {"path": str(target.root), "result": target.index()}
+                elif sub == "check":
+                    result = target.check()
+                    out[name] = {"path": str(target.root), "counts": result["counts"],
+                                 "refusals": len(result["refusals"]), "stale": len(result["stale"]),
+                                 "entries": sum(result["counts"].values())}
+                else:
+                    result = target.stats()
+                    out[name] = {"path": str(target.root), "counts": result["counts"],
+                                 "reads_7d": result["reads_7d"],
+                                 "never_read_count": result["never_read_count"],
+                                 "never_read": result["never_read"]}
+            if sub == "index":
+                return out, lambda r: [print(f"{name}: indexed {v['result']['indexed']} -> {v['result']['path']}")
+                                       for name, v in r.items()] and None
+            if sub == "check":
+                return out, lambda r: [print(f"{name} ({v['path']}): entries {v['entries']}, refusals {v['refusals']}, stale {v['stale']}")
+                                       for name, v in r.items()] and None
+            return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, reads_7d {v['reads_7d']}, "
+                                        f"never_read {v['never_read_count']}") for name, v in r.items()] and None
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
