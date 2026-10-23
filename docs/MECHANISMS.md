@@ -7,11 +7,21 @@ one line, names the test that exercises it, and says whether that test exists.
 > **If the case cannot be stated in one line, we do not know what the mechanism is
 > for — and no test can be right.**
 
-`tests/test_mechanism_census.py` enforces this file: every row must have a one-line
-case, every cited test must exist in the suite, every mechanism must appear in the
-code, and every mechanism declared one-purpose must appear here. A census that
-drifts from the code fails the suite, so this cannot become a document nobody
-updates.
+`tests/test_mechanism_census.py` enforces this file. It is **derived from the
+tree**, not from a list somebody remembers to update:
+
+- a public function or method whose name carries a mechanism word
+  (`supersede`, `retire`, `restore`, `recover`, `reap`, `rollback`, `quarantine`,
+  `archive`, `backfill`, `resume`, `purge`, `migrate`, `flush`, `clear`,
+  `deprecate`) is a **candidate**;
+- every candidate must have a **row here**, or an **exemption** in the test with a
+  reason *and* a covering test that must exist;
+- private helpers (`_`) and registry handlers (`h_*`) are excluded by rule, and so
+  are read-only predicates (`is_`, `all_`, `has_`, `mailbox_`, `rule_`);
+- every row's case must fit in **90 characters**, and every cited test must exist.
+
+So a `rollback` written tomorrow fails the suite until its only case is stated in
+one line. That was proven by adding one.
 
 | mechanism | its only case, one line | test | state |
 |---|---|---|---|
@@ -23,7 +33,13 @@ updates.
 | `memory_backfill` | a second run over a corpus that was partly done | `test_a_second_start_does_not_re_enqueue_and_limit_is_respected` | tested |
 | `tick` | a ready lane with no mail, and a ready lane that already has some | `test_a_ready_lane_with_unread_mail_has_an_assignment_already` | tested |
 | `archive` | bulk clearing mail older than a stamp without deleting it | `test_archive_before_only_touches_older_mail` | tested |
-| `task_reap` | a lease whose caller process is dead, not merely late | `test_task_lease_expired_unrenewed_and_reaped` | tested |
+| `reap` | a lease whose caller process is dead, not merely late | `test_reap_requeues_a_dead_caller_even_with_a_live_pane` | tested |
+| `recover` | after an upgrade, a bare shell is offered its session and a live agent is left alone | `test_apply_types_only_into_empty_shells` | tested |
+| `superuser_recover` | an empty allowlist is bootstrapped once, then gated | `test_recover_bootstraps_an_empty_allowlist_then_requires_superuser` | tested |
+| `recover_leases` | an ingest lease left by a stopped process is requeued, not lost | `test_recover_leases_requeues_an_expired_ingest` | tested |
+| `resume` | resuming an ingest that was paused mid-corpus | `test_pause_and_resume_change_the_ingest_state` | tested |
+| `purge` | retention drops old read mail and keeps unread | `test_purge_keeps_unread_mail_and_drops_old_read_mail` | tested |
+| `auto_archive_undeliverable` | mail to a pane that no longer exists, older than the archive age | `test_undeliverable_mail_older_than_24h_is_auto_archived` | tested |
 | `kill_decision` | a real TERM of a process we started, and a protected pid refused | `test_a_real_kill_of_a_process_we_started` | tested |
 | `write_heartbeat` | the watchdog itself being dead, detected without it | `test_the_deadman_has_exactly_one_recipient` | tested |
 | `rule_resource_would_kill` | a lane tripping a policy while doing asked-for work | `test_a_would_kill_names_the_lane_and_the_task_it_was_doing` | tested |
@@ -47,5 +63,6 @@ updates.
 1. Write the one-line case **first**. If it needs two lines, the mechanism is doing
    two jobs.
 2. Add the test for that case, not for a neighbouring one.
-3. Add the row here, and add the name to `ONE_PURPOSE` in
-   `tests/test_mechanism_census.py`.
+3. Add the row here. Nothing else: the tree scan finds the function by name, and the
+   suite fails until the row exists. (If it is genuinely not a one-purpose
+   mechanism, add an `EXEMPT` entry with a reason and a covering test instead.)

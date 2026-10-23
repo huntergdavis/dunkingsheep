@@ -24,12 +24,38 @@ import _bootstrap  # noqa: E402,F401
 
 CENSUS = ROOT / "docs" / "MECHANISMS.md"
 
-# Every mechanism that exists for exactly one purpose. Adding one is a decision,
-# so it goes here and in the census in the same commit.
-ONE_PURPOSE = {
-    "supersede", "retire", "unretire", "clear_box", "flush_box", "memory_backfill",
-    "tick", "archive", "task_reap", "kill_decision", "write_heartbeat",
-    "rule_resource_would_kill",
+# The census is DERIVED from the tree, not from a list somebody remembers to
+# update: a public function whose name carries one of these words is a candidate,
+# and must either have a row or an explicit exemption with a reason and a test.
+# (A list maintained by hand is how a new mechanism would slip through in a month.)
+VOCABULARY = ("supersede", "retire", "unretire", "restore", "recover", "reap", "rollback",
+              "quarantine", "archive", "backfill", "resume", "purge", "migrate",
+              "flush", "clear", "deprecate")
+
+# Named by rule, not one by one: a registry shim delegates, a predicate only reads.
+EXCLUDED_PREFIXES = {
+    "_": "private helper, exercised through its public caller",
+    "h_": "registry handler that delegates to the flock method (the mechanism is that method)",
+    "is_": "read-only predicate",
+    "all_": "read-only listing",
+    "has_": "read-only predicate",
+    "mailbox_": "read-only predicate",
+    "rule_": "watchdog rule over a mechanism, not the mechanism",
+}
+
+# A mechanism-shaped function that is NOT a one-purpose mechanism, with the reason
+# and the test that covers it. An exemption is as checked as a row: the test must
+# exist.
+EXEMPT = {
+    "inbox_archive": ("thin API shim over Inbox.archive; the mechanism is `archive`",
+                      "test_archive_through_the_flock_drains_unread"),
+    "task_reap": ("daemon entry point that calls `reap`; the mechanism and its case are "
+                  "the `reap` row",
+                  "test_reap_requeues_a_dead_caller_even_with_a_live_pane"),
+    "clear_caller": ("clears per-request caller state; not a recovery mechanism",
+                     "test_task_claims_carry_the_socket_peer_agent_identity"),
+    "recoveries": ("read-only view of recorded recoveries",
+                   "test_a_reaped_event_is_reported_once_ever_not_again_after_cooldown"),
 }
 
 
@@ -52,6 +78,36 @@ def test_functions():
     for path in (ROOT / "tests").glob("test_*.py"):
         names |= set(re.findall(r"def (test_\w+)", path.read_text()))
     return names
+
+
+def mechanism_candidates():
+    """Public module functions and class methods whose name carries a mechanism word.
+
+    Nested closures are excluded: `flush()` inside the ingest loop is a local step,
+    not something a caller can invoke.
+    """
+    found = {}
+    for path in sorted(ROOT.glob("*.py")):
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
+        # Module level and class methods only: a closure inside a loop (the ingest
+        # `flush`) is a local step, not something a caller can invoke.
+        definitions = [node for node in tree.body
+                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                definitions += [child for child in node.body
+                                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        for node in definitions:
+            name = node.name
+            if not any(word in name.lower() for word in VOCABULARY):
+                continue
+            if any(name.startswith(prefix) for prefix in EXCLUDED_PREFIXES):
+                continue
+            found.setdefault(name, path.name)
+    return found
 
 
 def code_attributes():
@@ -89,12 +145,30 @@ class CensusTests(unittest.TestCase):
             name = row["mechanism"].split(".")[-1]
             self.assertIn(name, known, f"census names {name}, which no module defines")
 
-    def test_every_one_purpose_mechanism_has_a_row(self):
-        listed = {row["mechanism"].split(".")[-1] for row in rows()}
-        missing = ONE_PURPOSE - listed
-        self.assertEqual(set(), missing,
-                         "a one-purpose mechanism without a census row (write its one-line "
-                         "case first): " + ", ".join(sorted(missing)))
+    def test_every_mechanism_shaped_function_is_accounted_for(self):
+        """The failure mode that happens in a month: a new one-purpose function.
+
+        Derived from the tree, so a `rollback` or a `quarantine` written tomorrow
+        fails this test until it has a row (with its one-line case) or an exemption
+        (with a reason and a covering test).
+        """
+        listed = {row["mechanism"] for row in rows()}
+        known_tests = test_functions()
+        missing, bad_exemptions = [], []
+        for name, module in sorted(mechanism_candidates().items()):
+            if name in listed:
+                continue
+            if name in EXEMPT:
+                reason, test = EXEMPT[name]
+                if not reason or test not in known_tests:
+                    bad_exemptions.append(f"{name}: exemption names {test}, which does not exist")
+                continue
+            missing.append(f"{name} ({module})")
+        self.assertEqual([], bad_exemptions, "; ".join(bad_exemptions))
+        self.assertEqual([], missing,
+                         "mechanism-shaped functions with no census row and no exemption: "
+                         + ", ".join(missing)
+                         + " - state the case in one line in docs/MECHANISMS.md first")
 
     def test_no_row_claims_a_state_other_than_tested(self):
         for row in rows():
