@@ -115,7 +115,31 @@ class PlaceholderTests(unittest.TestCase):
         self.assertTrue(dunk_core._is_placeholder("type your request"))
 
 
+def bordered_draft_above_an_empty_prompt(draft="check your inbox"):
+    """The literal screen that broke flush, kept as a fixture.
+
+    Row 1 is a BORDERED draft ('│ ❯ check your inbox'): the first character of the
+    row is the box border, so a reader testing the raw first character for the sigil
+    says "not a prompt". Row 3 is the live prompt and it is empty. Reading only the
+    last prompt line therefore reported "the input box is already clear" over a real
+    draft - and it failed in the SAFE direction, which is why it survived so long.
+    """
+    return (f"│ ❯ {draft}\n"
+            "│\n"
+            "❯\u00a0\n"
+            "─────────────────────────────────────────────\n"
+            "  ⏵⏵ bypass permissions on · 1 shell\n")
+
+
 class BoxReaderTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     """One reader for 'what is in the box', and it says what it read.
 
     flush reported 'the input box is already clear' over a visible draft because
@@ -126,10 +150,31 @@ class BoxReaderTests(unittest.TestCase):
     """
 
     def test_a_draft_above_an_empty_prompt_is_still_found(self):
-        screen = "│ ❯ check your inbox\n│\n❯\u00a0\n──────────\n"
-        text, detail = dunk_core.box_text(screen)
+        text, detail = dunk_core.box_text(bordered_draft_above_an_empty_prompt())
         self.assertEqual("check your inbox", text)
         self.assertIn("text on row 1", detail)
+
+    def test_the_same_fixture_proves_every_asker(self):
+        """One screen, three components: the reader, flush, and the send gate.
+
+        send believed a claim, delivery and the queue asked different questions, and
+        flush misread this row - all three on the same day. They now ask one reader,
+        so one fixture can prove all three.
+        """
+        screen = bordered_draft_above_an_empty_prompt()
+        text, detail = dunk_core.box_text(screen)
+        self.assertEqual("check your inbox", text)
+        self.assertIn("row 1", detail)
+
+        self.flock.herdr.screens["w1:p2"] = screen
+        flushed = self.flock.flush_box("w1:p2", self_pane_id="w1:p1")
+        self.assertEqual("check your inbox", flushed["text"])
+
+        state = self.flock.delivery_state("w1:p2")
+        self.assertEqual("blocked", state["state"])
+        self.assertIn("draft", state["reason"])
+        blocker = self.flock.send_blocker("w1:p2")
+        self.assertEqual(blocker[1], state["reason"])
 
     def test_a_bordered_draft_is_found(self):
         text, _detail = dunk_core.box_text("│ ❯ check your inbox\n❯\u00a0\n")

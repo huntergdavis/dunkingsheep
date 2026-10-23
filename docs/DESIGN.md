@@ -667,5 +667,30 @@ Consequences enforced in the code:
 - **A claim is believed only while fresh**, and the release needs *positive* evidence
   of idleness — a draft-free box is not evidence (a 75-minute byte job has one).
 
-The test for this rule is not a sentence in a doc: it is `box_text` returning the
-draft in each of the shapes a real composer draws it.
+### The root cause worth keeping: a well-formed box defeated a parser that assumed plain text
+
+`flush` read each line's **raw first character** to find the prompt sigil. On a
+bordered composer that character is the **box border**, not the sigil:
+
+```text
+│ ❯ check your inbox      <- first char is '│': "not a prompt"
+│
+❯                         <- the only line it believed, and it is empty
+```
+
+So the reader concluded "already clear" over a real draft. Two details make this a
+lesson rather than an anecdote:
+
+- **it failed in the SAFE direction** (nothing was typed over anyone), which is
+  exactly why it survived so long without anyone noticing;
+- **the screen was well-formed** — the parser assumed plain text, and a correctly
+  drawn box is what defeated it.
+
+Both shapes are now a literal fixture (`bordered_draft_above_an_empty_prompt()`), and
+**one fixture proves all three askers**, because they share one reader: `box_text()`
+returns the draft, `flush_box()` submits it, and `delivery_state()`/`send_blocker()`
+report it as blocked *in the same words*.
+
+Every question about the pane goes through `read_screen()` / `read_box()`. One read,
+one parser, one fixture — so a component cannot quietly answer from a claim, a cache,
+or a neighbouring row again.

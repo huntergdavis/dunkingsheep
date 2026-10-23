@@ -63,7 +63,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.53.0"
+VERSION = "2.54.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3080,7 +3080,9 @@ class Flock:
                     if message is None:
                         self.outbox.pop(pane_id, None)
                         return
-                if self._clear_to_send(pane_id):
+                # A message sent with the hold bypassed must not be gated here
+                # either: `--ignore-typing` means this send does not ask the pane.
+                if not message.hold_while_typing or self._clear_to_send(pane_id):
                     if held_since is not None:
                         log.info("message %s -> %s: box clear after %ds, delivering",
                                  message.id, pane_id, int(time.time() - held_since))
@@ -3276,12 +3278,34 @@ class Flock:
                 dunker.awaiting_consumption = False
         return not pending
 
+    def read_screen(self, pane_id, lines=None, ansi=True):
+        """The one way a component asks the pane what it looks like.
+
+        Three components disagreed with the pane in one day (send believed a claim,
+        delivery and the queue asked different questions, flush misread a bordered
+        row). The only one that never lied was the one reading the pane, so every
+        question about the pane goes through here: one read, one parser, one fixture
+        can prove all of them.
+        """
+        try:
+            return self.herdr.read_pane(pane_id, lines=lines or CONSUMPTION_READ_LINES,
+                                        source="visible", ansi=ansi)
+        except Exception:                   # noqa: BLE001 - unreadable is None, not an error
+            return None
+
+    def read_box(self, pane_id):
+        """(screen, text, detail) for a pane's input box, from one read."""
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return None, "", "the pane could not be read"
+        text, detail = box_text(screen)
+        return screen, text, detail
+
     def _typing_in(self, pane_id, last_sent_text=None, awaiting_consumption=False):
         """True if someone is composing text in `pane_id`'s input box. See
         `_human_typing` for the reasoning; this is the pane-level form used by
         dunks and by queued direct messages alike."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return False
         if _modal_open(screen):
@@ -3313,8 +3337,18 @@ class Flock:
             return ("blocked", "a declared turn is active")
         if self._claude_busy(pane_id):
             return ("blocked", "claude reports this session busy")
-        if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
-            return ("blocked", "the input box holds a draft")
+        screen, text, _detail = self.read_box(pane_id)
+        if screen is not None and _modal_open(screen):
+            # A panel is not a draft. Its selected row sits where a draft would, and
+            # keys/Enter are how a panel is dismissed - holding them behind it is how
+            # a queued Escape waited for ever.
+            return None
+        if (text and not _is_our_send(text, last_sent_text, awaiting_consumption)
+                and not self._looks_like_ours(pane_id, text)):
+            # Same words as `delivery`: the two surfaces must not describe one
+            # condition differently, or a reader cannot tell they are one condition.
+            _state, reason = classify_delivery(screen, None, typed=text)
+            return ("blocked", reason or "the input box holds a draft")
         return None
 
     def _clear_to_send(self, pane_id, last_sent_text=None,
@@ -3341,8 +3375,7 @@ class Flock:
         and the send stands. Only a pane we cannot read at all is inconclusive,
         and that is the case the strict rule is for. Conflating the two made
         every send to a shell pane report failure."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return None
         if _modal_open(screen):
@@ -3360,10 +3393,9 @@ class Flock:
         Only the tail counts: a live pane whose transcript quotes the phrase is
         not dead, and refusing it would make the guard the outage.
         """
-        try:
-            screen = self.herdr.read_pane(pane_id, lines=40, source="visible")
-        except Exception:  # noqa: BLE001 - an unreadable pane is not this check
-            return None
+        # A plain read: a banner needs no styling, and the styled read is the one
+        # the send path already pays for. Same reader, cheaper form.
+        screen = self.read_screen(pane_id, lines=40, ansi=False)
         return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
     def _press_until_submitted(self, pane_id, text):
@@ -3440,8 +3472,7 @@ class Flock:
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
         when there is no box to read."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return None
         return _typed_text(screen)
@@ -3489,11 +3520,9 @@ class Flock:
         "yes, send that" for those cases."""
         pane = self.resolve_target(target, self_pane_id)
         pane_id = pane["pane_id"]
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen, shown, detail = self.read_box(pane_id)
         if screen is None:
             raise DunkError(f"could not read the input box of {pane_id}")
-        shown, detail = box_text(screen)
         label = pane.get("tab_label") or pane_id
         if not shown:
             # Say WHAT was read, not just 'nothing to do': the box that survived two
@@ -3510,8 +3539,7 @@ class Flock:
         """What the pane is showing, as ("modal"|"box", text). A panel and a
         draft both stop a send, but they are cleared in different ways, so the
         stale-state tracking has to tell them apart."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return ("gone", "")
         if _modal_open(screen):
@@ -3553,8 +3581,7 @@ class Flock:
         this is the other half of that pair - without it a Codex pane that was
         merely working kept refusing a notification, 14 times in 82 seconds."""
         time.sleep(DRAFT_CONFIRM_S)
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None or _modal_open(screen):
             return None
         return _typed_text(screen) or None
@@ -3595,11 +3622,8 @@ class Flock:
                 status = self.herdr.agent_status(pane_id)
             except Exception:                   # noqa: BLE001 - status is optional
                 status = None
-        screen = None
-        try:
-            screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                          source="visible", ansi=True)
-        except Exception:                       # an unreadable pane is unknown, not ready
+        screen = self.read_screen(pane_id)
+        if screen is None:                      # an unreadable pane is unknown, not ready
             return {"state": "unknown", "reason": "pane unreadable"}
         typed = None if _modal_open(screen) else _typed_text(screen)
         state, reason = classify_delivery(screen, status, typed=typed)
@@ -3661,8 +3685,7 @@ class Flock:
         if self._claude_busy(pane_id):
             self._last_block_reason[pane_id] = "working"
             return False
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return True                      # unreadable: nothing to go on
         if _modal_open(screen):
@@ -3804,11 +3827,7 @@ class Flock:
                 status = ""
         if status not in ("idle", "done"):
             return False
-        try:
-            screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                          source="visible", ansi=True)
-        except Exception:                   # noqa: BLE001
-            return False
+        screen = self.read_screen(pane_id)
         if screen is None:
             return False
         state, _reason = classify_delivery(screen, "idle",
