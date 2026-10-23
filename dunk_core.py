@@ -4311,12 +4311,20 @@ BOX_LEADING = " \t\u2502\u2503\u2506\u250a\u2551|"
 
 
 def _prompt_body(row):
-    """The text after the prompt sigil on one row, or None if the row has no sigil."""
-    body = DECORATION_RE.sub(" ", _bright_text(row))
-    body = body.lstrip(BOX_LEADING)
-    if body[:1] not in INPUT_BOX_SIGILS:
+    """The text after the prompt sigil on one row, or None if the row has no sigil.
+
+    The sigil is detected from the PLAIN row and the text is read from the BRIGHT
+    part of it. Codex draws its sigil dim ('\x1b[2m› ') while the draft after it is
+    bright, so a brightness-based detector loses the sigil and a plain-text reader
+    would also pick up dim placeholder hints - each needs the other.
+    """
+    plain = _strip_ansi(row).lstrip(BOX_LEADING)
+    if plain[:1] not in INPUT_BOX_SIGILS:
         return None
-    return _collapse(body[1:])
+    body = DECORATION_RE.sub(" ", _bright_text(row)).lstrip(BOX_LEADING)
+    if body[:1] in INPUT_BOX_SIGILS:
+        body = body[1:]
+    return _collapse(body)
 
 
 def box_text(screen):
