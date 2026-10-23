@@ -249,3 +249,82 @@ class MemoryStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackfillCommandTests(unittest.TestCase):
+    """`memory_backfill` exists to enqueue the whole corpus resumably.
+
+    Its only case is "run it again on a corpus that was partly done": a backfill
+    that is not idempotent re-ingests 14 GB, and one that cannot resume repeats the
+    work it already finished. The nearest existing test exercised `enqueue`, not the
+    command - a convenient neighbour rather than the case the mechanism exists for.
+    """
+
+    def setUp(self):
+        import dunk_core
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = dunk_core.Flock(persist=False, restore=False, memory=None)
+        self.enqueued, self.calls = [], {"paused": False}
+
+        class FakeMemory:
+            def enqueue(self, path, **_kwargs):
+                if path in owner.seen:
+                    raise ValueError("already queued")
+                owner.seen.add(path)
+                owner.enqueued.append(path)
+
+            def status(self):
+                return {"enabled": True, "sources": len(owner.enqueued)}
+
+        owner = self
+        self.seen = set()
+
+        class FakeIngestor:
+            def pause(self):
+                owner.calls["paused"] = True
+
+            def resume(self):
+                owner.calls["paused"] = False
+
+            def paused(self):
+                return owner.calls["paused"]
+
+            def status(self):
+                return {"queued": 0, "paused": owner.calls["paused"]}
+
+        self.flock.memory = FakeMemory()
+        self.flock.memory_ingestor = FakeIngestor()
+        self.sources = []
+        for index in range(3):
+            path = os.path.join(self.tmp.name, f"session-{index}.jsonl")
+            with open(path, "w") as handle:
+                handle.write("{}\n")
+            self.sources.append(path)
+        self._real_sources = dunk_core.memory_sources
+        dunk_core.memory_sources = lambda: list(self.sources)
+
+    def tearDown(self):
+        import dunk_core
+        dunk_core.memory_sources = self._real_sources
+        self.tmp.cleanup()
+
+    def test_a_second_start_does_not_re_enqueue_and_limit_is_respected(self):
+        first = self.flock.memory_backfill(action="start")
+        self.assertEqual(3, first["enqueued"])
+        second = self.flock.memory_backfill(action="start")
+        self.assertEqual(0, second["enqueued"],
+                         "a second backfill must not re-enqueue finished work")
+        limited = self.flock.memory_backfill(action="start", limit=1)
+        self.assertEqual(0, limited["enqueued"], "limit caps the work, it does not refill")
+
+    def test_pause_and_resume_change_the_ingest_state(self):
+        self.flock.memory_backfill(action="pause")
+        self.assertTrue(self.calls["paused"])
+        self.flock.memory_backfill(action="resume")
+        self.assertFalse(self.calls["paused"])
+
+    def test_a_corpus_that_is_not_there_is_a_named_refusal(self):
+        import dunk_core
+        self.flock.memory_ingestor = None
+        with self.assertRaises(dunk_core.DunkError):
+            self.flock.memory_backfill(action="start")

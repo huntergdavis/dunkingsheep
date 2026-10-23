@@ -38,6 +38,17 @@ class RetireTests(unittest.TestCase):
         self.assertFalse(dunk_panes.mailbox_retired("par-d2 (wW:p7)", path=self.path))
         self.assertFalse(dunk_panes.mailbox_retired("wW:p7", path=self.path))
 
+    def test_retiring_a_pane_that_no_longer_exists_still_records_it(self):
+        """The case retire exists FOR: the pane is superseded, often already gone.
+
+        A retirement that needs the pane to be resolvable would fail on exactly the
+        panes we retire - superseded ones, whose replacement lives in another pane.
+        """
+        record = dunk_panes.retire("wW:p4", "superseded-by:wW:p7", by="w9:pH",
+                                   labels=["par-d"], path=self.path)
+        self.assertEqual("wW:p4", record["pane_id"])
+        self.assertTrue(dunk_panes.mailbox_retired("par-d (wW:p4)", path=self.path))
+
     def test_unretire_brings_a_pane_back(self):
         dunk_panes.retire("wW:p1", "replaced-by:dispatcher", by="w9:pH", path=self.path)
         self.assertTrue(dunk_panes.is_retired("wW:p1", path=self.path))

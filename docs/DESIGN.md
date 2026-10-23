@@ -551,3 +551,23 @@ Corollary, from the same message: a **repair** that changes no claim carries a
 dated note beside the evidence, not a rewritten document — a rewritten doc reads as
 if the claim had always held.
 
+## A rule tested only in its happy path may be impossible in its only case
+
+`supersede()` is the *only* mechanism by which a context entry may change. It
+derived the same slug as the entry it replaced — same day, same subject — so the
+new file collided with the old and it refused with "entry already exists". The
+mechanism was documented, tested on a convenient case (a *later* date), and
+impossible in the only situation it exists for. **A rule that is documented,
+happy-path tested, and impossible in practice is worse than no rule**: it reads
+like a guarantee.
+
+> **When a mechanism exists for one purpose — supersede, retire, rollback,
+> migration, restore — test the case it exists FOR, not a convenient neighbour.**
+
+Applying it the same night found one more: `memory_backfill` exists to enqueue the
+whole corpus *resumably*, and its nearest test exercised `enqueue`, not the
+command. The case that matters is "run it again on a corpus that was partly done",
+because a backfill that is not idempotent re-ingests 14 GB. That test exists now,
+alongside the same-case tests for `clear_box` (blocked on a full context — the
+reason it was built) and `retire` (a pane that no longer exists — which is what
+we retire).

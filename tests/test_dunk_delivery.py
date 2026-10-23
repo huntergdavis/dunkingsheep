@@ -166,6 +166,23 @@ class ClearBoxTests(unittest.TestCase):
         result = self.flock.clear_box({"pane_id": "w1:p9"}, self_pane_id="w1:p1", reason="probe")
         self.assertEqual("w1:p9", result["target_label"])
 
+    def test_clear_box_works_on_the_case_it_exists_for_a_full_context(self):
+        """The mechanism exists for a lane blocked on context, not for a dead one.
+
+        Testing only the dead-pane path would be testing a convenient neighbour:
+        the reason we built clear-box was par-a/par-d, both blocked on a full
+        context with a draft in the box.
+        """
+        self.herdr.screens["w1:p2"] = CONTEXT_FULL
+        self.herdr.statuses["w1:p2"] = "idle"
+        before = self.flock.delivery_state("w1:p2")
+        self.assertEqual("blocked", before["state"])
+        self.assertIn("context full", before["reason"])
+        result = self.flock.clear_box("w1:p2", self_pane_id="w1:p1", reason="context full")
+        self.assertTrue(result["flushed"], result)
+        self.assertEqual([("w1:p2", ["C-u"]), ("w1:p2", ["Escape"])], self.herdr.keys)
+        self.assertEqual("blocked", result["before"]["state"])
+
     def test_a_working_lane_is_not_interrupted_by_a_clear(self):
         self.herdr.screens["w1:p2"] = "│ ✻ Working"
         self.herdr.statuses["w1:p2"] = "working"
