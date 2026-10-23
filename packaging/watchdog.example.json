@@ -61,7 +61,8 @@
       "cooldown_minutes": 1440,
       "must_hold_runs": 1,
       "consecutive_skips": 10,
-      "lookback_hours": 168
+      "lookback_hours": 168,
+      "fresh_minutes": 120
     },
     "dunk.overdue": {
       "enabled": true,

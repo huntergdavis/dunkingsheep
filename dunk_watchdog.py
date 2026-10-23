@@ -177,7 +177,9 @@ RULE_PARAMS = {
     "task.blocked_stale": {"threshold_minutes": POSITIVE},
     "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE,
                          "fresh_minutes": POSITIVE},
-    "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE},
+    "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE,
+                       # A streak that stopped N minutes ago is history, not a condition.
+                       "fresh_minutes": POSITIVE_INT},
     "dunk.overdue": {"missed_intervals": POSITIVE},
     # Above the 24h auto-archive: a page must mean "the archive did not catch
     # this", not "the archive is about to catch this".
@@ -517,8 +519,19 @@ def rule_task_lease_stale(inputs, rule):
 
 
 def rule_dunk_skip_loop(inputs, rule):
+    """A dunk that is still skipping. Not one that skipped for a while and stopped.
+
+    d52 paged with 33 consecutive skips and a cumulative 52 - but its last skip was
+    76 hours old and its target run had ended days before. The streak was real and
+    the alarm was not: a condition that has stopped is not an incident. And a
+    cumulative counter that only grows fires on its own history, so the count is
+    now the CURRENT run (it resets when the dunk sends) with the lifetime figure
+    reporting separately.
+    """
     since = inputs.now - rule["lookback_hours"] * 3600
+    fresh_s = rule["fresh_minutes"] * 60
     out = []
+    retired = _retired_panes(inputs)
     for dunk in sorted(inputs.dunks(), key=lambda d: d["id"]):
         rows = inputs.metrics(
             "SELECT id, at, kind FROM events WHERE source=? AND kind IN "
@@ -533,19 +546,39 @@ def rule_dunk_skip_loop(inputs, rule):
                     best, best_start, best_end = run, run_start, (event_id, at)
             else:
                 run, run_start = 0, None
-        if best >= rule["consecutive_skips"]:
-            # Keyed by the run's FIRST skip, which stays fixed while the run grows,
-            # so a continuing loop is one incident under its cooldown, not one per skip.
-            out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_start[0]}",
-                               f"dunk {dunk['id']} skipped {best} times in a row",
-                               f"{rule['consecutive_skips']} consecutive skips", f"{best} consecutive skips",
-                               f"{rule['lookback_hours']}h lookback",
-                               {"dunk": dunk["id"], "target_pane": dunk.get("target_pane_id"),
-                                "current_streak": run,
-                                "run_start_hours_ago": round((inputs.now - best_start[1]) / 3600, 1),
-                                "run_end_hours_ago": round((inputs.now - best_end[1]) / 3600, 1),
-                                "cumulative_skip_count": dunk.get("skip_count"),
-                                "skip_if_unconsumed": dunk.get("skip_if_unconsumed")}))
+        if best < rule["consecutive_skips"]:
+            continue
+        target = dunk.get("target_pane_id")
+        if target and target in retired:
+            # Not a loop: a dunk aimed at a pane we deliberately retired.
+            item = finding("dunk.skip_loop", rule, f"{dunk['id']}:obsolete",
+                           f"dunk {dunk['id']} targets retired pane {target} "
+                           f"({retired[target].get('reason')}) - its streak is not a condition",
+                           "not retired", "retired", "current",
+                           {"dunk": dunk["id"], "target_pane": target,
+                            "retired_reason": retired[target].get("reason")},
+                           once=True)
+            item["severity"] = "info"
+            out.append(item)
+            continue
+        if best_end and inputs.now - best_end[1] > fresh_s:
+            # The streak stopped; say nothing. A page here would describe the past.
+            continue
+        # Keyed by the run's FIRST skip, which stays fixed while the run grows, so
+        # a continuing loop is one incident under its cooldown, not one per skip.
+        out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_start[0]}",
+                           f"dunk {dunk['id']} skipped {best} times in a row "
+                           f"(last {round((inputs.now - best_end[1]) / 60)} min ago)",
+                           f"{rule['consecutive_skips']} consecutive skips",
+                           f"{best} consecutive skips",
+                           f"last skip within {rule['fresh_minutes']}min",
+                           {"dunk": dunk["id"], "target_pane": dunk.get("target_pane_id"),
+                            "current_streak": run,
+                            "run_start_hours_ago": round((inputs.now - best_start[1]) / 3600, 1),
+                            "run_end_hours_ago": round((inputs.now - best_end[1]) / 3600, 1),
+                            "skips_this_run": dunk.get("skip_count"),
+                            "cumulative_skip_count_lifetime": dunk.get("total_skips", dunk.get("skip_count")),
+                            "skip_if_unconsumed": dunk.get("skip_if_unconsumed")}))
     return out
 
 
@@ -599,6 +632,15 @@ def _group_evidence(inputs, mailbox, group, samples=3):
             "reasons": dict(sorted(group["reasons"].items())),
             "oldest_hours_ago": round((inputs.now - group["oldest"]) / 3600, 1),
             "newest_hours_ago": round((inputs.now - group["newest"]) / 3600, 1)}
+
+
+def _retired_panes(inputs):
+    try:
+        import dunk_panes
+    except ImportError:
+        return {}
+    return {record["pane_id"]: record
+            for record in dunk_panes.all_retired(path=inputs.path("retired-panes.json"))}
 
 
 def rule_inbox_undeliverable(inputs, rule):

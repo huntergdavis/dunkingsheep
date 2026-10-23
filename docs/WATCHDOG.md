@@ -229,6 +229,32 @@ w8:p8 would be flagged by resource policy while working on t6: advance strict C 
 Severity is **info** on purpose: the owner asked for this in the digest, because
 a lane being expensive is a fact about our thresholds until proven otherwise.
 
+## `dunk.skip_loop`: a running streak, not a remembered one
+
+d52 paged with "33 consecutive skips, cumulative 52" while **its last skip was 76
+hours old** and its target run had ended days earlier. The streak was real; the
+alarm was not. Two corrections, both about the same habit - an alert must describe
+a condition that is happening:
+
+1. **`fresh_minutes` (default 120).** A streak whose most recent skip is older than
+   this is history and is not reported. The lookback still bounds the search; it no
+   longer decides whether the finding is current.
+2. **The skip counter resets with the run.** `skip_count` is now the *current*
+   run's skips and goes back to zero on a delivered send; the lifetime number is
+   `total_skips`, reported separately as
+   `cumulative_skip_count_lifetime`. A counter that only grows eventually fires on
+   its own history rather than on a current condition.
+
+A dunk aimed at a **retired pane** is reported once, at info, as obsolete:
+
+```text
+dunk d52 targets retired pane w9:p9 (superseded-by:w9:p10) - its streak is not a condition
+```
+
+It is `once=True`, so it says this one time and stops, rather than accumulating a
+streak that eventually pages. The alert for a live loop now names when it last
+happened: `dunk d9 skipped 5 times in a row (last 2 min ago)`.
+
 ## Before you model a number, check the recorder
 
 Three recorders threw data away tonight: `pane_samples` only recorded the

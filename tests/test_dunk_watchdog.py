@@ -138,6 +138,16 @@ class Fleet:
         with open(os.path.join(self.dir, "health.json"), "w") as handle:
             json.dump(self.health, handle)
 
+    def dunk(self, dunk_id, target="w1:p1", **extra):
+        """Register a dunker in the store the watchdog reads."""
+        record = {"id": dunk_id, "text": "go", "target": target, "target_pane_id": target,
+                  "interval_minutes": 60, "running": True, "skip_if_unconsumed": False,
+                  "skip_count": 0, "total_skips": 0}
+        record.update(extra)
+        self.dunks.append(record)
+        self.write_json()
+        return record
+
     def task(self, task_id, status, updated_at, assignees=(), title="t", body="", block_reason=None):
         self.sql("tasks.db", "INSERT INTO tasks (id, scope, title, body, status, assignees, created_at, "
                  "updated_at, block_reason) VALUES (?, 'global', ?, ?, ?, ?, ?, ?, ?)",
@@ -285,17 +295,20 @@ class RuleBoundaryTests(WatchdogCase):
                         wd.advance_streaks(cfg, state, later_findings, later), later)
         self.assertEqual("dedupe", again[0]["vp"])
 
-    def test_dunk_skip_loop_uses_lookback_not_recency_and_a_stable_key(self):
-        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3, "lookback_hours": 168})
+    def test_a_running_streak_keeps_one_stable_key_and_ends_with_the_run(self):
+        # The lookback bounds how far back we look; `fresh_minutes` decides whether
+        # the streak is still happening. A streak that stopped is history (d52).
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3,
+                                                 "lookback_hours": 168, "fresh_minutes": 120})
         self.fleet.dunks = [{"id": "d1", "running": True}, {"id": "d2", "running": True}]
         self.fleet.write_json()
         for n in range(3):
-            self.fleet.metric("dunk.skipped", "d1", NOW - 48 * HOUR + n)
+            self.fleet.metric("dunk.skipped", "d1", NOW - 30 * MIN + n)
         first = self.fleet.evaluate(cfg)
-        self.fleet.metric("dunk.skipped", "d1", NOW - 47.5 * HOUR)  # the run grows
+        self.fleet.metric("dunk.skipped", "d1", NOW - 25 * MIN)  # the run grows
         grown = self.fleet.evaluate(cfg)
         self.assertEqual(self.keys(first), self.keys(grown), "a growing loop keeps its key (one incident)")
-        self.fleet.metric("dunk.sent", "d1", NOW - 47 * HOUR)
+        self.fleet.metric("dunk.sent", "d1", NOW - 20 * MIN)      # the run ends
         for n in range(2):
             self.fleet.metric("dunk.skipped", "d2", NOW - HOUR + n)
         self.assertEqual(["d1"], [f["evidence"]["dunk"] for f in self.fleet.evaluate(cfg)])
@@ -319,6 +332,43 @@ class RuleBoundaryTests(WatchdogCase):
         ]
         self.fleet.write_json()
         self.assertEqual([("dunk.overdue", "d1"), ("dunk.overdue", "d4")], self.keys(self.fleet.evaluate(cfg)))
+
+    def test_a_skip_streak_that_stopped_is_history_not_a_condition(self):
+        """d52 paged with 33 skips whose last one was 76 hours old."""
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3,
+                                                 "lookback_hours": 168, "fresh_minutes": 120})
+        self.fleet.dunk("d52", target="w1:p1")
+        for index in range(5):
+            self.fleet.metric("dunk.skipped", "d52", NOW - 76 * HOUR + index * MIN)
+        self.assertEqual([], [k for k in self.keys(self.fleet.evaluate(cfg))
+                              if k[0] == "dunk.skip_loop"],
+                         "a streak that ended 76h ago is not a current condition")
+
+    def test_a_skip_streak_that_is_still_running_pages(self):
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3,
+                                                 "lookback_hours": 168, "fresh_minutes": 120})
+        self.fleet.dunk("d9", target="w1:p1")
+        for index in range(5):
+            self.fleet.metric("dunk.skipped", "d9", NOW - 30 * MIN + index * MIN)
+        found = [f for f in self.fleet.evaluate(cfg) if f["rule"] == "dunk.skip_loop"]
+        self.assertEqual(1, len(found))
+        self.assertIn("5 times in a row", found[0]["summary"])
+        self.assertIn("min ago", found[0]["summary"])
+
+    def test_a_dunk_aimed_at_a_retired_pane_is_obsolete_once(self):
+        cfg = self.fleet.config(dunk__skip_loop={"consecutive_skips": 3,
+                                                 "lookback_hours": 168, "fresh_minutes": 120})
+        self.fleet.dunk("d52", target="w9:p9")
+        for index in range(5):
+            self.fleet.metric("dunk.skipped", "d52", NOW - 10 * MIN + index * MIN)
+        with open(os.path.join(self.fleet.dir, "retired-panes.json"), "w") as handle:
+            json.dump({"w9:p9": {"pane_id": "w9:p9", "reason": "superseded-by:w9:p10",
+                                 "labels": [], "retired_at": NOW}}, handle)
+        found = [f for f in self.fleet.evaluate(cfg) if f["rule"] == "dunk.skip_loop"]
+        self.assertEqual(1, len(found))
+        self.assertEqual("info", found[0]["severity"])
+        self.assertIn("retired pane w9:p9", found[0]["summary"])
+        self.assertTrue(found[0].get("once"), "an obsolete dunk is reported once, not every run")
 
     def test_inbox_undeliverable_backlog_has_no_age_limit(self):
         cfg = self.fleet.config(inbox__undeliverable={"min_messages": 2, "min_age_hours": 0.01})

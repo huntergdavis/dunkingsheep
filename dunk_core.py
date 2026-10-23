@@ -330,7 +330,7 @@ class Dunker:
         "target_workspace", "target_cwd", "interval_minutes", "text",
         "running", "only_when", "max_sends", "send_count", "created_at",
         "started_at", "last_sent_at", "next_send_at", "last_error",
-        "skip_if_unconsumed", "skip_count", "last_skipped_at",
+        "skip_if_unconsumed", "skip_count", "total_skips", "last_skipped_at",
         "awaiting_consumption", "last_sent_text", "unknown_skips",
         "hold_while_typing", "hold_count", "last_held_at",
     )
@@ -360,7 +360,11 @@ class Dunker:
         self.last_error = kwargs.get("last_error")
         # Backpressure (all persisted; old state files simply lack them).
         self.skip_if_unconsumed = bool(kwargs.get("skip_if_unconsumed", False))
+        # skip_count is the CURRENT run's skips and resets when the dunk sends;
+        # total_skips is the lifetime number, which is history and must never be
+        # the thing a threshold fires on.
         self.skip_count = int(kwargs.get("skip_count") or 0)
+        self.total_skips = int(kwargs.get("total_skips") or self.skip_count)
         self.last_skipped_at = kwargs.get("last_skipped_at")
         # True from a successful send until the target is seen consuming it.
         self.awaiting_consumption = bool(kwargs.get("awaiting_consumption", False))
@@ -1798,6 +1802,7 @@ class Flock:
                 "interval_minutes": d.interval_minutes,
                 "send_count": d.send_count,
                 "skip_count": d.skip_count,
+                "total_skips": d.total_skips,
                 "hold_count": d.hold_count,
                 "created_at": d.created_at,
             } for d in self.dunkers]
@@ -3059,6 +3064,10 @@ class Flock:
         with self._lock:
             if ok:
                 dunker.send_count += 1
+                # A delivered send ends the run: the skip counter belongs to the
+                # run, not to the dunk's lifetime, or a threshold eventually fires
+                # on accumulated history rather than on a current condition.
+                dunker.skip_count = 0
                 dunker.last_sent_at = time.time()
                 dunker.last_error = None
                 dunker.last_sent_text = text
@@ -3666,6 +3675,7 @@ class Flock:
                             return
                         dunker.next_send_at = time.time() + max(1.0, dunker.interval_minutes * 60)
                         dunker.skip_count += 1
+                        dunker.total_skips += 1
                         dunker.last_skipped_at = time.time()
                         if (dunker.last_error
                                 and "target pane not found" in dunker.last_error):
