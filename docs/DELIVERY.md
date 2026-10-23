@@ -1,5 +1,10 @@
 # Delivery state: can this lane receive a message, and if not why
 
+> *"clear-box and flush read the PANE; send read a CLAIM about the pane. Both were
+> right about their own evidence and only one was right about the world."*
+> — the whole hold bug in one line: a report is a claim, the pane is the evidence,
+> the claim is believed while fresh, and the evidence decides after that.
+
 A lane can be alive, have unread mail, and be **unreachable**. Its input box holds
 a draft that never submitted, so every later send is held as "a human is typing"
 and the lane starves silently. From the outside that is indistinguishable from
@@ -71,13 +76,18 @@ expiry, and two checks that can disagree will*:
 1. **`send_blocker()` is the single predicate.** `delivery_state`, the queued-message
    worker and `send_text` all ask it, so `delivery` cannot say `ready` while the
    queue says held. It returns the reason in the same words both surface.
-2. **A `busy` report expires.** Claude's session status is a claim about a pane made
-   by another process. It is believed while fresh; after `CLAUDE_BUSY_TTL_S`
-   (default 600 s) the **pane's own evidence** decides — if it shows no declared
-   turn and no draft, the hold is released and the release is logged with both
-   numbers:
-   `claude status says busy for wW:p5 for 10 min but the pane shows no turn and a
-   clear box; releasing the hold`.
+2. **A `busy` report expires — and a WRONG claim is distinguished from a stale one.**
+   Claude's session status is a claim about a pane made by another process, and it
+   can be wrong in two different ways that produce the same symptom:
+
+   | the claim | what it means | what happens |
+   |---|---|---|
+   | names a session whose **process is gone** | the claim is **wrong**, now | released immediately: `releasing the hold on wS:p1: the session named in the claim is gone (pid 3379009 is not running) - the claim is wrong, not stale` |
+   | names a live session still saying busy, but the pane shows no turn and no draft | the claim is **stale** | released after `CLAUDE_BUSY_TTL_S` (600 s): `releasing the hold on wW:p5 after 10 min of 'busy' (TTL 600s): the report is STALE, not wrong - the session is running and still says busy, but the pane shows no turn and a clear box` |
+
+   The pid in the claim is the difference, and it is why the two log lines read
+   differently: the first is a bug in the reporter, the second is a reporter that
+   cannot tell. Both are auditable at 3am without reading this file.
 3. **The queue survives a restart.** Held messages are persisted with the daemon
    state and re-queued on start, and the restart says what it resumed:
    `resumed 1 held message(s) after restart: m1`. Before this, restarting to clear a

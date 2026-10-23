@@ -3695,6 +3695,19 @@ class Flock:
         if not busy:
             self._claude_busy_since.pop(pane_id, None)
             return False
+        # A claim can be WRONG, not merely stale: if it names a session whose
+        # process is gone (the dead-pane case), the hold is wrong NOW and waiting
+        # for the TTL would be a delay on a known-false claim.
+        try:
+            session = self.claude_status.session_for_pane(pane)
+        except Exception:                   # noqa: BLE001 - a claim we cannot read is not a claim
+            session = None
+        gone = self._claim_names_a_dead_session(session)
+        if gone:
+            log.warning("releasing the hold on %s: %s - the claim is wrong, not stale "
+                        "(claude reports busy for that cwd)", pane_id, gone)
+            self._claude_busy_since.pop(pane_id, None)
+            return False
         since = self._claude_busy_since.setdefault(pane_id, time.time())
         held = time.time() - since
         if held <= CLAUDE_BUSY_TTL_S:
@@ -3703,11 +3716,27 @@ class Flock:
         # pane agrees that nothing is happening.
         if self.turn_active(pane_id) or self._typing_in(pane_id):
             return True
-        log.warning("claude status says busy for %s for %d min but the pane shows no "
-                    "turn and a clear box; releasing the hold (CLAUDE_BUSY_TTL_S=%d)",
+        log.warning("releasing the hold on %s after %d min of 'busy' (TTL %ds): the "
+                    "report is STALE, not wrong - the session is running and still "
+                    "says busy, but the pane shows no turn and a clear box",
                     pane_id, held / 60, CLAUDE_BUSY_TTL_S)
         self._claude_busy_since.pop(pane_id, None)
         return False
+
+    def _claim_names_a_dead_session(self, session):
+        """A sentence naming why a busy claim is WRONG rather than stale, or None."""
+        if not session:
+            return None
+        pid = session.get("pid")
+        if not pid:
+            return None
+        try:
+            from dunk_callers import process_alive
+        except ImportError:                 # the watchdog-style import must never break a send
+            return None
+        if process_alive(int(pid)):
+            return None
+        return f"the session named in the claim is gone (pid {pid} is not running)"
 
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right

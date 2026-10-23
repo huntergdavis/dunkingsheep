@@ -72,6 +72,51 @@ class BusyReportExpiryTests(unittest.TestCase):
         self.assertEqual({}, self.flock._claude_busy_since)
 
 
+class WrongClaimTests(unittest.TestCase):
+    """A claim can be WRONG, not just stale - and only the log tells them apart."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.pane = self.herdr.panes[0]["pane_id"]
+        self.herdr.panes[0]["agent"] = "claude"
+        self.herdr.screens[self.pane] = "❯\u00a0\n"
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def test_a_claim_naming_a_dead_session_is_released_immediately_and_says_so(self):
+        class BusyDead:
+            def status_for_pane(self, pane, fresh=False):
+                return "busy"
+
+            def session_for_pane(self, pane, fresh=False):
+                return {"cwd": "/gone", "status": "busy", "pid": 999999}
+
+        self.flock.claude_status = BusyDead()
+        with self.assertLogs("dunkingsheep", level="WARNING") as captured:
+            busy = self.flock._claude_busy(self.pane)
+        self.assertFalse(busy, "a claim naming a dead session is wrong, not merely stale")
+        text = "\n".join(captured.output)
+        self.assertIn("the session named in the claim is gone", text)
+        self.assertIn("pid 999999", text)
+        self.assertIn("wrong, not stale", text)
+
+    def test_a_stale_claim_says_stale_rather_than_gone(self):
+        import os
+        class BusyAlive:
+            def status_for_pane(self, pane, fresh=False):
+                return "busy"
+
+            def session_for_pane(self, pane, fresh=False):
+                return {"cwd": "/here", "status": "busy", "pid": os.getpid()}
+
+        self.flock.claude_status = BusyAlive()
+        self.flock._claude_busy_since[self.pane] = time.time() - (dunk_core.CLAUDE_BUSY_TTL_S + 1)
+        with self.assertLogs("dunkingsheep", level="WARNING") as captured:
+            self.assertFalse(self.flock._claude_busy(self.pane))
+        text = "\n".join(captured.output)
+        self.assertIn("STALE, not wrong", text)
+        self.assertNotIn("is gone", text)
+
+
 class OnePredicateTests(unittest.TestCase):
     """delivery and the queue must not disagree; they now ask the same function."""
 
