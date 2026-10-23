@@ -63,7 +63,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.52.0"
+VERSION = "2.53.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3491,13 +3491,16 @@ class Flock:
         pane_id = pane["pane_id"]
         screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
                                       source="visible", ansi=True)
-        shown = _typed_text(screen) if screen is not None else None
-        if shown is None:
+        if screen is None:
             raise DunkError(f"could not read the input box of {pane_id}")
+        shown, detail = box_text(screen)
         label = pane.get("tab_label") or pane_id
         if not shown:
+            # Say WHAT was read, not just 'nothing to do': the box that survived two
+            # hours did so behind a bare 'already clear'.
             return {"pane_id": pane_id, "target_label": label, "flushed": False,
-                    "text": None, "message": "the input box is already empty"}
+                    "text": None, "detail": detail,
+                    "message": f"nothing to submit: {detail}"}
         ok, detail = self._press_until_submitted(pane_id, shown)
         log.info("flush %s: %s (%s)", pane_id, "submitted" if ok else "FAILED", detail)
         return {"pane_id": pane_id, "target_label": label, "flushed": ok,
@@ -4298,6 +4301,63 @@ def _modal_open(screen):
     return any(marker in low for marker in MODAL_MARKERS)
 
 
+# The composer lives at the bottom of a pane. Sigil lines above that are old
+# prompts in the scrollback, not the box someone is typing into.
+BOX_REGION_ROWS = 14
+# Box borders and padding sit BEFORE the prompt sigil on a bordered composer, so a
+# raw first-character test missed '│ ❯ check your inbox' entirely - which is
+# exactly the row a stuck draft sits on.
+BOX_LEADING = " \t\u2502\u2503\u2506\u250a\u2551|"
+
+
+def _prompt_body(row):
+    """The text after the prompt sigil on one row, or None if the row has no sigil."""
+    body = DECORATION_RE.sub(" ", _bright_text(row))
+    body = body.lstrip(BOX_LEADING)
+    if body[:1] not in INPUT_BOX_SIGILS:
+        return None
+    return _collapse(body[1:])
+
+
+def box_text(screen):
+    """What is in the input box, and how we know, as (text, detail).
+
+    ONE reader, because three components have now answered 'is there text in the
+    box?' from something other than the box. Two rules learned from the failures:
+
+    - scan every sigil line in the composer region, not just the LAST one: a draft
+      can sit on an earlier line while the bottom line is an empty prompt, and
+      reading only the last one reported 'already clear' over a real draft;
+    - return a sentence describing what was read, so a caller that finds nothing
+      can say *what it looked at* instead of 'already clear'. A checker that reports
+      'nothing to do' without its evidence is how a stuck box survives two hours.
+    """
+    if not screen:
+        return "", "the pane could not be read"
+    rows = [row for row in screen.splitlines() if _strip_ansi(row).strip()]
+    region_start = max(0, len(rows) - BOX_REGION_ROWS)
+    sigils = [(index, row) for index, row in enumerate(rows)
+              if _prompt_body(row) is not None]
+    in_region = [(index, row) for index, row in sigils if index >= region_start]
+    if not in_region:
+        return "", f"no input box found (no prompt sigil in the last {BOX_REGION_ROWS} rows of {len(rows)})"
+    candidates = []
+    for index, row in in_region:
+        body = _prompt_body(row)
+        if body:
+            candidates.append((index, body))
+    if candidates:
+        index, text = candidates[-1]
+        below = sum(1 for row in rows[index + 1:]
+                    if _strip_ansi(row).strip() and _prompt_body(row) is None)
+        return text, (f"read {len(in_region)} prompt line(s); text on row {index + 1} "
+                      f"of {len(rows)}: {text[:60]!r}"
+                      + (f" (+{below} line(s) below it)" if below else ""))
+    index, _row = in_region[-1]
+    return "", (f"read {len(in_region)} prompt line(s); the last is at row {index + 1} "
+                f"of {len(rows)} with nothing after the sigil")
+
+
 def _typed_text(screen):
     """What a human has typed into the target's input box, judged from an
     ANSI-styled screen: the non-dim text on the last prompt-sigil line, minus
@@ -4307,17 +4367,12 @@ def _typed_text(screen):
     tell from an agent's footer."""
     if not screen:
         return None
-    sigil_line = None
-    for line in screen.splitlines():
-        plain = _strip_ansi(line).strip()
-        if plain[:1] in INPUT_BOX_SIGILS:
-            sigil_line = line
-    if sigil_line is None:
+    rows = [row for row in screen.splitlines() if _strip_ansi(row).strip()]
+    if not any(_prompt_body(row) is not None
+               for row in rows[max(0, len(rows) - BOX_REGION_ROWS):]):
         return None
-    bright = DECORATION_RE.sub(" ", _bright_text(sigil_line)).strip()
-    if bright[:1] in INPUT_BOX_SIGILS:
-        bright = bright[1:]
-    return _collapse(bright)
+    text, _detail = box_text(screen)
+    return text
 
 
 def _is_our_send(typed, last_sent_text, awaiting_consumption):

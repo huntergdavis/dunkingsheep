@@ -641,3 +641,31 @@ A hand-maintained version constant is the same failure as a hand-maintained cens
    latest commit subject that declares `N.N.N:` and fails when it disagrees with
    `VERSION`. Writing the guard is what forces the constant to be bumped in the same
    commit as the claim.
+
+## The pane is the only source of truth about the pane
+
+Four components failed the same way in one day: `send` believed a **claim** (claude's
+session list saying busy, held for 8.5 hours while the pane sat with an empty prompt);
+`delivery` and the queue asked **different questions** and gave different answers;
+and `flush` disbelieved the pane, reporting "the input box is already clear" over a
+visible draft because the draft sat on a bordered row (`│ ❯ check your inbox`) above
+an empty prompt and only the last sigil line was consulted.
+
+> **Any code path that answers a question about the pane without reading the pane
+> will eventually disagree with it.** Caching, claims and inference are all the same
+> mistake at different distances from the terminal.
+
+Consequences enforced in the code:
+
+- **`box_text(screen)` is the single reader** for "what is in the box", and it returns
+  `(text, detail)` — a sentence saying *what it read and how* ("read 2 prompt
+  line(s); text on row 1 of 4: 'check your inbox'"). A caller that finds nothing can
+  therefore say `nothing to submit: <that sentence>`, never a bare "already clear".
+- **`send_blocker()` is the single predicate** for "may a send go now", used by
+  `delivery_state`, the outbox worker and `send_text`, so no two surfaces can answer
+  differently.
+- **A claim is believed only while fresh**, and the release needs *positive* evidence
+  of idleness — a draft-free box is not evidence (a 75-minute byte job has one).
+
+The test for this rule is not a sentence in a doc: it is `box_text` returning the
+draft in each of the shapes a real composer draws it.

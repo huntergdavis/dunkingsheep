@@ -115,6 +115,42 @@ class PlaceholderTests(unittest.TestCase):
         self.assertTrue(dunk_core._is_placeholder("type your request"))
 
 
+class BoxReaderTests(unittest.TestCase):
+    """One reader for 'what is in the box', and it says what it read.
+
+    flush reported 'the input box is already clear' over a visible draft because
+    the draft sat on a BORDERED row ('│ ❯ check your inbox') above an empty prompt,
+    and only the last sigil line was consulted. Same disease as send believing
+    claude's claim: a component answering a question about the pane without reading
+    it properly.
+    """
+
+    def test_a_draft_above_an_empty_prompt_is_still_found(self):
+        screen = "│ ❯ check your inbox\n│\n❯\u00a0\n──────────\n"
+        text, detail = dunk_core.box_text(screen)
+        self.assertEqual("check your inbox", text)
+        self.assertIn("text on row 1", detail)
+
+    def test_a_bordered_draft_is_found(self):
+        text, _detail = dunk_core.box_text("│ ❯ check your inbox\n❯\u00a0\n")
+        self.assertEqual("check your inbox", text)
+
+    def test_an_empty_box_says_what_it_read(self):
+        text, detail = dunk_core.box_text("│ doing work\n❯\u00a0\n──────────\n")
+        self.assertEqual("", text)
+        self.assertIn("nothing after the sigil", detail)
+        self.assertIn("row 2 of 3", detail)
+
+    def test_no_box_says_so_instead_of_claiming_empty(self):
+        text, detail = dunk_core.box_text("$ ls\nfoo\n")
+        self.assertEqual("", text)
+        self.assertIn("no input box found", detail)
+
+    def test_a_dim_hint_is_not_a_draft(self):
+        text, _detail = dunk_core.box_text("❯\u00a0\n\x1b[2mnew task? /clear to save 1k tokens\x1b[0m\n")
+        self.assertEqual("", text)
+
+
 class ClearBoxTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -182,6 +218,22 @@ class ClearBoxTests(unittest.TestCase):
         self.assertTrue(result["flushed"], result)
         self.assertEqual([("w1:p2", ["C-u"]), ("w1:p2", ["Escape"])], self.herdr.keys)
         self.assertEqual("blocked", result["before"]["state"])
+
+    def test_flush_reports_the_evidence_when_the_box_reads_clear(self):
+        self.herdr.screens["w1:p2"] = "│ ❯ check your inbox\n❯\u00a0\n"
+        # A draft IS there, so flush submits it rather than reporting 'already clear'.
+        result = self.flock.flush_box("w1:p2", self_pane_id="w1:p1")
+        self.assertEqual("check your inbox", result.get("text"),
+                         "flush must submit what the pane shows, not report it clear")
+        self.assertTrue(any("Enter" in str(keys) for _pane, keys in self.herdr.keys),
+                        "submitting means pressing Enter, not just reading")
+
+    def test_flush_says_what_it_read_when_there_is_nothing_to_submit(self):
+        self.herdr.screens["w1:p2"] = "│ doing work\n❯\u00a0\n──────────\n"
+        result = self.flock.flush_box("w1:p2", self_pane_id="w1:p1")
+        self.assertFalse(result["flushed"])
+        self.assertIn("nothing to submit", result["message"])
+        self.assertIn("nothing after the sigil", result["message"])
 
     def test_a_working_lane_is_not_interrupted_by_a_clear(self):
         self.herdr.screens["w1:p2"] = "│ ✻ Working"
