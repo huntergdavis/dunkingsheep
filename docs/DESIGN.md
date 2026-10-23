@@ -564,6 +564,14 @@ like a guarantee.
 > **When a mechanism exists for one purpose — supersede, retire, rollback,
 > migration, restore — test the case it exists FOR, not a convenient neighbour.**
 
+The census is in **`docs/MECHANISMS.md`**: one row per one-purpose mechanism, each
+stating *what its only case is in one line*, the test that exercises it, and its
+state. If the case cannot be stated in one line, we do not know what the mechanism
+is for — and no test can be right. `tests/test_mechanism_census.py` enforces the
+file (one-line case, cited test exists, mechanism exists in code, every declared
+one-purpose mechanism has a row), so the census cannot drift into a document nobody
+updates.
+
 Applying it the same night found one more: `memory_backfill` exists to enqueue the
 whole corpus *resumably*, and its nearest test exercised `enqueue`, not the
 command. The case that matters is "run it again on a corpus that was partly done",
