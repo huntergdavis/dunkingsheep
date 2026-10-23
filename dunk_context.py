@@ -232,7 +232,17 @@ class Store:
         folder.mkdir(exist_ok=True)
         path = folder / f"{slug}.md"
         if path.exists():
-            raise ContextError(f"entry {slug} already exists")
+            # A supersede on the same day derives the same slug, so the guarantee
+            # "supersession is the only way an entry changes" was unimplementable
+            # within a day: the new file collided with the old one. A superseding
+            # entry gets a distinct, deterministic slug instead.
+            if not supersedes:
+                raise ContextError(f"entry {slug} already exists")
+            counter = 2
+            while (folder / f"{slug}-{counter}.md").exists():
+                counter += 1
+            slug = f"{slug}-{counter}"
+            path = folder / f"{slug}.md"
         if supersedes:
             old = self.find(supersedes)
             if old is None:

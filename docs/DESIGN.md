@@ -516,10 +516,36 @@ closes it by executing **every** command in the registry against a fixture fleet
   for a key the `Command` does not declare `required` is a schema that lies about
   its needs, and it reaches a user as "internal error".
 
-The first run found two such lies (`clear_box`, `delivery`). The gate is proven to
-fail: a deliberately broken handler that reads an unimported name is registered in
-`test_the_gate_would_catch_an_unimported_name` and the test asserts the smoke gate
-reports it.
+### The two lies it found, on the first run
+
+Both were commands the night depended on, and both were invisible to every
+spelling-based check we had:
+
+| command | what the registry claimed | what it actually did |
+|---|---|---|
+| `clear_box` | "DESTRUCTIVE, superuser only: clear an unsubmitted draft" | raised `KeyError: 'target'` when run against a blocked pane — the one command that unblocks a lane crashed on the lanes that needed it |
+| `delivery` | "Can this lane receive a message, and if not why: ready / working / blocked / dead" | the printer read the clear result as if it were a message, and `target` was never declared required, so an empty call crashed rather than answering |
+
+The registry said what they *were for*; no test said they *ran*. **A gate that
+found two lies in one run is a gate that should have existed three hours earlier** —
+those two commands were written and shipped in the same window as the incidents
+they were meant to fix.
+
+The gate is proven to fail: `test_the_gate_would_catch_an_unimported_name` registers
+a handler that reads an unimported name and asserts the smoke gate reports it.
+
+### The general form
+
+> **A check that proves SPELLING is not a check that proves FUNCTION.**
+
+Grepping a help text, importing a module, compiling a file, listing a registry —
+each proves a **name exists**, and none proves a handler **runs**. A test has to
+**execute** the thing and assert a **result**.
+
+And the clause that turns a smoke test into a real one: *a command with no required
+parameters must return a result, not a polite nothing*. A handler that returns `{}`
+and calls it success passes every weaker assertion, so the test rejects `None`, `{}`,
+`[]` and `""` explicitly.
 
 Corollary, from the same message: a **repair** that changes no claim carries a
 dated note beside the evidence, not a rewritten document — a rewritten doc reads as

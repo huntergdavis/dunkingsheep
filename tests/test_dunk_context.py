@@ -86,6 +86,19 @@ class ContextTests(unittest.TestCase):
         self.assertIsNotNone(found["global"])
         self.assertIsNone(found["project"])
 
+    def test_a_supersede_within_the_same_day_gets_its_own_slug(self):
+        """Same day + same subject derived the same slug, so a supersede collided
+        with the entry it was replacing - the mechanism could never work in a day."""
+        first = self.store.add("the old claim", cls="fact", subject="claim",
+                              type_="lesson", authority="agent", stated="2026-10-22")
+        second = self.store.supersede(first["slug"], "the corrected claim")
+        self.assertNotEqual(first["slug"], second["slug"])
+        old = self.store.find(first["slug"])
+        new = self.store.find(second["slug"])
+        self.assertEqual(second["slug"], old["superseded_by"])
+        self.assertEqual(first["slug"], new["supersedes"])
+        self.assertIn("the corrected claim", new["body"])
+
     def test_delivery_is_recorded_separately_from_reading(self):
         # "nobody reads it" and "nobody was ever told it" are different failures.
         from dunk_context import digest_both
