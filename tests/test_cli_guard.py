@@ -108,6 +108,14 @@ class PollCacheScopeTests(unittest.TestCase):
         live = self.path_for("/home/hunter/.config/dunkingsheep/dunkingsheep.sock")
         self.assertNotEqual(temp, live, "two stores shared one poll cache entry")
 
+    def test_two_mailboxes_do_not_share_one_cached_answer(self):
+        """Keying by command alone handed lane A's numbers to a caller asking about B."""
+        first = self.path_for("/tmp/x/test.sock", ("inbox", "count", "wR:p5"))
+        second = self.path_for("/tmp/x/test.sock", ("inbox", "count", "wR:p4"))
+        self.assertNotEqual(first, second, "different mailboxes shared one cache entry")
+        again = self.path_for("/tmp/x/test.sock", ("inbox", "count", "wR:p5"))
+        self.assertEqual(first, again)
+
     def test_the_same_store_reuses_its_entry(self):
         first = self.path_for("/tmp/x/test.sock")
         second = self.path_for("/tmp/x/test.sock")

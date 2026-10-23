@@ -1493,15 +1493,17 @@ def _coalesce(argv):
     if words[0] == "inbox":
         if len(words) < 2 or words[1] not in _INBOX_POLLS:
             return None, False
-        key = "inbox-" + words[1]
-    elif words[0] in _POLL_COMMANDS:
-        key = words[0]
-    else:
+    elif words[0] not in _POLL_COMMANDS:
         return None, False
-    import hashlib
+    # The key includes the ARGUMENTS, not just the command. Keying on the command
+    # alone meant `inbox count alpha` and `inbox count beta` shared one entry, so a
+    # caller asking about lane B was handed lane A's numbers - the same
+    # correct-looking cache, scoped wrong, as the cross-store collision.
+    import hashlib as _hashlib
     scope = os.environ.get("DUNKINGSHEEP_SOCKET") or os.environ.get("DUNKINGSHEEP_DIR") or "default"
-    digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:12]
-    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + digest + "-" + key)
+    digest = _hashlib.sha256((" ".join(argv) + "|" + scope).encode("utf-8")).hexdigest()[:16]
+    key = digest
+    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
     now = time.time()
     try:
         last = os.path.getmtime(path)

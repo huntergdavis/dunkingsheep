@@ -546,6 +546,56 @@ class InboxErrorShapeTests(unittest.TestCase):
                                "notify": False}, self_pane_id="w1:p2")
 
 
+class MailboxRoutingTests(unittest.TestCase):
+    """A mailbox NAME is a conversation; a pane id is a process.
+
+    On 2026-10-22 a message addressed to 'codex-poolrad2 (wR:p5)' was answered by
+    wR:p4 and that lane stood down believing it was the duplicate. The decorated
+    address fell through to a mailbox NAME with no pane, so delivery picked
+    whichever pane owned the name.
+    """
+
+    def setUp(self):
+        import dunk_core
+        from fakes import FakeHerdr
+        self.herdr = FakeHerdr(panes=[
+            {"pane_id": "wR:p4", "tab_id": "wR:t4", "workspace_id": "wR",
+             "label": "codex-poolrad2", "agent": "codex"},
+            {"pane_id": "wR:p5", "tab_id": "wR:t5", "workspace_id": "wR",
+             "label": "codex-poolrad2", "agent": "codex"},
+        ])
+        self.herdr.tabs = [
+            {"tab_id": "wR:t4", "label": "codex-poolrad2", "number": 1, "workspace_id": "wR"},
+            {"tab_id": "wR:t5", "label": "codex-poolrad2", "number": 2, "workspace_id": "wR"},
+        ]
+        self.herdr.workspaces = [{"workspace_id": "wR", "label": "poolrad", "number": 1}]
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+        self.dunk_core = dunk_core
+
+    def test_a_decorated_address_delivers_to_the_pane_it_names(self):
+        for pane in ("wR:p5", "wR:p4"):
+            key, _label, resolved = self.flock.resolve_mailbox(f"codex-poolrad2 ({pane})")
+            self.assertEqual(pane, resolved)
+            self.assertEqual(pane, key, "the key must identify the pane, not the name")
+
+    def test_a_decorated_address_for_a_dead_pane_is_refused(self):
+        with self.assertRaises(self.dunk_core.DunkError) as caught:
+            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)")
+        self.assertIn("wR:p9", str(caught.exception))
+        self.assertIn("not live", str(caught.exception))
+
+    def test_a_bare_name_shared_by_two_panes_is_refused_with_both(self):
+        with self.assertRaises(self.dunk_core.AmbiguousTarget) as caught:
+            self.flock.resolve_mailbox("codex-poolrad2")
+        message = str(caught.exception)
+        self.assertIn("wR:p4", message)
+        self.assertIn("wR:p5", message)
+
+    def test_a_bare_dead_pane_id_is_not_a_mailbox_even_for_a_letter_workspace(self):
+        with self.assertRaises(self.dunk_core.DunkError):
+            self.flock.resolve_mailbox("wR:p9")
+
+
 class SurfaceParityTests(unittest.TestCase):
     """Every registry command must exist on all three surfaces."""
 

@@ -70,8 +70,14 @@ LAUNCHES_FILE = os.path.join(CONFIG_DIR, "launches.json")
 
 # Agent states during which an `only_when="idle"` dunk holds its send.
 BUSY_STATUSES = ("working", "blocked")
-_PANE_ID_RE = re.compile(r"^w\d+:p\d+$")
+# Pane ids are 'w<workspace>:p<number>' where the workspace may be a LETTER:
+# wR:p5. A digits-only pattern meant 'wR:p9' was not recognised as a pane id at
+# all, so a dead pane id fell through to becoming a mailbox name.
+_PANE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+:p\d+$")
 _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
+# 'codex-poolrad2 (wR:p5)': a name with its pane id appended. The parenthetical is
+# the ONLY unambiguous part, so it decides where the mail goes.
+_EMBEDDED_PANE_RE = re.compile(r"\(\s*([A-Za-z0-9_.-]+:p\d+)\s*\)\s*$")
 IDLE_POLL_S = 5
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
@@ -871,6 +877,22 @@ class Flock:
             raise DunkError(
                 f"no live pane {spec!r}; a dead pane id is not a mailbox. "
                 "Use a current pane id or a mailbox name.")
+        # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
+        # that id decides. Without this the whole string fell through to step 3 and
+        # became a mailbox NAME with no pane: mail addressed to
+        # 'codex-poolrad2 (wR:p5)' was then answered by wR:p4, whose conversation
+        # name was the same one. A name is a conversation; a pane id is a process.
+        embedded = _EMBEDDED_PANE_RE.search(spec)
+        if embedded:
+            hinted = embedded.group(1)
+            for pane in panes:
+                if pane.get("pane_id") == hinted or pane.get("terminal_id") == hinted:
+                    return self._mailbox_for_pane(pane)
+            raise DunkError(
+                f"target {spec!r} names pane {hinted}, which is not live. A decorated "
+                f"address must name a live pane: use a current pane id, or a bare "
+                f"mailbox name without the parenthetical.")
+
         # 2. An exact *name* must identify exactly one pane across every name
         #    field. Two same-type panes can share a label (or one pane's label
         #    can equal another's tab label); picking by field priority delivered

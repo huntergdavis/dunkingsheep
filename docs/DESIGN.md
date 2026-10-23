@@ -579,3 +579,31 @@ because a backfill that is not idempotent re-ingests 14 GB. That test exists now
 alongside the same-case tests for `clear_box` (blocked on a full context — the
 reason it was built) and `retire` (a pane that no longer exists — which is what
 we retire).
+
+## A mailbox name is a conversation; a pane id is a process
+
+On 2026-10-22 a message addressed to `codex-poolrad2 (wR:p5)` was **answered by
+`wR:p4`**, and that lane stood down believing it was the duplicate. A misdelivered
+instruction that changes behaviour is the worst failure mode there is — the same
+family as the ack that cleared someone else's inbox.
+
+Two causes, both now closed:
+
+1. **The decorated address was not parsed.** `name (wR:p5)` matched neither an exact
+   pane id nor an exact label, so it fell through to being a mailbox **name** with
+   `pane_id: null`. Delivery then resolved the name — and a name is a conversation,
+   not a process. The parenthetical is the only unambiguous part, so it decides:
+   a decorated address resolves to that pane, and a decorated address naming a pane
+   that is not live is refused by name.
+2. **Pane ids with a lettered workspace were not recognised.** `_PANE_ID_RE` was
+   `^w\d+:p\d+$`, so `wR:p9` was not a pane id at all and a *dead* pane id became a
+   mailbox name. The pattern now accepts a lettered workspace.
+
+A name that two panes share is still refused, with both candidates named. The rule:
+**resolve by pane id at send time; refuse when the name is ambiguous.**
+
+And the same night, the poll cache: its key was the command alone, so
+`inbox count wR:p5` and `inbox count wR:p4` shared one entry and a caller asking
+about one lane was handed the other's numbers. The key is now a hash of the whole
+argument vector plus the store — **the third "correct-looking cache, scoped wrong"**
+of the week, after the cross-store collision and the never-expiring entry.
