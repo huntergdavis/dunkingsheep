@@ -607,3 +607,37 @@ And the same night, the poll cache: its key was the command alone, so
 about one lane was handed the other's numbers. The key is now a hash of the whole
 argument vector plus the store — **the third "correct-looking cache, scoped wrong"**
 of the week, after the cross-store collision and the never-expiring entry.
+
+## A version number is a claim about the code
+
+For eight commits `dunk_core.py` said `VERSION = "2.37.4"` while the commit subjects
+claimed 2.38 through 2.51, and `status` printed the constant. So the one number
+people look at to answer **"is my fix live?"** answered *wrong, in the reassuring
+direction* — and the only way to find out was to compare the daemon's process start
+time to the file's mtime, which is not a check any human should have to run.
+
+A hand-maintained version constant is the same failure as a hand-maintained census:
+**a hand-maintained list is a future omission.** Two guards, one of each kind:
+
+1. **Derived, so it cannot drift.** `code_identity()` hashes `dunk_core.py` (12 hex)
+   and records its mtime at import; `status` prints the hash beside the constant and
+   answers the real question:
+
+   ```text
+   version          2.52.0 (code 9c2de7f79541)
+   code_mtime       2026-10-23 12:11:15 (7s ago)
+   started_at       2026-10-23 12:11:18 (4s ago)
+   code_stale       no
+   ```
+
+   `code_stale` compares the hash this process imported with the hash of the file
+   **now**. (The first attempt compared a captured mtime against the process start
+   time — a value against itself — and said `no` while the daemon ran four commits
+   behind the file. A guard that has never been seen to fail is a guard we are
+   assuming: appending one comment to the file now flips it to `YES - the code on
+   disk is newer than this process; restart it`.)
+
+2. **Checked, so a commit cannot claim what the code does not.** A test reads the
+   latest commit subject that declares `N.N.N:` and fails when it disagrees with
+   `VERSION`. Writing the guard is what forces the constant to be bumped in the same
+   commit as the claim.

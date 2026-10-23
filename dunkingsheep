@@ -43,7 +43,10 @@ def build_parser():
         epilog=SHORT,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"dunkingsheep {VERSION}")
+    import dunk_core as _core
+    parser.add_argument("--version", action="version",
+                        version=f"dunkingsheep {VERSION} (code "
+                                f"{_core.CODE_IDENTITY.get('code_hash') or 'unknown'})")
     parser.add_argument("--json", action="store_true", help="print raw JSON results")
     parser.add_argument("--socket", help="daemon socket path (default: $DUNKINGSHEEP_SOCKET "
                                          "or ~/.config/dunkingsheep/dunkingsheep.sock)")
@@ -1378,10 +1381,30 @@ def print_poll(result):
 
 
 def print_status(result):
-    for key in ("version", "pid", "dunkers", "running", "herdr_available",
+    """Status, with the code's identity beside the constant.
+
+    'is the running daemon the code I just wrote' must be one line to answer, and a
+    hand-maintained constant cannot answer it: this file said 2.37.4 for eight
+    commits whose messages claimed 2.38 through 2.51.
+    """
+    version = result.get("version")
+    code = result.get("code_hash")
+    if version and code:
+        print(f"{'version':<16} {version} (code {code})")
+    elif version:
+        print(f"{'version':<16} {version}")
+    for key in ("code_mtime", "started_at", "code_stale", "pid", "dunkers", "running",
+                "queued_messages", "herdr_available",
                 "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
-        if result.get(key) not in (None, ""):
-            print(f"{key:<16} {result[key]}")
+        value = result.get(key)
+        if value in (None, ""):
+            continue
+        if key in ("code_mtime", "started_at"):
+            value = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value))} ({int(time.time() - value)}s ago)"
+        if key == "code_stale":
+            value = ("YES - the code on disk is newer than this process; restart it"
+                     if value else "no")
+        print(f"{key:<16} {value}")
 
 
 # -- main -------------------------------------------------------------------------------
