@@ -1460,6 +1460,12 @@ def _be_nice():
 # Read only local files; never open a socket.
 LOCAL_ONLY_COMMANDS = ("context",)
 
+# A synchronous send waits for delivery, and delivery reads panes several times.
+# Under load (27 live lanes at 2.7/cpu) those reads are slow: 15 s was not enough
+# for a fire that was working, and the client reported a timeout for a send that
+# landed. This is a wait long enough to be honest about, not a retry.
+SEND_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_SEND_TIMEOUT_S", "120"))
+
 _POLL_COMMANDS = ("status", "list", "ls", "poll")
 _INBOX_POLLS = ("count", "list", "ls", "stats")
 
@@ -1752,6 +1758,12 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        # Synchronous send paths wait for the daemon to *deliver*, and delivery can
+        # need several pane reads (a typing check, a dead-session check, a submit
+        # confirmation). On a loaded host those reads are slow enough that the
+        # client's default 15 s timed out a `fire` that was working perfectly.
+        if command in ("fire", "send", "send-keys", "flush", "dunk"):
+            client.timeout = max(client.timeout, SEND_TIMEOUT_S)
         result, printer = run_client_command(client, args)
     except DunkError as error:
         print(f"error: {error}", file=sys.stderr)
