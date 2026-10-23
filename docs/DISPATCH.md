@@ -5,6 +5,31 @@ re-fed four lanes by hand, twice. This is the structural fix: a standby queue an
 a five-minute tick. **There is no model anywhere in it** - the gate is a pane's
 delivery state and an empty mailbox, both deterministic reads.
 
+## The board is the queue (a hand-written list is a future omission)
+
+The standby queue started hand-written, and it ran dry twice in one night while
+open tasks sat unclaimed on the board. That is the same defect as a hand-maintained
+checklist: **the list was already wrong before anyone touched it.**
+
+So the tick **derives** its items from the task board first, and the hand queue is
+only for work that is not a task yet. A task is dispatchable when it is:
+
+- `open` — not in progress, done or cancelled;
+- **not blocked** — any declared `block_reason` disqualifies it (held for the owner
+  is just one of those reasons);
+- **not dependency-gated** — every `depends_on` is done;
+- **not claimed** — no live lease;
+- **not recently dispatched** — a 6-hour cooldown, so a lane is not re-fed the same
+  assignment while it works;
+- **not already in the hand queue**.
+
+Order is priority (urgent → low) then age. A title longer than 90 characters is
+reported as **coarse**: an umbrella like "advance strict C" is a signal to split it,
+not a reason to keep a parallel hand-written list.
+
+With this, `queue empty` means **no open unblocked work anywhere** — a real
+finding — instead of "somebody forgot to top it up".
+
 ## The three moving parts
 
 | part | what it is |

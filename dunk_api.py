@@ -356,12 +356,27 @@ def h_dispatch(flock, args, self_pane_id):
         result = inbox.send(pane_id, text, subject="standby", sender=self_pane_id)
         return result.get("message_id")
 
+    # Derive from the BOARD, not from a list somebody tops up: a hand-maintained
+    # queue ran dry twice while open tasks sat unclaimed.
+    tasks = (flock.task_list(include_done=False, limit=500).get("tasks") or [])
+    for task in tasks:
+        try:
+            task["leases"] = flock.tasks.leases_for(task["id"])
+        except Exception:                       # noqa: BLE001 - visibility is optional
+            task["leases"] = []
+    recent = {entry["task_id"] for entry in (dunk_dispatch._load_state().get("history") or [])
+              if entry.get("task_id") and entry.get("at", 0) >= __import__("time").time() - 6 * 3600}
+    queued_ids = {str(item.get("task_id")) for item in queue.items() if item.get("task_id")}
+    derived, coarse = dunk_dispatch.derive_board_items(
+        tasks, dispatched_task_ids=(recent | queued_ids))
     state = dunk_dispatch.tick(
-        queue, panes,
+        queue, panes, derived=derived,
         delivery=lambda pane: flock.delivery_state(pane["pane_id"], pane.get("agent_status")),
         unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
         send=send, dry_run=bool(args.get("dry_run")))
     state["retired"] = len(dunk_panes.all_retired())
+    state["board_open"] = sum(1 for task in tasks if str(task.get("status")) == "open")
+    state["coarse_tasks"] = coarse
     return state
 
 

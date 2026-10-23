@@ -82,6 +82,54 @@ class LanePlanTests(unittest.TestCase):
         self.assertEqual("pane unreadable", plan["blocked"][0]["reason"])
 
 
+def task(task_id, status="open", priority="medium", depends=(), leases=(),
+         assignees=(), block_reason=None, title=None, created=1.0):
+    return {"id": task_id, "status": status, "priority": priority,
+            "depends_on": list(depends), "leases": list(leases),
+            "assignees": list(assignees), "block_reason": block_reason,
+            "title": title or f"task {task_id}", "created_at": created}
+
+
+class DeriveFromBoardTests(unittest.TestCase):
+    """The hand-written queue is a hand-maintained list, so the board is primary."""
+
+    def test_open_unblocked_unclaimed_tasks_become_items_in_priority_order(self):
+        items, coarse = dd.derive_board_items([
+            task("t1", priority="low", created=3),
+            task("t2", priority="high", created=2),
+            task("t3", priority="urgent", created=9),
+        ])
+        self.assertEqual(["t3", "t2", "t1"], [item["task_id"] for item in items])
+        self.assertEqual([], coarse)
+        self.assertTrue(all(item["derived"] for item in items))
+        self.assertEqual("[standby t2] task t2", dd.dispatch_text(items[1]))
+
+    def test_everything_that_is_not_dispatchable_is_skipped(self):
+        items, _ = dd.derive_board_items([
+            task("held", block_reason="HELD FOR OWNER DECISION: wait for owner"),
+            task("blocked", block_reason="waiting on vendor"),
+            task("dep", depends=["unfinished"]),
+            task("leased", leases=[{"pane_id": "w1:p1"}]),
+            task("working", status="in_progress"),
+            task("done", status="done"),
+            task("recent"),
+        ], dispatched_task_ids={"recent"})
+        self.assertEqual([], items)
+
+    def test_a_dependency_that_is_done_no_longer_blocks(self):
+        items, _ = dd.derive_board_items([
+            task("first", status="done"),
+            task("second", depends=["first"]),
+        ])
+        self.assertEqual(["second"], [item["task_id"] for item in items])
+
+    def test_an_umbrella_title_is_flagged_for_splitting_not_queued_by_hand(self):
+        items, coarse = dd.derive_board_items([task("big", title="x" * 120)])
+        self.assertEqual(["big"], [item["task_id"] for item in items])
+        self.assertEqual(["big"], coarse,
+                         "a coarse task is a signal to split it, not to keep a hand list")
+
+
 class TickTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -92,7 +140,8 @@ class TickTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def tick(self, panes, states, *, unread=None, now=1000.0, dry_run=False, fail=None):
+    def tick(self, panes, states, *, unread=None, now=1000.0, dry_run=False, fail=None,
+             derived=()):
         def send(pane_id, text):
             if fail:
                 raise dd.DispatchError(fail)
@@ -102,7 +151,8 @@ class TickTests(unittest.TestCase):
                        delivery=lambda p: {"state": states[p["pane_id"]][0],
                                            "reason": states[p["pane_id"]][1]},
                        unread=lambda p: (unread or {}).get(p["pane_id"], 0),
-                       send=send, now=now, dry_run=dry_run, state_path=self.state)
+                       send=send, now=now, dry_run=dry_run, state_path=self.state,
+                       derived=derived)
 
     def test_only_the_ready_lane_is_fed_and_the_text_carries_the_task(self):
         self.queue.add("advance strict C to 250", task_id="t6")
@@ -124,6 +174,15 @@ class TickTests(unittest.TestCase):
         state = self.tick([pane("w1:p1")], {"w1:p1": ("ready", None)}, fail="typing hold")
         self.assertIn("typing hold", state["dispatched"][0]["error"])
         self.assertEqual(1, len(self.queue.items()), "a failed send must not lose the assignment")
+
+    def test_a_derived_board_item_fills_an_idle_lane_without_a_hand_item(self):
+        derived, _coarse = dd.derive_board_items([task("t44", title="fold the flags")])
+        state = self.tick([pane("w1:p1")], {"w1:p1": ("ready", None)}, derived=derived)
+        self.assertEqual([("w1:p1", "[standby t44] fold the flags")], self.sent)
+        self.assertEqual(1, state["derived_dispatched"])
+        self.assertEqual(1, state["derived_available"])
+        self.assertFalse(state["queue_empty"],
+                         "'queue empty' must mean no open work, not 'nobody topped it up'")
 
     def test_an_empty_queue_with_idle_lanes_is_stated_not_hidden(self):
         state = self.tick([pane("w1:p1"), pane("w1:p2")],

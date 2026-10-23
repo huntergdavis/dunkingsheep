@@ -147,6 +147,64 @@ def lane_plan(panes, *, delivery, unread, lanes=None):
     return out
 
 
+PRIORITY_ORDER = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+# Kept as documentation of the marker: a held task carries a block_reason like any
+# other blocked task, and the dispatcher skips every block_reason.
+HELD_PREFIX = "HELD FOR OWNER DECISION"
+
+
+def derive_board_items(tasks, *, dispatched_task_ids=(), now=None, coarse_chars=90):
+    """Standby items DERIVED from the task board.
+
+    The hand-written queue is a hand-maintained list, and a hand-maintained list is
+    a future omission: it ran dry twice while open tasks sat on the board. So the
+    board is the primary source, and `queue empty` then means `no open unblocked
+    work` - a real finding - rather than `somebody forgot to top it up`.
+
+    A task is dispatchable when it is open, not held for an owner decision, has no
+    unfinished dependency, is not already being worked (a live lease), is not in the
+    hand queue, and was not dispatched inside the cooldown.
+    """
+    now = now or _now()
+    done = {str(task.get("id")) for task in tasks
+            if str(task.get("status")) in ("done", "cancelled")}
+    taken = {str(task_id) for task_id in dispatched_task_ids}
+    items, coarse = [], []
+    for task in tasks:
+        status = str(task.get("status") or "")
+        if status != "open":
+            continue
+        # Any declared block reason means the task is not dispatchable: a task held
+        # for the owner and a task waiting on a vendor are both waiting on somebody.
+        if str(task.get("block_reason") or "").strip():
+            continue
+        depends = [str(dep) for dep in (task.get("depends_on") or [])]
+        if any(dep not in done for dep in depends):
+            continue
+        if task.get("leases"):
+            continue                      # somebody is on it
+        task_id = str(task.get("id"))
+        if task_id in taken:
+            continue                      # dispatched recently; do not stack
+        assignees = task.get("assignees") or []
+        if assignees and str(task.get("status")) == "in_progress":
+            continue
+        title = " ".join(str(task.get("title") or "").split())
+        if not title:
+            continue
+        item = {"id": f"board:{task_id}", "task_id": task_id, "brief": title,
+                "lane": None, "derived": True,
+                "priority": PRIORITY_ORDER.get(str(task.get("priority")), 9),
+                "created_at": task.get("created_at") or now}
+        if len(title) > coarse_chars:
+            # An umbrella too broad to act on: a signal to split it, not a reason
+            # to keep a parallel hand-written list.
+            coarse.append(task_id)
+        items.append(item)
+    items.sort(key=lambda item: (item["priority"], item["created_at"]))
+    return items, coarse
+
+
 def dispatch_text(item):
     """What the lane is sent. One line, the task id first so the reply can cite it."""
     prefix = f"[standby {item['task_id']}] " if item.get("task_id") else "[standby] "
@@ -155,7 +213,7 @@ def dispatch_text(item):
 
 
 def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
-         lanes=None, state_path=STATE_PATH, one_per_lane=True):
+         lanes=None, state_path=STATE_PATH, one_per_lane=True, derived=()):
     """Fill idle lanes from the standby queue. Returns the state it wrote.
 
     `send(pane, text)` must be the guarded send path (the inbox nudge), so the
@@ -164,9 +222,16 @@ def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
     """
     now = now or _now()
     plan = lane_plan(panes, delivery=delivery, unread=unread, lanes=lanes)
+    # Derived board items first: they are the real backlog. The hand queue is for
+    # work that is not a task yet, so it comes second rather than starving it.
+    pending_derived = list(derived)
     dispatched = []
     for lane in plan["ready"]:
-        item = queue.next_for(lane["pane_id"])
+        if pending_derived:
+            item = pending_derived.pop(0)
+            item = dict(item, id=item.get("id") or f"board:{item['task_id']}")
+        else:
+            item = queue.next_for(lane["pane_id"])
         if item is None:
             break
         text = dispatch_text(item)
@@ -176,7 +241,8 @@ def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
             try:
                 record["message_id"] = send(lane["pane_id"], text)
                 record["sent"] = True
-                queue.take(item["id"], lane["pane_id"], record.get("message_id"), now=now)
+                if not item.get("derived"):
+                    queue.take(item["id"], lane["pane_id"], record.get("message_id"), now=now)
             except Exception as exc:             # a refused send is a fact, not a crash
                 record["error"] = str(exc)
         else:
@@ -186,6 +252,7 @@ def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
             continue                 # one item per lane per tick is the default
 
     pending = queue.items()
+    unfilled_derived = [item for item in pending_derived]
     filled = {record["pane_id"] for record in dispatched if record["sent"]}
     idle_unfilled = [lane["pane_id"] for lane in plan["ready"] if lane["pane_id"] not in filled]
     state = {
@@ -204,8 +271,13 @@ def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
         "dispatched_count": sum(1 for record in dispatched if record["sent"]),
         "idle_unfilled": idle_unfilled,
         "queue_depth": len(pending),
-        # The honest answer when lanes sit idle: the instruction supply is empty.
-        "queue_empty": len(pending) == 0 and bool(idle_unfilled),
+        "derived_available": len(derived),
+        "derived_dispatched": sum(1 for record in dispatched
+                                  if record.get("sent") and str(record["item"]).startswith("board:")),
+        # The honest answer when lanes sit idle: there is no open unblocked work
+        # anywhere - not in the board and not in the hand queue.
+        "queue_empty": (len(pending) == 0 and not unfilled_derived
+                        and not derived and bool(idle_unfilled)),
     }
     state["dispatched_1h"] = 0
     if state_path:

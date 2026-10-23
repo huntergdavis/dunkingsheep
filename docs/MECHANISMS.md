@@ -32,6 +32,7 @@ one line. That was proven by adding one.
 | `flush_box` | our own text stranded in the box after a failed submit | `test_our_stranded_text_is_flushed_before_the_next_send` | tested |
 | `memory_backfill` | a second run over a corpus that was partly done | `test_a_second_start_does_not_re_enqueue_and_limit_is_respected` | tested |
 | `tick` | a ready lane with no mail, and a ready lane that already has some | `test_a_ready_lane_with_unread_mail_has_an_assignment_already` | tested |
+| `derive_board_items` | an open task nobody has claimed, next to one that is held or dependent | `test_everything_that_is_not_dispatchable_is_skipped` | tested |
 | `archive` | bulk clearing mail older than a stamp without deleting it | `test_archive_before_only_touches_older_mail` | tested |
 | `reap` | a lease whose caller process is dead, not merely late | `test_reap_requeues_a_dead_caller_even_with_a_live_pane` | tested |
 | `recover` | after an upgrade, a bare shell is offered its session and a live agent is left alone | `test_apply_types_only_into_empty_shells` | tested |
