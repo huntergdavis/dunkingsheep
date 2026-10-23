@@ -220,6 +220,9 @@ PLACEHOLDER_PATTERNS = (
     re.compile(r"new task\?\s*/clear to save [\d.,]+[km]? tokens?", re.I),
     re.compile(r"^\s*(new task\?|type your (request|message)\b)", re.I),
 )
+# How long a "busy" report from another process may block delivery while the pane
+# itself shows no turn and a clear box. A remembered state needs an expiry.
+CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -508,6 +511,7 @@ class Flock:
         # delivery thread and a bounded history of finished messages.
         self.outbox = {}
         self.outbox_threads = {}
+        self._claude_busy_since = {}
         # The last text we typed into each pane, so text stranded by a failed
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
@@ -571,6 +575,8 @@ class Flock:
                 dunker.status = "Restored"
                 self.dunkers.append(dunker)
                 self.next_id = max(self.next_id, _numeric_id(dunker.id) + 1)
+            self.next_message_id = int(payload.get("next_message_id") or self.next_message_id)
+            self._restore_outbox(payload.get("outbox") or [])
             for dunker in list(self.dunkers):
                 if dunker.running:
                     now = time.time()
@@ -587,10 +593,25 @@ class Flock:
             payload = {
                 "version": 1,
                 "next_id": self.next_id,
+                "next_message_id": self.next_message_id,
                 "dunkers": [
                     {field: getattr(d, field) for field in Dunker.FIELDS}
                     for d in self.dunkers
                 ],
+                # Held mail must survive a restart. Losing a queued notice is worse
+                # than delaying it: on 2026-10-23 a restart to clear a stuck hold
+                # silently discarded every held message and three lanes were never
+                # told anything.
+                "outbox": [
+                    {"id": message.id, "pane_id": message.pane_id,
+                     "target_label": message.target_label, "text": message.text,
+                     "source": message.source, "kind": message.kind,
+                     "hold_while_typing": message.hold_while_typing,
+                     "is_notice": message.is_notice,
+                     "notify_for": list(message.notify_for),
+                     "created_at": message.created_at}
+                    for queue in self.outbox.values() for message in queue
+                    if message.status == "queued"],
             }
         try:
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
@@ -616,6 +637,41 @@ class Flock:
         if isinstance(panes, dict):
             self.launches = {pane_id: dict(entry) for pane_id, entry in panes.items()
                              if isinstance(entry, dict)}
+
+    def _restore_outbox(self, rows):
+        """Rebuild held messages after a restart and log what came back.
+
+        A notice is re-typed from its stored text, which is why the text is the
+        thing to persist: a restore that resends a *different* string would be a
+        new message wearing an old id.
+        """
+        restored = []
+        for row in rows:
+            try:
+                pane_id = row["pane_id"]
+                text = row.get("text") or ""
+                kind = row.get("kind") or "text"
+                if kind == "keys":
+                    keys = text.split()
+                    deliver = (lambda p=pane_id, k=keys: self.press_keys(p, k))
+                else:
+                    deliver = (lambda p=pane_id, t=text: self.submit_text(p, t))
+                message = self._new_message(pane_id, row.get("target_label") or pane_id,
+                                            text, row.get("source") or "restored", deliver)
+                message.id = row.get("id") or message.id
+                message.kind = kind
+                message.hold_while_typing = bool(row.get("hold_while_typing", True))
+                message.is_notice = bool(row.get("is_notice"))
+                message.notify_for = list(row.get("notify_for") or [])
+                message.created_at = float(row.get("created_at") or time.time())
+                self._enqueue(message)
+                restored.append(message)
+            except Exception as error:      # noqa: BLE001 - one bad row must not lose the rest
+                log.warning("could not restore a held message: %s", error)
+        if restored:
+            log.warning("resumed %d held message(s) after restart: %s",
+                        len(restored), ", ".join(m.id for m in restored))
+        return restored
 
     def _save_launches(self):
         if not self.persist_enabled:
@@ -2924,6 +2980,9 @@ class Flock:
                                           name=f"outbox-{message.pane_id}", daemon=True)
                 self.outbox_threads[message.pane_id] = thread
                 thread.start()
+        # Persist on enqueue, not only on dunk changes: a restart between a hold
+        # and its delivery used to discard the message silently.
+        self._save()
 
     def _unwedge(self, pane_id, content, since):
         """Last resort when a box has held the same text, unchanged, for
@@ -3189,17 +3248,32 @@ class Flock:
         # to wait behind; `_ensure_box_clear` flushes it before the next send.
         return not self._looks_like_ours(pane_id, typed)
 
+    def send_blocker(self, pane_id, last_sent_text=None, awaiting_consumption=False):
+        """Why a send cannot go now, as (state, reason), or None if it can.
+
+        One function, because two checks gave two answers: `delivery` said ready
+        while the queue held the mail, and there was no way to see which was right.
+        Every gate - delivery_state, the queued-message worker, send_text - asks
+        this, so they cannot disagree again.
+        """
+        marker = self._dead_session(pane_id)
+        if marker:
+            return ("dead", f"dead session ({marker})")
+        if self.turn_active(pane_id):
+            return ("blocked", "a declared turn is active")
+        if self._claude_busy(pane_id):
+            return ("blocked", "claude reports this session busy")
+        if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
+            return ("blocked", "the input box holds a draft")
+        return None
+
     def _clear_to_send(self, pane_id, last_sent_text=None,
                        awaiting_consumption=False, stop_event=None):
         """True once the box has read clear on two checks TYPING_SETTLE_S
         apart, so a pause between thoughts is not mistaken for being done.
         False as soon as either check sees typing, a declared turn is active,
         or the wait is stopped."""
-        if self.turn_active(pane_id):
-            return False
-        if self._claude_busy(pane_id):
-            return False
-        if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
+        if self.send_blocker(pane_id, last_sent_text, awaiting_consumption):
             return False
         if stop_event is not None:
             if stop_event.wait(TYPING_SETTLE_S):
@@ -3476,6 +3550,12 @@ class Flock:
             return {"state": "unknown", "reason": "pane unreadable"}
         typed = None if _modal_open(screen) else _typed_text(screen)
         state, reason = classify_delivery(screen, status, typed=typed)
+        # A hold that the classifier cannot see (a declared turn, a stale busy
+        # report) is still a hold: report it as blocked with that reason, so
+        # `delivery` and the queue never disagree.
+        blocker = self.send_blocker(pane_id)
+        if blocker and state in ("ready", "working"):
+            return {"state": "blocked", "reason": blocker[1]}
         return {"state": state, "reason": reason}
 
     def clear_box(self, target, self_pane_id=None, reason=None):
@@ -3591,10 +3671,16 @@ class Flock:
             return True, ok, detail
 
     def _claude_busy(self, pane_id):
-        """True only when Claude's own session reports status=busy.
+        """True only when Claude's own session reports status=busy AND that report
+        is fresh enough to believe.
 
-        Unknown/unavailable is not busy: the screen/typing detector and the
-        declared-turn TTL remain the fallbacks. This is the tmux gate-2 signal.
+        A busy report is a REMEMBERED state from another process: it froze the fleet
+        for eight and a half hours on 2026-10-23 while the pane sat with an empty
+        prompt and no turn. So the hold is bounded: if the session has said busy for
+        longer than CLAUDE_BUSY_TTL_S while this pane's box reads clear and no turn
+        is active, the report is stale, the hold is released, and the release is
+        logged with both numbers. The pane is the evidence; the status file is a
+        claim about it.
         """
         try:
             pane = self.herdr.get_pane(pane_id)
@@ -3603,9 +3689,25 @@ class Flock:
         if not pane or str(pane.get("agent") or "").lower() != "claude":
             return False
         try:
-            return self.claude_status.status_for_pane(pane) == "busy"
+            busy = self.claude_status.status_for_pane(pane) == "busy"
         except Exception:  # noqa: BLE001
             return False
+        if not busy:
+            self._claude_busy_since.pop(pane_id, None)
+            return False
+        since = self._claude_busy_since.setdefault(pane_id, time.time())
+        held = time.time() - since
+        if held <= CLAUDE_BUSY_TTL_S:
+            return True
+        # Long "busy" report: believe the pane over the report, but only when the
+        # pane agrees that nothing is happening.
+        if self.turn_active(pane_id) or self._typing_in(pane_id):
+            return True
+        log.warning("claude status says busy for %s for %d min but the pane shows no "
+                    "turn and a clear box; releasing the hold (CLAUDE_BUSY_TTL_S=%d)",
+                    pane_id, held / 60, CLAUDE_BUSY_TTL_S)
+        self._claude_busy_since.pop(pane_id, None)
+        return False
 
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right

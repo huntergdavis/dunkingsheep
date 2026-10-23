@@ -59,6 +59,46 @@ in practice that was the pane doing the work. The rule is now:
 This is the same lesson as the ack scope: the guard has to match the shape the
 thing actually has, or the guard becomes the outage.
 
+## The hold: one predicate, an expiry, and a queue that survives a restart
+
+The hold exists to stop us typing over a human. On 2026-10-23 it stopped the fleet
+from talking at all, invisibly: every message to par-e was held for 8.5 hours while
+that pane sat with an **empty prompt, no turn, and no output**.
+
+Three fixes, and the shape of each is the same — *a remembered state needs an
+expiry, and two checks that can disagree will*:
+
+1. **`send_blocker()` is the single predicate.** `delivery_state`, the queued-message
+   worker and `send_text` all ask it, so `delivery` cannot say `ready` while the
+   queue says held. It returns the reason in the same words both surface.
+2. **A `busy` report expires.** Claude's session status is a claim about a pane made
+   by another process. It is believed while fresh; after `CLAUDE_BUSY_TTL_S`
+   (default 600 s) the **pane's own evidence** decides — if it shows no declared
+   turn and no draft, the hold is released and the release is logged with both
+   numbers:
+   `claude status says busy for wW:p5 for 10 min but the pane shows no turn and a
+   clear box; releasing the hold`.
+3. **The queue survives a restart.** Held messages are persisted with the daemon
+   state and re-queued on start, and the restart says what it resumed:
+   `resumed 1 held message(s) after restart: m1`. Before this, restarting to clear a
+   stuck hold silently discarded every held message and three lanes were never told
+   anything. **Losing mail is worse than delaying it.**
+
+### When the hold is wrong: `--ignore-typing`
+
+If `delivery <pane>` says blocked but the pane in front of you is empty, read the
+pane first, then send with the hold bypassed:
+
+```bash
+dunkingsheep delivery wW:p5                    # what does it think, and why
+dunkingsheep send wW:p5 --ignore-typing 'text' # bypass the typing hold for this send
+```
+
+`--ignore-typing` skips the draft check for that one send. It is the documented
+answer to "the hold says typing and the pane is empty" — **and the warning is the
+point**: read the pane before using it, because the same flag will type over a real
+human draft. This is a bypass, not a fix; if the hold is wrong, fix the reason.
+
 ## Getting a stuck lane moving again
 
 Two different problems, two different commands:
