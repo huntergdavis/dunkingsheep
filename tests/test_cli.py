@@ -280,7 +280,9 @@ class CliEndToEndTests(unittest.TestCase):
         os.environ["DUNKINGSHEEP_MIN_POLL_S"] = "60"
         os.environ.pop("DUNKINGSHEEP_FRESH", None)
         try:
-            marker, _hit = module._coalesce(["inbox", "count"])
+            # The SAME argv the subprocess runs: the key hashes the whole argument
+            # vector, because the cached file is stdout and --json changes it.
+            marker, _hit = module._coalesce(["--json", "inbox", "count"])
         finally:
             for key, value in saved.items():
                 if value is None:
