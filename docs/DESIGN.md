@@ -496,3 +496,32 @@ persistence natural.
 - A TCP/HTTP transport. The unix socket is local by design; the MCP server is
   the remote-friendly surface (harnesses spawn it over stdio).
 - Exposing `shutdown` to agents.
+
+## "It compiles" is not "it runs"
+
+A gate that proves a module **binds** proves nothing about **execution**. On
+2026-10-22 an undefined Unicorn register constant reached `main` in the poolrad
+gate because `check_checker_builds.py --compile-only` compiled that module without
+executing a single hook; the `NameError` only fired inside a real audit hours
+later (#1437).
+
+Our own surface had the same hole: the CLI parity test greps the help text, which
+proves a name is *spelled*, not that a handler *works*. `tests/test_command_smoke.py`
+closes it by executing **every** command in the registry against a fixture fleet:
+
+- a command with no required parameters must **return a result**;
+- a command that needs parameters must refuse **with words**;
+- no command may raise `NameError`, `AttributeError`, `TypeError`,
+  `UnboundLocalError` or **`KeyError`** — a handler that indexes `args["target"]`
+  for a key the `Command` does not declare `required` is a schema that lies about
+  its needs, and it reaches a user as "internal error".
+
+The first run found two such lies (`clear_box`, `delivery`). The gate is proven to
+fail: a deliberately broken handler that reads an unimported name is registered in
+`test_the_gate_would_catch_an_unimported_name` and the test asserts the smoke gate
+reports it.
+
+Corollary, from the same message: a **repair** that changes no claim carries a
+dated note beside the evidence, not a rewritten document — a rewritten doc reads as
+if the claim had always held.
+

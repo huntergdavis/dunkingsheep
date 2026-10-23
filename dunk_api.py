@@ -914,14 +914,16 @@ COMMANDS = [
         "to SUBMIT text that simply never went in.",
         h_clear_box,
         params={"target": {"type": "string", "description": "Pane id, name or label."},
-                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}}),
+                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}},
+        required=("target",)),
     Command(
         "delivery",
         "Can this lane receive a message, and if not why: ready / working / "
         "blocked (dead session, paused goal, full context, unsubmitted draft) / unknown.",
         h_delivery,
         params={"target": {"type": "string", "description": "Pane id, name or label."},
-                "status": {"type": "string", "description": "The pane's reported status, if known."}}),
+                "status": {"type": "string", "description": "The pane's reported status, if known."}},
+        required=("target",)),
     Command(
         "help",
         "Explain Dunking Sheep: concepts, placeholders, the meta-dunking recipe, "
