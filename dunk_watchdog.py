@@ -184,7 +184,12 @@ RULE_PARAMS = {
     # Above the 24h auto-archive: a page must mean "the archive did not catch
     # this", not "the archive is about to catch this".
     "inbox.undeliverable": {"min_messages": POSITIVE_INT, "min_age_hours": POSITIVE},
-    "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT},
+    # A WORKING lane's unread mail is a queue; an IDLE lane's is a miss. The rule
+    # needs the state, not just the age: par-c authoring a body for four hours is
+    # throughput, not a lane we failed to reach.
+    "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT,
+                          "idle_statuses": _enum_list("idle", "done", "blocked", "unknown",
+                                                      allow_empty=False)},
     "inbox.unread_dead": {"min_messages": POSITIVE_INT},
     "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 50, integer=True),
                                "require_live_pane": _bool},
@@ -665,15 +670,27 @@ def _queued(inputs, older_than=None):
 
 
 def rule_inbox_unread_live(inputs, rule):
+    """Unread mail in a lane that is IDLE: a message it never saw.
+
+    A lane that is working through a long job has a queue, not a miss - paging on
+    it asks somebody to interrupt the work to read mail that will be read when the
+    job lands. So the lane's own state is the first condition and the age is the
+    second. With the pane source disabled the state is unknown to us, and the rule
+    keeps its old behaviour (page, and say liveness is unknown) rather than
+    silently going quiet.
+    """
     panes = inputs.panes()
+    idle = {status.lower() for status in rule["idle_statuses"]}
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs, inputs.now - rule["age_minutes"] * 60)
-            if panes is None or (pane in panes)]
+            if panes is None or (pane in panes and str(panes.get(pane) or "").lower() in idle)]
     rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
             evidence = _group_evidence(inputs, mailbox, group)
             evidence["pane_liveness"] = "unknown (pane source disabled)" if panes is None else "live"
+            evidence["pane_state"] = ("unknown (pane source disabled)" if panes is None
+                                      else panes.get(mailbox) or "idle")
             out.append(finding("inbox.unread_live", rule, mailbox, f"unread mail in {mailbox}",
                                f"{rule['min_messages']} msgs older than {rule['age_minutes']}min",
                                f"{group['count']} msgs", "current", evidence))

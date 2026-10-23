@@ -417,8 +417,30 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertIn("retired panes: 1 (wW:p4)", found[0]["summary"])
         self.assertEqual("info", found[0]["severity"])
 
+    def test_a_busy_lane_with_old_unread_mail_is_a_queue_not_a_miss(self):
+        """par-c authoring a body for four hours is throughput, not a missed lane."""
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1,
+                                                    "idle_statuses": ["idle", "done"]})
+        self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "working"},
+                            {"pane_id": "w1:p2", "agent_status": "idle"}]
+        self.fleet.message("busy", "queued", NOW - 4 * 3600, pane_id="w1:p1")
+        self.fleet.message("idle", "queued", NOW - 4 * 3600, pane_id="w1:p2")
+        keys = self.keys(self.fleet.evaluate(cfg))
+        self.assertIn(("inbox.unread_live", "idle"), keys)
+        self.assertNotIn(("inbox.unread_live", "busy"), keys,
+                         "a working lane's unread mail is a queue, not a miss")
+
+    def test_an_unknown_state_does_not_page_as_a_miss(self):
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1,
+                                                    "idle_statuses": ["idle", "done"]})
+        self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "unknown"}]
+        self.fleet.message("mystery", "queued", NOW - 4 * 3600, pane_id="w1:p1")
+        self.assertEqual([], [k for k in self.keys(self.fleet.evaluate(cfg))
+                              if k[0] == "inbox.unread_live"])
+
     def test_inbox_unread_live_and_dead(self):
-        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1},
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1,
+                                                    "idle_statuses": ["idle", "done"]},
                                 inbox__unread_dead={"min_messages": 1},
                                 inbox__undeliverable={"min_messages": 99, "min_age_hours": 0.01})
         self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]

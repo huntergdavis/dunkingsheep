@@ -88,7 +88,11 @@
       "cooldown_minutes": 240,
       "must_hold_runs": 1,
       "age_minutes": 240,
-      "min_messages": 1
+      "min_messages": 1,
+      "idle_statuses": [
+        "idle",
+        "done"
+      ]
     },
     "inbox.unread_dead": {
       "enabled": true,

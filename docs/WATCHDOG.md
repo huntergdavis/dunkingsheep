@@ -255,6 +255,36 @@ It is `once=True`, so it says this one time and stops, rather than accumulating 
 streak that eventually pages. The alert for a live loop now names when it last
 happened: `dunk d9 skipped 5 times in a row (last 2 min ago)`.
 
+## `inbox.unread_live`: state first, then age
+
+**A working lane's unread mail is a queue; an idle lane's is a miss.** par-c was
+authoring a body for four hours with two unread messages, and the rule paged about
+it: reading mail mid-authoring is a context switch the lane should not make, and the
+mail would be read when the body landed. Nothing was wrong.
+
+So the rule now requires the lane's **own state** to be idle (`idle_statuses`,
+default `idle` and `done`) *as well as* the age threshold:
+
+```text
+inbox.unread_live = mail older than age_minutes
+                    AND its pane's agent_status is idle/done
+                    AND the mailbox is not retired
+```
+
+An **unknown** status does not page either: we cannot say a lane missed mail we
+cannot see it holding. The exception is the degraded mode where the pane source is
+disabled entirely - then the rule keeps its old behaviour and says so in the
+evidence (`pane_liveness: unknown (pane source disabled)`), because a silent rule is
+worse than one that explains itself.
+
+The number now means something the owner can act on: **idle lanes with unread mail
+older than N** is the count of lanes we failed to reach, and it should be zero.
+"Working lanes with unread mail" is throughput.
+
+This is the fourth rule tonight with the same shape - retired pane, dead session,
+placeholder-only box, and now this: **state first, age second.** Age is not
+liveness, and it is not idleness either.
+
 ## Before you model a number, check the recorder
 
 Three recorders threw data away tonight: `pane_samples` only recorded the
