@@ -686,7 +686,25 @@ lesson rather than an anecdote:
 - **the screen was well-formed** — the parser assumed plain text, and a correctly
   drawn box is what defeated it.
 
-Both shapes are now a literal fixture (`bordered_draft_above_an_empty_prompt()`), and
+### One reader means one wrong answer, so the fixtures are the guard
+
+When three components read the pane independently, a bug shows up as
+*disagreement*. When they share one reader, a bug shows up as **everything being
+wrong in the same direction** — so the fixture set matters more, not less. Three
+literal screens, each a real shape a composer draws:
+
+| fixture | what it pins |
+|---|---|
+| `bordered_draft_above_an_empty_prompt()` | the border character is not the sigil, and the draft is not the last line |
+| `multi_line_draft()` | a pasted draft draws a sigil on every line: the draft **starts** at the first one, and the rest are continuations (reading the last line reported the tail as if it were the whole draft) |
+| `draft_that_looks_like_a_prompt()` | the message itself begins with the sigil (`❯ ❯ ls`): the inner sigil is text, not a second box |
+
+**One test drives all three through all three askers** — `box_text`, `flush_box`, and
+`delivery_state`/`send_blocker` — and requires the last two to agree in the same
+words. A wrong answer from the shared reader is now reproducible from a fixture
+instead of mysterious from a pane.
+
+Both shapes are literal fixtures, and
 **one fixture proves all three askers**, because they share one reader: `box_text()`
 returns the draft, `flush_box()` submits it, and `delivery_state()`/`send_blocker()`
 report it as blocked *in the same words*.

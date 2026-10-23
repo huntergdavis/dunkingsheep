@@ -131,6 +131,28 @@ def bordered_draft_above_an_empty_prompt(draft="check your inbox"):
             "  ⏵⏵ bypass permissions on · 1 shell\n")
 
 
+def multi_line_draft():
+    """A pasted two-line draft: the harness draws a sigil on BOTH lines.
+
+    Reading the LAST text-bearing prompt line reported '-la' as if it were the whole
+    draft. The draft starts at the first one, and the rest are continuations.
+    """
+    return ("│ ❯ make test\n"
+            "│ ❯ -k delivery\n"
+            "❯\u00a0\n"
+            "─────────────────────────────────────────────\n")
+
+
+def draft_that_looks_like_a_prompt():
+    """The draft's own text begins with the sigil: '❯ ls' typed INTO the box.
+
+    The screen shows the prompt sigil twice, and the second one is the message.
+    """
+    return ("❯ ❯ ls\n"
+            "❯\u00a0\n"
+            "─────────────────────────────────────────────\n")
+
+
 class BoxReaderTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -152,7 +174,7 @@ class BoxReaderTests(unittest.TestCase):
     def test_a_draft_above_an_empty_prompt_is_still_found(self):
         text, detail = dunk_core.box_text(bordered_draft_above_an_empty_prompt())
         self.assertEqual("check your inbox", text)
-        self.assertIn("text on row 1", detail)
+        self.assertIn("text starts on row 1", detail)
 
     def test_the_same_fixture_proves_every_asker(self):
         """One screen, three components: the reader, flush, and the send gate.
@@ -175,6 +197,34 @@ class BoxReaderTests(unittest.TestCase):
         self.assertIn("draft", state["reason"])
         blocker = self.flock.send_blocker("w1:p2")
         self.assertEqual(blocker[1], state["reason"])
+
+    def test_a_multi_line_draft_starts_at_its_first_line(self):
+        text, detail = dunk_core.box_text(multi_line_draft())
+        self.assertEqual("make test", text, "the draft starts at the first prompt line")
+        self.assertIn("prompt line(s) below it", detail)
+
+    def test_a_draft_whose_text_begins_with_the_sigil_still_reads(self):
+        text, detail = dunk_core.box_text(draft_that_looks_like_a_prompt())
+        self.assertEqual("❯ ls", text,
+                         "the inner sigil is part of the message, not a second box")
+        self.assertIn("text starts on row 1", detail)
+
+    def test_all_three_fixtures_agree_across_the_askers(self):
+        """One reader means one wrong answer everywhere, so the fixture set is the guard."""
+        for fixture, expected in ((bordered_draft_above_an_empty_prompt(), "check your inbox"),
+                                  (multi_line_draft(), "make test"),
+                                  (draft_that_looks_like_a_prompt(), "❯ ls")):
+            text, _detail = dunk_core.box_text(fixture)
+            self.assertEqual(expected, text)
+
+            self.herdr.screens["w1:p2"] = fixture
+            flushed = self.flock.flush_box("w1:p2", self_pane_id="w1:p1")
+            self.assertEqual(expected, flushed["text"], "flush submits what the reader read")
+
+            state = self.flock.delivery_state("w1:p2")
+            self.assertEqual("blocked", state["state"], "a draft blocks delivery")
+            self.assertEqual(self.flock.send_blocker("w1:p2")[1], state["reason"],
+                             "the gate and delivery must use the same words")
 
     def test_a_bordered_draft_is_found(self):
         text, _detail = dunk_core.box_text("│ ❯ check your inbox\n❯\u00a0\n")

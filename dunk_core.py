@@ -63,7 +63,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.54.0"
+VERSION = "2.55.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -4374,12 +4374,23 @@ def box_text(screen):
         if body:
             candidates.append((index, body))
     if candidates:
-        index, text = candidates[-1]
+        # The draft STARTS at the first prompt line that carries text. A later prompt
+        # line with text is a continuation (a pasted multi-line draft draws a sigil on
+        # every line), not a new box: taking the LAST one reported the tail of a
+        # multi-line draft as if it were the whole thing.
+        index, text = candidates[0]
+        continuations = [body for _i, body in candidates[1:]]
         below = sum(1 for row in rows[index + 1:]
                     if _strip_ansi(row).strip() and _prompt_body(row) is None)
-        return text, (f"read {len(in_region)} prompt line(s); text on row {index + 1} "
-                      f"of {len(rows)}: {text[:60]!r}"
-                      + (f" (+{below} line(s) below it)" if below else ""))
+        extra = []
+        if continuations:
+            extra.append(f"+{len(continuations)} prompt line(s) below it "
+                         f"({continuations[0][:40]!r}...)")
+        if below:
+            extra.append(f"+{below} indented line(s)")
+        return text, (f"read {len(in_region)} prompt line(s); text starts on row "
+                      f"{index + 1} of {len(rows)}: {text[:60]!r}"
+                      + ((" " + ", ".join(extra)) if extra else ""))
     index, _row = in_region[-1]
     return "", (f"read {len(in_region)} prompt line(s); the last is at row {index + 1} "
                 f"of {len(rows)} with nothing after the sigil")
