@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.58.0"
+VERSION = "2.59.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1473,9 +1473,15 @@ class Flock:
         pane_id = pane_id or self_pane_id
         if not pane_id:
             raise DunkError("turn end requires a pane")
-        with self._lock:
-            state = self.turns.pop(pane_id, None)
         now = time.time()
+        with self._lock:
+            # Keep the ENDED turn instead of popping it: its end time is the only
+            # evidence of IDLENESS the pi extension will ever give us. Popping it
+            # made every pi lane read 'unknown' between turns.
+            state = self.turns.get(pane_id)
+            if state is not None:
+                state["ended_at"] = now
+                state["expires_at"] = 0.0
         duration = int((now - state["started_at"]) * 1000) if state else None
         self.metrics.record("turn.end", pane_id=pane_id, reason=reason,
                             outcome="ok" if state else "unknown", at=now,

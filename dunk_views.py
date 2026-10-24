@@ -8,6 +8,7 @@ No model, no inference about a pane that was not read, and every number is a cel
 import os
 import time
 
+import dunk_activity
 import dunk_context
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR", os.path.expanduser("~/.config/dunkingsheep"))
@@ -64,14 +65,26 @@ def roster(flock, now=None):
         except Exception:                       # noqa: BLE001
             unread, oldest = 0, None
         harness = lane.get("agent")
+        # What the lane is DOING comes from its own tool, not from a status field
+        # that may not exist (pi has none) - and an absent signal is UNKNOWN.
+        try:
+            doing = dunk_activity.activity(lane, claude_status=getattr(flock, "claude_status", None),
+                                           turns=getattr(flock, "turns", None), now=now)
+        except Exception as error:                 # noqa: BLE001 - a row must not fail
+            doing = {"state": "unknown", "since": None, "source": "activity",
+                     "reason": f"activity probe failed: {error}"}
         model_reason = MODEL_SOURCES.get(str(harness or "").lower(), (None, "unknown harness"))
         rows.append({
             "pane_id": pane_id,                       # internal; the UI drops it
             "name": lane.get("agent_name") or pane_id,
             "harness": harness,
             "model": cell(None, None, model_reason[1] if harness else "unknown harness"),
-            "state": status,
-            "since": cell(None, None, "the pane record carries a status, not when it changed"),
+            "state": doing["state"],
+            "state_source": doing["source"],
+            "state_reason": doing["reason"],
+            "since": cell(doing.get("since"), _iso(doing.get("since")),
+                          None if doing.get("since") else "the source reports a state, not when it changed"),
+            "pane_status": status,
             "task": task,
             "inbox": {"unread": unread,
                       "oldest_unread_s": cell(oldest, None,

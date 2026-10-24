@@ -738,3 +738,30 @@ Two instances of the fix, both cheap:
   `SuccessExitStatus=75`. `error: timed out` sent a reader hunting a hang that did
   not exist; the difference between "needs a rewrite" and "outgrew its deadline" is
   the difference between two very different investigations.
+
+## Activity comes from the tool; absent means UNKNOWN
+
+A pi lane read `ready` while its pane plainly said `⠋ Working`, because pi reports no
+status on the pane record. A live pane read `dead` because its transcript quoted the
+marker. Both are the same defect: **a status field that is not the thing it claims to
+be**. `dunk_activity.activity(pane)` answers the question per harness, with its own
+source and, when there is none, a reason:
+
+| harness | source | on failure |
+|---|---|---|
+| claude | `claude agents --json --cwd`, matched by session/pane cwd | `unknown` + "no claude session matches this pane's cwd" |
+| pi | the extension's turn events (`turn_start` / `turn_end`) | `unknown` + "no pi turn has ever been recorded for this pane" |
+| codex | its local turn socket - **not wired yet** | `unknown` + names the gap |
+
+> **An absent signal is UNKNOWN, never idle.** "Assume idle" cost four stalls in one
+> day; "unknown" costs one question.
+
+Two consequences that are easy to lose:
+
+- a pi turn that ENDED is kept (with its `ended_at`) rather than popped: that end
+  time is the only evidence of idleness the extension will ever give, and popping it
+  made every pi lane read `unknown` between turns;
+- the DELIVERY path does not consult activity at all (that is step 0 of the herdr
+  removal: a busy agent is not a hold). Activity serves the fleet questions - the
+  roster, the dispatcher's reporting, the UI - so a gap there is a wrong dot, not a
+  stuck message.
