@@ -30,6 +30,14 @@ not a reason to keep a parallel hand-written list.
 With this, `queue empty` means **no open unblocked work anywhere** — a real
 finding — instead of "somebody forgot to top it up".
 
+## Step 2 ordering: codex's turn socket first
+
+Codex is the harness whose mail depends on a short hold: it does not queue typed text,
+so a nudge to a busy codex lane waits for its turn to end. That makes
+`turn/started` + `turn/completed` on codex's socket **load-bearing** for step 2 rather
+than a refinement - its acceptance test is concrete: a nudge to a mid-turn codex lane
+is delivered within N seconds of `turn/completed`, with the hold reason gone.
+
 ## A tick has a budget, and a dead feeder is a number
 
 A tick classifies every lane, and that classification used to cost **3-4 pane reads
