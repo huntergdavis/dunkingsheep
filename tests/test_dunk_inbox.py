@@ -360,6 +360,15 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(pane_id, resolved)
         self.assertEqual("skies-android", key)
 
+    def test_a_dead_herdr_pane_id_is_not_a_mailbox_either(self):
+        """The vp lane's id ends in a letter (w9:pH), so the narrow numeric
+        pattern let it through and the send was accepted as a NEW mailbox name -
+        the VP's own ruling got filed into the void that way (2026-10-24)."""
+        from dunk_core import DunkError as _DunkError
+        for dead in ("w9:pH", "wR:p5", "w11:p1"):
+            with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
+                self.flock.resolve_mailbox(dead)
+
     def test_a_dead_tmux_pane_id_is_not_a_mailbox(self):
         """Both backends' ids are identities; neither is allowed to become a
         mailbox name just because its pane is gone."""

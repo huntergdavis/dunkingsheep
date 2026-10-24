@@ -113,6 +113,11 @@ BUSY_STATUSES = ("working", "blocked")
 # wR:p5. A digits-only pattern meant 'wR:p9' was not recognised as a pane id at
 # all, so a dead pane id fell through to becoming a mailbox name.
 _PANE_ID_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+:p\d+|%\d+)$")
+# A herdr pane id in its general spelling (w9:pH, wR:p5, w11:p1). The narrow
+# form above only covers the numeric suffix, and the lanes whose ids end in a
+# letter - the vp lane among them - slipped through to become brand new mailbox
+# names: 'w9:pH' accepted mail and queued it into nothing (2026-10-24).
+_HERDR_ID_RE = re.compile(r"^w\d+:p[A-Za-z0-9_.-]+$")
 PANE_ID_RE = _PANE_ID_RE
 _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
 # 'codex-poolrad2 (wR:p5)': a name with its pane id appended. The parenthetical is
@@ -1015,10 +1020,12 @@ class Flock:
         for pane in panes:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return self._mailbox_for_pane(pane)
-        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec):
+        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
             raise DunkError(
-                f"no live pane {spec!r}; a dead pane id is not a mailbox. "
-                "Use a current pane id or a mailbox name.")
+                f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
+                "pane id is not a name. If that lane still exists, address it by "
+                "mailbox name; if it does not, the send fails here instead of "
+                "queueing into nothing.")
         # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
         # that id decides. Without this the whole string fell through to step 3 and
         # became a mailbox NAME with no pane: mail addressed to
