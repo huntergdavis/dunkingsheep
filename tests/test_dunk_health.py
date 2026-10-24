@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import sys
 import tempfile
 import time
@@ -138,6 +139,17 @@ class DispatchFreshnessTests(unittest.TestCase):
         result = self.health._dispatch_freshness(self.tmp.name, 1000.0 + self.health.DISPATCH_STALE_S + 1)
         self.assertEqual("stale", result["status"])
         self.assertEqual(self.health.DISPATCH_STALE_S + 1, result["age_s"])
+
+    def test_the_human_line_reports_minutes(self):
+        import contextlib, io
+        from importlib.machinery import SourceFileLoader
+        cli = SourceFileLoader("dunkcli_health",
+                               str(Path(__file__).resolve().parent.parent / "dunkingsheep")).load_module()
+        result = {"ok": True, "checks": {"dispatch": {"status": "stale", "age_s": 1030}}}
+        with contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli.print_health(result)
+        line = [row for row in buffer.getvalue().splitlines() if "dispatcher" in row][0]
+        self.assertIn("last_tick=17.2m ago (1030s)", line)
 
     def test_an_unreadable_state_is_absent_not_ok(self):
         self.write("{not json")

@@ -120,3 +120,29 @@ class PollCacheScopeTests(unittest.TestCase):
         first = self.path_for("/tmp/x/test.sock")
         second = self.path_for("/tmp/x/test.sock")
         self.assertEqual(first, second)
+
+
+class StillWorkingTests(unittest.TestCase):
+    """A pace problem must not read as a failure.
+
+    'error: timed out' sent the VP hunting a hang that did not exist: the tick was a
+    bounded job that outgrew a 15 s socket deadline. The message must name the phase
+    and the elapsed time, and the exit code must say 'temporary'.
+    """
+
+    def setUp(self):
+        self.mod = load_cli()
+
+    def test_the_message_names_the_phase_the_elapsed_time_and_the_next_place_to_look(self):
+        message = self.mod._still_working_message("dispatch", 180)
+        self.assertIn("still working after 180s", message)
+        self.assertIn("dispatch", message)
+        self.assertIn("pace problem, not a failure", message)
+        self.assertIn("dispatch-state.json", message)
+        self.assertNotIn("error", message.lower())
+
+    def test_the_exit_code_is_distinct_from_a_real_failure(self):
+        self.assertEqual(75, self.mod.EXIT_STILL_WORKING)
+        self.assertNotIn(self.mod.EXIT_STILL_WORKING, (0, 2, 3),
+                         "a slow batch must not share an exit code with a refusal")
+        self.assertIn("dispatch", self.mod.BATCH_COMMANDS)

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import shlex
+import socket
 import sys
 import time
 
@@ -1076,8 +1077,10 @@ def print_health(result):
     if dispatch:
         # 'the feeder is dead' as a number, not an absence.
         age = dispatch.get("age_s")
-        print(f"  dispatcher={dispatch.get('status')} "
-              f"last_tick={('never' if age is None else str(age) + 's ago')}"
+        # Minutes, because that is the number a human reads.
+        human = ("never" if age is None
+                 else (f"{age / 60:.1f}m ago ({age}s)" if age >= 60 else f"{age}s ago"))
+        print(f"  dispatcher={dispatch.get('status')} last_tick={human}"
               + (" (dry run)" if dispatch.get("dry_run") else ""))
 
 
@@ -1496,6 +1499,20 @@ LOCAL_ONLY_COMMANDS = ("context",)
 # landed. This is a wait long enough to be honest about, not a retry.
 SEND_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_SEND_TIMEOUT_S", "120"))
 BATCH_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_BATCH_TIMEOUT_S", "180"))
+# A batch that outlived its socket timeout is NOT an implementation failure: it is a
+# bounded job that outgrew its deadline. Saying 'timed out' sends a reader hunting a
+# hang that does not exist, so the exit code says 'temporary' and the unit can accept
+# it as success.
+EXIT_STILL_WORKING = 75
+# A tick classifies every lane; it is a batch, not a single send.
+BATCH_COMMANDS = ("dispatch",)
+
+
+def _still_working_message(command, seconds):
+    return (f"still working after {int(seconds)}s: {command} has not answered yet. "
+            f"This is a pace problem, not a failure - the daemon keeps going and its "
+            f"result lands in the state it writes (e.g. dispatch-state.json). "
+            f"Raise DUNKINGSHEEP_BATCH_TIMEOUT_S or reduce the batch.")
 
 _POLL_COMMANDS = ("status", "list", "ls", "poll")
 _INBOX_POLLS = ("count", "list", "ls", "stats")
@@ -1795,7 +1812,7 @@ def main(argv=None):
         # client's default 15 s timed out a `fire` that was working perfectly.
         if command in ("fire", "send", "send-keys", "flush", "dunk"):
             client.timeout = max(client.timeout, SEND_TIMEOUT_S)
-        if command == "dispatch":
+        if command in BATCH_COMMANDS:
             # A tick classifies every lane; it is a batch, not a single send, and a
             # 15 s socket timeout turned a working tick into a failed unit.
             client.timeout = max(client.timeout, BATCH_TIMEOUT_S)
@@ -1803,6 +1820,14 @@ def main(argv=None):
     except DunkError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except socket.timeout:
+        # The socket deadline, not the work: say so, and let the caller treat a slow
+        # batch as 'not finished' rather than 'broken'.
+        if command in BATCH_COMMANDS:
+            print(_still_working_message(command, client.timeout), file=sys.stderr)
+            return EXIT_STILL_WORKING
+        print(f"error: no answer after {int(client.timeout)}s from the daemon", file=sys.stderr)
+        return 3
     except (DaemonUnavailable, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 3

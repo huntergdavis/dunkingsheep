@@ -712,3 +712,29 @@ report it as blocked *in the same words*.
 Every question about the pane goes through `read_screen()` / `read_box()`. One read,
 one parser, one fixture — so a component cannot quietly answer from a claim, a cache,
 or a neighbouring row again.
+
+## The automatic path that a human covers for fails silently
+
+Four components failed this way in one day: **delivery** (the hold froze the fleet
+while the VP hand-nudged), **the slot guard**, **flush** (reported "already clear"
+while the box held a draft), and **the dispatcher** (the unit failed every tick for
+hours while lanes were fed by hand). In each case the automatic path was dead, a
+person kept the lights on, and nothing anywhere said so.
+
+> **Any automatic path that a human can cover for will fail silently.** Give every
+> one of them a freshness number that health reports, and a message that says what
+> it was doing when it stopped.
+
+Two instances of the fix, both cheap:
+
+- **the feeder is a number**: `health` reports `dispatcher=ok last_tick=2.1m ago
+  (128s)`, or `stale`, or `absent — never`, and lists a problem when the last
+  completed tick is older than `DISPATCH_STALE_S` (two missed ticks). Absence and
+  staleness are different facts with different sentences.
+- **a pace problem is not a failure**: when a batch outlives its socket deadline the
+  CLI says `still working after 180s: dispatch has not answered yet. This is a pace
+  problem, not a failure - the daemon keeps going and its result lands in
+  dispatch-state.json` and exits **75**, which the unit accepts via
+  `SuccessExitStatus=75`. `error: timed out` sent a reader hunting a hang that did
+  not exist; the difference between "needs a rewrite" and "outgrew its deadline" is
+  the difference between two very different investigations.
