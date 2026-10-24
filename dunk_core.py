@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.0"
+VERSION = "2.69.2"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -997,8 +997,13 @@ class Flock:
             message["notified"] = False
         return message
 
-    def resolve_mailbox(self, spec, self_pane_id=None):
+    def resolve_mailbox(self, spec, self_pane_id=None, strict=False):
         """Turn a target into (mailbox key, label, pane id).
+
+        `strict` is the SEND-time contract (VP ruling 2026-10-24): a target must
+        resolve to a live pane or to a lane the registry knows, and a registered
+        lane marked dead is refused with its date. Reads stay permissive on
+        purpose - inspecting a stranded mailbox is how the backlog gets drained.
 
         The key has to identify one pane and keep identifying it. The pane's
         own label comes first, since that is a name someone chose; then the tab
@@ -1080,6 +1085,30 @@ class Flock:
                     f"{spec!r} is an agent type, not one agent: it would be a mailbox "
                     "several panes share. Use a pane id, a pane or tab label, or a "
                     "name of your own.")
+            # FAIL CLOSED (VP ruling 2026-10-24, owner #1556). Creating a mailbox as
+            # a fallback is what let 'w9:pH', 'w9:pM' and 'nav-fixer2' each become a
+            # brand new mailbox that swallowed the message and reported success. A
+            # target either resolves to a live pane or names a lane that the registry
+            # knows; anything else is refused here, with the reason, and the caller
+            # sees it.
+            if not strict:
+                return spec, spec, None
+            registered, alive, dead_since = self._registered_lane(spec)
+            if registered and not alive:
+                when = ""
+                if dead_since:
+                    when = f" (dead since {dead_since})"
+                raise DunkError(
+                    f"lane {spec!r} is registered as DEAD{when}: nothing can be "
+                    "delivered to it. reason=dead_lane. Restore the lane first, or "
+                    "send to a lane that is live.")
+            if not registered:
+                raise DunkError(
+                    f"target {spec!r} resolves to no live pane and to no registered "
+                    "lane; refusing rather than creating a mailbox that would queue in "
+                    "silence. reason=unknown_name. Use a live pane id, a pane/tab "
+                    "label, or a name recorded in the lane registry.")
+            log.warning("mail for registered but not-live lane %r is queued", spec)
             return spec, spec, None
         return self._mailbox_for_pane(pane)
 
@@ -1242,6 +1271,30 @@ class Flock:
             return candidates[0]
         return None, None              # none live, or two live: the caller refuses
 
+    def _registered_lane(self, name):
+        """(found, alive, dead_since) for a mailbox name in the lane registry.
+
+        The registry is the only place that can say "this lane exists and is not
+        live" (a lane between restarts, or one that died in a flip). A string
+        that is in NO registry row is not a lane at all: mail to it must fail at
+        send time, not create a mailbox and queue into nothing.
+
+        Rows are read tolerantly because the registry is being extended with
+        liveness: a row may be a plain mailbox name (pane -> name) or a dict
+        carrying name/alive/dead_since.
+        """
+        needle = str(name or "").strip().lower()
+        if not needle:
+            return False, True, None
+        for value in self._lane_registry().values():
+            if isinstance(value, dict):
+                label = str(value.get("mailbox") or value.get("name") or "").strip().lower()
+                if label == needle:
+                    return True, bool(value.get("alive", True)), value.get("dead_since")
+            elif str(value or "").strip().lower() == needle:
+                return True, True, None
+        return False, True, None
+
     def _mailbox_exists(self, name):
         """True when the inbox already holds mail addressed to this name."""
         where, params = __import__("dunk_inbox").mailbox_where(name)
@@ -1253,9 +1306,9 @@ class Flock:
         except Exception:                       # noqa: BLE001 - a fallback must not raise
             return False
 
-    def _mailbox_or_self(self, spec, self_pane_id):
+    def _mailbox_or_self(self, spec, self_pane_id, strict=False):
         if spec:
-            return self.resolve_mailbox(spec, self_pane_id)[0]
+            return self.resolve_mailbox(spec, self_pane_id, strict=strict)[0]
         if not self_pane_id:
             raise DunkError("no mailbox given and no caller pane to default to")
         return self._own_mailbox(self_pane_id)
@@ -1275,7 +1328,7 @@ class Flock:
                 raise DunkError(f"unknown system sender {system_sender!r}")
             if self_pane_id:
                 raise DunkError("a system sender cannot be claimed from a pane")
-        mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id)
+        mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id, strict=True)
         # The sender is the raw pane id, never a mailbox label. On 2026-10-19
         # wS:p1's mail arrived "from codex poolrad" because the label resolved
         # through a sibling pane; ids are unique and stable.

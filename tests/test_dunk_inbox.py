@@ -392,13 +392,35 @@ class InboxThroughTheFlockTests(unittest.TestCase):
             self.assertEqual("ghost lane", key, "an unstarted agent still gets mail")
             self.assertIsNone(pane)
 
-    def test_mail_can_be_left_for_an_agent_that_is_not_running(self):
-        key, label, pane = self.flock.resolve_mailbox("not-started-yet")
-        self.assertEqual("not-started-yet", key)
-        self.assertIsNone(pane)
-        sent = self.flock.inbox_send("not-started-yet", "waiting for you", notify=True)
-        self.assertEqual(1, self.flock.inbox_count("not-started-yet")["unread"])
+    def test_an_unknown_name_is_refused_rather_than_becoming_a_mailbox(self):
+        """FAIL CLOSED (VP ruling 2026-10-24): a mailbox created as a fallback
+        swallowed the message and reported success. Three real targets did that:
+        w9:pH, w9:pM and nav-fixer2."""
+        from dunk_core import DunkError as _DunkError
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.resolve_mailbox("not-started-yet", strict=True)
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.inbox_send("not-started-yet", "waiting for you", notify=True)
+        self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
+                         "a refused send must not leave a mailbox behind")
+
+    def test_mail_can_be_left_for_a_lane_the_registry_knows(self):
+        self.flock._remember_lane("w9:pZ", "arriving later")
+        key, label, pane = self.flock.resolve_mailbox("arriving later")
+        self.assertEqual("arriving later", key)
+        self.assertIsNone(pane, "the pane is not live yet; the lane still gets mail")
+        sent = self.flock.inbox_send("arriving later", "waiting for you", notify=True)
+        self.assertEqual(1, self.flock.inbox_count("arriving later")["unread"])
         self.assertFalse(sent["notified"], "nothing to nudge")
+
+    def test_a_lane_the_registry_marks_dead_alarms_with_the_date(self):
+        from dunk_core import DunkError as _DunkError
+        self.flock._remember_lane("w9:pY", {"mailbox": "gone lane", "alive": False,
+                                            "dead_since": "2026-10-24 08:00"})
+        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
+            self.flock.resolve_mailbox("gone lane", strict=True)
+        with self.assertRaisesRegex(_DunkError, "dead since 2026-10-24 08:00"):
+            self.flock.inbox_send("gone lane", "anyone there", notify=True)
 
     def test_send_nudges_the_recipient_with_one_short_line(self):
         self.herdr.set_screen("w2:p1", None)       # unreadable: nudge still queues
@@ -429,6 +451,8 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                         "the failed send must not store a message")
 
     def test_archive_through_the_flock_drains_unread(self):
+        # A registered lane whose pane is gone: archiving its backlog must work.
+        self.flock._remember_lane("w9:pW", "dead-mailbox")
         for n in range(2):
             self.flock.inbox_send("dead-mailbox", f"m{n}", notify=False)
         result = self.flock.inbox_archive("dead-mailbox")
@@ -436,6 +460,16 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         count = self.flock.inbox_count("dead-mailbox")
         self.assertEqual(0, count["unread"])
         self.assertEqual(2, count["archived"])
+
+    def test_a_stranded_mailbox_can_still_be_read_even_though_sends_are_refused(self):
+        """Reads stay permissive on purpose: draining stranded mail is the point."""
+        self.inbox.send("stranded lane", "from the void", sender="pm")
+        count = self.flock.inbox_count("stranded lane")
+        self.assertEqual(1, count["unread"])
+        self.assertEqual(["from the void"],
+                         [m["body"] for m in self.flock.inbox_read("stranded lane")["messages"]])
+        with self.assertRaisesRegex(DunkError, "reason=unknown_name"):
+            self.flock.inbox_send("stranded lane", "no", notify=False)
 
     def test_counting_without_a_mailbox_or_a_caller_is_a_clear_error(self):
         with self.assertRaisesRegex(DunkError, "no mailbox given"):
@@ -639,8 +673,9 @@ class InboxErrorShapeTests(unittest.TestCase):
     def test_a_bad_attachment_path_is_a_caller_error_too(self):
         with self.assertRaisesRegex(DunkError, "no such file"):
             dunk_api.dispatch(self.flock, "inbox_send",
-                              {"to": "someone", "body": "hi", "attach": "/no/such/file",
-                               "notify": False}, self_pane_id="w1:p2")
+                              {"to": "Codex Site", "body": "hi",
+                               "attach": "/no/such/file", "notify": False},
+                              self_pane_id="w1:p2")
 
 
 class MailboxRoutingTests(unittest.TestCase):

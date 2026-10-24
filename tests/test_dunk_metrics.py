@@ -157,6 +157,9 @@ class MetricsEndpointTests(unittest.TestCase):
         self.assertTrue(report["coverage"]["window_has_events"])
 
     def test_pane_breakdown_only_where_a_pane_id_exists(self):
+        # A registered lane with no live pane: sends are allowed for a lane the
+        # registry knows (the metrics question here is about pane attribution).
+        self.flock._remember_lane("w9:pV", "not-a-running-agent")
         self.flock.inbox_send("not-a-running-agent", "body", notify=False)
         report = self.flock.metrics_summary(window_s=3600)
         self.assertEqual({}, report["counts"]["by_pane"],
