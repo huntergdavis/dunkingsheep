@@ -1039,7 +1039,10 @@ class VpDeliveryTests(WatchdogCase):
                         host_sampler=self.fleet.host)
         self.assertEqual(1, len(calls))
         self.assertIn("daemon down", report["delivery_error"])
-        self.assertFalse(os.path.exists(cfg["heartbeat_path"]))
+        # The heartbeat says the watchdog RAN, so it is written even when delivery
+        # failed - otherwise a delivery bug silences the dead-man that reports it.
+        self.assertTrue(os.path.exists(cfg["heartbeat_path"]),
+                        "a delivery failure must not look like a watchdog that never ran")
         self.assertIn("DELIVERY FAILED (source=watchdog-self)", wd.render_text(report))
 
     def test_recovery_line_goes_to_vp(self):

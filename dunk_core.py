@@ -3880,16 +3880,6 @@ class Flock:
             return True
         self._last_block_reason[pane_id] = "foreign-text-will-not-submit"
         return False
-        still = self._draft_persists(pane_id)
-        if still is None:
-            return True                      # a redraw, not a draft
-        if self._looks_like_ours(pane_id, still):
-            ok, _detail = self._press_until_submitted(pane_id, still)
-            return ok
-        self._last_block_reason[pane_id] = "draft"
-        log.info("%s: holding, the input box still holds a draft: %r",
-                 pane_id, still[:60])
-        return False                         # someone is writing
 
     def _lock_for(self, pane_id):
         with self._lock:
