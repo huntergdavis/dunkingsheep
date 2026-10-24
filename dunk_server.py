@@ -231,6 +231,27 @@ def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
                   "unsupervised start. Run: systemctl --user start "
                   "dunkingsheep.service")
         return 3
+    # GATE 5 (the one that matters after 2026-10-24): a daemon started on a backend
+    # that sees NO panes would run, answer status, and fail every delivery with
+    # 'no server running on /tmp/tmux-1000/default'. That is not a degraded mode, it is
+    # a wrong environment - refuse to start and name it.
+    backend_name = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "herdr").strip().lower()
+    if os.environ.get("DUNKINGSHEEP_ALLOW_EMPTY_BACKEND") != "1":
+        from dunk_terminal import get_backend
+        try:
+            probe = get_backend()          # honours DUNKINGSHEEP_TERMINAL_BACKEND itself
+            panes = probe.list_panes()
+        except Exception as error:                      # noqa: BLE001 - a refusal, not a crash
+            log.error("refusing to start: backend %r cannot list panes: %s", backend_name, error)
+            return 4
+        if not panes:
+            log.error(
+                "refusing to start: backend %r sees zero panes. This daemon delivers by "
+                "reading and typing into panes; with none it would accept every message "
+                "and fail every delivery. Start it in an environment where the backend "
+                "has panes, or set DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1 for a deliberate "
+                "trial.", backend_name)
+            return 4
     kwargs = {"state_file": state_file} if state_file else {}
     flock = Flock(**kwargs)
     server = FlockServer(flock, socket_path=socket_path)

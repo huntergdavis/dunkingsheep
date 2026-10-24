@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.66.0"
+VERSION = "2.67.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -523,7 +523,7 @@ class Message:
 
     def _queued_message(self):
         if self.holds:
-            return f"queued: someone is typing in {self.target_label}"
+            return f"queued: the box in {self.target_label} would not clear"
         return f"queued for {self.target_label}, delivering once the input box is clear"
 
     def to_dict(self):
@@ -2933,7 +2933,7 @@ class Flock:
                 dunker.status = "Queued (typing)"
                 self._enqueue(message)
                 return {"id": dunker.id, "ok": None, "queued": True, "message_id": message.id,
-                        "message": f"queued: someone is typing in {dunker.target_label()}"}
+                        "message": f"queued: the box in {dunker.target_label()} would not clear"}
             dunker.status = "Sending..."
             sent, ok, message = self.send_guarded(
                 dunker.target_pane_id, lambda: self._do_send(dunker),
@@ -2947,7 +2947,7 @@ class Flock:
                 self._enqueue(queued)
                 return {"id": dunker.id, "ok": None, "queued": True,
                         "message_id": queued.id,
-                        "message": f"queued: someone is typing in {dunker.target_label()}"}
+                        "message": f"queued: the box in {dunker.target_label()} would not clear"}
             stamp = time.strftime("%H:%M:%S")
             dunker.status = f"Tested {stamp}" if ok else "Test failed"
             return {"id": dunker.id, "ok": ok, "queued": False, "message": message}
@@ -3155,8 +3155,9 @@ class Flock:
                     held_since = time.time()
                     with self._lock:
                         message.holds += 1
-                        self.last_message = f"Holding message for {message.target_label}: someone is typing"
-                    log.info("message %s -> %s: holding, someone is typing in the input box",
+                        self.last_message = (f"Holding message for {message.target_label}: "
+                                             f"the box would not clear")
+                    log.info("message %s -> %s: holding, the box would not clear",
                              message.id, pane_id)
                 # Watch what is in the box. While it changes someone is
                 # writing and we wait; while it does not, we are wedged.
@@ -4171,9 +4172,9 @@ class Flock:
                         with self._lock:
                             dunker.hold_count += 1
                             dunker.last_held_at = held_since
-                            self.last_message = f"Holding {dunker.id}: someone is typing"
+                            self.last_message = (f"Holding {dunker.id}: the box would not clear")
                             self._save()
-                        log.info("%s -> %s: holding, someone is typing in the input box",
+                        log.info("%s -> %s: holding, the box would not clear",
                                  dunker.id, dunker.target_pane_id)
                     dunker.status = "Held (typing)"
                     if stop_event.wait(TYPING_RECHECK_S):

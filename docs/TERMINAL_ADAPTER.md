@@ -410,3 +410,24 @@ and is read-only; `--panes`/`--tasks` are explicit extras. Panes and tasks are
 NOT included by default. All writes (inbox read/send/ack, task next/heartbeat/
 complete, send, close, start-agent) stay on the full guarded CLI; the batch is
 never a write bypass. Lanes should poll `dunk-poll`, not spawn the CLI.
+
+## Gate 5: refuse to start on a backend that sees no panes
+
+On 2026-10-24 a drop-in set `DUNKINGSHEEP_TERMINAL_BACKEND=tmux` and restarted the
+daemon. There was no tmux server and no panes, so the daemon started, answered
+`status` normally, and **failed every delivery** with `no server running on
+/tmp/tmux-1000/default` - three notices in the first minute. That is not a degraded
+mode; it is a wrong environment wearing a working one.
+
+The daemon now probes its backend at startup and refuses with exit 4:
+
+```text
+refusing to start: backend 'tmux' sees zero panes. This daemon delivers by reading and
+typing into panes; with none it would accept every message and fail every delivery.
+Start it in an environment where the backend has panes, or set
+DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1 for a deliberate trial.
+```
+
+A backend that cannot list panes at all is refused the same way. The override exists so
+an isolated trial daemon is still possible - deliberately, with one variable, rather
+than by accident.
