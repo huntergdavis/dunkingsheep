@@ -660,6 +660,7 @@ class SurfaceParityTests(unittest.TestCase):
             "pm_digest": "digest", "pm_routing": "routing",
             "clear_box": "clear-box", "delivery": "delivery", "dispatch": "dispatch",
             "retire_pane": "retired", "api": "api",
+            "state_capture": "state", "state_latest": "state",
             "roster": "roster", "message_state": "message-state",
             "reply_stats": "reply-stats", "project_summary": "project-summary",
         }
