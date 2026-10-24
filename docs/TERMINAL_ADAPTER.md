@@ -431,3 +431,25 @@ DUNKINGSHEEP_ALLOW_EMPTY_BACKEND=1 for a deliberate trial.
 A backend that cannot list panes at all is refused the same way. The override exists so
 an isolated trial daemon is still possible - deliberately, with one variable, rather
 than by accident.
+
+## A lane's mailbox must not depend on the backend's pane ids
+
+The tmux flip made this visible in the worst way: every herdr pane id became unknown to
+the daemon, so `inbox count` failed with `no herdr pane matches 'w8:p8'` - a lane could
+not read its own mail because the backend it was started on ran out of scope.
+
+The identity order for a caller's own mailbox is now:
+
+1. **`DUNKINGSHEEP_MAILBOX`** - an explicit name wins, always;
+2. **the lane registry** (`~/.config/dunkingsheep/lanes.json`) - `pane id -> mailbox`,
+   written whenever a resolution genuinely succeeds, and seeded from the inbox's own
+   `pane_id` column (72 lanes, so it exists before anything breaks);
+3. a mailbox named after the pane id, if one exists;
+4. otherwise a named refusal that says what to set.
+
+Two rules that made it trustworthy: a FALLBACK is never recorded (recording one poisons
+the registry with `pane id -> pane id` and loses the lane's name), and the registry is
+seeded from data we already had rather than from a guess.
+
+Measured: after the flip, this lane went from `no herdr pane matches 'w8:p8'` to
+`dunky pi: 0 unread of 216`.

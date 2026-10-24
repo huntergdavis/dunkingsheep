@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.67.0"
+VERSION = "2.68.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1129,9 +1129,73 @@ class Flock:
         cached = self._own_mailbox_cache.get(self_pane_id)
         if cached and now - cached[1] < MAILBOX_CACHE_S:
             return cached[0]
-        key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+        resolved = False
+        try:
+            key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+            resolved = True
+        except DunkError:
+            # A LANE'S MAILBOX MUST NOT DEPEND ON THE BACKEND'S PANE IDS. After the
+            # tmux flip every herdr pane id became unknown to the daemon, and every
+            # command that resolved "self" failed - including reading one's own mail.
+            # The inbox already supports a mailbox named after the pane id, so that is
+            # the identity of last resort, and it is explicit rather than guessed.
+            key = (os.environ.get("DUNKINGSHEEP_MAILBOX") or "").strip() or None
+            if not key and self_pane_id:
+                key = self._lane_registry().get(self_pane_id)
+            if not key and self_pane_id and self._mailbox_exists(self_pane_id):
+                key = self_pane_id
+            if not key:
+                raise DunkError(
+                    f"cannot resolve this lane's mailbox: {self_pane_id!r} is not a pane "
+                    f"on the current backend ({self.herdr.name if hasattr(self.herdr, 'name') else 'unknown'}) "
+                    f"and no mailbox is named after it; set DUNKINGSHEEP_MAILBOX to the "
+                    f"lane's mailbox name")
         self._own_mailbox_cache[self_pane_id] = (key, now)
+        # Only a REAL resolution is worth remembering: recording a fallback would
+        # poison the registry with 'pane id -> pane id' and lose the lane's name.
+        if self_pane_id and resolved:
+            self._remember_lane(self_pane_id, key)
         return key
+
+    # -- lane registry: an identity that survives a backend change -------------
+    def lane_registry_path(self):
+        return os.path.join(CONFIG_DIR, "lanes.json")
+
+    def _lane_registry(self):
+        try:
+            with open(self.lane_registry_path(), encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _remember_lane(self, pane_id, mailbox):
+        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail."""
+        data = self._lane_registry()
+        if data.get(pane_id) == mailbox:
+            return
+        data[pane_id] = mailbox
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            temporary = self.lane_registry_path() + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.lane_registry_path())
+        except OSError as error:
+            log.warning("could not record lane %s -> %s: %s", pane_id, mailbox, error)
+
+    def _mailbox_exists(self, name):
+        """True when the inbox already holds mail addressed to this name."""
+        where, params = __import__("dunk_inbox").mailbox_where(name)
+        try:
+            with self.inbox._lock:
+                row = self.inbox.db.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE {where}", params).fetchone()
+            return bool(row and row[0])
+        except Exception:                       # noqa: BLE001 - a fallback must not raise
+            return False
 
     def _mailbox_or_self(self, spec, self_pane_id):
         if spec:
