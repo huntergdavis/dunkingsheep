@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.61.0"
+VERSION = "2.62.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1808,6 +1808,15 @@ class Flock:
                     log.exception("inbox undeliverable sweep failed")
                 try:
                     archived = self.inbox.auto_archive_undeliverable()
+                    # A retired pane's mailbox is not undeliverable YET - it is
+                    # retained and quiet. Same 24h age, same retention, no alerts.
+                    try:
+                        import dunk_panes
+                        retired_boxes = {box for record in dunk_panes.all_retired()
+                                         for box in (record.get("mailboxes") or [])}
+                        archived += self.inbox.archive_retired(retired_boxes)
+                    except Exception as error:      # noqa: BLE001 - never break the tick
+                        log.warning("retired-mailbox archive failed: %s", error)
                     if archived:
                         self.metrics.record("inbox.archived", pane_id=None,
                                             source="inbox", outcome="ok",

@@ -44,7 +44,7 @@ def _write(data, path=PATH):
     os.replace(temporary, path)
 
 
-def retire(pane_id, reason, by=None, *, labels=(), path=PATH, now=None):
+def retire(pane_id, reason, by=None, *, labels=(), mailboxes=(), path=PATH, now=None):
     """Mark a pane retired. The reason is required: an unexplained silence is a bug."""
     pane_id = str(pane_id or "").strip()
     if not pane_id:
@@ -54,8 +54,13 @@ def retire(pane_id, reason, by=None, *, labels=(), path=PATH, now=None):
         raise RetireError("a reason is required (e.g. superseded-by:wW:p7)")
     data = _load(path)
     names = sorted({str(label).strip() for label in labels if str(label or "").strip()})
+    # MAILBOXES, not only labels: mail addressed to a dead pane is filed under a NAME
+    # ('crackdown-codex'), which is not a pane id and not always the tab label. A
+    # retire that only recorded labels left those mailboxes alerting and unarchived.
+    boxes = sorted({str(box).strip() for box in mailboxes if str(box or "").strip()})
     data[pane_id] = {"pane_id": pane_id, "reason": reason, "by": by,
-                     "labels": names, "retired_at": now or time.time()}
+                     "labels": names, "mailboxes": boxes,
+                     "retired_at": now or time.time()}
     _write(data, path)
     return data[pane_id]
 
@@ -96,5 +101,8 @@ def mailbox_retired(mailbox, *, path=PATH):
     for record in data.values():
         for label in record.get("labels") or ():
             if label == text.strip() or label == plain:
+                return True
+        for box in record.get("mailboxes") or ():
+            if box == text.strip() or box == plain:
                 return True
     return False

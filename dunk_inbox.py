@@ -519,6 +519,29 @@ class Inbox:
             self.db.commit()
         return int(cursor.rowcount or 0)
 
+    def archive_retired(self, mailboxes, age_s=86400, now=None, reason=None):
+        """Archive mail addressed to a RETIRED pane's mailbox, keeping every row.
+
+        Retention is not 'keep alerting': a retired pane's mail is the record of what
+        was tried, and 24 messages sat 42 hours old in a state that was neither
+        delivered nor archived. The rows stay; the state moves on.
+        """
+        if not mailboxes:
+            return 0
+        now = time.time() if now is None else float(now)
+        cutoff = now - float(age_s)
+        marks = ",".join("?" for _ in mailboxes)
+        with self._lock:
+            cursor = self.db.execute(
+                f"UPDATE messages SET state = 'archived', archived_at = ?, "
+                f"read_at = COALESCE(read_at, ?), "
+                f"reason = COALESCE(reason, ?) "
+                f"WHERE mailbox IN ({marks}) AND state IN ('queued','undeliverable') "
+                f"AND created_at < ? AND archived_at IS NULL",
+                (now, now, reason or "mailbox of a retired pane", *mailboxes, cutoff))
+            self.db.commit()
+        return int(cursor.rowcount or 0)
+
     def _transition(self, message_ids, state, stamp, allowed, read_stamp=False,
                     mailbox=None):
         ids = [message_ids] if isinstance(message_ids, str) else list(message_ids)

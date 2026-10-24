@@ -49,6 +49,16 @@ class RetireTests(unittest.TestCase):
         self.assertEqual("wW:p4", record["pane_id"])
         self.assertTrue(dunk_panes.mailbox_retired("par-d (wW:p4)", path=self.path))
 
+    def test_a_mailbox_name_that_outlives_its_pane_is_retired_too(self):
+        """The fifth name-vs-id instance: mail filed under 'crackdown-codex' kept
+        alerting after the pane was retired, because retire recorded the pane id and
+        the label, not the mailbox name."""
+        dunk_panes.retire("wS:p2", "shelved", by="w9:pH",
+                          labels=["crackdown-codex"], mailboxes=["crackdown-codex"],
+                          path=self.path)
+        self.assertTrue(dunk_panes.mailbox_retired("crackdown-codex", path=self.path))
+        self.assertTrue(dunk_panes.mailbox_retired("wS:p2", path=self.path))
+
     def test_unretire_brings_a_pane_back(self):
         dunk_panes.retire("wW:p1", "replaced-by:dispatcher", by="w9:pH", path=self.path)
         self.assertTrue(dunk_panes.is_retired("wW:p1", path=self.path))

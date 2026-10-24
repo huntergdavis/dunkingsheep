@@ -407,6 +407,23 @@ class RuleBoundaryTests(WatchdogCase):
         self.assertNotIn(("inbox.unread_live", "retired"), keys,
                          "a retired pane must not page")
 
+    def test_a_retired_MAILBOX_NAME_is_skipped_too(self):
+        """The name-vs-id instance: the row's mailbox is 'crackdown-codex', the
+        retired pane is 'wS:p2'. Keying on the pane id alone kept alerting."""
+        cfg = self.fleet.config(inbox__unread_live={"age_minutes": 60, "min_messages": 1,
+                                                    "idle_statuses": ["idle", "done"]})
+        self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]
+        self.fleet.message("crackdown-codex", "queued", NOW - 42 * HOUR, pane_id="w1:p1")
+        self.fleet.message("alive", "queued", NOW - 42 * HOUR, pane_id="w1:p1")
+        with open(os.path.join(self.fleet.dir, "retired-panes.json"), "w") as handle:
+            json.dump({"wS:p2": {"pane_id": "wS:p2", "reason": "shelved",
+                                 "labels": [], "mailboxes": ["crackdown-codex"],
+                                 "retired_at": NOW}}, handle)
+        keys = self.keys(self.fleet.evaluate(cfg))
+        self.assertIn(("inbox.unread_live", "alive"), keys)
+        self.assertNotIn(("inbox.unread_live", "crackdown-codex"), keys,
+                         "a retired mailbox NAME must not page")
+
     def test_retired_panes_appear_in_the_digest_as_a_count(self):
         cfg = self.fleet.config(pane__retired={})
         with open(os.path.join(self.fleet.dir, "retired-panes.json"), "w") as handle:

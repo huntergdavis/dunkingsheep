@@ -318,7 +318,18 @@ def h_retire_pane(flock, args, self_pane_id):
         pane_id = pane["pane_id"]
     except Exception:                       # a pane that is already gone is still recordable
         pane_id = str(args["pane"])
-    record = dunk_panes.retire(pane_id, args["reason"], by=self_pane_id, labels=labels)
+    # Every mailbox this pane owns, by its pane_id column: a name like
+    # 'crackdown-codex' outlives the pane and is what the alert and the archive key on.
+    boxes = []
+    try:
+        with flock.inbox._lock:
+            boxes = [row[0] for row in flock.inbox.db.execute(
+                "SELECT DISTINCT mailbox FROM messages WHERE pane_id = ? AND mailbox IS NOT NULL",
+                (pane_id,))]
+    except Exception:                       # noqa: BLE001 - retirement must still record
+        boxes = []
+    record = dunk_panes.retire(pane_id, args["reason"], by=self_pane_id,
+                               labels=labels, mailboxes=boxes)
     # The mail is evidence: report how much is now quiet, and keep every row.
     waiting = (flock.inbox.count(pane_id) or {}).get("unread") if getattr(flock, "inbox", None) else None
     return dict(record, unread_kept=waiting)

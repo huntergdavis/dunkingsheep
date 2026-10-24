@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -146,6 +147,25 @@ class InboxStoreTests(unittest.TestCase):
         self.assertEqual(3, count["archived"])
         self.assertEqual(3, count["total"], "archive must not delete")
         self.assertEqual(3, len(self.inbox.list("dead", unread_only=False)))
+
+    def test_mail_to_a_retired_mailbox_is_archived_and_kept(self):
+        """Retention is not 'keep alerting': the rows stay, the state moves on."""
+        old = self.inbox.send("crackdown-codex", "old mail", sender="w9:pH")["message_id"]
+        young = self.inbox.send("crackdown-codex", "new mail", sender="w9:pH")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET created_at = ? WHERE id = ?",
+                              (time.time() - 42 * 3600, old))
+        self.inbox.db.commit()
+        archived = self.inbox.archive_retired({"crackdown-codex"}, now=time.time())
+        self.assertEqual(1, archived, "only the mail older than the age is archived")
+        rows = {row["id"]: dict(row) for row in self.inbox.db.execute(
+            "SELECT id, state, archived_at, read_at, reason FROM messages")}
+        self.assertEqual("archived", rows[old]["state"])
+        self.assertIsNotNone(rows[old]["archived_at"])
+        self.assertIsNotNone(rows[old]["read_at"], "archived mail must not count as waiting")
+        self.assertIn("retired", rows[old]["reason"])
+        self.assertEqual("queued", rows[young]["state"], "young mail is left alone")
+        self.assertEqual(0, self.inbox.count("crackdown-codex")["unread"] - 1,
+                         "the archived row no longer counts as unread")
 
     def test_archive_before_only_touches_older_mail(self):
         old = self.inbox.send("dead", "old")
