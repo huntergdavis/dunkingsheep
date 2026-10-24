@@ -371,7 +371,13 @@ def h_dispatch(flock, args, self_pane_id):
         tasks, dispatched_task_ids=(recent | queued_ids))
     state = dunk_dispatch.tick(
         queue, panes, derived=derived,
-        delivery=lambda pane: flock.delivery_state(pane["pane_id"], pane.get("agent_status")),
+        # A pane that reports working needs no screen read to be excluded: reading
+        # 35 panes at ~0.4 s each is what made a tick exceed the client timeout.
+        # Only a lane that might be fed is worth a read.
+        delivery=lambda pane: ({"state": "working", "reason": str(pane.get("agent_status"))}
+                               if str(pane.get("agent_status") or "").lower() in ("working", "busy")
+                               else flock.delivery_state(pane["pane_id"],
+                                                         pane.get("agent_status"), pane=pane)),
         unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
         send=send, dry_run=bool(args.get("dry_run")))
     state["retired"] = len(dunk_panes.all_retired())

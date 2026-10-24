@@ -12,12 +12,17 @@ WAL. Anything that cannot be repaired is returned in `problems` for a human or
 the supervisor to see.
 """
 
+import json
 import os
 import shutil
 import sqlite3
 import time
 
 WAL_WARN_BYTES = 64 * 1024 * 1024
+# The dispatcher runs every 5 minutes. Missing two ticks means the feeder is dead,
+# which is invisible while a human is feeding lanes by hand - the failure mode that
+# lasted hours on 2026-10-23.
+DISPATCH_STALE_S = 16 * 60
 DISK_MIN_FREE_BYTES = 512 * 1024 * 1024
 HEALTH_PATH = os.path.expanduser("~/.config/dunkingsheep/health.json")
 
@@ -46,9 +51,36 @@ def _quick_check(path):
         conn.close()
 
 
+def _dispatch_freshness(config_dir, now):
+    """How long since a dispatcher tick completed: 'the feeder is dead' as a number.
+
+    Absence is not evidence: a tick that has never run and a tick that stopped are
+    different, so the check reports both, with the age.
+    """
+    path = os.path.join(config_dir, "dispatch-state.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        tick_at = float(state.get("tick_at") or 0)
+    except (OSError, ValueError):
+        return {"status": "absent", "age_s": None, "reason": "no dispatcher tick has ever run"}
+    if not tick_at:
+        return {"status": "absent", "age_s": None, "reason": "the dispatch state has no tick_at"}
+    age = max(0.0, now - tick_at)
+    return {"status": "ok" if age <= DISPATCH_STALE_S else "stale", "age_s": int(age),
+            "dry_run": bool(state.get("dry_run")), "reason": None}
+
+
 def run_health(flock, repair=False, deep=False):
     started = time.time()
     problems, repairs, checks = [], [], {}
+    dispatch = _dispatch_freshness(os.path.expanduser("~/.config/dunkingsheep"), started)
+    checks["dispatch"] = dispatch
+    if dispatch["status"] == "absent":
+        problems.append(f"dispatcher: {dispatch['reason']}")
+    elif dispatch["status"] == "stale":
+        problems.append(f"dispatcher: last successful tick {dispatch['age_s']}s ago "
+                        f"(stale after {DISPATCH_STALE_S}s) - the feeder is not running")
     store = getattr(flock, "memory", None)
     config_dir = os.path.expanduser("~/.config/dunkingsheep")
 

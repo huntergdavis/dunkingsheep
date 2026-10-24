@@ -1072,6 +1072,13 @@ def print_health(result):
     print(f"  integrity={checks.get('integrity')} "
           f"stale={checks.get('stale_leases')} wal={checks.get('wal_bytes')} "
           f"disk_free={checks.get('disk_free_bytes')} tasks={checks.get('tasks')}")
+    dispatch = checks.get("dispatch") or {}
+    if dispatch:
+        # 'the feeder is dead' as a number, not an absence.
+        age = dispatch.get("age_s")
+        print(f"  dispatcher={dispatch.get('status')} "
+              f"last_tick={('never' if age is None else str(age) + 's ago')}"
+              + (" (dry run)" if dispatch.get("dry_run") else ""))
 
 
 def print_doctor(result):
@@ -1488,6 +1495,7 @@ LOCAL_ONLY_COMMANDS = ("context",)
 # for a fire that was working, and the client reported a timeout for a send that
 # landed. This is a wait long enough to be honest about, not a retry.
 SEND_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_SEND_TIMEOUT_S", "120"))
+BATCH_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_BATCH_TIMEOUT_S", "180"))
 
 _POLL_COMMANDS = ("status", "list", "ls", "poll")
 _INBOX_POLLS = ("count", "list", "ls", "stats")
@@ -1787,6 +1795,10 @@ def main(argv=None):
         # client's default 15 s timed out a `fire` that was working perfectly.
         if command in ("fire", "send", "send-keys", "flush", "dunk"):
             client.timeout = max(client.timeout, SEND_TIMEOUT_S)
+        if command == "dispatch":
+            # A tick classifies every lane; it is a batch, not a single send, and a
+            # 15 s socket timeout turned a working tick into a failed unit.
+            client.timeout = max(client.timeout, BATCH_TIMEOUT_S)
         result, printer = run_client_command(client, args)
     except DunkError as error:
         print(f"error: {error}", file=sys.stderr)

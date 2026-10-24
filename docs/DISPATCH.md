@@ -30,6 +30,34 @@ not a reason to keep a parallel hand-written list.
 With this, `queue empty` means **no open unblocked work anywhere** — a real
 finding — instead of "somebody forgot to top it up".
 
+## A tick has a budget, and a dead feeder is a number
+
+A tick classifies every lane, and that classification used to cost **3-4 pane reads
+per lane** — 35 lanes at ~1.5 s each, which exceeded the client's socket timeout, so
+the systemd unit failed with `status=3/NOTIMPLEMENTED` and the dispatcher was dead for
+hours while a human fed lanes by hand. Three fixes:
+
+- **one styled read per classified lane** (`delivery_state` reuses the screen it
+  already read instead of asking `send_blocker` to read again);
+- **no read at all for a lane that reports `working`** — it can never be fed, so the
+  tick skips it;
+- **a batch timeout** for `dispatch` (`DUNKINGSHEEP_BATCH_TIMEOUT_S`, 180 s): a tick is
+  a batch, not a single send, and a 15 s socket timeout turned a working tick into a
+  failed unit.
+
+And because the failure was invisible while the manual path covered for it, **health
+now reports the feeder**:
+
+```text
+dispatcher=ok last_tick=82s ago
+dispatcher=stale last_tick=1030s ago          # a problem line names the threshold
+dispatcher=absent last_tick=never             # no tick has ever run
+```
+
+`health` lists a problem when the last successful tick is older than
+`DISPATCH_STALE_S` (16 minutes — two missed ticks) or when no tick has ever run, so
+"the feeder is dead" is a value with an age rather than an absence.
+
 ## The three moving parts
 
 | part | what it is |

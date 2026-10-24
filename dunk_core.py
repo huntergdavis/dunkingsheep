@@ -63,7 +63,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.55.0"
+VERSION = "2.56.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3601,13 +3601,14 @@ class Flock:
             if not pane.get("pane_id"):
                 continue
             lanes.append({"pane_id": pane["pane_id"],
+                          "agent": pane.get("agent"),
                           "agent_name": (pane.get("agent_name") or pane.get("tab_label")
                                          or pane.get("label") or pane["pane_id"]),
                           "tab_label": pane.get("tab_label"),
                           "agent_status": pane.get("agent_status")})
         return lanes
 
-    def delivery_state(self, pane_id, status=None):
+    def delivery_state(self, pane_id, status=None, pane=None, screen=None):
         """Classify whether this pane can receive a message, and why not.
 
         `status` comes from the pane list (working/idle). The screen decides the
@@ -3615,6 +3616,8 @@ class Flock:
         sitting unsubmitted in the box. None of those are "working", and all of
         them starve a lane silently if a dispatcher treats them as idle.
         """
+        if status is None and pane is not None:
+            status = pane.get("agent_status")
         if status is None:
             # The pane's own report beats our guess: a lane that says it is
             # working is working even if its screen has no composer to read.
@@ -3622,7 +3625,8 @@ class Flock:
                 status = self.herdr.agent_status(pane_id)
             except Exception:                   # noqa: BLE001 - status is optional
                 status = None
-        screen = self.read_screen(pane_id)
+        if screen is None:
+            screen = self.read_screen(pane_id)
         if screen is None:                      # an unreadable pane is unknown, not ready
             return {"state": "unknown", "reason": "pane unreadable"}
         typed = None if _modal_open(screen) else _typed_text(screen)
@@ -3630,9 +3634,15 @@ class Flock:
         # A hold that the classifier cannot see (a declared turn, a stale busy
         # report) is still a hold: report it as blocked with that reason, so
         # `delivery` and the queue never disagree.
-        blocker = self.send_blocker(pane_id)
-        if blocker and state in ("ready", "working"):
-            return {"state": "blocked", "reason": blocker[1]}
+        # The invisible holds, from the SAME read: a declared turn or a stale busy
+        # claim is a hold the screen cannot show. Asking send_blocker() here would
+        # read the pane again, and a dispatcher tick over 35 lanes cannot afford
+        # four reads each - it timed out at the client for exactly that reason.
+        if state in ("ready", "working"):
+            if self.turn_active(pane_id):
+                return {"state": "blocked", "reason": "a declared turn is active"}
+            if self._claude_busy(pane_id, pane=pane):
+                return {"state": "blocked", "reason": "claude reports this session busy"}
         return {"state": state, "reason": reason}
 
     def clear_box(self, target, self_pane_id=None, reason=None):
@@ -3746,7 +3756,7 @@ class Flock:
                 return True, False, str(error)
             return True, ok, detail
 
-    def _claude_busy(self, pane_id):
+    def _claude_busy(self, pane_id, pane=None):
         """True only when Claude's own session reports status=busy AND that report
         is fresh enough to believe.
 
@@ -3758,10 +3768,11 @@ class Flock:
         logged with both numbers. The pane is the evidence; the status file is a
         claim about it.
         """
-        try:
-            pane = self.herdr.get_pane(pane_id)
-        except Exception:  # noqa: BLE001 - never break a send on a status probe
-            return False
+        if pane is None:
+            try:
+                pane = self.herdr.get_pane(pane_id)
+            except Exception:  # noqa: BLE001 - never break a send on a status probe
+                return False
         if not pane or str(pane.get("agent") or "").lower() != "claude":
             return False
         try:

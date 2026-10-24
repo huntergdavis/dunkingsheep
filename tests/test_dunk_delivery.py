@@ -246,6 +246,31 @@ class BoxReaderTests(unittest.TestCase):
         self.assertEqual("", text)
 
 
+class OneReadPerLaneTests(unittest.TestCase):
+    """A dispatcher tick over 35 lanes timed out because each lane cost 3-4 reads."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def test_a_reported_status_is_used_without_asking_for_it_again(self):
+        pane = self.herdr.panes[0]
+        before = self.herdr.status_calls
+        self.flock.delivery_state(pane["pane_id"], "working", pane=pane)
+        self.assertEqual(before, self.herdr.status_calls,
+                         "the status was given; asking the backend again is a second read")
+
+    def test_classifying_a_lane_costs_exactly_one_styled_read(self):
+        # The dispatcher short-circuits a lane that reports working before it gets
+        # here; for the lanes it does classify, one read is the budget.
+        pane = self.herdr.panes[0]
+        before = len(self.herdr.ansi_reads)
+        state = self.flock.delivery_state(pane["pane_id"], "working", pane=pane)
+        self.assertEqual("working", state["state"])
+        self.assertEqual(before + 1, len(self.herdr.ansi_reads),
+                         "one lane must not cost 3-4 pane reads: that made a tick time out")
+
+
 class ClearBoxTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
