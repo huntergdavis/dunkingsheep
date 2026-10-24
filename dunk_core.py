@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.1"
+VERSION = "2.70.2"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3945,13 +3945,49 @@ class Flock:
                         return True, ("sent" if attempt == 1
                                       else f"sent ({key} x{attempt})")
                     if last_hold is True:
+                        # A BUSY LANE'S BOX IS NOT THE RECORD (measured 2026-10-24:
+                        # two sends to a claude lane reported "did not submit" and
+                        # the receiving lane showed both as turns). If the agent
+                        # started working, the submit landed and the reader is
+                        # looking at our own echo in the transcript.
+                        if self._turn_started(pane_id):
+                            if attempt > 1:
+                                self._submit_key[pane_id] = key
+                            self.metrics.record("submit.attempt", pane_id=pane_id,
+                                                outcome="ok-turn", attempts=attempt,
+                                                bytes=len((text or "").encode("utf-8")))
+                            return True, "sent (confirmed by the turn it started)"
                         break        # our text returned; another Enter is safe
             if last_hold is not True:
                 return False, "submission unconfirmed: input box unreadable or changing"
+            # The box still shows our text. That is only evidence of failure if the
+            # lane is NOT working: a busy pane keeps an echo in the transcript.
+            if self._turn_started(pane_id):
+                if attempt > 1:
+                    self._submit_key[pane_id] = "Enter"
+                self.metrics.record("submit.attempt", pane_id=pane_id,
+                                    outcome="ok-turn", attempts=attempt,
+                                    bytes=len((text or "").encode("utf-8")))
+                return True, "sent (confirmed by the turn it started)"
             log.info("%s: still in the input box after Enter #%d; pressing again",
                      pane_id, attempt)
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
+
+    def _turn_started(self, pane_id):
+        """True when the agent is demonstrably working: a turn began.
+
+        The second confirmation, for the case the box read cannot decide: a busy
+        pane's composer may still show our text (or its echo) after a successful
+        submit. A turn starting is evidence the text arrived; a box that looks
+        full is not evidence it did not.
+        """
+        status = None
+        try:
+            status = (self.herdr.agent_status(pane_id) or "").strip().lower()
+        except Exception:                        # noqa: BLE001 - never fail a send on a probe
+            return False
+        return status in ("working", "busy", "running", "processing")
 
     def _remember_typed(self, pane_id, text):
         with self._lock:

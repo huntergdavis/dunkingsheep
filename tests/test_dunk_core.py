@@ -1074,6 +1074,18 @@ class SendRaceTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
         self.assertEqual(1, len(self.herdr.keys), "no needless extra Enter")
 
+    def test_a_busy_lane_confirms_by_the_turn_it_started(self):
+        """The false negative cos measured: two sends to a claude lane reported
+        "did not submit" and the receiving lane showed both as turns. A busy box
+        is not evidence of failure; a turn starting is evidence of success."""
+        self.herdr.statuses["w2:p1"] = "working"      # a turn is running
+        # The reader keeps seeing our text (its echo in the transcript): the exact
+        # misreading that produced the false negative.
+        with mock.patch.object(type(self.flock), "_box_holds", return_value=True):
+            ok, detail = self.flock.submit_text("w2:p1", "a nudge")
+        self.assertTrue(ok, detail)
+        self.assertIn("confirmed by the turn", detail)
+
     def test_a_composer_that_needs_carriage_return_still_submits(self):
         """Measured 2026-10-24: five of six revived claude lanes sat with our text
         in the composer for four minutes while the send reported success, and
