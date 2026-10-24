@@ -367,3 +367,54 @@ class ClearBoxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnTextIsNotAHumanTests(unittest.TestCase):
+    """The daemon must recognise what IT typed; anything else is a human.
+
+    Regression 2026-10-24: three lanes reported 'a human is typing here' with OUR
+    nudge verbatim in the box, because a notice long enough to WRAP put only its
+    first line where the box reader looked.
+    """
+
+    NOTICE = ("[inbox] new message for w1:p1 (2 unread) from w2:p2. "
+              "Read it with: dunkingsheep inbox read")
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def test_a_wrapped_notice_is_ours_and_is_not_a_human(self):
+        self.flock._remember_typed("w1:p1", self.NOTICE)
+        wrapped = self.NOTICE[:78]          # the first visual line only
+        self.assertTrue(self.flock._looks_like_ours("w1:p1", wrapped))
+        self.assertFalse(self.flock._looks_like_ours("w1:p1", "a real human sentence"))
+
+    def test_a_notice_typed_but_not_submitted_is_flushed_not_held(self):
+        # The pane shows our own nudge, never submitted. The flush path must try to
+        # SUBMIT it (that is the repair), not classify it as a human and hold.
+        self.herdr.screens["w1:p1"] = f"❯ {self.NOTICE}\n────────────────\n"
+        self.herdr.box["w1:p1"] = self.NOTICE          # Enter consumes it
+        self.flock._remember_typed("w1:p1", self.NOTICE)
+        self.assertIsNone(self.flock.send_blocker("w1:p1"),
+                          "our own stranded nudge must not read as a human")
+        # The repair is to SUBMIT it. The fixture's screen does not clear on Enter,
+        # so the call reports 'unconfirmed' - what matters is that it tried, instead
+        # of holding our own text as if a person had written it.
+        self.flock._ensure_box_clear("w1:p1")
+        self.assertTrue(any("Enter" in str(keys) for _pane, keys in self.herdr.keys),
+                        "the repair is to SUBMIT our own text")
+
+    def test_a_human_draft_still_holds(self):
+        self.herdr.screens["w1:p1"] = "❯ a half-written sentence of my own\n──────\n"
+        blocker = self.flock.send_blocker("w1:p1")
+        self.assertIsNotNone(blocker, "a human's draft must still hold")
+        self.assertIn("a human is typing here", blocker[1])
+
+    def test_the_queued_message_text_counts_as_ours_even_with_no_memory(self):
+        # A restart wipes the in-memory record; the QUEUE still knows what we are
+        # trying to deliver, and that is enough to recognise our own text.
+        message = self.flock._new_message("w1:p1", "label", self.NOTICE, source="send_text",
+                                          deliver=lambda: (True, "sent"))
+        self.flock._enqueue(message)
+        self.assertTrue(self.flock._looks_like_ours("w1:p1", self.NOTICE[:70]))

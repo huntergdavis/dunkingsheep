@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.60.0"
+VERSION = "2.61.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3515,9 +3515,24 @@ class Flock:
             return True
         if not shown:
             return False
+        # THE DAEMON TRACKS WHAT IT TYPED. Two sources, both exact:
+        #  - what it has typed to this pane recently (in memory), and
+        #  - what it is TRYING to deliver (the queued outbox text for this pane),
+        # so a nudge that was typed but not yet submitted is recognised as ours.
+        # A long notice WRAPS, so the box may hold only its first line: the test is
+        # prefix-in-either-direction, not equality.
         with self._lock:
-            recent = list(self.sent_text_by_pane.get(pane_id, []))
-        return any(_is_our_send(shown, text, True) for text in recent)
+            candidates = list(self.sent_text_by_pane.get(pane_id, []))
+            candidates += [m.text for m in self.outbox.get(pane_id) or []
+                           if m.status == "queued" and m.text]
+        shown_c = _collapse(shown)
+        for text in candidates:
+            full = _collapse(text)
+            if not full:
+                continue
+            if full.startswith(shown_c) or shown_c.startswith(full[:CONSUMPTION_PREFIX_CHARS]):
+                return True
+        return any(_is_our_send(shown, text, True) for text in candidates)
 
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
