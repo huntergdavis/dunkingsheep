@@ -1295,7 +1295,8 @@ def print_capability(result):
     print(f"{result['pane_id']}  mailbox={result['mailbox']!r}"
           f"  declared={'yes' if result['declared'] else '-'}"
           f"  agent={result['agent'] or '-'}")
-    print(f"  drains={'yes' if result['drains'] else 'no'}  send={result['send']}")
+    print(f"  drains={'yes' if result['drains'] else 'no'}  send={result['send']}"
+          f"  evidence={result.get('drain_evidence') or '-'}")
     print(f"  {result['expect']}")
 
 

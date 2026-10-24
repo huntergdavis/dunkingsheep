@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.4"
+VERSION = "2.70.5"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1342,10 +1342,12 @@ class Flock:
             # immediate guarded send, because an unread queue is the failure mode
             # this whole day was about.
             "send": ("owner_push" if observed else "guarded"),
-            # 1 s poll on the push path; the guarded path is one typing round-trip.
-            "expect": ("push drained within ~1s, no inbox row"
-                       if drain else
-                       "immediate guarded send (Enter, then C-m); 'sent' means it left the box"),
+            # The promise follows the OBSERVED route, not the harness's name: a pi
+            # lane whose poller is not running is a guarded send like any other.
+            "expect": ("push drained by the lane's own poller, no inbox row"
+                       if observed else
+                       "immediate guarded send (Enter, then C-m); 'sent' means it "
+                       "left the box"),
         }
 
     def delivery_target(self, target, self_pane_id=None):
