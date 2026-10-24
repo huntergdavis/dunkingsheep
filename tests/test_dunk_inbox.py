@@ -860,7 +860,7 @@ class SurfaceParityTests(unittest.TestCase):
             "read_pane": "read", "list_workspaces": "workspaces",
             "create_workspace": "new-workspace", "create_tab": "new-tab",
             "lanes": "lane", "lane_set": "lane",
-            "delivery_capability": "capability",
+            "delivery_capability": "capability", "desk_token": "desk-token",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",
