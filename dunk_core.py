@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.2"
+VERSION = "2.70.3"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -540,12 +540,30 @@ class Message:
             return f"queued: the box in {self.target_label} would not clear"
         return f"queued for {self.target_label}, delivering once the input box is clear"
 
+    # The four outcomes a caller can act on, as one machine-readable field. Prose
+    # is for people; a caller that parses sentences gets it wrong (cos, 2026-10-24:
+    # "sent=false" substring matching, then a delivered message read as a 409).
+    OUTCOMES = ("ok", "queued", "unconfirmed", "refused")
+
+    def outcome(self):
+        if self.status == "queued":
+            return "queued"
+        if self.status == "sent":
+            return "ok"
+        detail = (self.detail or "").lower()
+        if "unconfirmed" in detail or "did not submit" in detail:
+            # Neither witness fired: it may well have arrived, so this is NOT a
+            # refusal and must not invite a blind resend.
+            return "unconfirmed"
+        return "refused"
+
     def to_dict(self):
         queued = self.status == "queued"
         return {
             "message_id": self.id, "pane_id": self.pane_id, "target_label": self.target_label,
             "text": self.text, "source": self.source, "status": self.status,
             "queued": queued, "ok": None if queued else self.status == "sent",
+            "outcome": self.outcome(),
             "message": (self._queued_message() if queued else self.detail or self.status),
             "holds": self.holds, "created_at": self.created_at, "finished_at": self.finished_at,
             "waiting_s": int(time.time() - self.created_at) if queued else None,

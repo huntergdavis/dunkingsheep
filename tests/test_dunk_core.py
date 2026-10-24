@@ -1074,6 +1074,22 @@ class SendRaceTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
         self.assertEqual(1, len(self.herdr.keys), "no needless extra Enter")
 
+    def test_the_send_result_carries_a_machine_readable_outcome(self):
+        """A caller must not have to parse prose to tell sent from queued from
+        unconfirmed from refused (cos measured all three arriving as sentences)."""
+        import dunk_core as dc
+        sent = self.flock.send_now("w2:p1", "one", wait_s=3)
+        self.assertEqual("ok", sent["outcome"])
+        self.assertTrue(sent["ok"])
+        probe = dc.Message("m1", "w2:p1", "claude", "x", "send_text", lambda: None)
+        probe.status, probe.detail = "queued", None
+        self.assertEqual("queued", probe.to_dict()["outcome"])
+        self.assertIsNone(probe.to_dict()["ok"], "queued is neither sent nor failed")
+        probe.status, probe.detail = "failed", "submission unconfirmed: box unreadable"
+        self.assertEqual("unconfirmed", probe.to_dict()["outcome"])
+        probe.status, probe.detail = "failed", "no such pane"
+        self.assertEqual("refused", probe.to_dict()["outcome"])
+
     def test_a_busy_lane_confirms_by_the_turn_it_started(self):
         """The false negative cos measured: two sends to a claude lane reported
         "did not submit" and the receiving lane showed both as turns. A busy box
