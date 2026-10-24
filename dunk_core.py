@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.65.0"
+VERSION = "2.66.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3496,6 +3496,20 @@ class Flock:
         screen = self.read_screen(pane_id, lines=40, ansi=False)
         return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
+    def _flush_once(self, pane_id, text):
+        """One Enter, one short check. Used INSIDE the typing lock, so it must be short.
+
+        The full retry loop (four presses, seconds apart) is right for a confirmed send
+        but wrong here: held under the global typing lock it delays every other sender,
+        which is the stall class the lock exists to prevent. If one press does not clear
+        the box, the send is deferred and the outbox worker tries again.
+        """
+        ok, detail = self.herdr.send_keys(pane_id, "Enter")
+        if not ok:
+            return False
+        time.sleep(SUBMIT_POLL_S[0])
+        return self._box_holds(pane_id, text) is False
+
     def _press_until_submitted(self, pane_id, text, first_pressed=False):
         """Press Enter (each press under the typing mutex) until `text` leaves the box.
 
@@ -3865,18 +3879,19 @@ class Flock:
             return True
         if self._looks_like_ours(pane_id, shown):
             self._last_block_reason[pane_id] = "stranded"
-            log.info("%s: our previous send is stranded in the box; submitting it first",
+            log.info("%s: our previous send is stranded in the box; submitting it",
                      pane_id)
-            ok, _detail = self._press_until_submitted(pane_id, shown)
-            return ok
+            if self._flush_once(pane_id, shown):
+                return True
+            self._last_block_reason[pane_id] = "stranded-will-not-submit"
+            return False
         # The box holds text we did not type. PRESERVE it: submit it (so it reaches the
         # agent rather than being clobbered), and only then type ours. If it will not
         # submit, leave it exactly as it is and deliver on a later attempt - never
         # overwrite somebody's text and never stall the whole queue behind it.
-        log.info("%s: box holds text we did not type (%r); submitting it first to preserve it",
+        log.info("%s: box holds text we did not type (%r); submitting it to preserve it",
                  pane_id, shown[:60])
-        ok, _detail = self._press_until_submitted(pane_id, shown)
-        if ok:
+        if self._flush_once(pane_id, shown):
             return True
         self._last_block_reason[pane_id] = "foreign-text-will-not-submit"
         return False

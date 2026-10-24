@@ -1751,13 +1751,15 @@ class GuardedKeysTests(unittest.TestCase):
         self.assertEqual([("w2:p1", ["Escape"])], self.herdr.keys)
         self.assertEqual("draft", self.herdr.box["w2:p1"], "Escape must not submit")
 
-    def test_send_keys_queues_behind_a_draft(self):
+    def test_send_keys_submits_the_text_that_was_there_first(self):
+        """Policy 2026-10-24: text in the box is preserved by submitting it, so a bare
+        Enter press no longer queues behind somebody's sentence forever."""
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("half a sentence"))
-        queued = self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
-        self.assertTrue(queued["queued"], "Enter must not submit their draft")
-        self.assertEqual([], self.herdr.keys)
-        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-        self.assertTrue(wait_until(lambda: self.herdr.keys == [("w2:p1", ["Enter"])], 5))
+        self.herdr.box["w2:p1"] = "half a sentence"
+        self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
+        self.assertTrue(wait_until(lambda: self.herdr.sends, 5),
+                        "the text that was in the box is submitted first")
+        self.assertEqual("half a sentence", self.herdr.sends[0][1])
 
     def test_send_keys_validates_and_can_barge_in(self):
         with self.assertRaisesRegex(DunkError, "keys are required"):
