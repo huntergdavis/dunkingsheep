@@ -1,0 +1,7 @@
+[Unit]
+Description=Capture agent state (restartable lanes: project, harness, argv, session, activity)
+
+[Service]
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep state capture --source periodic
+TimeoutStartSec=180

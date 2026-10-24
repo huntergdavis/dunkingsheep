@@ -556,6 +556,14 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
+    ssub = p.add_subparsers(dest="state_command", metavar="<action>")
+    q = ssub.add_parser("capture", help="record one row per agent lane now")
+    q.add_argument("--source", default="periodic", help="why this capture ran")
+    q = ssub.add_parser("latest", help="the most recent captured rows")
+    q.add_argument("pane", nargs="?")
+    q.add_argument("--project")
+    q.add_argument("--limit", type=int, default=20)
     p = sub.add_parser("roster", help="one row per agent lane (name, harness, state, task, inbox, cpu)")
     p = sub.add_parser("message-state", help="sent / delivered / seen for message ids")
     p.add_argument("ids", help="comma-separated message ids")
@@ -2275,6 +2283,12 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "state":
+        name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
+        payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {
+            "pane_id": getattr(args, "pane", None), "project": getattr(args, "project", None),
+            "limit": getattr(args, "limit", None)}
+        return client.call(name, **{k: v for k, v in payload.items() if v is not None}), print_view
     if command in ("roster", "message-state", "reply-stats", "project-summary"):
         name = {"message-state": "message_state", "reply-stats": "reply_stats",
                 "project-summary": "project_summary"}.get(command, command)

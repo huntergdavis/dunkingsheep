@@ -324,6 +324,19 @@ def h_retire_pane(flock, args, self_pane_id):
     return dict(record, unread_kept=waiting)
 
 
+def h_state_capture(flock, args, self_pane_id):
+    import dunk_state
+    return dunk_state.capture(flock, source=args.get("source") or "periodic")
+
+
+def h_state_latest(flock, args, self_pane_id):
+    import dunk_state
+    rows = dunk_state.StateStore().latest(pane_id=args.get("pane_id"),
+                                          project=args.get("project"),
+                                          limit=int(args.get("limit") or 50))
+    return {"rows": rows, "count": len(rows)}
+
+
 def h_roster(flock, args, self_pane_id):
     import dunk_views
     return dunk_views.roster(flock)
@@ -928,6 +941,19 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "state_capture",
+        "Record one row per agent lane: project, harness, argv, session, model, thinking, "
+        "activity and task. Null with a reason where not readable. The capture half of "
+        "restartable lanes.",
+        h_state_capture,
+        params={"source": {"type": "string", "description": "Why this capture ran (default periodic)."}}),
+    Command(
+        "state_latest",
+        "The most recent captured rows, newest first, optionally for one pane or project.",
+        h_state_latest,
+        params={"pane_id": {"type": "string"}, "project": {"type": "string"},
+                "limit": {"type": "integer"}}),
     Command(
         "roster",
         "One row per agent lane for the Command Center: name, harness, model (null with "
@@ -1945,7 +1971,8 @@ MCP_GROUPS = (
      "Read-only compositions for the Command Center: roster, message_state, "
      "reply_stats, project_summary. All queries, no model, no pane writes.",
      (("roster", "roster"), ("message_state", "message_state"),
-      ("reply_stats", "reply_stats"), ("project_summary", "project_summary"))),
+      ("reply_stats", "reply_stats"), ("project_summary", "project_summary"),
+      ("capture", "state_capture"), ("latest", "state_latest"))),
     ("dispatch",
      "Deterministic feeding, no model: the standby queue and the tick that fills "
      "idle lanes. action=add/list/remove/tick/status. A lane is fed only when it "
