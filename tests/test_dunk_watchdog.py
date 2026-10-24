@@ -723,6 +723,50 @@ class ConfigTests(WatchdogCase):
             self.assertIn("CONFIG:", read(error_file))
 
 
+class WatchdogDeliveryTests(WatchdogCase):
+    """'It ran' and 'it delivered' are different claims, and so is 'it delivered'
+    from 'the alert reached a pane'.
+
+    Regression: a delivery failure returned before the heartbeat was written, so the
+    dead-man check that exists to report delivery bugs was silenced by one.
+    """
+
+    def load_cfg(self):
+        cfg = self.fleet.config(host__load={"load1_per_cpu": 3.0,
+                                            "critical_load1_per_cpu": 3.5,
+                                            "critical_hold_runs": 3, "must_hold_runs": 1})
+        cfg.update(enabled=True, dry_run=False)      # a LIVE run, so delivery happens
+        return cfg
+
+    def test_a_delivered_digest_is_recorded_and_sent(self):
+        cfg = self.load_cfg()
+        self.fleet.hosts = {"/": {"load1": 40.0, "load5": 40.0, "cpus": 8},
+                            "/tmp": {"used_fraction": 0.5}}
+        report, sent = self.fleet.run(cfg, dry=False)
+        if not report["lines"]:
+            self.skipTest("no VP lines on this fixture")
+        self.assertIn("vp", report["sent"])
+        self.assertIsNone(report["delivery_error"])
+        self.assertTrue(sent, "the digest must actually be handed to a sender")
+
+    def test_a_delivery_failure_still_writes_the_heartbeat(self):
+        cfg = self.load_cfg()
+        self.fleet.hosts = {"/": {"load1": 40.0, "load5": 40.0, "cpus": 8},
+                            "/tmp": {"used_fraction": 0.5}}
+        heartbeat = os.path.join(self.tmp, "heartbeat")
+        cfg["heartbeat_path"] = heartbeat
+
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("daemon down")
+
+        report = wd.run(cfg, NOW, dry_run_flag=False, send=broken,
+                        owner_channel=FakeOwner(), panes_provider=lambda: list(self.fleet.panes),
+                        host_sampler=self.fleet.host)
+        self.assertIn("daemon down", report["delivery_error"] or "")
+        self.assertTrue(os.path.exists(heartbeat),
+                        "the heartbeat says the watchdog RAN; delivery is a separate fact")
+
+
 class LiveNowRefusalTests(WatchdogCase):
     def test_now_is_refused_on_a_live_run_and_allowed_on_a_dry_run(self):
         cfg = self.fleet.config()

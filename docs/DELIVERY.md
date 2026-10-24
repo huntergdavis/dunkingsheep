@@ -98,6 +98,30 @@ expiry, and two checks that can disagree will*:
    stuck hold silently discarded every held message and three lanes were never told
    anything. **Losing mail is worse than delaying it.**
 
+## The hold reasons that remain (owner policy, 2026-10-24)
+
+The owner removed the last one that was guessing: **"a human is typing here" is not a
+real state on this path.** Every message he sends goes through Dunking Sheep - web,
+phone, Telegram - and none of those paths type into a pane. This daemon is the only
+thing that types into a pane on the messaging path, so it must never hold its own
+delivery because it thinks a person might be there.
+
+| hold / refusal | when | evidence |
+|---|---|---|
+| **dead session** | the pane's own banner, or a gone process on its lease | a reading, never a status field |
+| **harness does not queue** | codex, while its turn is running | measured: 20 failed nudges, 14/14 mail read |
+| removed: a human is typing | never | the state does not exist: the daemon is the only typist |
+
+**Text in the box that is not ours is PRESERVED, never a reason to stop the queue**:
+
+- our send submits it first (Enter), so it reaches the agent instead of being clobbered,
+  and then types ours;
+- if it will not submit, it is left exactly as it is and our send is deferred with a
+  reason - the text is untouched and the queue is not blocked.
+
+`delivery_state` reports `foreign_text` and `foreign_excerpt`, so a UI can show "there is
+text in this box that we did not type" without treating it as a hold.
+
 ## The final definition of DELIVERED (after the 2026-10-23 policy change)
 
 > **DELIVERED means the NOTICE was typed into the pane and confirmed submitted

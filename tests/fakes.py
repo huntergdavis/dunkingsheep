@@ -314,8 +314,15 @@ class FakeHerdr:
             if "Enter" in keys and self.box.get(pane_id):
                 self.enter_presses[pane_id] = self.enter_presses.get(pane_id, 0) + 1
                 if self.enter_presses[pane_id] >= self.enters_needed.get(pane_id, 1):
-                    self.sends.append((pane_id, self.box.pop(pane_id)))
+                    taken = self.box.pop(pane_id)
+                    self.sends.append((pane_id, taken))
                     self.enter_presses[pane_id] = 0
+                    # A real harness redraws the composer empty once it takes the line,
+                    # so the screen must stop showing it - otherwise the box reader
+                    # keeps reporting text that has already been submitted.
+                    screen = self.screens.get(pane_id)
+                    if screen and taken and taken in screen:
+                        self.screens[pane_id] = "❯\u00a0\n────────────────\n"
                     self.sent.set()
         return True, "sent"
 

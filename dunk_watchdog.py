@@ -1501,6 +1501,12 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
             report["sent"].append("vp")
         except Exception as error:  # noqa: BLE001 - reported to stderr; never re-sent through the inbox
             report["delivery_error"] = f"{type(error).__name__}: {error}"
+            # The heartbeat says the WATCHDOG RAN. Whether the alert was delivered is
+            # a different fact, and tying them together silences the dead-man with the
+            # very bug it exists to report.
+            state["last_run"] = now
+            save_state(state_path, state)
+            write_heartbeat(_expand(config["heartbeat_path"]), now, config["cadence_minutes"])
             return report
 
     for decision in vp_send:

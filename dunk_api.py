@@ -15,7 +15,7 @@ own herdr pane id (so `target: "self"` means the *caller's* pane, not the
 daemon's). Handlers return JSON-serialisable data or raise `DunkError`.
 """
 
-from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError
+from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE
 from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
 # A direct send waits briefly for actual delivery before reporting back, so
@@ -346,6 +346,40 @@ def h_state_latest(flock, args, self_pane_id):
                                           project=args.get("project"),
                                           limit=int(args.get("limit") or 50))
     return {"rows": rows, "count": len(rows)}
+
+
+def h_owner_push(flock, args, self_pane_id):
+    """Owner -> agent delivery with NO inbox row and NO typing.
+
+    The owner's own words: 'there was never a need to wait for agent input to clear,
+    you could just send messages directly'. A push is stored for the pane and drained by
+    the harness extension, so no typing guard can hold it.
+    """
+    import dunk_owner
+    # A pane id is already the answer: resolving it costs a terminal-backend round
+    # trip (~250ms) and the owner's budget is two seconds for the whole path.
+    target = str(args["target"]).strip()
+    pane = ({"pane_id": target} if PANE_ID_RE.match(target)
+            else flock.resolve_target(target, self_pane_id))
+    store = dunk_owner.OwnerPush()
+    return store.push(pane["pane_id"], args["body"],
+                      target=args.get("target"), subject=args.get("subject"))
+
+
+def h_owner_take(flock, args, self_pane_id):
+    """What is waiting for this pane; the extension calls it about once a second."""
+    import dunk_owner
+    pane_id = args.get("pane_id") or self_pane_id
+    if not pane_id:
+        raise ValueError("owner_take needs a pane")
+    store = dunk_owner.OwnerPush()
+    return {"pane_id": pane_id, "messages": store.take(pane_id, by=args.get("by"))}
+
+
+def h_owner_stats(flock, args, self_pane_id):
+    import dunk_owner
+    store = dunk_owner.OwnerPush()
+    return {"stats": store.stats(), "pending": store.pending()}
 
 
 def h_roster(flock, args, self_pane_id):
@@ -952,6 +986,26 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "owner_push",
+        "Deliver an OWNER message to an agent with no inbox row and no typing: it is "
+        "pushed for the pane and the harness extension reads it. Use for owner -> CoS.",
+        h_owner_push,
+        params={"target": {"type": "string"},
+                "body": {"type": "string"},
+                "subject": {"type": "string"}},
+        required=("target", "body")),
+    Command(
+        "owner_take",
+        "Drain the owner messages waiting for a pane (called by the harness extension "
+        "about once a second).",
+        h_owner_take,
+        params={"pane_id": {"type": "string"}, "by": {"type": "string"}}),
+    Command(
+        "owner_stats",
+        "Owner-push counts and delivery latency (p50/p90/max) in the last day.",
+        h_owner_stats,
+        params={}),
     Command(
         "state_capture",
         "Record one row per agent lane: project, harness, argv, session, model, thinking, "
@@ -1981,7 +2035,8 @@ MCP_GROUPS = (
     ("views",
      "Read-only compositions for the Command Center: roster, message_state, "
      "reply_stats, project_summary. All queries, no model, no pane writes.",
-     (("roster", "roster"), ("message_state", "message_state"),
+     (("push", "owner_push"), ("take", "owner_take"), ("stats", "owner_stats"),
+      ("roster", "roster"), ("message_state", "message_state"),
       ("reply_stats", "reply_stats"), ("project_summary", "project_summary"),
       ("capture", "state_capture"), ("latest", "state_latest"))),
     ("dispatch",

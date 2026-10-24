@@ -11,6 +11,37 @@ from dunk_callers import (
 )
 
 
+class SystemSenderHasNoPaneTests(unittest.TestCase):
+    def test_a_system_send_does_not_carry_a_pane_identity(self):
+        from dunk_client import FlockClient
+        client = FlockClient(socket_path="/tmp/does-not-exist.sock", self_pane_id="w9:pH")
+        captured = {}
+
+        class FakeSock:
+            def settimeout(self, *_a): pass
+            def connect(self, _path):
+                captured["sent"] = True
+            def sendall(self, payload):
+                captured["payload"] = payload.decode()
+                raise OSError("stop here")
+            def close(self): pass
+
+        import socket as socket_mod
+        original = socket_mod.socket
+        socket_mod.socket = lambda *a, **k: FakeSock()
+        try:
+            try:
+                client.call("inbox_send", to="x", body="y", system_sender="watchdog")
+            except Exception:
+                pass
+        finally:
+            socket_mod.socket = original
+        import json as json_mod
+        request = json_mod.loads(captured["payload"].split("\n")[0])
+        self.assertIsNone(request["self_pane_id"],
+                          "a system sender has no pane; attaching one got the claim refused")
+
+
 class ProcessIdentityTests(unittest.TestCase):
     def test_self_is_alive_with_its_own_start_time(self):
         start = process_start(os.getpid())

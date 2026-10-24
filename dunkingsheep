@@ -556,6 +556,16 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("owner", help="owner -> agent delivery: pushed, never typed")
+    osub = p.add_subparsers(dest="owner_command", metavar="<action>")
+    q = osub.add_parser("push", help="push an owner message to a pane (no inbox row, no typing)")
+    q.add_argument("target")
+    q.add_argument("body", nargs="+")
+    q.add_argument("--subject", "-s")
+    q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
+    q.add_argument("pane_id")
+    q.add_argument("--by")
+    q = osub.add_parser("stats", help="owner-push counts and latency")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>")
     q = ssub.add_parser("capture", help="record one row per agent lane now")
@@ -1275,6 +1285,26 @@ def print_retired(result):
                  if result.get("unread_kept") is not None else ""))
         return
     print(f"unretired {result.get('pane_id')}")
+
+
+def print_owner_push(result):
+    print(f"pushed owner message {result['id']} for {result['pane_id']} "
+          f"(no inbox row, nothing typed)")
+
+
+def print_owner_take(result):
+    messages = result.get("messages") or []
+    if not messages:
+        return
+    for message in messages:
+        subject = f"[{message['subject']}] " if message.get("subject") else ""
+        print(f"--- owner message {message['id']} at "
+              f"{time.strftime('%H:%M:%S', time.localtime(message['created_at']))}")
+        print(subject + message["body"])
+
+
+def print_owner_stats(result):
+    print(json.dumps(result, indent=2))
 
 
 def print_view(result):
@@ -2283,6 +2313,15 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "owner":
+        sub = args.owner_command
+        if sub == "push":
+            return client.call("owner_push", target=args.target, body=" ".join(args.body),
+                               subject=args.subject), print_owner_push
+        if sub == "take":
+            return client.call("owner_take", pane_id=args.pane_id,
+                               by=args.by), print_owner_take
+        return client.call("owner_stats"), print_owner_stats
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
         payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {

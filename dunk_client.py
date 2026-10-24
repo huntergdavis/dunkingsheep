@@ -107,11 +107,15 @@ class FlockClient:
 
     def call(self, cmd, **args):
         """Send one command; return its result or raise DunkError / OSError."""
+        # A SYSTEM SENDER has no pane by definition (the watchdog runs from a timer).
+        # Attaching one - from the environment or a parent service - made the daemon
+        # refuse the claim, so monitoring went silent while the rule still fired.
+        pane_id = None if args.get("system_sender") else self.self_pane_id
         request = {
             "id": self._next_id,
             "cmd": cmd,
             "args": {key: value for key, value in args.items() if value is not ...},
-            "self_pane_id": self.self_pane_id,
+            "self_pane_id": pane_id,
         }
         self._next_id += 1
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.64.0"
+VERSION = "2.65.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -113,6 +113,7 @@ BUSY_STATUSES = ("working", "blocked")
 # wR:p5. A digits-only pattern meant 'wR:p9' was not recognised as a pane id at
 # all, so a dead pane id fell through to becoming a mailbox name.
 _PANE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+:p\d+$")
+PANE_ID_RE = _PANE_ID_RE
 _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
 # 'codex-poolrad2 (wR:p5)': a name with its pane id appended. The parenthetical is
 # the ONLY unambiguous part, so it decides where the mail goes.
@@ -289,7 +290,9 @@ TYPING_LOCK_LOUD_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_LOUD_S", "0.
 # A send that could not start because the box is not ours to type into is HELD, not
 # failed: a dialog someone is reading and a human mid-sentence are the same answer -
 # wait, do not report a failure.
-BOX_HOLD = "a human is typing here"
+# A send that could not start because the box would not clear is DEFERRED, not a claim
+# that a person is present (that state does not exist on this path any more).
+BOX_HOLD = "the box would not clear (text left untouched)"
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -3394,11 +3397,10 @@ class Flock:
             # keys/Enter are how a panel is dismissed - holding them behind it is how
             # a queued Escape waited for ever.
             return None
-        if (text and not _is_our_send(text, last_sent_text, awaiting_consumption)
-                and not self._looks_like_ours(pane_id, text)):
-            # Same words as `delivery`. A draft we did not type is a person, and that
-            # is the ONLY thing this layer holds for now.
-            return ("blocked", f"a human is typing here ({text[:60]!r})")
+        # NO 'A HUMAN IS TYPING' HOLD. Every message the owner sends goes through this
+        # daemon (web, phone, Telegram) - none of those paths type into a pane - so a
+        # non-empty box is not evidence of a person. Foreign text is PRESERVED at send
+        # time (submitted first, or left untouched), never a reason to stop the queue.
         # A harness that does not queue what we type while it works would LOSE the
         # message (codex: measured). Hold for that tool only, and say why.
         harness = self._pane_harness(pane_id)
@@ -3433,7 +3435,14 @@ class Flock:
                 return False
         else:
             time.sleep(TYPING_SETTLE_S)
-        return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
+        # The second read is for REDRAW safety (a pane that repaints mid-send), not for
+        # somebody's text: text in the box is preserved at send time now, so it is no
+        # longer a reason to return False. A screen that cannot be read is inconclusive
+        # and does not hold - the send's own confirmation decides.
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return True
+        return not self._dead_session(pane_id)
 
     def _box_holds(self, pane_id, text):
         """True if `text` still sits in the pane's input box, False if nothing
@@ -3783,6 +3792,7 @@ class Flock:
             return {"state": "unknown", "reason": "pane unreadable"}
         typed = None if _modal_open(screen) else _typed_text(screen)
         state, reason = classify_delivery(screen, status, typed=typed)
+        foreign = bool(typed) and not self._looks_like_ours(pane_id, typed)
         # A hold that the classifier cannot see (a declared turn, a stale busy
         # report) is still a hold: report it as blocked with that reason, so
         # `delivery` and the queue never disagree.
@@ -3790,7 +3800,9 @@ class Flock:
         # typed while it works. `deliverable` is the field a caller must consult, so
         # a state can never be mistaken for permission again.
         deliverable = state in ("ready", "working")
-        return {"state": state, "reason": reason, "deliverable": deliverable}
+        return {"state": state, "reason": reason, "deliverable": deliverable,
+                "foreign_text": foreign,
+                "foreign_excerpt": (" ".join(typed.split())[:60] if foreign else None)}
 
     def clear_box(self, target, self_pane_id=None, reason=None):
         """CLEAR an unsubmitted draft (Ctrl-U, Escape). The destructive pair to
@@ -3857,6 +3869,17 @@ class Flock:
                      pane_id)
             ok, _detail = self._press_until_submitted(pane_id, shown)
             return ok
+        # The box holds text we did not type. PRESERVE it: submit it (so it reaches the
+        # agent rather than being clobbered), and only then type ours. If it will not
+        # submit, leave it exactly as it is and deliver on a later attempt - never
+        # overwrite somebody's text and never stall the whole queue behind it.
+        log.info("%s: box holds text we did not type (%r); submitting it first to preserve it",
+                 pane_id, shown[:60])
+        ok, _detail = self._press_until_submitted(pane_id, shown)
+        if ok:
+            return True
+        self._last_block_reason[pane_id] = "foreign-text-will-not-submit"
+        return False
         still = self._draft_persists(pane_id)
         if still is None:
             return True                      # a redraw, not a draft
@@ -4528,11 +4551,11 @@ def classify_delivery(screen, status=None, *, typed=None, our_text=None,
         # The pane is mid-work: it offers an interrupt, so something is running.
         return "working", f"mid-work ({progress})"
     if typed and not _is_our_send(typed, our_text, awaiting_consumption):
-        # Policy (2026-10-23): only a HUMAN typing holds. This wording is the one the
-        # send gate uses too - two surfaces describing one condition differently is
-        # how a reader concludes they are two conditions.
-        clipped = " ".join(str(typed).split())[:60]
-        return "blocked", f"a human is typing here ({clipped!r})"
+        # OWNER POLICY (2026-10-24): 'a human is typing' is not a real state on this
+        # path - every message goes through the daemon, and the daemon is the only
+        # thing that types into a pane. Text we did not type is PRESERVED at send time
+        # (submitted first, or left untouched), never a reason to refuse delivery.
+        return "ready", None
     status_text = str(status or "").lower()
     if status_text in ("working", "thinking", "running", "busy"):
         return "working", status_text

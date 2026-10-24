@@ -70,11 +70,12 @@ class ClassifyDeliveryTests(unittest.TestCase):
         self.assertEqual("blocked", state)
         self.assertIn("/clear", reason)
 
-    def test_a_draft_in_the_box_blocks_delivery(self):
+    def test_a_draft_in_the_box_no_longer_blocks_delivery(self):
+        """Policy 2026-10-24: the text is preserved at send time, not refused."""
         state, reason = dunk_core.classify_delivery("│ › half a sentence", "idle",
                                                     typed="half a sentence")
-        self.assertEqual("blocked", state)
-        self.assertIn("a human is typing here", reason)
+        self.assertEqual("ready", state)
+        self.assertIsNone(reason)
 
     def test_working_is_not_ready_and_not_blocked(self):
         self.assertEqual(("working", "working"),
@@ -96,12 +97,12 @@ class PlaceholderTests(unittest.TestCase):
                              dunk_core.classify_delivery(f"❯\u00a0\n{screen}\n", "idle"), label)
 
     def test_the_hint_does_not_mask_a_real_draft(self):
-        # A lane with an actual unsent draft is still blocked; the hint sitting
-        # beside it must not launder that into 'ready'.
-        screen = f"❯ half a sentence\n{HINT_GREY_RGB}\n"
-        state, reason = dunk_core.classify_delivery(screen, "idle", typed="half a sentence")
-        self.assertEqual("blocked", state)
-        self.assertIn("a human is typing here", reason)
+        # The reader must still SEE the draft (so it can be preserved); the hint beside
+        # it must not make the box look empty.
+        self.assertEqual("half a sentence", dunk_core.box_text(f"❯ half a sentence\n{HINT_GREY_RGB}\n")[0])
+        state, _reason = dunk_core.classify_delivery(f"❯ half a sentence\n{HINT_GREY_RGB}\n",
+                                                     "idle", typed="half a sentence")
+        self.assertEqual("ready", state, "a draft is preserved, not a refusal")
 
     def test_a_real_full_context_banner_still_blocks(self):
         state, reason = dunk_core.classify_delivery("│ Context limit reached. Run /clear to continue\n", "idle")
@@ -193,10 +194,10 @@ class BoxReaderTests(unittest.TestCase):
         self.assertEqual("check your inbox", flushed["text"])
 
         state = self.flock.delivery_state("w1:p2")
-        self.assertEqual("blocked", state["state"])
-        self.assertIn("a human is typing here", state["reason"])
-        blocker = self.flock.send_blocker("w1:p2")
-        self.assertEqual(blocker[1], state["reason"])
+        self.assertTrue(state["deliverable"])
+        self.assertTrue(state["foreign_text"])
+        self.assertIsNone(self.flock.send_blocker("w1:p2"),
+                          "the gate must agree: foreign text is not a hold")
 
     def test_a_multi_line_draft_starts_at_its_first_line(self):
         text, detail = dunk_core.box_text(multi_line_draft())
@@ -222,9 +223,10 @@ class BoxReaderTests(unittest.TestCase):
             self.assertEqual(expected, flushed["text"], "flush submits what the reader read")
 
             state = self.flock.delivery_state("w1:p2")
-            self.assertEqual("blocked", state["state"], "a draft blocks delivery")
-            self.assertEqual(self.flock.send_blocker("w1:p2")[1], state["reason"],
-                             "the gate and delivery must use the same words")
+            # Policy 2026-10-24: text in the box is PRESERVED, not a hold - the reader
+            # still finds it, and the state flags it as foreign so the UI can say so.
+            self.assertTrue(state["deliverable"], "a draft must not block delivery")
+            self.assertTrue(state["foreign_text"], "the reader found text that is not ours")
 
     def test_a_bordered_draft_is_found(self):
         text, _detail = dunk_core.box_text("│ ❯ check your inbox\n❯\u00a0\n")
@@ -443,11 +445,16 @@ class OwnTextIsNotAHumanTests(unittest.TestCase):
         self.assertTrue(any("Enter" in str(keys) for _pane, keys in self.herdr.keys),
                         "the repair is to SUBMIT our own text")
 
-    def test_a_human_draft_still_holds(self):
+    def test_foreign_text_is_not_a_hold_any_more(self):
+        """Owner policy 2026-10-24: all his messaging goes through the daemon, so a
+        non-empty box is not evidence of a person. Preserve the text; never hold."""
         self.herdr.screens["w1:p1"] = "❯ a half-written sentence of my own\n──────\n"
-        blocker = self.flock.send_blocker("w1:p1")
-        self.assertIsNotNone(blocker, "a human's draft must still hold")
-        self.assertIn("a human is typing here", blocker[1])
+        self.assertIsNone(self.flock.send_blocker("w1:p1"),
+                          "text in the box must never stop delivery again")
+        state = self.flock.delivery_state("w1:p1")
+        self.assertTrue(state["deliverable"])
+        self.assertTrue(state["foreign_text"], "the state says the text is not ours")
+        self.assertIn("half-written", state["foreign_excerpt"])
 
     def test_the_queued_message_text_counts_as_ours_even_with_no_memory(self):
         # A restart wipes the in-memory record; the QUEUE still knows what we are
