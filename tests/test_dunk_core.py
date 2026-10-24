@@ -1074,6 +1074,17 @@ class SendRaceTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
         self.assertEqual(1, len(self.herdr.keys), "no needless extra Enter")
 
+    def test_a_composer_that_needs_carriage_return_still_submits(self):
+        """Measured 2026-10-24: five of six revived claude lanes sat with our text
+        in the composer for four minutes while the send reported success, and
+        `tmux send-keys C-m` submitted at once. Enter is not the submit key for
+        every TUI, so the retries alternate instead of pressing Enter forever."""
+        self.herdr.cm_only.add("w2:p1")
+        ok, detail = self.flock.submit_text("w2:p1", "a nudge")
+        self.assertTrue(ok, detail)
+        pressed = [keys for pane, keys in self.herdr.keys if pane == "w2:p1"]
+        self.assertIn(["C-m"], pressed, "the retry must try the carriage return")
+
     def test_a_pane_that_needs_two_enters_still_submits(self):
         # What a large paste does on Codex: the first Enter is swallowed.
         self.herdr.enters_needed["w2:p1"] = 2

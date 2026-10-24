@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.6"
+VERSION = "2.69.7"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -189,6 +189,15 @@ MESSAGE_HISTORY = 50
 # these gaps a 2.2k message submits; the long tail only costs time when a send
 # is actually stuck, since a normal one is confirmed on the first press.
 SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+# Enter is a line feed to some TUIs and does nothing in their composer; the
+# carriage return (C-m) is what submits. Measured 2026-10-24 on six revived
+# claude lanes: five sat with the text visible for four minutes and the send
+# still reported success, while `tmux send-keys C-m` submitted at once. So the
+# retries alternate: the first press stays Enter (correct for pi/codex), every
+# later one is C-m.
+# Two presses of Enter first: a composer that needs two Enters for a long paste
+# (Codex) must not be fed a carriage return before it has had its second.
+SUBMIT_KEY_AFTER = 2
 # How many recent sends per pane to recognise as ours. Remembering only the
 # last one meant a single mis-read lost track of our own text for good, and
 # every later message queued behind it until a human ran `flush`.
@@ -599,6 +608,9 @@ class Flock:
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
         self.sent_text_by_pane = {}
+        # pane_id -> the key that last submitted there (Enter for most, C-m for
+        # TUIs whose composer ignores Enter: measured on claude, 2026-10-24).
+        self._submit_key = {}
         self._warned_wedged = {}
         self._warned_modal = {}
         # Why the most recent refusal happened, per pane, so a held event can
@@ -3795,6 +3807,7 @@ class Flock:
             # One honest refusal naming the pane's own state, instead of four
             # Enter presses into a dead composer and a misleading "did not submit".
             return False, f"agent session is dead ({dead}); not submitting into a dead composer"
+        key = "Enter"          # what the press inside the mutex used, if any
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
             if gap:
@@ -3803,8 +3816,15 @@ class Flock:
                 # The first Enter went out with the text, inside the mutex.
                 pass
             else:
+                # The key that last submitted for this pane wins from then on. Until
+                # one has worked: Enter, Enter, then C-m, Enter, C-m ... - so a TUI
+                # that ignores Enter is not pressed four times for nothing, and a
+                # TUI that wants two Enters still gets them.
+                key = (self._submit_key.get(pane_id)
+                       or ("C-m" if attempt > SUBMIT_KEY_AFTER
+                           and attempt % 2 == 1 else "Enter"))
                 with self._typing(pane_id):      # one keystroke burst per attempt
-                    ok, detail = self.herdr.send_keys(pane_id, "Enter")
+                    ok, detail = self.herdr.send_keys(pane_id, key)
                 if not ok:
                     return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
@@ -3824,11 +3844,14 @@ class Flock:
                         # Only repeated readable checks prove submission. A
                         # missing input box during redraw proves nothing.
                         if attempt > 1:
-                            log.info("%s: submitted after %d Enter presses", pane_id, attempt)
+                            self._submit_key[pane_id] = key
+                            log.info("%s: submitted after %d presses (%s)",
+                                     pane_id, attempt, key)
                         self.metrics.record("submit.attempt", pane_id=pane_id,
                                             outcome="ok", attempts=attempt,
                                             bytes=len((text or "").encode("utf-8")))
-                        return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
+                        return True, ("sent" if attempt == 1
+                                      else f"sent ({key} x{attempt})")
                     if last_hold is True:
                         break        # our text returned; another Enter is safe
             if last_hold is not True:
