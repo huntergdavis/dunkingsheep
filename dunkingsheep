@@ -564,6 +564,10 @@ def build_parser():
     q.add_argument("target")
     q.add_argument("body", nargs="+")
     q.add_argument("--subject", "-s")
+    q = osub.add_parser("poll",
+                        help="drain heartbeat: this lane polls, even when the queue is empty")
+    q.add_argument("pane_id")
+    q.add_argument("--by", default="harness")
     q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
     q.add_argument("pane_id")
     q.add_argument("--by")
@@ -2370,6 +2374,10 @@ def run_client_command(client, args):
         if sub == "push":
             return client.call("owner_push", target=args.target, body=" ".join(args.body),
                                subject=args.subject), print_owner_push
+        if sub == "poll":
+            return client.call("owner_poll", pane_id=args.pane_id,
+                               by=args.by), lambda r: print(
+                f"poll recorded for {r['pane_id']} by {r['by']}")
         if sub == "take":
             return client.call("owner_take", pane_id=args.pane_id,
                                by=args.by), print_owner_take

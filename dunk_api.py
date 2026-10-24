@@ -401,6 +401,19 @@ def h_owner_push(flock, args, self_pane_id):
                       target=args.get("target"), subject=args.get("subject"))
 
 
+def h_owner_poll(flock, args, self_pane_id):
+    """The lane's harness says "I am polling" - including when there was nothing.
+
+    Empty polls are the point: an idle drainer that only wrote rows when it took
+    something would look dead, and a manual `owner take` would look alive for ever.
+    """
+    import dunk_owner
+    pane_id = args.get("pane_id") or self_pane_id
+    if not pane_id:
+        raise ValueError("owner_poll must be given a pane id")
+    return dunk_owner.OwnerPush().poll(pane_id, by=args.get("by") or "harness")
+
+
 def h_owner_take(flock, args, self_pane_id):
     """What is waiting for this pane; the extension calls it about once a second."""
     import dunk_owner
@@ -1059,6 +1072,15 @@ COMMANDS = [
                 "body": {"type": "string"},
                 "subject": {"type": "string"}},
         required=("target", "body")),
+    Command(
+        "owner_poll",
+        "Record a drain heartbeat: the lane's harness polls for owner messages "
+        "(even when the queue is empty). This, and only this, is what "
+        "delivery_capability reads to decide a lane drains - a manual owner take "
+        "must not confer capability.",
+        h_owner_poll,
+        params={"pane_id": {"type": "string", "description": "the pane that polled"},
+                "by": {"type": "string", "description": "who polled, e.g. pi-extension"}}),
     Command(
         "owner_take",
         "Drain the owner messages waiting for a pane (called by the harness extension "
@@ -2148,7 +2170,8 @@ MCP_GROUPS = (
     ("views",
      "Read-only compositions for the Command Center: roster, message_state, "
      "reply_stats, project_summary. All queries, no model, no pane writes.",
-     (("push", "owner_push"), ("take", "owner_take"), ("stats", "owner_stats"),
+     (("push", "owner_push"), ("take", "owner_take"), ("poll", "owner_poll"),
+      ("stats", "owner_stats"),
       ("roster", "roster"), ("message_state", "message_state"),
       ("reply_stats", "reply_stats"), ("project_summary", "project_summary"),
       ("capture", "state_capture"), ("latest", "state_latest"))),

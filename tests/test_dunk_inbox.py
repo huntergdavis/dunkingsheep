@@ -422,6 +422,31 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_capability_reads_an_observed_poll_not_a_harness_name(self):
+        """An independent review found the first version wrong twice: a manual
+        `owner take` conferred capability, and a poller draining EMPTY queues never
+        wrote a row so a healthy lane looked dead. Only the poller's own heartbeat
+        counts, empty polls included."""
+        import dunk_owner
+        made = self.flock.create_workspace(label="pi lane", cwd="/tmp",
+                                          mailbox="dunky pi lane")["pane_id"]
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == made:
+                pane["agent"] = "pi"
+        store = dunk_owner.OwnerPush()
+        before = self.flock.delivery_capability("dunky pi lane")
+        self.assertFalse(before["drains"], before["drain_evidence"])
+        self.assertEqual("guarded", before["send"])
+        store.poll(made, by="pi-extension")          # an EMPTY poll still counts
+        after = self.flock.delivery_capability("dunky pi lane")
+        self.assertTrue(after["drains"], after["drain_evidence"])
+        self.assertEqual("owner_push", after["send"])
+        # A manual take of nothing must not confer capability.
+        import time as _t
+        store.db.execute("DELETE FROM owner_poll"); store.db.commit()
+        store.take(made, by="manual")
+        self.assertFalse(self.flock.delivery_capability("dunky pi lane")["drains"])
+
     def test_delivery_capability_says_push_or_guarded_per_harness(self):
         """The desk routes on this: pi lanes drain a push queue, claude/codex lanes
         have no drain hook and must get an immediate guarded send."""
@@ -434,8 +459,10 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                 pane["agent"] = "pi"
             if pane["pane_id"] == claude:
                 pane["agent"] = "claude"
+        import dunk_owner
+        dunk_owner.OwnerPush().poll(pi, by="pi-extension")   # the harness is polling
         a = self.flock.delivery_capability("dunky")
-        self.assertTrue(a["drains"])
+        self.assertTrue(a["drains"], a["drain_evidence"])
         self.assertEqual("owner_push", a["send"])
         self.assertEqual("dunky", a["mailbox"], "the declared name is what the desk shows")
         b = self.flock.delivery_capability("PM (par-a)")
@@ -861,6 +888,7 @@ class SurfaceParityTests(unittest.TestCase):
             "create_workspace": "new-workspace", "create_tab": "new-tab",
             "lanes": "lane", "lane_set": "lane",
             "delivery_capability": "capability", "desk_token": "desk-token",
+            "owner_poll": "poll",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",

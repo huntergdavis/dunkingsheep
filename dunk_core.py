@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.3"
+VERSION = "2.70.4"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -626,6 +626,7 @@ class Flock:
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
         self.sent_text_by_pane = {}
+        self._delivered_text = {}      # pane_id -> recent texts WE delivered
         # pane_id -> the key that last submitted there (Enter for most, C-m for
         # TUIs whose composer ignores Enter: measured on claude, 2026-10-24).
         self._submit_key = {}
@@ -1290,6 +1291,10 @@ class Flock:
     # and codex lanes have no such hook, so a push to them is a queue nobody
     # reads. That is a CAPABILITY, not a preference: the desk routes on it.
     DRAIN_HOOKS = {"pi": "owner_push"}
+    # A drain observed this recently is evidence a poller is running now. Older
+    # than this and the lane is treated as not draining, because silence is the
+    # only safe reading of a stale take.
+    DRAIN_FRESH_S = 300
 
     def delivery_capability(self, target, self_pane_id=None):
         """How the desk may deliver to this target, and what it may show.
@@ -1305,14 +1310,38 @@ class Flock:
         agent = (pane.get("agent") or "").strip().lower()
         name, declared = self._row_identity(self._lane_registry().get(pane_id))
         drain = self.DRAIN_HOOKS.get(agent)
+        # OBSERVED, not inferred: only a take proves a drainer is running. A pi
+        # lane whose session predates the extension still polls nothing, and the
+        # desk would offer a route that silently waits (measured on %2).
+        evidence, last = "no poll observed", None
+        try:
+            import dunk_owner
+            store = dunk_owner.OwnerPush()
+            # The POLL heartbeat, not the last take: a manual take must not confer
+            # capability, and an idle poller draining empty queues must not lose it.
+            last = store.last_poll(pane_id)
+            if last:
+                age = int(time.time() - last)
+                evidence = (f"harness polled {age}s ago" if age < 86400
+                            else "harness last polled over a day ago")
+            elif drain:
+                evidence = ("harness has a poller but has never polled this pane "
+                            "(a manual owner take does not count)")
+        except Exception:                       # noqa: BLE001 - capability never crashes
+            evidence = "drain evidence unavailable"
+        observed = bool(last and time.time() - last < self.DRAIN_FRESH_S)
         return {
             "pane_id": pane_id,
             "mailbox": name or (pane.get("label") or pane_id),
             "declared": declared,
             "agent": agent or None,
             "alive": True,
-            "drains": bool(drain),
-            "send": drain or "guarded",
+            "drains": observed,
+            "drain_evidence": evidence,
+            # push only when a drain has ACTUALLY been seen recently; otherwise the
+            # immediate guarded send, because an unread queue is the failure mode
+            # this whole day was about.
+            "send": ("owner_push" if observed else "guarded"),
             # 1 s poll on the push path; the guarded path is one typing round-trip.
             "expect": ("push drained within ~1s, no inbox row"
                        if drain else

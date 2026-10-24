@@ -1090,6 +1090,25 @@ class SendRaceTests(unittest.TestCase):
         probe.status, probe.detail = "failed", "no such pane"
         self.assertEqual("refused", probe.to_dict()["outcome"])
 
+    def test_a_submitted_message_above_an_empty_composer_is_not_a_draft(self):
+        """Measured on %15: the transcript shows the user's own line with the same
+        sigil as the composer, so a delivered message sat in the box region and
+        every later send refused to press Enter on a "draft" (m1303 held 80+
+        times, m1305 held on our own echo)."""
+        screen = "\n".join([
+            "\u276f Desk acceptance test from %2 at 15:41:23",
+            "\u23fa Churned for 7s and finished.",
+            "\u2500" * 8,
+            "\u276f ",
+            "\u2500" * 8,
+        ])
+        text, detail = dunk_core.box_text(screen)
+        self.assertEqual("", text, detail)
+        self.herdr.screens["w2:p1"] = screen
+        state = self.flock.delivery_state("w2:p1", "idle")
+        self.assertFalse(state["foreign_text"], state)
+        self.assertTrue(state["deliverable"], state)
+
     def test_a_busy_lane_confirms_by_the_turn_it_started(self):
         """The false negative cos measured: two sends to a claude lane reported
         "did not submit" and the receiving lane showed both as turns. A busy box
