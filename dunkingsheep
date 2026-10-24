@@ -1951,7 +1951,9 @@ def main(argv=None):
     # happened (cos measured it, 2026-10-24). Anything the daemon answers with
     # ok=false is a non-zero exit, whatever the prose says.
     if isinstance(result, dict) and result.get("ok") is False:
-        return 1
+        # 2 is this CLI's existing "named refusal" code (see the DunkError path
+        # below). A failed send is a refusal with a reason, not a new kind of exit.
+        return 2
     return 0
 
 
