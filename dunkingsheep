@@ -585,6 +585,10 @@ def build_parser():
     p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8792)
+    p = sub.add_parser("capability", aliases=["capabilities"],
+                       help="how a target can receive: push queue (pi) or immediate guarded send",
+                       epilog="example: dunkingsheep capability '%9'")
+    p.add_argument("target")
     p = sub.add_parser("lane", aliases=["lanes"],
                        help="the lane registry: who each pane IS, declared or inferred",
                        epilog="examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'")
@@ -1277,6 +1281,14 @@ def print_message(result):
         print(f"sent to {result['target_label']} ({result['pane_id']})")
     else:
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
+
+
+def print_capability(result):
+    print(f"{result['pane_id']}  mailbox={result['mailbox']!r}"
+          f"  declared={'yes' if result['declared'] else '-'}"
+          f"  agent={result['agent'] or '-'}")
+    print(f"  drains={'yes' if result['drains'] else 'no'}  send={result['send']}")
+    print(f"  {result['expect']}")
 
 
 def print_lanes(result):
@@ -2372,6 +2384,8 @@ def run_client_command(client, args):
     if command == "api":
         import dunk_http
         return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
+    if command in ("capability", "capabilities"):
+        return client.call("delivery_capability", target=args.target), print_capability
     if command in ("lane", "lanes"):
         action = args.lane_command or "list"
         if action == "set":

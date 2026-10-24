@@ -800,6 +800,11 @@ def h_list_workspaces(flock, args, self_pane_id):
     return {"self": own, "workspaces": flock.list_workspaces()}
 
 
+def h_delivery_capability(flock, args, self_pane_id):
+    """What the desk may do with this target: push queue or immediate send."""
+    return flock.delivery_capability(args["target"], self_pane_id)
+
+
 def h_lanes(flock, args, self_pane_id):
     action = (args.get("action") or "list").strip().lower()
     if action == "set":
@@ -1856,6 +1861,16 @@ COMMANDS = [
     ),
     # -- herdr layout control: build the herd, then dunk on it ---------------
     Command(
+        "delivery_capability",
+        "How the desk may deliver to this target: does its harness drain a push "
+        "queue (pi) or must the message go as an immediate guarded send (claude, "
+        "codex)? Returns pane_id, mailbox (the PINNED name when declared), agent, "
+        "alive, drains, send ('owner_push' or 'guarded') and expect. Refusals use "
+        "the same tokens as a send: dead_lane / unhoused_lane / unknown_name.",
+        h_delivery_capability,
+        params={"target": {"type": "string",
+                           "description": "pane id (%9) or pinned lane name"}}),
+    Command(
         "list_workspaces",
         "List herdr workspaces with their tabs (ids, labels, agent status). "
         "`self` is the caller's own workspace/tab. Use it to pick where to "
@@ -2098,6 +2113,7 @@ MCP_GROUPS = (
      "queued=true and is delivered later. flush submits a stranded draft; "
      "clear_box DESTROYS one (superuser only). Prefer the inbox for agents.",
      (("list", "list_panes"), ("read", "read_pane"), ("delivery", "delivery"),
+      ("capability", "delivery_capability"),
       ("send", "send_text"),
       ("send_keys", "send_keys"), ("flush", "flush_box"),
       ("clear_box", "clear_box"),

@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.11"
+VERSION = "2.69.12"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1267,6 +1267,40 @@ class Flock:
         name = str(value or "").strip()
         return (name or None), False
 
+    # Which harnesses drain a push queue of their own. A pi lane runs the
+    # dunkingsheep extension, which polls owner_take about once a second; claude
+    # and codex lanes have no such hook, so a push to them is a queue nobody
+    # reads. That is a CAPABILITY, not a preference: the desk routes on it.
+    DRAIN_HOOKS = {"pi": "owner_push"}
+
+    def delivery_capability(self, target, self_pane_id=None):
+        """How the desk may deliver to this target, and what it may show.
+
+        Returns, for a live pane: pane_id, mailbox (pinned name if declared),
+        agent, alive, drains (does its harness poll a push queue), send
+        ('owner_push' or 'guarded'), and the latency expectation. A target that
+        does not resolve raises the same tokenised refusals as a send, so the UI
+        renders one vocabulary for every way a delivery can fail.
+        """
+        pane = self.delivery_target(target, self_pane_id)
+        pane_id = pane["pane_id"]
+        agent = (pane.get("agent") or "").strip().lower()
+        name, declared = self._row_identity(self._lane_registry().get(pane_id))
+        drain = self.DRAIN_HOOKS.get(agent)
+        return {
+            "pane_id": pane_id,
+            "mailbox": name or (pane.get("label") or pane_id),
+            "declared": declared,
+            "agent": agent or None,
+            "alive": True,
+            "drains": bool(drain),
+            "send": drain or "guarded",
+            # 1 s poll on the push path; the guarded path is one typing round-trip.
+            "expect": ("push drained within ~1s, no inbox row"
+                       if drain else
+                       "immediate guarded send (Enter, then C-m); 'sent' means it left the box"),
+        }
+
     def delivery_target(self, target, self_pane_id=None):
         """Resolve a DIRECT-DELIVERY target (owner push, keystrokes) to one pane.
 
@@ -2441,6 +2475,7 @@ class Flock:
             return None
 
     def is_superuser(self, self_pane_id):
+        self.superusers.refresh()          # the file can change mid-turn
         return self.superusers.is_superuser(self_pane_id,
                                             self._pane_info(self_pane_id))
 

@@ -422,6 +422,28 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_delivery_capability_says_push_or_guarded_per_harness(self):
+        """The desk routes on this: pi lanes drain a push queue, claude/codex lanes
+        have no drain hook and must get an immediate guarded send."""
+        pi = self.flock.create_workspace(label="pi lane", cwd="/tmp",
+                                        mailbox="dunky")["pane_id"]
+        claude = self.flock.create_workspace(label="claude lane", cwd="/tmp",
+                                             mailbox="PM (par-a)")["pane_id"]
+        for pane in self.herdr.panes:                 # the fake's agent field
+            if pane["pane_id"] == pi:
+                pane["agent"] = "pi"
+            if pane["pane_id"] == claude:
+                pane["agent"] = "claude"
+        a = self.flock.delivery_capability("dunky")
+        self.assertTrue(a["drains"])
+        self.assertEqual("owner_push", a["send"])
+        self.assertEqual("dunky", a["mailbox"], "the declared name is what the desk shows")
+        b = self.flock.delivery_capability("PM (par-a)")
+        self.assertFalse(b["drains"])
+        self.assertEqual("guarded", b["send"])
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.delivery_capability("%99")
+
     def test_two_live_panes_declaring_one_name_are_refused_not_split(self):
         """A restore that duplicates a lane must not split its mail silently."""
         a = self.flock.create_workspace(label="one", cwd="/tmp", mailbox="par-b")["pane_id"]
@@ -838,6 +860,7 @@ class SurfaceParityTests(unittest.TestCase):
             "read_pane": "read", "list_workspaces": "workspaces",
             "create_workspace": "new-workspace", "create_tab": "new-tab",
             "lanes": "lane", "lane_set": "lane",
+            "delivery_capability": "capability",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",
