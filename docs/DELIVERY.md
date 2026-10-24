@@ -1,5 +1,9 @@
 # Delivery state: can this lane receive a message, and if not why
 
+> *"inbox.sent ok is the MAIL; message.failed is the NUDGE. Two different events with
+> two different meanings, and conflating them made the situation look worse than it
+> was."*
+
 > *"clear-box and flush read the PANE; send read a CLAIM about the pane. Both were
 > right about their own evidence and only one was right about the world."*
 > — the whole hold bug in one line: a report is a claim, the pane is the evidence,
@@ -93,6 +97,33 @@ expiry, and two checks that can disagree will*:
    `resumed 1 held message(s) after restart: m1`. Before this, restarting to clear a
    stuck hold silently discarded every held message and three lanes were never told
    anything. **Losing mail is worse than delaying it.**
+
+## Rule 15, second half: when a harness cannot queue, HOLD **and** CONFIRM
+
+A harness's queue behaviour is a measured property, not an assumption
+(`HARNESS_QUEUES_WHILE_BUSY = {claude, pi}`; everything else holds with a reason that
+names the tool). The second half matters just as much: **the submit must be
+confirmed**, because the confirmation is what makes the hold diagnosable instead of
+mysterious.
+
+Codex proved both halves in one night:
+
+- it does not submit text typed during a turn, so the nudge is **held** (rule 15);
+- the four-Enter confirmation detected that the text never left the box and logged
+  `FAILED text did not submit; it is still in the pane's input box` **twenty times**,
+  each with its message id - which is why the failure was a conversation with numbers
+  instead of a lane quietly going silent for an hour.
+
+And the ledger that kept the story straight:
+
+| event | means |
+|---|---|
+| `inbox.sent ok` | the **MAIL** arrived in the mailbox (the row the lane will read) |
+| `message.sent ok` | the **NUDGE** was typed and confirmed submitted |
+| `message.failed` | the **NUDGE** did not submit; the mail is still there, unread |
+| `message.held` | the nudge is waiting, by policy, with a reason |
+
+**A mechanism that reports its own failures is worth the extra second it costs.**
 
 ### When the hold is wrong: `--ignore-typing`
 
