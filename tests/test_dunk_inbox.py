@@ -405,11 +405,13 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                          "a refused send must not leave a mailbox behind")
 
     def test_a_registered_lane_with_no_live_pane_refuses_a_send(self):
-        """A message in the queue for a lane with no pane is unreadable: it is the
-        same disease as a made-up mailbox, only slower (VP ruling 2026-10-24)."""
+        """Three states, three tokens (VP ruling 2026-10-24): a name that was never
+        a lane is unknown_name, a lane marked dead at a known time is dead_lane,
+        and a lane that exists but is not running on this backend is
+        unhoused_lane - the operator does something different for each."""
         from dunk_core import DunkError as _DunkError
         self.flock._remember_lane("w9:pZ", "arriving later")
-        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
+        with self.assertRaisesRegex(_DunkError, "reason=unhoused_lane"):
             self.flock.inbox_send("arriving later", "waiting for you", notify=True)
         self.assertEqual(0, self.inbox.count("arriving later")["total"])
 

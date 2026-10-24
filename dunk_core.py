@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.4"
+VERSION = "2.69.5"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1114,7 +1114,7 @@ class Flock:
             # the failure the VP outlawed, only slower. Refuse and say which it is.
             raise DunkError(
                 f"lane {spec!r} is registered but has no live pane on this backend; "
-                "nothing can be delivered to it right now. reason=dead_lane. "
+                "nothing can be delivered to it right now. reason=unhoused_lane. "
                 "Existing mail for it can still be read and archived; start or restore "
                 "the lane, or send to a lane that is live.")
         return self._mailbox_for_pane(pane)
