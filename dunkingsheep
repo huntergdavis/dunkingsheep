@@ -1706,6 +1706,12 @@ def _run(argv):
                   file=sys.stderr)
             return 0
         # No cached answer yet: run fresh rather than return a silent stub.
+    if not path:
+        # Only a coalescable command needs its stdout captured for the cache.
+        # Capturing everything replaced sys.stdout with a StringIO, which has
+        # no .buffer, so `dunkingsheep mcp` (a byte-stream server) died on
+        # start and every MCP client saw CONNECTION_CLOSED.
+        return main(argv)
     import contextlib
     import io
     buffer = io.StringIO()
