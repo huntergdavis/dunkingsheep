@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.5"
+VERSION = "2.69.6"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1136,6 +1136,14 @@ class Flock:
             matches = [p for p in panes if p.get(field) == value]
             return value if len(matches) == 1 else None
 
+        # A DECLARED identity wins over every name the pane carries. The title is
+        # written by the agent (claude sets it to its session summary) and the
+        # label is a display string; neither may decide who the lane is.
+        declared_name, declared = self._row_identity(
+            self._lane_registry().get(pane["pane_id"]))
+        if declared and declared_name:
+            return (declared_name, f"{declared_name} ({pane['pane_id']})",
+                    pane["pane_id"])
         key = unique("label") or unique("tab_label") or pane["pane_id"]
         label = pane.get("label") or pane.get("tab_label") or pane["pane_id"]
         if label != pane["pane_id"]:
@@ -1223,12 +1231,84 @@ class Flock:
         except (OSError, ValueError):
             return {}
 
-    def _remember_lane(self, pane_id, mailbox):
-        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail."""
+    @staticmethod
+    def _row_identity(value):
+        """(mailbox, declared) for a registry row, however it is spelled.
+
+        A row is either a plain mailbox name (older rows, and every inferred one)
+        or a dict that can carry `declared` plus liveness. Two questions only:
+        who is this lane, and did somebody SAY that or did we guess it.
+        """
+        if isinstance(value, dict):
+            name = str(value.get("mailbox") or value.get("name") or "").strip()
+            return (name or None), bool(value.get("declared"))
+        name = str(value or "").strip()
+        return (name or None), False
+
+    def lanes(self):
+        """The lane registry as rows: pane id, mailbox, declared?, alive?"""
+        rows = []
+        for pane_id, value in sorted(self._lane_registry().items()):
+            name, declared = self._row_identity(value)
+            alive = bool(value.get("alive", True)) if isinstance(value, dict) else None
+            rows.append({"pane_id": pane_id, "mailbox": name,
+                         "declared": declared, "alive": alive,
+                         "dead_since": (value.get("dead_since")
+                                        if isinstance(value, dict) else None)})
+        return rows
+
+    def lane_set(self, pane_id, mailbox, self_pane_id=None):
+        """Declare who a pane IS, after the fact. Superuser-gated by the caller.
+
+        The repair path for a lane whose declared name was overwritten by a title
+        (or never declared at all). Refuses a pane that does not exist, so a
+        typo cannot mint a lane.
+        """
+        pane_id = str(pane_id or "").strip()
+        mailbox = str(mailbox or "").strip()
+        if not pane_id or not mailbox:
+            raise DunkError("lane set must be given a pane id and a mailbox name")
+        if self.herdr.get_pane(pane_id) is None:
+            raise DunkError(f"no live pane {pane_id!r}: a lane row for a dead pane "
+                            "would be a guess. Create the pane first.")
+        self._remember_lane(pane_id, mailbox, declared=True)
+        self._invalidate_view()
+        name, _ = self._row_identity(self._lane_registry().get(pane_id))
+        return {"pane_id": pane_id, "mailbox": name, "declared": True}
+
+    def _remember_lane(self, pane_id, mailbox, declared=False):
+        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail.
+
+        A DECLARED identity (new-workspace --as, lane set) is immutable from the
+        inside: an agent renames its pane title every turn, and those names are
+        inferences, so they may fill an empty row and must never overwrite a
+        declared one. Measured 2026-10-24: `--as 'PM (par-a)'` was replaced by
+        claude's own conversation title minutes later, and the lane became
+        unaddressable by the name it had been given.
+        """
         data = self._lane_registry()
-        if data.get(pane_id) == mailbox:
-            return
-        data[pane_id] = mailbox
+        existing = data.get(pane_id)
+        existing_name, existing_declared = self._row_identity(existing)
+        if existing_declared and not declared:
+            return False
+        if not declared and existing_name:
+            return False
+        if declared:
+            row = dict(existing) if isinstance(existing, dict) else {}
+            row["mailbox"] = str(mailbox).strip()
+            row["declared"] = True
+            row.setdefault("declared_at", time.time())
+            row.setdefault("alive", True)
+            data[pane_id] = row
+        else:
+            if existing_name == mailbox:
+                return False
+            data[pane_id] = str(mailbox).strip()
+        self._write_lane_registry(data)
+        return True
+
+    def _write_lane_registry(self, data):
+        """Atomic replace of the lane registry. One writer, one rename."""
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             temporary = self.lane_registry_path() + ".tmp"
@@ -1237,8 +1317,10 @@ class Flock:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.lane_registry_path())
+            return True
         except OSError as error:
-            log.warning("could not record lane %s -> %s: %s", pane_id, mailbox, error)
+            log.warning("could not write the lane registry: %s", error)
+            return False
 
     def _title_pane(self, pane_id, mailbox):
         """Best effort: put the lane name in the pane title too.
@@ -1266,13 +1348,13 @@ class Flock:
         needle = str(mailbox or "").strip().lower()
         if not needle:
             return None, None
-        recorded = [pane_id for pane_id, name in self._lane_registry().items()
-                    if str(name or "").strip().lower() == needle]
+        recorded = [pane_id for pane_id, row in self._lane_registry().items()
+                    if (self._row_identity(row)[0] or "").lower() == needle]
         if not recorded:
             return None, None
         live = {pane.get("pane_id"): pane
                 for pane in self.herdr.list_panes_grouped()}
-        candidates = [(live[pane_id], self._lane_registry()[pane_id])
+        candidates = [(live[pane_id], self._row_identity(self._lane_registry()[pane_id])[0])
                       for pane_id in recorded if pane_id in live]
         if len(candidates) == 1:
             return candidates[0]
@@ -1294,12 +1376,12 @@ class Flock:
         if not needle:
             return False, True, None
         for value in self._lane_registry().values():
+            name, _declared = self._row_identity(value)
+            if (name or "").lower() != needle:
+                continue
             if isinstance(value, dict):
-                label = str(value.get("mailbox") or value.get("name") or "").strip().lower()
-                if label == needle:
-                    return True, bool(value.get("alive", True)), value.get("dead_since")
-            elif str(value or "").strip().lower() == needle:
-                return True, True, None
+                return True, bool(value.get("alive", True)), value.get("dead_since")
+            return True, True, None        # a plain name row says nothing about life
         return False, True, None
 
     def _mailbox_exists(self, name):
@@ -2436,7 +2518,7 @@ class Flock:
         ok, result = self.herdr.create_workspace(label=label, cwd=cwd, focus=focus)
         out = self._after_create(ok, result, command, f"workspace {label or ''}".strip())
         if mailbox and out.get("pane_id"):
-            self._remember_lane(out["pane_id"], str(mailbox).strip())
+            self._remember_lane(out["pane_id"], str(mailbox).strip(), declared=True)
             self._title_pane(out["pane_id"], mailbox)
         return out
 

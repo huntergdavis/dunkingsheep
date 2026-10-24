@@ -800,6 +800,26 @@ def h_list_workspaces(flock, args, self_pane_id):
     return {"self": own, "workspaces": flock.list_workspaces()}
 
 
+def h_lanes(flock, args, self_pane_id):
+    action = (args.get("action") or "list").strip().lower()
+    if action == "set":
+        # Same gate as the lane_set command: a name that decides who receives
+        # mail is not something any lane may assert about another.
+        flock.require_superuser(self_pane_id, "lane_set")
+        return flock.lane_set(args.get("pane"), args.get("mailbox"),
+                              self_pane_id=self_pane_id)
+    if action != "list":
+        raise ValueError("lanes action must be list or set")
+    rows = flock.lanes()
+    return {"lanes": rows, "count": len(rows)}
+
+
+def h_lane_set(flock, args, self_pane_id):
+    # No KeyError for a parameterless call: the refusal names what is missing.
+    return flock.lane_set(args.get("pane"), args.get("mailbox"),
+                          self_pane_id=self_pane_id)
+
+
 def h_create_workspace(flock, args, self_pane_id):
     return flock.create_workspace(
         label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
@@ -1046,6 +1066,25 @@ COMMANDS = [
         h_project_summary,
         params={"project": {"type": "string", "description": "Project name, or omit for global."},
                 "path": {"type": "string", "description": "Explicit project directory."}}),
+    Command(
+        "lanes",
+        "The lane registry: which pane is which lane, whether that name was "
+        "DECLARED (new-workspace --as, lane_set) or inferred from a title, and "
+        "whether the lane is alive. action=list (default) or set.",
+        h_lanes,
+        params={"action": {"type": "string", "enum": ["list", "set"],
+                           "description": "list (default) or set"},
+                "pane": {"type": "string", "description": "set: the pane id"},
+                "mailbox": {"type": "string",
+                            "description": "set: the lane name this pane IS"}}),
+    Command(
+        "lane_set",
+        "Declare who a pane IS, after the fact, in the registry's immutable field. "
+        "Repairs a lane whose declared name was overwritten by an agent's pane "
+        "title. Refuses a pane that does not exist. Superuser-gated.",
+        h_lane_set,
+        params={"pane": {"type": "string", "description": "the pane id"},
+                "mailbox": {"type": "string", "description": "the lane name"}}),
     Command(
         "retire_pane",
         "Retire a pane we deliberately stopped feeding (superseded, or its job "
@@ -2168,6 +2207,7 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
+    "lane_set",
     "memory_backfill",
 }
 

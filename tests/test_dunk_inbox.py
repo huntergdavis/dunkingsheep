@@ -339,7 +339,8 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                                           mailbox="dunky pi")
         pane_id = made["pane_id"]
         self.assertTrue(pane_id)
-        self.assertEqual("dunky pi", self.flock._lane_registry().get(pane_id))
+        self.assertEqual("dunky pi",
+                         self.flock._row_identity(self.flock._lane_registry()[pane_id])[0])
         key, label, resolved = self.flock.resolve_mailbox("dunky pi")
         self.assertEqual(pane_id, resolved, "mail for the lane must reach its new pane")
         self.assertEqual("dunky pi", key, "the key is the recorded name, not the title")
@@ -404,6 +405,33 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_a_declared_lane_name_survives_the_agent_renaming_its_pane(self):
+        """Measured 2026-10-24: `new-workspace --as 'PM (par-a)'` was replaced by
+        claude's own conversation title minutes later and the lane became
+        unaddressable by the name it had been given. A name the agent can rename
+        away is not a registration."""
+        made = self.flock.create_workspace(label="poolrad-pm", cwd="/tmp",
+                                          mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        for pane in self.herdr.panes:            # the agent renames itself
+            if pane["pane_id"] == pane_id:
+                pane["terminal_title"] = "✳ PR #1188 acceptance review"
+                pane["terminal_title_stripped"] = "✳ PR #1188 acceptance review"
+                pane["label"] = "✳ PR #1188 acceptance review"
+        key, label, resolved = self.flock.resolve_mailbox("PM (par-a)")
+        self.assertEqual(pane_id, resolved, "the declared name must still deliver")
+        self.assertEqual("PM (par-a)", key)
+        row = self.flock._lane_registry()[pane_id]
+        self.assertTrue(self.flock._row_identity(row)[1], "the row stays declared")
+        self.assertEqual("PM (par-a)", self.flock._row_identity(row)[0])
+
+    def test_an_inferred_name_never_overwrites_a_declared_one(self):
+        made = self.flock.create_workspace(label="pm", cwd="/tmp", mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        self.assertFalse(self.flock._remember_lane(pane_id, "✳ some title"))
+        self.assertEqual("PM (par-a)", self.flock._row_identity(
+            self.flock._lane_registry()[pane_id])[0])
+
     def test_a_registered_lane_with_no_live_pane_refuses_a_send(self):
         """Three states, three tokens (VP ruling 2026-10-24): a name that was never
         a lane is unknown_name, a lane marked dead at a known time is dead_lane,
@@ -417,8 +445,10 @@ class InboxThroughTheFlockTests(unittest.TestCase):
 
     def test_a_lane_the_registry_marks_dead_alarms_with_the_date(self):
         from dunk_core import DunkError as _DunkError
-        self.flock._remember_lane("w9:pY", {"mailbox": "gone lane", "alive": False,
-                                            "dead_since": "2026-10-24 08:00"})
+        self.flock._remember_lane("w9:pY", "gone lane", declared=True)
+        data = self.flock._lane_registry()
+        data["w9:pY"].update({"alive": False, "dead_since": "2026-10-24 08:00"})
+        self.flock._write_lane_registry(data)
         with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
             self.flock.resolve_mailbox("gone lane", strict=True)
         with self.assertRaisesRegex(_DunkError, "dead since 2026-10-24 08:00"):
@@ -763,6 +793,7 @@ class SurfaceParityTests(unittest.TestCase):
             "cancel_message": "cancel-message", "list_panes": "panes",
             "read_pane": "read", "list_workspaces": "workspaces",
             "create_workspace": "new-workspace", "create_tab": "new-tab",
+            "lanes": "lane", "lane_set": "lane",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",

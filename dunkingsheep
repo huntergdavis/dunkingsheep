@@ -585,6 +585,14 @@ def build_parser():
     p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8792)
+    p = sub.add_parser("lane", aliases=["lanes"],
+                       help="the lane registry: who each pane IS, declared or inferred",
+                       epilog="examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'")
+    lsub = p.add_subparsers(dest="lane_command", metavar="<action>")
+    lsub.add_parser("list", help="every lane row: pane, name, declared?, alive?")
+    q = lsub.add_parser("set", help="declare who a pane IS (superuser); overrides any title")
+    q.add_argument("pane")
+    q.add_argument("mailbox")
     p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
     rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
     q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
@@ -1269,6 +1277,23 @@ def print_message(result):
         print(f"sent to {result['target_label']} ({result['pane_id']})")
     else:
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
+
+
+def print_lanes(result):
+    rows = result.get("lanes") or []
+    if not rows:
+        print("the lane registry is empty")
+        return
+    print(f"{'PANE':<8} {'MAILBOX':<42} {'DECLARED':<9} ALIVE")
+    for row in rows:
+        declared = "yes" if row.get("declared") else "-"
+        alive = {True: "yes", False: "NO"}.get(row.get("alive"), "-")
+        name = (row.get("mailbox") or "-")[:42]
+        print(f"{row['pane_id']:<8} {name:<42} {declared:<9} {alive}")
+
+
+def print_lane(result):
+    print(f"{result['pane_id']} is {result['mailbox']!r} (declared)")
 
 
 def print_retired(result):
@@ -2347,6 +2372,12 @@ def run_client_command(client, args):
     if command == "api":
         import dunk_http
         return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
+    if command in ("lane", "lanes"):
+        action = args.lane_command or "list"
+        if action == "set":
+            return client.call("lane_set", pane=args.pane,
+                               mailbox=args.mailbox), print_lane
+        return client.call("lanes"), print_lanes
     if command == "retired":
         return client.call("retire_pane", action=args.retire_command,
                            pane=getattr(args, "pane", None),
