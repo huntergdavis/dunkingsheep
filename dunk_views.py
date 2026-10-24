@@ -8,10 +8,20 @@ No model, no inference about a pane that was not read, and every number is a cel
 import os
 import time
 
+import sqlite3
+
 import dunk_activity
 import dunk_context
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR", os.path.expanduser("~/.config/dunkingsheep"))
+# The COS/VP application's own message log: it holds the answer link (answer_id ->
+# reply row, answered_at). It records ITS ids, not our inbox ids, so the two stores
+# are joined by kind rather than pretended to be one.
+APP_DB = os.environ.get("DUNKINGSHEEP_APP_DB",
+                        os.path.expanduser("~/workspace/vp-of-agentry/data/messages.sqlite3"))
+# Their delivery column's progression. 'posted' is an agent reply reaching the chat;
+# 'read'/'acked' are transport acknowledgements.
+APP_DELIVERED = {"sent", "read", "acked", "posted"}
 
 # What each harness reports about its model. Unknown is null WITH a reason: a chat UI
 # that prints "unknown" as if it were a model name is worse than a gap.
@@ -118,6 +128,81 @@ def _cpu_for(flock, leases, now):
         return cell(None, None, f"cpu sample failed: {error}")
 
 
+def _app_row(message_id):
+    """One row from the application's log, or None. Never raises on a missing DB."""
+    try:
+        conn = sqlite3.connect(f"file:{APP_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT id, role, channel, body, delivery, delivery_detail, created_at, "
+            "answer_id, answered_at FROM messages WHERE id = ?", (int(message_id),)).fetchone()
+        if row is None:
+            return None
+        answer = None
+        if row["answer_id"]:
+            reply = conn.execute("SELECT id, role, channel, body, created_at FROM messages "
+                                 "WHERE id = ?", (row["answer_id"],)).fetchone()
+            if reply:
+                answer = {"id": reply["id"], "role": reply["role"], "channel": reply["channel"],
+                          "at": reply["created_at"],
+                          "excerpt": (reply["body"] or "").strip().splitlines()[:1][0][:120]
+                          if (reply["body"] or "").strip() else None}
+        return dict(row, answer=answer)
+    except (sqlite3.Error, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def _app_state(row, now):
+    """sent / delivered / replied for an APPLICATION message, with its evidence."""
+    delivery = (row.get("delivery") or "").strip().lower()
+    replied = None
+    if row.get("answered_at"):
+        replied = {"at": row["answered_at"], "reason": None}
+        if row.get("answer"):
+            replied["reply_id"] = row["answer"]["id"]
+            replied["reply_excerpt"] = row["answer"]["excerpt"]
+    return {
+        "id": row["id"], "found": True, "source": "application",
+        "mailbox": row.get("channel"),
+        "role": row.get("role"),
+        "sent": {"at": row.get("created_at"), "by": row.get("role")},
+        "delivered": {"ok": delivery in APP_DELIVERED if delivery else None,
+                      "state": delivery or None,
+                      "detail": row.get("delivery_detail") or None,
+                      "reason": None if delivery else "the application has not recorded a delivery state"},
+        "seen": cell(None, None,
+                     "the application records one delivery state, not a per-step timestamp"),
+        "replied": replied or cell(None, None, "no answer is linked to this message yet"),
+        "state": row.get("delivery"),
+    }
+
+
+def app_messages(channel=None, limit=50):
+    """Recent application messages, newest first: what the owner chat renders."""
+    try:
+        conn = sqlite3.connect(f"file:{APP_DB}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as error:
+        return {"error": f"application message log unavailable: {error}", "messages": []}
+    try:
+        where, params = "", []
+        if channel:
+            where, params = " WHERE channel = ?", [channel]
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT id, role, channel, body, delivery, created_at, answer_id, answered_at "
+            f"FROM messages{where} ORDER BY id DESC LIMIT ?", (*params, int(limit)))]
+    except sqlite3.Error as error:
+        return {"error": f"application message log unreadable: {error}", "messages": []}
+    finally:
+        conn.close()
+    return {"messages": rows, "count": len(rows), "channel": channel}
+
+
 def message_state(flock, message_ids, now=None):
     """sent / delivered / seen / replied for owner messages, with timestamps.
 
@@ -129,6 +214,16 @@ def message_state(flock, message_ids, now=None):
     now = now or time.time()
     out = []
     for message_id in message_ids:
+        # An APPLICATION id (numeric) has the answer link; an INBOX id ('i123') has
+        # the pane delivery. Report each from the store that knows it, and say which.
+        if str(message_id).isdigit():
+            app_row = _app_row(message_id)
+            if app_row is None:
+                out.append({"id": message_id, "found": False, "source": "application",
+                            "reason": "no application row with this id"})
+            else:
+                out.append(_app_state(app_row, now))
+            continue
         try:
             row = flock.inbox.get(message_id)
         except Exception:                       # noqa: BLE001
@@ -139,15 +234,23 @@ def message_state(flock, message_ids, now=None):
             continue
         created = row.get("created_at") or now
         out.append({
-            "id": row["id"], "found": True,
+            "id": row.get("id") or row.get("message_id"), "found": True,
+            "source": "inbox",
             "mailbox": row.get("mailbox"),
             "sent": {"at": _iso(created), "by": row.get("sender")},
-            "delivered": {"at": _iso(row.get("notified_at")) if row.get("notified_at") else None,
+            # DELIVERED is about the NUDGE, not the mail: the mail is the row you are
+            # reading. notify_state says whether the notice landed; a held or failed
+            # notice is delivered:false with the reason the send path recorded.
+            "delivered": {"ok": (row.get("notify_state") or "") == "notified",
                           "state": row.get("notify_state"),
-                          "reason": row.get("notify_reason")},
+                          "reason": row.get("notify_reason"),
+                          "at": None if row.get("notify_state") else None,
+                          "at_reason": "the store records the notify state, not when it changed"},
             "seen": {"at": _iso(row.get("read_at")) if row.get("read_at") else None,
                      "acked_at": _iso(row.get("acked_at")) if row.get("acked_at") else None},
-            "replied": cell(None, None, "the answer link lives in the COS/VP application, not this store"),
+            "replied": cell(None, None,
+                            "the COS/VP application records its own ids; this inbox message has "
+                            "no application row (its log has no external_id for inbox ids)"),
             "state": row.get("state"),
             "age_s": int(now - created),
         })

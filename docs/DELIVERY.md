@@ -98,6 +98,21 @@ expiry, and two checks that can disagree will*:
    stuck hold silently discarded every held message and three lanes were never told
    anything. **Losing mail is worse than delaying it.**
 
+## The final definition of DELIVERED (after the 2026-10-23 policy change)
+
+> **DELIVERED means the NOTICE was typed into the pane and confirmed submitted
+> (`notify_state='notified'`). The MAIL is the inbox row and is delivered the moment it
+> is written. A held or failed notice is `delivered:false`, with the reason the send
+> path recorded - never a guess.**
+>
+> One line for the UI: **DELIVERED = the nudge was typed and confirmed submitted** (the
+> mail itself is delivered when its row is written).
+
+For a message the COS/VP application transports (numeric ids in its own log), DELIVERED
+is the transport's own state (`sent` / `read` / `acked` / `posted`) and `replied` comes
+from `answered_at` + `answer_id`. Inbox ids (`i22636`) and application ids are reported
+by the store that knows them, each saying which - they are two records, not one.
+
 ## Rule 15, second half: when a harness cannot queue, HOLD **and** CONFIRM
 
 A harness's queue behaviour is a measured property, not an assumption
