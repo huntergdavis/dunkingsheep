@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.62.0"
+VERSION = "2.63.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -238,6 +238,19 @@ DEAD_SESSION_MARKERS = (
     "reconnect failed",
     "session expired",
 )
+# WHICH HARNESSES QUEUE WHAT WE TYPE WHILE THEY WORK. Measured, not assumed:
+#   claude -> yes: the composer shows "ctrl+x ctrl+s to send now" and the message is
+#             processed after the current turn (proven 2026-10-24, not interleaved).
+#   pi     -> yes: "Alt+Up to edit all queued messages", processed after the turn.
+#   codex  -> NO: text typed into the composer during a turn is NOT retained. Measured
+#             on wR:p6 during a 54-minute turn: four notices reported sent, the
+#             composer sat at its placeholder, and the scrollback contained exactly one
+#             composer line - i.e. accepted and lost, which is worse than held.
+# The policy is "a busy agent is not a hold" - but only where the harness actually
+# queues. For a harness that does not, holding is the lesser evil, and the reason says
+# so. Anything unknown is treated as not-queueing (conservative).
+HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}
+
 # A pane can be alive, have unread mail, and still be unreachable: its input box
 # holds something that was never submitted, so every later send is held as "a
 # human is typing" and the lane silently starves. These are the states that block
@@ -261,6 +274,11 @@ CONTEXT_FULL_MARKERS = ("/clear to save", "context is full", "context limit reac
 PLACEHOLDER_PATTERNS = (
     re.compile(r"new task\?\s*/clear to save [\d.,]+[km]? tokens?", re.I),
     re.compile(r"^\s*(new task\?|type your (request|message)\b)", re.I),
+    # Each harness's own empty-box hint. Usually drawn dim (so the bright-text
+    # reader already ignores it), but a bright redraw of the same words is not a
+    # draft either.
+    re.compile(r"^\s*ask (codex|claude|open ?code) to do anything", re.I),
+    re.compile(r"^\s*(send a message|type a message|ask anything)\b", re.I),
 )
 # How long a "busy" report from another process may block delivery while the pane
 # itself shows no turn and a clear box. A remembered state needs an expiry.
@@ -3381,7 +3399,26 @@ class Flock:
             # Same words as `delivery`. A draft we did not type is a person, and that
             # is the ONLY thing this layer holds for now.
             return ("blocked", f"a human is typing here ({text[:60]!r})")
+        # A harness that does not queue what we type while it works would LOSE the
+        # message (codex: measured). Hold for that tool only, and say why.
+        harness = self._pane_harness(pane_id)
+        if not HARNESS_QUEUES_WHILE_BUSY.get(harness, False):
+            # A working indicator sits a few lines above the composer (codex prints
+            # "• Working (54m · esc to interrupt)" above its status row), so this one
+            # check looks a little wider than the 3-line status window.
+            if screen and _status_marker(screen, WORKING_MARKERS, lines=8,
+                                         placeholder_safe=True, dim_ok=True):
+                return ("blocked", f"{harness or 'this harness'} does not queue text typed "
+                                   f"during a turn (measured: notices are lost), so this waits "
+                                   f"for the turn to end")
         return None
+
+    def _pane_harness(self, pane_id):
+        try:
+            pane = self.herdr.get_pane(pane_id) or {}
+        except Exception:                       # noqa: BLE001
+            return None
+        return str(pane.get("agent") or "").lower() or None
 
     def _clear_to_send(self, pane_id, last_sent_text=None,
                        awaiting_consumption=False, stop_event=None):
@@ -4408,11 +4445,15 @@ def _banner_marker(screen, markers):
 
 def _is_placeholder(text):
     """True when a line is the harness's empty-box hint rather than a state."""
-    plain = _strip_ansi(text or "").strip()
+    # Strip the box border and the prompt sigil first: the hint is drawn INSIDE the
+    # composer ('│ › Ask Codex to do anything'), so an anchored pattern missed it.
+    plain = _strip_ansi(text or "").strip().lstrip(BOX_LEADING).strip()
+    plain = plain.lstrip("".join(INPUT_BOX_SIGILS)).strip()
     return any(pattern.search(plain) for pattern in PLACEHOLDER_PATTERNS)
 
 
-def _status_marker(screen, markers, lines=STATUS_TAIL_LINES, *, placeholder_safe=False):
+def _status_marker(screen, markers, lines=STATUS_TAIL_LINES, *, placeholder_safe=False,
+                   dim_ok=False):
     """A status decoration on the composer line: '... · Goal paused (/goal resume)'.
 
     Only the last few non-blank lines count, because the composer is at the very
@@ -4427,7 +4468,12 @@ def _status_marker(screen, markers, lines=STATUS_TAIL_LINES, *, placeholder_safe
     raw = [row for row in (screen or "").splitlines() if _strip_ansi(row).strip()]
     for marker in markers:
         for row in raw[-lines:]:
-            plain = _strip_ansi(_bright_text(row)).lower()   # non-dim text only
+            # Dim text is excluded by default: a dim line is usually a hint. But some
+            # harnesses draw their WORKING indicator dim (codex prints
+            # "• Working (55m · esc to interrupt)" grey), so a caller that is asking
+            # "is anything happening" may say dim_ok - a false positive there only
+            # delays a message to a harness that would have lost it.
+            plain = (_strip_ansi(row) if dim_ok else _strip_ansi(_bright_text(row))).lower()
             if marker not in plain:
                 continue
             if placeholder_safe and _is_placeholder(row):
@@ -4531,7 +4577,12 @@ def _prompt_body(row):
     body = DECORATION_RE.sub(" ", _bright_text(row)).lstrip(BOX_LEADING)
     if body[:1] in INPUT_BOX_SIGILS:
         body = body[1:]
-    return _collapse(body)
+    body = _collapse(body)
+    if body and _is_placeholder(row):
+        # A hint drawn bright is still a hint: the box is empty, and calling it text
+        # is how codex's "Ask Codex to do anything" became 'a human is typing here'.
+        return ""
+    return body
 
 
 def box_text(screen):
@@ -4580,8 +4631,10 @@ def box_text(screen):
                       f"{index + 1} of {len(rows)}: {text[:60]!r}"
                       + ((" " + ", ".join(extra)) if extra else ""))
     index, _row = in_region[-1]
+    hint = " (only the harness's own hint was there)" if any(
+        _is_placeholder(row) for _i, row in in_region) else ""
     return "", (f"read {len(in_region)} prompt line(s); the last is at row {index + 1} "
-                f"of {len(rows)} with nothing after the sigil")
+                f"of {len(rows)} with nothing after the sigil{hint}")
 
 
 def _typed_text(screen):

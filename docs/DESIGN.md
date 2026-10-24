@@ -765,3 +765,28 @@ Two consequences that are easy to lose:
   removal: a busy agent is not a hold). Activity serves the fleet questions - the
   roster, the dispatcher's reporting, the UI - so a gap there is a wrong dot, not a
   stuck message.
+
+## The busy-hold policy is per harness, and it is measured
+
+The policy is "a busy agent is not a hold — the harness queues". That is true of two
+of our three harnesses, and the third would **lose** the message:
+
+| harness | queued while working? | evidence |
+|---|---|---|
+| claude | **yes** | composer showed `ctrl+x ctrl+s to send now` / `Press up to edit queued messages`; the task ran unbroken to 3000 and PROBE-ACK-1 was answered afterwards (2026-10-24) |
+| pi | **yes** | `Alt+Up to edit all queued messages`; PI-ACK-1 answered after the turn |
+| codex | **NO** | four notices reported `sent` during a 54-minute turn; the composer sat at its placeholder and the scrollback held exactly one composer line — accepted and lost |
+
+So `HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}` and anything else
+(including an unknown harness) keeps a hold **with a reason that says which harness
+and why**:
+
+```text
+codex does not queue text typed during a turn (measured: notices are lost), so this waits for the turn to end
+```
+
+Two bugs fell out of writing that: codex's status line is drawn **dim** (`• Working
+(55m · esc to interrupt)`), so a bright-text-only reader never saw it work — the
+working check now accepts dim text within eight lines; and codex's composer hint
+(`Ask Codex to do anything`) was not in the placeholder patterns, so a bright redraw of
+the hint was classified as a human typing. A hint drawn bright is still a hint.

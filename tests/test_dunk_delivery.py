@@ -369,6 +369,44 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class HarnessQueueCapabilityTests(unittest.TestCase):
+    """Only hold for a busy agent when its harness would LOSE the text.
+
+    Measured 2026-10-24 on wR:p6: codex accepted four notices during a 54-minute turn
+    and kept none of them (composer at its placeholder, one composer line in the
+    scrollback). claude and pi both queue natively and were proven to process the
+    message after the turn.
+    """
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+        self.herdr.screens["w1:p1"] = "│ ✻ Working\n│ • Working (55m) · esc to interrupt\n│ › Ask Codex to do anything\n"
+
+    def pane(self, harness):
+        self.herdr.panes = [{"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1",
+                             "agent": harness, "label": harness}]
+        return self.flock._pane_harness("w1:p1")
+
+    def test_codex_holds_because_it_would_lose_the_text(self):
+        self.assertEqual("codex", self.pane("codex"))
+        blocker = self.flock.send_blocker("w1:p1")
+        self.assertIsNotNone(blocker)
+        self.assertIn("does not queue", blocker[1])
+        self.assertIn("lost", blocker[1])
+
+    def test_claude_and_pi_are_not_held_while_working(self):
+        for harness in ("claude", "pi"):
+            self.pane(harness)
+            self.assertIsNone(self.flock.send_blocker("w1:p1"),
+                              f"{harness} queues natively and must not be held")
+
+    def test_an_unknown_harness_is_treated_as_not_queueing(self):
+        self.pane("mystery")
+        self.assertIsNotNone(self.flock.send_blocker("w1:p1"),
+                             "an unknown harness keeps the conservative hold")
+
+
 class OwnTextIsNotAHumanTests(unittest.TestCase):
     """The daemon must recognise what IT typed; anything else is a human.
 
