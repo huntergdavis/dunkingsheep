@@ -803,7 +803,7 @@ def h_list_workspaces(flock, args, self_pane_id):
 def h_create_workspace(flock, args, self_pane_id):
     return flock.create_workspace(
         label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
-        focus=_bool(args.get("focus"), False),
+        focus=_bool(args.get("focus"), False), mailbox=args.get("mailbox"),
     )
 
 
@@ -1835,6 +1835,10 @@ COMMANDS = [
             "cwd": CWD_PARAM,
             "command": RUN_COMMAND_PARAM,
             "focus": FOCUS_PARAM,
+            "mailbox": {"type": "string", "description":
+                        "the lane mailbox this new pane IS; recorded in the lane "
+                        "registry against the new pane id, so mail addressed to "
+                        "that lane reaches this pane after a backend change"},
         },
     ),
     Command(

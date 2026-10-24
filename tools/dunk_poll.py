@@ -12,7 +12,8 @@ daemon that already has everything open.
 
 No `dunk_*` modules are imported: this stays fast and independent of the
 daemon's implementation. Pane identity comes from the environment
-(HERDR_PANE_ID or TMUX_PANE); it never asks the terminal for `pane current`.
+(TMUX_PANE first, then HERDR_PANE_ID: an id inherited from the other backend
+can be stale, the one the terminal we are in exports cannot).
 """
 
 import argparse
@@ -49,7 +50,9 @@ def request(payload, socket_path, timeout=10.0):
 
 def poll(socket_path=None, self_pane=None, timeout=10.0, **options):
     socket_path = socket_path or os.environ.get("DUNKINGSHEEP_SOCKET") or DEFAULT_SOCKET
-    self_pane = self_pane or os.environ.get("HERDR_PANE_ID") or os.environ.get("TMUX_PANE")
+    # TMUX_PANE first: a tmux pane for a herdr lane inherits the dead herdr id
+    # (2026-10-24), and an inherited id is the one that can be wrong.
+    self_pane = self_pane or os.environ.get("TMUX_PANE") or os.environ.get("HERDR_PANE_ID")
     payload = {"id": 1, "cmd": "poll", "args": options,
                "self_pane_id": self_pane}
     response = request(payload, os.path.expanduser(socket_path), timeout=float(timeout))
@@ -86,7 +89,7 @@ def main(argv=None):
         prog="dunk-poll",
         description="One batched read from the Dunking Sheep daemon (stdlib only).")
     parser.add_argument("--socket", help="daemon socket (default DUNKINGSHEEP_SOCKET)")
-    parser.add_argument("--self-pane", help="caller pane (default HERDR_PANE_ID/TMUX_PANE)")
+    parser.add_argument("--self-pane", help="caller pane (default TMUX_PANE/HERDR_PANE_ID)")
     parser.add_argument("--mailbox", help="mailbox to poll (default: the caller's)")
     parser.add_argument("--limit", type=int, default=5,
                         help="unread messages to return (default 5)")

@@ -99,7 +99,10 @@ class GuardClassificationTests(unittest.TestCase):
                 mock.patch.object(dunk_tmux_guard, "load_managed",
                                   return_value={"%1"}), \
                 mock.patch.object(dunk_tmux_guard, "route_close",
-                                  return_value=0) as route:
+                                  return_value=0) as route, \
+                mock.patch.dict(os.environ, {"TMUX_PANE": ""}):
+            # No pane in the environment: a developer running the suite inside
+            # tmux must not turn "no target" into "the developer's own pane".
             dunk_tmux_guard.main(["kill-window"])
         current.assert_called_once_with("tab", None, [])
         route.assert_called_once_with("tab", "@9", [])

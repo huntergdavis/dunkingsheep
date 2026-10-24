@@ -85,13 +85,28 @@ def _current_pane_id():
         return None
 
 
+def exported_pane_id(environ=None):
+    """The pane this process is actually in, per the terminal that owns it.
+
+    TMUX_PANE wins over HERDR_PANE_ID on purpose. A tmux pane brought up for a
+    herdr lane inherits that lane's environment, so HERDR_PANE_ID keeps naming
+    the pane the lane used to be in. Measured 2026-10-24: every tmux pane in the
+    fleet carried its dead herdr twin's id, so this lane (tmux %4, title
+    'π - dunkingsheep') believed it was w9:pH and read, wrote and *attributed*
+    mail as the vp lane. An id the terminal exports for the terminal we are in
+    cannot be stale; one inherited from the other backend can be.
+    """
+    env = os.environ if environ is None else environ
+    return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
+
+
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
         explicit = self_pane_id is not None
         self.self_pane_id = (
             self_pane_id if explicit
-            else os.environ.get("HERDR_PANE_ID") or os.environ.get("TMUX_PANE")
+            else exported_pane_id()
         )
         # The terminal already exported our identity. Only pay for a
         # `pane current` round-trip when asked to verify a possibly-stale env.

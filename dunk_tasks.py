@@ -51,7 +51,10 @@ DEFAULT_LEASE_S = float(os.environ.get("DUNKINGSHEEP_LEASE_S", "1800"))
 
 # Pane ids are "<workspace>:<pane>" (w8:p3). Scope is either "global", "self"
 # (resolved by the caller) or a pane id.
-_PANE_ID = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
+# A pane id is whatever the current backend calls a pane: herdr's
+# 'workspace:pane' (w8:p8) or tmux's '%N'. Refusing tmux ids made every
+# per-pane task scope unusable the day the backend flipped (2026-10-24).
+_PANE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -151,7 +154,7 @@ def validate_scope(scope):
     if _PANE_ID.match(scope):
         return scope
     raise TaskError(
-        f"scope must be '{GLOBAL}' or a pane id such as 'w8:p3' (got {scope!r})"
+        f"scope must be '{GLOBAL}' or a pane id such as 'w8:p3' or '%4' (got {scope!r})"
     )
 
 

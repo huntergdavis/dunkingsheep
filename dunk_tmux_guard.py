@@ -228,9 +228,14 @@ def current_target(kind, pane_id, globals_):
     return proc.stdout.strip() or None
 
 
+def own_pane():
+    """The pane this shell is in, or None. An empty TMUX_PANE is not a pane."""
+    return os.environ.get("TMUX_PANE") or None
+
+
 def route_close(kind, target, globals_):
     if not target:
-        target = current_target(kind, os.environ.get("TMUX_PANE"), globals_)
+        target = current_target(kind, own_pane(), globals_)
     if not target:
         print("tmux guard: no target pane; refusing close", file=sys.stderr)
         return 1
@@ -273,10 +278,10 @@ def main(argv):
         kind = DESTRUCTIVE[command]
         target = option_value(rest)
         if not target:
-            target = current_target(kind, os.environ.get("TMUX_PANE"), globals_)
+            target = current_target(kind, own_pane(), globals_)
         decision = close_decision(
             kind, target, panes=tmux_panes(globals_), protected=load_protected(),
-            managed=load_managed(), caller_pane=os.environ.get("TMUX_PANE"))
+            managed=load_managed(), caller_pane=own_pane())
         if not decision.allowed:
             return refuse(command, decision.reason)
         return route_close(kind, target, globals_)

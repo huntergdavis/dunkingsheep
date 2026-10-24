@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.68.1"
+VERSION = "2.69.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -112,12 +112,12 @@ BUSY_STATUSES = ("working", "blocked")
 # Pane ids are 'w<workspace>:p<number>' where the workspace may be a LETTER:
 # wR:p5. A digits-only pattern meant 'wR:p9' was not recognised as a pane id at
 # all, so a dead pane id fell through to becoming a mailbox name.
-_PANE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+:p\d+$")
+_PANE_ID_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+:p\d+|%\d+)$")
 PANE_ID_RE = _PANE_ID_RE
 _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
 # 'codex-poolrad2 (wR:p5)': a name with its pane id appended. The parenthetical is
 # the ONLY unambiguous part, so it decides where the mail goes.
-_EMBEDDED_PANE_RE = re.compile(r"\(\s*([A-Za-z0-9_.-]+:p\d+)\s*\)\s*$")
+_EMBEDDED_PANE_RE = re.compile(r"\(\s*([A-Za-z0-9_.-]+:p\d+|%\d+)\s*\)\s*$")
 IDLE_POLL_S = 5
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
@@ -1035,6 +1035,17 @@ class Flock:
                 f"address must name a live pane: use a current pane id, or a bare "
                 f"mailbox name without the parenthetical.")
 
+        # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
+        # live pane wins over any name: labels and titles are chosen by the agent
+        # and change (claude rewrites its title every turn), while the registry
+        # row was written by the daemon when the pane was made.
+        recorded, recorded_name = self._lane_pane(spec)
+        if recorded is not None:
+            # The key is the name the daemon recorded, not the pane's current
+            # title: a title the agent overwrote is what lost the lane.
+            return (str(recorded_name), f"{recorded_name} ({recorded['pane_id']})",
+                    recorded["pane_id"])
+
         # 2. An exact *name* must identify exactly one pane across every name
         #    field. Two same-type panes can share a label (or one pane's label
         #    can equal another's tab label); picking by field priority delivered
@@ -1185,6 +1196,44 @@ class Flock:
             os.replace(temporary, self.lane_registry_path())
         except OSError as error:
             log.warning("could not record lane %s -> %s: %s", pane_id, mailbox, error)
+
+    def _title_pane(self, pane_id, mailbox):
+        """Best effort: put the lane name in the pane title too.
+
+        A title is a courtesy (the agent may replace it); the registry is the
+        record. Never let a failed rename undo a successful one.
+        """
+        rename = getattr(self.herdr, "rename", None)
+        if not callable(rename):
+            return False
+        try:
+            ok, _ = rename("pane", pane_id, str(mailbox))
+            return bool(ok)
+        except Exception:                        # noqa: BLE001 - cosmetic only
+            return False
+
+    def _lane_pane(self, mailbox):
+        """(live pane, recorded mailbox) for a mailbox in the lane registry, else (None, None).
+
+        The registry is pane -> mailbox, written on every genuine resolution and
+        on every create/restore that knows the lane. Reading it backwards is what
+        makes a mailbox addressable after a backend change, when the pane id the
+        message was written to no longer exists.
+        """
+        needle = str(mailbox or "").strip().lower()
+        if not needle:
+            return None, None
+        recorded = [pane_id for pane_id, name in self._lane_registry().items()
+                    if str(name or "").strip().lower() == needle]
+        if not recorded:
+            return None, None
+        live = {pane.get("pane_id"): pane
+                for pane in self.herdr.list_panes_grouped()}
+        candidates = [(live[pane_id], self._lane_registry()[pane_id])
+                      for pane_id in recorded if pane_id in live]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None, None              # none live, or two live: the caller refuses
 
     def _mailbox_exists(self, name):
         """True when the inbox already holds mail addressed to this name."""
@@ -2307,11 +2356,22 @@ class Flock:
                  f" running {command!r}" if command else "")
         return out
 
-    def create_workspace(self, label=None, cwd=None, command=None, focus=False):
-        """New herdr workspace (with its first tab and pane). `command`, if
-        given, is typed + Enter into that pane once it exists."""
+    def create_workspace(self, label=None, cwd=None, command=None, focus=False,
+                         mailbox=None):
+        """New workspace (with its first tab and pane). `command`, if given, is
+        typed + Enter into that pane once it exists.
+
+        `mailbox` names the lane the new pane IS, and is written into the lane
+        registry as soon as the pane exists. That is the write-back a backend
+        flip needs: without it the only record of the lane is a title the agent
+        itself may overwrite, and a restore produces a pane nobody can address.
+        """
         ok, result = self.herdr.create_workspace(label=label, cwd=cwd, focus=focus)
-        return self._after_create(ok, result, command, f"workspace {label or ''}".strip())
+        out = self._after_create(ok, result, command, f"workspace {label or ''}".strip())
+        if mailbox and out.get("pane_id"):
+            self._remember_lane(out["pane_id"], str(mailbox).strip())
+            self._title_pane(out["pane_id"], mailbox)
+        return out
 
     def create_tab(self, workspace=None, label=None, cwd=None, command=None, focus=False,
                    self_pane_id=None):

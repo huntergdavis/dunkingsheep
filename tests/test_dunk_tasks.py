@@ -54,6 +54,16 @@ class TaskStoreTests(unittest.TestCase):
         # b cannot reopen it by claiming; it is no longer eligible.
         self.assertIsNone(self.store.claim_next(GLOBAL, "b")["task"])
 
+    def test_a_tmux_pane_id_is_a_valid_scope(self):
+        """The backend flipped from herdr ids (w8:p8) to tmux ids (%4); a scope
+        validator that only knew the first spelling made every per-pane task
+        unusable on the new backend (2026-10-24)."""
+        from dunk_tasks import validate_scope
+        self.assertEqual("%4", validate_scope("%4"))
+        self.assertEqual("w8:p8", validate_scope("w8:p8"))
+        with self.assertRaisesRegex(Exception, "scope must be"):
+            validate_scope("not a pane")
+
     def test_scope_is_private_and_global_is_visible(self):
         pane = self.store.add("w2:p2", "local")
         glob = self.store.add(GLOBAL, "fleet")

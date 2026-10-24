@@ -641,8 +641,11 @@ def build_parser():
         p.add_argument("--focus", action="store_true", help="switch the view to it")
 
     p = sub.add_parser("new-workspace", aliases=["workspace"],
-                       help="create a named herdr workspace (first tab + shell pane)",
+                       help="create a named workspace (first tab + shell pane)",
                        epilog="example: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude")
+    p.add_argument("--as", dest="mailbox", metavar="MAILBOX",
+                   help="the lane this new pane IS: recorded in the lane registry, "
+                        "so mail for that lane reaches this pane after a backend change")
     placement(p)
     p = sub.add_parser("new-tab", aliases=["tab"], help="create a named tab in a workspace",
                        epilog="example: dunkingsheep new-tab -w Site -l writer -r 'codex'")
@@ -2381,7 +2384,8 @@ def run_client_command(client, args):
         return client.call("list_workspaces"), print_workspaces
     if command in ("new-workspace", "workspace"):
         return client.call("create_workspace", label=args.label, cwd=args.cwd,
-                           command=args.run, focus=args.focus), print_created
+                           command=args.run, focus=args.focus,
+                           mailbox=args.mailbox), print_created
     if command in ("new-tab", "tab"):
         return client.call("create_tab", workspace=args.workspace, label=args.label,
                            cwd=args.cwd, command=args.run, focus=args.focus), print_created

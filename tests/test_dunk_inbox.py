@@ -332,6 +332,57 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual("Codex Site", key, "the tab label names this one pane")
         self.assertIn("w2:p1", label)
 
+    def test_a_created_pane_is_recorded_as_the_lane_it_was_born_as(self):
+        """The write-back a backend flip needs: the pane id of a lane's new pane
+        is recorded the moment it exists, under the lane's own mailbox name."""
+        made = self.flock.create_workspace(label="restored", cwd="/tmp",
+                                          mailbox="dunky pi")
+        pane_id = made["pane_id"]
+        self.assertTrue(pane_id)
+        self.assertEqual("dunky pi", self.flock._lane_registry().get(pane_id))
+        key, label, resolved = self.flock.resolve_mailbox("dunky pi")
+        self.assertEqual(pane_id, resolved, "mail for the lane must reach its new pane")
+        self.assertEqual("dunky pi", key, "the key is the recorded name, not the title")
+        self.assertIn(pane_id, label)
+
+    def test_the_registry_beats_a_title_the_agent_rewrote(self):
+        """claude rewrites its pane title every turn. A lane found by its title is
+        a lane lost on the next turn; the registry row is the record."""
+        made = self.flock.create_workspace(label="ports", cwd="/tmp",
+                                          mailbox="skies-android")
+        pane_id = made["pane_id"]
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == pane_id:
+                pane["terminal_title"] = "✳ Investigating a build failure"
+                pane["terminal_title_stripped"] = "✳ Investigating a build failure"
+                pane["label"] = "Investigating a build failure"
+        key, _, resolved = self.flock.resolve_mailbox("skies-android")
+        self.assertEqual(pane_id, resolved)
+        self.assertEqual("skies-android", key)
+
+    def test_a_dead_tmux_pane_id_is_not_a_mailbox(self):
+        """Both backends' ids are identities; neither is allowed to become a
+        mailbox name just because its pane is gone."""
+        from dunk_core import DunkError as _DunkError
+        with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
+            self.flock.resolve_mailbox("%99")
+
+    def test_a_mailbox_named_after_a_live_tmux_pane_resolves(self):
+        made = self.flock.create_workspace(label="tmuxish", cwd="/tmp")
+        pane_id = made["pane_id"]
+        self.assertTrue(pane_id.startswith(("w", "%")))
+        key, _, resolved = self.flock.resolve_mailbox(pane_id)
+        self.assertEqual(pane_id, resolved)
+
+    def test_a_mailbox_recorded_against_a_dead_pane_does_not_resolve_to_a_live_one(self):
+        self.assertEqual((None, None), self.flock._lane_pane("never-recorded"))
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DIR": self.tmp.name}):
+            self.flock._remember_lane("w9:pH", "ghost lane")
+            self.assertEqual((None, None), self.flock._lane_pane("ghost lane"))
+            key, _, pane = self.flock.resolve_mailbox("ghost lane")
+            self.assertEqual("ghost lane", key, "an unstarted agent still gets mail")
+            self.assertIsNone(pane)
+
     def test_mail_can_be_left_for_an_agent_that_is_not_running(self):
         key, label, pane = self.flock.resolve_mailbox("not-started-yet")
         self.assertEqual("not-started-yet", key)
@@ -478,11 +529,28 @@ class MailboxIdentityTests(unittest.TestCase):
 
     def test_client_uses_the_exported_pane_id_without_asking_herdr(self):
         from dunk_client import FlockClient
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"},
-                             clear=False), \
+        env = {"HERDR_PANE_ID": "wR:p4"}
+        with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch("dunk_client._current_pane_id") as current:
             self.assertEqual("wR:p4", FlockClient().self_pane_id)
             current.assert_not_called()
+
+    def test_a_stale_herdr_id_does_not_beat_the_tmux_pane_we_are_in(self):
+        """Measured 2026-10-24: a tmux pane brought up for a herdr lane inherits
+        that lane's HERDR_PANE_ID, so every tmux lane believed it was its dead
+        herdr twin - this lane wrote and was credited as the vp lane."""
+        from dunk_client import FlockClient
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("%4", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_an_explicit_self_pane_still_wins_over_the_environment(self):
+        from dunk_client import FlockClient
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual("%2", FlockClient(self_pane_id="%2").self_pane_id)
 
     def test_client_uses_tmux_pane_when_herdr_is_absent(self):
         from dunk_client import FlockClient

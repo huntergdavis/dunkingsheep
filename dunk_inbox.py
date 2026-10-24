@@ -60,7 +60,9 @@ STATES = ("queued", "read", "acked", "cancelled", "archived",
           "undeliverable")
 # A mailbox key that is itself a pane id (older versions stored
 # dead-pane mail this way, with pane_id NULL).
-PANE_MAILBOX_RE = re.compile(r"^w\d+:p\d+$")
+# The identity of last resort: a mailbox named after the pane. Both backends
+# spell pane ids differently (w8:p8, %4) and both are legitimate here.
+PANE_MAILBOX_RE = re.compile(r"^(?:w\d+:p\d+|%\d+)$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -101,7 +103,7 @@ CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NU
 """
 
 
-_PANE_SUFFIX = re.compile(r"\s*\(\s*[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+\s*\)\s*$")
+_PANE_SUFFIX = re.compile(r"\s*\(\s*(?:[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+|%\d+)\s*\)\s*$")
 
 
 def normalise_mailbox(name):
