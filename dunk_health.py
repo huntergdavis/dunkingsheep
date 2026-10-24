@@ -74,15 +74,21 @@ def _dispatch_freshness(config_dir, now):
 def run_health(flock, repair=False, deep=False):
     started = time.time()
     problems, repairs, checks = [], [], {}
-    dispatch = _dispatch_freshness(os.path.expanduser("~/.config/dunkingsheep"), started)
+    dispatch = _dispatch_freshness(os.environ.get("DUNKINGSHEEP_DIR")
+                                   or os.path.expanduser("~/.config/dunkingsheep"), started)
     checks["dispatch"] = dispatch
-    if dispatch["status"] == "absent":
-        problems.append(f"dispatcher: {dispatch['reason']}")
-    elif dispatch["status"] == "stale":
+    # ABSENT IS NOT A PROBLEM: a fresh host has no tick yet, and a health check that
+    # calls that DEGRADED is an alarm nobody can satisfy until the timer runs. It is
+    # reported in the checks (so it is visible) and becomes a problem only when a tick
+    # EXISTS and has stopped.
+    if dispatch["status"] == "stale":
         problems.append(f"dispatcher: last successful tick {dispatch['age_s']}s ago "
                         f"(stale after {DISPATCH_STALE_S}s) - the feeder is not running")
     store = getattr(flock, "memory", None)
-    config_dir = os.path.expanduser("~/.config/dunkingsheep")
+    # Honour DUNKINGSHEEP_DIR: a health check that reads the LIVE dispatch state while
+    # a test points it at a temp dir is not isolated, and it reports the live fleet's
+    # staleness as if it were the test's.
+    config_dir = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser("~/.config/dunkingsheep")
 
     if store is None:
         problems.append("memory service disabled")
