@@ -34,6 +34,21 @@ be released the instant a turn completes.
 4. Proof by counter: zero `message.failed` events for codex lanes in the hour after
    the change, against twenty in the hour before.
 
+## Thread-to-pane mapping: the two gaps must be BLOCKED, never guessed
+
+Thread ids and panes are the name-vs-id mismatch that has cost us five incidents in one
+day, so both halves are decided here, before any code:
+
+| situation | answer | never |
+|---|---|---|
+| a **thread exists** with no pane matching its cwd/session | `unknown` + "codex thread <id> has no pane in this process's pane list" - the holder is not ours to report on | assume it belongs to the nearest codex pane |
+| a **pane exists** with no thread (starting, resumed elsewhere, app-server restarted) | `unknown` + "no codex thread matches pane <id> (session <sid>)" - and the HOLD stays, because a hold is diagnosable | assume idle |
+| one thread, two panes (a duplicate lane) | both `unknown`, naming both panes: the ambiguity is the finding | pick the newest |
+| two threads, one pane | `unknown` naming both threads | merge them |
+
+The mapping key is `(cwd, session id)` from `launches.json` - the same pair a restore
+would use, so a wrong mapping shows up here first rather than after a reboot.
+
 ## Why it waits for a fresh session
 
 The interface is marked experimental by its own authors, it requires a live busy codex
