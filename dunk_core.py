@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.9"
+VERSION = "2.69.10"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1038,11 +1038,17 @@ class Flock:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return self._mailbox_for_pane(pane)
         if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
+            if not strict:
+                # READS STAY PERMISSIVE. A dead pane id is a name mail can still be
+                # filed under - that is how 78 stranded messages exist, and they
+                # have to be readable and archivable or the triage cannot run.
+                # Only a SEND refuses here (measured regression, 2026-10-24).
+                return spec, spec, None
             raise DunkError(
                 f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
                 "pane id is not a name. If that lane still exists, address it by "
                 "mailbox name; if it does not, the send fails here instead of "
-                "queueing into nothing.")
+                "queueing into nothing. reason=dead_lane.")
         # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
         # that id decides. Without this the whole string fell through to step 3 and
         # became a mailbox NAME with no pane: mail addressed to
@@ -1054,10 +1060,14 @@ class Flock:
             for pane in panes:
                 if pane.get("pane_id") == hinted or pane.get("terminal_id") == hinted:
                     return self._mailbox_for_pane(pane)
+            if not strict:
+                # A decorated address is a mailbox NAME too ('PM (par-a) (wW:p1)'
+                # is exactly what the triage list shows). Reading it must work.
+                return spec, spec, None
             raise DunkError(
                 f"target {spec!r} names pane {hinted}, which is not live. A decorated "
                 f"address must name a live pane: use a current pane id, or a bare "
-                f"mailbox name without the parenthetical.")
+                f"mailbox name without the parenthetical. reason=dead_lane.")
 
         # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
         # live pane wins over any name: labels and titles are chosen by the agent

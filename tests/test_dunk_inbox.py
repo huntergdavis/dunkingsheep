@@ -361,6 +361,23 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(pane_id, resolved)
         self.assertEqual("skies-android", key)
 
+    def test_reading_and_acking_a_dead_name_still_works(self):
+        """Regression 2026-10-24: fail-closed leaked into the READ path, so 78
+        stranded messages became unreadable and the triage could not run. Only a
+        send refuses; a dead name is still a mailbox name."""
+        self.inbox.send("w9:pS", "from the void", sender="pm")
+        self.inbox.send("PM (par-a) (wW:p1)", "decorated", sender="pm")
+        self.inbox.send("w9:pS", "a second one to archive", sender="pm")
+        count = self.flock.inbox_count("w9:pS")
+        self.assertEqual(2, count["unread"])
+        first = [m["body"] for m in self.flock.inbox_read("w9:pS", limit=1)["messages"]]
+        self.assertEqual(["from the void"], first)
+        self.assertEqual(1, self.flock.inbox_count("PM (par-a) (wW:p1)")["unread"])
+        self.assertEqual(1, self.flock.inbox_archive("w9:pS")["archived"],
+                         "the unread one is still archivab1e after the read")
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.inbox_send("w9:pS", "no", notify=False)
+
     def test_a_dead_herdr_pane_id_is_not_a_mailbox_either(self):
         """The vp lane's id ends in a letter (w9:pH), so the narrow numeric
         pattern let it through and the send was accepted as a NEW mailbox name -
@@ -368,14 +385,14 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         from dunk_core import DunkError as _DunkError
         for dead in ("w9:pH", "wR:p5", "w11:p1"):
             with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
-                self.flock.resolve_mailbox(dead)
+                self.flock.resolve_mailbox(dead, strict=True)
 
     def test_a_dead_tmux_pane_id_is_not_a_mailbox(self):
         """Both backends' ids are identities; neither is allowed to become a
         mailbox name just because its pane is gone."""
         from dunk_core import DunkError as _DunkError
         with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
-            self.flock.resolve_mailbox("%99")
+            self.flock.resolve_mailbox("%99", strict=True)
 
     def test_a_mailbox_named_after_a_live_tmux_pane_resolves(self):
         made = self.flock.create_workspace(label="tmuxish", cwd="/tmp")
@@ -490,8 +507,10 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(["for codex"], [m["body"] for m in read["messages"]])
 
     def test_sending_to_a_dead_pane_id_errors(self):
+        # The SEND contract (strict). A read of the same name is allowed: that is
+        # where stranded mail lives.
         with self.assertRaisesRegex(DunkError, "no live pane"):
-            self.flock.resolve_mailbox("w9:p8")
+            self.flock.resolve_mailbox("w9:p8", strict=True)
         with self.assertRaisesRegex(DunkError, "no live pane"):
             self.flock.inbox_send("w9:p8", "lost")
         self.assertEqual(0, self.inbox.count("w9:p8")["total"],
@@ -758,7 +777,7 @@ class MailboxRoutingTests(unittest.TestCase):
 
     def test_a_decorated_address_for_a_dead_pane_is_refused(self):
         with self.assertRaises(self.dunk_core.DunkError) as caught:
-            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)")
+            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)", strict=True)
         self.assertIn("wR:p9", str(caught.exception))
         self.assertIn("not live", str(caught.exception))
 
@@ -771,7 +790,7 @@ class MailboxRoutingTests(unittest.TestCase):
 
     def test_a_bare_dead_pane_id_is_not_a_mailbox_even_for_a_letter_workspace(self):
         with self.assertRaises(self.dunk_core.DunkError):
-            self.flock.resolve_mailbox("wR:p9")
+            self.flock.resolve_mailbox("wR:p9", strict=True)
 
 
 class SurfaceParityTests(unittest.TestCase):
