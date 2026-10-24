@@ -64,6 +64,16 @@ class OwnerPush:
             self.db.executescript(SCHEMA)
             self.db.commit()
 
+    def close(self):
+        """Close the connection. A caller that opens a store per query must be able
+        to hand the handle back; without this a capability probe leaked one per
+        fleet row per refresh (independent review, 2026-10-24)."""
+        with self._lock:
+            try:
+                self.db.close()
+            except Exception:                    # noqa: BLE001 - closing twice is fine
+                pass
+
     def push(self, pane_id, body, *, target=None, subject=None, now=None):
         body = (body or "").strip()
         if not body:

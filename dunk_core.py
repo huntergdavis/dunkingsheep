@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.5"
+VERSION = "2.70.6"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1314,9 +1314,9 @@ class Flock:
         # lane whose session predates the extension still polls nothing, and the
         # desk would offer a route that silently waits (measured on %2).
         evidence, last = "no poll observed", None
+        import dunk_owner
+        store = dunk_owner.OwnerPush()
         try:
-            import dunk_owner
-            store = dunk_owner.OwnerPush()
             # The POLL heartbeat, not the last take: a manual take must not confer
             # capability, and an idle poller draining empty queues must not lose it.
             last = store.last_poll(pane_id)
@@ -1329,6 +1329,14 @@ class Flock:
                             "(a manual owner take does not count)")
         except Exception:                       # noqa: BLE001 - capability never crashes
             evidence = "drain evidence unavailable"
+        finally:
+            # One connection per query, closed deterministically: a capability probe
+            # runs per fleet row per refresh, and leaking a handle per call is how a
+            # desk ends up with a thousand open descriptors.
+            try:
+                store.close()
+            except Exception:                   # noqa: BLE001 - closing must not raise
+                pass
         observed = bool(last and time.time() - last < self.DRAIN_FRESH_S)
         return {
             "pane_id": pane_id,

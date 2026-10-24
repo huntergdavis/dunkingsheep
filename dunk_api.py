@@ -408,10 +408,22 @@ def h_owner_poll(flock, args, self_pane_id):
     something would look dead, and a manual `owner take` would look alive for ever.
     """
     import dunk_owner
-    pane_id = args.get("pane_id") or self_pane_id
-    if not pane_id:
-        raise ValueError("owner_poll must be given a pane id")
-    return dunk_owner.OwnerPush().poll(pane_id, by=args.get("by") or "harness")
+    claimed = (args.get("pane_id") or "").strip()
+    # A HEARTBEAT MUST COME FROM THE PANE IT CLAIMS. Otherwise one lane can declare
+    # another lane healthy and revive routing to a poller that is not running - the
+    # exact lie this field exists to prevent (independent review, 2026-10-24).
+    if not self_pane_id:
+        raise DunkError("owner_poll needs a caller pane: a heartbeat without an "
+                        "identity is a declaration, not an observation")
+    if claimed and claimed != self_pane_id:
+        raise DunkError(
+            f"owner_poll for {claimed!r} refused: this call comes from {self_pane_id!r}. "
+            "Only a lane may report its own polling.")
+    store = dunk_owner.OwnerPush()
+    try:
+        return store.poll(self_pane_id, by=args.get("by") or "harness")
+    finally:
+        store.close()
 
 
 def h_owner_take(flock, args, self_pane_id):
