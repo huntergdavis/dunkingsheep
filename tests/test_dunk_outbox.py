@@ -179,21 +179,26 @@ class OnePredicateTests(unittest.TestCase):
 
         self.flock.claude_status = Busy()
 
-    def test_delivery_reports_the_reason_the_queue_would_hold_for(self):
+    def test_a_busy_claim_no_longer_holds_and_delivery_says_so(self):
+        """The other half of the policy change: 'busy' is information now."""
         state = self.flock.delivery_state(self.pane)
-        self.assertEqual("blocked", state["state"])
-        self.assertIn("busy", state["reason"])
-        blocker = self.flock.send_blocker(self.pane)
-        self.assertIsNotNone(blocker)
-        self.assertEqual(blocker[1], state["reason"],
-                         "the two checks must give the same answer, in the same words")
+        self.assertTrue(state["deliverable"], state)
+        self.assertNotEqual("blocked", state["state"])
+        self.assertIsNone(self.flock.send_blocker(self.pane),
+                          "a busy claim must not block a send any more")
 
-    def test_a_declared_turn_is_visible_to_delivery_too(self):
+    def test_a_declared_turn_is_NOT_a_hold_any_more(self):
+        """Policy 2026-10-23: a busy agent (turn or claim) no longer holds a message.
+
+        The harness queues what we type while it works, so holding here cost the owner
+        minutes and bought nothing.
+        """
         self.flock.claude_status.status_for_pane = lambda pane, fresh=False: "idle"
         self.flock.turn_start(pane_id=self.pane)
         state = self.flock.delivery_state(self.pane)
-        self.assertEqual("blocked", state["state"])
-        self.assertIn("turn", state["reason"])
+        self.assertTrue(state["deliverable"], state)
+        self.assertNotEqual("blocked", state["state"])
+        self.assertIsNone(self.flock.send_blocker(self.pane))
 
 
 class OutboxRestartTests(unittest.TestCase):

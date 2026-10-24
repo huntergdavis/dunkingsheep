@@ -88,8 +88,10 @@ class CommandSmokeTests(unittest.TestCase):
                 if not str(refusal).strip():
                     failures.append(f"{command.name}: refused with no message")
                 continue
-            if result is None:
-                failures.append(f"{command.name}: returned None")
+            # A smoke test that accepts an empty answer is not a smoke test: a
+            # handler returning {} 'succeeds' while doing nothing at all.
+            if result is None or result == {} or result == [] or result == "":
+                failures.append(f"{command.name}: returned {result!r}, which proves nothing")
         self.assertEqual([], failures, "commands that did not run:\n" + "\n".join(failures))
 
     def test_a_command_with_no_required_parameters_returns_a_result(self):
@@ -109,8 +111,10 @@ class CommandSmokeTests(unittest.TestCase):
                 if "must" not in str(refusal) and "not enabled" not in str(refusal):
                     failures.append(f"{command.name}: refused without parameters: {refusal}")
                 continue
-            if result is None:
-                failures.append(f"{command.name}: returned None")
+            # A smoke test that accepts an empty answer is not a smoke test: a
+            # handler returning {} 'succeeds' while doing nothing at all.
+            if result is None or result == {} or result == [] or result == "":
+                failures.append(f"{command.name}: returned {result!r}, which proves nothing")
         self.assertEqual([], failures,
                          "parameterless commands must answer:\n" + "\n".join(failures))
 

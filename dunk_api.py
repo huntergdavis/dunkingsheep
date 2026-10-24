@@ -324,6 +324,32 @@ def h_retire_pane(flock, args, self_pane_id):
     return dict(record, unread_kept=waiting)
 
 
+def h_roster(flock, args, self_pane_id):
+    import dunk_views
+    return dunk_views.roster(flock)
+
+
+def h_message_state(flock, args, self_pane_id):
+    import dunk_views
+    ids = args.get("message_ids") or []
+    if isinstance(ids, str):
+        ids = [part.strip() for part in ids.split(",") if part.strip()]
+    return dunk_views.message_state(flock, ids)
+
+
+def h_reply_stats(flock, args, self_pane_id):
+    import dunk_views
+    boxes = args.get("mailboxes")
+    if isinstance(boxes, str):
+        boxes = [part.strip() for part in boxes.split(",") if part.strip()]
+    return dunk_views.reply_stats(flock, boxes)
+
+
+def h_project_summary(flock, args, self_pane_id):
+    import dunk_views
+    return dunk_views.project_summary(flock, args.get("project"), args.get("path"))
+
+
 def h_dispatch(flock, args, self_pane_id):
     """The deterministic feeder: standby queue + a tick that fills idle lanes.
 
@@ -902,6 +928,33 @@ MAX_SENDS_PARAM = {
 }
 
 COMMANDS = [
+    Command(
+        "roster",
+        "One row per agent lane for the Command Center: name, harness, model (null with "
+        "a reason), state, current task, inbox count and oldest unread, cost, cpu. No "
+        "screen reads: safe to poll.",
+        h_roster,
+        params={}),
+    Command(
+        "message_state",
+        "sent / delivered / seen for one or more messages, with timestamps. 'replied' "
+        "is null with a reason: the answer link lives in the COS/VP application.",
+        h_message_state,
+        params={"message_ids": {"type": "string", "description": "Comma-separated ids."}},
+        required=("message_ids",)),
+    Command(
+        "reply_stats",
+        "Per mailbox: how long mail sat before the lane read it - last and median - "
+        "from read_at minus created_at.",
+        h_reply_stats,
+        params={"mailboxes": {"type": "string", "description": "Comma-separated mailboxes (default all)."}}),
+    Command(
+        "project_summary",
+        "Everything a project page needs: ground truths, wiki articles, tasks in "
+        "flight, agents on it, and a completed-task timeline. project omitted = global.",
+        h_project_summary,
+        params={"project": {"type": "string", "description": "Project name, or omit for global."},
+                "path": {"type": "string", "description": "Explicit project directory."}}),
     Command(
         "retire_pane",
         "Retire a pane we deliberately stopped feeding (superseded, or its job "
@@ -1888,6 +1941,11 @@ MCP_GROUPS = (
       ("update", "update_dunk"), ("remove", "remove_dunk"),
       ("start", "start_dunk"), ("stop", "stop_dunk"), ("stop_all", "stop_all"),
       ("fire", "fire_dunk"))),
+    ("views",
+     "Read-only compositions for the Command Center: roster, message_state, "
+     "reply_stats, project_summary. All queries, no model, no pane writes.",
+     (("roster", "roster"), ("message_state", "message_state"),
+      ("reply_stats", "reply_stats"), ("project_summary", "project_summary"))),
     ("dispatch",
      "Deterministic feeding, no model: the standby queue and the tick that fills "
      "idle lanes. action=add/list/remove/tick/status. A lane is fed only when it "

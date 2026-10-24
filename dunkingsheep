@@ -556,6 +556,17 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("roster", help="one row per agent lane (name, harness, state, task, inbox, cpu)")
+    p = sub.add_parser("message-state", help="sent / delivered / seen for message ids")
+    p.add_argument("ids", help="comma-separated message ids")
+    p = sub.add_parser("reply-stats", help="last and median time for a lane to read its mail")
+    p.add_argument("mailboxes", nargs="?", help="comma-separated mailboxes (default all)")
+    p = sub.add_parser("project-summary", help="ground truths, articles, tasks in flight, agents, timeline")
+    p.add_argument("project", nargs="?", help="project name (default: global)")
+    p.add_argument("--path", help="explicit project directory")
+    p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8792)
     p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
     rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
     q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
@@ -1256,6 +1267,12 @@ def print_retired(result):
                  if result.get("unread_kept") is not None else ""))
         return
     print(f"unretired {result.get('pane_id')}")
+
+
+def print_view(result):
+    """The Command Center views on a terminal: JSON, because a UI consumes them."""
+    import json as _json
+    print(_json.dumps(result, indent=2))
 
 
 def print_dispatch(result):
@@ -2258,6 +2275,22 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command in ("roster", "message-state", "reply-stats", "project-summary"):
+        name = {"message-state": "message_state", "reply-stats": "reply_stats",
+                "project-summary": "project_summary"}.get(command, command)
+        payload = {}
+        if command == "message-state":
+            payload["message_ids"] = args.ids
+        if command == "reply-stats" and getattr(args, "mailboxes", None):
+            payload["mailboxes"] = args.mailboxes
+        if command == "project-summary":
+            payload["project"] = getattr(args, "project", None)
+            if getattr(args, "path", None):
+                payload["path"] = args.path
+        return client.call(name, **payload), print_view
+    if command == "api":
+        import dunk_http
+        return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
     if command == "retired":
         return client.call("retire_pane", action=args.retire_command,
                            pane=getattr(args, "pane", None),

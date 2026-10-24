@@ -74,7 +74,7 @@ class ClassifyDeliveryTests(unittest.TestCase):
         state, reason = dunk_core.classify_delivery("│ › half a sentence", "idle",
                                                     typed="half a sentence")
         self.assertEqual("blocked", state)
-        self.assertIn("unsubmitted draft", reason)
+        self.assertIn("a human is typing here", reason)
 
     def test_working_is_not_ready_and_not_blocked(self):
         self.assertEqual(("working", "working"),
@@ -101,7 +101,7 @@ class PlaceholderTests(unittest.TestCase):
         screen = f"❯ half a sentence\n{HINT_GREY_RGB}\n"
         state, reason = dunk_core.classify_delivery(screen, "idle", typed="half a sentence")
         self.assertEqual("blocked", state)
-        self.assertIn("unsubmitted draft", reason)
+        self.assertIn("a human is typing here", reason)
 
     def test_a_real_full_context_banner_still_blocks(self):
         state, reason = dunk_core.classify_delivery("│ Context limit reached. Run /clear to continue\n", "idle")
@@ -194,7 +194,7 @@ class BoxReaderTests(unittest.TestCase):
 
         state = self.flock.delivery_state("w1:p2")
         self.assertEqual("blocked", state["state"])
-        self.assertIn("draft", state["reason"])
+        self.assertIn("a human is typing here", state["reason"])
         blocker = self.flock.send_blocker("w1:p2")
         self.assertEqual(blocker[1], state["reason"])
 

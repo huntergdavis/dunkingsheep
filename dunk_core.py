@@ -41,6 +41,7 @@ Orchestration extras on top of the classic Dunking Bird model:
   agent builds its team here, then dunks on it.
 """
 
+import contextlib
 import functools
 import hashlib
 import json
@@ -63,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.57.0"
+VERSION = "2.58.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -264,6 +265,13 @@ PLACEHOLDER_PATTERNS = (
 # How long a "busy" report from another process may block delivery while the pane
 # itself shows no turn and a clear box. A remembered state needs an expiry.
 CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
+# The typing mutex: short by design, loud when contended.
+TYPING_LOCK_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "10"))
+TYPING_LOCK_LOUD_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_LOUD_S", "0.25"))
+# A send that could not start because the box is not ours to type into is HELD, not
+# failed: a dialog someone is reading and a human mid-sentence are the same answer -
+# wait, do not report a failure.
+BOX_HOLD = "a human is typing here"
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -554,6 +562,13 @@ class Flock:
         self.outbox_threads = {}
         self._claude_busy_since = {}
         self.started_at = time.time()
+        # ONE lock for anything that types anywhere (owner, 2026-10-23). Every typing
+        # surface we own goes through this daemon, so a process-wide lock is the whole
+        # truth; a human typing in a terminal directly is what the pre-send box read
+        # is for. Reentrant because the send path nests (guarded send -> submit).
+        self.typing_lock = threading.RLock()
+        self._typing_owner = None          # (pane_id, since) of the current holder
+        self.typing_contentions = 0
         # The last text we typed into each pane, so text stranded by a failed
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
@@ -3330,13 +3345,16 @@ class Flock:
         Every gate - delivery_state, the queued-message worker, send_text - asks
         this, so they cannot disagree again.
         """
+        # POLICY (owner, 2026-10-23): a busy agent is NOT a hold reason. Every
+        # harness we use queues a message typed while it is working, so holding it
+        # here was solving a problem that did not exist and costing the owner
+        # minutes. The only two reasons to refuse are a DEAD session (read, not
+        # claimed) and a HUMAN mid-sentence in this box.
         marker = self._dead_session(pane_id)
         if marker:
             return ("dead", f"dead session ({marker})")
-        if self.turn_active(pane_id):
-            return ("blocked", "a declared turn is active")
-        if self._claude_busy(pane_id):
-            return ("blocked", "claude reports this session busy")
+        if self._session_process_gone(pane_id):
+            return ("dead", "the lane's recorded process is gone")
         screen, text, _detail = self.read_box(pane_id)
         if screen is not None and _modal_open(screen):
             # A panel is not a draft. Its selected row sits where a draft would, and
@@ -3345,10 +3363,9 @@ class Flock:
             return None
         if (text and not _is_our_send(text, last_sent_text, awaiting_consumption)
                 and not self._looks_like_ours(pane_id, text)):
-            # Same words as `delivery`: the two surfaces must not describe one
-            # condition differently, or a reader cannot tell they are one condition.
-            _state, reason = classify_delivery(screen, None, typed=text)
-            return ("blocked", reason or "the input box holds a draft")
+            # Same words as `delivery`. A draft we did not type is a person, and that
+            # is the ONLY thing this layer holds for now.
+            return ("blocked", f"a human is typing here ({text[:60]!r})")
         return None
 
     def _clear_to_send(self, pane_id, last_sent_text=None,
@@ -3387,6 +3404,26 @@ class Flock:
             return False
         return _is_our_send(shown, text, True)
 
+    def _session_process_gone(self, pane_id):
+        """True when the lane's own recorded process is no longer running.
+
+        A second READING for the dead refusal, alongside the screen marker: a status
+        field can stick (a pane reported 'ready' all night while its session was
+        gone), and a process that is not there cannot be argued with.
+        """
+        try:
+            leases = self.tasks.leases_for_pane(pane_id)
+        except Exception:                   # noqa: BLE001
+            return False
+        for lease in leases:
+            pid = lease.get("caller_pid")
+            if not pid:
+                continue
+            from dunk_callers import process_alive
+            if not process_alive(int(pid), lease.get("caller_start")):
+                return True
+        return False
+
     def _dead_session(self, pane_id):
         """Return the dead-session marker showing at the BOTTOM of the pane, or None.
 
@@ -3398,8 +3435,10 @@ class Flock:
         screen = self.read_screen(pane_id, lines=40, ansi=False)
         return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
-    def _press_until_submitted(self, pane_id, text):
-        """Press Enter until `text` has left the input box. Returns
+    def _press_until_submitted(self, pane_id, text, first_pressed=False):
+        """Press Enter (each press under the typing mutex) until `text` leaves the box.
+
+        Press Enter until `text` has left the input box. Returns
         (ok, detail). Only ever presses again while our own text is still
         there, so it can never submit something a human typed afterwards."""
         dead = self._dead_session(pane_id)
@@ -3411,9 +3450,14 @@ class Flock:
             # Let the pane fall quiet first; a burst of Enters does not submit.
             if gap:
                 time.sleep(gap)
-            ok, detail = self.herdr.send_keys(pane_id, "Enter")
-            if not ok:
-                return False, detail
+            if first_pressed and attempt == 1:
+                # The first Enter went out with the text, inside the mutex.
+                pass
+            else:
+                with self._typing(pane_id):      # one keystroke burst per attempt
+                    ok, detail = self.herdr.send_keys(pane_id, "Enter")
+                if not ok:
+                    return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
             last_hold = None
             for wait in SUBMIT_POLL_S:
@@ -3478,6 +3522,11 @@ class Flock:
         return _typed_text(screen)
 
     def press_keys(self, pane_id, keys):
+        """Press a sequence, under the global typing mutex (one burst)."""
+        with self._typing(pane_id):
+            return self._press_keys_unlocked(pane_id, keys)
+
+    def _press_keys_unlocked(self, pane_id, keys):
         """Press keys in a pane. When the last key is Enter and the box holds
         text, the press is confirmed the same way a text send is: Enter does
         not reliably submit, so pressing it once and reporting success was how
@@ -3495,20 +3544,55 @@ class Flock:
             return self.herdr.send_keys(pane_id, [keys[-1]])
         return self._press_until_submitted(pane_id, pending)
 
-    def submit_text(self, pane_id, text, press_enter=True):
-        """Type `text` into a pane and confirm it was actually submitted."""
-        ok, detail = self.herdr.send_text(pane_id, text)
-        if not ok:
-            return False, detail
-        self._remember_typed(pane_id, text)
-        if not press_enter:
-            return True, "sent"
+    def submit_text(self, pane_id, text, press_enter=True, check_box=False):
+        """Type `text` into a pane, press Enter, and confirm it left the box.
+
+        The box check, the typing and the first Enter happen inside ONE hold of the
+        global typing mutex, so a human who starts typing in that gap cannot have our
+        text spliced onto their sentence. Everything that WAITS happens outside the
+        mutex: under the guard the confirmation is a single short check (the caller
+        re-attempts), and an unguarded call keeps the full careful loop.
+        """
+        if not hasattr(self, "_box_ctx"):
+            self._box_ctx = threading.local()
+        guarded = getattr(self._box_ctx, "enabled", False)
+        # The guard already checked the box under the same lock; checking again would
+        # be a second read of a decision just made.
+        check_box = (check_box or guarded) and not getattr(self._box_ctx, "checked", False)
+        allow_modal = getattr(self._box_ctx, "allow_modal", False)
+        if not getattr(self._box_ctx, "checked", False):
+            # A direct caller has not been through the guard: refuse a dead session
+            # BEFORE pressing anything (the guard does this itself for its own sends).
+            marker = self._dead_session(pane_id)
+            if marker:
+                return False, (f"agent session is dead ({marker}); "
+                               "not submitting into a dead composer")
         pane = next((item for item in self.herdr.list_panes()
                      if item.get("pane_id") == pane_id), None)
-        if pane is not None and not pane.get("agent"):
-            # A bare shell has no chat input box to read back.
-            return self.herdr.send_keys(pane_id, "Enter")
-        return self._press_until_submitted(pane_id, text)
+        shell = pane is not None and not pane.get("agent")
+        with self._typing(pane_id):
+            if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
+                why = self._last_block_reason.get(pane_id) or "draft"
+                return False, f"{BOX_HOLD} ({why})"
+            ok, detail = self.herdr.send_text(pane_id, text)
+            if not ok:
+                return False, detail
+            self._remember_typed(pane_id, text)
+            if not press_enter:
+                return True, "sent"
+            ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            if not ok:
+                return False, detail
+            if shell:
+                # A bare shell has no chat input box to read back.
+                return True, "sent"
+        if guarded:
+            # SHORT: one check, no retry loop, no sleeps. The caller re-attempts.
+            time.sleep(SUBMIT_POLL_S[0])
+            if self._box_holds(pane_id, text) is False:
+                return True, "sent"
+            return False, "text did not submit; it is still in the pane's input box"
+        return self._press_until_submitted(pane_id, text, first_pressed=True)
 
     def flush_box(self, target, self_pane_id=None):
         """Submit whatever is sitting unsent in a pane's input box.
@@ -3602,6 +3686,7 @@ class Flock:
                 continue
             lanes.append({"pane_id": pane["pane_id"],
                           "agent": pane.get("agent"),
+                          "cwd": pane.get("cwd"),
                           "agent_name": (pane.get("agent_name") or pane.get("tab_label")
                                          or pane.get("label") or pane["pane_id"]),
                           "tab_label": pane.get("tab_label"),
@@ -3634,16 +3719,11 @@ class Flock:
         # A hold that the classifier cannot see (a declared turn, a stale busy
         # report) is still a hold: report it as blocked with that reason, so
         # `delivery` and the queue never disagree.
-        # The invisible holds, from the SAME read: a declared turn or a stale busy
-        # claim is a hold the screen cannot show. Asking send_blocker() here would
-        # read the pane again, and a dispatcher tick over 35 lanes cannot afford
-        # four reads each - it timed out at the client for exactly that reason.
-        if state in ("ready", "working"):
-            if self.turn_active(pane_id):
-                return {"state": "blocked", "reason": "a declared turn is active"}
-            if self._claude_busy(pane_id, pane=pane):
-                return {"state": "blocked", "reason": "claude reports this session busy"}
-        return {"state": state, "reason": reason}
+        # `working` is INFORMATION now, not a gate: the harness queues a message
+        # typed while it works. `deliverable` is the field a caller must consult, so
+        # a state can never be mistaken for permission again.
+        deliverable = state in ("ready", "working")
+        return {"state": state, "reason": reason, "deliverable": deliverable}
 
     def clear_box(self, target, self_pane_id=None, reason=None):
         """CLEAR an unsubmitted draft (Ctrl-U, Escape). The destructive pair to
@@ -3675,8 +3755,9 @@ class Flock:
                     "before": before,
                     "reason": "the lane is working; a clear would interrupt it"}
         try:
-            self.herdr.send_keys(pane_id, "C-u")
-            self.herdr.send_keys(pane_id, "Escape")
+            with self._typing(pane_id):
+                self.herdr.send_keys(pane_id, "C-u")
+                self.herdr.send_keys(pane_id, "Escape")
         except Exception as exc:
             raise DunkError(f"flush failed for {pane_id}: {exc}")
         after = self.delivery_state(pane_id)
@@ -3689,12 +3770,8 @@ class Flock:
         """Make the input box ready to type into. Our own text stranded by a
         failed submit is flushed with Enter; a human's draft is left alone; a
         declared active turn holds the send."""
-        if self.turn_active(pane_id):
-            self._last_block_reason[pane_id] = "working"
-            return False
-        if self._claude_busy(pane_id):
-            self._last_block_reason[pane_id] = "working"
-            return False
+        # Busy is not a reason to wait (owner policy, 2026-10-23): the harness queues
+        # what we type while it works. Only a human mid-sentence holds a send.
         screen = self.read_screen(pane_id)
         if screen is None:
             return True                      # unreadable: nothing to go on
@@ -3745,16 +3822,83 @@ class Flock:
 
         Returns (sent, ok, detail): sent=False means a draft appeared and
         nothing was typed."""
-        with self._lock_for(pane_id):
-            if hold_while_typing and not self._ensure_box_clear(pane_id, allow_modal):
-                log.info("%s: draft appeared while waiting for the send lock; not typing",
-                         pane_id)
-                return False, None, "someone started typing"
+        # No lock here: the callable that types (submit_text, press_keys) takes the
+        # mutex around its own keystroke burst, with the box check inside it. A lock
+        # held out here would cover the submit confirmation, which waits and retries -
+        # the first version of this lock held it for 20s on one pane and every other
+        # sender timed out.
+        # Two locks, two jobs:
+        #  - _lock_for(pane_id) serialises WHOLE sends to one pane, so two messages
+        #    cannot interleave their bursts into the same box (the per-pane test).
+        #  - the global typing mutex inside submit_text serialises each keystroke
+        #    burst across the whole fleet (the owner's rule).
+        # The dead check here is read-free (a plain read, not the styled one) so the
+        # styled-read budget is unchanged; the box check happens inside the burst.
+        with self._lock_for(pane_id), self._typing(pane_id):
+            if hold_while_typing:
+                marker = self._dead_session(pane_id)
+                if marker:
+                    return False, None, f"dead session ({marker})"
+                if self._session_process_gone(pane_id):
+                    return False, None, "the lane's recorded process is gone"
+                if not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
+                    why = self._last_block_reason.get(pane_id) or "draft"
+                    return False, None, f"{BOX_HOLD} ({why})"
             try:
-                ok, detail = send()
+                with self._box_check(hold_while_typing, allow_modal, already_checked=True):
+                    ok, detail = send()
             except Exception as error:  # noqa: BLE001 - report, never crash a caller
                 return True, False, str(error)
+            if not ok and str(detail or "").startswith(BOX_HOLD):
+                # The box was not ours to type into: that is a HOLD (the message
+                # stays queued), not a failed send.
+                return False, None, detail
             return True, ok, detail
+
+    @contextlib.contextmanager
+    def _box_check(self, enabled, allow_modal=False, already_checked=False):
+        """Tell the typing primitive how this send treats the box.
+
+        `enabled` is the hold (a bypassed send does not read the box), `allow_modal`
+        is the key-press case: a panel is dismissed by keys, so keys go through it
+        while text waits for it.
+        """
+        if not hasattr(self, "_box_ctx"):
+            self._box_ctx = threading.local()
+        # A threading.local has no attributes in a thread that never set them: read
+        # them with defaults, or the first send in every worker thread raises.
+        previous = (getattr(self._box_ctx, "enabled", True),
+                    getattr(self._box_ctx, "allow_modal", False))
+        self._box_ctx.enabled = enabled
+        self._box_ctx.allow_modal = allow_modal
+        self._box_ctx.checked = already_checked
+        try:
+            yield
+        finally:
+            self._box_ctx.enabled, self._box_ctx.allow_modal = previous
+            self._box_ctx.checked = False
+
+    @contextlib.contextmanager
+    def _typing(self, pane_id, timeout_s=None):
+        """The global typing mutex, held for one keystroke burst."""
+        timeout_s = TYPING_LOCK_TIMEOUT_S if timeout_s is None else timeout_s
+        started = time.time()
+        acquired = self.typing_lock.acquire(timeout=timeout_s)
+        waited = time.time() - started
+        if not acquired:
+            raise DunkError(
+                f"the typing lock was held for more than {int(timeout_s)}s by "
+                f"{self._typing_owner}; refusing to type concurrently")
+        previous, self._typing_owner = self._typing_owner, (pane_id, time.time())
+        if waited > TYPING_LOCK_LOUD_S:
+            self.typing_contentions += 1
+            log.warning("typing lock contended for %dms: holder was %s, waiter %s",
+                        int(waited * 1000), previous, pane_id)
+        try:
+            yield
+        finally:
+            self._typing_owner = previous
+            self.typing_lock.release()
 
     def _claude_busy(self, pane_id, pane=None):
         """True only when Claude's own session reports status=busy AND that report
@@ -4308,8 +4452,11 @@ def classify_delivery(screen, status=None, *, typed=None, our_text=None,
         # The pane is mid-work: it offers an interrupt, so something is running.
         return "working", f"mid-work ({progress})"
     if typed and not _is_our_send(typed, our_text, awaiting_consumption):
+        # Policy (2026-10-23): only a HUMAN typing holds. This wording is the one the
+        # send gate uses too - two surfaces describing one condition differently is
+        # how a reader concludes they are two conditions.
         clipped = " ".join(str(typed).split())[:60]
-        return "blocked", f"unsubmitted draft in the input box ({clipped!r})"
+        return "blocked", f"a human is typing here ({clipped!r})"
     status_text = str(status or "").lower()
     if status_text in ("working", "thinking", "running", "busy"):
         return "working", status_text
