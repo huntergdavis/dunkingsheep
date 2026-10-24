@@ -2088,7 +2088,8 @@ MCP_GROUPS = (
      "is ready AND has no unread mail; the tick reports idle lanes, dispatched "
      "this hour, and blocked lanes with reasons.",
      (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
-      ("retired", "retire_pane"))),
+      ("retired", "retire_pane"),
+      ("lanes", "lanes"), ("lane_set", "lane_set"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
