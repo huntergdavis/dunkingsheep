@@ -404,14 +404,14 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
-    def test_mail_can_be_left_for_a_lane_the_registry_knows(self):
+    def test_a_registered_lane_with_no_live_pane_refuses_a_send(self):
+        """A message in the queue for a lane with no pane is unreadable: it is the
+        same disease as a made-up mailbox, only slower (VP ruling 2026-10-24)."""
+        from dunk_core import DunkError as _DunkError
         self.flock._remember_lane("w9:pZ", "arriving later")
-        key, label, pane = self.flock.resolve_mailbox("arriving later")
-        self.assertEqual("arriving later", key)
-        self.assertIsNone(pane, "the pane is not live yet; the lane still gets mail")
-        sent = self.flock.inbox_send("arriving later", "waiting for you", notify=True)
-        self.assertEqual(1, self.flock.inbox_count("arriving later")["unread"])
-        self.assertFalse(sent["notified"], "nothing to nudge")
+        with self.assertRaisesRegex(_DunkError, "reason=unhoused_lane"):
+            self.flock.inbox_send("arriving later", "waiting for you", notify=True)
+        self.assertEqual(0, self.inbox.count("arriving later")["total"])
 
     def test_a_lane_the_registry_marks_dead_alarms_with_the_date(self):
         from dunk_core import DunkError as _DunkError
@@ -451,10 +451,9 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                         "the failed send must not store a message")
 
     def test_archive_through_the_flock_drains_unread(self):
-        # A registered lane whose pane is gone: archiving its backlog must work.
-        self.flock._remember_lane("w9:pW", "dead-mailbox")
+        # A stranded mailbox can still be drained: sends are refused now, reads are not.
         for n in range(2):
-            self.flock.inbox_send("dead-mailbox", f"m{n}", notify=False)
+            self.inbox.send("dead-mailbox", f"m{n}", sender="pm")
         result = self.flock.inbox_archive("dead-mailbox")
         self.assertEqual(2, result["archived"])
         count = self.flock.inbox_count("dead-mailbox")

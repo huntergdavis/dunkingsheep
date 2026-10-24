@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.2"
+VERSION = "2.69.3"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1108,8 +1108,15 @@ class Flock:
                     "lane; refusing rather than creating a mailbox that would queue in "
                     "silence. reason=unknown_name. Use a live pane id, a pane/tab "
                     "label, or a name recorded in the lane registry.")
-            log.warning("mail for registered but not-live lane %r is queued", spec)
-            return spec, spec, None
+            # Registered, and no pane on the backend we deliver through. That is a
+            # lane between restarts OR a lane alive on the other backend, and in both
+            # cases a message put in the queue is a message nobody can read - which is
+            # the failure the VP outlawed, only slower. Refuse and say which it is.
+            raise DunkError(
+                f"lane {spec!r} is registered but has no live pane on this backend; "
+                "nothing can be delivered to it right now. reason=unhoused_lane. "
+                "Existing mail for it can still be read and archived; start or restore "
+                "the lane, or send to a lane that is live.")
         return self._mailbox_for_pane(pane)
 
     def _is_agent_type(self, spec):
