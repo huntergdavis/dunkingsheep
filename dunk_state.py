@@ -205,6 +205,56 @@ def _env_of(pid):
     return out
 
 
+def _proc_start(pid):
+    """Wall-clock start time of a pid, from /proc/<pid>/stat starttime + boot time."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read().decode("utf-8", "replace")
+        ticks = int(raw.rsplit(")", 1)[1].split()[19])
+        with open("/proc/stat", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("btime "):
+                    return int(line.split()[1]) + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _active_session_file(cwd, since, slack=90):
+    """The session file this workspace is actually being written to.
+
+    Evidence, not guessing: a candidate must live in THIS workspace's session directory
+    AND have been written at or after the pane's agent started (minus a small slack for
+    the file being created a moment before the process is observable). The newest such
+    file wins, and the caller is told when more than one qualifies.
+    """
+    slug = _cwd_slug(cwd)
+    if not slug:
+        return None, 0
+    cutoff = (since - slack) if since else None
+    best, newer, count = None, 0.0, 0
+    for root in _SESSION_ROOTS:
+        directory = os.path.join(root, slug)
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if cutoff is not None and mtime < cutoff:
+                continue
+            count += 1
+            if mtime > newer:
+                best, newer = path, mtime
+    return best, count
+
+
 def _cwd_slug(cwd):
     """The sessions-directory slug a harness uses for a working directory."""
     if not cwd:
@@ -259,6 +309,12 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
     # because the pane inherited it; trusting env without that check would have recorded
     # one lane's conversation against another lane, which is the defect this incident is
     # about. A mismatch is reported, never silently used.
+    # A session file being written for this workspace right now outranks an environment
+    # claim: the environment can be INHERITED from a pane created before this one (on
+    # 2026-10-24 the tmux global env carried the VP's session, and a lane that inherited it
+    # looked correct because the workspace matched while the conversation did not).
+    started = _proc_start(agent_pids[0][0])
+    active, candidates = _active_session_file(cwd, started)
     slug = _cwd_slug(cwd)
     for candidate, _argv in agent_pids:
         env = _env_of(candidate)
@@ -268,14 +324,35 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
             sess_id = _session_id_from_path(sess_file)
         if sess_id:
             if slug and sess_file and slug not in sess_file:
+                if active:
+                    active_id = _session_id_from_path(active)
+                    return active_id, (f"the environment names session {sess_id[:8]} from another "
+                                       f"workspace - an inherited claim, not this pane's session; "
+                                       f"recording {active_id[:8]}, the live file for this workspace")
                 return None, (f"the process environment names session {sess_id[:8]} from another "
                               f"workspace ({os.path.basename(os.path.dirname(sess_file))}) - an "
                               f"inherited claim, not this pane's session")
+            if active:
+                active_id = _session_id_from_path(active)
+                if active_id.split("-")[0] != sess_id.split("-")[0]:
+                    return active_id, (f"the environment claims session {sess_id[:8]}, but the only "
+                                       f"session file in this workspace written since the pane "
+                                       f"started is {active_id[:8]} - recording the live file and "
+                                       f"flagging the environment claim as inherited/stale")
             return sess_id, None
     for candidate, _argv in agent_pids:
         path = _open_session_file(candidate)
         if path:
             return _session_id_from_path(path), None
+    if active:
+        active_id = _session_id_from_path(active)
+        if candidates > 1:
+            return active_id, (f"no session in argv, environment or open files; recording the newest "
+                               f"of {candidates} session files written since this pane started - "
+                               f"{active_id[:8]} - which is the weakest admissible source")
+        return active_id, (f"no session in argv, environment or open files; recording the only "
+                           f"session file written in this workspace since the pane started "
+                           f"({active_id[:8]})")
     if recorded:
         return recorded, ("no session in the agent's argv and none open; keeping the recorded "
                           "launch session")
@@ -343,7 +420,9 @@ def capture(flock, *, source="periodic", now=None, store=None):
             "cwd": lane.get("cwd"),
             "argv": argv,
             "session_id": session,
-            "session_reason": None if session else session_reason,
+            # Kept even when a session WAS resolved: a lane whose session came from a live
+            # file while its environment claimed another one must still say so.
+            "session_reason": session_reason,
             "model": model,
             "model_reason": None if model else (
                 "no --model flag in the argv, and the process environment names no model"

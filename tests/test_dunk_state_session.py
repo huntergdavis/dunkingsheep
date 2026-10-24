@@ -53,9 +53,13 @@ class SessionFromProcess(unittest.TestCase):
         original = dunk_state._env_of
         original_kids = dunk_state._proc_children
         original_cmd = dunk_state._cmdline
+        original_start = dunk_state._proc_start
+        original_active = dunk_state._active_session_file
         try:
             dunk_state._cmdline = lambda pid: ["/usr/bin/pi", "--flag"]
             dunk_state._proc_children = lambda: {}
+            dunk_state._proc_start = lambda pid: 1000.0
+            dunk_state._active_session_file = lambda cwd, since, slack=90: (None, 0)
             dunk_state._env_of = lambda pid: {
                 "PI_SESSION_ID": "01a15560-dead-beef",
                 "PI_SESSION_FILE": ("/home/hunter/.pi/agent/sessions/"
@@ -73,6 +77,37 @@ class SessionFromProcess(unittest.TestCase):
             dunk_state._env_of = original
             dunk_state._proc_children = original_kids
             dunk_state._cmdline = original_cmd
+            dunk_state._proc_start = original_start
+            dunk_state._active_session_file = original_active
+
+
+class LiveFileOutranksAnEnvironmentClaim(unittest.TestCase):
+    def test_stale_env_claim_is_flagged_and_the_live_file_is_recorded(self):
+        """Same workspace, different conversation: the env can still be an inherited claim.
+
+        %1's environment named the 27.9 MB pre-incident session while the file being
+        written for that workspace was a different one. Workspace matching alone would have
+        recorded the wrong conversation - so the live file wins and the claim is flagged.
+        """
+        original = (dunk_state._env_of, dunk_state._proc_children, dunk_state._cmdline,
+                    dunk_state._proc_start, dunk_state._active_session_file)
+        try:
+            dunk_state._cmdline = lambda pid: ["/usr/bin/pi"]
+            dunk_state._proc_children = lambda: {}
+            dunk_state._proc_start = lambda pid: 1000.0
+            dunk_state._env_of = lambda pid: {
+                "PI_SESSION_ID": "aaaaaaaa-old",
+                "PI_SESSION_FILE": ("/home/hunter/.pi/agent/sessions/"
+                                    "--ws--/file_aaaaaaaa-old.jsonl"),
+            }
+            dunk_state._active_session_file = lambda cwd, since, slack=90: (
+                "/home/hunter/.pi/agent/sessions/--ws--/file_bbbbbbbb-live.jsonl", 1)
+            session, reason = dunk_state.session_of(4242, None, cwd="/ws")
+            self.assertEqual(session, "bbbbbbbb-live")
+            self.assertIn("inherited", reason)
+        finally:
+            (dunk_state._env_of, dunk_state._proc_children, dunk_state._cmdline,
+             dunk_state._proc_start, dunk_state._active_session_file) = original
 
 
 class SessionReasonColumn(unittest.TestCase):
