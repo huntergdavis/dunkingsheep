@@ -409,7 +409,7 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         same disease as a made-up mailbox, only slower (VP ruling 2026-10-24)."""
         from dunk_core import DunkError as _DunkError
         self.flock._remember_lane("w9:pZ", "arriving later")
-        with self.assertRaisesRegex(_DunkError, "reason=unhoused_lane"):
+        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
             self.flock.inbox_send("arriving later", "waiting for you", notify=True)
         self.assertEqual(0, self.inbox.count("arriving later")["total"])
 
