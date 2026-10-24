@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.10"
+VERSION = "2.69.11"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1410,7 +1410,16 @@ class Flock:
                       for pane_id in recorded if pane_id in live]
         if len(candidates) == 1:
             return candidates[0]
-        return None, None              # none live, or two live: the caller refuses
+        if len(candidates) > 1:
+            # Two live panes declaring one name is not a tie to break: it is a lane
+            # duplicated by a restore, and choosing one would silently split its
+            # mail. Refuse, and say both ids.
+            ids = ", ".join(pane["pane_id"] for pane, _ in candidates)
+            raise AmbiguousTarget(
+                f"lane {mailbox!r} is DECLARED by more than one live pane ({ids}); "
+                "delivery would pick one and split the lane's mail. Reset the "
+                "duplicate with `lane set` before sending.")
+        return None, None              # none live
 
     def _registered_lane(self, name):
         """(found, alive, dead_since) for a mailbox name in the lane registry.

@@ -422,6 +422,16 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_two_live_panes_declaring_one_name_are_refused_not_split(self):
+        """A restore that duplicates a lane must not split its mail silently."""
+        a = self.flock.create_workspace(label="one", cwd="/tmp", mailbox="par-b")["pane_id"]
+        b = self.flock.create_workspace(label="two", cwd="/tmp", mailbox="par-b")["pane_id"]
+        from dunk_core import AmbiguousTarget as _Ambiguous
+        with self.assertRaisesRegex(_Ambiguous, "DECLARED by more than one live pane"):
+            self.flock.resolve_mailbox("par-b", strict=True)
+        self.flock.lane_set(b, "par-b-2")
+        self.assertEqual(a, self.flock.resolve_mailbox("par-b", strict=True)[2])
+
     def test_direct_delivery_addresses_a_pane_or_a_pinned_name_and_refuses_loudly(self):
         """The desk's call (owner push / keystrokes) asks the same question as the
         inbox: who is this, are they alive. It gets the same tokens."""
