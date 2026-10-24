@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.8"
+VERSION = "2.69.9"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1256,6 +1256,36 @@ class Flock:
             return (name or None), bool(value.get("declared"))
         name = str(value or "").strip()
         return (name or None), False
+
+    def delivery_target(self, target, self_pane_id=None):
+        """Resolve a DIRECT-DELIVERY target (owner push, keystrokes) to one pane.
+
+        Same fail-closed rules as the inbox send path, because it is the same
+        question asked by a different caller: who is this and are they alive. The
+        refusal carries a token the UI can render - dead_lane, unhoused_lane,
+        unknown_name - instead of a generic "no pane". Addressing is the pane id
+        (%9) or the lane's PINNED name ("PM (par-a)"); the pinned name is what
+        survives a title change, so prefer it in anything a human reads.
+        """
+        spec = str(target or "").strip()
+        if not spec:
+            raise DunkError("a delivery target is required (a pane id like %9 "
+                            "or a pinned lane name)")
+        if _PANE_ID_RE.match(spec) or _HERDR_ID_RE.match(spec) or _TERM_ID_RE.match(spec):
+            pane = self.herdr.get_pane(spec)
+            if pane is not None:
+                return pane
+            raise DunkError(
+                f"no live pane {spec!r}: this terminal is gone. reason=dead_lane.")
+        pane = self.herdr.get_pane(spec)          # a bare '%4'
+        if pane is not None:
+            return pane
+        key, _label, pane_id = self.resolve_mailbox(spec, self_pane_id, strict=True)
+        if not pane_id:
+            raise DunkError(
+                f"lane {key!r} resolved but has no live pane to deliver to. "
+                "reason=unhoused_lane.")
+        return self.herdr.get_pane(pane_id)
 
     def lanes(self):
         """The lane registry as rows: pane id, mailbox, declared?, alive?"""

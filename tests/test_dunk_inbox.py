@@ -405,6 +405,21 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_direct_delivery_addresses_a_pane_or_a_pinned_name_and_refuses_loudly(self):
+        """The desk's call (owner push / keystrokes) asks the same question as the
+        inbox: who is this, are they alive. It gets the same tokens."""
+        from dunk_core import DunkError as _DunkError
+        made = self.flock.create_workspace(label="poolrad-pm", cwd="/tmp",
+                                          mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        self.assertEqual(pane_id, self.flock.delivery_target(pane_id)["pane_id"])
+        self.assertEqual(pane_id, self.flock.delivery_target("PM (par-a)")["pane_id"],
+                         "the pinned name must be as good as the pane id")
+        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
+            self.flock.delivery_target("%99")
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.delivery_target("nobody at all")
+
     def test_a_declared_lane_name_survives_the_agent_renaming_its_pane(self):
         """Measured 2026-10-24: `new-workspace --as 'PM (par-a)'` was replaced by
         claude's own conversation title minutes later and the lane became

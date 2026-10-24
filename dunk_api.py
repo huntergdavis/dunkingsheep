@@ -358,9 +358,9 @@ def h_owner_push(flock, args, self_pane_id):
     import dunk_owner
     # A pane id is already the answer: resolving it costs a terminal-backend round
     # trip (~250ms) and the owner's budget is two seconds for the whole path.
-    target = str(args["target"]).strip()
-    pane = ({"pane_id": target} if PANE_ID_RE.match(target)
-            else flock.resolve_target(target, self_pane_id))
+    # One seam for direct delivery, with tokenised refusals the desk can render
+    # (dead_lane / unhoused_lane / unknown_name) instead of a generic error.
+    pane = flock.delivery_target(args["target"], self_pane_id)
     store = dunk_owner.OwnerPush()
     return store.push(pane["pane_id"], args["body"],
                       target=args.get("target"), subject=args.get("subject"))
