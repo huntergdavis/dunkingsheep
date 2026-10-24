@@ -3967,6 +3967,9 @@ class Flock:
             if not pane.get("pane_id"):
                 continue
             lanes.append({"pane_id": pane["pane_id"],
+                          # pane_pid lets capture read the session from the PROCESS
+                          # instead of guessing from a cwd or trusting a stale launch row.
+                          "pane_pid": pane.get("pane_pid"),
                           "agent": pane.get("agent"),
                           "cwd": pane.get("cwd"),
                           "agent_name": (pane.get("agent_name") or pane.get("tab_label")

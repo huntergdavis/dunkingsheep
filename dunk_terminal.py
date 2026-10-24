@@ -326,13 +326,20 @@ class TmuxBackend(TerminalBackend):
             # config; the registry name we recorded at start_agent is the
             # stable, human-chosen label the inbox resolves by.
             label = record.get("name") or title.strip() or window_name
-            try:
-                number = int(window_index)
-                workspace_number = int(session_index)
-                pid = int(pane_pid)
-            except ValueError:
-                number = workspace_number = 0
-                pid = None
+            def _int(value, default=0):
+                try:
+                    return int(str(value).strip())
+                except (TypeError, ValueError):
+                    return default
+
+            # Each field is parsed on its own. The old single try/except meant a BLANK
+            # session_index (tmux leaves it empty when the session has no index set)
+            # raised on the first int() and silently nulled pane_pid with it - which is
+            # why capture could not identify a lane's agent process, and therefore why
+            # session_id was null for every live pane on 2026-10-24.
+            number = _int(window_index, 0)
+            workspace_number = _int(session_index, 0)
+            pid = None if str(pane_pid).strip() in ("", "None") else _int(pane_pid, None)
             panes.append({
                 "pane_id": pane_id,
                 "terminal_id": pane_id,
