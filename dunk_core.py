@@ -4825,9 +4825,20 @@ def box_text(screen):
         return "", "the pane could not be read"
     rows = [row for row in screen.splitlines() if _strip_ansi(row).strip()]
     region_start = max(0, len(rows) - BOX_REGION_ROWS)
+    region_end = len(rows)
     sigils = [(index, row) for index, row in enumerate(rows)
               if _prompt_body(row) is not None]
-    in_region = [(index, row) for index, row in sigils if index >= region_start]
+    # Submitted prompts use the same sigil as drafts. When the live composer
+    # has borders, use those boundaries rather than including nearby transcript
+    # in the last 14 rows. Keep EVERY prompt inside it: a multiline draft can
+    # end in an empty prompt, which is not evidence the preceding text was sent.
+    borders = [index for index, row in enumerate(rows) if _is_border_line(row)]
+    if len(borders) >= 2:
+        top, bottom = borders[-2:]
+        if bottom >= len(rows) - 5 and any(top < index < bottom for index, _ in sigils):
+            region_start, region_end = top + 1, bottom
+    in_region = [(index, row) for index, row in sigils
+                 if region_start <= index < region_end]
     if not in_region:
         return "", f"no input box found (no prompt sigil in the last {BOX_REGION_ROWS} rows of {len(rows)})"
     candidates = []
@@ -4842,7 +4853,7 @@ def box_text(screen):
         # multi-line draft as if it were the whole thing.
         index, text = candidates[0]
         continuations = [body for _i, body in candidates[1:]]
-        below = sum(1 for row in rows[index + 1:]
+        below = sum(1 for row in rows[index + 1:region_end]
                     if _strip_ansi(row).strip() and _prompt_body(row) is None)
         extra = []
         if continuations:
