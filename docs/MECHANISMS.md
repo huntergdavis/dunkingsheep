@@ -40,6 +40,7 @@ one line. That was proven by adding one.
 | `recover_leases` | an ingest lease left by a stopped process is requeued, not lost | `test_recover_leases_requeues_an_expired_ingest` | tested |
 | `resume` | resuming an ingest that was paused mid-corpus | `test_pause_and_resume_change_the_ingest_state` | tested |
 | `purge` | retention drops old read mail and keeps unread | `test_purge_keeps_unread_mail_and_drops_old_read_mail` | tested |
+| `archive_retired` | mail to a retired mailbox older than a day, which must be kept but not left waiting | `test_mail_to_a_retired_mailbox_is_archived_and_kept` | tested |
 | `auto_archive_undeliverable` | mail to a pane that no longer exists, older than the archive age | `test_undeliverable_mail_older_than_24h_is_auto_archived` | tested |
 | `kill_decision` | a real TERM of a process we started, and a protected pid refused | `test_a_real_kill_of_a_process_we_started` | tested |
 | `write_heartbeat` | the watchdog itself being dead, detected without it | `test_the_deadman_has_exactly_one_recipient` | tested |
