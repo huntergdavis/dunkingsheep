@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import shlex
+import socket
 import sys
 import time
 
@@ -43,7 +44,10 @@ def build_parser():
         epilog=SHORT,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"dunkingsheep {VERSION}")
+    import dunk_core as _core
+    parser.add_argument("--version", action="version",
+                        version=f"dunkingsheep {VERSION} (code "
+                                f"{_core.CODE_IDENTITY.get('code_hash') or 'unknown'})")
     parser.add_argument("--json", action="store_true", help="print raw JSON results")
     parser.add_argument("--socket", help="daemon socket path (default: $DUNKINGSHEEP_SOCKET "
                                          "or ~/.config/dunkingsheep/dunkingsheep.sock)")
@@ -60,7 +64,30 @@ def build_parser():
                                     parents=[common], **kw))
     sub.required = True
 
-    sub.add_parser("status", help="daemon health and counts")
+    p = sub.add_parser("status", help="daemon health and counts")
+    p.add_argument("--check-herdr", action="store_true",
+                   help="probe the terminal backend (slow; default off)")
+    p = sub.add_parser("turn", help="declare a busy turn (pi/claude hooks)")
+    tsub = p.add_subparsers(dest="turn_command", metavar="<start|end>")
+    tsub.required = True
+    q = tsub.add_parser("start", help="mark the pane busy until turn end")
+    q.add_argument("--pane", help="pane id (default: the caller's)")
+    q.add_argument("--ttl-s", type=float)
+    q.add_argument("--source")
+    q = tsub.add_parser("end", help="end the busy turn and release the hold")
+    q.add_argument("--pane", help="pane id (default: the caller's)")
+    q.add_argument("--reason")
+    p = sub.add_parser("poll", help="one batched read for sidebars: status + inbox + dunks",
+                       description="Read-only batch used by the sidebar poller. "
+                                   "It does not mark mail read; panes/tasks are opt-in.")
+    p.add_argument("--mailbox", help="mailbox to poll (default: the caller's)")
+    p.add_argument("--limit", type=int, default=5, help="unread messages to return (default 5)")
+    p.add_argument("--panes", action="store_true", help="include the pane list (slow; startup only)")
+    p.add_argument("--tasks", action="store_true", help="include the caller's task queue")
+    p.add_argument("--task-scope", choices=["global", "self"], default=None)
+    p.add_argument("--include-done", action="store_true")
+    p.add_argument("--check-herdr", action="store_true",
+                   help="probe the terminal backend (slow; default off)")
     p = sub.add_parser("list", aliases=["ls"], help="list all dunks",
                        description="List every dunk: id, running, live status, target, "
                                    "interval, sends (done/max), idle gate, text.")
@@ -169,7 +196,7 @@ def build_parser():
                                    "daemon instead. Every other herdr command is untouched.",
                        epilog="new shells pick it up; existing panes need a fresh shell")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "install", "uninstall", "check", "shadow", "unshadow"])
+                   choices=["status", "install", "install-tmux", "uninstall", "check", "shadow", "unshadow"])
     p.add_argument("--no-shadow", action="store_true",
                    help="install the PATH wrapper only; do not take herdr's own place "
                         "(agents herdr starts itself will not be covered)")
@@ -187,12 +214,16 @@ def build_parser():
     q = isub.add_parser("send", help="put a message in an agent's inbox",
                         epilog="example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'")
     q.add_argument("to")
-    q.add_argument("body", nargs="+")
+    q.add_argument("body", nargs="*")   # may come from --body-file instead
     q.add_argument("--subject", "-s")
     q.add_argument("--attach", "-a", action="append", metavar="PATH",
                    help="attach a local file (repeatable)")
     q.add_argument("--no-notify", action="store_true",
                    help="do not nudge the recipient's pane")
+    q.add_argument("--literal", action="store_true",
+                   help="send body text that contains shell-substitution syntax ($( ${ or a backtick)")
+    q.add_argument("--body-file", metavar="PATH",
+                   help="read the body from a file ('-' for stdin): immune to shell substitution")
     q = isub.add_parser("list", help="summaries of waiting messages")
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--all", action="store_true", help="include messages already read")
@@ -214,10 +245,98 @@ def build_parser():
                             ("delete", "delete messages and their attachments")):
         q = isub.add_parser(name, help=help_text)
         q.add_argument("message_ids", nargs="+")
+        if name == "ack":
+            q.add_argument("--mailbox", help="only ack this mailbox (default: your own)")
     isub.add_parser("stats", help="unread counts for every mailbox")
     q = isub.add_parser("fetch", help="write an attachment to a local directory")
     q.add_argument("attachment_id")
     q.add_argument("--dest", "-d", default=".")
+
+    # -- context store ---------------------------------------------------------
+    context = sub.add_parser("context", help="declarative context store: files are truth, index is a cache",
+                             description=".dunkingsheep/ per project plus one global. Ground truths never "
+                                         "expire; only the owner promotes one; supersede keeps both entries linked.")
+    csub = context.add_subparsers(dest="context_command", metavar="<subcommand>")
+    csub.required = True
+    q = csub.add_parser("init", help="create the store layout")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("add", help="add an entry (body from --text, stdin or a file)")
+    q.add_argument("file", nargs="?", default="-")
+    q.add_argument("--text", help="the body inline (otherwise stdin or the file argument)")
+    q.add_argument("--class", dest="cls", required=True)
+    q.add_argument("--subject", required=True)
+    q.add_argument("--type", dest="type_", default="reference")
+    q.add_argument("--authority", default="agent")
+    q.add_argument("--source", default="")
+    q.add_argument("--stated")
+    q.add_argument("--recheck-after")
+    q.add_argument("--supersedes")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("promote", help="owner-only: promote an entry to ground truth")
+    q.add_argument("slug")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("supersede", help="replace an entry, keeping both linked")
+    q.add_argument("slug")
+    q.add_argument("file", nargs="?", default="-")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("retire", help="append a retirement note (history kept)")
+    q.add_argument("slug")
+    q.add_argument("--reason", default="")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("get", help="show an entry by subject or slug")
+    q.add_argument("key")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("search", help="FTS5 search over the disposable index")
+    q.add_argument("query")
+    q.add_argument("--class", dest="cls")
+    q.add_argument("--scope")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q = csub.add_parser("digest", help="bounded session digest (global truths always included)")
+    q.add_argument("--subject")
+    q.add_argument("--max-bytes", type=int, default=8192)
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("snapshot", help="digest + per-article access counts, for the dashboard")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("check", help="schema, refusals and stale facts (both stores by default)")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("index", help="rebuild the disposable FTS index (both stores by default)")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+    q = csub.add_parser("stats", help="counts, ages, reads and never-read entries (both stores by default)")
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--project", action="store_true")
+    q.add_argument("--path")
+
+    # -- per-caller load -------------------------------------------------------
+    load = sub.add_parser("load", help="per-caller CPU from /proc (pid+starttime guarded, process tree)",
+                          description="Sample registered callers' CPU from /proc. Identity is pid+starttime; "
+                                      "a reused pid produces no sample. GPU is null with a reason on this hardware.")
+    load.add_argument("--policies", metavar="PATH",
+                      help="JSON {agent: policy}; adds dry-run would-kill lines (default: load-policies.json)")
+
+    # -- project PMs -----------------------------------------------------------
+    pm = sub.add_parser("pm", help="project PMs: lane routing and the one-per-project digest",
+                        description="A PM publishes ONE digest per project per window "
+                                    "under a stable id, and lanes report to their PM "
+                                    "instead of the VP.")
+    psub = pm.add_subparsers(dest="pm_command", metavar="<subcommand>")
+    psub.required = True
+    q = psub.add_parser("digest", help="publish/update one project digest",
+                        epilog="example: echo '{\"changed\":[\"t6 240/286\"],\"numbers\":[]}' | "
+                               "dunkingsheep pm digest poolrad")
+    q.add_argument("project")
+    q.add_argument("--to", help="VP pane (default from routing / DUNKINGSHEEP_VP_PANE)")
+    q.add_argument("--demo", action="store_true",
+                   help="label the subject DEMO (a shape demo carries live numbers, not template ones)")
+    q = psub.add_parser("routing", help="show the lane->PM routing registry")
 
     # -- tasks ----------------------------------------------------------------
     task = sub.add_parser(
@@ -287,6 +406,11 @@ def build_parser():
 
     q = tsub.add_parser("delete", help="delete a task")
     q.add_argument("id")
+
+    q = tsub.add_parser("note", help="append an event to a task's history")
+    q.add_argument("id")
+    q.add_argument("--event", default="note")
+    q.add_argument("--reason")
 
     q = tsub.add_parser("next", help="atomically claim the next task")
     q.add_argument("scope", nargs="?",
@@ -432,6 +556,62 @@ def build_parser():
     sub.add_parser("doctor",
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
+    p = sub.add_parser("owner", help="owner -> agent delivery: pushed, never typed")
+    osub = p.add_subparsers(dest="owner_command", metavar="<action>")
+    q = osub.add_parser("push", help="push an owner message to a pane (no inbox row, no typing)")
+    q.add_argument("target")
+    q.add_argument("body", nargs="+")
+    q.add_argument("--subject", "-s")
+    q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
+    q.add_argument("pane_id")
+    q.add_argument("--by")
+    q = osub.add_parser("stats", help="owner-push counts and latency")
+    p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
+    ssub = p.add_subparsers(dest="state_command", metavar="<action>")
+    q = ssub.add_parser("capture", help="record one row per agent lane now")
+    q.add_argument("--source", default="periodic", help="why this capture ran")
+    q = ssub.add_parser("latest", help="the most recent captured rows")
+    q.add_argument("pane", nargs="?")
+    q.add_argument("--project")
+    q.add_argument("--limit", type=int, default=20)
+    p = sub.add_parser("roster", help="one row per agent lane (name, harness, state, task, inbox, cpu)")
+    p = sub.add_parser("message-state", help="sent / delivered / seen for message ids")
+    p.add_argument("ids", help="comma-separated message ids")
+    p = sub.add_parser("reply-stats", help="last and median time for a lane to read its mail")
+    p.add_argument("mailboxes", nargs="?", help="comma-separated mailboxes (default all)")
+    p = sub.add_parser("project-summary", help="ground truths, articles, tasks in flight, agents, timeline")
+    p.add_argument("project", nargs="?", help="project name (default: global)")
+    p.add_argument("--path", help="explicit project directory")
+    p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8792)
+    p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
+    rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
+    q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
+    q.add_argument("pane")
+    q.add_argument("--reason", required=True, help="why, e.g. superseded-by:wW:p7")
+    q = rsub.add_parser("unretire", help="bring a pane back")
+    q.add_argument("pane")
+    q = rsub.add_parser("list", help="the retired panes")
+    p = sub.add_parser("dispatch", help="standby queue + a deterministic tick that fills idle lanes",
+                       epilog="examples: dispatch add t6 'advance strict C to 250' / dispatch tick")
+    dsub = p.add_subparsers(dest="dispatch_command", metavar="<action>")
+    q = dsub.add_parser("add", help="queue a one-line assignment")
+    q.add_argument("brief", nargs="+")
+    q.add_argument("--task-id", "-t", help="the task this assignment advances")
+    q.add_argument("--lane", help="reserve it for one lane (pane id or name)")
+    q = dsub.add_parser("list", help="the standby queue, in order")
+    q = dsub.add_parser("remove", help="drop an item")
+    q.add_argument("id", type=int)
+    q = dsub.add_parser("tick", help="fill every ready lane that has no mail (run on a timer)")
+    q.add_argument("--dry-run", action="store_true")
+    q = dsub.add_parser("status", help="the last tick's numbers")
+    p = sub.add_parser("clear-box", help="DESTRUCTIVE, superuser: clear an unsubmitted draft (Ctrl-U)")
+    p.add_argument("target")
+    p.add_argument("--reason", help="why the draft is being destroyed (it is logged)")
+    p = sub.add_parser("delivery", help="can this lane receive a message, and if not why")
+    p.add_argument("target")
+    p.add_argument("--status", help="the pane's reported status, if known")
     p = sub.add_parser("flush", help="submit text left sitting in a pane's input box")
     p.add_argument("target")
 
@@ -461,8 +641,11 @@ def build_parser():
         p.add_argument("--focus", action="store_true", help="switch the view to it")
 
     p = sub.add_parser("new-workspace", aliases=["workspace"],
-                       help="create a named herdr workspace (first tab + shell pane)",
+                       help="create a named workspace (first tab + shell pane)",
                        epilog="example: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude")
+    p.add_argument("--as", dest="mailbox", metavar="MAILBOX",
+                   help="the lane this new pane IS: recorded in the lane registry, "
+                        "so mail for that lane reaches this pane after a backend change")
     placement(p)
     p = sub.add_parser("new-tab", aliases=["tab"], help="create a named tab in a workspace",
                        epilog="example: dunkingsheep new-tab -w Site -l writer -r 'codex'")
@@ -692,6 +875,38 @@ def print_inbox_archive(result):
           f" (states {','.join(result['states'])}{when})")
 
 
+def print_load(r):
+    print(f"window {r.get('elapsed_s')}s | host load1 {r.get('host_load1')} "
+          f"| attributed {r.get('attributed_cores')} cores | "
+          f"unattributed {r.get('unattributed_cores')} cores")
+    if not r.get("callers"):
+        print("no registered callers with pid+starttime (nothing is assumed)")
+    for row in r.get("callers", []):
+        gpu = row.get("gpu_pct") or {}
+        gpu_text = f"{gpu['value']}%" if gpu.get("value") is not None else f"null ({gpu.get('reason')})"
+        print(f"  {row['name']:<24} {str(row.get('cpu_pct')):>6}%  peak {row.get('peak_cpu_pct')}%"
+              f"  rss {row.get('rss_mb')}MB  procs {row.get('process_count')}  gpu {gpu_text}")
+    for item in r.get("would_kill", []):
+        print(f"  {item['line']}{'' if item['kill'] else ' [alert-only]'}")
+    for skip in r.get("skipped", []):
+        print(f"  {skip['name']:<24} skipped: {skip['reason']}")
+
+
+def print_pm_digest(r):
+    print(f"{r.get('action', 'updated')} {r.get('digest_id')} -> {r.get('destination')} "
+          f"({r.get('state')}, {r.get('body_bytes')} bytes)")
+
+
+def print_pm_routing(r):
+    routing = r.get("routing") or {}
+    if not routing:
+        print(f"no PM routing configured at {r.get('registry')}")
+        return
+    for project, entry in sorted(routing.items()):
+        members = ", ".join(entry.get("members") or []) or "-"
+        print(f"{project}: pm {entry['pm']}  mode {entry['mode']}  lanes {members}")
+
+
 def print_inbox_count(r):
     line = f"{r['mailbox']}: {r['unread']} unread of {r['total']}"
     if r.get("oldest_unread_s"):
@@ -700,6 +915,8 @@ def print_inbox_count(r):
         line += f", {r['archived']} archived"
     if r.get("undeliverable"):
         line += f", {r['undeliverable']} undeliverable"
+    if r.get("from_lanes"):
+        line += f", {r['from_lanes']} from lanes (bypassed a PM)"
     if r.get("attachments_unread"):
         line += f", {r['attachments_unread']} attachment(s)"
     print(line)
@@ -888,6 +1105,15 @@ def print_health(result):
     print(f"  integrity={checks.get('integrity')} "
           f"stale={checks.get('stale_leases')} wal={checks.get('wal_bytes')} "
           f"disk_free={checks.get('disk_free_bytes')} tasks={checks.get('tasks')}")
+    dispatch = checks.get("dispatch") or {}
+    if dispatch:
+        # 'the feeder is dead' as a number, not an absence.
+        age = dispatch.get("age_s")
+        # Minutes, because that is the number a human reads.
+        human = ("never" if age is None
+                 else (f"{age / 60:.1f}m ago ({age}s)" if age >= 60 else f"{age}s ago"))
+        print(f"  dispatcher={dispatch.get('status')} last_tick={human}"
+              + (" (dry run)" if dispatch.get("dry_run") else ""))
 
 
 def print_doctor(result):
@@ -1045,6 +1271,99 @@ def print_message(result):
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
 
 
+def print_retired(result):
+    if "retired" in result:
+        records = result["retired"]
+        if not records:
+            print("no retired panes")
+            return
+        print(f"{'PANE':<10} {'RETIRED':<20} REASON")
+        for record in records:
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(record.get("retired_at") or 0))
+            print(f"{record['pane_id']:<10} {stamp:<20} {record.get('reason')}")
+        return
+    if "unread_kept" in result:
+        print(f"retired {result['pane_id']} ({result['reason']})"
+              + (f"; {result['unread_kept']} unread message(s) kept as the record"
+                 if result.get("unread_kept") is not None else ""))
+        return
+    print(f"unretired {result.get('pane_id')}")
+
+
+def print_owner_push(result):
+    print(f"pushed owner message {result['id']} for {result['pane_id']} "
+          f"(no inbox row, nothing typed)")
+
+
+def print_owner_take(result):
+    messages = result.get("messages") or []
+    if not messages:
+        return
+    for message in messages:
+        subject = f"[{message['subject']}] " if message.get("subject") else ""
+        print(f"--- owner message {message['id']} at "
+              f"{time.strftime('%H:%M:%S', time.localtime(message['created_at']))}")
+        print(subject + message["body"])
+
+
+def print_owner_stats(result):
+    print(json.dumps(result, indent=2))
+
+
+def print_view(result):
+    """The Command Center views on a terminal: JSON, because a UI consumes them."""
+    import json as _json
+    print(_json.dumps(result, indent=2))
+
+
+def print_dispatch(result):
+    """One line per number. A tick says what it did; a status says what it knows."""
+    if "summary" in result:
+        print(result["summary"])
+        print(f"standby queue: {result.get('pending')} pending")
+        return
+    if "items" in result:
+        items = result["items"]
+        if not items:
+            print("standby queue is empty")
+            return
+        print(f"{'ID':<5} {'TASK':<7} {'LANE':<10} BRIEF")
+        for item in items:
+            print(f"{item['id']:<5} {str(item.get('task_id') or '-'):<7} "
+                  f"{str(item.get('lane') or 'any'):<10} {_clip(item['brief'], 70)}")
+        return
+    if "removed" in result:
+        print(f"removed standby item {result['removed']}")
+        return
+    if "brief" in result and "id" in result:
+        print(f"added standby item {result['id']}"
+              + (f" for {result['task_id']}" if result.get("task_id") else "")
+              + (f" (reserved for {result['lane']})" if result.get("lane") else ""))
+        return
+    import dunk_dispatch
+    print(dunk_dispatch.summary(result))
+    for record in result.get("dispatched") or []:
+        state = "sent" if record.get("sent") else ("DRY RUN" if not record.get("error") else "FAILED")
+        print(f"  {state} {record['pane_id']}: {record['text']}"
+              + (f" [{record['error']}]" if record.get("error") else ""))
+
+
+def print_clear(result):
+    """A clear is not a message: it reports the state it found and the state it left.
+
+    Using print_message here raised KeyError 'target_label' and made the one
+    command that unblocks a lane the one command that could not run.
+    """
+    label = result.get("target_label") or result.get("pane_id")
+    before = (result.get("before") or {}).get("state")
+    if result.get("flushed"):
+        after = (result.get("after") or {}).get("state")
+        print(f"cleared {label} ({result.get('pane_id')}): {before} -> {after}"
+              + (f" [{result['reason']}]" if result.get("reason") else ""))
+    else:
+        print(f"nothing cleared on {label} ({result.get('pane_id')}): {result.get('reason')}")
+
+
 def print_messages(result):
     queued, recent = result.get("queued", []), result.get("recent", [])
     if not queued and not recent:
@@ -1112,11 +1431,48 @@ def print_herdr(result):
         sys.stdout.write(result["text"] if result["text"].endswith("\n") else result["text"] + "\n")
 
 
+def print_poll(result):
+    status = result.get("status") or {}
+    count = result.get("inbox_count") or {}
+    print(f"self {status.get('self_pane_id') or '?'}  v{status.get('version')}  "
+          f"dunks {status.get('running', 0)}/{status.get('dunkers', 0)} running  "
+          f"inbox {count.get('unread', 0)} unread / {count.get('total', 0)}")
+    if result.get("error"):
+        print(f"  note: {result['error']}")
+    for message in (result.get("dunks") or {}).get("messages", [])[:5]:
+        print(f"  #{message.get('message_id')} {message.get('sender')}: "
+              f"{message.get('subject') or '(no subject)'}")
+    for dunk in (result.get("dunks") or {}).get("dunks", [])[:10]:
+        state = "running" if dunk.get("running") else "stopped"
+        print(f"  {dunk.get('id')} {state} every {dunk.get('interval_minutes')}m "
+              f"-> {dunk.get('target_label') or dunk.get('target_pane_id')}")
+
+
 def print_status(result):
-    for key in ("version", "pid", "dunkers", "running", "herdr_available",
+    """Status, with the code's identity beside the constant.
+
+    'is the running daemon the code I just wrote' must be one line to answer, and a
+    hand-maintained constant cannot answer it: this file said 2.37.4 for eight
+    commits whose messages claimed 2.38 through 2.51.
+    """
+    version = result.get("version")
+    code = result.get("code_hash")
+    if version and code:
+        print(f"{'version':<16} {version} (code {code})")
+    elif version:
+        print(f"{'version':<16} {version}")
+    for key in ("code_mtime", "started_at", "code_stale", "pid", "dunkers", "running",
+                "queued_messages", "herdr_available",
                 "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
-        if result.get(key) not in (None, ""):
-            print(f"{key:<16} {result[key]}")
+        value = result.get(key)
+        if value in (None, ""):
+            continue
+        if key in ("code_mtime", "started_at"):
+            value = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value))} ({int(time.time() - value)}s ago)"
+        if key == "code_stale":
+            value = ("YES - the code on disk is newer than this process; restart it"
+                     if value else "no")
+        print(f"{key:<16} {value}")
 
 
 # -- main -------------------------------------------------------------------------------
@@ -1183,12 +1539,163 @@ def mcp_map_text(markdown=False):
     return "\n".join(out) + "\n"
 
 
+def _be_nice():
+    """A poller must not outrank an interactive agent. Courtesy, not a fix."""
+    try:
+        if os.environ.get("DUNKINGSHEEP_NICE") != "0":
+            os.nice(int(os.environ.get("DUNKINGSHEEP_NICE", "5")))
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+# Read only local files; never open a socket.
+LOCAL_ONLY_COMMANDS = ("context",)
+
+# A synchronous send waits for delivery, and delivery reads panes several times.
+# Under load (27 live lanes at 2.7/cpu) those reads are slow: 15 s was not enough
+# for a fire that was working, and the client reported a timeout for a send that
+# landed. This is a wait long enough to be honest about, not a retry.
+SEND_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_SEND_TIMEOUT_S", "120"))
+BATCH_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_BATCH_TIMEOUT_S", "180"))
+# A batch that outlived its socket timeout is NOT an implementation failure: it is a
+# bounded job that outgrew its deadline. Saying 'timed out' sends a reader hunting a
+# hang that does not exist, so the exit code says 'temporary' and the unit can accept
+# it as success.
+EXIT_STILL_WORKING = 75
+# A tick classifies every lane; it is a batch, not a single send.
+BATCH_COMMANDS = ("dispatch",)
+
+
+def _still_working_message(command, seconds):
+    return (f"still working after {int(seconds)}s: {command} has not answered yet. "
+            f"This is a pace problem, not a failure - the daemon keeps going and its "
+            f"result lands in the state it writes (e.g. dispatch-state.json). "
+            f"Raise DUNKINGSHEEP_BATCH_TIMEOUT_S or reduce the batch.")
+
+_POLL_COMMANDS = ("status", "list", "ls", "poll")
+_INBOX_POLLS = ("count", "list", "ls", "stats")
+
+
+def _coalesce(argv):
+    """Return (cache path, hit) for a poll command; path is None when uncacheable.
+
+    Ten lanes polling faster than they can act is pure overhead, but a
+    suppressed call must not lose the ANSWER: an interactive caller that asks
+    once must still get the count. The cache stores stdout under the key; a
+    coalesced caller replays it and marks stderr as cached. DUNKINGSHEEP_FRESH=1
+    bypasses the cache for a caller that needs certainty.
+
+    The key includes the SOCKET (and so the store behind it). Without it, two
+    different stores share one entry and a caller can be handed another store's
+    answer: a test asserting `total: 0` from its own temp daemon was handed
+    `total: 163` from the live mailbox, and the same collision could report the
+    live inbox to a sandboxed agent.
+    """
+    if os.environ.get("DUNKINGSHEEP_FRESH") == "1":
+        return None, False
+    try:
+        minimum = float(os.environ.get("DUNKINGSHEEP_MIN_POLL_S", "2"))
+    except ValueError:
+        minimum = 2.0
+    if minimum <= 0:
+        return None, False
+    words = [word for word in argv if not word.startswith("-")]
+    if not words:
+        return None, False
+    if words[0] == "inbox":
+        if len(words) < 2 or words[1] not in _INBOX_POLLS:
+            return None, False
+    elif words[0] not in _POLL_COMMANDS:
+        return None, False
+    # The key includes the ARGUMENTS, not just the command. Keying on the command
+    # alone meant `inbox count alpha` and `inbox count beta` shared one entry, so a
+    # caller asking about lane B was handed lane A's numbers - the same
+    # correct-looking cache, scoped wrong, as the cross-store collision.
+    import hashlib as _hashlib
+    scope = os.environ.get("DUNKINGSHEEP_SOCKET") or os.environ.get("DUNKINGSHEEP_DIR") or "default"
+    digest = _hashlib.sha256((" ".join(argv) + "|" + scope).encode("utf-8")).hexdigest()[:16]
+    key = digest
+    path = os.path.join("/tmp", "dunkingsheep-poll-" + str(os.getuid()) + "-" + key)
+    now = time.time()
+    try:
+        last = os.path.getmtime(path)
+    except OSError:
+        last = 0.0
+    if last and now - last < minimum:
+        return path, True
+    try:
+        open(path, "a").close()
+        os.utime(path, (now, now))
+    except OSError:
+        return None, False
+    # Return the path even on creation: _run writes the fresh stdout there so
+    # the next call inside the interval can replay it instead of a stub.
+    return path, False
+
+
+def _run(argv):
+    """Run main(), caching the stdout of a coalescable command.
+
+    A cache hit replays the previous stdout (same fields) and writes a
+    {"coalesced": true, "cached": true} marker to stderr; the caller parses the
+    same answer it would have parsed fresh.
+
+    Replay happens ONLY on a hit. Replaying whenever a `.out` exists pinned the
+    first answer forever: a 16-hour-old `status` (version 2.28.0, pid long dead)
+    was still being served because the fresh path returned before it could
+    overwrite the file. A cache that cannot expire is a stale answer generator.
+    """
+    path, hit = _coalesce(argv)
+    if path and hit:
+        try:
+            with open(path + ".out", encoding="utf-8") as handle:
+                cached = handle.read()
+        except OSError:
+            cached = ""
+        if cached:
+            sys.stdout.write(cached)
+            print(json.dumps({"coalesced": True, "cached": True,
+                              "interval_s": float(os.environ.get(
+                                  "DUNKINGSHEEP_MIN_POLL_S", "2"))}),
+                  file=sys.stderr)
+            return 0
+        # No cached answer yet: run fresh rather than return a silent stub.
+    import contextlib
+    import io
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            code = main(argv)
+    except SystemExit as exc:
+        # argparse --version/--help print inside the capture and then exit;
+        # the captured text must still reach stdout. A STRING code is a named
+        # refusal ("no entry 'x'"): it belongs on stderr with a failing exit,
+        # and dropping it made refusals exit 1 with no message at all.
+        if isinstance(exc.code, str):
+            sys.stderr.write(f"error: {exc.code}\n")
+            code = 2
+        else:
+            code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    output = buffer.getvalue()
+    if path:
+        try:
+            with open(path + ".out", "w", encoding="utf-8") as handle:
+                handle.write(output)
+        except OSError:
+            pass
+    sys.stdout.write(output)
+    return code
+
+
 def main(argv=None):
     parser = build_parser()
-    if not (argv if argv is not None else sys.argv[1:]):
+    words = list(argv if argv is not None else sys.argv[1:])
+    if not words:
         parser.print_help()
         return 0
-    args = parser.parse_args(argv)
+    _be_nice()
+    _coalesce(words)
+    args = parser.parse_args(words)
     command = args.command
 
     if command in ("guide", "help", "docs"):
@@ -1216,6 +1723,8 @@ def main(argv=None):
         import dunk_guard
         if args.action == "install":
             result = dunk_guard.install(shadow_binary=not args.no_shadow)
+        elif args.action == "install-tmux":
+            result = dunk_guard.install_tmux()
         else:
             result = getattr(dunk_guard, args.action)()
         if getattr(args, "json", False):
@@ -1328,6 +1837,19 @@ def main(argv=None):
             print(f"{cmd.name}({params}){flag}\n    {cmd.description}")
         return 0
 
+    _check_send_body(args)
+
+    # Commands that read local files must not depend on the daemon. The digest is
+    # injected at session start; making it wait for a socket would mean an agent
+    # gets no standing rules exactly when the daemon is down.
+    if command in LOCAL_ONLY_COMMANDS:
+        result, printer = run_client_command(None, args)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            printer(result)
+        return 0
+
     try:
         # A send may ask the daemon to block for --wait seconds; the socket read
         # has to outlast that or the CLI reports a timeout for a send that is
@@ -1342,10 +1864,28 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        # Synchronous send paths wait for the daemon to *deliver*, and delivery can
+        # need several pane reads (a typing check, a dead-session check, a submit
+        # confirmation). On a loaded host those reads are slow enough that the
+        # client's default 15 s timed out a `fire` that was working perfectly.
+        if command in ("fire", "send", "send-keys", "flush", "dunk"):
+            client.timeout = max(client.timeout, SEND_TIMEOUT_S)
+        if command in BATCH_COMMANDS:
+            # A tick classifies every lane; it is a batch, not a single send, and a
+            # 15 s socket timeout turned a working tick into a failed unit.
+            client.timeout = max(client.timeout, BATCH_TIMEOUT_S)
         result, printer = run_client_command(client, args)
     except DunkError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except socket.timeout:
+        # The socket deadline, not the work: say so, and let the caller treat a slow
+        # batch as 'not finished' rather than 'broken'.
+        if command in BATCH_COMMANDS:
+            print(_still_working_message(command, client.timeout), file=sys.stderr)
+            return EXIT_STILL_WORKING
+        print(f"error: no answer after {int(client.timeout)}s from the daemon", file=sys.stderr)
+        return 3
     except (DaemonUnavailable, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 3
@@ -1357,11 +1897,195 @@ def main(argv=None):
     return 0
 
 
+def run_context_command(dunk_context, args):
+    """The context store commands. Local files only: no socket, no daemon."""
+    sub = args.context_command
+    store = dunk_context.Store(args.path if getattr(args, "path", None) else None,
+                               global_store=bool(getattr(args, "global_store", False)))
+    if sub == "init":
+        return {"root": str(store.ensure())}, lambda r: print(f"store at {r['root']}")
+    if sub == "add":
+        if getattr(args, "text", None):
+            body = args.text
+        elif args.file == "-":
+            body = sys.stdin.read()
+        else:
+            try:
+                body = open(args.file).read()
+            except FileNotFoundError:
+                raise SystemExit(
+                    f"no such file: {args.file!r} - the body comes from --text, stdin or a "
+                    f"file; for text inline use: dunkingsheep context add --text "
+                    f"'<claim>' --class ... --subject ...")
+        return store.add(body, cls=args.cls, subject=args.subject, type_=args.type_,
+                         authority=args.authority, source=args.source, stated=args.stated,
+                         recheck_after=args.recheck_after, supersedes=args.supersedes), \
+            lambda r: print(f"added {r['class']}/{r['slug']}")
+    if sub == "promote":
+        entry = store.find(args.slug)
+        if entry is None:
+            raise SystemExit(1)
+        if os.environ.get("DUNKINGSHEEP_SUPERUSER") != "1":
+            raise SystemExit("refused: only an owner act promotes a ground truth")
+        return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
+                         type_=entry.get("type") or "principle", authority="owner",
+                         source=entry.get("source") or "",
+                         supersedes=entry["slug"]), lambda r: print(f"promoted {r['slug']}")
+    if sub == "supersede":
+        body = sys.stdin.read() if args.file == "-" else open(args.file).read()
+        return store.supersede(args.slug, body), lambda r: print(f"superseded by {r['slug']}")
+    if sub == "retire":
+        return store.retire(args.slug, args.reason), lambda r: print(f"retired {r['slug']}")
+    if sub in ("get", "search"):
+        # The same scope rule as stats/check/digest: a lookup must find a
+        # global ground truth from inside a project, or the rules are write-only.
+        which = ("global" if getattr(args, "global_store", False)
+                 else "project" if getattr(args, "project", False) else None)
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        if sub == "get":
+            for name, target in stores.items():
+                entry = target.find(args.key)
+                if entry is not None:
+                    target.log_access(entry["slug"])
+                    return entry, lambda r: print(
+                        f"# {r['slug']} ({r['class']}, {r['authority']}, {name})\n\n{r['body']}")
+            raise SystemExit(f"no entry {args.key!r} in {', '.join(stores) or 'any store'}")
+        rows = []
+        for name, target in stores.items():
+            for row in target.search(args.query, cls=args.cls, scope=args.scope):
+                rows.append(dict(row, store=name))
+        return rows, lambda rs: [print(f"{r['store']:<8} {r['class']:<13} {r['slug']:<40} {r['subject']}")
+                                 for r in rs] and None
+    if sub == "digest":
+        which = ("global" if getattr(args, "global_store", False)
+                 else "project" if getattr(args, "project", False) else None)
+        return dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                        max_bytes=args.max_bytes, subject=args.subject), print
+    which = ("global" if getattr(args, "global_store", False)
+             else "project" if getattr(args, "project", False) else None)
+    if sub == "snapshot":
+        import json as _json
+        # One deterministic call for the dashboard: the digest exactly as an
+        # agent receives it, plus per-article delivery and read counts.
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        data = {"schema": "context-snapshot/1", "as_of": int(time.time()),
+                "digest": dunk_context.digest_both(getattr(args, "path", None), which=which,
+                                                   record=False),
+                "stores": {}}
+        for name, target in stores.items():
+            stats = target.stats()
+            data["stores"][name] = {
+                "status": "ok" if target.exists() else "absent",
+                "path": str(target.root), "counts": stats["counts"],
+                "reads_7d": stats["reads_7d"], "injected_7d": stats["injected_7d"],
+                "never_read_count": stats["never_read_count"],
+                "never_delivered_count": stats["never_delivered_count"],
+                "entries": target.entry_stats()}
+        return data, lambda d: print(_json.dumps(d, indent=2))
+    if sub in ("check", "index", "stats"):
+        stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
+        out = {}
+        for name, target in stores.items():
+            if sub == "index":
+                out[name] = {"path": str(target.root), "result": target.index()}
+            elif sub == "check":
+                result = target.check()
+                out[name] = {"path": str(target.root), "counts": result["counts"],
+                             "refusals": len(result["refusals"]), "stale": len(result["stale"]),
+                             "entries": sum(result["counts"].values())}
+            else:
+                result = target.stats()
+                out[name] = {"path": str(target.root), "counts": result["counts"],
+                             "reads_7d": result["reads_7d"],
+                             "injected_7d": result["injected_7d"],
+                             "never_read_count": result["never_read_count"],
+                             "never_read": result["never_read"],
+                             "never_delivered_count": result["never_delivered_count"]}
+        if sub == "index":
+            return out, lambda r: [print(f"{name}: indexed {v['result']['indexed']} -> {v['result']['path']}")
+                                   for name, v in r.items()] and None
+        if sub == "check":
+            return out, lambda r: [print(f"{name} ({v['path']}): entries {v['entries']}, refusals {v['refusals']}, stale {v['stale']}")
+                                   for name, v in r.items()] and None
+        return out, lambda r: [print(f"{name} ({v['path']}): counts {v['counts']}, "
+                                    f"injected_7d {v['injected_7d']}, reads_7d {v['reads_7d']}, "
+                                    f"never_delivered {v['never_delivered_count']}, "
+                                    f"never_read {v['never_read_count']}") for name, v in r.items()] and None
+
+
+SHELL_SUBSTITUTION = ("`", "$(", "${")
+
+
+def _check_send_body(args):
+    """Guard the send path before anything else happens.
+
+    Runs before the socket: a refusal that needs the daemon is a refusal that
+    fails open when the daemon is down.
+    """
+    if getattr(args, "command", None) != "inbox" or getattr(args, "inbox_command", None) != "send":
+        return
+    from_file = getattr(args, "body_file", None)
+    if from_file:
+        return                      # read from a file: never passed through a shell
+    _refuse_shell_substitution(" ".join(getattr(args, "body", []) or []),
+                               getattr(args, "subject", None),
+                               literal=bool(getattr(args, "literal", False)))
+
+
+def _refuse_shell_substitution(body, subject=None, *, literal=False):
+    """Refuse a body the sending shell was free to rewrite.
+
+    A backtick in an unquoted shell argument is executed before this program
+    runs, so the word between the backticks disappears and the message arrives
+    with a hole in it that only the reader can see. The failure is silent at the
+    sending end, which is why it is worth a refusal.
+
+    The honest limit: this guard CANNOT see what the shell already removed. It
+    catches bodies where the syntax survived (double quotes, a heredoc that was
+    not expanded), and it does that by refusing rather than guessing. For a body
+    that must contain these characters, pass --literal; for a body that must
+    never be touched by a shell, pass --body-file.
+    """
+    if literal:                      # the caller said "these characters are text"
+        return
+    for label, text in (("body", body), ("subject", subject)):
+        if not text:
+            continue
+        for fragment in SHELL_SUBSTITUTION:
+            index = text.find(fragment)
+            if index < 0:
+                continue
+            around = text[max(0, index - 30):index + 30].replace("\n", " ")
+            raise SystemExit(
+                f"inbox send: the {label} contains shell-substitution syntax {fragment!r} "
+                f"(...{around}...). An unquoted shell may have already rewritten it, and a "
+                f"backtick pair deletes the word between them before this command runs. "
+                f"Use single quotes, or pass --literal to send these characters as text, "
+                f"or --body-file PATH to bypass the shell entirely.")
+
+
 def run_client_command(client, args):
     """Map CLI args onto a registry command; return (result, human printer)."""
     command = args.command
     if command == "status":
-        return client.call("status"), print_status
+        return client.call("status", check_herdr=args.check_herdr), print_status
+    if command == "turn":
+        if args.turn_command == "start":
+            return client.call("turn_start", pane=args.pane, ttl_s=args.ttl_s,
+                               source=args.source), \
+                lambda r: print(f"turn start {r['pane_id']} ttl {r['ttl_s']}s")
+        return client.call("turn_end", pane=args.pane,
+                           reason=args.reason), \
+            lambda r: print(f"turn end {r['pane_id']} (ended={r['ended']})")
+    if command == "poll":
+        payload = {"limit": args.limit, "panes": args.panes, "tasks": args.tasks,
+                   "include_done": args.include_done,
+                   "check_herdr": args.check_herdr}
+        if args.mailbox:
+            payload["mailbox"] = args.mailbox
+        if args.task_scope:
+            payload["task_scope"] = args.task_scope
+        return client.call("poll", **payload), print_poll
     if command in ("list", "ls"):
         return client.call("list_dunks"), lambda r: print_dunks(r["dunks"])
     if command == "get":
@@ -1439,7 +2163,12 @@ def run_client_command(client, args):
         if sub == "count":
             return client.call("inbox_count", mailbox=args.mailbox), print_inbox_count
         if sub == "send":
-            return client.call("inbox_send", to=args.to, body=" ".join(args.body),
+            body = " ".join(args.body)
+            if getattr(args, "body_file", None):
+                if args.body:
+                    raise SystemExit("inbox send: pass a body or --body-file, not both")
+                body = sys.stdin.read() if args.body_file == "-" else open(args.body_file).read()
+            return client.call("inbox_send", to=args.to, body=body,
                                subject=args.subject,
                                attach=",".join(args.attach) if args.attach else None,
                                notify=not args.no_notify), print_inbox_sent
@@ -1452,9 +2181,11 @@ def run_client_command(client, args):
         if sub == "status":
             return client.call("inbox_status", message_id=args.message_id), print_inbox_status
         if sub in ("ack", "cancel", "delete"):
-            return client.call(f"inbox_{sub}", message_ids=",".join(args.message_ids)), \
+            return client.call(f"inbox_{sub}", message_ids=",".join(args.message_ids),
+                               **({"mailbox": args.mailbox} if getattr(args, "mailbox", None) else {})), \
                 lambda r: print(f"{r.get('state', sub)}: "
                                 f"{', '.join(r.get('changed') or r.get('deleted') or []) or 'nothing'}"
+                                + (f" in mailbox {r['acked_in']!r}" if r.get("acked_in") else "")
                                 + (f"; unchanged {r['unchanged']}" if r.get("unchanged") else ""))
         if sub == "archive":
             return client.call("inbox_archive", mailbox=args.mailbox,
@@ -1466,6 +2197,44 @@ def run_client_command(client, args):
             return client.call("inbox_fetch", attachment_id=args.attachment_id,
                                dest=args.dest), \
                 lambda r: print(f"wrote {r['path']} ({r['size']} bytes)")
+    if command == "context":
+        import dunk_context
+        try:
+            return run_context_command(dunk_context, args)
+        except dunk_context.ContextError as error:
+            raise SystemExit(f"context: {error}")
+    if command == "load":
+        tasks = client.call("task_list", limit=500).get("tasks") or []
+        callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
+                    "caller_name": t.get("caller_name")} for t in tasks]
+        import dunk_load, json, os
+        policies = None
+        policy_path = args.policies or os.path.expanduser("~/.config/dunkingsheep/load-policies.json")
+        try:
+            with open(policy_path) as handle:
+                policies = json.load(handle).get("agents") or json.load(handle)
+        except (OSError, ValueError):
+            policies = None
+        result = dunk_load.collect(dunk_load.registered_callers(callers), policies=policies)
+        if args.json:
+            return result, None
+        return result, print_load
+    if command == "pm":
+        sub = args.pm_command
+        if sub == "digest":
+            raw = sys.stdin.read()
+            if args.demo:
+                import json as _json
+                try:
+                    payload = _json.loads(raw) if raw.strip().startswith("{") else {"note": raw}
+                except ValueError:
+                    payload = {"note": raw}
+                payload["demo"] = True
+                raw = _json.dumps(payload)
+            return client.call("pm_digest", project=args.project,
+                               payload=raw, to=args.to), print_pm_digest
+        if sub == "routing":
+            return client.call("pm_routing"), print_pm_routing
     if command == "task":
         sub = args.task_command
         if sub == "add":
@@ -1511,6 +2280,10 @@ def run_client_command(client, args):
         if sub == "delete":
             return client.call("task_delete", id=args.id), \
                 lambda r: print(f"deleted {r['deleted']}")
+        if sub == "note":
+            return client.call("task_note", id=args.id, event=args.event,
+                               reason=args.reason), \
+                lambda r: print(f"noted {r['noted']}: {r['event']}")
         if sub == "next":
             return client.call("task_next", scope=args.scope,
                                lease_seconds=args.lease), print_task_next
@@ -1543,6 +2316,56 @@ def run_client_command(client, args):
                 lambda r: print(f"requeued {len(r['requeued'])} lease(s)"
                                 + (f": {', '.join(x['task_id'] for x in r['requeued'])}"
                                    if r["requeued"] else ""))
+    if command == "owner":
+        sub = args.owner_command
+        if sub == "push":
+            return client.call("owner_push", target=args.target, body=" ".join(args.body),
+                               subject=args.subject), print_owner_push
+        if sub == "take":
+            return client.call("owner_take", pane_id=args.pane_id,
+                               by=args.by), print_owner_take
+        return client.call("owner_stats"), print_owner_stats
+    if command == "state":
+        name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
+        payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {
+            "pane_id": getattr(args, "pane", None), "project": getattr(args, "project", None),
+            "limit": getattr(args, "limit", None)}
+        return client.call(name, **{k: v for k, v in payload.items() if v is not None}), print_view
+    if command in ("roster", "message-state", "reply-stats", "project-summary"):
+        name = {"message-state": "message_state", "reply-stats": "reply_stats",
+                "project-summary": "project_summary"}.get(command, command)
+        payload = {}
+        if command == "message-state":
+            payload["message_ids"] = args.ids
+        if command == "reply-stats" and getattr(args, "mailboxes", None):
+            payload["mailboxes"] = args.mailboxes
+        if command == "project-summary":
+            payload["project"] = getattr(args, "project", None)
+            if getattr(args, "path", None):
+                payload["path"] = args.path
+        return client.call(name, **payload), print_view
+    if command == "api":
+        import dunk_http
+        return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
+    if command == "retired":
+        return client.call("retire_pane", action=args.retire_command,
+                           pane=getattr(args, "pane", None),
+                           reason=getattr(args, "reason", None)), print_retired
+    if command == "dispatch":
+        payload = {"action": args.dispatch_command}
+        if getattr(args, "brief", None):
+            payload["brief"] = " ".join(args.brief)
+        for key in ("task_id", "lane", "id"):
+            if getattr(args, key, None) is not None:
+                payload[key] = getattr(args, key)
+        if getattr(args, "dry_run", False):
+            payload["dry_run"] = True
+        return client.call("dispatch", **payload), print_dispatch
+    if command == "clear-box":
+        return client.call("clear_box", target=args.target, reason=args.reason), print_clear
+    if command == "delivery":
+        return client.call("delivery", target=args.target, status=args.status), \
+            lambda r: print(f"{args.target}: {r['state']}" + (f" - {r['reason']}" if r.get('reason') else ""))
     if command == "flush":
         return client.call("flush_box", target=args.target), lambda r: print(
             f"{r['target_label']} ({r['pane_id']}): {r['message']}"
@@ -1561,7 +2384,8 @@ def run_client_command(client, args):
         return client.call("list_workspaces"), print_workspaces
     if command in ("new-workspace", "workspace"):
         return client.call("create_workspace", label=args.label, cwd=args.cwd,
-                           command=args.run, focus=args.focus), print_created
+                           command=args.run, focus=args.focus,
+                           mailbox=args.mailbox), print_created
     if command in ("new-tab", "tab"):
         return client.call("create_tab", workspace=args.workspace, label=args.label,
                            cwd=args.cwd, command=args.run, focus=args.focus), print_created
@@ -1651,4 +2475,4 @@ def run_client_command(client, args):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run(sys.argv[1:]))

@@ -175,11 +175,21 @@ RULE_COMMON = {
 
 RULE_PARAMS = {
     "task.blocked_stale": {"threshold_minutes": POSITIVE},
-    "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE},
-    "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE},
+    "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE,
+                         "fresh_minutes": POSITIVE},
+    "dunk.skip_loop": {"consecutive_skips": POSITIVE_INT, "lookback_hours": POSITIVE,
+                       # A streak that stopped N minutes ago is history, not a condition.
+                       "fresh_minutes": POSITIVE_INT},
     "dunk.overdue": {"missed_intervals": POSITIVE},
-    "inbox.undeliverable": {"min_messages": POSITIVE_INT},
-    "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT},
+    # Above the 24h auto-archive: a page must mean "the archive did not catch
+    # this", not "the archive is about to catch this".
+    "inbox.undeliverable": {"min_messages": POSITIVE_INT, "min_age_hours": POSITIVE},
+    # A WORKING lane's unread mail is a queue; an IDLE lane's is a miss. The rule
+    # needs the state, not just the age: par-c authoring a body for four hours is
+    # throughput, not a lane we failed to reach.
+    "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT,
+                          "idle_statuses": _enum_list("idle", "done", "blocked", "unknown",
+                                                      allow_empty=False)},
     "inbox.unread_dead": {"min_messages": POSITIVE_INT},
     "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 50, integer=True),
                                "require_live_pane": _bool},
@@ -187,7 +197,9 @@ RULE_PARAMS = {
     "lane.idle_holding_task": {"quiet_minutes": POSITIVE, "idle_statuses": _enum_list(
         "idle", "done", "blocked", "unknown", allow_empty=False), "holding_statuses": _enum_list(
         "open", "in_progress", "blocked", allow_empty=False)},
-    "host.load": {"load1_per_cpu": POSITIVE},
+    # load1_* names are kept for config compatibility; the rule judges load5/cpu.
+    "host.load": {"load1_per_cpu": POSITIVE, "critical_load1_per_cpu": POSITIVE,
+                  "critical_hold_runs": POSITIVE_INT},
     "host.tmp": {"max_used_fraction": FRACTION, "critical_used_fraction": FRACTION,
                  "min_free_bytes": POSITIVE_INT, "max_inode_fraction": FRACTION, "path": _str},
     "host.heavy_slot_stale": {"directory": _str, "prefix": _str, "max_age_minutes": POSITIVE},
@@ -195,6 +207,12 @@ RULE_PARAMS = {
     "money.spend_projection": {"source": _opt_str, "cap": _opt_positive},
     "host.disk_full": {"max_used_fraction": FRACTION, "paths": _str_list},
     "health.failed": {"stale_minutes": POSITIVE},
+    # A would-kill is a THRESHOLD-wrong signal, not an incident: our own lane
+    # tripped a limit while doing the work it was given.
+    "resource.would_kill": {"policies_path": _str, "state_path": _str,
+                            "require_task": _bool},
+    # A retired pane is a STATE we report, never a condition we page about.
+    "pane.retired": {},
 }
 
 TOP = {
@@ -387,9 +405,10 @@ class Inputs:
 
 def sample_host(path):
     stat = os.statvfs(path)
-    load1, _, _ = os.getloadavg()
+    load1, load5, _ = os.getloadavg()
     return {
         "load1": load1,
+        "load5": load5,
         "cpus": os.cpu_count() or 1,
         "used_fraction": ((stat.f_blocks - stat.f_bfree) / stat.f_blocks) if stat.f_blocks else 1.0,
         "free_bytes": stat.f_bavail * stat.f_frsize,
@@ -399,18 +418,36 @@ def sample_host(path):
 
 # -- findings -----------------------------------------------------------------
 
-def finding(rule_id, rule, key, summary, threshold, measured, window, evidence, source=SOURCE_RULE):
+def finding(rule_id, rule, key, summary, threshold, measured, window, evidence,
+            source=SOURCE_RULE, once=False):
     """One finding. `threshold`, `measured` and `window` are value+unit strings
-    printed on every dry-run line (spec section 4)."""
-    return {
+    printed on every dry-run line (spec section 4).
+
+    `once=True` marks an immutable event: it is reported once ever, not again
+    after a cooldown. A cooldown is for a continuing condition; a historical
+    reap is not news four hours later.
+    """
+    item = {
         "rule": rule_id, "key": str(key), "severity": rule["severity"], "class": rule["class"],
         "source": source, "summary": summary, "threshold": threshold, "measured": measured,
         "window": window, "evidence": evidence,
     }
+    if once:
+        item["once"] = True
+    return item
 
 
 def _minutes(seconds):
     return round(seconds / 60.0, 1)
+
+
+# A DECLARED marker, not prose inference: a blocked task whose reason starts
+# with this is parked on the owner, not stale. The digest still counts it.
+HELD_OWNER_MARKER = "HELD FOR OWNER DECISION"
+
+
+def _is_held(task):
+    return (task.get("block_reason") or "").strip().upper().startswith(HELD_OWNER_MARKER)
 
 
 def rule_task_blocked_stale(inputs, rule):
@@ -419,17 +456,30 @@ def rule_task_blocked_stale(inputs, rule):
     for event in data["events"]:
         last_event[event["task_id"]] = max(last_event.get(event["task_id"], 0), event["at"])
     out = []
+    held = []
     for task in data["tasks"]:
         if task["status"] != "blocked":
             continue
         last = max(task["updated_at"], last_event.get(task["id"], 0))
         idle = inputs.now - last
+        if _is_held(task):
+            held.append((task, idle))
+            continue
         if idle >= rule["threshold_minutes"] * 60:
             out.append(finding("task.blocked_stale", rule, task["id"],
                                f"task {task['id']} blocked with no state change or event",
                                f"{rule['threshold_minutes']}min", f"{_minutes(idle)}min", "since last activity",
                                {"task": task["id"], "assignees": task["assignees"],
                                 "block_reason_set": task["block_reason"] is not None}))
+    if held:
+        oldest = max(idle for _task, idle in held) / 86400
+        out.append(finding("task.blocked_stale", rule, "held-owner",
+                           f"{len(held)} task(s) held on owner decisions (oldest {oldest:.1f}d)",
+                           f"{rule['threshold_minutes']}min", f"{oldest:.1f}d", "held by declared marker",
+                           {"held": [task["id"] for task, _idle in held],
+                            "oldest_days": round(oldest, 1)},
+                           source="digest"))
+        out[-1]["severity"] = "info"
     return out
 
 
@@ -450,7 +500,12 @@ def rule_task_lease_stale(inputs, rule):
                                f"{rule['never_renewed_minutes']}min",
                                f"{_minutes(inputs.now - lease['claimed_at'])}min", "since claim",
                                {"task": lease["task_id"], "pane": lease["pane_id"]}))
-    since = inputs.now - rule["lookback_minutes"] * 60
+    # A reaped event is history, not a current state: only fresh reaps are
+    # news, and each event is reported once (finding once=True). The wider
+    # lookback is for the current leases, not for resurrecting old events.
+    fresh = rule.get("fresh_minutes", rule["lookback_minutes"]) * 60
+    since = max(inputs.now - rule["lookback_minutes"] * 60,
+                inputs.now - fresh)
     for event in data["events"]:
         if event["event"] not in ("requeued", "released") or event["at"] < since:
             continue
@@ -458,16 +513,30 @@ def rule_task_lease_stale(inputs, rule):
         if meta.get("reason") not in ("expired", "pane_gone"):
             continue
         out.append(finding("task.lease_stale", rule, f"reaped:{event['id']}",
-                           f"task {event['task_id']} lease reaped ({meta['reason']}) and {event['event']}",
-                           "any reap", "1 reap", f"{rule['lookback_minutes']}min lookback",
+                           f"task {event['task_id']} lease reaped ({meta['reason']}) "
+                           f"{_minutes(inputs.now - event['at'])}min ago and {event['event']}",
+                           "any reap", f"{_minutes(inputs.now - event['at'])}min old",
+                           f"{rule['fresh_minutes']}min fresh window",
                            {"task": event["task_id"], "event_id": event["id"], "reason": meta["reason"],
-                            "minutes_ago": _minutes(inputs.now - event["at"])}))
+                            "minutes_ago": _minutes(inputs.now - event["at"])},
+                           once=True))
     return out
 
 
 def rule_dunk_skip_loop(inputs, rule):
+    """A dunk that is still skipping. Not one that skipped for a while and stopped.
+
+    d52 paged with 33 consecutive skips and a cumulative 52 - but its last skip was
+    76 hours old and its target run had ended days before. The streak was real and
+    the alarm was not: a condition that has stopped is not an incident. And a
+    cumulative counter that only grows fires on its own history, so the count is
+    now the CURRENT run (it resets when the dunk sends) with the lifetime figure
+    reporting separately.
+    """
     since = inputs.now - rule["lookback_hours"] * 3600
+    fresh_s = rule["fresh_minutes"] * 60
     out = []
+    retired = _retired_panes(inputs)
     for dunk in sorted(inputs.dunks(), key=lambda d: d["id"]):
         rows = inputs.metrics(
             "SELECT id, at, kind FROM events WHERE source=? AND kind IN "
@@ -482,19 +551,39 @@ def rule_dunk_skip_loop(inputs, rule):
                     best, best_start, best_end = run, run_start, (event_id, at)
             else:
                 run, run_start = 0, None
-        if best >= rule["consecutive_skips"]:
-            # Keyed by the run's FIRST skip, which stays fixed while the run grows,
-            # so a continuing loop is one incident under its cooldown, not one per skip.
-            out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_start[0]}",
-                               f"dunk {dunk['id']} skipped {best} times in a row",
-                               f"{rule['consecutive_skips']} consecutive skips", f"{best} consecutive skips",
-                               f"{rule['lookback_hours']}h lookback",
-                               {"dunk": dunk["id"], "target_pane": dunk.get("target_pane_id"),
-                                "current_streak": run,
-                                "run_start_hours_ago": round((inputs.now - best_start[1]) / 3600, 1),
-                                "run_end_hours_ago": round((inputs.now - best_end[1]) / 3600, 1),
-                                "cumulative_skip_count": dunk.get("skip_count"),
-                                "skip_if_unconsumed": dunk.get("skip_if_unconsumed")}))
+        if best < rule["consecutive_skips"]:
+            continue
+        target = dunk.get("target_pane_id")
+        if target and target in retired:
+            # Not a loop: a dunk aimed at a pane we deliberately retired.
+            item = finding("dunk.skip_loop", rule, f"{dunk['id']}:obsolete",
+                           f"dunk {dunk['id']} targets retired pane {target} "
+                           f"({retired[target].get('reason')}) - its streak is not a condition",
+                           "not retired", "retired", "current",
+                           {"dunk": dunk["id"], "target_pane": target,
+                            "retired_reason": retired[target].get("reason")},
+                           once=True)
+            item["severity"] = "info"
+            out.append(item)
+            continue
+        if best_end and inputs.now - best_end[1] > fresh_s:
+            # The streak stopped; say nothing. A page here would describe the past.
+            continue
+        # Keyed by the run's FIRST skip, which stays fixed while the run grows, so
+        # a continuing loop is one incident under its cooldown, not one per skip.
+        out.append(finding("dunk.skip_loop", rule, f"{dunk['id']}:{best_start[0]}",
+                           f"dunk {dunk['id']} skipped {best} times in a row "
+                           f"(last {round((inputs.now - best_end[1]) / 60)} min ago)",
+                           f"{rule['consecutive_skips']} consecutive skips",
+                           f"{best} consecutive skips",
+                           f"last skip within {rule['fresh_minutes']}min",
+                           {"dunk": dunk["id"], "target_pane": dunk.get("target_pane_id"),
+                            "current_streak": run,
+                            "run_start_hours_ago": round((inputs.now - best_start[1]) / 3600, 1),
+                            "run_end_hours_ago": round((inputs.now - best_end[1]) / 3600, 1),
+                            "skips_this_run": dunk.get("skip_count"),
+                            "cumulative_skip_count_lifetime": dunk.get("total_skips", dunk.get("skip_count")),
+                            "skip_if_unconsumed": dunk.get("skip_if_unconsumed")}))
     return out
 
 
@@ -517,6 +606,19 @@ def rule_dunk_overdue(inputs, rule):
     return out
 
 
+def _retired_mailbox(inputs, mailbox):
+    """A retired pane's mail is the record of what was tried, not a condition.
+
+    Retiring is how a superseded pane stops paging without deleting evidence -
+    the same shape as 'dead': a state to report, not an alarm to raise.
+    """
+    try:
+        import dunk_panes
+    except ImportError:                     # the watchdog runs without the rest of the package
+        return False
+    return dunk_panes.mailbox_retired(mailbox, path=inputs.path("retired-panes.json"))
+
+
 def _mailbox_groups(rows):
     groups = {}
     for message_id, mailbox, created_at, reason in rows:
@@ -537,15 +639,26 @@ def _group_evidence(inputs, mailbox, group, samples=3):
             "newest_hours_ago": round((inputs.now - group["newest"]) / 3600, 1)}
 
 
+def _retired_panes(inputs):
+    try:
+        import dunk_panes
+    except ImportError:
+        return {}
+    return {record["pane_id"]: record
+            for record in dunk_panes.all_retired(path=inputs.path("retired-panes.json"))}
+
+
 def rule_inbox_undeliverable(inputs, rule):
     rows = inputs.inbox("SELECT id, mailbox, created_at, reason FROM messages "
                         "WHERE state='undeliverable' AND created_at<=? ORDER BY created_at, id", (inputs.now,))
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
-        if group["count"] >= rule["min_messages"]:
+        age_hours = (inputs.now - group["oldest"]) / 3600
+        if group["count"] >= rule["min_messages"] and age_hours >= rule["min_age_hours"]:
             out.append(finding("inbox.undeliverable", rule, mailbox,
                                f"undeliverable message backlog for {mailbox}",
-                               f"{rule['min_messages']} msgs", f"{group['count']} msgs", "current backlog",
+                               f"{rule['min_messages']} msgs older than {rule['min_age_hours']}h",
+                               f"{group['count']} msgs, oldest {age_hours:.1f}h", "current backlog",
                                _group_evidence(inputs, mailbox, group)))
     return out
 
@@ -557,14 +670,27 @@ def _queued(inputs, older_than=None):
 
 
 def rule_inbox_unread_live(inputs, rule):
+    """Unread mail in a lane that is IDLE: a message it never saw.
+
+    A lane that is working through a long job has a queue, not a miss - paging on
+    it asks somebody to interrupt the work to read mail that will be read when the
+    job lands. So the lane's own state is the first condition and the age is the
+    second. With the pane source disabled the state is unknown to us, and the rule
+    keeps its old behaviour (page, and say liveness is unknown) rather than
+    silently going quiet.
+    """
     panes = inputs.panes()
+    idle = {status.lower() for status in rule["idle_statuses"]}
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs, inputs.now - rule["age_minutes"] * 60)
-            if panes is None or (pane in panes)]
+            if panes is None or (pane in panes and str(panes.get(pane) or "").lower() in idle)]
+    rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
             evidence = _group_evidence(inputs, mailbox, group)
             evidence["pane_liveness"] = "unknown (pane source disabled)" if panes is None else "live"
+            evidence["pane_state"] = ("unknown (pane source disabled)" if panes is None
+                                      else panes.get(mailbox) or "idle")
             out.append(finding("inbox.unread_live", rule, mailbox, f"unread mail in {mailbox}",
                                f"{rule['min_messages']} msgs older than {rule['age_minutes']}min",
                                f"{group['count']} msgs", "current", evidence))
@@ -574,6 +700,7 @@ def rule_inbox_unread_live(inputs, rule):
 def rule_inbox_unread_dead(inputs, rule):
     panes = inputs.panes()
     rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs) if pane and pane not in panes]
+    rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
         if group["count"] >= rule["min_messages"]:
@@ -673,14 +800,86 @@ def rule_lane_idle_holding_task(inputs, rule):
     return out
 
 
+def _heavy_jobs(inputs):
+    """Heavy slot holders plus free-model slots currently running.
+
+    Best effort: an unreadable slot directory reports 0 rather than breaking
+    the rule. `live`/`busy` come from the same host sample once the recorder
+    writes them; until then they are derived from the pane source.
+    """
+    count = 0
+    try:
+        for name in os.listdir("/tmp"):
+            if name.startswith("poolrad-heavy."):
+                holder = os.path.join("/tmp", name, "pid")
+                try:
+                    pid = int(open(holder, encoding="utf-8").read().strip())
+                except (OSError, ValueError):
+                    count += 1
+                    continue
+                try:
+                    os.kill(pid, 0)
+                    count += 1
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
 def rule_host_load(inputs, rule):
+    """A band fitted to our own recorded work (2026-10-22), not to a guess.
+
+    Fit over 461 samples / 8.3 h of host-watch history, on load5/cpu:
+
+        load5/cpu = 0.49 + 0.190*busy + 0.336*heavy     R2 0.52, RMS 0.33
+
+    `live` was 27 in every sample (nobody closed a pane all night), so its
+    coefficient is unidentifiable from this data - which is also why the earlier
+    lane-reserve shape could never be estimated. The band is set from the
+    observed envelope of legitimate work, not from the point prediction: the
+    machine reached 2.79/cpu with four lanes and a heavy job, so a threshold of
+    2.0/2.6 paged on our own productivity. warning 3.0/cpu, critical 3.5/cpu
+    (2 sigma of the fit residual above the observed maximum).
+    """
     host = inputs.host("/")
-    per_cpu = host["load1"] / max(1, host["cpus"])
-    if per_cpu >= rule["load1_per_cpu"]:
-        return [finding("host.load", rule, "load1", f"load1 {host['load1']:.2f} on {host['cpus']} CPUs",
-                        f"{rule['load1_per_cpu']}/cpu", f"{round(per_cpu, 2)}/cpu", "load1 (1 min)",
-                        {"load1": round(host["load1"], 2), "cpus": host["cpus"]})]
-    return []
+    cpus = max(1, host["cpus"])
+    panes = inputs.panes() or {}
+    live = len(panes)
+    busy = sum(1 for status in panes.values()
+               if str(status or "").lower() == "working")
+    heavy = _heavy_jobs(inputs)
+    warning = rule["load1_per_cpu"]
+    critical = rule["critical_load1_per_cpu"]
+    # Judge on load5, not load1: a CRITICAL fired at load1 30.5 with busy 1 /
+    # heavy 0 and load1 was 18.9 a minute later. A one-minute spike is the wrong
+    # measurement; load5 plus must_hold_runs (consecutive spaced runs) is a
+    # persisted condition. The config keys still say load1_* for compatibility;
+    # the value they hold is per-cpu load5.
+    load5 = host.get("load5", host["load1"])
+    per_cpu = load5 / cpus
+    if per_cpu < warning:
+        return []
+    level = "critical" if per_cpu >= critical else "warning"
+    item = finding("host.load", rule, f"load5:{level}",
+                   f"load5 {load5:.1f} = {per_cpu:.2f}/cpu, "
+                   f"band {warning:.1f}-{critical:.1f}/cpu (fitted 2026-10-22), "
+                   f"{live} live / {busy} busy / {heavy} heavy",
+                   f"{warning:.1f}/cpu (load5 {warning * cpus:.1f})",
+                   f"{per_cpu:.2f}/cpu (load5 {load5:.1f})",
+                   "load5 (5 min)",
+                   {"load1": round(host["load1"], 2), "load5": round(load5, 2),
+                    "cpus": cpus, "per_cpu": round(per_cpu, 2), "live": live,
+                    "busy": busy, "heavy": heavy,
+                    "warning_per_cpu": warning,
+                    "critical_per_cpu": critical})
+    if level == "critical":
+        item["severity"] = "critical"
+        item["threshold"] = (f"{critical:.1f}/cpu "
+                             f"(sustained {rule['critical_hold_runs']} runs)")
+    return [item]
 
 
 def rule_host_tmp(inputs, rule):
@@ -707,20 +906,142 @@ def rule_host_tmp(inputs, rule):
     return out
 
 
+def _slot_holder_alive(slot):
+    """True if the slot records a live holder pid; None for a legacy slot."""
+    try:
+        with open(os.path.join(slot, "pid"), encoding="utf-8") as handle:
+            raw = handle.read().strip()
+    except OSError:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours
+    return True
+
+
+def rule_pane_retired(inputs, rule):
+    """Report how many panes are retired, in the info digest.
+
+    Retiring a pane stops it paging (its mail is the record of what was tried),
+    but a silence nobody sees is how a lane vanishes from the fleet unnoticed. So
+    the count is stated every digest: 'retired panes: 2 (wW:p4, wW:p1)'.
+    """
+    try:
+        import dunk_panes
+    except ImportError:
+        return []
+    records = dunk_panes.all_retired(path=inputs.path("retired-panes.json"))
+    if not records:
+        return []
+    names = ", ".join(record["pane_id"] for record in records)
+    reasons = "; ".join(f"{record['pane_id']}: {record.get('reason')}" for record in records)
+    item = finding("pane.retired", rule, "count",
+                   f"retired panes: {len(records)} ({names})",
+                   "informational", f"{len(records)} retired", "current",
+                   {"panes": [record["pane_id"] for record in records],
+                    "reasons": {record["pane_id"]: record.get("reason") for record in records}},
+                   source="digest")
+    item["severity"] = "info"
+    item["measured"] = reasons
+    return [item]
+
+
+def rule_resource_would_kill(inputs, rule):
+    """Report a lane that would trip a resource policy while it is doing its job.
+
+    This is the signal that a threshold is wrong rather than a lane: the limits in
+    the policy file are guesses until a lane that is legitimately working crosses
+    one. It never signals anything - the sampler is asked for `would_kill` and the
+    policy is evaluated with the caller's own dry_run/kill flags recorded, so the
+    finding says what WOULD happen, not what happened.
+
+    The rule lives in the info band on purpose: a lane being expensive is a fact
+    about our thresholds until proven otherwise, and the owner asked for it in the
+    digest, not as a page.
+    """
+    path = _expand(rule["policies_path"])
+    if not os.path.exists(path):
+        return []            # no policies configured: there is nothing to cross
+    try:
+        with open(path, encoding="utf-8") as handle:
+            policies = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"resource.would_kill: cannot read {path}: {exc}")
+    tasks = inputs.tasks()
+    leased = {}
+    for lease in tasks["leases"]:
+        task = next((t for t in tasks["tasks"] if t["id"] == lease["task_id"]), None)
+        if task and task.get("status") == "in_progress":
+            leased[str(lease.get("pane_id"))] = task
+    callers, names = [], {}
+    for lease in tasks["leases"]:
+        if not lease.get("caller_pid"):
+            continue
+        names[str(lease["caller_pid"])] = lease.get("caller_name") or lease.get("pane_id")
+        callers.append({"caller_pid": lease["caller_pid"], "caller_start": lease.get("caller_start"),
+                        "caller_name": lease.get("caller_name") or lease.get("pane_id")})
+    if not callers:
+        return []
+    import dunk_load
+    result = dunk_load.collect(callers, now=inputs.now, policies=policies,
+                               state_path=_expand(rule["state_path"]))
+    out = []
+    for item in result["would_kill"]:
+        agent = item["agent"]
+        task = leased.get(str(agent))
+        if rule["require_task"] and task is None:
+            continue        # an idle lane crossing a limit is not a threshold problem
+        doing = (f"while working on {task['id']}: {task['title']}" if task
+                 else "with no leased task")
+        measured = ", ".join(f"{f['rule']} {f['measured']} > {f['threshold']} {f['window']}"
+                             for f in item["findings"] if f.get("measured"))
+        out.append(finding("resource.would_kill", rule, f"{agent}:{item['pid']}",
+                           f"{agent} would be {('killed' if item['kill'] and not item['dry_run'] else 'flagged')} "
+                           f"by resource policy {doing}",
+                           "policy limits", measured or "no measured finding",
+                           "sample window", {"agent": agent, "pid": item["pid"],
+                                             "task": task["id"] if task else None,
+                                             "kill": item["kill"], "dry_run": item["dry_run"],
+                                             "findings": item["findings"]}))
+    return out
+
+
 def rule_host_heavy_slot_stale(inputs, rule):
-    """poolrad-heavy.sh slots are bare mkdir locks with no holder pid, so a dead
-    holder cannot be detected; age is the only signal (the script itself
-    reclaims a slot older than 30 min)."""
+    """A poolrad-heavy slot is stale only when its holder is gone.
+
+    poolrad-heavy.sh records the holder pid in the slot. Age alone is not
+    staleness: a legitimate >30min compile kept its slot and the watchdog woke
+    the VP for a healthy job (t31). Legacy slots with no pid file fall back to
+    the age threshold for one migration.
+    """
     out = []
     directory = rule["directory"]
     for name in sorted(os.listdir(directory)):
         if not name.startswith(rule["prefix"]):
             continue
-        age = inputs.now - os.stat(os.path.join(directory, name)).st_mtime
-        if age >= rule["max_age_minutes"] * 60:
-            out.append(finding("host.heavy_slot_stale", rule, name, f"heavy-job slot {name} is stale",
-                               f"{rule['max_age_minutes']}min", f"{_minutes(age)}min", "slot age",
-                               {"slot": os.path.join(directory, name)}))
+        slot = os.path.join(directory, name)
+        age = inputs.now - os.stat(slot).st_mtime
+        holder = _slot_holder_alive(slot)
+        if holder is True:
+            continue
+        if holder is None and age < rule["max_age_minutes"] * 60:
+            continue
+        detail = ("holder gone" if holder is False else
+                  f"legacy slot, age {_minutes(age)}min")
+        out.append(finding("host.heavy_slot_stale", rule, name,
+                           f"heavy-job slot {name} is stale",
+                           f"holder alive or <{rule['max_age_minutes']}min",
+                           detail, "holder liveness",
+                           {"slot": slot, "holder": holder}))
     return out
 
 
@@ -820,6 +1141,8 @@ RULES = {
     "host.tmp": rule_host_tmp,
     "host.disk_full": rule_host_disk_full,
     "host.heavy_slot_stale": rule_host_heavy_slot_stale,
+    "resource.would_kill": rule_resource_would_kill,
+    "pane.retired": rule_pane_retired,
     "security.secret_text": rule_security_secret_text,
     "money.spend_projection": rule_money_spend_projection,
     "health.failed": rule_health_failed,
@@ -936,8 +1259,14 @@ def advance_streaks(config, state, findings, now):
 def _cooling(config, state, item, now):
     if item["source"] == SOURCE_SELF:
         return False
-    last = state["alerts"].get(dedupe_key(item), {}).get("last_alerted")
-    return last is not None and now - last < config["rules"][item["rule"]]["cooldown_minutes"] * 60
+    entry = state["alerts"].get(dedupe_key(item), {})
+    last = entry.get("last_alerted")
+    if last is None:
+        return False
+    if item.get("once"):
+        # Immutable event: said once, never re-alerted after a cooldown.
+        return True
+    return now - last < config["rules"][item["rule"]]["cooldown_minutes"] * 60
 
 
 def plan(config, findings, state, streaks, now, owner_blocked=None):
@@ -1172,6 +1501,12 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
             report["sent"].append("vp")
         except Exception as error:  # noqa: BLE001 - reported to stderr; never re-sent through the inbox
             report["delivery_error"] = f"{type(error).__name__}: {error}"
+            # The heartbeat says the WATCHDOG RAN. Whether the alert was delivered is
+            # a different fact, and tying them together silences the dead-man with the
+            # very bug it exists to report.
+            state["last_run"] = now
+            save_state(state_path, state)
+            write_heartbeat(_expand(config["heartbeat_path"]), now, config["cadence_minutes"])
             return report
 
     for decision in vp_send:

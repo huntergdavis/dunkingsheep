@@ -76,7 +76,7 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | Rule id | Fires when | Parameters | Shipped |
 | --- | --- | --- | --- |
 | `task.blocked_stale` | a blocked task has had no update or event for at least the threshold | `threshold_minutes` | warning / ops |
-| `task.lease_stale` | a lease is expired but not yet reaped, or was never renewed for at least N min, or a reap event (`expired`/`pane_gone`) falls in the lookback | `never_renewed_minutes`, `lookback_minutes` | warning / ops |
+| `task.lease_stale` | a lease is expired but not yet reaped, or was never renewed for at least N min, or a **fresh** reap event (`expired`/`pane_gone`) falls in the fresh window. A reap event is reported once ever (`once=True`), not again after a cooldown: history is not news. | `never_renewed_minutes`, `lookback_minutes`, `fresh_minutes` | warning / ops |
 | `dunk.skip_loop` | the longest consecutive run of `dunk.skipped` in the lookback is at least N. Keyed by the run's first skip, so a growing loop is one incident | `consecutive_skips`, `lookback_hours` | warning / ops |
 | `dunk.overdue` | a running dunk is at least N intervals past `next_send_at`, or has no scheduled send | `missed_intervals` | warning / ops |
 | `inbox.undeliverable` | a mailbox's undeliverable backlog is at least N (no age limit) | `min_messages` | warning / ops |
@@ -85,15 +85,216 @@ The validator refuses an owner class on any rule outside `OWNER_ELIGIBLE_RULES`
 | `inbox.ambiguous_sender` | a sender is a mailbox name that routes to a (live) pane, not a pane id. Samples are the first `sample_ids` by time (the sample ships 30) | `lookback_hours`, `sample_ids`, `require_live_pane` | info / ops |
 | `lane.working_without_task` | a pane is working, holds no task, and has no task event in N min | `quiet_minutes` | info / ops |
 | `lane.idle_holding_task` | a pane holds a task while idle, with no task, send or read activity in N min | `quiet_minutes`, `idle_statuses`, `holding_statuses` | warning / ops |
-| `host.load` | load1 per CPU is at or above the threshold | `load1_per_cpu` | warning / ops |
+| `host.load` | per-CPU **load5** at or above a band fitted to our own history (3.0/cpu warning, 3.5/cpu critical, sustained 3 runs). The keys are named `load1_*` for compatibility; the value is load5 | `load1_per_cpu`, `critical_load1_per_cpu`, `critical_hold_runs` | warning / ops |
 | `host.tmp` | used fraction is at least 0.70 (warning) or at least 0.90 (critical), free bytes are at or below the floor, or the inode fraction is at or above the limit | `max_used_fraction`, `critical_used_fraction`, `min_free_bytes`, `max_inode_fraction`, `path` | warning / ops |
 | `host.disk_full` | /tmp or / is at least 98% full | `max_used_fraction`, `paths` | **critical / outage, hold 2** |
 | `host.heavy_slot_stale` | a heavy-job semaphore slot is older than N min (no holder pid exists) | `directory`, `prefix`, `max_age_minutes` | warning / ops |
 | `security.secret_text` | a credential-shaped line appears in inbox, task or dunk text, re-verified on a second read; allowlisted line hashes are skipped | `patterns`, `allowlist_sha256`, `lookback_hours` | **critical / security** |
 | `money.spend_projection` | never: there is no metering source. It cannot be enabled without `source` and `cap`, and always prints SKIPPED | `source`, `cap` | disabled / money |
+| `resource.would_kill` | one info line per lane that would trip a **resource policy** while holding a leased task. Never signals; the point is that our threshold is probably wrong, not the lane | `policies_path`, `state_path`, `require_task` | info / ops |
 | `health.failed` | `health.json` is stale, or reports problems | `stale_minutes` | critical / ops |
 | `watchdog.self_error` | anything the watchdog could not do this run: a rule error, missing or corrupt state, or an owner post or confirmation problem. One finding per run | (none) | VP only |
 | `watchdog.deadman` | the heartbeat is missing or older than 3x the cadence (separate process) | CLI flags | VP only |
+
+## `host.load`: a band fitted to our own history (2026-10-22)
+
+`host.load` warns at **3.0/cpu** and is critical at **3.5/cpu**, judged on
+**`load5`**, sustained 3 runs. The number now comes from 461 recorded samples
+over 8.3 hours of this machine doing the work we assigned it, not from a guess.
+
+### The fit
+
+Ordinary least squares on `load5 / cpus`:
+
+```text
+load5/cpu = 0.49 + 0.190*busy + 0.336*heavy          n = 461, R2 = 0.52, RMS = 0.33 load/cpu
+load5/cpu = 0.45 + 0.240*busy                        n = 461, R2 = 0.49, RMS = 0.34
+load5/cpu = 0.40 + 0.095*busy + 0.007*heavy + 0.022*psi60   n = 461, R2 = 0.76, RMS = 0.24
+```
+
+`busy` = panes with `agent_status working`, `heavy` = live heavy-slot holders,
+`psi60` = CPU pressure stall over 60 s. **`live` is not in the model**: it was
+27 in every one of the 461 samples, so its coefficient is unidentifiable from
+this data - the matrix is singular. That is also why the earlier lane-reserve
+shape (`0.55 CPU/lane`) could never have been estimated from a week of samples.
+
+The third model fits best but was not adopted: pressure stall is a *consequence*
+of load, not a count of our work, so a threshold on it would page on a symptom
+we already measure directly. It is recorded here because a future reader should
+know the fitted shape is only half the story.
+
+### What normal looks like (compare a reading in front of you; no arithmetic)
+
+**Predicted** is the model, so nobody has to compute it. **Observed** is what the
+machine actually did in that regime; where the two differ, the model is the
+lower bound of what to expect.
+
+| busy lanes | heavy jobs | predicted load5/cpu | predicted load5 (8 cpus) | observed median | p90 | max | samples |
+|---|---|---|---|---|---|---|---|
+| 0 | 0 | **0.49** | 3.9 | 0.35 | 0.53 | 1.77 | 196 |
+| 1 | 0 | **0.68** | 5.4 | 0.76 | 1.58 | 2.46 | 91 |
+| 2 | 0 | **0.87** | 7.0 | 0.80 | 1.31 | 2.46 | 124 |
+| 4 | 1 | **1.59** | 12.7 | 2.31 | 2.69 | 2.69 | 2 |
+| 5 | 2 | **2.11** | 16.9 | 2.20 | 2.76 | 2.76 | 6 |
+| >= 4 | any | 1.59 - 2.11 | 12.7 - 16.9 | 1.93 | 2.50 | **2.79** | 27 |
+
+Read it like this: four lanes plus a compile *predicts* 1.59/cpu and actually
+measured 2.31-2.69, i.e. the model understates the top of the range by about
+0.7/cpu - roughly two fit residuals. That is why the band is set from the
+observed envelope and not from the prediction: a threshold derived from the model
+alone would sit at 1.6 and page on every compile. The machine reached
+**2.79/cpu** while doing assigned work (two compiles, an assembler and an
+objdump), so any threshold at or below 2.8 pages on our own productivity.
+
+### Finding: per-lane cost is not measurable while the lane count is constant
+
+`live` was 27 in all 461 samples, so the design matrix is **singular**: the
+coefficient on `live` does not exist as an estimate, it is not merely imprecise.
+Consequence, stated plainly because it cost a week of guessing:
+
+> **Per-lane cost is not measurable while the lane count is constant. The model
+> uses busy lanes and heavy jobs only.**
+
+The earlier lane-reserve shape (`0.55 CPU/lane`, `warning = lane_reserve *
+lanes / cpus`) could never have been estimated from this history by any method -
+the data contains no variation in the lane count. Estimating a per-lane cost
+needs a day in which panes are opened and closed, or a deliberate experiment that
+varies them. Until then `live` stays out of the model, and any future proposal to
+tune a per-lane constant should be answered with this paragraph.
+
+### Why the band is not a quantile
+
+Percentiles do not help here: p95 was 1.84 and p99 was 2.46, yet a *legitimate*
+reading of 2.65 fired CRITICAL at the old 2.6. A quantile of a mostly-idle
+history is below the peak of a working day. The band is therefore set from the
+**observed maximum of legitimate work plus a margin**:
+
+```text
+warning  3.0/cpu  = observed maximum 2.79 + 0.21   (~0.6 sigma)
+critical 3.5/cpu  = warning + 0.5                  (~1.5 sigma, and 2 sigma above the maximum)
+```
+
+Zero of the 461 samples reached 3.0. The first warning is therefore genuinely
+novel, which is the property a pager needs; the cost is that a runaway sitting
+between 2.8 and 3.0 will not page. With `must_hold_runs: 3` and a 30-minute
+cooldown, a sustained runaway climbs well past 3.5 within minutes of starting,
+so that gap is small in practice.
+
+### What the fit cannot tell you
+
+- **`load5` is a five-minute average; `busy`/`heavy` are instantaneous.** The
+  residual (RMS 0.33/cpu) is largely that mismatch. A lane that starts and
+  finishes inside the window barely moves load5; four lanes that run for an
+  hour move it a lot. This is why the model explains 52% of the variance and
+  why the band is set from the envelope rather than the prediction.
+- **Only 27 samples had 4+ busy lanes** and only 2 had exactly 4 busy + 1 heavy.
+  The top of the table is a small-sample claim and should be treated as such.
+- **`live` was constant.** A day where panes are opened and closed would allow a
+  per-pane term; until then it stays out of the model.
+
+The alert keeps every ingredient, so it is diagnosable from the message alone:
+
+```text
+load5 26.4 = 3.30/cpu, band 3.0-3.5/cpu (fitted 2026-10-22), 27 live / 5 busy / 2 heavy
+```
+
+The config keys are still named `load1_per_cpu` / `critical_load1_per_cpu` for
+compatibility with existing config files; the number they hold is per-CPU
+**load5**.
+
+## `resource.would_kill`: the threshold-wrong signal, in the digest
+
+A resource policy is a guess until a lane that is legitimately working crosses
+one. This rule reports exactly that, and nothing else:
+
+- It samples the same way `dunkingsheep load --policies` does, from the caller
+  identity recorded on each task lease, but keeps **its own state file**, so the
+  watchdog and the CLI never corrupt each other's sample window.
+- It **never signals**. `dry_run` and `kill` are recorded in the evidence; the
+  finding says what *would* have happened.
+- It fires **only for a lane holding an in-progress lease** (`require_task`). An
+  idle lane crossing a cpu limit is not evidence that the limit is wrong; a lane
+  that is busy on t6 and crosses it is.
+- No policies file means no findings, not an error: there is nothing to cross.
+  An unreadable policies file raises a config error, which is a self error, not
+  a silent pass.
+
+The line reads like this:
+
+```text
+w8:p8 would be flagged by resource policy while working on t6: advance strict C toward the 815-body ceiling
+  threshold=policy limits  measured=cpu_pct_over 96.0% > 80% 60s  window=sample window
+```
+
+Severity is **info** on purpose: the owner asked for this in the digest, because
+a lane being expensive is a fact about our thresholds until proven otherwise.
+
+## `dunk.skip_loop`: a running streak, not a remembered one
+
+d52 paged with "33 consecutive skips, cumulative 52" while **its last skip was 76
+hours old** and its target run had ended days earlier. The streak was real; the
+alarm was not. Two corrections, both about the same habit - an alert must describe
+a condition that is happening:
+
+1. **`fresh_minutes` (default 120).** A streak whose most recent skip is older than
+   this is history and is not reported. The lookback still bounds the search; it no
+   longer decides whether the finding is current.
+2. **The skip counter resets with the run.** `skip_count` is now the *current*
+   run's skips and goes back to zero on a delivered send; the lifetime number is
+   `total_skips`, reported separately as
+   `cumulative_skip_count_lifetime`. A counter that only grows eventually fires on
+   its own history rather than on a current condition.
+
+A dunk aimed at a **retired pane** is reported once, at info, as obsolete:
+
+```text
+dunk d52 targets retired pane w9:p9 (superseded-by:w9:p10) - its streak is not a condition
+```
+
+It is `once=True`, so it says this one time and stops, rather than accumulating a
+streak that eventually pages. The alert for a live loop now names when it last
+happened: `dunk d9 skipped 5 times in a row (last 2 min ago)`.
+
+## `inbox.unread_live`: state first, then age
+
+**A working lane's unread mail is a queue; an idle lane's is a miss.** par-c was
+authoring a body for four hours with two unread messages, and the rule paged about
+it: reading mail mid-authoring is a context switch the lane should not make, and the
+mail would be read when the body landed. Nothing was wrong.
+
+So the rule now requires the lane's **own state** to be idle (`idle_statuses`,
+default `idle` and `done`) *as well as* the age threshold:
+
+```text
+inbox.unread_live = mail older than age_minutes
+                    AND its pane's agent_status is idle/done
+                    AND the mailbox is not retired
+```
+
+An **unknown** status does not page either: we cannot say a lane missed mail we
+cannot see it holding. The exception is the degraded mode where the pane source is
+disabled entirely - then the rule keeps its old behaviour and says so in the
+evidence (`pane_liveness: unknown (pane source disabled)`), because a silent rule is
+worse than one that explains itself.
+
+The number now means something the owner can act on: **idle lanes with unread mail
+older than N** is the count of lanes we failed to reach, and it should be zero.
+"Working lanes with unread mail" is throughput.
+
+This is the fourth rule tonight with the same shape - retired pane, dead session,
+placeholder-only box, and now this: **state first, age second.** Age is not
+liveness, and it is not idleness either.
+
+## Before you model a number, check the recorder
+
+Three recorders threw data away tonight: `pane_samples` only recorded the
+poolrad lanes, the host-watch history kept only two samples (`history[-2:]`),
+and a case-sensitive grep "proved" absence while the word sat in a subtitle
+with a capital letter. Two samples were enough for the load LEVEL and useless
+for a FIT; the recorder now keeps a bounded 10-day history. A fit also needs a
+minimum sample count (30) across at least two heavy/busy regimes, and must
+report the residual error - otherwise it is the "load per busy lane ~12" guess
+again.
 
 ## Config (`~/.config/dunkingsheep/watchdog.json`)
 

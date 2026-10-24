@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools"))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_usage as usage  # noqa: E402
 import usage_providers as providers  # noqa: E402
 

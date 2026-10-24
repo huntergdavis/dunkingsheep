@@ -15,7 +15,7 @@ own herdr pane id (so `target: "self"` means the *caller's* pane, not the
 daemon's). Handlers return JSON-serialisable data or raise `DunkError`.
 """
 
-from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError
+from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE
 from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
 # A direct send waits briefly for actual delivery before reporting back, so
@@ -145,13 +145,67 @@ MEMORY_PATH_PARAM = {"type": "string",
 # -- handlers -----------------------------------------------------------------
 
 def h_status(flock, args, self_pane_id):
+    # The cheap top of status is the cached view; the expensive availability
+    # probe stays opt-in (check_herdr) and `full=true` keeps the old answer.
+    if not _bool(args.get("full"), False):
+        view = flock.view(self_pane_id, fresh=_bool(args.get("fresh"), False))
+        result = dict(view["status"])
+        if _bool(args.get("check_herdr"), False):
+            result["herdr_available"] = flock.herdr.is_available()
+        return result
     result = flock.status()
     result["self_pane_id"] = self_pane_id
     return result
 
 
+def h_turn_start(flock, args, self_pane_id):
+    return flock.turn_start(args.get("pane"), ttl_s=args.get("ttl_s"),
+                            source=args.get("source"),
+                            self_pane_id=self_pane_id)
+
+
+def h_turn_end(flock, args, self_pane_id):
+    return flock.turn_end(args.get("pane"),
+                          reason=args.get("reason") or "turn_end",
+                          self_pane_id=self_pane_id)
+
+
 def h_list_dunks(flock, args, self_pane_id):
-    return {"dunks": flock.list()}
+    return {"dunks": flock.view(self_pane_id,
+                                fresh=_bool(args.get("fresh"), False))["dunks"]}
+
+
+def h_poll(flock, args, self_pane_id):
+    """One batched read for sidebars: status + inbox + dunks.
+
+    Read-only: it does not mark mail read. `panes`/`tasks` are opt-in because
+    listing panes is the expensive part; the client asks for them only when it
+    needs them. A missing self pane is reported in `error`, not raised, so the
+    status/dunks half still renders.
+    """
+    status = flock.poll_status()
+    status["self_pane_id"] = self_pane_id
+    result = {"status": status}
+    try:
+        result["inbox_count"] = flock.inbox_count(
+            args.get("mailbox"), self_pane_id=self_pane_id)
+        listed = flock.inbox_list(
+            args.get("mailbox"), unread_only=True,
+            limit=int(_opt(args, "limit", 5)), self_pane_id=self_pane_id)
+        result["dunks"] = {"dunks": flock.list(),
+                           "mailbox": listed["mailbox"],
+                           "messages": listed["messages"]}
+    except DunkError as error:
+        result["error"] = str(error)
+        result["dunks"] = {"dunks": flock.list(), "messages": []}
+    if _bool(args.get("panes"), False):
+        result["panes"] = h_list_panes(flock, args, self_pane_id)
+    if _bool(args.get("tasks"), False):
+        result["tasks"] = flock.task_list(
+            scope=args.get("task_scope"), assignee=args.get("assignee"),
+            include_done=_bool(args.get("include_done"), False),
+            limit=int(_opt(args, "task_limit", 50)), self_pane_id=self_pane_id)
+    return result
 
 
 def h_get_dunk(flock, args, self_pane_id):
@@ -240,6 +294,193 @@ def h_flush_box(flock, args, self_pane_id):
     return flock.flush_box(args["target"], self_pane_id=self_pane_id)
 
 
+def h_retire_pane(flock, args, self_pane_id):
+    """Retire a pane: stop feeding it, stop paging about it, keep its mail.
+
+    Superuser-gated because it silences an alert, and the reason is required
+    because an unexplained silence is how an alert dies without anyone learning.
+    """
+    import dunk_panes
+    action = args.get("action") or "list"
+    if action == "list":
+        retired = dunk_panes.all_retired()
+        return {"retired": retired, "count": len(retired)}
+    if action == "unretire":
+        return dunk_panes.unretire(args["pane"])
+    if action != "retire":
+        raise ValueError("retire action must be retire, unretire or list")
+    flock.require_superuser(self_pane_id, "retire_pane")
+    labels = []
+    try:
+        pane = flock.resolve_target(args["pane"], self_pane_id)
+        labels = [value for value in (pane.get("tab_label"), pane.get("agent_name"),
+                                      pane.get("label"), pane.get("name")) if value]
+        pane_id = pane["pane_id"]
+    except Exception:                       # a pane that is already gone is still recordable
+        pane_id = str(args["pane"])
+    # Every mailbox this pane owns, by its pane_id column: a name like
+    # 'crackdown-codex' outlives the pane and is what the alert and the archive key on.
+    boxes = []
+    try:
+        with flock.inbox._lock:
+            boxes = [row[0] for row in flock.inbox.db.execute(
+                "SELECT DISTINCT mailbox FROM messages WHERE pane_id = ? AND mailbox IS NOT NULL",
+                (pane_id,))]
+    except Exception:                       # noqa: BLE001 - retirement must still record
+        boxes = []
+    record = dunk_panes.retire(pane_id, args["reason"], by=self_pane_id,
+                               labels=labels, mailboxes=boxes)
+    # The mail is evidence: report how much is now quiet, and keep every row.
+    waiting = (flock.inbox.count(pane_id) or {}).get("unread") if getattr(flock, "inbox", None) else None
+    return dict(record, unread_kept=waiting)
+
+
+def h_state_capture(flock, args, self_pane_id):
+    import dunk_state
+    return dunk_state.capture(flock, source=args.get("source") or "periodic")
+
+
+def h_state_latest(flock, args, self_pane_id):
+    import dunk_state
+    rows = dunk_state.StateStore().latest(pane_id=args.get("pane_id"),
+                                          project=args.get("project"),
+                                          limit=int(args.get("limit") or 50))
+    return {"rows": rows, "count": len(rows)}
+
+
+def h_owner_push(flock, args, self_pane_id):
+    """Owner -> agent delivery with NO inbox row and NO typing.
+
+    The owner's own words: 'there was never a need to wait for agent input to clear,
+    you could just send messages directly'. A push is stored for the pane and drained by
+    the harness extension, so no typing guard can hold it.
+    """
+    import dunk_owner
+    # A pane id is already the answer: resolving it costs a terminal-backend round
+    # trip (~250ms) and the owner's budget is two seconds for the whole path.
+    target = str(args["target"]).strip()
+    pane = ({"pane_id": target} if PANE_ID_RE.match(target)
+            else flock.resolve_target(target, self_pane_id))
+    store = dunk_owner.OwnerPush()
+    return store.push(pane["pane_id"], args["body"],
+                      target=args.get("target"), subject=args.get("subject"))
+
+
+def h_owner_take(flock, args, self_pane_id):
+    """What is waiting for this pane; the extension calls it about once a second."""
+    import dunk_owner
+    pane_id = args.get("pane_id") or self_pane_id
+    if not pane_id:
+        raise ValueError("owner_take needs a pane")
+    store = dunk_owner.OwnerPush()
+    return {"pane_id": pane_id, "messages": store.take(pane_id, by=args.get("by"))}
+
+
+def h_owner_stats(flock, args, self_pane_id):
+    import dunk_owner
+    store = dunk_owner.OwnerPush()
+    return {"stats": store.stats(), "pending": store.pending()}
+
+
+def h_roster(flock, args, self_pane_id):
+    import dunk_views
+    return dunk_views.roster(flock)
+
+
+def h_message_state(flock, args, self_pane_id):
+    import dunk_views
+    ids = args.get("message_ids") or []
+    if isinstance(ids, str):
+        ids = [part.strip() for part in ids.split(",") if part.strip()]
+    return dunk_views.message_state(flock, ids)
+
+
+def h_reply_stats(flock, args, self_pane_id):
+    import dunk_views
+    boxes = args.get("mailboxes")
+    if isinstance(boxes, str):
+        boxes = [part.strip() for part in boxes.split(",") if part.strip()]
+    return dunk_views.reply_stats(flock, boxes)
+
+
+def h_project_summary(flock, args, self_pane_id):
+    import dunk_views
+    return dunk_views.project_summary(flock, args.get("project"), args.get("path"))
+
+
+def h_dispatch(flock, args, self_pane_id):
+    """The deterministic feeder: standby queue + a tick that fills idle lanes.
+
+    action=add/list/remove/tick/status. Nothing here consults a model: the gate
+    is `delivery_state` plus an empty mailbox, and the send goes through the same
+    guarded nudge a human would use.
+    """
+    import dunk_dispatch
+    action = args.get("action") or "status"
+    queue = dunk_dispatch.Queue()
+    if action == "add":
+        return queue.add(args["brief"], task_id=args.get("task_id"), lane=args.get("lane"))
+    if action == "list":
+        return {"items": queue.items(), "pending": len(queue.items())}
+    if action == "remove":
+        return queue.remove(args["id"])
+    if action == "status":
+        state = dunk_dispatch._load_state()
+        return {"state": state, "summary": dunk_dispatch.summary(state) if state else "no tick yet",
+                "pending": len(queue.items())}
+    if action != "tick":
+        raise ValueError("dispatch action must be add, list, remove, tick or status")
+    import dunk_panes
+    panes = [pane for pane in flock.resolve_lanes()
+             if (pane.get("agent_status") not in (None, "unknown"))
+             and not dunk_panes.is_retired(pane["pane_id"])]
+    inbox = flock.inbox
+
+    def send(pane_id, text):
+        result = inbox.send(pane_id, text, subject="standby", sender=self_pane_id)
+        return result.get("message_id")
+
+    # Derive from the BOARD, not from a list somebody tops up: a hand-maintained
+    # queue ran dry twice while open tasks sat unclaimed.
+    tasks = (flock.task_list(include_done=False, limit=500).get("tasks") or [])
+    for task in tasks:
+        try:
+            task["leases"] = flock.tasks.leases_for(task["id"])
+        except Exception:                       # noqa: BLE001 - visibility is optional
+            task["leases"] = []
+    recent = {entry["task_id"] for entry in (dunk_dispatch._load_state().get("history") or [])
+              if entry.get("task_id") and entry.get("at", 0) >= __import__("time").time() - 6 * 3600}
+    queued_ids = {str(item.get("task_id")) for item in queue.items() if item.get("task_id")}
+    derived, coarse = dunk_dispatch.derive_board_items(
+        tasks, dispatched_task_ids=(recent | queued_ids))
+    state = dunk_dispatch.tick(
+        queue, panes, derived=derived,
+        # A pane that reports working needs no screen read to be excluded: reading
+        # 35 panes at ~0.4 s each is what made a tick exceed the client timeout.
+        # Only a lane that might be fed is worth a read.
+        delivery=lambda pane: ({"state": "working", "reason": str(pane.get("agent_status"))}
+                               if str(pane.get("agent_status") or "").lower() in ("working", "busy")
+                               else flock.delivery_state(pane["pane_id"],
+                                                         pane.get("agent_status"), pane=pane)),
+        unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
+        send=send, dry_run=bool(args.get("dry_run")))
+    state["retired"] = len(dunk_panes.all_retired())
+    state["board_open"] = sum(1 for task in tasks if str(task.get("status")) == "open")
+    state["coarse_tasks"] = coarse
+    return state
+
+
+def h_clear_box(flock, args, self_pane_id):
+    """Destroy an unsubmitted draft. Superuser only, and every use is logged."""
+    return flock.clear_box(args["target"], self_pane_id=self_pane_id,
+                           reason=args.get("reason"))
+
+
+def h_delivery(flock, args, self_pane_id):
+    pane = flock.resolve_target(args["target"], self_pane_id)
+    return flock.delivery_state(pane["pane_id"], args.get("status"))
+
+
 def h_list_messages(flock, args, self_pane_id):
     return flock.list_messages()
 
@@ -265,7 +506,24 @@ def h_inbox_send(flock, args, self_pane_id):
 
 
 def h_inbox_count(flock, args, self_pane_id):
-    return flock.inbox_count(args.get("mailbox"), self_pane_id=self_pane_id)
+    if args.get("mailbox"):
+        return flock.inbox_count(args.get("mailbox"), self_pane_id=self_pane_id)
+    view = flock.view(self_pane_id, fresh=_bool(args.get("fresh"), False))
+    if "inbox_count" in view:
+        return view["inbox_count"]
+    return flock.inbox_count(None, self_pane_id=self_pane_id)
+
+
+def h_pm_digest(flock, args, self_pane_id):
+    return flock.pm_digest(args["project"], args.get("payload") or "",
+                           to=args.get("to"), self_pane_id=self_pane_id)
+
+
+def h_pm_routing(flock, args, self_pane_id):
+    import dunk_pm
+    return {"routing": dunk_pm.load_routing(),
+            "registry": str(dunk_pm.ROUTING),
+            "vp_pane": dunk_pm.DEFAULT_VP_PANE}
 
 
 def h_inbox_list(flock, args, self_pane_id):
@@ -291,7 +549,7 @@ def _ids(args):
 
 
 def h_inbox_ack(flock, args, self_pane_id):
-    return flock.inbox_ack(_ids(args))
+    return flock.inbox_ack(_ids(args), mailbox=args.get("mailbox"), self_pane_id=self_pane_id)
 
 
 def h_inbox_cancel(flock, args, self_pane_id):
@@ -409,6 +667,12 @@ def h_task_cancel(flock, args, self_pane_id):
 
 def h_task_delete(flock, args, self_pane_id):
     return flock.task_delete(args["id"], self_pane_id=self_pane_id)
+
+
+def h_task_note(flock, args, self_pane_id):
+    return flock.task_note(args["id"], event=args.get("event") or "note",
+                           reason=args.get("reason"),
+                           self_pane_id=self_pane_id)
 
 
 def h_task_next(flock, args, self_pane_id):
@@ -539,7 +803,7 @@ def h_list_workspaces(flock, args, self_pane_id):
 def h_create_workspace(flock, args, self_pane_id):
     return flock.create_workspace(
         label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
-        focus=_bool(args.get("focus"), False),
+        focus=_bool(args.get("focus"), False), mailbox=args.get("mailbox"),
     )
 
 
@@ -723,6 +987,109 @@ MAX_SENDS_PARAM = {
 
 COMMANDS = [
     Command(
+        "owner_push",
+        "Deliver an OWNER message to an agent with no inbox row and no typing: it is "
+        "pushed for the pane and the harness extension reads it. Use for owner -> CoS.",
+        h_owner_push,
+        params={"target": {"type": "string"},
+                "body": {"type": "string"},
+                "subject": {"type": "string"}},
+        required=("target", "body")),
+    Command(
+        "owner_take",
+        "Drain the owner messages waiting for a pane (called by the harness extension "
+        "about once a second).",
+        h_owner_take,
+        params={"pane_id": {"type": "string"}, "by": {"type": "string"}}),
+    Command(
+        "owner_stats",
+        "Owner-push counts and delivery latency (p50/p90/max) in the last day.",
+        h_owner_stats,
+        params={}),
+    Command(
+        "state_capture",
+        "Record one row per agent lane: project, harness, argv, session, model, thinking, "
+        "activity and task. Null with a reason where not readable. The capture half of "
+        "restartable lanes.",
+        h_state_capture,
+        params={"source": {"type": "string", "description": "Why this capture ran (default periodic)."}}),
+    Command(
+        "state_latest",
+        "The most recent captured rows, newest first, optionally for one pane or project.",
+        h_state_latest,
+        params={"pane_id": {"type": "string"}, "project": {"type": "string"},
+                "limit": {"type": "integer"}}),
+    Command(
+        "roster",
+        "One row per agent lane for the Command Center: name, harness, model (null with "
+        "a reason), state, current task, inbox count and oldest unread, cost, cpu. No "
+        "screen reads: safe to poll.",
+        h_roster,
+        params={}),
+    Command(
+        "message_state",
+        "sent / delivered / seen for one or more messages, with timestamps. 'replied' "
+        "is null with a reason: the answer link lives in the COS/VP application.",
+        h_message_state,
+        params={"message_ids": {"type": "string", "description": "Comma-separated ids."}},
+        required=("message_ids",)),
+    Command(
+        "reply_stats",
+        "Per mailbox: how long mail sat before the lane read it - last and median - "
+        "from read_at minus created_at.",
+        h_reply_stats,
+        params={"mailboxes": {"type": "string", "description": "Comma-separated mailboxes (default all)."}}),
+    Command(
+        "project_summary",
+        "Everything a project page needs: ground truths, wiki articles, tasks in "
+        "flight, agents on it, and a completed-task timeline. project omitted = global.",
+        h_project_summary,
+        params={"project": {"type": "string", "description": "Project name, or omit for global."},
+                "path": {"type": "string", "description": "Explicit project directory."}}),
+    Command(
+        "retire_pane",
+        "Retire a pane we deliberately stopped feeding (superseded, or its job "
+        "moved to the dispatcher): it stops paging inbox.unread_live and stops "
+        "counting as idle/ready, while its mail rows stay as the record. "
+        "action=retire/unretire/list. Superuser-gated; a reason is required.",
+        h_retire_pane,
+        params={"action": {"type": "string", "description": "retire (default), unretire or list."},
+                "pane": {"type": "string", "description": "Pane id or name."},
+                "reason": {"type": "string",
+                           "description": "Why it is retired, e.g. superseded-by:wW:p7."}}),
+    Command(
+        "dispatch",
+        "Deterministic feeding, no model: a standby queue plus a tick that sends "
+        "the next item to a lane that is READY and has no unread mail. "
+        "action=add/list/remove/tick/status. tick reports idle lanes, dispatched "
+        "this hour, and blocked lanes with reasons.",
+        h_dispatch,
+        params={"action": {"type": "string",
+                           "description": "add, list, remove, tick or status (default status)."},
+                "brief": {"type": "string", "description": "One-line assignment (add)."},
+                "task_id": {"type": "string", "description": "Task this assignment advances (add)."},
+                "lane": {"type": "string", "description": "Reserve the item for one lane (add)."},
+                "id": {"type": "integer", "description": "Standby item id (remove)."},
+                "dry_run": {"type": "boolean", "description": "Plan the tick, send nothing."}}),
+    Command(
+        "clear_box",
+        "DESTRUCTIVE, superuser only: clear (Ctrl-U, Escape) an unsubmitted draft "
+        "in a pane's input box. Use when a send could not be submitted - a draft "
+        "that stays there blocks every later message to that lane. Use flush_box "
+        "to SUBMIT text that simply never went in.",
+        h_clear_box,
+        params={"target": {"type": "string", "description": "Pane id, name or label."},
+                "reason": {"type": "string", "description": "Why this draft is being destroyed (logged)."}},
+        required=("target",)),
+    Command(
+        "delivery",
+        "Can this lane receive a message, and if not why: ready / working / "
+        "blocked (dead session, paused goal, full context, unsubmitted draft) / unknown.",
+        h_delivery,
+        params={"target": {"type": "string", "description": "Pane id, name or label."},
+                "status": {"type": "string", "description": "The pane's reported status, if known."}},
+        required=("target",)),
+    Command(
         "help",
         "Explain Dunking Sheep: concepts, placeholders, the meta-dunking recipe, "
         "every command with its schema, and the socket protocol. Call this first "
@@ -735,12 +1102,71 @@ COMMANDS = [
         "status",
         "Daemon health: version, dunk counts, and whether herdr is reachable.",
         h_status,
+        params={"check_herdr": {"type": "boolean",
+                                "description": "Probe the terminal backend (slow; default off)."},
+                "full": {"type": "boolean",
+                         "description": "Use the full status rather than the cached view."},
+                "fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
+    ),
+    Command(
+        "turn_start",
+        "Declare a busy turn for a pane (pi/claude hooks). Holds sends until "
+        "turn_end; the TTL releases the hold and records turn.expired if the "
+        "turn-end never arrives.",
+        h_turn_start,
+        params={"pane": {"type": "string",
+                         "description": "Pane id; defaults to the caller's."},
+                "ttl_s": {"type": "number",
+                          "description": "Override the turn TTL in seconds."},
+                "source": {"type": "string",
+                           "description": "Hook/extension that declared it."}},
+        mcp=False,
+    ),
+    Command(
+        "turn_end",
+        "End a declared busy turn and release the hold.",
+        h_turn_end,
+        params={"pane": {"type": "string",
+                         "description": "Pane id; defaults to the caller's."},
+                "reason": {"type": "string",
+                           "description": "Why the turn ended."}},
+        mcp=False,
+    ),
+    Command(
+        "poll",
+        "One cheap read for sidebars: status + inbox count + unread messages + "
+        "dunks. Read-only (does not mark mail read). panes/tasks are opt-in.",
+        h_poll,
+        params={
+            "mailbox": {"type": "string",
+                        "description": "Mailbox to poll; defaults to the caller's."},
+            "limit": {"type": "integer", "minimum": 1,
+                      "description": "Unread messages to return (default 5)."},
+            "panes": {"type": "boolean",
+                      "description": "Include the pane list (expensive; startup only)."},
+            "tasks": {"type": "boolean",
+                      "description": "Include the caller's task queue."},
+            "task_scope": {"type": "string", "enum": ["global", "self"],
+                           "description": "Task scope when tasks=true."},
+            "assignee": {"type": "string",
+                         "description": "Only tasks assigned to this pane/agent."},
+            "include_done": {"type": "boolean",
+                             "description": "Include completed tasks (default false)."},
+            "task_limit": {"type": "integer", "minimum": 1,
+                           "description": "Maximum tasks (default 50)."},
+            "check_herdr": {"type": "boolean",
+                            "description": "Probe the terminal backend (default false; slow)."},
+        },
+        mcp=False,
     ),
     Command(
         "list_dunks",
         "List every dunk with its target, text, interval, running state, "
         "live status, send count, skip count and seconds until the next send.",
         h_list_dunks,
+        params={"fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
     ),
     Command(
         "get_dunk",
@@ -937,7 +1363,31 @@ COMMANDS = [
         "How many messages are waiting: unread, total, and how long the oldest "
         "unread has waited. Cheap enough to poll. Defaults to your own inbox.",
         h_inbox_count,
-        params={"mailbox": MAILBOX_PARAM},
+        params={"mailbox": MAILBOX_PARAM,
+                "fresh": {"type": "boolean",
+                          "description": "Rebuild the cached view before answering."}},
+    ),
+    Command(
+        "pm_digest",
+        "Publish or update ONE digest for a project under a stable id "
+        "(pm-digest:<project>) so a PM never becomes a stream. The payload is "
+        "JSON with changed/blocked/owner_decisions/numbers, or plain text. The "
+        "row is updated in place and becomes unread again.",
+        h_pm_digest,
+        params={
+            "project": {"type": "string", "description": "Project name, e.g. poolrad."},
+            "payload": {"type": "string",
+                        "description": "JSON digest payload or plain text body."},
+            "to": {"type": "string", "description": "VP pane (default from routing)."},
+        },
+        required=["project", "payload"],
+    ),
+    Command(
+        "pm_routing",
+        "Show the lane->PM routing registry: which project each lane reports to, "
+        "its PM pane, and whether a stray VP message is redirected or flagged.",
+        h_pm_routing,
+        params={},
     ),
     Command(
         "inbox_list",
@@ -980,7 +1430,8 @@ COMMANDS = [
         "as well, so a board that counts NULL read_at never reports drained "
         "mail as unread.",
         h_inbox_ack,
-        params={"message_ids": MESSAGE_IDS_PARAM},
+        params={"message_ids": MESSAGE_IDS_PARAM,
+                "mailbox": MAILBOX_PARAM},
         required=["message_ids"],
     ),
     Command(
@@ -1145,6 +1596,18 @@ COMMANDS = [
         "Delete a task. Refused while it has children or is a dependency.",
         h_task_delete,
         params={"id": TASK_ID_PARAM},
+        required=["id"],
+    ),
+    Command(
+        "task_note",
+        "Append an explanatory event to a task's history, including after the "
+        "task row was deleted; the board's history explains its own gaps.",
+        h_task_note,
+        params={"id": TASK_ID_PARAM,
+                "event": {"type": "string",
+                          "description": "Event name (default 'note')."},
+                "reason": {"type": "string",
+                           "description": "Human rationale stored in meta.reason."}},
         required=["id"],
     ),
     Command(
@@ -1372,6 +1835,10 @@ COMMANDS = [
             "cwd": CWD_PARAM,
             "command": RUN_COMMAND_PARAM,
             "focus": FOCUS_PARAM,
+            "mailbox": {"type": "string", "description":
+                        "the lane mailbox this new pane IS; recorded in the lane "
+                        "registry against the new pane id, so mail addressed to "
+                        "that lane reaches this pane after a backend change"},
         },
     ),
     Command(
@@ -1556,7 +2023,7 @@ MCP_GROUPS = (
       ("update", "task_update"), ("assign", "task_assign"),
       ("complete", "task_complete"), ("block", "task_block"),
       ("unblock", "task_unblock"), ("cancel", "task_cancel"),
-      ("delete", "task_delete"), ("next", "task_next"),
+      ("delete", "task_delete"), ("note", "task_note"), ("next", "task_next"),
       ("heartbeat", "task_heartbeat"), ("release", "task_release"),
       ("follow", "task_follow"), ("unfollow", "task_unfollow"),
       ("followers", "task_followers"), ("stats", "task_stats"),
@@ -1569,13 +2036,31 @@ MCP_GROUPS = (
       ("update", "update_dunk"), ("remove", "remove_dunk"),
       ("start", "start_dunk"), ("stop", "stop_dunk"), ("stop_all", "stop_all"),
       ("fire", "fire_dunk"))),
+    ("views",
+     "Read-only compositions for the Command Center: roster, message_state, "
+     "reply_stats, project_summary. All queries, no model, no pane writes.",
+     (("push", "owner_push"), ("take", "owner_take"), ("stats", "owner_stats"),
+      ("roster", "roster"), ("message_state", "message_state"),
+      ("reply_stats", "reply_stats"), ("project_summary", "project_summary"),
+      ("capture", "state_capture"), ("latest", "state_latest"))),
+    ("dispatch",
+     "Deterministic feeding, no model: the standby queue and the tick that fills "
+     "idle lanes. action=add/list/remove/tick/status. A lane is fed only when it "
+     "is ready AND has no unread mail; the tick reports idle lanes, dispatched "
+     "this hour, and blocked lanes with reasons.",
+     (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
+      ("retired", "retire_pane"))),
     ("pane",
-     "Inspect and address a pane. action=list/read/send/send_keys/flush/"
-     "messages/get_message/cancel_message. send_text (send) types plus Enter; "
-     "when a human is composing it returns queued=true and is delivered later. "
-     "Prefer the inbox for agents.",
-     (("list", "list_panes"), ("read", "read_pane"), ("send", "send_text"),
+     "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
+     "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
+     "a lane can receive anything and why not (ready/working/blocked/dead). "
+     "send_text (send) types plus Enter; when a human is composing it returns "
+     "queued=true and is delivered later. flush submits a stranded draft; "
+     "clear_box DESTROYS one (superuser only). Prefer the inbox for agents.",
+     (("list", "list_panes"), ("read", "read_pane"), ("delivery", "delivery"),
+      ("send", "send_text"),
       ("send_keys", "send_keys"), ("flush", "flush_box"),
+      ("clear_box", "clear_box"),
       ("messages", "list_messages"), ("get_message", "get_message"),
       ("cancel_message", "cancel_message"))),
     ("workspace",
@@ -1604,6 +2089,12 @@ MCP_GROUPS = (
      "coverage), status (daemon health + counts), health (deterministic "
      "self-check; repair=true fixes stale leases and a large WAL).",
      (("summary", "metrics"), ("status", "status"), ("health", "health"))),
+    ("pm",
+     "Project PMs. action=digest publishes or updates ONE digest per project "
+     "under a stable id (pm-digest:<project>) with changed/blocked/"
+     "owner_decisions/numbers so a PM is a digest, not a stream; routing shows "
+     "the lane->PM registry and whether stray VP mail is redirected or flagged.",
+     (("digest", "pm_digest"), ("routing", "pm_routing"))),
     ("system",
      "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), "
      "herdr (any herdr subcommand except the typing ones), herdr_help, recover, doctor.",

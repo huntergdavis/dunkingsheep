@@ -10,6 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_core  # noqa: E402
 from dunk_core import (  # noqa: E402
     DunkError, Dunker, Flock, expand_template, format_interval, parse_interval,
@@ -77,12 +78,166 @@ class FlockTests(unittest.TestCase):
         self.state = os.path.join(self.tmp.name, "dunks.json")
         self.herdr = FakeHerdr()
         self.flock = Flock(herdr=self.herdr, state_file=self.state)
+        # The real `claude agents --json` is 2.9 s; tests must never run it.
+        class _NoClaude:
+            def status_for_pane(self, pane, fresh=False):
+                return None
+        self.flock.claude_status = _NoClaude()
 
     def tearDown(self):
         self.flock.close()
         self.tmp.cleanup()
 
     # -- CRUD -----------------------------------------------------------------
+
+    def test_status_can_skip_the_terminal_probe_for_the_sidebar(self):
+        with mock.patch.object(self.flock.herdr, "is_available",
+                               return_value=True) as probe:
+            status = self.flock.status(check_herdr=False)
+            probe.assert_not_called()
+        self.assertIsNone(status["herdr_available"])
+        self.assertIsNone(status["herdr_hint"])
+
+    def test_a_declared_turn_holds_sends_until_turn_end(self):
+        self.flock.turn_start("w1:p2", ttl_s=60, source="test")
+        self.assertTrue(self.flock.turn_active("w1:p2"))
+        held = self.flock.send_now("w1:p2", "GATE-turn-hold", wait_s=0)
+        self.assertTrue(held.get("queued"), f"the active turn must hold: {held}")
+        self.assertTrue(self.flock.turn_active("w1:p2"))
+        self.flock.turn_end("w1:p2")
+        self.assertFalse(self.flock.turn_active("w1:p2"))
+        # The turn no longer blocks; the pane's own box may still queue, which
+        # is the ordinary hold path, not the turn hold.
+        after = self.flock.send_now("w1:p2", "GATE-turn-after", wait_s=0)
+        self.assertIn(after.get("status"), ("queued", "sent"), after)
+        rows = [dict(row) for row in self.flock.metrics.db.execute(
+            "SELECT kind FROM events WHERE kind='turn.end'")]
+        self.assertTrue(rows)
+
+    def test_a_crashed_turn_releases_after_ttl_and_logs_the_reason(self):
+        self.flock.turn_start("w1:p2", ttl_s=0.05, source="test-crash")
+        held = self.flock.send_now("w1:p2", "GATE-crash-held", wait_s=0)
+        self.assertTrue(held.get("queued"))
+        time.sleep(0.08)
+        # No turn_end arrives: the TTL must release the hold, not hold forever.
+        released = self.flock.turn_expire()
+        self.assertEqual("ttl", released[0]["reason"])
+        self.assertFalse(self.flock.turn_active("w1:p2"))
+        after = self.flock.send_now("w1:p2", "GATE-crash-delivered", wait_s=0)
+        self.assertIn(after.get("status"), ("queued", "sent"), after)
+        rows = [dict(row) for row in self.flock.metrics.db.execute(
+            "SELECT kind, reason, outcome FROM events WHERE kind='turn.expired'")]
+        self.assertTrue(rows and rows[-1]["reason"] == "ttl", rows)
+
+    def test_task_claim_carries_the_request_caller_for_proc_liveness(self):
+        from dunk_callers import process_start
+        self.flock.tasks.add("global", "caller test")
+        caller = {"pid": os.getpid(), "start": process_start(os.getpid()),
+                  "name": "pi"}
+        self.flock.set_caller(caller)
+        try:
+            claimed = self.flock.task_next(scope="global", lease_seconds=60,
+                                           self_pane_id="w1:p2")
+        finally:
+            self.flock.clear_caller()
+        self.assertIsNotNone(claimed["task"])
+        lease = self.flock.tasks.leases_for(claimed["task"]["id"])[0]
+        self.assertEqual(os.getpid(), lease["caller_pid"])
+        self.assertEqual("pi", lease["caller_name"])
+
+    def test_task_reap_refuses_a_fixture_pane_list(self):
+        # A fixture pane list must fail loudly, never move real work.
+        self.flock.tasks.add("global", "fixture reap")
+        with self.assertRaisesRegex(DunkError, "alive_source|fixture"):
+            self.flock.task_reap(self_pane_id="w1:p2")
+
+    def test_claude_busy_holds_and_idle_accepts(self):
+        from dunk_claude import ClaudeStatus
+        class FakeStatus:
+            def __init__(self, status): self.status = status; self.calls = 0
+            def status_for_pane(self, pane, fresh=False):
+                self.calls += 1
+                return self.status
+        self.flock.claude_status = FakeStatus("busy")
+        # w1:p2 is the claude pane in the fixture.
+        busy = self.flock.send_now("w1:p2", "GATE-claude-busy", wait_s=0)
+        self.assertTrue(busy.get("queued"), busy)
+        self.flock.claude_status = FakeStatus("idle")
+        idle = self.flock.send_now("w1:p2", "GATE-claude-idle", wait_s=0)
+        self.assertIn(idle.get("status"), ("queued", "sent"), idle)
+        self.flock.claude_status = FakeStatus(None)
+        unknown = self.flock.send_now("w1:p2", "GATE-claude-unknown", wait_s=0)
+        self.assertIn(unknown.get("status"), ("queued", "sent"), unknown)
+
+    def test_claude_status_maps_by_cwd_and_reports_unknown_honestly(self):
+        from dunk_claude import ClaudeStatus
+        calls = []
+        def run(argv, **kwargs):
+            calls.append(argv)
+            class P:
+                returncode = 0
+                stdout = json.dumps([
+                    {"pid": 1, "cwd": "/work/a", "status": "busy", "name": "a"},
+                    {"pid": 2, "cwd": "/work/b", "status": "idle", "name": "b"},
+                ])
+                stderr = ""
+            return P()
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_CLAUDE_STATUS": "1"}), \
+                mock.patch("dunk_claude.subprocess.run", side_effect=run):
+            status = ClaudeStatus(ttl=60)
+            self.assertEqual("busy", status.status_for_pane({"cwd": "/work/a"}))
+            self.assertEqual("idle", status.status_for_pane({"cwd": "/work/b"}))
+            self.assertIsNone(status.status_for_pane({"cwd": "/work/unknown"}))
+            self.assertEqual("busy", status.status_for_pane({"cwd": "/work/a"}))
+            self.assertEqual(1, len(calls), "the agents list is cached")
+            status.status_for_pane({"cwd": "/work/a"}, fresh=True)
+            self.assertEqual(2, len(calls), "fresh bypasses the cache")
+
+    def test_own_mailbox_is_cached_for_the_poll(self):
+        calls = []
+        original = self.herdr.list_panes_grouped
+        self.herdr.list_panes_grouped = lambda: (calls.append(1), original())[1]
+        first = self.flock.inbox_count(None, self_pane_id="w1:p2")
+        after_first = len(calls)
+        self.assertGreater(after_first, 0)
+        second = self.flock.inbox_count(None, self_pane_id="w1:p2")
+        self.assertEqual(first, second)
+        self.assertEqual(after_first, len(calls),
+                         "the second self poll must add no pane walk")
+        # An explicit target still resolves fresh.
+        self.flock.inbox_count("w2:p1", self_pane_id="w1:p2")
+        self.assertGreater(len(calls), after_first)
+
+    def test_own_mailbox_cache_expires(self):
+        calls = []
+        original = self.herdr.list_panes_grouped
+        self.herdr.list_panes_grouped = lambda: (calls.append(1), original())[1]
+        with mock.patch("dunk_core.MAILBOX_CACHE_S", 0.01):
+            self.flock.inbox_count(None, self_pane_id="w1:p2")
+            before = len(calls)
+            time.sleep(0.02)
+            self.flock.inbox_count(None, self_pane_id="w1:p2")
+        self.assertGreater(len(calls), before)
+
+    def test_poll_batches_status_inbox_and_dunks_without_marking_read(self):
+        from dunk_api import h_poll
+        sent = self.flock.inbox_send("w1:p2", "hello", self_pane_id="w2:p1",
+                                     notify=False)
+        before = self.flock.inbox_count("w1:p2")["unread"]
+        result = h_poll(self.flock, {"limit": 5}, "w1:p2")
+        self.assertEqual("w1:p2", result["status"]["self_pane_id"])
+        self.assertIsNone(result["status"]["herdr_available"])
+        self.assertEqual(before, result["inbox_count"]["unread"])
+        self.assertEqual(before, self.flock.inbox_count("w1:p2")["unread"])
+        ids = [message["message_id"] for message in result["dunks"]["messages"]]
+        self.assertIn(sent["message_id"], ids)
+        self.assertIn("dunks", result["dunks"])
+
+    def test_poll_reports_a_dead_mailbox_as_an_error_but_still_shows_dunks(self):
+        from dunk_api import h_poll
+        result = h_poll(self.flock, {}, "wZ:p9")
+        self.assertIn("error", result)
+        self.assertIn("dunks", result["dunks"])
 
     def test_add_assigns_ids_and_resolves_target_labels(self):
         dunk = self.flock.add(target="w1:p2", text="go", interval_minutes=5)
@@ -499,44 +654,34 @@ class FlockTests(unittest.TestCase):
 
     # ---- never type over a human: end to end through the running timer ----
 
-    def test_send_is_held_while_someone_types_and_fires_once_they_finish(self):
+    def test_text_in_the_box_no_longer_holds_a_dunk(self):
+        """Policy 2026-10-24: nothing else types into a pane, so a non-empty box is not
+        a reason to hold. The text is PRESERVED (submitted first), then the dunk goes."""
         with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.2):
             self.herdr.set_screen("w2:p1", claude_box_typing_ansi("delete numb"))
+            self.herdr.box["w2:p1"] = "delete numb"
             dunk = self.flock.add(target="w2:p1", text="nudge {count}", interval_minutes=1 / 60,
                                   start=True)
+            self.assertTrue(self.herdr.sent.wait(10), "the dunk must deliver, not hold")
+            self.assertEqual(0, self.flock.get(dunk["id"])["hold_count"],
+                             "text in the box is not a hold any more")
             self.assertTrue(wait_until(
-                lambda: self.flock.get(dunk["id"])["status"] == "Held (typing)", 5))
-            time.sleep(0.8)  # several re-checks go by
-            state = self.flock.get(dunk["id"])
-            self.assertEqual([], self.herdr.sends, "must not type over a draft")
-            self.assertEqual(1, state["hold_count"], "one hold, however many re-checks")
-            self.assertIsNotNone(state["last_held_at"])
-            self.assertIsNone(state["last_error"], "a hold is not an error")
-            self.assertGreater(len(self.herdr.ansi_reads), 1, "re-checks read the styled box")
-            # They finish and submit; the box shows only a dim hint now.
-            self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-            self.assertTrue(self.herdr.sent.wait(3))
-            self.assertEqual([("w2:p1", "nudge 1")], self.herdr.sends)
-            self.assertTrue(wait_until(
-                lambda: self.flock.get(dunk["id"])["send_count"] == 1, 5))
+                lambda: self.flock.get(dunk["id"])["send_count"] >= 1, 10))
 
-    def test_idle_gate_runs_again_after_a_typing_hold(self):
-        # Finishing typing usually means submitting, so the agent goes busy
-        # right as the box clears; an idle-gated dunk must wait for that turn.
-        with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.2), \
-                mock.patch.object(dunk_core, "IDLE_POLL_S", 0.1):
-            self.herdr.set_screen("w2:p1", codex_box_typing_ansi("please also"))
+    def test_the_idle_gate_still_waits_for_a_busy_agent(self):
+        # The typing hold is gone; the IDLE gate is not. A busy agent is respected
+        # where the dunk asked to be (only_when="idle"), which is a delivery-time
+        # choice rather than a claim about who is typing.
+        with mock.patch.object(dunk_core, "IDLE_POLL_S", 0.1):
+            self.herdr.statuses["w2:p1"] = "working"
+            self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
             dunk = self.flock.add(target="w2:p1", text="go", interval_minutes=1 / 60,
                                   start=True, only_when="idle")
             self.assertTrue(wait_until(
-                lambda: self.flock.get(dunk["id"])["status"] == "Held (typing)", 5))
-            self.herdr.statuses["w2:p1"] = "working"
-            self.herdr.set_screen("w2:p1", codex_box_hint_ansi())
-            self.assertTrue(wait_until(
-                lambda: self.flock.get(dunk["id"])["status"] == "Busy (working)", 5))
+                lambda: self.flock.get(dunk["id"])["status"] == "Busy (working)", 6))
             self.assertEqual([], self.herdr.sends)
             self.herdr.statuses["w2:p1"] = "idle"
-            self.assertTrue(self.herdr.sent.wait(3))
+            self.assertTrue(self.herdr.sent.wait(4))
 
     def test_ignore_typing_sends_over_a_draft(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("delete numb"))
@@ -672,7 +817,7 @@ class TypingSettleTests(unittest.TestCase):
     def tearDown(self):
         self.flock.close()
 
-    def test_clear_then_typing_within_the_window_is_not_clear(self):
+    def test_typing_between_the_two_reads_no_longer_cancels_the_send(self):
         with mock.patch.object(dunk_core, "TYPING_SETTLE_S", 0.15):
             self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
 
@@ -681,8 +826,9 @@ class TypingSettleTests(unittest.TestCase):
                 self.herdr.set_screen("w2:p1", claude_box_typing_ansi("wait, also"))
 
             threading.Thread(target=start_typing, daemon=True).start()
-            # First check sees an empty box; by the second the human has typed.
-            self.assertFalse(self.flock._clear_to_send("w2:p1"))
+            # Text is preserved at send time now, so the second read no longer
+            # cancels the send; it exists for REDRAW safety.
+            self.assertTrue(self.flock._clear_to_send("w2:p1"))
 
     def test_two_clear_checks_a_second_apart_allow_the_send(self):
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
@@ -691,12 +837,12 @@ class TypingSettleTests(unittest.TestCase):
         self.assertGreaterEqual(time.time() - started, dunk_core.TYPING_SETTLE_S)
         self.assertEqual(2, len(self.herdr.ansi_reads))
 
-    def test_typing_on_the_first_check_returns_at_once(self):
+    def test_text_in_the_box_no_longer_stops_a_send(self):
+        """The hold it used to trigger ('a human is typing') is gone by owner policy."""
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("mid sentence"))
         started = time.time()
-        self.assertFalse(self.flock._clear_to_send("w2:p1"))
-        self.assertLess(time.time() - started, dunk_core.TYPING_SETTLE_S)
-        self.assertEqual(1, len(self.herdr.ansi_reads), "no need to wait it out")
+        self.assertTrue(self.flock._clear_to_send("w2:p1"))
+        self.assertLess(time.time() - started, 4 * dunk_core.TYPING_SETTLE_S)
 
     def test_a_stopped_dunk_does_not_finish_its_settle_wait(self):
         stop = threading.Event()
@@ -721,32 +867,16 @@ class MessageQueueTests(unittest.TestCase):
         self.recheck.stop()
         self.flock.close()
 
-    def test_message_waits_while_typing_then_lands_when_the_box_clears(self):
-        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("hold on, I am writing"))
-        queued = self.flock.send_now("codex", "stop and write tests first", wait_s=0.3)
-        self.assertTrue(queued["queued"])
-        self.assertIsNone(queued["ok"])
-        self.assertEqual("m1", queued["message_id"])
-        self.assertIn("someone is typing", queued["message"])
-        self.assertEqual([], self.herdr.sends, "must not type over a draft")
-        listed = self.flock.list_messages()
-        self.assertEqual(["m1"], [m["message_id"] for m in listed["queued"]])
-        self.assertEqual([], listed["recent"])
-        self.assertEqual(1, self.flock.status()["queued_messages"])
-        # They finish; the daemon delivers it.
-        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-        self.assertTrue(self.herdr.sent.wait(5))
-        self.assertEqual([("w2:p1", "stop and write tests first")], self.herdr.sends)
-        self.assertTrue(wait_until(
-            lambda: self.flock.get_message("m1")["status"] == "sent", 5))
-        done = self.flock.get_message("m1")
-        self.assertTrue(done["ok"])
-        self.assertFalse(done["queued"])
-        self.assertGreaterEqual(done["holds"], 1)
-        self.assertEqual(["m1"], [m["message_id"] for m in self.flock.list_messages()["recent"]])
-        self.assertTrue(wait_until(
-            lambda: self.flock.status()["queued_messages"] == 0, 5),
-            "the queue should drain once the message is delivered")
+    def test_a_message_with_text_in_the_box_is_delivered_by_preserving_it(self):
+        """Policy 2026-10-24: text in the box is submitted first, never a reason to queue."""
+        self.herdr.set_screen("w2:p1", claude_box_typing_ansi("let me think"))
+        self.herdr.box["w2:p1"] = "let me think"
+        queued = self.flock.send_now("w2:p1", "hello there", hold_while_typing=True, wait_s=4)
+        self.assertFalse(queued.get("queued", False),
+                         "the message must not be queued behind text any more")
+        self.assertEqual("let me think", self.herdr.sends[0][1],
+                         "their text went first, unmodified")
+        self.assertIn(("w2:p1", "hello there"), self.herdr.text_only)
 
     def test_queued_messages_keep_their_order_per_pane(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("typing"))
@@ -763,8 +893,8 @@ class MessageQueueTests(unittest.TestCase):
         self.herdr.set_screen("w2:p3", claude_box_hint_ansi())
         self.flock.send_now("codex", "waits", wait_s=0)
         other = self.flock.send_now("w2:p3", "goes now", wait_s=2)
-        self.assertTrue(other["ok"])
-        self.assertEqual([("w2:p3", "goes now")], self.herdr.sends)
+        self.assertEqual("sent", other.get("status"),
+                         f"the quiet pane goes now; the busy one cannot delay it ({other})")
 
     def test_wait_s_blocks_for_delivery_and_zero_returns_immediately(self):
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
@@ -848,27 +978,28 @@ class SendRaceTests(unittest.TestCase):
         self.recheck.stop()
         self.flock.close()
 
-    def test_draft_appearing_while_we_wait_for_the_send_lock_stops_the_send(self):
+    def test_a_draft_appearing_while_we_wait_is_preserved_then_our_send_goes(self):
+        """The race that used to hold the message: the draft is submitted, then ours."""
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-        # Someone else's send holds the global lock; the human starts typing
-        # during that wait, after our settle check already said "clear".
         released = threading.Event()
 
         def hog():
             with self.flock._lock_for("w2:p1"):
                 self.herdr.set_screen("w2:p1", claude_box_typing_ansi("I am mid sentence"))
+                self.herdr.box["w2:p1"] = "I am mid sentence"
                 released.set()
                 time.sleep(0.3)
 
-        self.assertTrue(self.flock._clear_to_send("w2:p1"), "box looked clear first")
         threading.Thread(target=hog, daemon=True).start()
         released.wait(2)
         sent, ok, detail = self.flock.send_guarded(
             "w2:p1", lambda: self.herdr.send_text_and_enter("w2:p1", "AGENT TEXT"))
-        self.assertFalse(sent, "must not type onto the end of their sentence")
-        self.assertIsNone(ok)
-        self.assertIn("typing", detail)
-        self.assertEqual([], self.herdr.sends)
+        self.assertTrue(sent, detail)
+        self.assertTrue(ok, detail)
+        self.assertEqual("I am mid sentence", self.herdr.sends[0][1],
+                         "their sentence went first, unmodified")
+        self.assertIn(("w2:p1", "AGENT TEXT"), self.herdr.text_only,
+                      "our text went in afterwards")
 
     def test_the_guard_sends_when_the_box_is_still_clear(self):
         self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
@@ -900,11 +1031,12 @@ class SendRaceTests(unittest.TestCase):
         self.assertTrue(self.herdr.sent.wait(5))
         self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
 
-    def test_a_dunk_refused_at_the_last_moment_holds_instead_of_sending(self):
+    def test_a_late_draft_is_preserved_and_the_dunk_sends(self):
+        """Policy 2026-10-24: a draft appearing mid-wait no longer parks the dunk in
+        'Held (typing)'. It is preserved (submitted) or deferred by the box's own
+        refusal - never held because a person might be there."""
         with mock.patch.object(dunk_core, "TYPING_RECHECK_S", 0.1):
             self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-            # Hold the send lock before the dunk can take it, so the dunk is
-            # provably parked on it when the draft appears.
             self.flock._lock_for("w2:p1").acquire()
             dunk = self.flock.add(target="w2:p1", text="nudge", interval_minutes=1 / 60,
                                   start=True)
@@ -913,18 +1045,13 @@ class SendRaceTests(unittest.TestCase):
                     lambda: self.flock.get(dunk["id"])["status"] == "Sending...", 5),
                     "dunk should be waiting on the send lock")
                 self.herdr.set_screen("w2:p1", claude_box_typing_ansi("a late draft"))
+                self.herdr.box["w2:p1"] = "a late draft"
             finally:
                 self.flock._lock_for("w2:p1").release()
             self.assertTrue(wait_until(
-                lambda: self.flock.get(dunk["id"])["hold_count"] >= 1, 5))
-            self.assertEqual([], self.herdr.sends, "must not type onto their draft")
-            self.assertEqual("Held (typing)", self.flock.get(dunk["id"])["status"])
-            self.assertEqual(0, self.flock.get(dunk["id"])["send_count"])
-
-
-class ConfirmedSubmitTests(unittest.TestCase):
-    """Enter is not reliable on its own: confirm the text left the box."""
-
+                lambda: self.flock.get(dunk["id"])["hold_count"] == 0, 10),
+                "a 'typing' hold must never appear again")
+            self.assertEqual(0, self.flock.get(dunk["id"])["hold_count"])
     def setUp(self):
         self.herdr = FakeHerdr()
         self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
@@ -955,6 +1082,17 @@ class ConfirmedSubmitTests(unittest.TestCase):
         self.assertEqual("sent (Enter x2)", detail)
         self.assertEqual([("w2:p1", "a long message")], self.herdr.sends)
         self.assertEqual(2, len(self.herdr.keys))
+
+    def test_a_dead_agent_session_is_refused_before_any_enter(self):
+        # wR:p4's codex session died and still showed an editable composer; four
+        # Enter presses reported "did not submit". The pane's own words are the
+        # signal, and this must refuse before pressing anything.
+        self.herdr.screens["w2:p1"] = ("■ Server connection could not be restored\n"
+                                       "• Reconnect failed - check the endpoint, then relaunch")
+        ok, detail = self.flock.submit_text("w2:p1", "a message")
+        self.assertFalse(ok)
+        self.assertIn("agent session is dead", detail)
+        self.assertEqual([], self.herdr.keys)
 
     def test_a_box_that_reads_clear_then_fills_again_is_not_counted_as_sent(self):
         # What stranded a message in the VP pane: the box read empty for an
@@ -1053,11 +1191,26 @@ class ConfirmedSubmitTests(unittest.TestCase):
             self.assertTrue(self.flock._looks_like_ours("w2:p1", text), text)
         self.assertFalse(self.flock._looks_like_ours("w2:p1", "something a human wrote"))
 
-    def test_a_humans_draft_is_still_never_flushed(self):
+    def test_foreign_text_is_submitted_to_preserve_it_not_sat_through(self):
+        """Owner policy 2026-10-24: nothing else types into a pane, so text we did not
+        write is PRESERVED by submitting it - never a hold, never clobbered."""
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("my own sentence"))
-        self.assertTrue(self.flock._typing_in("w2:p1"))
-        self.assertFalse(self.flock._ensure_box_clear("w2:p1"))
-        self.assertEqual([], self.herdr.keys, "never press Enter on their text")
+        self.herdr.box["w2:p1"] = "my own sentence"      # Enter consumes it
+        # After the harness takes the line, the composer redraws empty.
+        original = self.herdr.send_keys
+        def clearing(pane_id, keys):
+            result = original(pane_id, keys)
+            if "Enter" in ([keys] if isinstance(keys, str) else list(keys)):
+                self.herdr.set_screen(pane_id, claude_box_hint_ansi())
+            return result
+        self.herdr.send_keys = clearing
+        self.assertTrue(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual([("w2:p1", ["Enter"])], self.herdr.keys,
+                         "their text is submitted, not overwritten: Enter only, no typing")
+        # The fake records 'Enter submits the box' as a send: that IS the preserved
+        # text reaching the agent. What must be empty is the text WE typed over it.
+        self.assertEqual([("w2:p1", "my own sentence")], self.herdr.sends)
+        self.assertEqual([], self.herdr.text_only, "nothing of ours was typed over it")
 
     def test_an_unreadable_pane_cannot_confirm_so_the_send_is_not_claimed(self):
         self.herdr.set_screen("w2:p1", None)
@@ -1431,13 +1584,23 @@ class StrandedNoticeTests(unittest.TestCase):
             "the dunk never recovered from its own stranded notice")
         self.assertIn(("w2:p1", self.NOTICE), self.herdr.sends)
 
-    def test_a_humans_draft_is_still_protected_after_a_restart(self):
+    def test_foreign_text_after_a_restart_is_preserved_the_same_way(self):
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("my own half sentence"))
+        self.herdr.box["w2:p1"] = "my own half sentence"
+        original = self.herdr.send_keys
+        def clearing(pane_id, keys):
+            result = original(pane_id, keys)
+            if "Enter" in ([keys] if isinstance(keys, str) else list(keys)):
+                self.herdr.set_screen(pane_id, claude_box_hint_ansi())
+            return result
+        self.herdr.send_keys = clearing
         fresh = Flock(herdr=self.herdr, persist=False, restore=False)
         try:
-            self.assertTrue(fresh._typing_in("w2:p1"))
-            self.assertFalse(fresh._ensure_box_clear("w2:p1"))
-            self.assertEqual([], self.herdr.keys, "never press Enter on their text")
+            self.assertTrue(fresh._ensure_box_clear("w2:p1"))
+            self.assertEqual([("w2:p1", ["Enter"])], self.herdr.keys)
+            self.assertEqual([("w2:p1", "my own half sentence")], self.herdr.sends,
+                             "their text was submitted, not overwritten")
+            self.assertEqual([], self.herdr.text_only)
         finally:
             fresh.close()
 
@@ -1588,13 +1751,15 @@ class GuardedKeysTests(unittest.TestCase):
         self.assertEqual([("w2:p1", ["Escape"])], self.herdr.keys)
         self.assertEqual("draft", self.herdr.box["w2:p1"], "Escape must not submit")
 
-    def test_send_keys_queues_behind_a_draft(self):
+    def test_send_keys_submits_the_text_that_was_there_first(self):
+        """Policy 2026-10-24: text in the box is preserved by submitting it, so a bare
+        Enter press no longer queues behind somebody's sentence forever."""
         self.herdr.set_screen("w2:p1", claude_box_typing_ansi("half a sentence"))
-        queued = self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
-        self.assertTrue(queued["queued"], "Enter must not submit their draft")
-        self.assertEqual([], self.herdr.keys)
-        self.herdr.set_screen("w2:p1", claude_box_hint_ansi())
-        self.assertTrue(wait_until(lambda: self.herdr.keys == [("w2:p1", ["Enter"])], 5))
+        self.herdr.box["w2:p1"] = "half a sentence"
+        self.flock.send_keys_now("codex", "Enter", wait_s=0.2)
+        self.assertTrue(wait_until(lambda: self.herdr.sends, 5),
+                        "the text that was in the box is submitted first")
+        self.assertEqual("half a sentence", self.herdr.sends[0][1])
 
     def test_send_keys_validates_and_can_barge_in(self):
         with self.assertRaisesRegex(DunkError, "keys are required"):
@@ -1651,12 +1816,12 @@ class QueueVisibilityTests(unittest.TestCase):
             patch.stop()
         self.flock.close()
 
-    def test_unknown_draft_remains_held_even_when_idle(self):
+    def test_text_in_the_box_is_delivered_after_preserving_it(self):
         self.herdr.box["w2:p1"] = "private unfinished draft"
-        queued = self.flock.send_now("codex", "wait your turn", wait_s=0)
-        time.sleep(0.3)
-        self.assertEqual([], self.herdr.sends, "never submit a draft being written")
-        self.assertEqual("queued", self.flock.get_message(queued["message_id"])["status"])
+        sent = self.flock.send_now("codex", "wait your turn", wait_s=4)
+        self.assertEqual("private unfinished draft", self.herdr.sends[0][1],
+                         "the draft is submitted to preserve it")
+        self.assertIn(("w2:p1", "wait your turn"), self.herdr.text_only)
 
     def test_list_messages_says_what_is_blocking_a_queue(self):
         self.herdr.box["w2:p1"] = "something in the way"
@@ -1702,28 +1867,14 @@ class UnwedgeTests(unittest.TestCase):
             lambda: self.flock.get_message(queued["message_id"])["status"] == "sent", 8))
         self.assertEqual("please deliver me", self.herdr.sends[-1][1])
 
-    def test_a_draft_we_did_not_type_is_never_auto_submitted(self):
-        # Unchanged text we do not recognise is most likely a person who
-        # started a sentence and walked away. Waiting beats sending half a
-        # thought on their behalf; `flush` releases it deliberately.
+    def test_a_draft_we_did_not_type_is_submitted_to_preserve_it(self):
+        """Policy 2026-10-24: text we did not write is PRESERVED by submitting it."""
         self.herdr.box["w2:p1"] = "I was in the middle of saying"
-        queued = self.flock.send_now("codex", "behind their draft", wait_s=0)
-        time.sleep(1.0)                                    # well past STALE_BOX_S
-        self.assertEqual([], self.herdr.sends, "never submit someone's draft")
-        self.assertEqual("queued",
-                         self.flock.get_message(queued["message_id"])["status"])
-        blocked = self.flock.list_messages()["queued"][0]
-        self.assertIn("draft", blocked["blocked_by"])
-
-    def test_a_box_that_keeps_changing_is_someone_writing_and_is_left_alone(self):
-        self.herdr.box["w2:p1"] = "I am typing"
-        queued = self.flock.send_now("codex", "wait your turn", wait_s=0)
-        for extra in (" some", " more", " words", " still going", " and going"):
-            self.herdr.box["w2:p1"] += extra
-            time.sleep(0.12)
-        self.assertEqual([], self.herdr.sends, "never submit a draft being written")
-        self.assertEqual("queued", self.flock.get_message(queued["message_id"])["status"])
-
+        sent = self.flock.send_now("codex", "behind their draft", wait_s=4)
+        self.assertEqual("I was in the middle of saying", self.herdr.sends[0][1],
+                         "their text is submitted first, unmodified")
+        self.assertIn(("w2:p1", "behind their draft"), self.herdr.text_only)
+        self.assertNotEqual("queued", sent.get("status"))
     def test_nothing_is_unwedged_when_no_message_is_waiting(self):
         self.herdr.box["w2:p1"] = "a draft nobody is waiting on"
         time.sleep(0.6)
@@ -1828,6 +1979,16 @@ class LayoutControlTests(unittest.TestCase):
         self.assertEqual({"kind": "tab", "id": "w2:t3", "focused": True},
                          self.flock.focus("tab", "Other"))
         self.assertEqual(("focus", "tab", "w2:t3"), self.herdr.layout_calls[-1])
+
+    def test_a_closed_dunk_never_reports_itself_as_scheduled_again(self):
+        # The countdown thread writes dunker.status every second. Close the dunk
+        # immediately after starting it: the thread's first tick used to land
+        # afterwards and overwrite "Target closed" with "Next: 60:00", so a
+        # stopped dunk reported itself as scheduled again.
+        dunk = self.flock.add(target="w2:p3", text="go", interval_minutes=60, start=True)
+        self.flock.close_target("tab", "Other", self_pane_id="w1:p2")
+        time.sleep(1.5)
+        self.assertEqual("Target closed", self.flock.get(dunk["id"])["status"])
 
     def test_close_stops_dunks_aimed_inside_and_refuses_own_container(self):
         dunk = self.flock.add(target="w2:p3", text="go", interval_minutes=60, start=True)

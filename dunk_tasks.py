@@ -51,7 +51,10 @@ DEFAULT_LEASE_S = float(os.environ.get("DUNKINGSHEEP_LEASE_S", "1800"))
 
 # Pane ids are "<workspace>:<pane>" (w8:p3). Scope is either "global", "self"
 # (resolved by the caller) or a pane id.
-_PANE_ID = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
+# A pane id is whatever the current backend calls a pane: herdr's
+# 'workspace:pane' (w8:p8) or tmux's '%N'. Refusing tmux ids made every
+# per-pane task scope unusable the day the backend flipped (2026-10-24).
+_PANE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -83,6 +86,9 @@ CREATE TABLE IF NOT EXISTS task_leases (
     claimed_at  REAL NOT NULL,
     heartbeat_at REAL NOT NULL,
     expires_at  REAL NOT NULL,
+    caller_pid   INTEGER,
+    caller_start TEXT,
+    caller_name  TEXT,
     PRIMARY KEY (task_id, pane_id)
 );
 CREATE INDEX IF NOT EXISTS leases_by_pane ON task_leases (pane_id);
@@ -148,7 +154,7 @@ def validate_scope(scope):
     if _PANE_ID.match(scope):
         return scope
     raise TaskError(
-        f"scope must be '{GLOBAL}' or a pane id such as 'w8:p3' (got {scope!r})"
+        f"scope must be '{GLOBAL}' or a pane id such as 'w8:p3' or '%4' (got {scope!r})"
     )
 
 
@@ -188,6 +194,12 @@ class Tasks:
                           ("attempts", "INTEGER NOT NULL DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+        lease_columns = {row["name"] for row in self.db.execute(
+            "PRAGMA table_info(task_leases)")}
+        for name, ddl in (("caller_pid", "INTEGER"), ("caller_start", "TEXT"),
+                          ("caller_name", "TEXT")):
+            if name not in lease_columns:
+                self.db.execute(f"ALTER TABLE task_leases ADD COLUMN {name} {ddl}")
 
     def close(self):
         with self._lock:
@@ -525,6 +537,15 @@ class Tasks:
                 raise
         return {"deleted": task_id}
 
+    def note(self, task_id, event="note", actor=None, meta=None):
+        """Append a history event without changing the task row (or needing it)."""
+        with self._lock:
+            self._record(str(task_id), event, at=_now(), actor=actor,
+                         meta=meta or {})
+            self.db.commit()
+        return {"noted": str(task_id), "event": event, "actor": actor,
+                "meta": meta or {}}
+
     # -- reading ------------------------------------------------------------
 
     def get(self, task_id, pane_id=None):
@@ -642,15 +663,21 @@ class Tasks:
             return task["multi_assignee"] or assigned_to_me
         return False
 
-    def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None):
+    def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None,
+                   caller=None):
         """Atomically claim the next eligible task in ``scope``.
 
         The whole read-select-update runs under ``BEGIN IMMEDIATE``. SQLite
         serialises writers across processes, so two agents polling at the same
         instant cannot both win the same exclusive task: the second one sees
         the first one's commit and picks the next task (or nothing). The claim
-        carries a lease; ``heartbeat`` extends it and ``reap`` returns expired
-        or dead-pane work to the queue.
+        carries a lease; ``heartbeat`` extends it and ``reap`` returns expired,
+        dead-pane or dead-caller work to the queue.
+
+        ``caller`` is ``{"pid", "start", "name"}`` for the stable agent process
+        behind the request. The pane id stays the registry key; the pid/start
+        is liveness, so a crashed agent's lease can be reclaimed while its
+        shell pane still exists. The name is only a label.
         """
         target = validate_scope(scope)
         if not pane_id:
@@ -658,6 +685,10 @@ class Tasks:
         lease_s = float(lease_seconds or DEFAULT_LEASE_S)
         if lease_s <= 0:
             raise TaskError("lease_seconds must be positive")
+        caller = caller or {}
+        caller_pid = caller.get("pid")
+        caller_start = caller.get("start")
+        caller_name = caller.get("name")
 
         with self._lock:
             if self.db.in_transaction:
@@ -692,9 +723,11 @@ class Tasks:
                 expires = now + lease_s
                 self.db.execute(
                     "INSERT OR REPLACE INTO task_leases "
-                    "(task_id, pane_id, claimed_at, heartbeat_at, expires_at) "
-                    "VALUES (?,?,?,?,?)",
-                    (chosen["id"], pane_id, now, now, expires),
+                    "(task_id, pane_id, claimed_at, heartbeat_at, expires_at, "
+                    "caller_pid, caller_start, caller_name) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (chosen["id"], pane_id, now, now, expires,
+                     caller_pid, caller_start, caller_name),
                 )
                 self.db.execute(
                     "UPDATE tasks SET status = 'in_progress', assignees = ?, "
@@ -707,25 +740,43 @@ class Tasks:
                     scope=target, priority=chosen["priority"],
                     status_from=chosen["status"], status_to="in_progress",
                     duration_ms=int((now - chosen["created_at"]) * 1000),
-                    meta={"lease_seconds": lease_s})
+                    meta={"lease_seconds": lease_s, "caller_pid": caller_pid,
+                          "caller_name": caller_name})
                 self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
         return {"task": self.get(chosen["id"]), "scope": target,
                 "pane_id": pane_id, "lease_seconds": lease_s,
-                "expires_at": now + lease_s}
+                "expires_at": now + lease_s,
+                "caller": {"pid": caller_pid, "start": caller_start,
+                           "name": caller_name}}
 
-    def heartbeat(self, task_id, pane_id, lease_seconds=None):
-        """Extend a live lease. Raises when the caller does not hold one."""
+    def heartbeat(self, task_id, pane_id, lease_seconds=None, caller=None):
+        """Extend a live lease. Raises when the caller does not hold one.
+
+        A heartbeat refreshes the caller identity too: the pane's agent may
+        have been restarted, and liveness should track the current process.
+        """
         lease_s = float(lease_seconds or DEFAULT_LEASE_S)
         now = _now()
+        caller = caller or {}
         with self._lock:
-            cursor = self.db.execute(
-                "UPDATE task_leases SET heartbeat_at = ?, expires_at = ? "
-                "WHERE task_id = ? AND pane_id = ?",
-                (now, now + lease_s, str(task_id), str(pane_id)),
-            )
+            if caller.get("pid"):
+                cursor = self.db.execute(
+                    "UPDATE task_leases SET heartbeat_at = ?, expires_at = ?, "
+                    "caller_pid = ?, caller_start = ?, caller_name = ? "
+                    "WHERE task_id = ? AND pane_id = ?",
+                    (now, now + lease_s, caller.get("pid"),
+                     caller.get("start"), caller.get("name"),
+                     str(task_id), str(pane_id)),
+                )
+            else:
+                cursor = self.db.execute(
+                    "UPDATE task_leases SET heartbeat_at = ?, expires_at = ? "
+                    "WHERE task_id = ? AND pane_id = ?",
+                    (now, now + lease_s, str(task_id), str(pane_id)),
+                )
             self.db.commit()
         if cursor.rowcount == 0:
             raise TaskError(
@@ -758,14 +809,24 @@ class Tasks:
                 raise
         return self.get(task_id)
 
-    def reap(self, alive_panes=None, now=None):
-        """Return expired or dead-pane leases to the queue.
+    def reap(self, alive_panes=None, caller_alive=None, now=None,
+             alive_source=None):
+        """Return expired, dead-pane or dead-caller leases to the queue.
 
-        ``alive_panes`` is the set of pane ids herdr currently knows about. A
-        lease whose pane is gone is requeued immediately; one whose lease has
-        simply expired is requeued too (a stalled agent). A task with another
-        live claimant stays in progress for that claimant.
+        ``alive_panes`` is the set of pane ids the terminal backend currently
+        knows about. ``caller_alive(pid, start)`` is the process check.
+
+        Only the explicit lease deadline or a dead /proc caller requeues a
+        claim. A vanished pane is recorded in the event but is **not** evidence
+        by itself: the pane reader can lag, a live agent may still own the
+        work, and a legacy lease with no caller identity is unattributable
+        rather than dead. A task with another live claimant stays in progress
+        for that claimant.
         """
+        if alive_panes is not None and alive_source != "live":
+            raise TaskError(
+                "alive_panes must be tagged alive_source='live'; a fixture "
+                "pane list must never move real work")
         now = _now() if now is None else now
         requeued = []
         with self._lock:
@@ -776,9 +837,19 @@ class Tasks:
                 leases = self.db.execute("SELECT * FROM task_leases").fetchall()
                 for lease in leases:
                     expired = lease["expires_at"] <= now
-                    gone = alive_panes is not None and lease["pane_id"] not in alive_panes
-                    if not (expired or gone):
+                    gone = (alive_panes is not None
+                            and lease["pane_id"] not in alive_panes)
+                    dead_caller = bool(
+                        caller_alive is not None and lease["caller_pid"]
+                        and not caller_alive(lease["caller_pid"],
+                                             lease["caller_start"]))
+                    # BOTH-condition rule: a live agent behind a vanished pane
+                    # is not a dead claim; an unattributable lease is not
+                    # guessed dead. Only the lease deadline or /proc caller
+                    # death are reasons.
+                    if not (expired or dead_caller):
                         continue
+                    reason = "caller_dead" if dead_caller else "expired"
                     self.db.execute(
                         "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
                         (lease["task_id"], lease["pane_id"]),
@@ -800,7 +871,9 @@ class Tasks:
                         actor=lease["pane_id"], scope=row["scope"],
                         priority=row["priority"], status_from=row["status"],
                         status_to=resulting,
-                        meta={"reason": "pane_gone" if gone else "expired"})
+                        meta={"reason": reason, "pane_gone": gone,
+                              "caller_pid": lease["caller_pid"],
+                              "caller_name": lease["caller_name"]})
                     # Only a task that actually reopened is a requeue. A
                     # lease released while another claimant keeps the task in
                     # progress is logged as a release by the events, not here.
@@ -808,7 +881,7 @@ class Tasks:
                         requeued.append({
                             "task_id": lease["task_id"],
                             "pane_id": lease["pane_id"],
-                            "reason": "pane_gone" if gone else "expired",
+                            "reason": reason,
                         })
                 self.db.commit()
             except Exception:

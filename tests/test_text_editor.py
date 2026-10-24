@@ -1,3 +1,4 @@
+import _bootstrap  # noqa: F401  (isolate live state)
 import unittest
 
 from text_editor import TextEditorBuffer

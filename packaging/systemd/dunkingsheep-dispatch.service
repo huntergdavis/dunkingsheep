@@ -1,0 +1,11 @@
+[Unit]
+Description=Dunking Sheep dispatcher: fill idle lanes from the standby queue
+After=default.target dunkingsheep.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep dispatch tick
+TimeoutStartSec=240
+# A tick that outlives its socket deadline is SLOW, not broken: the CLI exits
+# 75 ('still working after Ns') and that is not a unit failure.
+SuccessExitStatus=75

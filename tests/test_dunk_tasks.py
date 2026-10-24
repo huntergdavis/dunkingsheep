@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
@@ -52,6 +53,16 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual("a", done["completed_by"])
         # b cannot reopen it by claiming; it is no longer eligible.
         self.assertIsNone(self.store.claim_next(GLOBAL, "b")["task"])
+
+    def test_a_tmux_pane_id_is_a_valid_scope(self):
+        """The backend flipped from herdr ids (w8:p8) to tmux ids (%4); a scope
+        validator that only knew the first spelling made every per-pane task
+        unusable on the new backend (2026-10-24)."""
+        from dunk_tasks import validate_scope
+        self.assertEqual("%4", validate_scope("%4"))
+        self.assertEqual("w8:p8", validate_scope("w8:p8"))
+        with self.assertRaisesRegex(Exception, "scope must be"):
+            validate_scope("not a pane")
 
     def test_scope_is_private_and_global_is_visible(self):
         pane = self.store.add("w2:p2", "local")
@@ -115,20 +126,34 @@ class TaskStoreTests(unittest.TestCase):
     def test_lease_expiry_requeues(self):
         task = self.store.add(GLOBAL, "work")
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
-        self.assertEqual([], self.store.reap(alive_panes={"w1:p1"}))
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w1:p1"}))
         import time
         time.sleep(0.1)
-        requeued = self.store.reap(alive_panes={"w1:p1"})
+        requeued = self.store.reap(alive_source="live", alive_panes={"w1:p1"})
         self.assertEqual([(task["id"], "expired")],
                          [(item["task_id"], item["reason"]) for item in requeued])
         self.assertEqual("open", self.store.get(task["id"])["status"])
         self.assertEqual([], self.store.get(task["id"])["assignees"])
 
-    def test_dead_pane_requeues_immediately(self):
+    def test_pane_gone_alone_does_not_requeue(self):
         task = self.store.add(GLOBAL, "work")
+        # Legacy lease: no caller identity -> unattributable, not dead.
         self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
-        requeued = self.store.reap(alive_panes={"w2:p2"})
-        self.assertEqual([(task["id"], "pane_gone")],
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w2:p2"}))
+        # A live agent behind a vanished pane is still a live claim.
+        self.store.release(task["id"], "w1:p1")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                              caller={"pid": 42, "start": "42", "name": "pi"})
+        self.assertEqual([], self.store.reap(
+            alive_source="live", alive_panes={"w2:p2"}, caller_alive=lambda pid, start: True))
+
+    def test_pane_gone_with_a_dead_caller_requeues(self):
+        task = self.store.add(GLOBAL, "work")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                              caller={"pid": 42, "start": "42", "name": "pi"})
+        requeued = self.store.reap(
+            alive_source="live", alive_panes={"w2:p2"}, caller_alive=lambda pid, start: False)
+        self.assertEqual([(task["id"], "caller_dead")],
                          [(item["task_id"], item["reason"]) for item in requeued])
 
     def test_heartbeat_extends_and_requires_a_lease(self):
@@ -147,7 +172,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(task["id"], two["id"])
         self.assertEqual(["w1:p1", "w2:p2"], two["assignees"])
         # Both leases are live, so neither is reaped.
-        self.assertEqual([], self.store.reap(alive_panes={"w1:p1", "w2:p2"}))
+        self.assertEqual([], self.store.reap(alive_source="live", alive_panes={"w1:p1", "w2:p2"}))
 
     def test_claim_requires_a_pane(self):
         self.store.add(GLOBAL, "work")
@@ -230,7 +255,7 @@ class TaskStoreTests(unittest.TestCase):
         self.store.claim_next(GLOBAL, "w2:p2", lease_seconds=300)
         import time as _time
         _time.sleep(0.1)
-        reaped = self.store.reap(alive_panes={"w1:p1", "w2:p2"})
+        reaped = self.store.reap(alive_source="live", alive_panes={"w1:p1", "w2:p2"})
         self.assertEqual([], reaped,
                          "the task was not requeued; another lease lives")
         self.assertEqual(["w2:p2"],
@@ -367,3 +392,75 @@ class FlockTaskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CallerLivenessTests(unittest.TestCase):
+    """A task lease is keyed by pane, liveness-checked by pid + start."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+        self.task = self.store.add(GLOBAL, "caller-liveness")
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_claim_records_the_caller_pid_and_start(self):
+        caller = {"pid": os.getpid(), "start": "12345", "name": "pi"}
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=60, caller=caller)
+        lease = self.store.leases_for(self.task["id"])[0]
+        self.assertEqual(os.getpid(), lease["caller_pid"])
+        self.assertEqual("12345", lease["caller_start"])
+        self.assertEqual("pi", lease["caller_name"])
+
+    def test_heartbeat_refreshes_the_caller_identity(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=30,
+                              caller={"pid": 1, "start": "1", "name": "old"})
+        self.store.heartbeat(self.task["id"], "w1:p1", lease_seconds=60,
+                             caller={"pid": 2, "start": "2", "name": "new"})
+        lease = self.store.leases_for(self.task["id"])[0]
+        self.assertEqual(2, lease["caller_pid"])
+        self.assertEqual("new", lease["caller_name"])
+
+    def test_reap_requeues_a_dead_caller_even_with_a_live_pane(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600,
+                              caller={"pid": os.getpid(), "start": "1",
+                                      "name": "pi"})
+        requeued = self.store.reap(
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False)
+        self.assertEqual(1, len(requeued))
+        self.assertEqual("caller_dead", requeued[0]["reason"])
+        self.assertEqual("open", self.store.get(self.task["id"])["status"])
+        self.assertEqual([], self.store.leases_for(self.task["id"]))
+
+    def test_reap_keeps_a_live_caller(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600,
+                              caller={"pid": os.getpid(), "start": "1",
+                                      "name": "pi"})
+        self.assertEqual([], self.store.reap(
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: True))
+        self.assertEqual("in_progress", self.store.get(self.task["id"])["status"])
+
+    def test_reap_does_not_guess_for_a_legacy_lease_without_a_caller(self):
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=600)
+        self.assertEqual([], self.store.reap(
+            alive_source="live", alive_panes={"w1:p1"}, caller_alive=lambda pid, start: False))
+
+    def test_old_lease_table_is_migrated_in_place(self):
+        import sqlite3
+        path = os.path.join(self.tmp.name, "old.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE task_leases (task_id TEXT NOT NULL, "
+                     "pane_id TEXT NOT NULL, claimed_at REAL NOT NULL, "
+                     "heartbeat_at REAL NOT NULL, expires_at REAL NOT NULL, "
+                     "PRIMARY KEY (task_id, pane_id))")
+        conn.commit()
+        conn.close()
+        old = Tasks(path)
+        try:
+            columns = {row["name"] for row in old.db.execute(
+                "PRAGMA table_info(task_leases)")}
+            self.assertTrue({"caller_pid", "caller_start", "caller_name"} <= columns)
+        finally:
+            old.close()
+

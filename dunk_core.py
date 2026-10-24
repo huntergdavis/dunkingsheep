@@ -41,7 +41,9 @@ Orchestration extras on top of the classic Dunking Bird model:
   agent builds its team here, then dunks on it.
 """
 
+import contextlib
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -50,15 +52,54 @@ import shlex
 import threading
 import time
 
+from pathlib import Path
+
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
 from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
-from herdr_client import HerdrClient
+from dunk_terminal import get_backend
+from dunk_callers import process_alive
+from dunk_claude import ClaudeStatus
 
-VERSION = "2.24.0"
+VERSION = "2.69.5"
+
+def code_identity(path=None):
+    """The code's own identity: a short hash of this file, and its mtime.
+
+    A hand-maintained version constant answers "is my fix live?" wrong in the
+    reassuring direction: this file said 2.37.4 for eight commits whose messages
+    claimed 2.38 through 2.51, and the daemon printed the constant. The constant is
+    now checked against the commit subject by a test, and the hash + mtime are
+    derived so the answer never depends on someone remembering to edit a string.
+    """
+    target = Path(path or __file__)
+    try:
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()[:12]
+        mtime = target.stat().st_mtime
+    except OSError:
+        return {"code_hash": None, "code_mtime": None}
+    return {"code_hash": digest, "code_mtime": mtime}
+
+
+CODE_IDENTITY = code_identity()
+
+
+def code_is_stale(identity=None, current=None):
+    """True when the code ON DISK is not the code this process is running.
+
+    The comparison has to be between the hash this process imported and the hash of
+    the file as it is now. Comparing a captured mtime to the process start time was
+    a comparison of a value with itself, and it said 'no' while the daemon ran four
+    commits behind the file - the exact lie this exists to prevent.
+    """
+    identity = identity or CODE_IDENTITY
+    current = current if current is not None else code_identity()
+    if not identity.get("code_hash") or not current.get("code_hash"):
+        return None
+    return identity["code_hash"] != current["code_hash"]
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -68,8 +109,20 @@ LAUNCHES_FILE = os.path.join(CONFIG_DIR, "launches.json")
 
 # Agent states during which an `only_when="idle"` dunk holds its send.
 BUSY_STATUSES = ("working", "blocked")
-_PANE_ID_RE = re.compile(r"^w\d+:p\d+$")
+# Pane ids are 'w<workspace>:p<number>' where the workspace may be a LETTER:
+# wR:p5. A digits-only pattern meant 'wR:p9' was not recognised as a pane id at
+# all, so a dead pane id fell through to becoming a mailbox name.
+_PANE_ID_RE = re.compile(r"^(?:[A-Za-z0-9_.-]+:p\d+|%\d+)$")
+# A herdr pane id in its general spelling (w9:pH, wR:p5, w11:p1). The narrow
+# form above only covers the numeric suffix, and the lanes whose ids end in a
+# letter - the vp lane among them - slipped through to become brand new mailbox
+# names: 'w9:pH' accepted mail and queued it into nothing (2026-10-24).
+_HERDR_ID_RE = re.compile(r"^w\d+:p[A-Za-z0-9_.-]+$")
+PANE_ID_RE = _PANE_ID_RE
 _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
+# 'codex-poolrad2 (wR:p5)': a name with its pane id appended. The parenthetical is
+# the ONLY unambiguous part, so it decides where the mail goes.
+_EMBEDDED_PANE_RE = re.compile(r"\(\s*([A-Za-z0-9_.-]+:p\d+|%\d+)\s*\)\s*$")
 IDLE_POLL_S = 5
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
@@ -79,6 +132,20 @@ ONLY_WHEN_CHOICES = (None, "idle")
 # Deterministic task coordination cadence. The reaper requeues expired/dead
 # claims; the pusher feeds idle followers without any agent polling.
 TASK_REAP_S = float(os.environ.get("DUNKINGSHEEP_REAP_S", "15"))
+# A turn declared by a harness (pi/claude) holds sends until turn-end. A missed
+# turn-end (crash/force-quit) must never hold mail forever: the state expires,
+# the hold releases, and turn.expired is recorded with the reason.
+TURN_TTL_S = float(os.environ.get("DUNKINGSHEEP_TURN_TTL_S", "1800"))
+# The sidebar poll resolves the caller's own mailbox by walking the pane list
+# every time; that walk is the ~2-4 s cost, not the inbox SQL. Cache only the
+# self->mailbox mapping, briefly.
+MAILBOX_CACHE_S = float(os.environ.get("DUNKINGSHEEP_MAILBOX_CACHE_S", "30"))
+# Daemon-side view cache for the poll-shaped commands. Derived from: the dunk
+# list, poll_status, and the caller's inbox count. Invalidated by every dunk /
+# inbox / task mutation (they all call _save or inbox/task writes); max
+# staleness is this TTL past the last invalidation. `fresh=True` bypasses it
+# for a send/ack/claim that needs certainty.
+VIEW_CACHE_S = float(os.environ.get("DUNKINGSHEEP_VIEW_CACHE_S", "5"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -167,6 +234,70 @@ MODAL_WAIT_S = 30.0
 # Key names that mean "submit this".
 ENTER_KEYS = ("Enter", "enter", "Return", "return", "KP_Enter")
 SUBMIT_ATTEMPTS = len(SUBMIT_GAPS)
+# A pane whose agent session died still shows an editable composer and still
+# accepts typed text; Enter can never submit because there is no server. Pressing
+# Enter four times reports "did not submit", which looks like a dunk problem.
+# These markers are the pane's own words, checked BEFORE any key is pressed.
+DEAD_SESSION_MARKERS = (
+    "server connection could not be restored",
+    "automatic reconnect could not restore this session",
+    "reconnect failed",
+    "session expired",
+)
+# WHICH HARNESSES QUEUE WHAT WE TYPE WHILE THEY WORK. Measured, not assumed:
+#   claude -> yes: the composer shows "ctrl+x ctrl+s to send now" and the message is
+#             processed after the current turn (proven 2026-10-24, not interleaved).
+#   pi     -> yes: "Alt+Up to edit all queued messages", processed after the turn.
+#   codex  -> NO: text typed into the composer during a turn is NOT retained. Measured
+#             on wR:p6 during a 54-minute turn: four notices reported sent, the
+#             composer sat at its placeholder, and the scrollback contained exactly one
+#             composer line - i.e. accepted and lost, which is worse than held.
+# The policy is "a busy agent is not a hold" - but only where the harness actually
+# queues. For a harness that does not, holding is the lesser evil, and the reason says
+# so. Anything unknown is treated as not-queueing (conservative).
+HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}
+
+# A pane can be alive, have unread mail, and still be unreachable: its input box
+# holds something that was never submitted, so every later send is held as "a
+# human is typing" and the lane silently starves. These are the states that block
+# delivery, and each one has a name because "busy" hides them.
+# These banners sit at the BOTTOM of a pane: that is where an agent prints its
+# connection error, its goal state and its input box. Scanning the whole visible
+# screen made a pane look dead because its own transcript quoted the phrase -
+# including the pane that had just written the string into a file.
+DELIVERY_TAIL_LINES = 12
+STATUS_TAIL_LINES = 3
+
+# A pane that is mid-work says so and offers an interrupt key. Absence of a draft
+# is NOT evidence of idleness - par-e sat mid-turn for 75 minutes with a clear box.
+WORKING_MARKERS = ("esc to interrupt", "esc to cancel", "ctrl+c to interrupt")
+PAUSED_GOAL_MARKERS = ("goal paused", "paused (/goal resume)", "/goal resume")
+CONTEXT_FULL_MARKERS = ("/clear to save", "context is full", "context limit reached")
+# The harness's empty-box HINT, not a state. Claude draws it next to an empty
+# composer ("new task? /clear to save 497.4k tokens") and colours it grey, not
+# dim, so colour alone cannot tell it from a banner. Reading it as "context full"
+# made a healthy lane permanently unreachable while it looked alive.
+PLACEHOLDER_PATTERNS = (
+    re.compile(r"new task\?\s*/clear to save [\d.,]+[km]? tokens?", re.I),
+    re.compile(r"^\s*(new task\?|type your (request|message)\b)", re.I),
+    # Each harness's own empty-box hint. Usually drawn dim (so the bright-text
+    # reader already ignores it), but a bright redraw of the same words is not a
+    # draft either.
+    re.compile(r"^\s*ask (codex|claude|open ?code) to do anything", re.I),
+    re.compile(r"^\s*(send a message|type a message|ask anything)\b", re.I),
+)
+# How long a "busy" report from another process may block delivery while the pane
+# itself shows no turn and a clear box. A remembered state needs an expiry.
+CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
+# The typing mutex: short by design, loud when contended.
+TYPING_LOCK_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "10"))
+TYPING_LOCK_LOUD_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_LOUD_S", "0.25"))
+# A send that could not start because the box is not ours to type into is HELD, not
+# failed: a dialog someone is reading and a human mid-sentence are the same answer -
+# wait, do not report a failure.
+# A send that could not start because the box would not clear is DEFERRED, not a claim
+# that a person is present (that state does not exist on this path any more).
+BOX_HOLD = "the box would not clear (text left untouched)"
 SUBMIT_CONFIRM_S = 2.0
 # Most submits land at once, so look soon and back off rather than paying a
 # fixed delay on every send.
@@ -283,7 +414,7 @@ class Dunker:
         "target_workspace", "target_cwd", "interval_minutes", "text",
         "running", "only_when", "max_sends", "send_count", "created_at",
         "started_at", "last_sent_at", "next_send_at", "last_error",
-        "skip_if_unconsumed", "skip_count", "last_skipped_at",
+        "skip_if_unconsumed", "skip_count", "total_skips", "last_skipped_at",
         "awaiting_consumption", "last_sent_text", "unknown_skips",
         "hold_while_typing", "hold_count", "last_held_at",
     )
@@ -313,7 +444,11 @@ class Dunker:
         self.last_error = kwargs.get("last_error")
         # Backpressure (all persisted; old state files simply lack them).
         self.skip_if_unconsumed = bool(kwargs.get("skip_if_unconsumed", False))
+        # skip_count is the CURRENT run's skips and resets when the dunk sends;
+        # total_skips is the lifetime number, which is history and must never be
+        # the thing a threshold fires on.
         self.skip_count = int(kwargs.get("skip_count") or 0)
+        self.total_skips = int(kwargs.get("total_skips") or self.skip_count)
         self.last_skipped_at = kwargs.get("last_skipped_at")
         # True from a successful send until the target is seen consuming it.
         self.awaiting_consumption = bool(kwargs.get("awaiting_consumption", False))
@@ -393,7 +528,7 @@ class Message:
 
     def _queued_message(self):
         if self.holds:
-            return f"queued: someone is typing in {self.target_label}"
+            return f"queued: the box in {self.target_label} would not clear"
         return f"queued for {self.target_label}, delivering once the input box is clear"
 
     def to_dict(self):
@@ -415,7 +550,7 @@ class Flock:
                  launches_file=LAUNCHES_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
                  superusers=None, memory=None):
-        self.herdr = herdr or HerdrClient()
+        self.herdr = get_backend(herdr)
         self.state_file = state_file
         self.launches_file = launches_file
         # pane_id -> {agent, session, session_kind, cwd, argv, command, source}
@@ -424,6 +559,16 @@ class Flock:
         self.persist_enabled = persist
         self._load_launches()
         self._lock = threading.RLock()
+        # Per-request caller identity (pane id + stable agent pid/start). The
+        # server sets it from SO_PEERCRED; direct callers leave it empty.
+        self._caller_state = threading.local()
+        # Claude session status comes from `claude agents --json`, cached.
+        self.claude_status = ClaudeStatus()
+        # self pane -> (mailbox key, resolved_at); bounded by MAILBOX_CACHE_S.
+        self._own_mailbox_cache = {}
+        self._view_cache = {"at": 0.0, "pane": None, "data": None}
+        # pane_id -> {started_at, expires_at, ttl_s, source, caller}
+        self.turns = {}
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
         # seconds when an agent will not take Enter. With a single lock that
@@ -441,6 +586,15 @@ class Flock:
         # delivery thread and a bounded history of finished messages.
         self.outbox = {}
         self.outbox_threads = {}
+        self._claude_busy_since = {}
+        self.started_at = time.time()
+        # ONE lock for anything that types anywhere (owner, 2026-10-23). Every typing
+        # surface we own goes through this daemon, so a process-wide lock is the whole
+        # truth; a human typing in a terminal directly is what the pre-send box read
+        # is for. Reentrant because the send path nests (guarded send -> submit).
+        self.typing_lock = threading.RLock()
+        self._typing_owner = None          # (pane_id, since) of the current holder
+        self.typing_contentions = 0
         # The last text we typed into each pane, so text stranded by a failed
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
@@ -504,6 +658,8 @@ class Flock:
                 dunker.status = "Restored"
                 self.dunkers.append(dunker)
                 self.next_id = max(self.next_id, _numeric_id(dunker.id) + 1)
+            self.next_message_id = int(payload.get("next_message_id") or self.next_message_id)
+            self._restore_outbox(payload.get("outbox") or [])
             for dunker in list(self.dunkers):
                 if dunker.running:
                     now = time.time()
@@ -513,16 +669,32 @@ class Flock:
         log.info("restored %d dunk(s) from %s", len(self.dunkers), self.state_file)
 
     def _save(self):
+        self._invalidate_view()
         if not self.persist_enabled:
             return
         with self._lock:
             payload = {
                 "version": 1,
                 "next_id": self.next_id,
+                "next_message_id": self.next_message_id,
                 "dunkers": [
                     {field: getattr(d, field) for field in Dunker.FIELDS}
                     for d in self.dunkers
                 ],
+                # Held mail must survive a restart. Losing a queued notice is worse
+                # than delaying it: on 2026-10-23 a restart to clear a stuck hold
+                # silently discarded every held message and three lanes were never
+                # told anything.
+                "outbox": [
+                    {"id": message.id, "pane_id": message.pane_id,
+                     "target_label": message.target_label, "text": message.text,
+                     "source": message.source, "kind": message.kind,
+                     "hold_while_typing": message.hold_while_typing,
+                     "is_notice": message.is_notice,
+                     "notify_for": list(message.notify_for),
+                     "created_at": message.created_at}
+                    for queue in self.outbox.values() for message in queue
+                    if message.status == "queued"],
             }
         try:
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
@@ -548,6 +720,41 @@ class Flock:
         if isinstance(panes, dict):
             self.launches = {pane_id: dict(entry) for pane_id, entry in panes.items()
                              if isinstance(entry, dict)}
+
+    def _restore_outbox(self, rows):
+        """Rebuild held messages after a restart and log what came back.
+
+        A notice is re-typed from its stored text, which is why the text is the
+        thing to persist: a restore that resends a *different* string would be a
+        new message wearing an old id.
+        """
+        restored = []
+        for row in rows:
+            try:
+                pane_id = row["pane_id"]
+                text = row.get("text") or ""
+                kind = row.get("kind") or "text"
+                if kind == "keys":
+                    keys = text.split()
+                    deliver = (lambda p=pane_id, k=keys: self.press_keys(p, k))
+                else:
+                    deliver = (lambda p=pane_id, t=text: self.submit_text(p, t))
+                message = self._new_message(pane_id, row.get("target_label") or pane_id,
+                                            text, row.get("source") or "restored", deliver)
+                message.id = row.get("id") or message.id
+                message.kind = kind
+                message.hold_while_typing = bool(row.get("hold_while_typing", True))
+                message.is_notice = bool(row.get("is_notice"))
+                message.notify_for = list(row.get("notify_for") or [])
+                message.created_at = float(row.get("created_at") or time.time())
+                self._enqueue(message)
+                restored.append(message)
+            except Exception as error:      # noqa: BLE001 - one bad row must not lose the rest
+                log.warning("could not restore a held message: %s", error)
+        if restored:
+            log.warning("resumed %d held message(s) after restart: %s",
+                        len(restored), ", ".join(m.id for m in restored))
+        return restored
 
     def _save_launches(self):
         if not self.persist_enabled:
@@ -626,18 +833,26 @@ class Flock:
         with self._lock:
             return [d.to_dict() for d in self.dunkers]
 
-    def status(self):
+    def status(self, check_herdr=True):
         with self._lock:
             running = sum(1 for d in self.dunkers if d.running)
             total = len(self.dunkers)
-        available = self.herdr.is_available()
+        # The sidebar poll runs often; asking the terminal backend for
+        # availability spawns a subprocess. `check_herdr=False` keeps that out
+        # of the hot path and leaves the field None (not "down").
+        available = self.herdr.is_available() if check_herdr else None
         return {
             "version": VERSION,
+            "code_hash": CODE_IDENTITY["code_hash"],
+            "code_mtime": CODE_IDENTITY["code_mtime"],
+            "started_at": self.started_at,
+            "code_stale": code_is_stale(),
             "pid": os.getpid(),
             "dunkers": total,
             "running": running,
             "herdr_available": available,
-            "herdr_hint": None if available else self.herdr.server_error_hint(),
+            "herdr_hint": (None if available is not False
+                           else self.herdr.server_error_hint()),
             "state_file": self.state_file if self.persist_enabled else None,
             "uptime_s": int(time.time() - self.started_at),
             "queued_messages": sum(len(q) for q in self.outbox.values()),
@@ -646,6 +861,33 @@ class Flock:
             "task_followers": len(self.task_waiters),
             "quarantined_mailboxes": self.quarantined_mailboxes or None,
             "message": self.last_message,
+        }
+
+    def poll_status(self):
+        """The cheap half of status: counts only, no global inbox/task scans.
+
+        The sidebar poll must not pay for `inbox.stats()` and `tasks.stats()`
+        (they scan the whole stores); those are for the human `status` command.
+        """
+        with self._lock:
+            running = sum(1 for d in self.dunkers if d.running)
+            total = len(self.dunkers)
+            queued = sum(len(queue) for queue in self.outbox.values())
+            message = self.last_message
+        return {
+            "version": VERSION,
+            "code_hash": CODE_IDENTITY["code_hash"],
+            "code_mtime": CODE_IDENTITY["code_mtime"],
+            "started_at": self.started_at,
+            "code_stale": code_is_stale(),
+            "pid": os.getpid(),
+            "dunkers": total,
+            "running": running,
+            "queued_messages": queued,
+            "message": message,
+            "herdr_available": None,
+            "herdr_hint": None,
+            "uptime_s": int(time.time() - self.started_at),
         }
 
     def summary(self):
@@ -693,8 +935,75 @@ class Flock:
                             count, mailbox, mailbox)
         return moved
 
-    def resolve_mailbox(self, spec, self_pane_id=None):
+    def pm_digest(self, project, payload, to=None, *, window="30 min", self_pane_id=None):
+        """Publish ONE digest per project under a stable id.
+
+        The row is updated in place (unread again after an update), so the VP
+        reads a single message per project rather than a stream. Returns the
+        row plus whether it was created or updated.
+        """
+        import dunk_pm
+        did = dunk_pm.digest_id(project)
+        if isinstance(payload, str):
+            # The socket carries the payload as a string; render it, do not
+            # store it verbatim. JSON object -> structured digest; text -> note.
+            text = payload.strip()
+            if text.startswith("{"):
+                try:
+                    payload = json.loads(text)
+                except ValueError:
+                    payload = {"note": text}
+            else:
+                payload = {"note": text}
+        demo = bool(payload.get("demo")) if isinstance(payload, dict) else False
+        if isinstance(payload, dict):
+            # Numbers are read at publish time from the checkpoint, never from
+            # the caller's template: a stale digest number is worse than none.
+            live = dunk_pm.checkpoint_numbers(project)
+            numbers = live if live is not None else payload.get("numbers", ())
+            body = dunk_pm.render_digest(project, window=window,
+                                         changed=payload.get("changed", ()),
+                                         blocked=payload.get("blocked", ()),
+                                         owner_decisions=payload.get("owner_decisions", ()),
+                                         numbers=numbers,
+                                         note=payload.get("note"))
+        else:
+            body = str(payload)
+        vp_pane = to or os.environ.get("DUNKINGSHEEP_VP_PANE", dunk_pm.DEFAULT_VP_PANE)
+        mailbox, label, pane_id = self.resolve_mailbox(vp_pane, self_pane_id)
+        existing = None
+        try:
+            with self.inbox._lock:
+                existing = self.inbox.db.execute(
+                    "SELECT 1 FROM messages WHERE digest_id=?", (did,)).fetchone()
+        except Exception:  # noqa: BLE001
+            existing = None
+        subject = f"PM digest (DEMO): {project}" if demo else f"PM digest: {project}"
+        message = self.inbox.upsert_digest(mailbox, did, body,
+                                           subject=subject,
+                                           sender=self_pane_id,
+                                           mailbox_label=label, pane_id=pane_id)
+        message["digest_id"] = did
+        message["action"] = "updated" if existing else "created"
+        message["body"] = body
+        try:
+            if pane_id:
+                unread = self.inbox.count(mailbox)["unread"]
+                text = _notice_text(mailbox, unread, self_pane_id,
+                                    f"PM digest: {project}")
+                self.send_now(pane_id, text, wait_s=0)
+                message["notified"] = True
+        except Exception:  # noqa: BLE001 - the digest is stored even if the nudge fails
+            message["notified"] = False
+        return message
+
+    def resolve_mailbox(self, spec, self_pane_id=None, strict=False):
         """Turn a target into (mailbox key, label, pane id).
+
+        `strict` is the SEND-time contract (VP ruling 2026-10-24): a target must
+        resolve to a live pane or to a lane the registry knows, and a registered
+        lane marked dead is refused with its date. Reads stay permissive on
+        purpose - inspecting a stranded mailbox is how the backlog gets drained.
 
         The key has to identify one pane and keep identifying it. The pane's
         own label comes first, since that is a name someone chose; then the tab
@@ -716,10 +1025,39 @@ class Flock:
         for pane in panes:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return self._mailbox_for_pane(pane)
-        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec):
+        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
             raise DunkError(
-                f"no live pane {spec!r}; a dead pane id is not a mailbox. "
-                "Use a current pane id or a mailbox name.")
+                f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
+                "pane id is not a name. If that lane still exists, address it by "
+                "mailbox name; if it does not, the send fails here instead of "
+                "queueing into nothing.")
+        # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
+        # that id decides. Without this the whole string fell through to step 3 and
+        # became a mailbox NAME with no pane: mail addressed to
+        # 'codex-poolrad2 (wR:p5)' was then answered by wR:p4, whose conversation
+        # name was the same one. A name is a conversation; a pane id is a process.
+        embedded = _EMBEDDED_PANE_RE.search(spec)
+        if embedded:
+            hinted = embedded.group(1)
+            for pane in panes:
+                if pane.get("pane_id") == hinted or pane.get("terminal_id") == hinted:
+                    return self._mailbox_for_pane(pane)
+            raise DunkError(
+                f"target {spec!r} names pane {hinted}, which is not live. A decorated "
+                f"address must name a live pane: use a current pane id, or a bare "
+                f"mailbox name without the parenthetical.")
+
+        # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
+        # live pane wins over any name: labels and titles are chosen by the agent
+        # and change (claude rewrites its title every turn), while the registry
+        # row was written by the daemon when the pane was made.
+        recorded, recorded_name = self._lane_pane(spec)
+        if recorded is not None:
+            # The key is the name the daemon recorded, not the pane's current
+            # title: a title the agent overwrote is what lost the lane.
+            return (str(recorded_name), f"{recorded_name} ({recorded['pane_id']})",
+                    recorded["pane_id"])
+
         # 2. An exact *name* must identify exactly one pane across every name
         #    field. Two same-type panes can share a label (or one pane's label
         #    can equal another's tab label); picking by field priority delivered
@@ -747,7 +1085,38 @@ class Flock:
                     f"{spec!r} is an agent type, not one agent: it would be a mailbox "
                     "several panes share. Use a pane id, a pane or tab label, or a "
                     "name of your own.")
-            return spec, spec, None
+            # FAIL CLOSED (VP ruling 2026-10-24, owner #1556). Creating a mailbox as
+            # a fallback is what let 'w9:pH', 'w9:pM' and 'nav-fixer2' each become a
+            # brand new mailbox that swallowed the message and reported success. A
+            # target either resolves to a live pane or names a lane that the registry
+            # knows; anything else is refused here, with the reason, and the caller
+            # sees it.
+            if not strict:
+                return spec, spec, None
+            registered, alive, dead_since = self._registered_lane(spec)
+            if registered and not alive:
+                when = ""
+                if dead_since:
+                    when = f" (dead since {dead_since})"
+                raise DunkError(
+                    f"lane {spec!r} is registered as DEAD{when}: nothing can be "
+                    "delivered to it. reason=dead_lane. Restore the lane first, or "
+                    "send to a lane that is live.")
+            if not registered:
+                raise DunkError(
+                    f"target {spec!r} resolves to no live pane and to no registered "
+                    "lane; refusing rather than creating a mailbox that would queue in "
+                    "silence. reason=unknown_name. Use a live pane id, a pane/tab "
+                    "label, or a name recorded in the lane registry.")
+            # Registered, and no pane on the backend we deliver through. That is a
+            # lane between restarts OR a lane alive on the other backend, and in both
+            # cases a message put in the queue is a message nobody can read - which is
+            # the failure the VP outlawed, only slower. Refuse and say which it is.
+            raise DunkError(
+                f"lane {spec!r} is registered but has no live pane on this backend; "
+                "nothing can be delivered to it right now. reason=unhoused_lane. "
+                "Existing mail for it can still be read and archived; start or restore "
+                "the lane, or send to a lane that is live.")
         return self._mailbox_for_pane(pane)
 
     def _is_agent_type(self, spec):
@@ -773,13 +1142,180 @@ class Flock:
             label = f"{label} ({pane['pane_id']})"
         return str(key), label, pane["pane_id"]
 
+    def view(self, self_pane_id=None, fresh=False):
+        """Cheap view for the poll-shaped commands: status + dunks + inbox count.
+
+        Derived from poll_status, the in-memory dunk list and Inbox.count. A
+        mutation (add/update/remove/start/stop, inbox send/ack/read, task
+        change) bumps `_view_cache["at"]=0`, so the next read rebuilds; the TTL
+        bounds staleness for external writers. `fresh=True` rebuilds now.
+        """
+        now = time.time()
+        cached = self._view_cache
+        if (not fresh and cached["data"] is not None
+                and cached["pane"] == self_pane_id
+                and now - cached["at"] < VIEW_CACHE_S):
+            return cached["data"]
+        status = self.poll_status()
+        status["self_pane_id"] = self_pane_id
+        data = {"status": status, "dunks": self.list()}
+        if self_pane_id:
+            try:
+                data["inbox_count"] = self.inbox_count(None,
+                                                       self_pane_id=self_pane_id)
+            except Exception as error:  # noqa: BLE001 - a view never breaks
+                data["inbox_error"] = str(error)
+        self._view_cache = {"at": now, "pane": self_pane_id, "data": data}
+        return data
+
+    def _invalidate_view(self):
+        self._view_cache["at"] = 0.0
+        self._view_cache["data"] = None
+
     def _own_mailbox(self, self_pane_id):
-        key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+        """The caller's mailbox key, briefly cached.
+
+        Resolving it walks the pane list; on a busy herdr that is 2-4 s per
+        poll, while the inbox query itself is sub-millisecond. Only the
+        self-default is cached; an explicit target still resolves fresh.
+        """
+        now = time.time()
+        cached = self._own_mailbox_cache.get(self_pane_id)
+        if cached and now - cached[1] < MAILBOX_CACHE_S:
+            return cached[0]
+        resolved = False
+        try:
+            key, _label, _pane = self.resolve_mailbox("self", self_pane_id)
+            resolved = True
+        except DunkError:
+            # A LANE'S MAILBOX MUST NOT DEPEND ON THE BACKEND'S PANE IDS. After the
+            # tmux flip every herdr pane id became unknown to the daemon, and every
+            # command that resolved "self" failed - including reading one's own mail.
+            # The inbox already supports a mailbox named after the pane id, so that is
+            # the identity of last resort, and it is explicit rather than guessed.
+            key = (os.environ.get("DUNKINGSHEEP_MAILBOX") or "").strip() or None
+            if not key and self_pane_id:
+                key = self._lane_registry().get(self_pane_id)
+            if not key and self_pane_id and self._mailbox_exists(self_pane_id):
+                key = self_pane_id
+            if not key:
+                raise DunkError(
+                    f"cannot resolve this lane's mailbox: {self_pane_id!r} is not a pane "
+                    f"on the current backend ({self.herdr.name if hasattr(self.herdr, 'name') else 'unknown'}) "
+                    f"and no mailbox is named after it; set DUNKINGSHEEP_MAILBOX to the "
+                    f"lane's mailbox name")
+        self._own_mailbox_cache[self_pane_id] = (key, now)
+        # Only a REAL resolution is worth remembering: recording a fallback would
+        # poison the registry with 'pane id -> pane id' and lose the lane's name.
+        if self_pane_id and resolved:
+            self._remember_lane(self_pane_id, key)
         return key
 
-    def _mailbox_or_self(self, spec, self_pane_id):
+    # -- lane registry: an identity that survives a backend change -------------
+    def lane_registry_path(self):
+        return os.path.join(CONFIG_DIR, "lanes.json")
+
+    def _lane_registry(self):
+        try:
+            with open(self.lane_registry_path(), encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _remember_lane(self, pane_id, mailbox):
+        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail."""
+        data = self._lane_registry()
+        if data.get(pane_id) == mailbox:
+            return
+        data[pane_id] = mailbox
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            temporary = self.lane_registry_path() + ".tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.lane_registry_path())
+        except OSError as error:
+            log.warning("could not record lane %s -> %s: %s", pane_id, mailbox, error)
+
+    def _title_pane(self, pane_id, mailbox):
+        """Best effort: put the lane name in the pane title too.
+
+        A title is a courtesy (the agent may replace it); the registry is the
+        record. Never let a failed rename undo a successful one.
+        """
+        rename = getattr(self.herdr, "rename", None)
+        if not callable(rename):
+            return False
+        try:
+            ok, _ = rename("pane", pane_id, str(mailbox))
+            return bool(ok)
+        except Exception:                        # noqa: BLE001 - cosmetic only
+            return False
+
+    def _lane_pane(self, mailbox):
+        """(live pane, recorded mailbox) for a mailbox in the lane registry, else (None, None).
+
+        The registry is pane -> mailbox, written on every genuine resolution and
+        on every create/restore that knows the lane. Reading it backwards is what
+        makes a mailbox addressable after a backend change, when the pane id the
+        message was written to no longer exists.
+        """
+        needle = str(mailbox or "").strip().lower()
+        if not needle:
+            return None, None
+        recorded = [pane_id for pane_id, name in self._lane_registry().items()
+                    if str(name or "").strip().lower() == needle]
+        if not recorded:
+            return None, None
+        live = {pane.get("pane_id"): pane
+                for pane in self.herdr.list_panes_grouped()}
+        candidates = [(live[pane_id], self._lane_registry()[pane_id])
+                      for pane_id in recorded if pane_id in live]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None, None              # none live, or two live: the caller refuses
+
+    def _registered_lane(self, name):
+        """(found, alive, dead_since) for a mailbox name in the lane registry.
+
+        The registry is the only place that can say "this lane exists and is not
+        live" (a lane between restarts, or one that died in a flip). A string
+        that is in NO registry row is not a lane at all: mail to it must fail at
+        send time, not create a mailbox and queue into nothing.
+
+        Rows are read tolerantly because the registry is being extended with
+        liveness: a row may be a plain mailbox name (pane -> name) or a dict
+        carrying name/alive/dead_since.
+        """
+        needle = str(name or "").strip().lower()
+        if not needle:
+            return False, True, None
+        for value in self._lane_registry().values():
+            if isinstance(value, dict):
+                label = str(value.get("mailbox") or value.get("name") or "").strip().lower()
+                if label == needle:
+                    return True, bool(value.get("alive", True)), value.get("dead_since")
+            elif str(value or "").strip().lower() == needle:
+                return True, True, None
+        return False, True, None
+
+    def _mailbox_exists(self, name):
+        """True when the inbox already holds mail addressed to this name."""
+        where, params = __import__("dunk_inbox").mailbox_where(name)
+        try:
+            with self.inbox._lock:
+                row = self.inbox.db.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE {where}", params).fetchone()
+            return bool(row and row[0])
+        except Exception:                       # noqa: BLE001 - a fallback must not raise
+            return False
+
+    def _mailbox_or_self(self, spec, self_pane_id, strict=False):
         if spec:
-            return self.resolve_mailbox(spec, self_pane_id)[0]
+            return self.resolve_mailbox(spec, self_pane_id, strict=strict)[0]
         if not self_pane_id:
             raise DunkError("no mailbox given and no caller pane to default to")
         return self._own_mailbox(self_pane_id)
@@ -799,15 +1335,41 @@ class Flock:
                 raise DunkError(f"unknown system sender {system_sender!r}")
             if self_pane_id:
                 raise DunkError("a system sender cannot be claimed from a pane")
-        mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id)
+        mailbox, label, pane_id = self.resolve_mailbox(to, self_pane_id, strict=True)
         # The sender is the raw pane id, never a mailbox label. On 2026-10-19
         # wS:p1's mail arrived "from codex poolrad" because the label resolved
         # through a sibling pane; ids are unique and stable.
         sender = system_sender or self_pane_id or None
+        # PM routing: a lane that messages the VP out of habit is redirected
+        # to its project PM (or flagged). The VP reads PM digests, not lane
+        # reports; this is the "routing is wrong" count's other half.
+        redirected = None
+        try:
+            import dunk_pm
+            routing = dunk_pm.load_routing()
+            project = None
+            for name, entry in routing.items():
+                if pane_id and entry["vp_pane"] == pane_id and self_pane_id in entry["members"]:
+                    project = name
+                    break
+            if project:
+                pm_pane, _, mode = dunk_pm.redirect(self_pane_id, routing)
+                if pm_pane:
+                    if mode == "redirect":
+                        mailbox, label, pane_id = self.resolve_mailbox(pm_pane, self_pane_id)
+                        body = f"[redirected from the VP to the {project} PM]\n\n{body}"
+                        redirected = {"from": "vp", "to": pm_pane, "project": project}
+                    else:
+                        subject = f"[lane mail to VP: {project}] {subject or ''}".strip()
+                        redirected = {"flag": project}
+        except Exception:  # noqa: BLE001 - routing must never block a send
+            redirected = None
         attachments = [attach] if isinstance(attach, str) else list(attach or ())
         message = self.inbox.send(mailbox, body, subject=subject, sender=sender,
                                   mailbox_label=label, pane_id=pane_id,
                                   attachments=attachments)
+        if redirected:
+            message["redirected"] = redirected
         message["notified"] = False
         if notify and pane_id:
             unread = self.inbox.count(mailbox)["unread"]
@@ -872,7 +1434,15 @@ class Flock:
         return None
 
     def inbox_count(self, mailbox=None, self_pane_id=None):
-        return self.inbox.count(self._mailbox_or_self(mailbox, self_pane_id))
+        key = self._mailbox_or_self(mailbox, self_pane_id)
+        lane_panes = []
+        try:
+            import dunk_pm
+            for entry in dunk_pm.load_routing().values():
+                lane_panes.extend(entry["members"])
+        except Exception:  # noqa: BLE001 - a bad routing file must not break counts
+            lane_panes = []
+        return self.inbox.count(key, lane_panes=sorted(set(lane_panes)))
 
     @_as_dunk_error
     def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):
@@ -904,7 +1474,11 @@ class Flock:
         return self.inbox.status(message_id)
 
     @_as_dunk_error
-    def inbox_ack(self, message_ids):
+    def inbox_ack(self, message_ids, mailbox=None, self_pane_id=None):
+        """Ack only messages in the caller's own mailbox. Sender is irrelevant;
+        an id from another mailbox is refused, never marked read there. The
+        internal no-mailbox call (tests, in-process) keeps the old behaviour."""
+        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
         before = {}
         for message_id in ([message_ids] if isinstance(message_ids, str)
                            else list(message_ids)):
@@ -912,15 +1486,15 @@ class Flock:
                 before[message_id] = self.inbox.status(message_id)
             except InboxError:
                 pass
-        result = self.inbox.ack(message_ids)
+        result = self.inbox.ack(message_ids, mailbox=key)
+        result["acked_in"] = key
         for message_id in result.get("changed", []):
             was = before.get(message_id) or {}
             started = was.get("read_at") or was.get("created_at")
-            # How long the recipient held it after picking it up.
-            self.metrics.record(
-                "inbox.acked", pane_id=was.get("pane_id"), mailbox=was.get("mailbox"),
-                sender=was.get("sender"), source="inbox", outcome="ok",
-                duration_ms=int((time.time() - started) * 1000) if started else None)
+            self.metrics.record("inbox.acked", pane_id=was.get("pane_id"), mailbox=key,
+                                sender=was.get("sender"), source="inbox", outcome="ok",
+                                duration_ms=int((self.inbox.get(message_id)["read_at"] - started) * 1000)
+                                if started else None)
         return result
 
     @_as_dunk_error
@@ -1067,6 +1641,104 @@ class Flock:
         return self.tasks.delete(task_id)
 
     @_as_dunk_error
+    def task_note(self, task_id, event="note", reason=None, self_pane_id=None):
+        """Append an explanatory event (e.g. why a task was removed)."""
+        return self.tasks.note(task_id, event=event, actor=self_pane_id,
+                               meta={"reason": reason} if reason else {})
+
+    def turn_start(self, pane_id=None, ttl_s=None, source=None,
+                   self_pane_id=None):
+        """Declare a busy turn for `pane_id` (pi/claude hook or extension).
+
+        The turn holds sends until turn_end, but carries a TTL so a crashed or
+        force-quit agent cannot hold mail forever. The expiry is recorded and
+        reconciled by turn_expire().
+        """
+        pane_id = pane_id or self_pane_id
+        if not pane_id:
+            raise DunkError("turn start requires a pane")
+        ttl = float(ttl_s or TURN_TTL_S)
+        if ttl <= 0:
+            raise DunkError("ttl_s must be positive")
+        now = time.time()
+        state = {"started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
+                 "source": source, "caller": self.current_caller()}
+        with self._lock:
+            self.turns[pane_id] = state
+        self.metrics.record("turn.start", pane_id=pane_id, source=source,
+                            outcome="ok", at=now)
+        return {"pane_id": pane_id, "started_at": now,
+                "expires_at": now + ttl, "ttl_s": ttl, "source": source}
+
+    def turn_end(self, pane_id=None, reason="turn_end", self_pane_id=None):
+        pane_id = pane_id or self_pane_id
+        if not pane_id:
+            raise DunkError("turn end requires a pane")
+        now = time.time()
+        with self._lock:
+            # Keep the ENDED turn instead of popping it: its end time is the only
+            # evidence of IDLENESS the pi extension will ever give us. Popping it
+            # made every pi lane read 'unknown' between turns.
+            state = self.turns.get(pane_id)
+            if state is not None:
+                state["ended_at"] = now
+                state["expires_at"] = 0.0
+        duration = int((now - state["started_at"]) * 1000) if state else None
+        self.metrics.record("turn.end", pane_id=pane_id, reason=reason,
+                            outcome="ok" if state else "unknown", at=now,
+                            duration_ms=duration)
+        return {"pane_id": pane_id, "ended": bool(state), "reason": reason}
+
+    def turn_active(self, pane_id):
+        """True only for an unexpired declared turn. Expiry is the safety."""
+        with self._lock:
+            state = self.turns.get(pane_id)
+            if not state:
+                return False
+            return state["expires_at"] > time.time()
+
+    def turn_expire(self, now=None):
+        """Release expired turns: record the reason, reconcile the caller pid.
+
+        This is the crashed-turn path: no turn_end arrived, so the TTL fires,
+        mail is released, and the event says why. Reconciliation is recorded,
+        not used to extend the hold: a live pid does not prove the turn is
+        still running after the declared deadline.
+        """
+        now = now or time.time()
+        released = []
+        with self._lock:
+            for pane_id, state in list(self.turns.items()):
+                if state["expires_at"] > now:
+                    continue
+                self.turns.pop(pane_id, None)
+                released.append((pane_id, state))
+        for pane_id, state in released:
+            caller = state.get("caller") or {}
+            alive = bool(caller.get("pid") and process_alive(
+                caller.get("pid"), caller.get("start")))
+            log.warning(
+                "turn expired on %s after %.0fs (ttl %.0fs); releasing hold "
+                "(caller pid %s alive=%s)",
+                pane_id, now - state["started_at"], state["ttl_s"],
+                caller.get("pid"), alive)
+            self.metrics.record(
+                "turn.expired", pane_id=pane_id, reason="ttl",
+                outcome="released", at=now,
+                duration_ms=int((now - state["started_at"]) * 1000))
+        return [{"pane_id": pane_id, "ttl_s": state["ttl_s"],
+                 "reason": "ttl"} for pane_id, state in released]
+
+    def set_caller(self, caller):
+        self._caller_state.value = caller
+
+    def current_caller(self):
+        return getattr(self._caller_state, "value", None)
+
+    def clear_caller(self):
+        self._caller_state.value = None
+
+    @_as_dunk_error
     def task_next(self, scope=None, lease_seconds=None, self_pane_id=None):
         """Atomically claim the next task; subscribe if the queue is empty.
 
@@ -1074,6 +1746,7 @@ class Flock:
         daemon pushes the next task when this pane next goes idle instead of
         the agent polling.
         """
+        caller = self.current_caller()
         value = "" if scope is None else str(scope).strip()
         follow_scope = TASK_GLOBAL
         if value in ("", "global"):
@@ -1088,7 +1761,8 @@ class Flock:
             if self_pane_id:
                 local = self.tasks.claim_next(scope=self_pane_id,
                                               pane_id=self_pane_id,
-                                              lease_seconds=lease_seconds)
+                                              lease_seconds=lease_seconds,
+                                              caller=caller)
                 if local.get("task"):
                     return local
         else:
@@ -1096,7 +1770,8 @@ class Flock:
             follow_scope = target
 
         result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
-                                       lease_seconds=lease_seconds)
+                                       lease_seconds=lease_seconds,
+                                       caller=caller)
         if not result.get("task") and self_pane_id:
             with self._lock:
                 self.task_waiters[self_pane_id] = follow_scope
@@ -1138,7 +1813,8 @@ class Flock:
             raise DunkError("task heartbeat requires a known caller pane")
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         return self.tasks.heartbeat(task_id, self_pane_id,
-                                    lease_seconds=lease_seconds)
+                                    lease_seconds=lease_seconds,
+                                    caller=self.current_caller())
 
     @_as_dunk_error
     def task_release(self, task_id, self_pane_id=None):
@@ -1153,7 +1829,10 @@ class Flock:
             panes = {p["pane_id"] for p in self.herdr.list_panes()}
         except Exception:
             panes = None
-        return {"requeued": self.tasks.reap(alive_panes=panes)}
+        source = "live" if getattr(self.herdr, "live", False) else "fixture"
+        return {"requeued": self.tasks.reap(alive_panes=panes,
+                                            alive_source=source,
+                                            caller_alive=process_alive)}
 
     @_as_dunk_error
     def task_stats(self, scope=None, self_pane_id=None):
@@ -1328,8 +2007,31 @@ class Flock:
                             ", ".join(str(p) for p in marked["panes"][:5]))
                 except Exception:  # noqa: BLE001 - maintenance must not die
                     log.exception("inbox undeliverable sweep failed")
+                try:
+                    archived = self.inbox.auto_archive_undeliverable()
+                    # A retired pane's mailbox is not undeliverable YET - it is
+                    # retained and quiet. Same 24h age, same retention, no alerts.
+                    try:
+                        import dunk_panes
+                        retired_boxes = {box for record in dunk_panes.all_retired()
+                                         for box in (record.get("mailboxes") or [])}
+                        archived += self.inbox.archive_retired(retired_boxes)
+                    except Exception as error:      # noqa: BLE001 - never break the tick
+                        log.warning("retired-mailbox archive failed: %s", error)
+                    if archived:
+                        self.metrics.record("inbox.archived", pane_id=None,
+                                            source="inbox", outcome="ok",
+                                            reason="undeliverable_24h")
+                        log.info("inbox: auto-archived %d undeliverable message(s) "
+                                 "older than 24h", archived)
+                except Exception:  # noqa: BLE001
+                    log.exception("inbox auto-archive failed")
             try:
-                requeued = self.tasks.reap(alive_panes=panes)
+                source = ("live" if getattr(self.herdr, "live", False)
+                          else "fixture")
+                requeued = self.tasks.reap(alive_panes=panes,
+                                           alive_source=source,
+                                           caller_alive=process_alive)
             except Exception:
                 log.exception("task reaper failed")
                 continue
@@ -1459,6 +2161,7 @@ class Flock:
                 "interval_minutes": d.interval_minutes,
                 "send_count": d.send_count,
                 "skip_count": d.skip_count,
+                "total_skips": d.total_skips,
                 "hold_count": d.hold_count,
                 "created_at": d.created_at,
             } for d in self.dunkers]
@@ -1720,11 +2423,22 @@ class Flock:
                  f" running {command!r}" if command else "")
         return out
 
-    def create_workspace(self, label=None, cwd=None, command=None, focus=False):
-        """New herdr workspace (with its first tab and pane). `command`, if
-        given, is typed + Enter into that pane once it exists."""
+    def create_workspace(self, label=None, cwd=None, command=None, focus=False,
+                         mailbox=None):
+        """New workspace (with its first tab and pane). `command`, if given, is
+        typed + Enter into that pane once it exists.
+
+        `mailbox` names the lane the new pane IS, and is written into the lane
+        registry as soon as the pane exists. That is the write-back a backend
+        flip needs: without it the only record of the lane is a title the agent
+        itself may overwrite, and a restore produces a pane nobody can address.
+        """
         ok, result = self.herdr.create_workspace(label=label, cwd=cwd, focus=focus)
-        return self._after_create(ok, result, command, f"workspace {label or ''}".strip())
+        out = self._after_create(ok, result, command, f"workspace {label or ''}".strip())
+        if mailbox and out.get("pane_id"):
+            self._remember_lane(out["pane_id"], str(mailbox).strip())
+            self._title_pane(out["pane_id"], mailbox)
+        return out
 
     def create_tab(self, workspace=None, label=None, cwd=None, command=None, focus=False,
                    self_pane_id=None):
@@ -2085,6 +2799,11 @@ class Flock:
         ids here, not labels; the typed commands above resolve labels. Returns
         {"ok", "result" (parsed JSON when herdr printed JSON, else None),
         "text" (raw stdout), "error" (herdr's message, if any)}."""
+        if getattr(self.herdr, "name", "herdr") != "herdr":
+            raise DunkError(
+                "the herdr passthrough is not available with the "
+                f"{getattr(self.herdr, 'name', 'unknown')} terminal backend; "
+                "use the dedicated workspace/tab/pane commands instead")
         argv = shlex.split(str(command or "")) if not isinstance(command, list) \
             else [str(a) for a in command]
         if argv and argv[0] == "herdr":
@@ -2139,6 +2858,10 @@ class Flock:
         'wait', 'notification', ...). This is how an agent discovers what the
         `herdr` passthrough can do; `herdr api schema --json` has the full
         machine-readable schema."""
+        if getattr(self.herdr, "name", "herdr") != "herdr":
+            raise DunkError(
+                "herdr help is not available with the "
+                f"{getattr(self.herdr, 'name', 'unknown')} terminal backend")
         topic = str(topic or "").strip().split()
         argv = topic[:1] if topic else ["--help"]
         code, out, err = self.herdr._run(argv, timeout=10)
@@ -2401,7 +3124,7 @@ class Flock:
                 dunker.status = "Queued (typing)"
                 self._enqueue(message)
                 return {"id": dunker.id, "ok": None, "queued": True, "message_id": message.id,
-                        "message": f"queued: someone is typing in {dunker.target_label()}"}
+                        "message": f"queued: the box in {dunker.target_label()} would not clear"}
             dunker.status = "Sending..."
             sent, ok, message = self.send_guarded(
                 dunker.target_pane_id, lambda: self._do_send(dunker),
@@ -2415,7 +3138,7 @@ class Flock:
                 self._enqueue(queued)
                 return {"id": dunker.id, "ok": None, "queued": True,
                         "message_id": queued.id,
-                        "message": f"queued: someone is typing in {dunker.target_label()}"}
+                        "message": f"queued: the box in {dunker.target_label()} would not clear"}
             stamp = time.strftime("%H:%M:%S")
             dunker.status = f"Tested {stamp}" if ok else "Test failed"
             return {"id": dunker.id, "ok": ok, "queued": False, "message": message}
@@ -2549,6 +3272,9 @@ class Flock:
                                           name=f"outbox-{message.pane_id}", daemon=True)
                 self.outbox_threads[message.pane_id] = thread
                 thread.start()
+        # Persist on enqueue, not only on dunk changes: a restart between a hold
+        # and its delivery used to discard the message silently.
+        self._save()
 
     def _unwedge(self, pane_id, content, since):
         """Last resort when a box has held the same text, unchanged, for
@@ -2596,7 +3322,9 @@ class Flock:
                     if message is None:
                         self.outbox.pop(pane_id, None)
                         return
-                if self._clear_to_send(pane_id):
+                # A message sent with the hold bypassed must not be gated here
+                # either: `--ignore-typing` means this send does not ask the pane.
+                if not message.hold_while_typing or self._clear_to_send(pane_id):
                     if held_since is not None:
                         log.info("message %s -> %s: box clear after %ds, delivering",
                                  message.id, pane_id, int(time.time() - held_since))
@@ -2618,8 +3346,9 @@ class Flock:
                     held_since = time.time()
                     with self._lock:
                         message.holds += 1
-                        self.last_message = f"Holding message for {message.target_label}: someone is typing"
-                    log.info("message %s -> %s: holding, someone is typing in the input box",
+                        self.last_message = (f"Holding message for {message.target_label}: "
+                                             f"the box would not clear")
+                    log.info("message %s -> %s: holding, the box would not clear",
                              message.id, pane_id)
                 # Watch what is in the box. While it changes someone is
                 # writing and we wait; while it does not, we are wedged.
@@ -2711,6 +3440,10 @@ class Flock:
         with self._lock:
             if ok:
                 dunker.send_count += 1
+                # A delivered send ends the run: the skip counter belongs to the
+                # run, not to the dunk's lifetime, or a threshold eventually fires
+                # on accumulated history rather than on a current condition.
+                dunker.skip_count = 0
                 dunker.last_sent_at = time.time()
                 dunker.last_error = None
                 dunker.last_sent_text = text
@@ -2788,12 +3521,34 @@ class Flock:
                 dunker.awaiting_consumption = False
         return not pending
 
+    def read_screen(self, pane_id, lines=None, ansi=True):
+        """The one way a component asks the pane what it looks like.
+
+        Three components disagreed with the pane in one day (send believed a claim,
+        delivery and the queue asked different questions, flush misread a bordered
+        row). The only one that never lied was the one reading the pane, so every
+        question about the pane goes through here: one read, one parser, one fixture
+        can prove all of them.
+        """
+        try:
+            return self.herdr.read_pane(pane_id, lines=lines or CONSUMPTION_READ_LINES,
+                                        source="visible", ansi=ansi)
+        except Exception:                   # noqa: BLE001 - unreadable is None, not an error
+            return None
+
+    def read_box(self, pane_id):
+        """(screen, text, detail) for a pane's input box, from one read."""
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return None, "", "the pane could not be read"
+        text, detail = box_text(screen)
+        return screen, text, detail
+
     def _typing_in(self, pane_id, last_sent_text=None, awaiting_consumption=False):
         """True if someone is composing text in `pane_id`'s input box. See
         `_human_typing` for the reasoning; this is the pane-level form used by
         dunks and by queued direct messages alike."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return False
         if _modal_open(screen):
@@ -2810,19 +3565,76 @@ class Flock:
         # to wait behind; `_ensure_box_clear` flushes it before the next send.
         return not self._looks_like_ours(pane_id, typed)
 
-    def _clear_to_send(self, pane_id, last_sent_text=None, awaiting_consumption=False,
-                       stop_event=None):
+    def send_blocker(self, pane_id, last_sent_text=None, awaiting_consumption=False):
+        """Why a send cannot go now, as (state, reason), or None if it can.
+
+        One function, because two checks gave two answers: `delivery` said ready
+        while the queue held the mail, and there was no way to see which was right.
+        Every gate - delivery_state, the queued-message worker, send_text - asks
+        this, so they cannot disagree again.
+        """
+        # POLICY (owner, 2026-10-23): a busy agent is NOT a hold reason. Every
+        # harness we use queues a message typed while it is working, so holding it
+        # here was solving a problem that did not exist and costing the owner
+        # minutes. The only two reasons to refuse are a DEAD session (read, not
+        # claimed) and a HUMAN mid-sentence in this box.
+        marker = self._dead_session(pane_id)
+        if marker:
+            return ("dead", f"dead session ({marker})")
+        if self._session_process_gone(pane_id):
+            return ("dead", "the lane's recorded process is gone")
+        screen, text, _detail = self.read_box(pane_id)
+        if screen is not None and _modal_open(screen):
+            # A panel is not a draft. Its selected row sits where a draft would, and
+            # keys/Enter are how a panel is dismissed - holding them behind it is how
+            # a queued Escape waited for ever.
+            return None
+        # NO 'A HUMAN IS TYPING' HOLD. Every message the owner sends goes through this
+        # daemon (web, phone, Telegram) - none of those paths type into a pane - so a
+        # non-empty box is not evidence of a person. Foreign text is PRESERVED at send
+        # time (submitted first, or left untouched), never a reason to stop the queue.
+        # A harness that does not queue what we type while it works would LOSE the
+        # message (codex: measured). Hold for that tool only, and say why.
+        harness = self._pane_harness(pane_id)
+        if not HARNESS_QUEUES_WHILE_BUSY.get(harness, False):
+            # A working indicator sits a few lines above the composer (codex prints
+            # "• Working (54m · esc to interrupt)" above its status row), so this one
+            # check looks a little wider than the 3-line status window.
+            if screen and _status_marker(screen, WORKING_MARKERS, lines=8,
+                                         placeholder_safe=True, dim_ok=True):
+                return ("blocked", f"{harness or 'this harness'} does not queue text typed "
+                                   f"during a turn (measured: notices are lost), so this waits "
+                                   f"for the turn to end")
+        return None
+
+    def _pane_harness(self, pane_id):
+        try:
+            pane = self.herdr.get_pane(pane_id) or {}
+        except Exception:                       # noqa: BLE001
+            return None
+        return str(pane.get("agent") or "").lower() or None
+
+    def _clear_to_send(self, pane_id, last_sent_text=None,
+                       awaiting_consumption=False, stop_event=None):
         """True once the box has read clear on two checks TYPING_SETTLE_S
         apart, so a pause between thoughts is not mistaken for being done.
-        False as soon as either check sees typing (or the wait is stopped)."""
-        if self._typing_in(pane_id, last_sent_text, awaiting_consumption):
+        False as soon as either check sees typing, a declared turn is active,
+        or the wait is stopped."""
+        if self.send_blocker(pane_id, last_sent_text, awaiting_consumption):
             return False
         if stop_event is not None:
             if stop_event.wait(TYPING_SETTLE_S):
                 return False
         else:
             time.sleep(TYPING_SETTLE_S)
-        return not self._typing_in(pane_id, last_sent_text, awaiting_consumption)
+        # The second read is for REDRAW safety (a pane that repaints mid-send), not for
+        # somebody's text: text in the box is preserved at send time now, so it is no
+        # longer a reason to return False. A screen that cannot be read is inconclusive
+        # and does not hold - the send's own confirmation decides.
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return True
+        return not self._dead_session(pane_id)
 
     def _box_holds(self, pane_id, text):
         """True if `text` still sits in the pane's input box, False if nothing
@@ -2833,8 +3645,7 @@ class Flock:
         and the send stands. Only a pane we cannot read at all is inconclusive,
         and that is the case the strict rule is for. Conflating the two made
         every send to a shell pane report failure."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return None
         if _modal_open(screen):
@@ -2846,17 +3657,74 @@ class Flock:
             return False
         return _is_our_send(shown, text, True)
 
-    def _press_until_submitted(self, pane_id, text):
-        """Press Enter until `text` has left the input box. Returns
+    def _session_process_gone(self, pane_id):
+        """True when the lane's own recorded process is no longer running.
+
+        A second READING for the dead refusal, alongside the screen marker: a status
+        field can stick (a pane reported 'ready' all night while its session was
+        gone), and a process that is not there cannot be argued with.
+        """
+        try:
+            leases = self.tasks.leases_for_pane(pane_id)
+        except Exception:                   # noqa: BLE001
+            return False
+        for lease in leases:
+            pid = lease.get("caller_pid")
+            if not pid:
+                continue
+            from dunk_callers import process_alive
+            if not process_alive(int(pid), lease.get("caller_start")):
+                return True
+        return False
+
+    def _dead_session(self, pane_id):
+        """Return the dead-session marker showing at the BOTTOM of the pane, or None.
+
+        Only the tail counts: a live pane whose transcript quotes the phrase is
+        not dead, and refusing it would make the guard the outage.
+        """
+        # A plain read: a banner needs no styling, and the styled read is the one
+        # the send path already pays for. Same reader, cheaper form.
+        screen = self.read_screen(pane_id, lines=40, ansi=False)
+        return _banner_marker(screen, DEAD_SESSION_MARKERS)
+
+    def _flush_once(self, pane_id, text):
+        """One Enter, one short check. Used INSIDE the typing lock, so it must be short.
+
+        The full retry loop (four presses, seconds apart) is right for a confirmed send
+        but wrong here: held under the global typing lock it delays every other sender,
+        which is the stall class the lock exists to prevent. If one press does not clear
+        the box, the send is deferred and the outbox worker tries again.
+        """
+        ok, detail = self.herdr.send_keys(pane_id, "Enter")
+        if not ok:
+            return False
+        time.sleep(SUBMIT_POLL_S[0])
+        return self._box_holds(pane_id, text) is False
+
+    def _press_until_submitted(self, pane_id, text, first_pressed=False):
+        """Press Enter (each press under the typing mutex) until `text` leaves the box.
+
+        Press Enter until `text` has left the input box. Returns
         (ok, detail). Only ever presses again while our own text is still
         there, so it can never submit something a human typed afterwards."""
+        dead = self._dead_session(pane_id)
+        if dead:
+            # One honest refusal naming the pane's own state, instead of four
+            # Enter presses into a dead composer and a misleading "did not submit".
+            return False, f"agent session is dead ({dead}); not submitting into a dead composer"
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
             if gap:
                 time.sleep(gap)
-            ok, detail = self.herdr.send_keys(pane_id, "Enter")
-            if not ok:
-                return False, detail
+            if first_pressed and attempt == 1:
+                # The first Enter went out with the text, inside the mutex.
+                pass
+            else:
+                with self._typing(pane_id):      # one keystroke burst per attempt
+                    ok, detail = self.herdr.send_keys(pane_id, "Enter")
+                if not ok:
+                    return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
             last_hold = None
             for wait in SUBMIT_POLL_S:
@@ -2908,20 +3776,39 @@ class Flock:
             return True
         if not shown:
             return False
+        # THE DAEMON TRACKS WHAT IT TYPED. Two sources, both exact:
+        #  - what it has typed to this pane recently (in memory), and
+        #  - what it is TRYING to deliver (the queued outbox text for this pane),
+        # so a nudge that was typed but not yet submitted is recognised as ours.
+        # A long notice WRAPS, so the box may hold only its first line: the test is
+        # prefix-in-either-direction, not equality.
         with self._lock:
-            recent = list(self.sent_text_by_pane.get(pane_id, []))
-        return any(_is_our_send(shown, text, True) for text in recent)
+            candidates = list(self.sent_text_by_pane.get(pane_id, []))
+            candidates += [m.text for m in self.outbox.get(pane_id) or []
+                           if m.status == "queued" and m.text]
+        shown_c = _collapse(shown)
+        for text in candidates:
+            full = _collapse(text)
+            if not full:
+                continue
+            if full.startswith(shown_c) or shown_c.startswith(full[:CONSUMPTION_PREFIX_CHARS]):
+                return True
+        return any(_is_our_send(shown, text, True) for text in candidates)
 
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
         when there is no box to read."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return None
         return _typed_text(screen)
 
     def press_keys(self, pane_id, keys):
+        """Press a sequence, under the global typing mutex (one burst)."""
+        with self._typing(pane_id):
+            return self._press_keys_unlocked(pane_id, keys)
+
+    def _press_keys_unlocked(self, pane_id, keys):
         """Press keys in a pane. When the last key is Enter and the box holds
         text, the press is confirmed the same way a text send is: Enter does
         not reliably submit, so pressing it once and reporting success was how
@@ -2939,20 +3826,55 @@ class Flock:
             return self.herdr.send_keys(pane_id, [keys[-1]])
         return self._press_until_submitted(pane_id, pending)
 
-    def submit_text(self, pane_id, text, press_enter=True):
-        """Type `text` into a pane and confirm it was actually submitted."""
-        ok, detail = self.herdr.send_text(pane_id, text)
-        if not ok:
-            return False, detail
-        self._remember_typed(pane_id, text)
-        if not press_enter:
-            return True, "sent"
+    def submit_text(self, pane_id, text, press_enter=True, check_box=False):
+        """Type `text` into a pane, press Enter, and confirm it left the box.
+
+        The box check, the typing and the first Enter happen inside ONE hold of the
+        global typing mutex, so a human who starts typing in that gap cannot have our
+        text spliced onto their sentence. Everything that WAITS happens outside the
+        mutex: under the guard the confirmation is a single short check (the caller
+        re-attempts), and an unguarded call keeps the full careful loop.
+        """
+        if not hasattr(self, "_box_ctx"):
+            self._box_ctx = threading.local()
+        guarded = getattr(self._box_ctx, "enabled", False)
+        # The guard already checked the box under the same lock; checking again would
+        # be a second read of a decision just made.
+        check_box = (check_box or guarded) and not getattr(self._box_ctx, "checked", False)
+        allow_modal = getattr(self._box_ctx, "allow_modal", False)
+        if not getattr(self._box_ctx, "checked", False):
+            # A direct caller has not been through the guard: refuse a dead session
+            # BEFORE pressing anything (the guard does this itself for its own sends).
+            marker = self._dead_session(pane_id)
+            if marker:
+                return False, (f"agent session is dead ({marker}); "
+                               "not submitting into a dead composer")
         pane = next((item for item in self.herdr.list_panes()
                      if item.get("pane_id") == pane_id), None)
-        if pane is not None and not pane.get("agent"):
-            # A bare shell has no chat input box to read back.
-            return self.herdr.send_keys(pane_id, "Enter")
-        return self._press_until_submitted(pane_id, text)
+        shell = pane is not None and not pane.get("agent")
+        with self._typing(pane_id):
+            if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
+                why = self._last_block_reason.get(pane_id) or "draft"
+                return False, f"{BOX_HOLD} ({why})"
+            ok, detail = self.herdr.send_text(pane_id, text)
+            if not ok:
+                return False, detail
+            self._remember_typed(pane_id, text)
+            if not press_enter:
+                return True, "sent"
+            ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            if not ok:
+                return False, detail
+            if shell:
+                # A bare shell has no chat input box to read back.
+                return True, "sent"
+        if guarded:
+            # SHORT: one check, no retry loop, no sleeps. The caller re-attempts.
+            time.sleep(SUBMIT_POLL_S[0])
+            if self._box_holds(pane_id, text) is False:
+                return True, "sent"
+            return False, "text did not submit; it is still in the pane's input box"
+        return self._press_until_submitted(pane_id, text, first_pressed=True)
 
     def flush_box(self, target, self_pane_id=None):
         """Submit whatever is sitting unsent in a pane's input box.
@@ -2964,15 +3886,16 @@ class Flock:
         "yes, send that" for those cases."""
         pane = self.resolve_target(target, self_pane_id)
         pane_id = pane["pane_id"]
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
-        shown = _typed_text(screen) if screen is not None else None
-        if shown is None:
+        screen, shown, detail = self.read_box(pane_id)
+        if screen is None:
             raise DunkError(f"could not read the input box of {pane_id}")
         label = pane.get("tab_label") or pane_id
         if not shown:
+            # Say WHAT was read, not just 'nothing to do': the box that survived two
+            # hours did so behind a bare 'already clear'.
             return {"pane_id": pane_id, "target_label": label, "flushed": False,
-                    "text": None, "message": "the input box is already empty"}
+                    "text": None, "detail": detail,
+                    "message": f"nothing to submit: {detail}"}
         ok, detail = self._press_until_submitted(pane_id, shown)
         log.info("flush %s: %s (%s)", pane_id, "submitted" if ok else "FAILED", detail)
         return {"pane_id": pane_id, "target_label": label, "flushed": ok,
@@ -2982,8 +3905,7 @@ class Flock:
         """What the pane is showing, as ("modal"|"box", text). A panel and a
         draft both stop a send, but they are cleared in different ways, so the
         stale-state tracking has to tell them apart."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None:
             return ("gone", "")
         if _modal_open(screen):
@@ -3025,17 +3947,120 @@ class Flock:
         this is the other half of that pair - without it a Codex pane that was
         merely working kept refusing a notification, 14 times in 82 seconds."""
         time.sleep(DRAFT_CONFIRM_S)
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        screen = self.read_screen(pane_id)
         if screen is None or _modal_open(screen):
             return None
         return _typed_text(screen) or None
 
+    def resolve_lanes(self):
+        """Every pane that has an agent in it: the set the dispatcher may feed.
+
+        A bare shell has no agent_status and is not a lane. `list_panes_grouped`
+        carries the labels, so a dispatch line can name the lane it fed.
+        """
+        try:
+            panes = self.herdr.list_panes_grouped()
+        except Exception as exc:                # noqa: BLE001 - a backend outage is a refusal
+            raise DunkError(f"cannot list panes: {exc}")
+        lanes = []
+        for pane in panes:
+            if not pane.get("pane_id"):
+                continue
+            lanes.append({"pane_id": pane["pane_id"],
+                          # pane_pid lets capture read the session from the PROCESS
+                          # instead of guessing from a cwd or trusting a stale launch row.
+                          "pane_pid": pane.get("pane_pid"),
+                          "agent": pane.get("agent"),
+                          "cwd": pane.get("cwd"),
+                          "agent_name": (pane.get("agent_name") or pane.get("tab_label")
+                                         or pane.get("label") or pane["pane_id"]),
+                          "tab_label": pane.get("tab_label"),
+                          "agent_status": pane.get("agent_status")})
+        return lanes
+
+    def delivery_state(self, pane_id, status=None, pane=None, screen=None):
+        """Classify whether this pane can receive a message, and why not.
+
+        `status` comes from the pane list (working/idle). The screen decides the
+        blocked states: a dead session, a paused goal, a full context, or a draft
+        sitting unsubmitted in the box. None of those are "working", and all of
+        them starve a lane silently if a dispatcher treats them as idle.
+        """
+        if status is None and pane is not None:
+            status = pane.get("agent_status")
+        if status is None:
+            # The pane's own report beats our guess: a lane that says it is
+            # working is working even if its screen has no composer to read.
+            try:
+                status = self.herdr.agent_status(pane_id)
+            except Exception:                   # noqa: BLE001 - status is optional
+                status = None
+        if screen is None:
+            screen = self.read_screen(pane_id)
+        if screen is None:                      # an unreadable pane is unknown, not ready
+            return {"state": "unknown", "reason": "pane unreadable"}
+        typed = None if _modal_open(screen) else _typed_text(screen)
+        state, reason = classify_delivery(screen, status, typed=typed)
+        foreign = bool(typed) and not self._looks_like_ours(pane_id, typed)
+        # A hold that the classifier cannot see (a declared turn, a stale busy
+        # report) is still a hold: report it as blocked with that reason, so
+        # `delivery` and the queue never disagree.
+        # `working` is INFORMATION now, not a gate: the harness queues a message
+        # typed while it works. `deliverable` is the field a caller must consult, so
+        # a state can never be mistaken for permission again.
+        deliverable = state in ("ready", "working")
+        return {"state": state, "reason": reason, "deliverable": deliverable,
+                "foreign_text": foreign,
+                "foreign_excerpt": (" ".join(typed.split())[:60] if foreign else None)}
+
+    def clear_box(self, target, self_pane_id=None, reason=None):
+        """CLEAR an unsubmitted draft (Ctrl-U, Escape). The destructive pair to
+        `flush_box`, which submits what is there.
+
+        Use this when submit has failed - the nudge that would not take - because
+        submitting is what we wanted and it did not work. Use `flush_box` when the
+        text simply never went in.
+
+        Ctrl-U clears the input line, then Escape leaves any open modal without
+        submitting anything. Every flush is logged: clearing someone's draft is a
+        destructive act even when the draft is our own text.
+        """
+        self.require_superuser(self_pane_id, "clear_box")
+        pane = self.resolve_target(target, self_pane_id)
+        pane_id = pane["pane_id"]
+        # A pane record may carry tab_label, label, name or none of them; two
+        # spellings of the same lane have already bitten the ack path, so the
+        # label is looked up rather than assumed.
+        label = (pane.get("tab_label") or pane.get("label") or pane.get("name")
+                 or pane.get("agent_name") or pane_id)
+        before = self.delivery_state(pane_id)
+        if before["state"] == "ready":
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "before": before,
+                    "reason": "nothing to clear: the input box is already clear"}
+        if before["state"] == "working":
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "before": before,
+                    "reason": "the lane is working; a clear would interrupt it"}
+        try:
+            with self._typing(pane_id):
+                self.herdr.send_keys(pane_id, "C-u")
+                self.herdr.send_keys(pane_id, "Escape")
+        except Exception as exc:
+            raise DunkError(f"flush failed for {pane_id}: {exc}")
+        after = self.delivery_state(pane_id)
+        log.warning("flushed pane %s by %s (%s): %s -> %s", pane_id, self_pane_id,
+                    reason or "no reason given", before["state"], after["state"])
+        return {"pane_id": pane_id, "target_label": label, "flushed": True,
+                "before": before, "after": after, "by": self_pane_id, "reason": reason}
+
     def _ensure_box_clear(self, pane_id, allow_modal=False):
         """Make the input box ready to type into. Our own text stranded by a
-        failed submit is flushed with Enter; a human's draft is left alone."""
-        screen = self.herdr.read_pane(pane_id, lines=CONSUMPTION_READ_LINES,
-                                      source="visible", ansi=True)
+        failed submit is flushed with Enter; a human's draft is left alone; a
+        declared active turn holds the send."""
+        # Busy is not a reason to wait (owner policy, 2026-10-23): the harness queues
+        # what we type while it works. Only a human mid-sentence holds a send.
+        screen = self.read_screen(pane_id)
         if screen is None:
             return True                      # unreadable: nothing to go on
         if _modal_open(screen):
@@ -3049,20 +4074,22 @@ class Flock:
             return True
         if self._looks_like_ours(pane_id, shown):
             self._last_block_reason[pane_id] = "stranded"
-            log.info("%s: our previous send is stranded in the box; submitting it first",
+            log.info("%s: our previous send is stranded in the box; submitting it",
                      pane_id)
-            ok, _detail = self._press_until_submitted(pane_id, shown)
-            return ok
-        still = self._draft_persists(pane_id)
-        if still is None:
-            return True                      # a redraw, not a draft
-        if self._looks_like_ours(pane_id, still):
-            ok, _detail = self._press_until_submitted(pane_id, still)
-            return ok
-        self._last_block_reason[pane_id] = "draft"
-        log.info("%s: holding, the input box still holds a draft: %r",
-                 pane_id, still[:60])
-        return False                         # someone is writing
+            if self._flush_once(pane_id, shown):
+                return True
+            self._last_block_reason[pane_id] = "stranded-will-not-submit"
+            return False
+        # The box holds text we did not type. PRESERVE it: submit it (so it reaches the
+        # agent rather than being clobbered), and only then type ours. If it will not
+        # submit, leave it exactly as it is and deliver on a later attempt - never
+        # overwrite somebody's text and never stall the whole queue behind it.
+        log.info("%s: box holds text we did not type (%r); submitting it to preserve it",
+                 pane_id, shown[:60])
+        if self._flush_once(pane_id, shown):
+            return True
+        self._last_block_reason[pane_id] = "foreign-text-will-not-submit"
+        return False
 
     def _lock_for(self, pane_id):
         with self._lock:
@@ -3085,16 +4112,187 @@ class Flock:
 
         Returns (sent, ok, detail): sent=False means a draft appeared and
         nothing was typed."""
-        with self._lock_for(pane_id):
-            if hold_while_typing and not self._ensure_box_clear(pane_id, allow_modal):
-                log.info("%s: draft appeared while waiting for the send lock; not typing",
-                         pane_id)
-                return False, None, "someone started typing"
+        # No lock here: the callable that types (submit_text, press_keys) takes the
+        # mutex around its own keystroke burst, with the box check inside it. A lock
+        # held out here would cover the submit confirmation, which waits and retries -
+        # the first version of this lock held it for 20s on one pane and every other
+        # sender timed out.
+        # Two locks, two jobs:
+        #  - _lock_for(pane_id) serialises WHOLE sends to one pane, so two messages
+        #    cannot interleave their bursts into the same box (the per-pane test).
+        #  - the global typing mutex inside submit_text serialises each keystroke
+        #    burst across the whole fleet (the owner's rule).
+        # The dead check here is read-free (a plain read, not the styled one) so the
+        # styled-read budget is unchanged; the box check happens inside the burst.
+        with self._lock_for(pane_id), self._typing(pane_id):
+            if hold_while_typing:
+                marker = self._dead_session(pane_id)
+                if marker:
+                    return False, None, f"dead session ({marker})"
+                if self._session_process_gone(pane_id):
+                    return False, None, "the lane's recorded process is gone"
+                if not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
+                    why = self._last_block_reason.get(pane_id) or "draft"
+                    return False, None, f"{BOX_HOLD} ({why})"
             try:
-                ok, detail = send()
+                with self._box_check(hold_while_typing, allow_modal, already_checked=True):
+                    ok, detail = send()
             except Exception as error:  # noqa: BLE001 - report, never crash a caller
                 return True, False, str(error)
+            if not ok and str(detail or "").startswith(BOX_HOLD):
+                # The box was not ours to type into: that is a HOLD (the message
+                # stays queued), not a failed send.
+                return False, None, detail
             return True, ok, detail
+
+    @contextlib.contextmanager
+    def _box_check(self, enabled, allow_modal=False, already_checked=False):
+        """Tell the typing primitive how this send treats the box.
+
+        `enabled` is the hold (a bypassed send does not read the box), `allow_modal`
+        is the key-press case: a panel is dismissed by keys, so keys go through it
+        while text waits for it.
+        """
+        if not hasattr(self, "_box_ctx"):
+            self._box_ctx = threading.local()
+        # A threading.local has no attributes in a thread that never set them: read
+        # them with defaults, or the first send in every worker thread raises.
+        previous = (getattr(self._box_ctx, "enabled", True),
+                    getattr(self._box_ctx, "allow_modal", False))
+        self._box_ctx.enabled = enabled
+        self._box_ctx.allow_modal = allow_modal
+        self._box_ctx.checked = already_checked
+        try:
+            yield
+        finally:
+            self._box_ctx.enabled, self._box_ctx.allow_modal = previous
+            self._box_ctx.checked = False
+
+    @contextlib.contextmanager
+    def _typing(self, pane_id, timeout_s=None):
+        """The global typing mutex, held for one keystroke burst."""
+        timeout_s = TYPING_LOCK_TIMEOUT_S if timeout_s is None else timeout_s
+        started = time.time()
+        acquired = self.typing_lock.acquire(timeout=timeout_s)
+        waited = time.time() - started
+        if not acquired:
+            raise DunkError(
+                f"the typing lock was held for more than {int(timeout_s)}s by "
+                f"{self._typing_owner}; refusing to type concurrently")
+        previous, self._typing_owner = self._typing_owner, (pane_id, time.time())
+        if waited > TYPING_LOCK_LOUD_S:
+            self.typing_contentions += 1
+            log.warning("typing lock contended for %dms: holder was %s, waiter %s",
+                        int(waited * 1000), previous, pane_id)
+        try:
+            yield
+        finally:
+            self._typing_owner = previous
+            self.typing_lock.release()
+
+    def _claude_busy(self, pane_id, pane=None):
+        """True only when Claude's own session reports status=busy AND that report
+        is fresh enough to believe.
+
+        A busy report is a REMEMBERED state from another process: it froze the fleet
+        for eight and a half hours on 2026-10-23 while the pane sat with an empty
+        prompt and no turn. So the hold is bounded: if the session has said busy for
+        longer than CLAUDE_BUSY_TTL_S while this pane's box reads clear and no turn
+        is active, the report is stale, the hold is released, and the release is
+        logged with both numbers. The pane is the evidence; the status file is a
+        claim about it.
+        """
+        if pane is None:
+            try:
+                pane = self.herdr.get_pane(pane_id)
+            except Exception:  # noqa: BLE001 - never break a send on a status probe
+                return False
+        if not pane or str(pane.get("agent") or "").lower() != "claude":
+            return False
+        try:
+            busy = self.claude_status.status_for_pane(pane) == "busy"
+        except Exception:  # noqa: BLE001
+            return False
+        if not busy:
+            self._claude_busy_since.pop(pane_id, None)
+            return False
+        # A claim can be WRONG, not merely stale: if it names a session whose
+        # process is gone (the dead-pane case), the hold is wrong NOW and waiting
+        # for the TTL would be a delay on a known-false claim.
+        try:
+            session = self.claude_status.session_for_pane(pane)
+        except Exception:                   # noqa: BLE001 - a claim we cannot read is not a claim
+            session = None
+        gone = self._claim_names_a_dead_session(session)
+        if gone:
+            log.warning("releasing the hold on %s: %s - the claim is wrong, not stale "
+                        "(claude reports busy for that cwd)", pane_id, gone)
+            self._claude_busy_since.pop(pane_id, None)
+            return False
+        since = self._claude_busy_since.setdefault(pane_id, time.time())
+        held = time.time() - since
+        if held <= CLAUDE_BUSY_TTL_S:
+            return True
+        # Long "busy" report. The TTL is for a claim whose PANE CONTRADICTS it -
+        # not for a claim that is merely long. par-e ran a 75-minute byte job with
+        # a clear box, and releasing then would have typed into a working agent.
+        # So the release needs POSITIVE evidence of idleness, not the absence of a
+        # draft: no declared turn, no draft, and the pane must not show that it is
+        # offering an interrupt.
+        if self.turn_active(pane_id) or self._typing_in(pane_id):
+            return True
+        if not self._pane_is_quietly_idle(pane_id):
+            return True
+        log.warning("releasing the hold on %s after %d min of 'busy' (TTL %ds): the "
+                    "report is STALE, not wrong - the session is running and still "
+                    "says busy, but the pane shows no turn and a clear box",
+                    pane_id, held / 60, CLAUDE_BUSY_TTL_S)
+        self._claude_busy_since.pop(pane_id, None)
+        return False
+
+    def _pane_is_quietly_idle(self, pane_id):
+        """True only when the pane itself says nothing is happening.
+
+        The distinction that matters: a claim can be long and TRUE (a 75-minute
+        byte job), and releasing a true claim interrupts live work. A draft-free box
+        is not evidence of idleness - the pane must report an idle status and must
+        not be showing a working indicator or an interrupt hint.
+        """
+        try:
+            pane = self.herdr.get_pane(pane_id) or {}
+        except Exception:                   # noqa: BLE001
+            return False                    # cannot see it -> do not release
+        # 'unknown' is the pane record's way of saying it does not know: ask the
+        # status source rather than treating a word as evidence.
+        status = str(pane.get("agent_status") or "").lower()
+        if status in ("", "unknown"):
+            try:
+                status = str(self.herdr.agent_status(pane_id) or "").lower()
+            except Exception:               # noqa: BLE001
+                status = ""
+        if status not in ("idle", "done"):
+            return False
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return False
+        state, _reason = classify_delivery(screen, "idle",
+                                           typed=None if _modal_open(screen) else _typed_text(screen))
+        return state == "ready"
+
+    def _claim_names_a_dead_session(self, session):
+        """A sentence naming why a busy claim is WRONG rather than stale, or None."""
+        if not session:
+            return None
+        pid = session.get("pid")
+        if not pid:
+            return None
+        try:
+            from dunk_callers import process_alive
+        except ImportError:                 # the watchdog-style import must never break a send
+            return None
+        if process_alive(int(pid)):
+            return None
+        return f"the session named in the claim is gone (pid {pid} is not running)"
 
     def _human_typing(self, dunker):
         """True if someone is composing text in the target's input box right
@@ -3128,7 +4326,14 @@ class Flock:
                     if remaining <= 0:
                         break
                     minutes, seconds = divmod(int(remaining + 0.999), 60)
-                    dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
+                    # Write the countdown under the lock and only while the dunk
+                    # is still live. A closed dunk's thread used to write one
+                    # more "Next: 60:00" after close_target set "Target closed",
+                    # so a stopped dunk could report itself as scheduled again.
+                    with self._lock:
+                        if stop_event.is_set() or not dunker.running:
+                            return
+                        dunker.status = f"Next: {minutes:02d}:{seconds:02d}"
                     if stop_event.wait(min(1.0, remaining)):
                         return
 
@@ -3161,9 +4366,9 @@ class Flock:
                         with self._lock:
                             dunker.hold_count += 1
                             dunker.last_held_at = held_since
-                            self.last_message = f"Holding {dunker.id}: someone is typing"
+                            self.last_message = (f"Holding {dunker.id}: the box would not clear")
                             self._save()
-                        log.info("%s -> %s: holding, someone is typing in the input box",
+                        log.info("%s -> %s: holding, the box would not clear",
                                  dunker.id, dunker.target_pane_id)
                     dunker.status = "Held (typing)"
                     if stop_event.wait(TYPING_RECHECK_S):
@@ -3179,6 +4384,7 @@ class Flock:
                             return
                         dunker.next_send_at = time.time() + max(1.0, dunker.interval_minutes * 60)
                         dunker.skip_count += 1
+                        dunker.total_skips += 1
                         dunker.last_skipped_at = time.time()
                         if (dunker.last_error
                                 and "target pane not found" in dunker.last_error):
@@ -3444,6 +4650,118 @@ def _notice_text(mailbox, unread, sender=None, subject=None):
     return f"{head}. Read it with: dunkingsheep inbox read"
 
 
+def _banner_marker(screen, markers):
+    """A marker that starts its own line is a banner; one mid-sentence is prose.
+
+    A dead pane prints `■ Server connection could not be restored` as a status
+    line. A live pane that merely wrote those words into a message shows them
+    inside a sentence. Matching anywhere in the scrollback classified the live
+    pane as dead - which is a guard that becomes the outage.
+    """
+    for row in delivery_rows(screen):
+        stripped = row.lstrip(" \t\u2500\u2502\u25a0\u25cf\u2022*\u00b7-\u2014>|#~[]").lower()
+        for marker in markers:
+            if stripped.startswith(marker):
+                return marker
+    return None
+
+
+def _is_placeholder(text):
+    """True when a line is the harness's empty-box hint rather than a state."""
+    # Strip the box border and the prompt sigil first: the hint is drawn INSIDE the
+    # composer ('│ › Ask Codex to do anything'), so an anchored pattern missed it.
+    plain = _strip_ansi(text or "").strip().lstrip(BOX_LEADING).strip()
+    plain = plain.lstrip("".join(INPUT_BOX_SIGILS)).strip()
+    return any(pattern.search(plain) for pattern in PLACEHOLDER_PATTERNS)
+
+
+def _status_marker(screen, markers, lines=STATUS_TAIL_LINES, *, placeholder_safe=False,
+                   dim_ok=False):
+    """A status decoration on the composer line: '... · Goal paused (/goal resume)'.
+
+    Only the last few non-blank lines count, because the composer is at the very
+    bottom, and only NON-DIM text counts: Claude draws its empty-box hint dim
+    ("new task? /clear to save 497.4k tokens"), so a marker found in dim text is
+    a placeholder, not a state. Reading the placeholder as a state made a healthy
+    lane permanently unreachable while it looked alive - the third variant of
+    that failure in one night.
+    """
+    # Raw rows, NOT delivery_rows: those have the ANSI stripped, and the dim/not-dim
+    # distinction is carried by the escapes.
+    raw = [row for row in (screen or "").splitlines() if _strip_ansi(row).strip()]
+    for marker in markers:
+        for row in raw[-lines:]:
+            # Dim text is excluded by default: a dim line is usually a hint. But some
+            # harnesses draw their WORKING indicator dim (codex prints
+            # "• Working (55m · esc to interrupt)" grey), so a caller that is asking
+            # "is anything happening" may say dim_ok - a false positive there only
+            # delays a message to a harness that would have lost it.
+            plain = (_strip_ansi(row) if dim_ok else _strip_ansi(_bright_text(row))).lower()
+            if marker not in plain:
+                continue
+            if placeholder_safe and _is_placeholder(row):
+                continue
+            return marker
+    return None
+
+
+def delivery_rows(screen):
+    """Non-blank rows with colour codes removed.
+
+    A banner starts with an escape sequence before its glyph, so stripping the
+    glyph alone left '\x1b[31m■ Server connection...' unparsed and the dead pane
+    was classified by its draft instead of its banner.
+    """
+    plain = _strip_ansi(screen) if screen else ""
+    return [row.rstrip() for row in plain.splitlines() if row.strip()]
+
+
+def delivery_tail(screen, lines=DELIVERY_TAIL_LINES):
+    """The last non-blank lines of a pane, lowercased: where state banners live.
+
+    A marker anywhere in the scrollback is not a state. The pane that wrote the
+    string "server connection could not be restored" into a file then re-read its
+    own transcript was classified dead while it was working.
+    """
+    rows = [row for row in (screen or "").splitlines() if row.strip()]
+    return "\n".join(rows[-lines:]).lower()
+
+
+def classify_delivery(screen, status=None, *, typed=None, our_text=None,
+                      awaiting_consumption=False):
+    """Why a pane can or cannot receive a message, as (state, reason).
+
+    States: dead, blocked, working, ready. `blocked` is the one that matters:
+    the pane is alive and idle but a send would be held, so a dispatcher must
+    count it as unavailable and say why rather than queue behind it.
+
+    Pure so a test can assert on a canned screen without a terminal.
+    """
+    marker = _banner_marker(screen, DEAD_SESSION_MARKERS)
+    if marker:
+        return "dead", f"dead session ({marker})"
+    marker = _status_marker(screen, PAUSED_GOAL_MARKERS, placeholder_safe=False)
+    if marker:
+        return "blocked", f"paused goal ({marker}) - it will not act on a message"
+    marker = _status_marker(screen, CONTEXT_FULL_MARKERS, placeholder_safe=True)
+    if marker:
+        return "blocked", f"context full ({marker}) - needs a /clear first"
+    progress = _status_marker(screen, WORKING_MARKERS, placeholder_safe=True)
+    if progress:
+        # The pane is mid-work: it offers an interrupt, so something is running.
+        return "working", f"mid-work ({progress})"
+    if typed and not _is_our_send(typed, our_text, awaiting_consumption):
+        # OWNER POLICY (2026-10-24): 'a human is typing' is not a real state on this
+        # path - every message goes through the daemon, and the daemon is the only
+        # thing that types into a pane. Text we did not type is PRESERVED at send time
+        # (submitted first, or left untouched), never a reason to refuse delivery.
+        return "ready", None
+    status_text = str(status or "").lower()
+    if status_text in ("working", "thinking", "running", "busy"):
+        return "working", status_text
+    return "ready", None
+
+
 def _modal_open(screen):
     """True if the pane is showing a panel or dialog *right now*.
 
@@ -3459,6 +4777,89 @@ def _modal_open(screen):
     return any(marker in low for marker in MODAL_MARKERS)
 
 
+# The composer lives at the bottom of a pane. Sigil lines above that are old
+# prompts in the scrollback, not the box someone is typing into.
+BOX_REGION_ROWS = 14
+# Box borders and padding sit BEFORE the prompt sigil on a bordered composer, so a
+# raw first-character test missed '│ ❯ check your inbox' entirely - which is
+# exactly the row a stuck draft sits on.
+BOX_LEADING = " \t\u2502\u2503\u2506\u250a\u2551|"
+
+
+def _prompt_body(row):
+    """The text after the prompt sigil on one row, or None if the row has no sigil.
+
+    The sigil is detected from the PLAIN row and the text is read from the BRIGHT
+    part of it. Codex draws its sigil dim ('\x1b[2m› ') while the draft after it is
+    bright, so a brightness-based detector loses the sigil and a plain-text reader
+    would also pick up dim placeholder hints - each needs the other.
+    """
+    plain = _strip_ansi(row).lstrip(BOX_LEADING)
+    if plain[:1] not in INPUT_BOX_SIGILS:
+        return None
+    body = DECORATION_RE.sub(" ", _bright_text(row)).lstrip(BOX_LEADING)
+    if body[:1] in INPUT_BOX_SIGILS:
+        body = body[1:]
+    body = _collapse(body)
+    if body and _is_placeholder(row):
+        # A hint drawn bright is still a hint: the box is empty, and calling it text
+        # is how codex's "Ask Codex to do anything" became 'a human is typing here'.
+        return ""
+    return body
+
+
+def box_text(screen):
+    """What is in the input box, and how we know, as (text, detail).
+
+    ONE reader, because three components have now answered 'is there text in the
+    box?' from something other than the box. Two rules learned from the failures:
+
+    - scan every sigil line in the composer region, not just the LAST one: a draft
+      can sit on an earlier line while the bottom line is an empty prompt, and
+      reading only the last one reported 'already clear' over a real draft;
+    - return a sentence describing what was read, so a caller that finds nothing
+      can say *what it looked at* instead of 'already clear'. A checker that reports
+      'nothing to do' without its evidence is how a stuck box survives two hours.
+    """
+    if not screen:
+        return "", "the pane could not be read"
+    rows = [row for row in screen.splitlines() if _strip_ansi(row).strip()]
+    region_start = max(0, len(rows) - BOX_REGION_ROWS)
+    sigils = [(index, row) for index, row in enumerate(rows)
+              if _prompt_body(row) is not None]
+    in_region = [(index, row) for index, row in sigils if index >= region_start]
+    if not in_region:
+        return "", f"no input box found (no prompt sigil in the last {BOX_REGION_ROWS} rows of {len(rows)})"
+    candidates = []
+    for index, row in in_region:
+        body = _prompt_body(row)
+        if body:
+            candidates.append((index, body))
+    if candidates:
+        # The draft STARTS at the first prompt line that carries text. A later prompt
+        # line with text is a continuation (a pasted multi-line draft draws a sigil on
+        # every line), not a new box: taking the LAST one reported the tail of a
+        # multi-line draft as if it were the whole thing.
+        index, text = candidates[0]
+        continuations = [body for _i, body in candidates[1:]]
+        below = sum(1 for row in rows[index + 1:]
+                    if _strip_ansi(row).strip() and _prompt_body(row) is None)
+        extra = []
+        if continuations:
+            extra.append(f"+{len(continuations)} prompt line(s) below it "
+                         f"({continuations[0][:40]!r}...)")
+        if below:
+            extra.append(f"+{below} indented line(s)")
+        return text, (f"read {len(in_region)} prompt line(s); text starts on row "
+                      f"{index + 1} of {len(rows)}: {text[:60]!r}"
+                      + ((" " + ", ".join(extra)) if extra else ""))
+    index, _row = in_region[-1]
+    hint = " (only the harness's own hint was there)" if any(
+        _is_placeholder(row) for _i, row in in_region) else ""
+    return "", (f"read {len(in_region)} prompt line(s); the last is at row {index + 1} "
+                f"of {len(rows)} with nothing after the sigil{hint}")
+
+
 def _typed_text(screen):
     """What a human has typed into the target's input box, judged from an
     ANSI-styled screen: the non-dim text on the last prompt-sigil line, minus
@@ -3468,17 +4869,12 @@ def _typed_text(screen):
     tell from an agent's footer."""
     if not screen:
         return None
-    sigil_line = None
-    for line in screen.splitlines():
-        plain = _strip_ansi(line).strip()
-        if plain[:1] in INPUT_BOX_SIGILS:
-            sigil_line = line
-    if sigil_line is None:
+    rows = [row for row in screen.splitlines() if _strip_ansi(row).strip()]
+    if not any(_prompt_body(row) is not None
+               for row in rows[max(0, len(rows) - BOX_REGION_ROWS):]):
         return None
-    bright = DECORATION_RE.sub(" ", _bright_text(sigil_line)).strip()
-    if bright[:1] in INPUT_BOX_SIGILS:
-        bright = bright[1:]
-    return _collapse(bright)
+    text, _detail = box_text(screen)
+    return text
 
 
 def _is_our_send(typed, last_sent_text, awaiting_consumption):

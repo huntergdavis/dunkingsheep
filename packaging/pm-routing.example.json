@@ -1,0 +1,18 @@
+{
+  "_comment": "Lane -> project PM routing. Each project names one PM pane and its member lanes. mode=redirect sends a member lane's stray VP message to the PM; mode=flag leaves it in place with a [lane mail to VP: project] subject. pm and members are pane ids; the VP appoints the agents. The PM is not listed in members.",
+  "poolrad": {
+    "pm": "wW:p1",
+    "members": ["wR:p1", "wR:p3", "wR:p4", "wW:p2", "wW:p3", "wW:p4", "wW:p5"],
+    "mode": "redirect"
+  },
+  "crackdown": {
+    "pm": "wS:p3",
+    "members": ["wS:p2"],
+    "mode": "redirect"
+  },
+  "dunkies": {
+    "pm": "w8:p8",
+    "members": ["w8:pE", "wV:p2", "wV:p4"],
+    "mode": "redirect"
+  }
+}

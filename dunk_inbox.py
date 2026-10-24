@@ -60,7 +60,9 @@ STATES = ("queued", "read", "acked", "cancelled", "archived",
           "undeliverable")
 # A mailbox key that is itself a pane id (older versions stored
 # dead-pane mail this way, with pane_id NULL).
-PANE_MAILBOX_RE = re.compile(r"^w\d+:p\d+$")
+# The identity of last resort: a mailbox named after the pane. Both backends
+# spell pane ids differently (w8:p8, %4) and both are legitimate here.
+PANE_MAILBOX_RE = re.compile(r"^(?:w\d+:p\d+|%\d+)$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -79,7 +81,9 @@ CREATE TABLE IF NOT EXISTS messages (
     cancelled_at  REAL,
     reason        TEXT,
     notify_state  TEXT,
-    notify_reason TEXT
+    notify_reason TEXT,
+    digest_id     TEXT,
+    digest_updated_at REAL
 );
 CREATE INDEX IF NOT EXISTS messages_by_mailbox
     ON messages (mailbox, state, created_at);
@@ -97,6 +101,34 @@ CREATE TABLE IF NOT EXISTS attachments (
 CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments (message_id);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
+
+
+_PANE_SUFFIX = re.compile(r"\s*\(\s*(?:[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+|%\d+)\s*\)\s*$")
+
+
+def normalise_mailbox(name):
+    """'vp of agentry (w9:pH)' and 'vp of agentry' are ONE mailbox.
+
+    The table carries both spellings: a channel that resolves with its pane id
+    appends it, and the same mailbox addressed by name does not. Comparing the
+    raw strings made the ack guard refuse the VP's own mail - a guard that
+    refuses valid writes teaches people to work around it, which is worse than
+    the bug it prevents. Only a trailing pane-id parenthetical is stripped:
+    a label that merely contains brackets stays intact.
+    """
+    if name is None:
+        return None
+    text = str(name).strip()
+    stripped = _PANE_SUFFIX.sub("", text).strip()
+    return stripped or text
+
+
+def mailbox_where(mailbox, column="mailbox"):
+    """SQL that matches either spelling the table may hold for one mailbox."""
+    plain = normalise_mailbox(mailbox)
+    escaped = plain.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return (f"({column} = ? OR {column} LIKE ? ESCAPE '\\')",
+            [plain, escaped + " (%"])
 
 
 class InboxError(ValueError):
@@ -126,6 +158,19 @@ class Inbox:
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
             if "archived_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN archived_at REAL")
+            if "digest_id" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
+            if "digest_updated_at" not in columns:
+                self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
+            # Created after the migration: on an existing DB the column is new,
+            # and a CREATE INDEX inside SCHEMA ran before ALTER TABLE.
+            try:
+                self.db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS messages_by_digest "
+                    "ON messages (digest_id) WHERE digest_id IS NOT NULL")
+            except sqlite3.OperationalError as exc:
+                if "digest_id" not in str(exc):
+                    raise
             # Acked mail is read mail. Older rows could be acked without a
             # read_at, which made boards that count NULLs report drained mail
             # as unread; backfill them once.
@@ -185,6 +230,43 @@ class Inbox:
             self.db.commit()
         return self.get(message_id)
 
+    def upsert_digest(self, mailbox, digest_id, body, subject=None, sender=None,
+                      mailbox_label=None, pane_id=None):
+        """One message per digest id, updated in place.
+
+        A PM publishes a digest every window; it must not become a stream. The
+        stable id means the VP's inbox holds one row per project: unread again
+        after an update, with the previous body replaced.
+        """
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise InboxError("a digest needs a body")
+        if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+            raise InboxError(f"body is larger than {MAX_BODY_BYTES} bytes")
+        with self._lock:
+            existing = self.db.execute(
+                "SELECT * FROM messages WHERE digest_id = ?", (digest_id,)).fetchone()
+            if existing is not None:
+                self.db.execute(
+                    "UPDATE messages SET mailbox=?, mailbox_label=?, pane_id=?, "
+                    "sender=?, subject=?, body=?, state='queued', read_at=NULL, "
+                    "acked_at=NULL, archived_at=NULL, cancelled_at=NULL, reason=NULL, "
+                    "notify_state=NULL, notify_reason=NULL, digest_updated_at=? "
+                    "WHERE digest_id=?",
+                    (mailbox, mailbox_label or mailbox, pane_id, sender, subject, body,
+                     _now(), digest_id))
+                self.db.commit()
+                return self.get(existing["id"])
+            message_id = self._next_id()
+            self.db.execute(
+                "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, "
+                "subject, body, state, created_at, digest_id, digest_updated_at) "
+                "VALUES (?,?,?,?,?,?,?,'queued',?,?,?)",
+                (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
+                 subject, body, _now(), digest_id, _now()))
+            self.db.commit()
+        return self.get(message_id)
+
     def rename_mailbox(self, old, new):
         """Move every message from one mailbox key to another. Returns how
         many moved. Used to retire a mailbox that turned out to be shared."""
@@ -204,7 +286,8 @@ class Inbox:
 
     # -- reading ------------------------------------------------------------
 
-    def count(self, mailbox):
+    def count(self, mailbox, lane_panes=None):
+        where, params = mailbox_where(mailbox)
         with self._lock:
             row = self.db.execute(
                 "SELECT COUNT(*) AS total, "
@@ -212,12 +295,19 @@ class Inbox:
                 "SUM(state = 'archived') AS archived, "
                 "SUM(state = 'undeliverable') AS undeliverable, "
                 "MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest "
-                "FROM messages WHERE mailbox = ? AND state != 'cancelled'",
-                (mailbox,)).fetchone()
+                f"FROM messages WHERE {where} AND state != 'cancelled'",
+                params).fetchone()
             blobs = self.db.execute(
                 "SELECT COUNT(*) AS n FROM attachments a JOIN messages m "
-                "ON m.id = a.message_id WHERE m.mailbox = ? AND m.state = 'queued'",
-                (mailbox,)).fetchone()
+                f"ON m.id = a.message_id WHERE m.mailbox IN "
+                f"(SELECT mailbox FROM messages WHERE {where}) AND m.state = 'queued'",
+                params).fetchone()
+            from_lanes = 0
+            if lane_panes:
+                marks = ",".join("?" for _ in lane_panes)
+                from_lanes = self.db.execute(
+                    f"SELECT COUNT(*) FROM messages WHERE {where} AND state = 'queued' "
+                    f"AND sender IN ({marks})", (*params, *lane_panes)).fetchone()[0]
         unread = int(row["unread"] or 0)
         return {
             "mailbox": mailbox,
@@ -227,12 +317,13 @@ class Inbox:
             "archived": int(row["archived"] or 0),
             "undeliverable": int(row["undeliverable"] or 0),
             "oldest_unread_s": int(_now() - row["oldest"]) if row["oldest"] else None,
+            "from_lanes": int(from_lanes),
         }
 
     def list(self, mailbox, unread_only=True, limit=50):
         """Summaries, oldest first. No bodies."""
-        where = "mailbox = ? AND state != 'cancelled'"
-        params = [mailbox]
+        condition, params = mailbox_where(mailbox)
+        where = f"{condition} AND state != 'cancelled'"
         if unread_only:
             where += " AND state = 'queued'"
         with self._lock:
@@ -325,11 +416,14 @@ class Inbox:
 
     # -- retiring -----------------------------------------------------------
 
-    def ack(self, message_ids):
+    def ack(self, message_ids, mailbox=None):
         # Ack implies read: stamp read_at so a board that counts NULLs as
-        # unread cannot report drained mail as waiting.
+        # unread cannot report drained mail as waiting. It is scoped to the
+        # caller's mailbox: an id from another mailbox is refused, never
+        # silently marked read in that mailbox by someone else's ack.
         return self._transition(message_ids, "acked", "acked_at",
-                                allowed=("queued", "read"), read_stamp=True)
+                                allowed=("queued", "read"), read_stamp=True,
+                                mailbox=mailbox)
 
     def cancel(self, message_ids):
         return self._transition(message_ids, "cancelled", "cancelled_at",
@@ -353,10 +447,11 @@ class Inbox:
             raise InboxError("state must be one of queued, read, acked")
         now = _now()
         placeholders = ",".join("?" for _ in allowed)
+        condition, box_params = mailbox_where(mailbox)
         sql = (f"UPDATE messages SET state = 'archived', archived_at = ?, "
-               f"read_at = COALESCE(read_at, ?) WHERE mailbox = ? "
+               f"read_at = COALESCE(read_at, ?) WHERE {condition} "
                f"AND state IN ({placeholders})")
-        params = [now, now, mailbox, *allowed]
+        params = [now, now, *box_params, *allowed]
         if before is not None:
             sql += " AND created_at < ?"
             params.append(float(before))
@@ -406,7 +501,51 @@ class Inbox:
         return {"undeliverable": changed, "panes": dead_panes,
                 "mailboxes": dead_mailboxes}
 
-    def _transition(self, message_ids, state, stamp, allowed, read_stamp=False):
+    def auto_archive_undeliverable(self, age_s=86400, now=None):
+        """Archive undeliverable mail whose target has been gone for `age_s`.
+
+        Undeliverable mail can never be delivered and pages the watchdog until
+        someone archives it by hand. After 24 h the reason is recorded and the
+        state moves to archived; the watchdog's digest counts it daily instead
+        of alerting per mailbox.
+        """
+        now = time.time() if now is None else float(now)
+        cutoff = now - float(age_s)
+        with self._lock:
+            cursor = self.db.execute(
+                "UPDATE messages SET state = 'archived', archived_at = ?, "
+                "reason = COALESCE(reason, 'undeliverable older than 24h') "
+                "WHERE state = 'undeliverable' AND created_at < ? "
+                "AND archived_at IS NULL",
+                (now, cutoff))
+            self.db.commit()
+        return int(cursor.rowcount or 0)
+
+    def archive_retired(self, mailboxes, age_s=86400, now=None, reason=None):
+        """Archive mail addressed to a RETIRED pane's mailbox, keeping every row.
+
+        Retention is not 'keep alerting': a retired pane's mail is the record of what
+        was tried, and 24 messages sat 42 hours old in a state that was neither
+        delivered nor archived. The rows stay; the state moves on.
+        """
+        if not mailboxes:
+            return 0
+        now = time.time() if now is None else float(now)
+        cutoff = now - float(age_s)
+        marks = ",".join("?" for _ in mailboxes)
+        with self._lock:
+            cursor = self.db.execute(
+                f"UPDATE messages SET state = 'archived', archived_at = ?, "
+                f"read_at = COALESCE(read_at, ?), "
+                f"reason = COALESCE(reason, ?) "
+                f"WHERE mailbox IN ({marks}) AND state IN ('queued','undeliverable') "
+                f"AND created_at < ? AND archived_at IS NULL",
+                (now, now, reason or "mailbox of a retired pane", *mailboxes, cutoff))
+            self.db.commit()
+        return int(cursor.rowcount or 0)
+
+    def _transition(self, message_ids, state, stamp, allowed, read_stamp=False,
+                    mailbox=None):
         ids = [message_ids] if isinstance(message_ids, str) else list(message_ids)
         ids = [str(i).strip() for i in ids if str(i).strip()]
         if not ids:
@@ -415,9 +554,15 @@ class Inbox:
         with self._lock:
             for message_id in ids:
                 row = self.db.execute(
-                    "SELECT state FROM messages WHERE id = ?", (message_id,)).fetchone()
+                    "SELECT state, mailbox FROM messages WHERE id = ?", (message_id,)).fetchone()
                 if row is None:
                     raise InboxError(f"no message with id {message_id!r}")
+                if mailbox and normalise_mailbox(row["mailbox"]) != normalise_mailbox(mailbox):
+                    # A write not scoped to its owner is a blast radius: the VP
+                    # acked a sent copy and the recipient lane lost its unread.
+                    raise InboxError(
+                        f"message {message_id} is not in mailbox {mailbox!r}; "
+                        "an ack only applies to the caller's own mailbox")
                 if row["state"] not in allowed:
                     skipped.append({"message_id": message_id, "state": row["state"]})
                     continue
@@ -557,6 +702,7 @@ class Inbox:
             "waiting_s": (int(_now() - row["created_at"])
                           if row["state"] == "queued" else None),
             "body_bytes": len((row["body"] or "").encode("utf-8")),
+            "digest_id": row["digest_id"] if "digest_id" in row.keys() else None,
             "attachments": blobs,
         }
 

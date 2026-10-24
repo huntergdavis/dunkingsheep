@@ -387,6 +387,23 @@ def guide(markdown=False):
       "agent with text like \"call inbox_count; if anything is waiting, read and\n"
       "act on it\".\n")
 
+    w(h(2, "Project PMs: one digest, one routing"))
+    w("A project has one PM. Lanes report to the PM; the PM publishes ONE digest "
+      "per project per window under a stable id (`pm-digest:<project>`), updated "
+      "in place so a PM is a digest, not a stream. The digest always has four "
+      "sections: changed, blocked, owner decisions, and numbers with evidence "
+      "refs. A lane that messages the VP pane is redirected to its PM (or "
+      "flagged) by `~/.config/dunkingsheep/pm-routing.json`, and `inbox count` "
+      "reports `from_lanes` -- lane mail that bypassed the PM -- which should "
+      "trend to zero.\n")
+    w(code("echo '{\"changed\":[\"strict C 240 -> 252\"],\"numbers\":[]}' | "
+           "dunkingsheep pm digest poolrad\n"
+           "dunkingsheep pm routing"))
+    w("The registry is per project: `{\"pm\": pane, \"members\": [pane...], "
+      "\"mode\": \"redirect\"|\"flag\"}`. The PM is never redirected to "
+      "itself; a bad registry is a named refusal when read and is ignored for "
+      "sending. See `docs/PM.md`.\n")
+
     w(h(2, "Setting an agent up to use its inbox"))
     w("Two things make the inbox reachable from an agent's session.\n")
     w(code("dunkingsheep install     # put the CLI on PATH as a plain command\n"
@@ -459,9 +476,16 @@ def guide(markdown=False):
            "task_metrics(window_s=3600, scope=\"global\", bucket=\"hour\")"))
     w("Per-pane privacy is enforced by the daemon: an agent may add, list, read\n"
       "or claim only its own pane's tasks (plus global tasks). A caller with no\n"
-      "pane, such as the human CLI outside herdr, may inspect any pane. Use\n"
-      "`task_reap` to requeue expired or dead-pane leases immediately; the daemon\n"
-      "also does it on a timer.\n")
+      "pane, such as the human CLI outside herdr, may inspect any pane. Each\n"
+      "claim stores the pane id plus the stable agent process pid and kernel\n"
+      "start time; the reaper checks /proc liveness, so a crashed agent's task\n"
+      "returns to the queue even if its shell pane remains. A vanished pane is\n"
+      "NOT evidence by itself: only the lease deadline or a dead caller\n"
+      "requeues, so a live agent behind a stale pane reading keeps its claim.\n"
+      "The name is only a label. The pane list is source-tagged; the reaper\n"
+      "refuses a fixture/untagged list, so a test double cannot move real\n"
+      "work. Use `task_reap` to requeue immediately; the daemon also runs it on\n"
+      "a timer. `task note` appends an explanatory event to the history.\n")
     w(h(2, "Memory and recall"))
     w("A SQLite + FTS5 memory service ingests Claude/Codex/opencode/pi sessions\n"
       "in the background through one writer, and answers recall from read-only\n"
@@ -479,6 +503,32 @@ def guide(markdown=False):
       "only recall path (the legacy index is retired; see\n"
       "docs/MEMORY_MIGRATION.md).\n")
 
+    w(h(2, "Terminal backends: herdr and tmux"))
+    w("Everything above the adapter asks for placements, panes, screen text and\n"
+      "sends; the backend owns the tool's grammar. DUNKINGSHEEP_TERMINAL_BACKEND\n"
+      "selects herdr (default) or tmux. herdr 0.9.5 starts an agent only in an\n"
+      "existing shell pane, so start-agent creates/locates the pane first and\n"
+      "then calls `agent start NAME --kind KIND --pane ID`; the tmux backend\n"
+      "creates a window/split running the command. In tmux a session is a\n"
+      "workspace, a window is a tab, and panes keep tmux's %N ids (also exported\n"
+      "as TMUX_PANE). Tmux has no agent-status API, so that capability is\n"
+      "honestly 'unknown' there.\n")
+    w("The tmux backend refuses to close a pane/window/session Dunking Sheep did\n"
+      "not create. `dunkingsheep guard install-tmux` installs a tmux wrapper that\n"
+      "is put first on PATH only for agent panes the backend starts (never the\n"
+      "user's shell): kill-pane/kill-window/kill-session go through the daemon's\n"
+      "superuser/self policy, kill-server and `-a` are refused, and raw\n"
+      "send-keys/layout mutation is refused with a pointer at the daemon. herdr\n"
+      "stays the default until this guard is demonstrated on live lanes; see\n"
+      "docs/TERMINAL_ADAPTER.md.\n")
+    w(h(2, "Sidebar poll (dunk-poll)"))
+    w("`dunk-poll` is a stdlib-only client: one socket request returns status +\n"
+      "inbox count + unread messages + dunks (optionally panes/tasks). It\n"
+      "replaces three full CLI startups per sidebar poll (the owner's CPU note)\n"
+      "and never asks the terminal for `pane current`; identity comes from\n"
+      "HERDR_PANE_ID/TMUX_PANE. `dunkingsheep poll` is the same batch for a\n"
+      "human, and `dunkingsheep install` writes ~/.local/bin/dunk-poll. The\n"
+      "status half skips the terminal probe unless --check-herdr is given.\n")
     w(h(2, "Real provider usage"))
     w("`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json\n"
       "(sample: packaging/usage.example.json), which maps each provider to a\n"
@@ -489,7 +539,9 @@ def guide(markdown=False):
       "rollout snapshot; older than max_age_s is UNKNOWN (no live endpoint).\n"
       "Pi: local session cost/tokens, not the OpenCode Go plan quota. OpenCode Go:\n"
       "`opencode stats` is local token/cost; no documented account usage endpoint,\n"
-      "so the plan is UNKNOWN.\n")
+      "so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine\n"
+      "interface; the VP ops dashboard stores age-labelled provider_usage\n"
+      "snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).\n")
     w(h(2, "Recovery after a herdr upgrade"))
     w("An upgrade can restore every pane as a bare shell and lose the agent roster. "
       "`dunkingsheep doctor` is the read-only check: herdr version, pane detection, "

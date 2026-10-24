@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox, InboxError  # noqa: E402
@@ -83,6 +85,49 @@ class InboxStoreTests(unittest.TestCase):
             (sent["message_id"],)).fetchall()
         self.assertEqual(2, len({row["id"] for row in rows}))
 
+    def test_an_ack_is_scoped_to_the_callers_mailbox(self):
+        # The VP acked a list that included his SENT copies; the recipient lane
+        # lost its unread. An ack must never write another mailbox.
+        self.inbox.send("bob", "from alice", sender="w1:p1")
+        message_id = self.inbox.list("bob")[0]["message_id"]
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
+        # Sender identity grants nothing: the VP could not ack mail he wrote.
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
+        self.inbox.ack([message_id], mailbox="bob")
+        self.assertEqual(0, self.inbox.count("bob")["unread"])
+
+    def test_a_pane_suffixed_mailbox_is_the_same_mailbox(self):
+        """The VP's own mail was refused: mailbox 'X (w9:pH)', caller 'X'.
+
+        Both spellings exist in the table (a channel that resolves with its pane
+        id appends it), so the comparison has to be on the MAILBOX, not on the
+        string. Same for counting: an owner must see one inbox, not two.
+        """
+        message_id = self.inbox.send("alice", "hello", sender="w1:p1")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET mailbox = ? WHERE id = ?",
+                              ("alice (w9:pH)", message_id))
+        self.inbox.db.commit()
+        self.assertEqual(1, self.inbox.count("alice")["unread"],
+                         "the plain name must see the suffixed row")
+        self.assertEqual(1, self.inbox.count("alice (w9:pH)")["unread"])
+        self.inbox.ack([message_id], mailbox="alice")     # the owner, plain name
+        self.assertEqual(0, self.inbox.count("alice")["unread"])
+        self.assertEqual(0, self.inbox.count("alice (w9:pH)")["unread"])
+
+    def test_a_foreign_mailbox_with_a_pane_suffix_is_still_refused(self):
+        """Normalisation must not become a way to clear someone else's mail."""
+        message_id = self.inbox.send("bob", "hello", sender="w1:p1")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET mailbox = ? WHERE id = ?",
+                              ("bob (w9:pH)", message_id))
+        self.inbox.db.commit()
+        with self.assertRaises(InboxError):
+            self.inbox.ack([message_id], mailbox="alice")
+        self.assertEqual(1, self.inbox.count("bob")["unread"])
+
     def test_ack_stamps_read_at(self):
         sent = self.inbox.send("writer", "handled")
         self.inbox.ack([sent["message_id"]])
@@ -102,6 +147,25 @@ class InboxStoreTests(unittest.TestCase):
         self.assertEqual(3, count["archived"])
         self.assertEqual(3, count["total"], "archive must not delete")
         self.assertEqual(3, len(self.inbox.list("dead", unread_only=False)))
+
+    def test_mail_to_a_retired_mailbox_is_archived_and_kept(self):
+        """Retention is not 'keep alerting': the rows stay, the state moves on."""
+        old = self.inbox.send("crackdown-codex", "old mail", sender="w9:pH")["message_id"]
+        young = self.inbox.send("crackdown-codex", "new mail", sender="w9:pH")["message_id"]
+        self.inbox.db.execute("UPDATE messages SET created_at = ? WHERE id = ?",
+                              (time.time() - 42 * 3600, old))
+        self.inbox.db.commit()
+        archived = self.inbox.archive_retired({"crackdown-codex"}, now=time.time())
+        self.assertEqual(1, archived, "only the mail older than the age is archived")
+        rows = {row["id"]: dict(row) for row in self.inbox.db.execute(
+            "SELECT id, state, archived_at, read_at, reason FROM messages")}
+        self.assertEqual("archived", rows[old]["state"])
+        self.assertIsNotNone(rows[old]["archived_at"])
+        self.assertIsNotNone(rows[old]["read_at"], "archived mail must not count as waiting")
+        self.assertIn("retired", rows[old]["reason"])
+        self.assertEqual("queued", rows[young]["state"], "young mail is left alone")
+        self.assertEqual(0, self.inbox.count("crackdown-codex")["unread"] - 1,
+                         "the archived row no longer counts as unread")
 
     def test_archive_before_only_touches_older_mail(self):
         old = self.inbox.send("dead", "old")
@@ -268,13 +332,97 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual("Codex Site", key, "the tab label names this one pane")
         self.assertIn("w2:p1", label)
 
-    def test_mail_can_be_left_for_an_agent_that_is_not_running(self):
-        key, label, pane = self.flock.resolve_mailbox("not-started-yet")
-        self.assertEqual("not-started-yet", key)
-        self.assertIsNone(pane)
-        sent = self.flock.inbox_send("not-started-yet", "waiting for you", notify=True)
-        self.assertEqual(1, self.flock.inbox_count("not-started-yet")["unread"])
-        self.assertFalse(sent["notified"], "nothing to nudge")
+    def test_a_created_pane_is_recorded_as_the_lane_it_was_born_as(self):
+        """The write-back a backend flip needs: the pane id of a lane's new pane
+        is recorded the moment it exists, under the lane's own mailbox name."""
+        made = self.flock.create_workspace(label="restored", cwd="/tmp",
+                                          mailbox="dunky pi")
+        pane_id = made["pane_id"]
+        self.assertTrue(pane_id)
+        self.assertEqual("dunky pi", self.flock._lane_registry().get(pane_id))
+        key, label, resolved = self.flock.resolve_mailbox("dunky pi")
+        self.assertEqual(pane_id, resolved, "mail for the lane must reach its new pane")
+        self.assertEqual("dunky pi", key, "the key is the recorded name, not the title")
+        self.assertIn(pane_id, label)
+
+    def test_the_registry_beats_a_title_the_agent_rewrote(self):
+        """claude rewrites its pane title every turn. A lane found by its title is
+        a lane lost on the next turn; the registry row is the record."""
+        made = self.flock.create_workspace(label="ports", cwd="/tmp",
+                                          mailbox="skies-android")
+        pane_id = made["pane_id"]
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == pane_id:
+                pane["terminal_title"] = "✳ Investigating a build failure"
+                pane["terminal_title_stripped"] = "✳ Investigating a build failure"
+                pane["label"] = "Investigating a build failure"
+        key, _, resolved = self.flock.resolve_mailbox("skies-android")
+        self.assertEqual(pane_id, resolved)
+        self.assertEqual("skies-android", key)
+
+    def test_a_dead_herdr_pane_id_is_not_a_mailbox_either(self):
+        """The vp lane's id ends in a letter (w9:pH), so the narrow numeric
+        pattern let it through and the send was accepted as a NEW mailbox name -
+        the VP's own ruling got filed into the void that way (2026-10-24)."""
+        from dunk_core import DunkError as _DunkError
+        for dead in ("w9:pH", "wR:p5", "w11:p1"):
+            with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
+                self.flock.resolve_mailbox(dead)
+
+    def test_a_dead_tmux_pane_id_is_not_a_mailbox(self):
+        """Both backends' ids are identities; neither is allowed to become a
+        mailbox name just because its pane is gone."""
+        from dunk_core import DunkError as _DunkError
+        with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
+            self.flock.resolve_mailbox("%99")
+
+    def test_a_mailbox_named_after_a_live_tmux_pane_resolves(self):
+        made = self.flock.create_workspace(label="tmuxish", cwd="/tmp")
+        pane_id = made["pane_id"]
+        self.assertTrue(pane_id.startswith(("w", "%")))
+        key, _, resolved = self.flock.resolve_mailbox(pane_id)
+        self.assertEqual(pane_id, resolved)
+
+    def test_a_mailbox_recorded_against_a_dead_pane_does_not_resolve_to_a_live_one(self):
+        self.assertEqual((None, None), self.flock._lane_pane("never-recorded"))
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DIR": self.tmp.name}):
+            self.flock._remember_lane("w9:pH", "ghost lane")
+            self.assertEqual((None, None), self.flock._lane_pane("ghost lane"))
+            key, _, pane = self.flock.resolve_mailbox("ghost lane")
+            self.assertEqual("ghost lane", key, "an unstarted agent still gets mail")
+            self.assertIsNone(pane)
+
+    def test_an_unknown_name_is_refused_rather_than_becoming_a_mailbox(self):
+        """FAIL CLOSED (VP ruling 2026-10-24): a mailbox created as a fallback
+        swallowed the message and reported success. Three real targets did that:
+        w9:pH, w9:pM and nav-fixer2."""
+        from dunk_core import DunkError as _DunkError
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.resolve_mailbox("not-started-yet", strict=True)
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.inbox_send("not-started-yet", "waiting for you", notify=True)
+        self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
+                         "a refused send must not leave a mailbox behind")
+
+    def test_a_registered_lane_with_no_live_pane_refuses_a_send(self):
+        """Three states, three tokens (VP ruling 2026-10-24): a name that was never
+        a lane is unknown_name, a lane marked dead at a known time is dead_lane,
+        and a lane that exists but is not running on this backend is
+        unhoused_lane - the operator does something different for each."""
+        from dunk_core import DunkError as _DunkError
+        self.flock._remember_lane("w9:pZ", "arriving later")
+        with self.assertRaisesRegex(_DunkError, "reason=unhoused_lane"):
+            self.flock.inbox_send("arriving later", "waiting for you", notify=True)
+        self.assertEqual(0, self.inbox.count("arriving later")["total"])
+
+    def test_a_lane_the_registry_marks_dead_alarms_with_the_date(self):
+        from dunk_core import DunkError as _DunkError
+        self.flock._remember_lane("w9:pY", {"mailbox": "gone lane", "alive": False,
+                                            "dead_since": "2026-10-24 08:00"})
+        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
+            self.flock.resolve_mailbox("gone lane", strict=True)
+        with self.assertRaisesRegex(_DunkError, "dead since 2026-10-24 08:00"):
+            self.flock.inbox_send("gone lane", "anyone there", notify=True)
 
     def test_send_nudges_the_recipient_with_one_short_line(self):
         self.herdr.set_screen("w2:p1", None)       # unreadable: nudge still queues
@@ -305,13 +453,24 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                         "the failed send must not store a message")
 
     def test_archive_through_the_flock_drains_unread(self):
+        # A stranded mailbox can still be drained: sends are refused now, reads are not.
         for n in range(2):
-            self.flock.inbox_send("dead-mailbox", f"m{n}", notify=False)
+            self.inbox.send("dead-mailbox", f"m{n}", sender="pm")
         result = self.flock.inbox_archive("dead-mailbox")
         self.assertEqual(2, result["archived"])
         count = self.flock.inbox_count("dead-mailbox")
         self.assertEqual(0, count["unread"])
         self.assertEqual(2, count["archived"])
+
+    def test_a_stranded_mailbox_can_still_be_read_even_though_sends_are_refused(self):
+        """Reads stay permissive on purpose: draining stranded mail is the point."""
+        self.inbox.send("stranded lane", "from the void", sender="pm")
+        count = self.flock.inbox_count("stranded lane")
+        self.assertEqual(1, count["unread"])
+        self.assertEqual(["from the void"],
+                         [m["body"] for m in self.flock.inbox_read("stranded lane")["messages"]])
+        with self.assertRaisesRegex(DunkError, "reason=unknown_name"):
+            self.flock.inbox_send("stranded lane", "no", notify=False)
 
     def test_counting_without_a_mailbox_or_a_caller_is_a_clear_error(self):
         with self.assertRaisesRegex(DunkError, "no mailbox given"):
@@ -383,14 +542,81 @@ class MailboxIdentityTests(unittest.TestCase):
         self.assertEqual("wS:p1",
                          self.flock.inbox.status(sent["message_id"])["sender"])
 
-    def test_client_prefers_herdr_pane_current_over_a_stale_env(self):
+    def test_undeliverable_mail_older_than_24h_is_auto_archived(self):
+        import time
+        now = time.time()
+        old = self.inbox.send("w1:p2", "old")
+        new = self.inbox.send("w1:p2", "new")
+        with self.inbox._lock:
+            self.inbox.db.execute("UPDATE messages SET state='undeliverable', "
+                                  "reason='target pane no longer exists', created_at=? "
+                                  "WHERE id=?", (now - 25 * 3600, old["message_id"]))
+            self.inbox.db.execute("UPDATE messages SET state='undeliverable', "
+                                  "reason='target pane no longer exists', created_at=? "
+                                  "WHERE id=?", (now - 2 * 3600, new["message_id"]))
+            self.inbox.db.commit()
+        self.assertEqual(1, self.inbox.auto_archive_undeliverable(now=now))
+        old_row = self.inbox.status(old["message_id"])
+        new_row = self.inbox.status(new["message_id"])
+        self.assertEqual("archived", old_row["state"])
+        self.assertEqual("undeliverable", new_row["state"])
+        self.assertEqual("target pane no longer exists", old_row["reason"])
+
+    def test_client_refuses_to_auto_start_a_partial_tmux_backend(self):
+        from dunk_client import DaemonUnavailable, FlockClient
+        env = {"DUNKINGSHEEP_TERMINAL_BACKEND": "tmux"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("DUNKINGSHEEP_TMUX_SOCKET", None)
+            with self.assertRaisesRegex(DaemonUnavailable,
+                                        "refusing to auto-start a tmux daemon"):
+                FlockClient(socket_path="/tmp/no-such-dsh-partial.sock").start_daemon()
+
+    def test_client_uses_the_exported_pane_id_without_asking_herdr(self):
         from dunk_client import FlockClient
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
+        env = {"HERDR_PANE_ID": "wR:p4"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("wR:p4", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_a_stale_herdr_id_does_not_beat_the_tmux_pane_we_are_in(self):
+        """Measured 2026-10-24: a tmux pane brought up for a herdr lane inherits
+        that lane's HERDR_PANE_ID, so every tmux lane believed it was its dead
+        herdr twin - this lane wrote and was credited as the vp lane."""
+        from dunk_client import FlockClient
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("%4", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_an_explicit_self_pane_still_wins_over_the_environment(self):
+        from dunk_client import FlockClient
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual("%2", FlockClient(self_pane_id="%2").self_pane_id)
+
+    def test_client_uses_tmux_pane_when_herdr_is_absent(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}, clear=True), \
+                mock.patch("dunk_client._current_pane_id") as current:
+            self.assertEqual("%3", FlockClient().self_pane_id)
+            current.assert_not_called()
+
+    def test_opt_in_verify_reconciles_a_stale_exported_pane(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(
+                os.environ,
+                {"HERDR_PANE_ID": "wR:p4", "DUNKINGSHEEP_VERIFY_SELF": "1"},
+                clear=False), \
                 mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
             self.assertEqual("wS:p1", FlockClient().self_pane_id)
-        with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wR:p4"}), \
-                mock.patch("dunk_client._current_pane_id", return_value=None):
-            self.assertEqual("wR:p4", FlockClient().self_pane_id)
+
+    def test_no_exported_pane_falls_back_to_detection(self):
+        from dunk_client import FlockClient
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
+            self.assertEqual("wS:p1", FlockClient().self_pane_id)
 
     def test_an_agent_type_naming_several_panes_is_refused(self):
         with self.assertRaisesRegex(DunkError, "ambiguous"):
@@ -448,8 +674,59 @@ class InboxErrorShapeTests(unittest.TestCase):
     def test_a_bad_attachment_path_is_a_caller_error_too(self):
         with self.assertRaisesRegex(DunkError, "no such file"):
             dunk_api.dispatch(self.flock, "inbox_send",
-                              {"to": "someone", "body": "hi", "attach": "/no/such/file",
-                               "notify": False}, self_pane_id="w1:p2")
+                              {"to": "Codex Site", "body": "hi",
+                               "attach": "/no/such/file", "notify": False},
+                              self_pane_id="w1:p2")
+
+
+class MailboxRoutingTests(unittest.TestCase):
+    """A mailbox NAME is a conversation; a pane id is a process.
+
+    On 2026-10-22 a message addressed to 'codex-poolrad2 (wR:p5)' was answered by
+    wR:p4 and that lane stood down believing it was the duplicate. The decorated
+    address fell through to a mailbox NAME with no pane, so delivery picked
+    whichever pane owned the name.
+    """
+
+    def setUp(self):
+        import dunk_core
+        from fakes import FakeHerdr
+        self.herdr = FakeHerdr(panes=[
+            {"pane_id": "wR:p4", "tab_id": "wR:t4", "workspace_id": "wR",
+             "label": "codex-poolrad2", "agent": "codex"},
+            {"pane_id": "wR:p5", "tab_id": "wR:t5", "workspace_id": "wR",
+             "label": "codex-poolrad2", "agent": "codex"},
+        ])
+        self.herdr.tabs = [
+            {"tab_id": "wR:t4", "label": "codex-poolrad2", "number": 1, "workspace_id": "wR"},
+            {"tab_id": "wR:t5", "label": "codex-poolrad2", "number": 2, "workspace_id": "wR"},
+        ]
+        self.herdr.workspaces = [{"workspace_id": "wR", "label": "poolrad", "number": 1}]
+        self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False)
+        self.dunk_core = dunk_core
+
+    def test_a_decorated_address_delivers_to_the_pane_it_names(self):
+        for pane in ("wR:p5", "wR:p4"):
+            key, _label, resolved = self.flock.resolve_mailbox(f"codex-poolrad2 ({pane})")
+            self.assertEqual(pane, resolved)
+            self.assertEqual(pane, key, "the key must identify the pane, not the name")
+
+    def test_a_decorated_address_for_a_dead_pane_is_refused(self):
+        with self.assertRaises(self.dunk_core.DunkError) as caught:
+            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)")
+        self.assertIn("wR:p9", str(caught.exception))
+        self.assertIn("not live", str(caught.exception))
+
+    def test_a_bare_name_shared_by_two_panes_is_refused_with_both(self):
+        with self.assertRaises(self.dunk_core.AmbiguousTarget) as caught:
+            self.flock.resolve_mailbox("codex-poolrad2")
+        message = str(caught.exception)
+        self.assertIn("wR:p4", message)
+        self.assertIn("wR:p5", message)
+
+    def test_a_bare_dead_pane_id_is_not_a_mailbox_even_for_a_letter_workspace(self):
+        with self.assertRaises(self.dunk_core.DunkError):
+            self.flock.resolve_mailbox("wR:p9")
 
 
 class SurfaceParityTests(unittest.TestCase):
@@ -471,7 +748,10 @@ class SurfaceParityTests(unittest.TestCase):
         memory_help = subprocess.run(
             [sys.executable, os.path.join(ROOT, "dunkingsheep"), "memory", "--help"],
             capture_output=True, text=True, timeout=60).stdout
-        blob = help_text + inbox_help + task_help + superuser_help + memory_help
+        pm_help = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "dunkingsheep"), "pm", "--help"],
+            capture_output=True, text=True, timeout=60).stdout
+        blob = help_text + inbox_help + task_help + superuser_help + memory_help + pm_help
         # The CLI spells commands as subcommands, sometimes grouped or renamed;
         # this maps each registry command to the words that must appear.
         spelled = {
@@ -496,7 +776,7 @@ class SurfaceParityTests(unittest.TestCase):
             "task_update": "update", "task_assign": "assign",
             "task_complete": "complete", "task_block": "block",
             "task_unblock": "unblock", "task_cancel": "cancel",
-            "task_delete": "delete", "task_next": "next",
+            "task_delete": "delete", "task_note": "note", "task_next": "next",
             "task_heartbeat": "heartbeat", "task_release": "release",
             "task_follow": "follow", "task_unfollow": "unfollow",
             "task_followers": "followers", "task_stats": "stats",
@@ -508,6 +788,15 @@ class SurfaceParityTests(unittest.TestCase):
             "memory_status": "status", "memory_ingest": "ingest",
             "memory_backfill": "backfill",
             "health": "health", "recover": "recover", "doctor": "doctor",
+            "poll": "poll",
+            "turn_start": "turn", "turn_end": "turn",
+            "pm_digest": "digest", "pm_routing": "routing",
+            "clear_box": "clear-box", "delivery": "delivery", "dispatch": "dispatch",
+            "retire_pane": "retired", "api": "api",
+            "owner_push": "owner", "owner_take": "owner", "owner_stats": "owner",
+            "state_capture": "state", "state_latest": "state",
+            "roster": "roster", "message_state": "message-state",
+            "reply_stats": "reply-stats", "project_summary": "project-summary",
         }
         missing = [c.name for c in dunk_api.COMMANDS if c.name not in spelled]
         self.assertEqual([], missing,

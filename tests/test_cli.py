@@ -14,6 +14,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(ROOT, "dunkingsheep")
 sys.path.insert(0, ROOT)
+import _bootstrap  # noqa: F401  (isolate live state)
 from dunk_core import VERSION  # noqa: E402
 
 FAKE_HERDR = r'''#!/usr/bin/env python3
@@ -93,6 +94,11 @@ class CliEndToEndTests(unittest.TestCase):
             FAKE_HERDR_LOG=cls.log,
             DUNKINGSHEEP_DIR=cls.config,
             DUNKINGSHEEP_SOCKET=os.path.join(cls.tmp.name, "ds.sock"),
+            # TMUX_PANE first is the real precedence (a tmux pane for a herdr
+            # lane inherits the dead herdr id, 2026-10-24), so a test that only
+            # sets HERDR_PANE_ID would inherit whatever pane the developer is
+            # in - the live one. Name the pane this test IS, in both spellings.
+            TMUX_PANE="",
             HERDR_PANE_ID="w1:p2",
             # Bootstrap this test pane as the superuser; the CLI lifecycle
             # exercises gated dunk/close/shutdown commands.
@@ -119,7 +125,7 @@ class CliEndToEndTests(unittest.TestCase):
         # 1. status auto-starts the daemon.
         status = self.run_json("status")
         self.assertEqual(0, status["dunkers"])
-        self.assertTrue(status["herdr_available"])
+        self.assertTrue(json.loads(self.run_cli("status", "--check-herdr", "--json").stdout)["herdr_available"])
         self.assertTrue(os.path.exists(self.env["DUNKINGSHEEP_SOCKET"]))
         self.assertTrue(os.path.exists(os.path.join(self.config, "daemon.log")))
 
@@ -237,6 +243,83 @@ class CliEndToEndTests(unittest.TestCase):
         proc = self.run_cli("--no-start-daemon", "status", expect=3)
         self.assertIn("no dunkingsheep daemon", proc.stderr)
         self.assertEqual(0, self.run_json("status")["dunkers"])
+
+    def test_a_coalesced_call_returns_the_cached_answer_with_a_marker(self):
+        import os, subprocess, sys
+        base = [sys.executable, CLI, "--json", "inbox", "count"]
+        # Start from the test's own config, not the developer's environment: an
+        # ambient TMUX_PANE/HERDR_PANE_ID made this talk to the LIVE daemon and
+        # resolve this pane as some other lane (2026-10-24).
+        env = dict(self.env, DUNKINGSHEEP_MIN_POLL_S="10", DUNKINGSHEEP_FRESH="0")
+        for path in (f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count",
+                     f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count.out"):
+            try: os.remove(path)
+            except OSError: pass
+        first = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+        second = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertEqual(first.stdout, second.stdout,
+                         "a coalesced call must return the same fields, not a stub")
+        self.assertIn('"coalesced": true', second.stderr)
+        self.assertIn('"cached": true', second.stderr)
+        fresh = subprocess.run(base, capture_output=True, text=True,
+                               env=dict(env, DUNKINGSHEEP_FRESH="1"), timeout=60)
+        self.assertNotIn("coalesced", fresh.stderr)
+        self.assertEqual(first.stdout, fresh.stdout)
+        for path in (f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count",
+                     f"/tmp/dunkingsheep-poll-{os.getuid()}-inbox-count.out"):
+            try: os.remove(path)
+            except OSError: pass
+
+    def test_an_expired_poll_cache_recomputes_instead_of_replaying(self):
+        # The bug this covers: .out was replayed whenever it existed, so the very
+        # first answer for a key was served forever (a 16h-old `status` still
+        # reporting a dead daemon's version and pid). A stale .out past the
+        # interval must be overwritten, never replayed.
+        #
+        # The cache path is asked from the CLI itself: hard-coding it made this
+        # test break when the key gained the store hash, which is a test that
+        # fails for a reason unrelated to what it checks.
+        import os, subprocess, sys
+        from importlib.machinery import SourceFileLoader
+        env = dict(self.env, DUNKINGSHEEP_MIN_POLL_S="60", DUNKINGSHEEP_FRESH="0")
+        module = SourceFileLoader("dunkcli_cache", CLI).load_module()
+        # Marker paths are keyed by the store, so the marker must be computed
+        # with the SAME environment the subprocess gets. Asking for it from the
+        # developer's environment produced a marker for another store, and then
+        # blamed the CLI for replaying a cache (2026-10-24).
+        # Restore the WHOLE environment: `env` carries keys this test does not
+        # name (DUNKINGSHEEP_VP_PANE among them), and a partial restore leaked
+        # one into later modules - the delivery tests then saw a superuser where
+        # they had proved there was none (a flaky test, which is a defect).
+        saved = dict(os.environ)
+        os.environ.update(env)
+        os.environ.pop("DUNKINGSHEEP_FRESH", None)
+        try:
+            # The SAME argv the subprocess runs: the key hashes the whole argument
+            # vector, because the cached file is stdout and --json changes it.
+            marker, _hit = module._coalesce(["--json", "inbox", "count"])
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        out = marker + ".out"
+        base = [sys.executable, CLI, "--json", "inbox", "count"]
+        try:
+            with open(out, "w", encoding="utf-8") as handle:
+                handle.write('{"total": -1, "stale": true}\n')
+            open(marker, "a").close()
+            os.utime(marker, (0, 0))  # an hour-old marker: the cache has expired
+            result = subprocess.run(base, capture_output=True, text=True, env=env, timeout=60)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("cached", result.stderr, "an expired cache must recompute")
+            self.assertNotIn("-1", result.stdout, "the stale answer was replayed")
+            self.assertIn("total", result.stdout)
+            with open(out, encoding="utf-8") as handle:
+                self.assertNotIn("-1", handle.read(), "the cache file was not refreshed")
+        finally:
+            for path in (marker, out):
+                try: os.remove(path)
+                except OSError: pass
 
     def test_commands_listing_and_version(self):
         out = self.run_cli("commands").stdout

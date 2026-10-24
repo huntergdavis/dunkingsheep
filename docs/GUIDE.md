@@ -1,4 +1,4 @@
-# Dunking Sheep 2.24.0 guide
+# Dunking Sheep 2.69.5 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -402,6 +402,17 @@ A standing dunk is the easy way to get an agent checking: point one at the
 agent with text like "call inbox_count; if anything is waiting, read and
 act on it".
 
+## Project PMs: one digest, one routing
+
+A project has one PM. Lanes report to the PM; the PM publishes ONE digest per project per window under a stable id (`pm-digest:<project>`), updated in place so a PM is a digest, not a stream. The digest always has four sections: changed, blocked, owner decisions, and numbers with evidence refs. A lane that messages the VP pane is redirected to its PM (or flagged) by `~/.config/dunkingsheep/pm-routing.json`, and `inbox count` reports `from_lanes` -- lane mail that bypassed the PM -- which should trend to zero.
+
+```
+echo '{"changed":["strict C 240 -> 252"],"numbers":[]}' | dunkingsheep pm digest poolrad
+dunkingsheep pm routing
+```
+
+The registry is per project: `{"pm": pane, "members": [pane...], "mode": "redirect"|"flag"}`. The PM is never redirected to itself; a bad registry is a named refusal when read and is ignored for sending. See `docs/PM.md`.
+
 ## Setting an agent up to use its inbox
 
 Two things make the inbox reachable from an agent's session.
@@ -494,9 +505,16 @@ task_metrics(window_s=3600, scope="global", bucket="hour")
 
 Per-pane privacy is enforced by the daemon: an agent may add, list, read
 or claim only its own pane's tasks (plus global tasks). A caller with no
-pane, such as the human CLI outside herdr, may inspect any pane. Use
-`task_reap` to requeue expired or dead-pane leases immediately; the daemon
-also does it on a timer.
+pane, such as the human CLI outside herdr, may inspect any pane. Each
+claim stores the pane id plus the stable agent process pid and kernel
+start time; the reaper checks /proc liveness, so a crashed agent's task
+returns to the queue even if its shell pane remains. A vanished pane is
+NOT evidence by itself: only the lease deadline or a dead caller
+requeues, so a live agent behind a stale pane reading keeps its claim.
+The name is only a label. The pane list is source-tagged; the reaper
+refuses a fixture/untagged list, so a test double cannot move real
+work. Use `task_reap` to requeue immediately; the daemon also runs it on
+a timer. `task note` appends an explanatory event to the history.
 
 ## Memory and recall
 
@@ -520,6 +538,37 @@ p50/p95/p99, DB bytes and queue depth. The legacy index is retired:
 only recall path (the legacy index is retired; see
 docs/MEMORY_MIGRATION.md).
 
+## Terminal backends: herdr and tmux
+
+Everything above the adapter asks for placements, panes, screen text and
+sends; the backend owns the tool's grammar. DUNKINGSHEEP_TERMINAL_BACKEND
+selects herdr (default) or tmux. herdr 0.9.5 starts an agent only in an
+existing shell pane, so start-agent creates/locates the pane first and
+then calls `agent start NAME --kind KIND --pane ID`; the tmux backend
+creates a window/split running the command. In tmux a session is a
+workspace, a window is a tab, and panes keep tmux's %N ids (also exported
+as TMUX_PANE). Tmux has no agent-status API, so that capability is
+honestly 'unknown' there.
+
+The tmux backend refuses to close a pane/window/session Dunking Sheep did
+not create. `dunkingsheep guard install-tmux` installs a tmux wrapper that
+is put first on PATH only for agent panes the backend starts (never the
+user's shell): kill-pane/kill-window/kill-session go through the daemon's
+superuser/self policy, kill-server and `-a` are refused, and raw
+send-keys/layout mutation is refused with a pointer at the daemon. herdr
+stays the default until this guard is demonstrated on live lanes; see
+docs/TERMINAL_ADAPTER.md.
+
+## Sidebar poll (dunk-poll)
+
+`dunk-poll` is a stdlib-only client: one socket request returns status +
+inbox count + unread messages + dunks (optionally panes/tasks). It
+replaces three full CLI startups per sidebar poll (the owner's CPU note)
+and never asks the terminal for `pane current`; identity comes from
+HERDR_PANE_ID/TMUX_PANE. `dunkingsheep poll` is the same batch for a
+human, and `dunkingsheep install` writes ~/.local/bin/dunk-poll. The
+status half skips the terminal probe unless --check-herdr is given.
+
 ## Real provider usage
 
 `dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json
@@ -531,7 +580,9 @@ the live OAuth usage endpoint. Codex: weekly percent USED from the latest
 rollout snapshot; older than max_age_s is UNKNOWN (no live endpoint).
 Pi: local session cost/tokens, not the OpenCode Go plan quota. OpenCode Go:
 `opencode stats` is local token/cost; no documented account usage endpoint,
-so the plan is UNKNOWN.
+so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine
+interface; the VP ops dashboard stores age-labelled provider_usage
+snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).
 
 ## Recovery after a herdr upgrade
 

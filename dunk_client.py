@@ -60,12 +60,14 @@ class DaemonUnavailable(RuntimeError):
 
 
 def _current_pane_id():
-    """The pane this process is actually in, per herdr 0.9.5.
+    """The herdr pane this process is actually in, per herdr 0.9.5.
 
-    A pane restored by an upgrade can carry a stale HERDR_PANE_ID from the
-    pane it was cloned from; `herdr pane current` uses the controlling
-    terminal and is authoritative. Only consulted inside a tty with a pane id
-    set: outside a pane the command reports the focused pane, which is not us.
+    This is an *opt-in verification* (`DUNKINGSHEEP_VERIFY_SELF=1`), not the
+    normal identity path. The normal path trusts the pane id the terminal
+    exports (HERDR_PANE_ID / TMUX_PANE), which costs nothing; asking herdr for
+    `pane current` costs 1-2 s and is only useful after a restore may have
+    cloned a stale env. Only consulted inside a tty with a pane id set:
+    outside a pane the command reports the focused pane, which is not us.
     """
     if not os.environ.get("HERDR_PANE_ID"):
         return None
@@ -83,13 +85,36 @@ def _current_pane_id():
         return None
 
 
+def exported_pane_id(environ=None):
+    """The pane this process is actually in, per the terminal that owns it.
+
+    TMUX_PANE wins over HERDR_PANE_ID on purpose. A tmux pane brought up for a
+    herdr lane inherits that lane's environment, so HERDR_PANE_ID keeps naming
+    the pane the lane used to be in. Measured 2026-10-24: every tmux pane in the
+    fleet carried its dead herdr twin's id, so this lane (tmux %4, title
+    'π - dunkingsheep') believed it was w9:pH and read, wrote and *attributed*
+    mail as the vp lane. An id the terminal exports for the terminal we are in
+    cannot be stale; one inherited from the other backend can be.
+    """
+    env = os.environ if environ is None else environ
+    return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
+
+
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
+        explicit = self_pane_id is not None
         self.self_pane_id = (
-            self_pane_id if self_pane_id is not None
-            else (_current_pane_id() or os.environ.get("HERDR_PANE_ID"))
+            self_pane_id if explicit
+            else exported_pane_id()
         )
+        # The terminal already exported our identity. Only pay for a
+        # `pane current` round-trip when asked to verify a possibly-stale env.
+        if not explicit and (
+            self.self_pane_id is None
+            or os.environ.get("DUNKINGSHEEP_VERIFY_SELF") == "1"
+        ):
+            self.self_pane_id = _current_pane_id() or self.self_pane_id
         self.timeout = timeout
         self._next_id = 1
 
@@ -97,11 +122,15 @@ class FlockClient:
 
     def call(self, cmd, **args):
         """Send one command; return its result or raise DunkError / OSError."""
+        # A SYSTEM SENDER has no pane by definition (the watchdog runs from a timer).
+        # Attaching one - from the environment or a parent service - made the daemon
+        # refuse the claim, so monitoring went silent while the rule still fired.
+        pane_id = None if args.get("system_sender") else self.self_pane_id
         request = {
             "id": self._next_id,
             "cmd": cmd,
             "args": {key: value for key, value in args.items() if value is not ...},
-            "self_pane_id": self.self_pane_id,
+            "self_pane_id": pane_id,
         }
         self._next_id += 1
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -165,7 +194,20 @@ class FlockClient:
 
     def start_daemon(self):
         """Start the daemon: hand off to systemd when it supervises, else spawn
-        a detached `dunkingsheep serve` that outlives this process."""
+        a detached `dunkingsheep serve` that outlives this process.
+
+        Refuse a partial backend environment: a client that auto-starts with
+        only DUNKINGSHEEP_DIR/SOCKET once started a tmux trial daemon on the
+        herdr backend, where it silently saw the wrong panes. A component that
+        guesses its environment produces a plausible wrong answer.
+        """
+        backend = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND")
+                   or "herdr").strip().lower()
+        if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
+            raise DaemonUnavailable(
+                "refusing to auto-start a tmux daemon without "
+                "DUNKINGSHEEP_TMUX_SOCKET; start it explicitly with the full "
+                "backend environment")
         # The literal default socket belongs to the unit, even when a parent
         # service exported DUNKINGSHEEP_SOCKET to that same path.
         supervised = self.socket_path == DEFAULT_SOCKET

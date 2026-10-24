@@ -496,3 +496,302 @@ persistence natural.
 - A TCP/HTTP transport. The unix socket is local by design; the MCP server is
   the remote-friendly surface (harnesses spawn it over stdio).
 - Exposing `shutdown` to agents.
+
+## "It compiles" is not "it runs"
+
+A gate that proves a module **binds** proves nothing about **execution**. On
+2026-10-22 an undefined Unicorn register constant reached `main` in the poolrad
+gate because `check_checker_builds.py --compile-only` compiled that module without
+executing a single hook; the `NameError` only fired inside a real audit hours
+later (#1437).
+
+Our own surface had the same hole: the CLI parity test greps the help text, which
+proves a name is *spelled*, not that a handler *works*. `tests/test_command_smoke.py`
+closes it by executing **every** command in the registry against a fixture fleet:
+
+- a command with no required parameters must **return a result**;
+- a command that needs parameters must refuse **with words**;
+- no command may raise `NameError`, `AttributeError`, `TypeError`,
+  `UnboundLocalError` or **`KeyError`** — a handler that indexes `args["target"]`
+  for a key the `Command` does not declare `required` is a schema that lies about
+  its needs, and it reaches a user as "internal error".
+
+### The two lies it found, on the first run
+
+Both were commands the night depended on, and both were invisible to every
+spelling-based check we had:
+
+| command | what the registry claimed | what it actually did |
+|---|---|---|
+| `clear_box` | "DESTRUCTIVE, superuser only: clear an unsubmitted draft" | raised `KeyError: 'target'` when run against a blocked pane — the one command that unblocks a lane crashed on the lanes that needed it |
+| `delivery` | "Can this lane receive a message, and if not why: ready / working / blocked / dead" | the printer read the clear result as if it were a message, and `target` was never declared required, so an empty call crashed rather than answering |
+
+The registry said what they *were for*; no test said they *ran*. **A gate that
+found two lies in one run is a gate that should have existed three hours earlier** —
+those two commands were written and shipped in the same window as the incidents
+they were meant to fix.
+
+The gate is proven to fail: `test_the_gate_would_catch_an_unimported_name` registers
+a handler that reads an unimported name and asserts the smoke gate reports it.
+
+### The general form
+
+> **A check that proves SPELLING is not a check that proves FUNCTION.**
+
+Grepping a help text, importing a module, compiling a file, listing a registry —
+each proves a **name exists**, and none proves a handler **runs**. A test has to
+**execute** the thing and assert a **result**.
+
+And the clause that turns a smoke test into a real one: *a command with no required
+parameters must return a result, not a polite nothing*. A handler that returns `{}`
+and calls it success passes every weaker assertion, so the test rejects `None`, `{}`,
+`[]` and `""` explicitly.
+
+Corollary, from the same message: a **repair** that changes no claim carries a
+dated note beside the evidence, not a rewritten document — a rewritten doc reads as
+if the claim had always held.
+
+## A rule tested only in its happy path may be impossible in its only case
+
+`supersede()` is the *only* mechanism by which a context entry may change. It
+derived the same slug as the entry it replaced — same day, same subject — so the
+new file collided with the old and it refused with "entry already exists". The
+mechanism was documented, tested on a convenient case (a *later* date), and
+impossible in the only situation it exists for. **A rule that is documented,
+happy-path tested, and impossible in practice is worse than no rule**: it reads
+like a guarantee.
+
+> **When a mechanism exists for one purpose — supersede, retire, rollback,
+> migration, restore — test the case it exists FOR, not a convenient neighbour.**
+
+The census is in **`docs/MECHANISMS.md`**: one row per one-purpose mechanism, each
+stating *what its only case is in one line*, the test that exercises it, and its
+state. If the case cannot be stated in one line, we do not know what the mechanism
+is for — and no test can be right. `tests/test_mechanism_census.py` enforces the
+file (one-line case, cited test exists, mechanism exists in code, every declared
+one-purpose mechanism has a row), so the census cannot drift into a document nobody
+updates.
+
+Applying it the same night found one more: `memory_backfill` exists to enqueue the
+whole corpus *resumably*, and its nearest test exercised `enqueue`, not the
+command. The case that matters is "run it again on a corpus that was partly done",
+because a backfill that is not idempotent re-ingests 14 GB. That test exists now,
+alongside the same-case tests for `clear_box` (blocked on a full context — the
+reason it was built) and `retire` (a pane that no longer exists — which is what
+we retire).
+
+## A mailbox name is a conversation; a pane id is a process
+
+On 2026-10-22 a message addressed to `codex-poolrad2 (wR:p5)` was **answered by
+`wR:p4`**, and that lane stood down believing it was the duplicate. A misdelivered
+instruction that changes behaviour is the worst failure mode there is — the same
+family as the ack that cleared someone else's inbox.
+
+Two causes, both now closed:
+
+1. **The decorated address was not parsed.** `name (wR:p5)` matched neither an exact
+   pane id nor an exact label, so it fell through to being a mailbox **name** with
+   `pane_id: null`. Delivery then resolved the name — and a name is a conversation,
+   not a process. The parenthetical is the only unambiguous part, so it decides:
+   a decorated address resolves to that pane, and a decorated address naming a pane
+   that is not live is refused by name.
+2. **Pane ids with a lettered workspace were not recognised.** `_PANE_ID_RE` was
+   `^w\d+:p\d+$`, so `wR:p9` was not a pane id at all and a *dead* pane id became a
+   mailbox name. The pattern now accepts a lettered workspace.
+
+A name that two panes share is still refused, with both candidates named. The rule:
+**resolve by pane id at send time; refuse when the name is ambiguous.**
+
+And the same night, the poll cache: its key was the command alone, so
+`inbox count wR:p5` and `inbox count wR:p4` shared one entry and a caller asking
+about one lane was handed the other's numbers. The key is now a hash of the whole
+argument vector plus the store — **the third "correct-looking cache, scoped wrong"**
+of the week, after the cross-store collision and the never-expiring entry.
+
+## A version number is a claim about the code
+
+For eight commits `dunk_core.py` said `VERSION = "2.37.4"` while the commit subjects
+claimed 2.38 through 2.51, and `status` printed the constant. So the one number
+people look at to answer **"is my fix live?"** answered *wrong, in the reassuring
+direction* — and the only way to find out was to compare the daemon's process start
+time to the file's mtime, which is not a check any human should have to run.
+
+A hand-maintained version constant is the same failure as a hand-maintained census:
+**a hand-maintained list is a future omission.** Two guards, one of each kind:
+
+1. **Derived, so it cannot drift.** `code_identity()` hashes `dunk_core.py` (12 hex)
+   and records its mtime at import; `status` prints the hash beside the constant and
+   answers the real question:
+
+   ```text
+   version          2.52.0 (code 9c2de7f79541)
+   code_mtime       2026-10-23 12:11:15 (7s ago)
+   started_at       2026-10-23 12:11:18 (4s ago)
+   code_stale       no
+   ```
+
+   `code_stale` compares the hash this process imported with the hash of the file
+   **now**. (The first attempt compared a captured mtime against the process start
+   time — a value against itself — and said `no` while the daemon ran four commits
+   behind the file. A guard that has never been seen to fail is a guard we are
+   assuming: appending one comment to the file now flips it to `YES - the code on
+   disk is newer than this process; restart it`.)
+
+2. **Checked, so a commit cannot claim what the code does not.** A test reads the
+   latest commit subject that declares `N.N.N:` and fails when it disagrees with
+   `VERSION`. Writing the guard is what forces the constant to be bumped in the same
+   commit as the claim.
+
+## The pane is the only source of truth about the pane
+
+Four components failed the same way in one day: `send` believed a **claim** (claude's
+session list saying busy, held for 8.5 hours while the pane sat with an empty prompt);
+`delivery` and the queue asked **different questions** and gave different answers;
+and `flush` disbelieved the pane, reporting "the input box is already clear" over a
+visible draft because the draft sat on a bordered row (`│ ❯ check your inbox`) above
+an empty prompt and only the last sigil line was consulted.
+
+> **Any code path that answers a question about the pane without reading the pane
+> will eventually disagree with it.** Caching, claims and inference are all the same
+> mistake at different distances from the terminal.
+
+Consequences enforced in the code:
+
+- **`box_text(screen)` is the single reader** for "what is in the box", and it returns
+  `(text, detail)` — a sentence saying *what it read and how* ("read 2 prompt
+  line(s); text on row 1 of 4: 'check your inbox'"). A caller that finds nothing can
+  therefore say `nothing to submit: <that sentence>`, never a bare "already clear".
+- **`send_blocker()` is the single predicate** for "may a send go now", used by
+  `delivery_state`, the outbox worker and `send_text`, so no two surfaces can answer
+  differently.
+- **A claim is believed only while fresh**, and the release needs *positive* evidence
+  of idleness — a draft-free box is not evidence (a 75-minute byte job has one).
+
+### The root cause worth keeping: a well-formed box defeated a parser that assumed plain text
+
+`flush` read each line's **raw first character** to find the prompt sigil. On a
+bordered composer that character is the **box border**, not the sigil:
+
+```text
+│ ❯ check your inbox      <- first char is '│': "not a prompt"
+│
+❯                         <- the only line it believed, and it is empty
+```
+
+So the reader concluded "already clear" over a real draft. Two details make this a
+lesson rather than an anecdote:
+
+- **it failed in the SAFE direction** (nothing was typed over anyone), which is
+  exactly why it survived so long without anyone noticing;
+- **the screen was well-formed** — the parser assumed plain text, and a correctly
+  drawn box is what defeated it.
+
+### One reader means one wrong answer, so the fixtures are the guard
+
+When three components read the pane independently, a bug shows up as
+*disagreement*. When they share one reader, a bug shows up as **everything being
+wrong in the same direction** — so the fixture set matters more, not less. Three
+literal screens, each a real shape a composer draws:
+
+| fixture | what it pins |
+|---|---|
+| `bordered_draft_above_an_empty_prompt()` | the border character is not the sigil, and the draft is not the last line |
+| `multi_line_draft()` | a pasted draft draws a sigil on every line: the draft **starts** at the first one, and the rest are continuations (reading the last line reported the tail as if it were the whole draft) |
+| `draft_that_looks_like_a_prompt()` | the message itself begins with the sigil (`❯ ❯ ls`): the inner sigil is text, not a second box |
+
+**One test drives all three through all three askers** — `box_text`, `flush_box`, and
+`delivery_state`/`send_blocker` — and requires the last two to agree in the same
+words. A wrong answer from the shared reader is now reproducible from a fixture
+instead of mysterious from a pane.
+
+Both shapes are literal fixtures, and
+**one fixture proves all three askers**, because they share one reader: `box_text()`
+returns the draft, `flush_box()` submits it, and `delivery_state()`/`send_blocker()`
+report it as blocked *in the same words*.
+
+Every question about the pane goes through `read_screen()` / `read_box()`. One read,
+one parser, one fixture — so a component cannot quietly answer from a claim, a cache,
+or a neighbouring row again.
+
+## The automatic path that a human covers for fails silently
+
+Four components failed this way in one day: **delivery** (the hold froze the fleet
+while the VP hand-nudged), **the slot guard**, **flush** (reported "already clear"
+while the box held a draft), and **the dispatcher** (the unit failed every tick for
+hours while lanes were fed by hand). In each case the automatic path was dead, a
+person kept the lights on, and nothing anywhere said so.
+
+> **Any automatic path that a human can cover for will fail silently.** Give every
+> one of them a freshness number that health reports, and a message that says what
+> it was doing when it stopped.
+
+Two instances of the fix, both cheap:
+
+- **the feeder is a number**: `health` reports `dispatcher=ok last_tick=2.1m ago
+  (128s)`, or `stale`, or `absent — never`, and lists a problem when the last
+  completed tick is older than `DISPATCH_STALE_S` (two missed ticks). Absence and
+  staleness are different facts with different sentences.
+- **a pace problem is not a failure**: when a batch outlives its socket deadline the
+  CLI says `still working after 180s: dispatch has not answered yet. This is a pace
+  problem, not a failure - the daemon keeps going and its result lands in
+  dispatch-state.json` and exits **75**, which the unit accepts via
+  `SuccessExitStatus=75`. `error: timed out` sent a reader hunting a hang that did
+  not exist; the difference between "needs a rewrite" and "outgrew its deadline" is
+  the difference between two very different investigations.
+
+## Activity comes from the tool; absent means UNKNOWN
+
+A pi lane read `ready` while its pane plainly said `⠋ Working`, because pi reports no
+status on the pane record. A live pane read `dead` because its transcript quoted the
+marker. Both are the same defect: **a status field that is not the thing it claims to
+be**. `dunk_activity.activity(pane)` answers the question per harness, with its own
+source and, when there is none, a reason:
+
+| harness | source | on failure |
+|---|---|---|
+| claude | `claude agents --json --cwd`, matched by session/pane cwd | `unknown` + "no claude session matches this pane's cwd" |
+| pi | the extension's turn events (`turn_start` / `turn_end`) | `unknown` + "no pi turn has ever been recorded for this pane" |
+| codex | its local turn socket - **not wired yet** | `unknown` + names the gap |
+
+> **An absent signal is UNKNOWN, never idle.** "Assume idle" cost four stalls in one
+> day; "unknown" costs one question.
+
+Two consequences that are easy to lose:
+
+- a pi turn that ENDED is kept (with its `ended_at`) rather than popped: that end
+  time is the only evidence of idleness the extension will ever give, and popping it
+  made every pi lane read `unknown` between turns;
+- the DELIVERY path does not consult activity at all (that is step 0 of the herdr
+  removal: a busy agent is not a hold). Activity serves the fleet questions - the
+  roster, the dispatcher's reporting, the UI - so a gap there is a wrong dot, not a
+  stuck message.
+
+## The busy-hold policy is per harness, and it is measured
+
+The policy is "a busy agent is not a hold — the harness queues". That is true of two
+of our three harnesses, and the third would **lose** the message:
+
+| harness | queued while working? | evidence |
+|---|---|---|
+| claude | **yes** | composer showed `ctrl+x ctrl+s to send now` / `Press up to edit queued messages`; the task ran unbroken to 3000 and PROBE-ACK-1 was answered afterwards (2026-10-24) |
+| pi | **yes** | `Alt+Up to edit all queued messages`; PI-ACK-1 answered after the turn |
+| codex | **NO** | codex accepts text into its composer and does **not** submit it during a turn. Measured on wR:p6: **20 failed nudges** in the log (`text did not submit; it is still in the pane's input box`), while the **mail was intact - 14 of 14 messages read**. So the cost is a delayed nudge, not lost mail, and each failure was recorded with its message id |
+
+**The correction matters as much as the finding**: the first version of this note said
+codex "accepted and lost" four notices, which overstated it. The send was *recorded as
+failed*, the inbox row survived, and the lane read the mail. A doc that overstates a
+loss is as bad as one that hides it.
+
+So `HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}` and anything else
+(including an unknown harness) keeps a hold **with a reason that says which harness
+and why**:
+
+```text
+codex does not queue text typed during a turn (measured: notices are lost), so this waits for the turn to end
+```
+
+Two bugs fell out of writing that: codex's status line is drawn **dim** (`• Working
+(55m · esc to interrupt)`), so a bright-text-only reader never saw it work — the
+working check now accepts dim text within eight lines; and codex's composer hint
+(`Ask Codex to do anything`) was not in the placeholder patterns, so a bright redraw of
+the hint was classified as a human typing. A hint drawn bright is still a hint.
