@@ -9,6 +9,7 @@ import os
 import time
 
 import sqlite3
+import subprocess
 
 import dunk_activity
 import dunk_context
@@ -19,9 +20,13 @@ CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR", os.path.expanduser("~/.config/du
 # are joined by kind rather than pretended to be one.
 APP_DB = os.environ.get("DUNKINGSHEEP_APP_DB",
                         os.path.expanduser("~/workspace/vp-of-agentry/data/messages.sqlite3"))
-# Their delivery column's progression. 'posted' is an agent reply reaching the chat;
-# 'read'/'acked' are transport acknowledgements.
-APP_DELIVERED = {"sent", "read", "acked", "posted"}
+# The application's delivery column does DOUBLE DUTY and must not be passed through
+# raw: on an owner message it is TRANSPORT (sent -> read -> acked), on an agent message
+# it is REPLY LIFECYCLE (posted). The design lane asked for the split rather than a
+# passthrough, because a UI that renders 'acked' next to 'posted' has two meanings in
+# one column.
+TRANSPORT_STATES = ("sent", "read", "acked")
+REPLY_STATES = ("posted",)
 
 # What each harness reports about its model. Unknown is null WITH a reason: a chat UI
 # that prints "unknown" as if it were a model name is worse than a gap.
@@ -158,27 +163,50 @@ def _app_row(message_id):
 
 
 def _app_state(row, now):
-    """sent / delivered / replied for an APPLICATION message, with its evidence."""
+    """sent / delivered / seen / replied for an APPLICATION message, with evidence.
+
+    replied is `answer_id IS NOT NULL` - NOT answered_at. The design lane measured it:
+    456 owner rows all carry answered_at, but 70 have no answer_id, so answered_at is
+    'picked up', not 'answered'. Using it made every message look replied.
+    """
     delivery = (row.get("delivery") or "").strip().lower()
-    replied = None
-    if row.get("answered_at"):
-        replied = {"at": row["answered_at"], "reason": None}
-        if row.get("answer"):
-            replied["reply_id"] = row["answer"]["id"]
-            replied["reply_excerpt"] = row["answer"]["excerpt"]
+    role = (row.get("role") or "").strip().lower()
+    if role == "owner":
+        transport = delivery if delivery in TRANSPORT_STATES else None
+        reply_lifecycle = None
+        delivery_reason = (None if transport else
+                           (f"unexpected transport state {delivery!r}" if delivery
+                            else "no transport state recorded"))
+    else:
+        transport = None
+        reply_lifecycle = delivery if delivery in REPLY_STATES else None
+        delivery_reason = (None if reply_lifecycle else
+                           (f"unexpected reply state {delivery!r}" if delivery
+                            else "no reply state recorded"))
+    if row.get("answer_id"):
+        reply = row.get("answer") or {}
+        replied = {"at": reply.get("at"), "reply_id": row["answer_id"],
+                   "reply_excerpt": reply.get("excerpt"),
+                   "reason": None if reply.get("at") else
+                             "answer_id is set but the reply row is missing"}
+    else:
+        replied = cell(None, None, "awaiting reply (no answer_id yet)")
+    picked_up = ({"at": row.get("answered_at"), "reason": None}
+                 if row.get("answered_at") else
+                 cell(None, None, "not picked up yet"))
     return {
         "id": row["id"], "found": True, "source": "application",
         "mailbox": row.get("channel"),
         "role": row.get("role"),
         "sent": {"at": row.get("created_at"), "by": row.get("role")},
-        "delivered": {"ok": delivery in APP_DELIVERED if delivery else None,
-                      "state": delivery or None,
+        "delivered": {"ok": bool(transport or reply_lifecycle),
+                      "transport": transport,
+                      "reply_lifecycle": reply_lifecycle,
                       "detail": row.get("delivery_detail") or None,
-                      "reason": None if delivery else "the application has not recorded a delivery state"},
-        "seen": cell(None, None,
-                     "the application records one delivery state, not a per-step timestamp"),
-        "replied": replied or cell(None, None, "no answer is linked to this message yet"),
-        "state": row.get("delivery"),
+                      "reason": delivery_reason},
+        "seen": picked_up,
+        "replied": replied,
+        "state": transport or reply_lifecycle,
     }
 
 
@@ -304,6 +332,40 @@ def _median(values):
     return round((ordered[middle - 1] + ordered[middle]) / 2, 1)
 
 
+# The repositories a project page can show merges for. A merge list is the repo's own
+# record, so it carries the repo's own as_of rather than the page's.
+PROJECT_REPOS = {
+    "dunkingsheep": "~/workspace/dunkingsheep",
+    "vp-of-agentry": "~/workspace/vp-of-agentry",
+    "herdr-webui": "~/workspace/herdr-webui",
+}
+
+
+def git_merges(repo, limit=10, timeout=10):
+    """Recent merges for one repository, with its own as_of. Deterministic, no model."""
+    path = os.path.expanduser(repo)
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return {"repo": path, "merges": [], "as_of": None,
+                "reason": f"{path} is not a git repository"}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "log", "--merges", f"-n{int(limit)}",
+             "--format=%h%x1f%s%x1f%cI"],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"repo": path, "merges": [], "as_of": None, "reason": f"git log failed: {error}"}
+    if proc.returncode != 0:
+        return {"repo": path, "merges": [], "as_of": None,
+                "reason": (proc.stderr or "git log failed").strip()[:200]}
+    merges = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) == 3:
+            merges.append({"sha": parts[0], "subject": parts[1], "at": parts[2]})
+    return {"repo": path, "merges": merges, "as_of": merges[0]["at"] if merges else None,
+            "reason": None if merges else "no merge commits in this repository"}
+
+
 def project_summary(flock, project=None, path=None, now=None):
     """Everything one project page needs, from the store and the DB.
 
@@ -361,6 +423,8 @@ def project_summary(flock, project=None, path=None, now=None):
         "now": {"agents": [{"name": lane.get("agent_name"), "pane_id": lane["pane_id"],
                             "state": lane.get("agent_status")} for lane in lanes],
                 "tasks_in_flight": in_flight},
+        "merges": {name: git_merges(repo) for name, repo in PROJECT_REPOS.items()
+                   if label in ("global", name)},
         "history": history[:50],
         "history_note": ("merges and decisions are the repository's record; this timeline is "
                          "tasks completed here" if history else "no completed task has a timestamp yet"),
