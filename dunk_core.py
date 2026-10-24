@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.12"
+VERSION = "2.70.0"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -2550,8 +2550,16 @@ class Flock:
                 **self.superuser_status(self_pane_id)}
 
     def require_send_self(self, target, self_pane_id, action):
-        """Non-superusers may only type into their own pane."""
+        """Non-superusers may only type into their own pane.
+
+        A DESK CREDENTIAL is the one exception, and only because the caller has
+        already been narrowed to send_text/send_keys on an explicit pane set
+        (dunk_desk.DeskCredential). It is not a superuser entry and grants nothing
+        else; the flag is set per request by _authorise_send.
+        """
         if self.is_superuser(self_pane_id):
+            return
+        if getattr(getattr(self, "_caller_state", None), "desk_send", False):
             return
         if not self_pane_id:
             raise DunkError(

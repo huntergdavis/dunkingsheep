@@ -274,7 +274,41 @@ def h_fire_dunk(flock, args, self_pane_id):
     )
 
 
+def h_desk_token(flock, args, self_pane_id):
+    """Create the narrow desk credential. Returns the token exactly once."""
+    import dunk_desk
+    panes = [part.strip() for part in str(args.get("panes") or "").split(",")
+             if part.strip()]
+    token = dunk_desk.DeskCredential().issue(panes)
+    return {"token": token, "panes": panes,
+            "permits": sorted(dunk_desk.DESK_VERBS),
+            "note": "store it in the desk's environment; it can only type into "
+                    "these panes, and it is not a superuser entry"}
+
+
+def _authorise_send(flock, command, args):
+    """Refuse a desk token used for anything but a listed verb on a listed pane.
+
+    A valid desk credential skips the self-only rule below; it never skips the
+    pane list, and it cannot be used for any other command because the token is
+    only inspected on these two paths.
+    """
+    token = (args.get("desk_token") or "").strip()
+    if not token:
+        return False
+    import dunk_desk
+    try:
+        dunk_desk.DeskCredential().permits(command, args.get("target"), token)
+    except dunk_desk.DeskError as error:
+        raise DunkError(f"desk credential refused: {error}") from None
+    # Per-request, per-thread: a process-wide flag would leak the permission into
+    # the next request handled by the same thread.
+    flock._caller_state.desk_send = True
+    return True
+
+
 def h_send_text(flock, args, self_pane_id):
+    _authorise_send(flock, "send_text", args)
     flock.require_send_self(args["target"], self_pane_id, "send_text")
     return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id,
                           hold_while_typing=_bool(args.get("hold_while_typing"), True),
@@ -283,6 +317,7 @@ def h_send_text(flock, args, self_pane_id):
 
 
 def h_send_keys(flock, args, self_pane_id):
+    _authorise_send(flock, "send_keys", args)
     flock.require_send_self(args["target"], self_pane_id, "send_keys")
     return flock.send_keys_now(args["target"], args["keys"], self_pane_id=self_pane_id,
                                hold_while_typing=_bool(args.get("hold_while_typing"), True),
@@ -802,7 +837,11 @@ def h_list_workspaces(flock, args, self_pane_id):
 
 def h_delivery_capability(flock, args, self_pane_id):
     """What the desk may do with this target: push queue or immediate send."""
-    return flock.delivery_capability(args["target"], self_pane_id)
+    target = (args.get("target") or "").strip()
+    if not target:
+        raise DunkError("delivery_capability must be given a target (a pane id like "
+                        "%9 or a pinned lane name)")
+    return flock.delivery_capability(target, self_pane_id)
 
 
 def h_lanes(flock, args, self_pane_id):
@@ -1016,7 +1055,7 @@ COMMANDS = [
         "Deliver an OWNER message to an agent with no inbox row and no typing: it is "
         "pushed for the pane and the harness extension reads it. Use for owner -> CoS.",
         h_owner_push,
-        params={"target": {"type": "string"},
+        params={"desk_token": {"type": "string", "description": "narrow desk credential"}, "desk_token": {"type": "string", "description": "narrow desk credential"}, "target": {"type": "string"},
                 "body": {"type": "string"},
                 "subject": {"type": "string"}},
         required=("target", "body")),
@@ -1297,6 +1336,14 @@ COMMANDS = [
         required=["id"],
     ),
     Command(
+        "desk_token",
+        "Issue (or rotate) the desk credential: one token that may send_text/"
+        "send_keys to an explicit list of panes and do NOTHING else. Not a "
+        "superuser entry. Superuser-gated because it hands out typing rights.",
+        h_desk_token,
+        params={"panes": {"type": "string",
+                          "description": "comma-separated pane ids, e.g. %1,%2,%4"}}),
+    Command(
         "send_text",
         "Send a direct message or instruction to a pane: type text + Enter once, "
         "with no dunk created. Use it to talk to another agent (target its pane) "
@@ -1323,7 +1370,11 @@ COMMANDS = [
                 "press_enter": {
                     "type": "boolean",
                     "description": ("Press Enter after the text (default true). false "
-                                    "leaves it in the box unsubmitted.")}},
+                                    "leaves it in the box unsubmitted.")},
+                "desk_token": {"type": "string",
+                               "description": ("Narrow desk credential: permits this "
+                                               "verb on an explicitly listed pane and "
+                                               "nothing else. Not a superuser entry.")}},
         required=["target", "text"],
     ),
     Command(
@@ -1341,7 +1392,11 @@ COMMANDS = [
                     "type": "boolean",
                     "description": "Queue behind a human who is typing (default true)."},
                 "wait_s": {"type": "number", "minimum": 0, "maximum": 3600,
-                           "description": "Block up to this many seconds for delivery (default 3)."}},
+                           "description": "Block up to this many seconds for delivery (default 3)."},
+                "desk_token": {"type": "string",
+                               "description": ("Narrow desk credential: permits this "
+                                               "verb on an explicitly listed pane and "
+                                               "nothing else. Not a superuser entry.")}},
         required=["target", "keys"],
     ),
     Command(
@@ -2224,7 +2279,7 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
-    "lane_set",
+    "lane_set", "desk_token",
     "memory_backfill",
 }
 
@@ -2234,6 +2289,9 @@ def dispatch(flock, name, args=None, self_pane_id=None):
     command = COMMANDS_BY_NAME.get(name)
     if command is None:
         raise DunkError(f"unknown command {name!r}")
+    # Each dispatch starts from "no desk credential used", whatever the last
+    # request on this thread did.
+    flock._caller_state.desk_send = False
     if name in SUPERUSER_ONLY:
         flock.require_superuser(self_pane_id, name)
     args = dict(args or {})
