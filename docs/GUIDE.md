@@ -1,4 +1,4 @@
-# Dunking Sheep 2.70.32 guide
+# Dunking Sheep 2.70.33 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -430,6 +430,11 @@ should refuse and does - Claude's auto mode reads it as running external
 code. A plain `dunkingsheep inbox read` is the supported shape, and an
 allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto
 mode run it without prompting.
+
+Since 2.70.32 a batch is marked read only after the result is built, so a
+read that fails no longer consumes the mail. A REPEATED batch after an error
+is the fix working, not a bug: the same messages are offered again until a
+read completes. `--peek` still marks nothing at all.
 
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which
