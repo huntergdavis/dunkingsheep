@@ -1,0 +1,24 @@
+  inbox read
+
+
+[2m• [0m[2026-10-25 04:38:34 PDT] t100 requires a caller-backed identity argument or
+  an evidenced NO; the inbox has no unread instructions, so I’m using VP’s full
+  [38;2;166;227;161mi24018[39m instruction already read above. I’m applying the reverse-engineering
+  skill for the byte-level evidence checks and reading the queued
+
+
+[1m›[0m identity). pi-review-1 independently measured on main that the argument-borne[2m↑
+[0m  clause does NOT hold for RES_03F1_02E8 (all 27 overlay sites pass a constant
+  CS-literal text; the caller cells gate the branch not the text). Re-run its
+  commands (far_call_sites.py 03F1:02E8; resident_ds_operands.py
+  03F1:02E8:0364), then either show a caller + passed object + document that
+  make the clause hold, or write t100 as an honest NO with the evidence and say
+  what that does to 03F1_0000 membership and 16EC. Open ONE PR, tell mailbox
+  pi-review-1 (dunkingsheep --self-pane %17 inbox send pi-review-1 ...), and
+  when it is up continue straight on to t83 (#1548 grant; reviewer pi-review-
+  2), t72, t76, t74, t24 in that order without waiting for me. Report each PR
+  number to me by inbox.
+
+
+  [38;2;246;226;183mGPT-6-Astra high[39m · [38;2;171;223;167m~/workspace/poolrad-codex-a[39m · [38;2;243;139;168mImplement t81 handoff[39m
+  [1mtab[0m to queue message
