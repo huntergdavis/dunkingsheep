@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.21"
+VERSION = "2.70.22"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -5176,6 +5176,19 @@ def box_text(screen):
                  if region_start <= index < region_end]
     if not in_region:
         return "", f"no input box found (no prompt sigil in the last {BOX_REGION_ROWS} rows of {len(rows)})"
+    # A PLACEHOLDER ON THE LAST PROMPT ROW MEANS THE BOX IS EMPTY, and every earlier
+    # prompt-marked line is transcript. This is the BUSY codex frame (pane %17,
+    # 06:35): the composer is the last prompt row holding 'Ask Codex to do anything'
+    # with the status line under it, while an inbox nudge echoed into the transcript
+    # above - so the hint-below-the-candidate rule of 2.70.21 missed it and a plain
+    # send still queued as "someone is typing" (m1977). A BLANK last prompt row is
+    # NOT a placeholder, so a draft above a trailing empty prompt keeps its meaning.
+    last_index, last_row = in_region[-1]
+    if _is_placeholder(last_row):
+        return "", (f"the last prompt row (row {last_index + 1} of {len(rows)}) holds "
+                    f"only the harness hint "
+                    f"('{_collapse(_strip_ansi(last_row))[:40]}'), so the box is empty "
+                    "and the earlier prompt lines are transcript")
     candidates = []
     for index, row in in_region:
         body = _prompt_body(row)
