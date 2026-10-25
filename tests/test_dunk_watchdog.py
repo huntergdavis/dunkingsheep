@@ -463,9 +463,39 @@ class RuleBoundaryTests(WatchdogCase):
         self.fleet.panes = [{"pane_id": "w1:p1", "agent_status": "idle"}]
         self.fleet.message("alive", "queued", NOW - 60 * MIN, pane_id="w1:p1")
         self.fleet.message("alive2", "queued", NOW - 60 * MIN + 1, pane_id="w1:p1")
-        self.fleet.message("gone", "queued", NOW - 1, pane_id="w9:p9")
+        self.fleet.message("gone", "queued", NOW - 11 * MIN, pane_id="w9:p9")
         self.assertEqual([("inbox.unread_dead", "gone"), ("inbox.unread_live", "alive")],
                          self.keys(self.fleet.evaluate(cfg)))
+
+    def test_unread_dead_needs_a_minimum_age(self):
+        """Measured 2026-10-24: the rule fired on the vp mailbox with a message 0.0h
+        old, because a lane being handed over looks exactly like a dead one for the
+        first minutes. Tested in BOTH directions - a threshold nobody tested on the
+        quiet side is just a constant."""
+        cfg = self.fleet.config(inbox__unread_dead={"min_messages": 1,
+                                                    "min_age_minutes": 10})
+        self.fleet.panes = []
+        self.fleet.message("fresh", "queued", NOW - 30, pane_id="w9:p9")
+        self.assertEqual([], [k for k in self.keys(self.fleet.evaluate(cfg))
+                              if k[0] == "inbox.unread_dead"],
+                         "30 seconds old is not evidence the lane is dead")
+        self.fleet.message("stale", "queued", NOW - 11 * MIN, pane_id="w9:p8")
+        keys = [k for k in self.keys(self.fleet.evaluate(cfg)) if k[0] == "inbox.unread_dead"]
+        self.assertIn(("inbox.unread_dead", "stale"), keys)
+        self.assertNotIn(("inbox.unread_dead", "fresh"), keys)
+
+    def test_the_unread_dead_age_is_configurable(self):
+        cfg = self.fleet.config(inbox__unread_dead={"min_messages": 1,
+                                                    "min_age_minutes": 30})
+        self.fleet.panes = []
+        self.fleet.message("eleven", "queued", NOW - 11 * MIN, pane_id="w9:p9")
+        self.assertEqual([], [k for k in self.keys(self.fleet.evaluate(cfg))
+                              if k[0] == "inbox.unread_dead"],
+                         "11 minutes is under a 30-minute threshold")
+        self.fleet.message("long", "queued", NOW - 31 * MIN, pane_id="w9:p8")
+        self.assertIn(("inbox.unread_dead", "long"),
+                      [k for k in self.keys(self.fleet.evaluate(cfg))
+                       if k[0] == "inbox.unread_dead"])
 
     def test_inbox_ambiguous_sender_names_only_pane_resolving_labels(self):
         cfg = self.fleet.config(inbox__ambiguous_sender={"lookback_hours": 24, "sample_ids": 2,

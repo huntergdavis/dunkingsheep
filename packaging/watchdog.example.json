@@ -100,7 +100,8 @@
       "class": "ops",
       "cooldown_minutes": 1440,
       "must_hold_runs": 1,
-      "min_messages": 1
+      "min_messages": 1,
+      "min_age_minutes": 10
     },
     "inbox.ambiguous_sender": {
       "enabled": true,
