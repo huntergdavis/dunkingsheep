@@ -178,7 +178,15 @@ class Inbox:
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
         os.makedirs(self.blob_dir, exist_ok=True)
-        self.db = connect(path)
+        # ONE CONNECTION PER THREAD, the same rule Tasks learned (t93): a sqlite3
+        # connection is not safe to use from two threads at once even with
+        # check_same_thread=False. Measured here too: four readers and two writers on a
+        # shared connection produced "IndexError: tuple index out of range" - rows
+        # arriving as tuples - while row_factory was set (t142's hammer).
+        self._local = threading.local()
+        self._connections = []
+        self._connections_lock = threading.Lock()
+        self.db = self._connection()
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)
@@ -206,9 +214,33 @@ class Inbox:
                 "WHERE state = 'acked' AND read_at IS NULL")
             self.db.commit()
 
+    def _connection(self):
+        """This thread's connection, opened on first use and kept for its lifetime."""
+        connection = getattr(self._local, "db", None)
+        if connection is not None:
+            return connection
+        connection = connect(self.path)
+        connection.row_factory = sqlite3.Row
+        self._local.db = connection
+        with self._connections_lock:
+            self._connections.append(connection)
+        return connection
+
+    def __getattribute__(self, name):
+        if name == "db":
+            return object.__getattribute__(self, "_connection")()
+        return object.__getattribute__(self, name)
+
     def close(self):
-        with self._lock:
-            self.db.close()
+        """Close every thread's connection (the inbox is shared by the daemon)."""
+        with self._connections_lock:
+            connections, self._connections = self._connections, []
+        for connection in connections:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        self._local = threading.local()
 
     # -- ids ----------------------------------------------------------------
 

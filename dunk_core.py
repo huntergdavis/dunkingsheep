@@ -303,6 +303,10 @@ PLACEHOLDER_PATTERNS = (
 )
 # How long a "busy" report from another process may block delivery while the pane
 # itself shows no turn and a clear box. A remembered state needs an expiry.
+# How long a zero-wait nudge may take to finish before its state is recorded as
+# "queued". Small: a notice is one short line, and the value only decides what the
+# inbox records about it.
+NOTIFY_SETTLE_S = float(os.environ.get("DUNKINGSHEEP_NOTIFY_SETTLE_S", "1.0"))
 CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
 # The typing mutex: short by design, loud when contended.
 TYPING_LOCK_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "10"))
@@ -1713,6 +1717,19 @@ class Flock:
                     raise _NoticeFolded
                 nudge = self.send_now(pane_id, text, wait_s=0,
                                       notify_for=message["message_id"])
+                # THE NOTIFY STATE FOLLOWS THE NOTICE, so it must not be a snapshot of
+                # a zero-wait send: with the stores now opening one connection per
+                # thread, the delivery thread's first call can land a few milliseconds
+                # later and the snapshot said "queued" for a notice that had in fact
+                # gone out. Wait for the notice's own outcome, briefly, and record that.
+                if nudge.get("queued") and nudge.get("message_id"):
+                    deadline = time.time() + NOTIFY_SETTLE_S
+                    while time.time() < deadline:
+                        current = self.get_message(nudge["message_id"])
+                        if current and not current.get("queued"):
+                            nudge = current
+                            break
+                        time.sleep(0.02)
                 self.inbox.record_notify(message["message_id"],
                                          "queued" if nudge.get("queued") else "sent",
                                          nudge.get("message"))
