@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.22"
+VERSION = "2.70.23"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -5189,6 +5189,27 @@ def box_text(screen):
                     f"only the harness hint "
                     f"('{_collapse(_strip_ansi(last_row))[:40]}'), so the box is empty "
                     "and the earlier prompt lines are transcript")
+    # A HINT *BELOW* THE LAST PROMPT ROW MEANS THAT PROMPT IS TRANSCRIPT. This is the
+    # idle-footer frame (live pane %17, 06:52): the composer is empty, the last
+    # prompt-marked row is the echo of a message already submitted, and the harness
+    # hint ('tab to queue message') is drawn two rows further down, under the status
+    # footer. The 2.70.21 rule looked for a hint below the CANDIDATE and bailed out
+    # when any prompt row followed it - which is exactly this frame, so the echo was
+    # still returned as a draft (cos, live measurement).
+    #
+    # Structural, not string-matching: what matters is that a hint exists BELOW the
+    # last prompt row and is not the row directly under it (a hint one row under the
+    # line being typed belongs to that line - the 'hint must not mask a real draft'
+    # fixture). No new wording is matched here.
+    last_prompt_index = in_region[-1][0]
+    hint_rows = [index for index, row in enumerate(rows[hint_from:], start=hint_from)
+                 if _is_placeholder(row)]
+    if any(index - last_prompt_index >= 2 for index in hint_rows):
+        return "", (f"the harness hint on row "
+                    f"{[i for i in hint_rows if i - last_prompt_index >= 2][0] + 1} of "
+                    f"{len(rows)} sits below the last prompt row "
+                    f"({last_prompt_index + 1}), so that prompt is transcript and the "
+                    "box is empty")
     candidates = []
     for index, row in in_region:
         body = _prompt_body(row)
