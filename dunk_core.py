@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.19"
+VERSION = "2.70.20"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1321,7 +1321,7 @@ class Flock:
         # desk would offer a route that silently waits (measured on %2).
         evidence, last = "no poll observed", None
         import dunk_owner
-        store = dunk_owner.OwnerPush()
+        store = dunk_owner.shared()
         try:
             # The POLL heartbeat, not the last take: a manual take must not confer
             # capability, and an idle poller draining empty queues must not lose it.
@@ -1335,14 +1335,9 @@ class Flock:
                             "(a manual owner take does not count)")
         except Exception:                       # noqa: BLE001 - capability never crashes
             evidence = "drain evidence unavailable"
-        finally:
-            # One connection per query, closed deterministically: a capability probe
-            # runs per fleet row per refresh, and leaking a handle per call is how a
-            # desk ends up with a thousand open descriptors.
-            try:
-                store.close()
-            except Exception:                   # noqa: BLE001 - closing must not raise
-                pass
+        # No close here: the store is shared by the daemon (dunk_owner.shared()),
+        # and closing it per probe is what produced the handle churn in the first
+        # place. One connection for the process, not one per capability query.
         observed = bool(last and time.time() - last < self.DRAIN_FRESH_S)
         return {
             "pane_id": pane_id,
