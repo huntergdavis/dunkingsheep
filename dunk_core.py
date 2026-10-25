@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.34"
+VERSION = "2.70.35"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -4142,7 +4142,15 @@ class Flock:
                                         outcome="ok-turn", attempts=attempt,
                                         bytes=len((text or "").encode("utf-8")))
                     return True, "sent (confirmed by the turn it started)"
-                return False, "submission unconfirmed: input box unreadable or changing"
+                # ...AND UNKNOWN IS NOT A REASON TO STOP PRESSING. Returning here
+                # after the first attempt is what left nudges TYPED BUT UNSUBMITTED in
+                # six idle codex lanes (t130): their composer reads as "transcript" by
+                # the footer-adjacency rule, so the box is unknown, the first Enter does
+                # nothing, and the ladder gave up before ever trying the carriage
+                # return that submits. The retry is the whole point of the ladder.
+                log.info("%s: box read is inconclusive after press #%d (%s); trying the "
+                         "next key", pane_id, attempt, key)
+                continue
             # The box still shows our text. That is only evidence of failure if the
             # lane is NOT working: a busy pane keeps an echo in the transcript.
             if self._turn_started(pane_id):
@@ -4154,6 +4162,13 @@ class Flock:
                 return True, "sent (confirmed by the turn it started)"
             log.info("%s: still in the input box after Enter #%d; pressing again",
                      pane_id, attempt)
+        if last_hold is None:
+            # We pressed every key and the pane never gave a readable answer. Say what
+            # we know: the box could not be read, so this is UNCONFIRMED - not "the text
+            # is still there", which would be a claim we cannot support.
+            return False, (f"submission unconfirmed: input box unreadable or changing "
+                           f"after {SUBMIT_ATTEMPTS} presses; the lane may or may not "
+                           "have taken it - check the pane before resending")
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
 
