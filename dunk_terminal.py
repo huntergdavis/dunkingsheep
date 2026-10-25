@@ -698,10 +698,18 @@ def get_backend(herdr=None):
         if isinstance(herdr, TerminalBackend):
             return herdr
         return HerdrBackend(herdr)
-    name = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "herdr").strip().lower()
-    if name in ("", "herdr"):
-        return HerdrBackend()
-    if name == "tmux":
+    # TMUX IS THE DEFAULT (owner decision on t50, 2026-10-24). herdr was the default
+    # for the whole life of the daemon, so the flip depended on one systemd drop-in
+    # setting the variable: any unit that lost that drop-in silently moved the daemon
+    # back onto a backend with no agents on it (herdr pane list: 47 panes, 0 agents).
+    # A default that needs a drop-in to be correct is not a default.
+    #
+    # herdr is still selectable, explicitly, for the week-long rollback:
+    #   DUNKINGSHEEP_TERMINAL_BACKEND=herdr
+    name = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "tmux").strip().lower()
+    if name in ("", "tmux"):
         return TmuxBackend()
+    if name == "herdr":
+        return HerdrBackend()
     raise ValueError(
-        f"unknown terminal backend {name!r}; expected 'herdr' or 'tmux'")
+        f"unknown terminal backend {name!r}; expected 'tmux' or 'herdr'")
