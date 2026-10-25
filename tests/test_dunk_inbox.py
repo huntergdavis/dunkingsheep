@@ -471,6 +471,30 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
             self.flock.delivery_capability("%99")
 
+    def test_capability_says_whether_the_desk_credential_covers_this_pane(self):
+        """A token existing is not the same as this pane being on its list: the
+        credential names panes, so a view that only knows a token exists offers a
+        button the daemon refuses (found reviewing the desk's can_type)."""
+        import json as _json
+        import dunk_desk
+        made = self.flock.create_workspace(label="guarded", cwd="/tmp",
+                                          mailbox="guarded lane")["pane_id"]
+        path = os.path.join(self.tmp.name, "desk.json")
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DESK_FILE": path}):
+            desk = dunk_desk.DeskCredential(path=path)
+            before = self.flock.delivery_capability("guarded lane")
+            self.assertFalse(before["desk_credential"])
+            self.assertFalse(before["desk_can_type"])
+            token = desk.issue([made])
+            after = self.flock.delivery_capability("guarded lane")
+            self.assertTrue(after["desk_credential"])
+            self.assertTrue(after["desk_can_type"], "this pane is on the list")
+            desk.issue(["%1"])
+            other = self.flock.delivery_capability("guarded lane")
+            self.assertTrue(other["desk_credential"])
+            self.assertFalse(other["desk_can_type"],
+                             "a token that does not cover this pane must not offer a button")
+
     def test_two_live_panes_declaring_one_name_are_refused_not_split(self):
         """A restore that duplicates a lane must not split its mail silently."""
         a = self.flock.create_workspace(label="one", cwd="/tmp", mailbox="par-b")["pane_id"]

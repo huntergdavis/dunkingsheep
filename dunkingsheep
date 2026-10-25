@@ -1298,6 +1298,9 @@ def print_capability(result):
     print(f"  drains={'yes' if result['drains'] else 'no'}  send={result['send']}"
           f"  evidence={result.get('drain_evidence') or '-'}")
     print(f"  {result['expect']}")
+    if result.get("desk_credential") is not None:
+        print(f"  desk: credential={'yes' if result['desk_credential'] else 'no'}"
+              f"  may type here={'yes' if result['desk_can_type'] else 'no'}")
 
 
 def print_lanes(result):
