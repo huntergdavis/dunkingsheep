@@ -99,11 +99,24 @@ _subprocess.Popen = _popen_recording_daemons
 
 
 def _alive(pid):
+    """Alive AND still a daemon.
+
+    `kill(pid, 0)` is not the test: it succeeds for a ZOMBIE (a child that has
+    exited but not been reaped) and for a pid that has been REUSED by something
+    else. Both produced false LEAKED lines on 2026-10-24, and a word that is wrong
+    twice stops being read. The state must be a live one and the cmdline must still
+    be our daemon; anything else is gone for our purposes.
+    """
     try:
-        os.kill(pid, 0)
-        return True
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            state = handle.read().rsplit(b")", 1)[1].split()[0]
+        if state in (b"Z", b"X", b"x"):
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            cmdline = handle.read()
     except OSError:
         return False
+    return b"serve" in cmdline
 
 
 def _pids_from_pidfile():
@@ -134,14 +147,32 @@ def _sweep_recorded_daemons():
     # Give a signal time to be handled before crying leak: a 0.3s window reported
     # daemons that were already on their way out, which is how a checker stops
     # being believed.
-    deadline = _time.time() + 3.0
-    while _time.time() < deadline and any(_alive(pid) for pid in pids):
-        _time.sleep(0.1)
+    # Two passes: a loaded host can take seconds to unwind a daemon, and a false
+    # LEAKED costs more than a sentence - it teaches the next reader to ignore the
+    # word. Measured 2026-10-24: a daemon that was swept correctly still printed
+    # LEAKED because it exited 0.2 s after the grace.
+    for grace in (3.0, 4.0):
+        deadline = _time.time() + grace
+        while _time.time() < deadline and any(_alive(pid) for pid in pids):
+            _time.sleep(0.1)
+        pids = [pid for pid in pids if _alive(pid)]
+        if not pids:
+            return
+    # Escalate: these pids are OURS (recorded at spawn), and a test daemon that has
+    # ignored SIGTERM for 7 s is not going to leave politely. LEAKED is reserved for
+    # a pid that survives even SIGKILL, which means a real problem (a zombie, a
+    # process in another namespace), not a slow shutdown.
     for pid in pids:
-        if not _alive(pid):
-            continue
-        # Still there after SIGTERM: say WHICH spawn leaked, and where its config
-        # was, instead of leaving the next reader to guess from `pgrep`.
+        try:
+            os.kill(pid, _signal.SIGKILL)
+        except OSError:
+            pass
+    kill_deadline = _time.time() + 1.5
+    while _time.time() < kill_deadline and any(_alive(pid) for pid in pids):
+        _time.sleep(0.05)
+    for pid in [p for p in pids if _alive(p)]:
+        # Say WHICH spawn leaked, and where its config was, instead of leaving the
+        # next reader to guess from `pgrep`.
         try:
             environ = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
             config = next((part.decode("utf-8", "replace") for part in environ
