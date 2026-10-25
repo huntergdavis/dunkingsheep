@@ -164,47 +164,75 @@ def exported_pane_id(environ=None):
     return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
 
 
-def resolve_identity(explicit=None, environ=None, tty_lookup=None):
-    """(pane_id, note) for this caller, refusing rather than guessing.
+def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None):
+    """(pane_id, note) for this caller, refusing only a LYING environment.
 
     The terminal we are IN beats a claim inherited from somewhere else, and a claim
-    that disagrees with the terminal is refused rather than preferred: an inherited
-    TMUX_PANE is exactly how this lane spent a day reading another lane's mail
-    (2026-10-24). Refusals, each with its reason:
+    that disagrees with it is refused rather than preferred: an inherited TMUX_PANE
+    is exactly how this lane spent a day reading another lane's mail (2026-10-24).
 
-      - TMUX_PANE set, TTY says a DIFFERENT pane   -> refuse (a forged/stale claim)
-      - no TMUX_PANE, TTY says zero panes          -> refuse (not a lane)
-      - no TMUX_PANE, TTY says two panes           -> refuse (a question, not an id)
+    The distinction that matters, and that a first version got wrong: an ABSENT
+    identity is not a lying one. A systemd unit (dispatch, health, state, watchdog,
+    deadman, desk) has no pane and no pty - that is what a unit looks like - so it
+    is ANONYMOUS. Refusing there took every one of those units down (VP i24050).
+    A refusal is for the case where a terminal EXISTS and either disagrees with the
+    claim or does not resolve to exactly one pane.
 
     The TTY fallback is for IDENTITY ONLY: it confers no superuser and no
-    capability (drains stays observed), so a codex runner that strips TMUX_PANE
-    gets a name, not authority.
+    capability (drains stays observed).
     """
     env = os.environ if environ is None else environ
     if explicit is not None:
         return explicit, "explicit"
+    if env.get("DUNKINGSHEEP_VERIFY_SELF") == "1":
+        detect = _current_pane_id if detect is None else detect
+        detected = detect()
+        if detected:
+            return detected, "verified by the backend (VERIFY_SELF)"
     claimed = (env.get("TMUX_PANE") or "").strip()
+    herdr_claim = (env.get("HERDR_PANE_ID") or "").strip()
+    claim = claimed or herdr_claim
     if env.get("DUNKINGSHEEP_TTY_IDENTITY", "1") == "0":
-        return (claimed or env.get("HERDR_PANE_ID") or None), "env only (tty check off)"
+        detect = _current_pane_id if detect is None else detect
+        return (claim or detect() or None), "env only (tty check off)"
+
     lookup = tty_lookup or pane_for_tty
-    try:
-        pane, note = lookup()
-    except Exception as error:                  # noqa: BLE001 - identity must not crash
-        pane, note = None, f"tty lookup failed: {error}"
-    if claimed:
-        if pane and pane != claimed:
+    pane, note = lookup()
+    if claim:
+        if pane and pane != claim:
             raise IdentityRefused(
-                f"identity refused: TMUX_PANE says {claimed!r} but this terminal is "
-                f"pane {pane!r} ({note}). The terminal you are in wins, and a claim "
-                "that disagrees with it is not corrected silently - if you inherited "
-                "TMUX_PANE from another lane, unset it or set it to yours.")
-        return claimed, (f"env, confirmed by {note}" if pane else
-                         f"env only ({note})")
+                f"identity refused: TMUX_PANE/HERDR_PANE_ID says {claim!r} but this "
+                f"terminal is pane {pane!r} ({note}). The terminal you are in wins, "
+                "and a claim that disagrees with it is not corrected silently - if "
+                "you inherited it from another lane, unset it or set it to yours.")
+        return claim, (f"env, confirmed by {note}" if pane else f"env only ({note})")
     if pane:
         return pane, f"resolved by terminal ({note})"
-    raise IdentityRefused(
-        f"identity refused: no TMUX_PANE and the terminal did not identify a pane "
-        f"({note}). Set TMUX_PANE, or run inside a tmux pane.")
+    if _terminal_exists(lookup):
+        # A terminal exists but identifies no single pane: a question, not an id.
+        raise IdentityRefused(
+            f"identity refused: the terminal exists but resolved to no single pane "
+            f"({note}). Set TMUX_PANE, or run inside a tmux pane.")
+    detect = _current_pane_id if detect is None else detect
+    detected = detect()
+    if detected:
+        return detected, "detected by the backend (no terminal in this process chain)"
+    return None, f"anonymous: no pane in the environment and no terminal ({note})"
+
+
+def _terminal_exists(lookup):
+    """True when the lookup's reason says a TERMINAL was found but did not resolve.
+
+    pane_for_tty reports 'no controlling terminal found…' when there is none, and
+    '<tty> is claimed by N panes' / 'no tmux pane owns <tty>' when one exists. Only
+    the second class is a refusal.
+    """
+    try:
+        _pane, note = lookup()
+    except Exception:                            # noqa: BLE001 - absence is not an error
+        return False
+    text = str(note or "")
+    return (text.startswith("/dev/") or "owns /dev/" in text or "claimed by" in text)
 
 
 class FlockClient:

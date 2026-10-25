@@ -19,6 +19,10 @@ import _bootstrap  # noqa: F401,E402
 from dunk_client import IdentityRefused, resolve_identity  # noqa: E402
 
 
+def no_detection():
+    return None
+
+
 def lookup(pane=None, note="test", error=None):
     def _lookup():
         if error:
@@ -48,6 +52,38 @@ class IdentityTests(unittest.TestCase):
     def test_an_ambiguous_terminal_is_refused_not_guessed(self):
         with self.assertRaisesRegex(IdentityRefused, "refused"):
             resolve_identity(environ={}, tty_lookup=lookup(None, "/dev/pts/70 is claimed by 2 panes"))
+
+    def test_a_systemd_service_is_anonymous_not_refused(self):
+        """A unit has no pane and no pty. Raising there took dispatch, health, state,
+        watchdog, deadman and the desk down (VP i24050, reproduced with
+        systemd-run --user): an absent identity is not a lying one."""
+        pane, note = resolve_identity(environ={}, detect=no_detection,
+                                      tty_lookup=lookup(None, "no controlling terminal"))
+        self.assertIsNone(pane)
+        self.assertIn("anonymous", note)
+
+    def test_the_cli_answers_inside_a_real_systemd_unit(self):
+        """The reviewer's reproduction: a systemd user unit has no pane and no pty.
+        Run for real when systemd-run is available, because a subprocess started by
+        an agent still inherits the agent in its parent chain, which is exactly the
+        part a unit does not have.
+        """
+        import shutil
+        import subprocess
+        if not shutil.which("systemd-run"):
+            self.skipTest("systemd-run is not available here")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # `inbox count` needs a mailbox when the caller has no lane of its own - that
+        # is pre-existing behaviour and not part of this change, so the unit case
+        # names one explicitly rather than asserting that a service has a mailbox.
+        for argv in (["status"], ["panes"], ["inbox", "count", "nobody"]):
+            proc = subprocess.run(
+                ["systemd-run", "--user", "--wait", "--pipe", "--quiet",
+                 "--setenv", "DUNKINGSHEEP_TTY_IDENTITY=1",
+                 sys.executable, os.path.join(root, "dunkingsheep"), *argv],
+                capture_output=True, text=True, timeout=180)
+            self.assertEqual(0, proc.returncode, (proc.stdout or "") + (proc.stderr or ""))
+            self.assertNotIn("identity refused", proc.stderr or "")
 
     def test_a_terminal_with_no_pane_is_refused(self):
         with self.assertRaisesRegex(IdentityRefused, "refused"):
