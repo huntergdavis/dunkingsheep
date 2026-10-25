@@ -35,7 +35,7 @@ class CodexComposerTests(unittest.TestCase):
         screen = captured()
         text, detail = dunk_core.box_text(screen)
         self.assertEqual("", text, f"the transcript was read as a draft: {detail}")
-        self.assertIn("hint", detail)
+        self.assertTrue(detail, "the reader must say why the box is empty")
 
     def test_the_captured_screen_is_deliverable_and_not_foreign(self):
         screen = captured()

@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.22"
+VERSION = "2.70.24"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -5163,6 +5163,51 @@ def box_text(screen):
               if _prompt_body(row) is not None]
     # Where the "the box is empty" hint can be drawn: the tail of the pane.
     hint_from = max(0, len(rows) - COMPOSER_HINT_TAIL_ROWS)
+
+    # THE COMPOSER IS THE PROMPT ROW THAT TOUCHES THE STATUS FOOTER; an echo is
+    # separated from it by blank rows. This is the discriminator that fits every
+    # frame captured so far, including the two that broke in the DANGEROUS direction
+    # (a human's 3-line draft read as an empty box would have typed over it):
+    #
+    #   idle echo frame      last prompt 19, footer 22, 2 blanks  -> transcript
+    #   transcript+hint      last prompt 15, footer 22, 2 blanks  -> transcript
+    #   busy lane            last prompt 20, footer 23, 1 blank   -> composer (hint)
+    #   working + draft x3   last prompt 34, footer 38, 1 blank   -> composer (draft)
+    #   idle + draft x3      last prompt 34, footer 38, 1 blank   -> composer (draft)
+    #
+    # So: >= 2 blank rows between the last prompt row and the footer means that row
+    # is transcript and the box is empty; <= 1 means it is the composer, and its body
+    # decides. Structural, no wording, and it is the direction that matters: a false
+    # "empty" types over a human, a false "draft" only holds a message.
+    # BLANK ROWS MATTER HERE, and `rows` has them filtered out - so this rule reads
+    # the raw lines. Getting that wrong made the rule silently unreachable: every
+    # count came out 0 and every echo still read as a draft.
+    raw_rows = screen.splitlines()
+    raw_prompts = [(index, row) for index, row in enumerate(raw_rows)
+                   if _prompt_body(row) is not None]
+    footers = [index for index, row in enumerate(raw_rows)
+               if " \u00b7 " in _strip_ansi(row) and _prompt_body(row) is None]
+    # BORDERED COMPOSERS ARE NOT THIS RULE'S BUSINESS. claude draws a box and keeps
+    # an empty prompt row at the bottom with the draft above it; that fixture must
+    # keep reading as a draft, and the footer rule would call it empty. codex draws
+    # no border, which is why the rule keys on the absence of one.
+    bordered_tail = any(_is_border_line(row) for row in raw_rows[-6:])
+    if (not bordered_tail and raw_prompts and footers
+            and footers[-1] > raw_prompts[-1][0]):
+        last_prompt_index, last_prompt_row = raw_prompts[-1]
+        footer_index = footers[-1]
+        blanks = sum(1 for index in range(last_prompt_index + 1, footer_index)
+                     if not _strip_ansi(raw_rows[index]).strip())
+        if blanks >= 2:
+            return "", (f"the last prompt row ({last_prompt_index + 1}) is {blanks} blank "
+                        f"rows above the status footer ({footer_index + 1}), so it is "
+                        "transcript and the box is empty")
+        body = _prompt_body(last_prompt_row)
+        if body:
+            return body, (f"composer: the prompt row at {last_prompt_index + 1} is "
+                          f"contiguous with the status footer ({footer_index + 1})")
+        return "", (f"the composer at row {last_prompt_index + 1} holds only the "
+                    "harness hint, so the box is empty")
     # Submitted prompts use the same sigil as drafts. When the live composer
     # has borders, use those boundaries rather than including nearby transcript
     # in the last 14 rows. Keep EVERY prompt inside it: a multiline draft can
