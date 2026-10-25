@@ -52,6 +52,24 @@ class CoalesceFreshnessTests(unittest.TestCase):
         self.assertNotIn("cached", after.stderr,
                          "a read after a write replayed the pre-write answer")
 
+    def test_a_mutation_bumps_the_generation_before_and_after(self):
+        """The interleaving case: a read that lands between the pre-bump and the write
+        completing would cache a pre-write answer under the NEW generation, and that
+        answer would look valid until the next mutation. So the bump happens twice, and
+        the value says which phase wrote it."""
+        self.run_cli("task", "add", "a task")
+        import glob
+        pattern = os.path.join("/tmp", "dunkingsheep-gen-" + str(os.getuid()) + "-*")
+        recent = [path for path in glob.glob(pattern)
+                  if os.path.getmtime(path) > __import__("time").time() - 120]
+        self.assertTrue(recent, "no generation file was written")
+        values = []
+        for path in recent:
+            with open(path, encoding="utf-8") as handle:
+                values.append(handle.read().strip())
+        self.assertTrue(any(value.endswith("-post") for value in values),
+                        f"the generation was not bumped after the run: {values}")
+
     def test_reads_with_no_write_between_them_stay_cached(self):
         """The coalescer still does its job: this is a fix for writes, not a
         blanket disabling of the cache."""

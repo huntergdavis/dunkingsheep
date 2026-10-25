@@ -1689,11 +1689,19 @@ def _generation():
         return "0"
 
 
-def _bump_generation():
+def _bump_generation(phase="pre"):
+    """Invalidate cached reads. Called BEFORE a mutating run and AGAIN after it.
+
+    Both are needed, and the second is not belt-and-braces: a read that lands between
+    the pre-bump and the write completing would otherwise cache a PRE-write answer
+    under the NEW generation, and that answer would then look valid until the next
+    mutation (VP follow-up on t89). The phase is in the value so a test can see that
+    the post-run bump happened rather than inferring it.
+    """
     path = _generation_path()
     try:
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write(str(time.time()))
+            handle.write(f"{time.time()}-{phase}")
     except OSError:
         pass
 
@@ -1780,6 +1788,7 @@ def _run(argv):
     was still being served because the fresh path returned before it could
     overwrite the file. A cache that cannot expire is a stale answer generator.
     """
+    mutating = _is_mutating(argv)
     path, hit = _coalesce(argv)
     if path and hit:
         try:
@@ -1800,7 +1809,10 @@ def _run(argv):
         # Capturing everything replaced sys.stdout with a StringIO, which has
         # no .buffer, so `dunkingsheep mcp` (a byte-stream server) died on
         # start and every MCP client saw CONNECTION_CLOSED.
-        return main(argv)
+        code = main(argv)
+        if mutating:
+            _bump_generation("post")
+        return code
     import contextlib
     import io
     buffer = io.StringIO()
@@ -1827,6 +1839,10 @@ def _run(argv):
         except OSError:
             pass
     sys.stdout.write(output)
+    if mutating:
+        # AFTER the run: a read that raced the write must not keep a pre-write answer
+        # that now carries the pre-bump generation.
+        _bump_generation("post")
     return code
 
 
