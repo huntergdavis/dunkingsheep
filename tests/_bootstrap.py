@@ -134,12 +134,18 @@ def _sweep_recorded_daemons():
     # Give a signal time to be handled before crying leak: a 0.3s window reported
     # daemons that were already on their way out, which is how a checker stops
     # being believed.
-    deadline = _time.time() + 3.0
-    while _time.time() < deadline and any(_alive(pid) for pid in pids):
-        _time.sleep(0.1)
+    # Two passes: a loaded host can take seconds to unwind a daemon, and a false
+    # LEAKED costs more than a sentence - it teaches the next reader to ignore the
+    # word. Measured 2026-10-24: a daemon that was swept correctly still printed
+    # LEAKED because it exited 0.2 s after the grace.
+    for grace in (3.0, 4.0):
+        deadline = _time.time() + grace
+        while _time.time() < deadline and any(_alive(pid) for pid in pids):
+            _time.sleep(0.1)
+        pids = [pid for pid in pids if _alive(pid)]
+        if not pids:
+            return
     for pid in pids:
-        if not _alive(pid):
-            continue
         # Still there after SIGTERM: say WHICH spawn leaked, and where its config
         # was, instead of leaving the next reader to guess from `pgrep`.
         try:
