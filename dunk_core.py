@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.35"
+VERSION = "2.70.37"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -4300,10 +4300,29 @@ class Flock:
                 # A bare shell has no chat input box to read back.
                 return True, "sent"
         if guarded:
-            # SHORT: one check, no retry loop, no sleeps. The caller re-attempts.
+            # SHORT: one check, one extra press, no long sleeps. The caller re-attempts.
+            #
+            # THE NUDGE PATH IS THIS ONE, and it used to press Enter exactly once and
+            # give up - which is why fixing the retry ladder changed nothing for the
+            # six idle codex lanes (t130): their composer ignores Enter and submits on
+            # the carriage return, and this branch never tried it.
             time.sleep(SUBMIT_POLL_S[0])
-            if self._box_holds(pane_id, text) is False:
+            held = self._box_holds(pane_id, text)
+            if held is False:
                 return True, "sent"
+            if self._turn_started(pane_id):
+                return True, "sent (confirmed by the turn it started)"
+            key = self._submit_key.get(pane_id) or "C-m"
+            with self._typing(pane_id):
+                ok, _detail = self.herdr.send_keys(pane_id, key)
+            if ok:
+                time.sleep(SUBMIT_POLL_S[0])
+                if self._box_holds(pane_id, text) is False:
+                    self._submit_key[pane_id] = key
+                    return True, f"sent ({key})"
+                if self._turn_started(pane_id):
+                    self._submit_key[pane_id] = key
+                    return True, "sent (confirmed by the turn it started)"
             return False, "text did not submit; it is still in the pane's input box"
         return self._press_until_submitted(pane_id, text, first_pressed=True)
 
