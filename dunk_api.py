@@ -396,7 +396,7 @@ def h_owner_push(flock, args, self_pane_id):
     # One seam for direct delivery, with tokenised refusals the desk can render
     # (dead_lane / unhoused_lane / unknown_name) instead of a generic error.
     pane = flock.delivery_target(args["target"], self_pane_id)
-    store = dunk_owner.OwnerPush()
+    store = dunk_owner.shared()
     result = store.push(pane["pane_id"], args["body"],
                         target=args.get("target"), subject=args.get("subject"))
     # "stored" is its own outcome (VP ruling 2026-10-24): the message is durable and
@@ -426,11 +426,9 @@ def h_owner_poll(flock, args, self_pane_id):
         raise DunkError(
             f"owner_poll for {claimed!r} refused: this call comes from {self_pane_id!r}. "
             "Only a lane may report its own polling.")
-    store = dunk_owner.OwnerPush()
-    try:
-        return store.poll(self_pane_id, by=args.get("by") or "harness")
-    finally:
-        store.close()
+    # Shared store: never closed here. Closing it per poll is the leak's mirror
+    # image - one process, one connection (VP i24037).
+    return dunk_owner.shared().poll(self_pane_id, by=args.get("by") or "harness")
 
 
 def h_owner_take(flock, args, self_pane_id):
@@ -439,13 +437,13 @@ def h_owner_take(flock, args, self_pane_id):
     pane_id = args.get("pane_id") or self_pane_id
     if not pane_id:
         raise ValueError("owner_take needs a pane")
-    store = dunk_owner.OwnerPush()
+    store = dunk_owner.shared()
     return {"pane_id": pane_id, "messages": store.take(pane_id, by=args.get("by"))}
 
 
 def h_owner_stats(flock, args, self_pane_id):
     import dunk_owner
-    store = dunk_owner.OwnerPush()
+    store = dunk_owner.shared()
     return {"stats": store.stats(), "pending": store.pending()}
 
 

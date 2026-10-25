@@ -52,6 +52,28 @@ CREATE TABLE IF NOT EXISTS owner_poll (
 """
 
 
+_SHARED = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def shared(path=DB_PATH):
+    """ONE connection for the daemon, behind the store's own lock.
+
+    OwnerPush opens a sqlite connection in its constructor. The owner_push /
+    owner_take / owner_stats / owner_poll handlers each built a fresh one per call
+    and never closed it: the daemon held 60 handles on owner-push.db with a soft
+    limit of 1024, and the journal already shows "Too many open files" twice
+    (measured 2026-10-24, VP i24037). A per-call connection is fine for a CLI that
+    exits; in a long-lived daemon it is a leak by construction.
+    """
+    with _SHARED_LOCK:
+        store = _SHARED.get(path)
+        if store is None:
+            store = OwnerPush(path=path)
+            _SHARED[path] = store
+        return store
+
+
 class OwnerPush:
     def __init__(self, path=DB_PATH):
         self.path = path
@@ -63,6 +85,13 @@ class OwnerPush:
         with self._lock:
             self.db.executescript(SCHEMA)
             self.db.commit()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
 
     def close(self):
         """Close the connection. A caller that opens a store per query must be able
