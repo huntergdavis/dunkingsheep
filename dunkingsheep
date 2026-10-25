@@ -1621,6 +1621,83 @@ def _still_working_message(command, seconds):
             f"result lands in the state it writes (e.g. dispatch-state.json). "
             f"Raise DUNKINGSHEEP_BATCH_TIMEOUT_S or reduce the batch.")
 
+# Commands that CHANGE state. After one of these, a cached read is not merely
+# stale, it is a lie: "drain 200 messages, then count" returned the pre-drain count
+# for up to DUNKINGSHEEP_MIN_POLL_S and I nearly filed a bug against working code
+# (VP i24046 -> t89). A mutating command bumps a generation file; a cached answer
+# carries the generation it was computed under, and a mismatch means recompute.
+_MUTATING_COMMANDS = (
+    "send", "send-keys", "fire", "flush", "clear-box", "start", "stop", "toggle",
+    "stop-all", "add", "update", "set", "remove", "rm", "delete", "cancel",
+    "cancel-message", "inbox", "task", "superuser", "desk-token", "lane", "lanes",
+    "new-workspace", "workspace", "new-tab", "tab", "split", "start-agent", "agent",
+    "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
+    "recover", "shutdown", "watchdog", "watchdog-deadman", "memory", "context",
+)
+
+
+# Subcommands that only READ, per mutating command. A flat list of commands was
+# wrong in the obvious way: `task list` bumped the generation and therefore never
+# hit its own cache. `inbox read` is NOT here on purpose - reading marks messages
+# read, which is a write.
+_READ_ONLY_SUBCOMMANDS = {
+    "task": {"list", "ls", "read", "stats", "metrics", "followers", "get"},
+    "inbox": {"count", "list", "ls", "stats", "status", "fetch"},
+    "lane": {"list", "lanes"},
+    "lanes": {"list"},
+    "owner": {"stats"},
+    "state": {"latest"},
+    "retired": {"list"},
+    "memory": {"recall", "context", "search", "stats", "status"},
+    "context": {"get", "list", "search", "stats"},
+    "dispatch": {"status", "list"},
+    "superuser": {"status"},
+    "workspace": {"list"},
+    "workspaces": {"list"},
+    "tab": {"list"},
+    "tabs": {"list"},
+    "agent": {"list"},
+    "panes": {"list"},
+}
+
+
+def _is_mutating(words):
+    """True when this invocation can change state, and so invalidates cached reads."""
+    words = [word for word in words if not word.startswith("-")]
+    if not words:
+        return False
+    command = words[0]
+    if command not in _MUTATING_COMMANDS:
+        return False
+    if len(words) > 1 and words[1] in _READ_ONLY_SUBCOMMANDS.get(command, set()):
+        return False
+    return True
+
+
+def _generation_path():
+    scope = (os.environ.get("DUNKINGSHEEP_SOCKET")
+             or os.environ.get("DUNKINGSHEEP_DIR") or "default")
+    digest = __import__("hashlib").sha256(scope.encode("utf-8")).hexdigest()[:12]
+    return os.path.join("/tmp", "dunkingsheep-gen-" + str(os.getuid()) + "-" + digest)
+
+
+def _generation():
+    try:
+        with open(_generation_path(), encoding="utf-8") as handle:
+            return handle.read().strip() or "0"
+    except OSError:
+        return "0"
+
+
+def _bump_generation():
+    path = _generation_path()
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(str(time.time()))
+    except OSError:
+        pass
+
+
 _POLL_COMMANDS = ("status", "list", "ls", "poll")
 _INBOX_POLLS = ("count", "list", "ls", "stats")
 
@@ -1671,6 +1748,15 @@ def _coalesce(argv):
     except OSError:
         last = 0.0
     if last and now - last < minimum:
+        # ...and only if nothing has CHANGED since this answer was computed.
+        stamp = os.path.join(path + ".gen")
+        try:
+            with open(stamp, encoding="utf-8") as handle:
+                cached_generation = handle.read().strip()
+        except OSError:
+            cached_generation = None
+        if cached_generation != _generation():
+            return path, False          # a write happened: recompute, do not replay
         return path, True
     try:
         open(path, "a").close()
@@ -1736,6 +1822,8 @@ def _run(argv):
         try:
             with open(path + ".out", "w", encoding="utf-8") as handle:
                 handle.write(output)
+            with open(path + ".gen", "w", encoding="utf-8") as handle:
+                handle.write(_generation())
         except OSError:
             pass
     sys.stdout.write(output)
@@ -1752,6 +1840,11 @@ def main(argv=None):
     _coalesce(words)
     args = parser.parse_args(words)
     command = args.command
+    # A mutating command invalidates every cached READ for this store. Bumping
+    # before the run means a read that races the write recomputes rather than
+    # replaying a pre-write answer.
+    if _is_mutating(words):
+        _bump_generation()
 
     if command in ("guide", "help", "docs"):
         sys.stdout.write(guide(markdown=args.markdown))
