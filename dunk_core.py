@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.12"
+VERSION = "2.70.13"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1362,7 +1362,23 @@ class Flock:
                        if observed else
                        "immediate guarded send (Enter, then C-m); 'sent' means it "
                        "left the box"),
+            # WHETHER THE DESK CAN ACTUALLY TYPE HERE. A token existing is not the
+            # same as this pane being on its list: the credential names panes, so a
+            # view that only knows "a token is configured" offers a button that the
+            # daemon will refuse (found reviewing the desk's can_type, 2026-10-24).
+            **self._desk_send_rights(pane_id),
         }
+
+    def _desk_send_rights(self, pane_id):
+        """Does the desk credential exist, and does it cover THIS pane?"""
+        try:
+            import dunk_desk
+            desk = dunk_desk.DeskCredential()
+            panes = set(desk.panes())
+            return {"desk_credential": desk.has_token(),
+                    "desk_can_type": bool(desk.has_token() and pane_id in panes)}
+        except Exception:                        # noqa: BLE001 - capability never crashes
+            return {"desk_credential": False, "desk_can_type": False}
 
     def delivery_target(self, target, self_pane_id=None):
         """Resolve a DIRECT-DELIVERY target (owner push, keystrokes) to one pane.
