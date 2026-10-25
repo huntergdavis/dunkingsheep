@@ -1089,6 +1089,8 @@ class SendRaceTests(unittest.TestCase):
         self.assertEqual("unconfirmed", probe.to_dict()["outcome"])
         probe.status, probe.detail = "failed", "no such pane"
         self.assertEqual("refused", probe.to_dict()["outcome"])
+        self.assertIn("stored", dc.Message.OUTCOMES,
+                      "a durable queue row is its own outcome, not 'ok'")
 
     def test_a_busy_lane_confirms_by_the_turn_it_started(self):
         """The false negative cos measured: two sends to a claude lane reported

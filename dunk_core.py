@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.9"
+VERSION = "2.70.10"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -543,7 +543,13 @@ class Message:
     # The four outcomes a caller can act on, as one machine-readable field. Prose
     # is for people; a caller that parses sentences gets it wrong (cos, 2026-10-24:
     # "sent=false" substring matching, then a delivered message read as a 409).
-    OUTCOMES = ("ok", "queued", "unconfirmed", "refused")
+    # ok          submitted and confirmed (box cleared, or a turn started)
+    # stored      accepted into a durable queue the LANE drains itself (owner_push);
+    #             it has not been read, which is a different fact from "sent"
+    # queued      held behind a human typing / not yet delivered by the typing path
+    # unconfirmed neither witness fired: may have arrived, do not resend blindly
+    # refused     a named refusal, nothing was written or typed
+    OUTCOMES = ("ok", "stored", "queued", "unconfirmed", "refused")
 
     def outcome(self):
         if self.status == "queued":

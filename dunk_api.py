@@ -397,8 +397,15 @@ def h_owner_push(flock, args, self_pane_id):
     # (dead_lane / unhoused_lane / unknown_name) instead of a generic error.
     pane = flock.delivery_target(args["target"], self_pane_id)
     store = dunk_owner.OwnerPush()
-    return store.push(pane["pane_id"], args["body"],
-                      target=args.get("target"), subject=args.get("subject"))
+    result = store.push(pane["pane_id"], args["body"],
+                        target=args.get("target"), subject=args.get("subject"))
+    # "stored" is its own outcome (VP ruling 2026-10-24): the message is durable and
+    # the LANE drains it, so it has not been read - a caller that treats this as
+    # delivered would be reporting a delivery nobody has made.
+    result["outcome"] = "stored"
+    result["expect"] = ("the lane's own harness drains it (owner_take); no inbox row, "
+                        "nothing typed into the pane")
+    return result
 
 
 def h_owner_poll(flock, args, self_pane_id):
@@ -1078,9 +1085,11 @@ COMMANDS = [
     Command(
         "owner_push",
         "Deliver an OWNER message to an agent with no inbox row and no typing: it is "
-        "pushed for the pane and the harness extension reads it. Use for owner -> CoS.",
+        "pushed for the pane and the harness extension reads it. Use for owner -> CoS. "
+        "The result carries outcome='stored' (a durable queue row the LANE drains - not "
+        "read yet, which is a different fact from 'sent'), expect=how it will be drained.",
         h_owner_push,
-        params={"desk_token": {"type": "string", "description": "narrow desk credential"}, "desk_token": {"type": "string", "description": "narrow desk credential"}, "target": {"type": "string"},
+        params={"target": {"type": "string"},
                 "body": {"type": "string"},
                 "subject": {"type": "string"}},
         required=("target", "body")),
@@ -1951,6 +1960,10 @@ COMMANDS = [
     # -- herdr layout control: build the herd, then dunk on it ---------------
     Command(
         "delivery_capability",
+        "Outcome vocabulary for every send: ok (submitted and confirmed), stored (a "
+        "durable queue row the lane drains itself - NOT read), queued (held behind a "
+        "human typing), unconfirmed (neither witness fired; do not resend blindly), "
+        "refused (named refusal, nothing written or typed). "
         "How the desk may deliver to this target: does its harness drain a push "
         "queue (pi) or must the message go as an immediate guarded send (claude, "
         "codex)? Returns pane_id, mailbox (the PINNED name when declared), agent, "
