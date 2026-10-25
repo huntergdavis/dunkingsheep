@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.39"
+VERSION = "2.70.40"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -4317,25 +4317,28 @@ class Flock:
                 time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
                 held = self._box_holds(pane_id, text)
                 if held is False:
+                    # ONE LINE PER GUARDED DELIVERY, naming how it went (VP i25315): a
+                    # clear box used to leave no trace at all, so the only evidence of a
+                    # guarded nudge was the generic "message sent" line.
+                    if attempt == 0:
+                        log.info("guarded nudge: %s submitted, box already clear", pane_id)
+                    else:
+                        log.info("guarded nudge: %s submitted, %s took at round %d",
+                                 pane_id, key, attempt)
                     return True, ("sent" if attempt == 0 else
                                   f"sent (confirmed after {attempt + 1} checks)")
                 if self._turn_started(pane_id):
+                    log.info("guarded nudge: %s submitted, the lane started a turn%s",
+                             pane_id, f" after {key} at round {attempt}" if attempt else "")
                     return True, "sent (confirmed by the turn it started)"
                 key = self._submit_key.get(pane_id) or ("Enter" if attempt == 0 else "C-m")
                 with self._typing(pane_id):
                     ok, _detail = self.herdr.send_keys(pane_id, key)
                 if not ok:
                     continue
-                if key != "Enter":
-                    log.info("guarded nudge: Enter did not submit on %s; pressed %s "
-                             "(round %d of %d)", pane_id, key, attempt + 1,
-                             GUARDED_PRESS_ATTEMPTS)
-                # Do NOT remember a key until it CONFIRMS: remembering after every
-                # successful send_keys call made attempt 1 reuse the key that had just
-                # failed, so the carriage return was never tried (found by the test).
-            # The failure must be VISIBLE from the sender's side: a recurrence then shows
-            # up in the journal as this line, not as an idle lane somebody infers hours
-            # later (VP i25123).
+            # The failure must be VISIBLE from the sender's side (VP i25123/i25315): a
+            # recurrence then shows up in the journal as this line, not as an idle lane
+            # somebody infers hours later.
             log.warning("guarded nudge: typed, not submitted on %s after %d rounds; the "
                         "text is in the composer and the lane has not started a turn",
                         pane_id, GUARDED_PRESS_ATTEMPTS)

@@ -34,17 +34,25 @@ class GuardedNudgeTests(unittest.TestCase):
         self.assertIn(["C-m"], pressed,
                       "the guarded path never tried the key that submits")
 
-    def test_the_log_says_which_key_took(self):
+    def test_every_guarded_delivery_leaves_one_line_naming_the_outcome(self):
+        """VP i25315: a guarded nudge must leave its own trace, not only the generic
+        'message sent' line. The reachable outcomes are: the box was already clear at the
+        first check, a key took at round N, the lane started a turn, or the warning."""
         with self.assertLogs("dunkingsheep", level="INFO") as captured:
-            self.flock.send_now("w2:p1", "a nudge", wait_s=3)
-        self.assertTrue(any("pressed C-m" in line for line in captured.output),
+            self.flock.send_now("w2:p1", "enter takes", wait_s=3)
+        self.assertTrue(any("guarded nudge:" in line for line in captured.output),
+                        captured.output)
+
+        self.herdr.cm_only.add("w2:p1")
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.flock.send_now("w2:p1", "cm takes", wait_s=3)
+        self.assertTrue(any("C-m took at round" in line for line in captured.output),
                         captured.output)
 
     def test_a_failure_is_visible_from_the_senders_side(self):
         """The observable the VP asked for: a recurrence appears in the journal, not as
         an idle lane somebody infers."""
         self.herdr.cm_only.discard("w2:p1")
-        # A pane whose composer never submits at all.
         self.herdr.enters_needed["w2:p1"] = 99
         with self.assertLogs("dunkingsheep", level="WARNING") as captured:
             result = self.flock.send_now("w2:p1", "a nudge", wait_s=3)
