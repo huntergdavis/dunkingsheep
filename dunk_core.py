@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.38"
+VERSION = "2.70.39"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -4326,9 +4326,19 @@ class Flock:
                     ok, _detail = self.herdr.send_keys(pane_id, key)
                 if not ok:
                     continue
+                if key != "Enter":
+                    log.info("guarded nudge: Enter did not submit on %s; pressed %s "
+                             "(round %d of %d)", pane_id, key, attempt + 1,
+                             GUARDED_PRESS_ATTEMPTS)
                 # Do NOT remember a key until it CONFIRMS: remembering after every
                 # successful send_keys call made attempt 1 reuse the key that had just
                 # failed, so the carriage return was never tried (found by the test).
+            # The failure must be VISIBLE from the sender's side: a recurrence then shows
+            # up in the journal as this line, not as an idle lane somebody infers hours
+            # later (VP i25123).
+            log.warning("guarded nudge: typed, not submitted on %s after %d rounds; the "
+                        "text is in the composer and the lane has not started a turn",
+                        pane_id, GUARDED_PRESS_ATTEMPTS)
             return False, "text did not submit; it is still in the pane's input box"
         return self._press_until_submitted(pane_id, text, first_pressed=True)
 
