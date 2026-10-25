@@ -520,6 +520,17 @@ class TmuxBackend(TerminalBackend):
             return None, f"unsupported agent kind {kind!r}"
         return kind, shlex.join(argv)
 
+    @staticmethod
+    def _agent_launch(command):
+        """Wrap an agent command so its exit is visible rather than invisible.
+
+        The pane runs this as its process; without the wrapper a fast exit takes the
+        pane and the error with it, and `remain-on-exit` is a window option the caller
+        has no handle on. Printing the status and dropping to a shell keeps both.
+        """
+        return ("sh -c " + shlex.quote(
+            f"{command}; printf '\\n[agent exited rc=%s]\\n' \"$?\"; exec sh"))
+
     def start_agent(self, name, argv, workspace_id=None, tab_id=None, split=None,
                     cwd=None, focus=False, env=None):
         kind, command = self._agent_command(argv)
@@ -540,7 +551,7 @@ class TmuxBackend(TerminalBackend):
                 return False, f"tab {tab_id} has no pane to split"
             ok, result = self.split_pane(
                 panes[0]["pane_id"], direction=split or "right", cwd=cwd,
-                focus=focus, env=env, command=command)
+                focus=focus, env=env, command=self._agent_launch(command))
             if not ok:
                 return ok, result
             pane = result["pane"]
@@ -553,7 +564,13 @@ class TmuxBackend(TerminalBackend):
             if cwd:
                 args += ["-c", str(cwd)]
             args += self._env_args(env)
-            args.append(command)
+            # AN AGENT THAT DIES MUST LEAVE EVIDENCE. Running the command as the
+            # window process with remain-on-exit off means any fast exit destroys the
+            # pane AND the error text with it: a start that printed "started agent in
+            # %24" left nothing three seconds later (VP t115). The wrapper keeps the
+            # pane, prints the exit status, and drops to a shell so the failure can be
+            # read instead of guessed at.
+            args.append(self._agent_launch(command))
             code, out, err = self._tmux(*args)
             if code != 0:
                 return False, (err.strip() or out.strip()
