@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.31"
+VERSION = "2.70.32"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1773,21 +1773,41 @@ class Flock:
 
     @_as_dunk_error
     def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
+        """Read a batch WITHOUT consuming it, build the whole result, then commit.
+
+        The order matters and it is the whole point of this method: marking read first
+        meant a reader whose rendering or task lookup failed had already consumed the
+        batch, and the messages were gone on the next read - pi-review-1 issued a
+        verdict on a head whose withdrawal message it never saw (VP, t93). So:
+
+          1. fetch with mark=False,
+          2. build the FULL result, including the caller's task queues (which is where
+             the failure actually happened: the row_factory drift crashed for_pane),
+          3. only then mark those ids read.
+        A failure in 1 or 2 leaves the batch unread, which is the safe direction: the
+        reader sees the same mail again rather than losing it.
+        """
         key = self._mailbox_or_self(mailbox, self_pane_id)
-        messages = self.inbox.read(key, limit=limit, peek=peek)
-        if not peek:
-            for message in messages:
-                # How long it waited to be picked up.
-                self.metrics.record(
-                    "inbox.read", pane_id=message.get("pane_id"), mailbox=key,
-                    sender=message.get("sender"), source="inbox", outcome="ok",
-                    duration_ms=int((message["read_at"] - message["created_at"]) * 1000),
-                    bytes=message.get("body_bytes"))
+        messages = self.inbox.read(key, limit=limit, peek=True)
         result = {"mailbox": key, "messages": messages}
         if self_pane_id:
             # The owner's directive: mail and the reader's task queues travel
-            # together, so one inbox read is the whole handoff.
+            # together, so one inbox read is the whole handoff. This runs BEFORE the
+            # mark for the reason above - it is the step that used to crash.
             result["tasks"] = self.tasks.for_pane(self_pane_id)
+        if peek or not messages:
+            return result
+        marked = self.inbox.mark_read([message["message_id"] for message in messages])
+        now = time.time()
+        for message in messages:
+            message["state"] = "read"
+            message["read_at"] = now
+            self.metrics.record(
+                "inbox.read", pane_id=message.get("pane_id"), mailbox=key,
+                sender=message.get("sender"), source="inbox", outcome="ok",
+                duration_ms=int((now - message["created_at"]) * 1000),
+                bytes=message.get("body_bytes"))
+        result["marked_read"] = marked
         return result
 
     @_as_dunk_error
