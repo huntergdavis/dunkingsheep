@@ -27,9 +27,12 @@ to a scope string and hand it over.
 """
 
 import json
+import logging
 import os
 import re
 import sqlite3
+
+log = logging.getLogger("dunkingsheep.tasks")
 import threading
 import time
 from collections import Counter
@@ -631,12 +634,27 @@ class Tasks:
 
     # -- atomic claiming, leases and reaping --------------------------------
 
+    def _rows(self, sql, params=()):
+        """Rows as sqlite3.Row, whatever the connection's factory says today.
+
+        Observed 2026-10-24 20:08: `leases_for` raised IndexError: tuple index out
+        of range, i.e. the rows came back as plain TUPLES though __init__ sets
+        row_factory. Two calls a minute later were fine, so the cause is a state
+        change on the shared connection (one connection, several threads) rather
+        than a bad query. Reading by column name must not depend on that state, so
+        the factory is re-asserted and the fact is logged when it had drifted.
+        """
+        rows = self.db.execute(sql, params).fetchall()
+        if rows and not isinstance(rows[0], sqlite3.Row):
+            self.db.row_factory = sqlite3.Row
+            log.warning("task rows came back without a row factory; re-asserted it")
+            return self.db.execute(sql, params).fetchall()
+        return rows
+
     def leases_for(self, task_id, now=None):
         """Live leases for a task (expired rows are ignored)."""
         now = _now() if now is None else now
-        rows = self.db.execute(
-            "SELECT * FROM task_leases WHERE task_id = ?", (str(task_id),)
-        ).fetchall()
+        rows = self._rows("SELECT * FROM task_leases WHERE task_id = ?", (str(task_id),))
         return [dict(row) for row in rows if row["expires_at"] > now]
 
     def leases_for_pane(self, pane_id, now=None):
