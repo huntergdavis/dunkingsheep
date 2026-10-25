@@ -332,14 +332,21 @@ class Inbox:
                 (*params, int(limit))).fetchall()
             return [self._summary(row) for row in rows]
 
-    def read(self, mailbox, limit=10, peek=False):
-        """Full messages in queue order. Marks them read unless `peek`."""
+    def read(self, mailbox, limit=10, peek=False, mark=True):
+        """Full messages in queue order. Marks them read unless `peek` or `mark=False`.
+
+        `mark=False` exists so a caller can BUILD ITS OUTPUT FIRST and mark only once
+        the output exists: marking before rendering meant a reader that crashed while
+        displaying a batch had already consumed it, and pi-review-1 issued a verdict on
+        a head whose withdrawal message it never saw (VP, t93). The mark is the caller's
+        commit, so the caller decides when it is safe.
+        """
         with self._lock:
             rows = self.db.execute(
                 "SELECT * FROM messages WHERE mailbox = ? AND state = 'queued' "
                 "ORDER BY created_at LIMIT ?", (mailbox, int(limit))).fetchall()
             messages = [self._full(row) for row in rows]
-            if not peek and rows:
+            if not peek and mark and rows:
                 now = _now()
                 self.db.executemany(
                     "UPDATE messages SET state = 'read', read_at = ? "
@@ -350,6 +357,24 @@ class Inbox:
                     message["state"] = "read"
                     message["read_at"] = now
         return messages
+
+    def mark_read(self, message_ids, now=None):
+        """Commit the read for ids a caller has already rendered.
+
+        Idempotent and narrow: only rows still 'queued' move, so a second call (or a
+        concurrent reader) cannot re-stamp a message that was already consumed.
+        """
+        ids = [str(i) for i in (message_ids or [])]
+        if not ids:
+            return 0
+        now = _now() if now is None else now
+        with self._lock:
+            before = self.db.total_changes
+            self.db.executemany(
+                "UPDATE messages SET state = 'read', read_at = ? "
+                "WHERE id = ? AND state = 'queued'", [(now, i) for i in ids])
+            self.db.commit()
+            return self.db.total_changes - before
 
     def get(self, message_id, with_body=True):
         with self._lock:
