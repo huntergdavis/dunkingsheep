@@ -36,10 +36,12 @@ class FakeClient:
 
 
 class BackendSelectionTests(unittest.TestCase):
-    def test_default_is_herdr(self):
+    def test_default_is_tmux(self):
+        """t50 step 1 (owner decision): the default must not depend on a drop-in.
+        herdr remains selectable explicitly for the rollback."""
         with mock.patch.dict(os.environ,
                                       {"DUNKINGSHEEP_TERMINAL_BACKEND": ""}):
-            self.assertIsInstance(get_backend(), HerdrBackend)
+            self.assertIsInstance(get_backend(), TmuxBackend)
 
     def test_tmux_is_selected_by_env(self):
         with mock.patch.dict(

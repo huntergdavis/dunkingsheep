@@ -100,6 +100,10 @@ class CliEndToEndTests(unittest.TestCase):
             # in - the live one. Name the pane this test IS, in both spellings.
             TMUX_PANE="",
             HERDR_PANE_ID="w1:p2",
+            # This suite drives the FAKE herdr backend, so it says so: the daemon's
+            # default is tmux now (t50), and inheriting that default made these tests
+            # talk to the developer's real tmux.
+            DUNKINGSHEEP_TERMINAL_BACKEND="herdr",
             # Bootstrap this test pane as the superuser; the CLI lifecycle
             # exercises gated dunk/close/shutdown commands.
             DUNKINGSHEEP_VP_PANE="w1:p2",
