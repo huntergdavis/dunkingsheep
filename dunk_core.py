@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.69.5"
+VERSION = "2.70.12"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -189,6 +189,15 @@ MESSAGE_HISTORY = 50
 # these gaps a 2.2k message submits; the long tail only costs time when a send
 # is actually stuck, since a normal one is confirmed on the first press.
 SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+# Enter is a line feed to some TUIs and does nothing in their composer; the
+# carriage return (C-m) is what submits. Measured 2026-10-24 on six revived
+# claude lanes: five sat with the text visible for four minutes and the send
+# still reported success, while `tmux send-keys C-m` submitted at once. So the
+# retries alternate: the first press stays Enter (correct for pi/codex), every
+# later one is C-m.
+# Two presses of Enter first: a composer that needs two Enters for a long paste
+# (Codex) must not be fed a carriage return before it has had its second.
+SUBMIT_KEY_AFTER = 2
 # How many recent sends per pane to recognise as ours. Remembering only the
 # last one meant a single mis-read lost track of our own text for good, and
 # every later message queued behind it until a human ran `flush`.
@@ -531,12 +540,36 @@ class Message:
             return f"queued: the box in {self.target_label} would not clear"
         return f"queued for {self.target_label}, delivering once the input box is clear"
 
+    # The four outcomes a caller can act on, as one machine-readable field. Prose
+    # is for people; a caller that parses sentences gets it wrong (cos, 2026-10-24:
+    # "sent=false" substring matching, then a delivered message read as a 409).
+    # ok          submitted and confirmed (box cleared, or a turn started)
+    # stored      accepted into a durable queue the LANE drains itself (owner_push);
+    #             it has not been read, which is a different fact from "sent"
+    # queued      held behind a human typing / not yet delivered by the typing path
+    # unconfirmed neither witness fired: may have arrived, do not resend blindly
+    # refused     a named refusal, nothing was written or typed
+    OUTCOMES = ("ok", "stored", "queued", "unconfirmed", "refused")
+
+    def outcome(self):
+        if self.status == "queued":
+            return "queued"
+        if self.status == "sent":
+            return "ok"
+        detail = (self.detail or "").lower()
+        if "unconfirmed" in detail or "did not submit" in detail:
+            # Neither witness fired: it may well have arrived, so this is NOT a
+            # refusal and must not invite a blind resend.
+            return "unconfirmed"
+        return "refused"
+
     def to_dict(self):
         queued = self.status == "queued"
         return {
             "message_id": self.id, "pane_id": self.pane_id, "target_label": self.target_label,
             "text": self.text, "source": self.source, "status": self.status,
             "queued": queued, "ok": None if queued else self.status == "sent",
+            "outcome": self.outcome(),
             "message": (self._queued_message() if queued else self.detail or self.status),
             "holds": self.holds, "created_at": self.created_at, "finished_at": self.finished_at,
             "waiting_s": int(time.time() - self.created_at) if queued else None,
@@ -599,6 +632,10 @@ class Flock:
         # submit is recognised as ours and flushed instead of being mistaken
         # for a human's draft (which would stall that pane's queue for good).
         self.sent_text_by_pane = {}
+        self._delivered_text = {}      # pane_id -> recent texts WE delivered
+        # pane_id -> the key that last submitted there (Enter for most, C-m for
+        # TUIs whose composer ignores Enter: measured on claude, 2026-10-24).
+        self._submit_key = {}
         self._warned_wedged = {}
         self._warned_modal = {}
         # Why the most recent refusal happened, per pane, so a held event can
@@ -1026,11 +1063,17 @@ class Flock:
             if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
                 return self._mailbox_for_pane(pane)
         if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
+            if not strict:
+                # READS STAY PERMISSIVE. A dead pane id is a name mail can still be
+                # filed under - that is how 78 stranded messages exist, and they
+                # have to be readable and archivable or the triage cannot run.
+                # Only a SEND refuses here (measured regression, 2026-10-24).
+                return spec, spec, None
             raise DunkError(
                 f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
                 "pane id is not a name. If that lane still exists, address it by "
                 "mailbox name; if it does not, the send fails here instead of "
-                "queueing into nothing.")
+                "queueing into nothing. reason=dead_lane.")
         # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
         # that id decides. Without this the whole string fell through to step 3 and
         # became a mailbox NAME with no pane: mail addressed to
@@ -1042,10 +1085,14 @@ class Flock:
             for pane in panes:
                 if pane.get("pane_id") == hinted or pane.get("terminal_id") == hinted:
                     return self._mailbox_for_pane(pane)
+            if not strict:
+                # A decorated address is a mailbox NAME too ('PM (par-a) (wW:p1)'
+                # is exactly what the triage list shows). Reading it must work.
+                return spec, spec, None
             raise DunkError(
                 f"target {spec!r} names pane {hinted}, which is not live. A decorated "
                 f"address must name a live pane: use a current pane id, or a bare "
-                f"mailbox name without the parenthetical.")
+                f"mailbox name without the parenthetical. reason=dead_lane.")
 
         # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
         # live pane wins over any name: labels and titles are chosen by the agent
@@ -1136,6 +1183,14 @@ class Flock:
             matches = [p for p in panes if p.get(field) == value]
             return value if len(matches) == 1 else None
 
+        # A DECLARED identity wins over every name the pane carries. The title is
+        # written by the agent (claude sets it to its session summary) and the
+        # label is a display string; neither may decide who the lane is.
+        declared_name, declared = self._row_identity(
+            self._lane_registry().get(pane["pane_id"]))
+        if declared and declared_name:
+            return (declared_name, f"{declared_name} ({pane['pane_id']})",
+                    pane["pane_id"])
         key = unique("label") or unique("tab_label") or pane["pane_id"]
         label = pane.get("label") or pane.get("tab_label") or pane["pane_id"]
         if label != pane["pane_id"]:
@@ -1223,12 +1278,186 @@ class Flock:
         except (OSError, ValueError):
             return {}
 
-    def _remember_lane(self, pane_id, mailbox):
-        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail."""
+    @staticmethod
+    def _row_identity(value):
+        """(mailbox, declared) for a registry row, however it is spelled.
+
+        A row is either a plain mailbox name (older rows, and every inferred one)
+        or a dict that can carry `declared` plus liveness. Two questions only:
+        who is this lane, and did somebody SAY that or did we guess it.
+        """
+        if isinstance(value, dict):
+            name = str(value.get("mailbox") or value.get("name") or "").strip()
+            return (name or None), bool(value.get("declared"))
+        name = str(value or "").strip()
+        return (name or None), False
+
+    # Which harnesses drain a push queue of their own. A pi lane runs the
+    # dunkingsheep extension, which polls owner_take about once a second; claude
+    # and codex lanes have no such hook, so a push to them is a queue nobody
+    # reads. That is a CAPABILITY, not a preference: the desk routes on it.
+    DRAIN_HOOKS = {"pi": "owner_push"}
+    # A drain observed this recently is evidence a poller is running now. Older
+    # than this and the lane is treated as not draining, because silence is the
+    # only safe reading of a stale take.
+    DRAIN_FRESH_S = 300
+
+    def delivery_capability(self, target, self_pane_id=None):
+        """How the desk may deliver to this target, and what it may show.
+
+        Returns, for a live pane: pane_id, mailbox (pinned name if declared),
+        agent, alive, drains (does its harness poll a push queue), send
+        ('owner_push' or 'guarded'), and the latency expectation. A target that
+        does not resolve raises the same tokenised refusals as a send, so the UI
+        renders one vocabulary for every way a delivery can fail.
+        """
+        pane = self.delivery_target(target, self_pane_id)
+        pane_id = pane["pane_id"]
+        agent = (pane.get("agent") or "").strip().lower()
+        name, declared = self._row_identity(self._lane_registry().get(pane_id))
+        drain = self.DRAIN_HOOKS.get(agent)
+        # OBSERVED, not inferred: only a take proves a drainer is running. A pi
+        # lane whose session predates the extension still polls nothing, and the
+        # desk would offer a route that silently waits (measured on %2).
+        evidence, last = "no poll observed", None
+        import dunk_owner
+        store = dunk_owner.OwnerPush()
+        try:
+            # The POLL heartbeat, not the last take: a manual take must not confer
+            # capability, and an idle poller draining empty queues must not lose it.
+            last = store.last_poll(pane_id)
+            if last:
+                age = int(time.time() - last)
+                evidence = (f"harness polled {age}s ago" if age < 86400
+                            else "harness last polled over a day ago")
+            elif drain:
+                evidence = ("harness has a poller but has never polled this pane "
+                            "(a manual owner take does not count)")
+        except Exception:                       # noqa: BLE001 - capability never crashes
+            evidence = "drain evidence unavailable"
+        finally:
+            # One connection per query, closed deterministically: a capability probe
+            # runs per fleet row per refresh, and leaking a handle per call is how a
+            # desk ends up with a thousand open descriptors.
+            try:
+                store.close()
+            except Exception:                   # noqa: BLE001 - closing must not raise
+                pass
+        observed = bool(last and time.time() - last < self.DRAIN_FRESH_S)
+        return {
+            "pane_id": pane_id,
+            "mailbox": name or (pane.get("label") or pane_id),
+            "declared": declared,
+            "agent": agent or None,
+            "alive": True,
+            "drains": observed,
+            "drain_evidence": evidence,
+            # push only when a drain has ACTUALLY been seen recently; otherwise the
+            # immediate guarded send, because an unread queue is the failure mode
+            # this whole day was about.
+            "send": ("owner_push" if observed else "guarded"),
+            # The promise follows the OBSERVED route, not the harness's name: a pi
+            # lane whose poller is not running is a guarded send like any other.
+            "expect": ("push drained by the lane's own poller, no inbox row"
+                       if observed else
+                       "immediate guarded send (Enter, then C-m); 'sent' means it "
+                       "left the box"),
+        }
+
+    def delivery_target(self, target, self_pane_id=None):
+        """Resolve a DIRECT-DELIVERY target (owner push, keystrokes) to one pane.
+
+        Same fail-closed rules as the inbox send path, because it is the same
+        question asked by a different caller: who is this and are they alive. The
+        refusal carries a token the UI can render - dead_lane, unhoused_lane,
+        unknown_name - instead of a generic "no pane". Addressing is the pane id
+        (%9) or the lane's PINNED name ("PM (par-a)"); the pinned name is what
+        survives a title change, so prefer it in anything a human reads.
+        """
+        spec = str(target or "").strip()
+        if not spec:
+            raise DunkError("a delivery target is required (a pane id like %9 "
+                            "or a pinned lane name)")
+        if _PANE_ID_RE.match(spec) or _HERDR_ID_RE.match(spec) or _TERM_ID_RE.match(spec):
+            pane = self.herdr.get_pane(spec)
+            if pane is not None:
+                return pane
+            raise DunkError(
+                f"no live pane {spec!r}: this terminal is gone. reason=dead_lane.")
+        pane = self.herdr.get_pane(spec)          # a bare '%4'
+        if pane is not None:
+            return pane
+        key, _label, pane_id = self.resolve_mailbox(spec, self_pane_id, strict=True)
+        if not pane_id:
+            raise DunkError(
+                f"lane {key!r} resolved but has no live pane to deliver to. "
+                "reason=unhoused_lane.")
+        return self.herdr.get_pane(pane_id)
+
+    def lanes(self):
+        """The lane registry as rows: pane id, mailbox, declared?, alive?"""
+        rows = []
+        for pane_id, value in sorted(self._lane_registry().items()):
+            name, declared = self._row_identity(value)
+            alive = bool(value.get("alive", True)) if isinstance(value, dict) else None
+            rows.append({"pane_id": pane_id, "mailbox": name,
+                         "declared": declared, "alive": alive,
+                         "dead_since": (value.get("dead_since")
+                                        if isinstance(value, dict) else None)})
+        return rows
+
+    def lane_set(self, pane_id, mailbox, self_pane_id=None):
+        """Declare who a pane IS, after the fact. Superuser-gated by the caller.
+
+        The repair path for a lane whose declared name was overwritten by a title
+        (or never declared at all). Refuses a pane that does not exist, so a
+        typo cannot mint a lane.
+        """
+        pane_id = str(pane_id or "").strip()
+        mailbox = str(mailbox or "").strip()
+        if not pane_id or not mailbox:
+            raise DunkError("lane set must be given a pane id and a mailbox name")
+        if self.herdr.get_pane(pane_id) is None:
+            raise DunkError(f"no live pane {pane_id!r}: a lane row for a dead pane "
+                            "would be a guess. Create the pane first.")
+        self._remember_lane(pane_id, mailbox, declared=True)
+        self._invalidate_view()
+        name, _ = self._row_identity(self._lane_registry().get(pane_id))
+        return {"pane_id": pane_id, "mailbox": name, "declared": True}
+
+    def _remember_lane(self, pane_id, mailbox, declared=False):
+        """Record pane id -> mailbox, so a backend flip cannot orphan a lane's mail.
+
+        A DECLARED identity (new-workspace --as, lane set) is immutable from the
+        inside: an agent renames its pane title every turn, and those names are
+        inferences, so they may fill an empty row and must never overwrite a
+        declared one. Measured 2026-10-24: `--as 'PM (par-a)'` was replaced by
+        claude's own conversation title minutes later, and the lane became
+        unaddressable by the name it had been given.
+        """
         data = self._lane_registry()
-        if data.get(pane_id) == mailbox:
-            return
-        data[pane_id] = mailbox
+        existing = data.get(pane_id)
+        existing_name, existing_declared = self._row_identity(existing)
+        if existing_declared and not declared:
+            return False
+        if not declared and existing_name:
+            return False
+        if declared:
+            row = dict(existing) if isinstance(existing, dict) else {}
+            row["mailbox"] = str(mailbox).strip()
+            row["declared"] = True
+            row.setdefault("declared_at", time.time())
+            row.setdefault("alive", True)
+            data[pane_id] = row
+        else:
+            if existing_name == mailbox:
+                return False
+            data[pane_id] = str(mailbox).strip()
+        self._write_lane_registry(data)
+        return True
+
+    def _write_lane_registry(self, data):
+        """Atomic replace of the lane registry. One writer, one rename."""
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             temporary = self.lane_registry_path() + ".tmp"
@@ -1237,8 +1466,10 @@ class Flock:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.lane_registry_path())
+            return True
         except OSError as error:
-            log.warning("could not record lane %s -> %s: %s", pane_id, mailbox, error)
+            log.warning("could not write the lane registry: %s", error)
+            return False
 
     def _title_pane(self, pane_id, mailbox):
         """Best effort: put the lane name in the pane title too.
@@ -1266,17 +1497,26 @@ class Flock:
         needle = str(mailbox or "").strip().lower()
         if not needle:
             return None, None
-        recorded = [pane_id for pane_id, name in self._lane_registry().items()
-                    if str(name or "").strip().lower() == needle]
+        recorded = [pane_id for pane_id, row in self._lane_registry().items()
+                    if (self._row_identity(row)[0] or "").lower() == needle]
         if not recorded:
             return None, None
         live = {pane.get("pane_id"): pane
                 for pane in self.herdr.list_panes_grouped()}
-        candidates = [(live[pane_id], self._lane_registry()[pane_id])
+        candidates = [(live[pane_id], self._row_identity(self._lane_registry()[pane_id])[0])
                       for pane_id in recorded if pane_id in live]
         if len(candidates) == 1:
             return candidates[0]
-        return None, None              # none live, or two live: the caller refuses
+        if len(candidates) > 1:
+            # Two live panes declaring one name is not a tie to break: it is a lane
+            # duplicated by a restore, and choosing one would silently split its
+            # mail. Refuse, and say both ids.
+            ids = ", ".join(pane["pane_id"] for pane, _ in candidates)
+            raise AmbiguousTarget(
+                f"lane {mailbox!r} is DECLARED by more than one live pane ({ids}); "
+                "delivery would pick one and split the lane's mail. Reset the "
+                "duplicate with `lane set` before sending.")
+        return None, None              # none live
 
     def _registered_lane(self, name):
         """(found, alive, dead_since) for a mailbox name in the lane registry.
@@ -1294,12 +1534,12 @@ class Flock:
         if not needle:
             return False, True, None
         for value in self._lane_registry().values():
+            name, _declared = self._row_identity(value)
+            if (name or "").lower() != needle:
+                continue
             if isinstance(value, dict):
-                label = str(value.get("mailbox") or value.get("name") or "").strip().lower()
-                if label == needle:
-                    return True, bool(value.get("alive", True)), value.get("dead_since")
-            elif str(value or "").strip().lower() == needle:
-                return True, True, None
+                return True, bool(value.get("alive", True)), value.get("dead_since")
+            return True, True, None        # a plain name row says nothing about life
         return False, True, None
 
     def _mailbox_exists(self, name):
@@ -2298,6 +2538,7 @@ class Flock:
             return None
 
     def is_superuser(self, self_pane_id):
+        self.superusers.refresh()          # the file can change mid-turn
         return self.superusers.is_superuser(self_pane_id,
                                             self._pane_info(self_pane_id))
 
@@ -2372,8 +2613,16 @@ class Flock:
                 **self.superuser_status(self_pane_id)}
 
     def require_send_self(self, target, self_pane_id, action):
-        """Non-superusers may only type into their own pane."""
+        """Non-superusers may only type into their own pane.
+
+        A DESK CREDENTIAL is the one exception, and only because the caller has
+        already been narrowed to send_text/send_keys on an explicit pane set
+        (dunk_desk.DeskCredential). It is not a superuser entry and grants nothing
+        else; the flag is set per request by _authorise_send.
+        """
         if self.is_superuser(self_pane_id):
+            return
+        if getattr(getattr(self, "_caller_state", None), "desk_send", False):
             return
         if not self_pane_id:
             raise DunkError(
@@ -2436,7 +2685,7 @@ class Flock:
         ok, result = self.herdr.create_workspace(label=label, cwd=cwd, focus=focus)
         out = self._after_create(ok, result, command, f"workspace {label or ''}".strip())
         if mailbox and out.get("pane_id"):
-            self._remember_lane(out["pane_id"], str(mailbox).strip())
+            self._remember_lane(out["pane_id"], str(mailbox).strip(), declared=True)
             self._title_pane(out["pane_id"], mailbox)
         return out
 
@@ -3713,6 +3962,7 @@ class Flock:
             # One honest refusal naming the pane's own state, instead of four
             # Enter presses into a dead composer and a misleading "did not submit".
             return False, f"agent session is dead ({dead}); not submitting into a dead composer"
+        key = "Enter"          # what the press inside the mutex used, if any
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
             if gap:
@@ -3721,8 +3971,15 @@ class Flock:
                 # The first Enter went out with the text, inside the mutex.
                 pass
             else:
+                # The key that last submitted for this pane wins from then on. Until
+                # one has worked: Enter, Enter, then C-m, Enter, C-m ... - so a TUI
+                # that ignores Enter is not pressed four times for nothing, and a
+                # TUI that wants two Enters still gets them.
+                key = (self._submit_key.get(pane_id)
+                       or ("C-m" if attempt > SUBMIT_KEY_AFTER
+                           and attempt % 2 == 1 else "Enter"))
                 with self._typing(pane_id):      # one keystroke burst per attempt
-                    ok, detail = self.herdr.send_keys(pane_id, "Enter")
+                    ok, detail = self.herdr.send_keys(pane_id, key)
                 if not ok:
                     return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
@@ -3742,19 +3999,58 @@ class Flock:
                         # Only repeated readable checks prove submission. A
                         # missing input box during redraw proves nothing.
                         if attempt > 1:
-                            log.info("%s: submitted after %d Enter presses", pane_id, attempt)
+                            self._submit_key[pane_id] = key
+                            log.info("%s: submitted after %d presses (%s)",
+                                     pane_id, attempt, key)
                         self.metrics.record("submit.attempt", pane_id=pane_id,
                                             outcome="ok", attempts=attempt,
                                             bytes=len((text or "").encode("utf-8")))
-                        return True, "sent" if attempt == 1 else f"sent (Enter x{attempt})"
+                        return True, ("sent" if attempt == 1
+                                      else f"sent ({key} x{attempt})")
                     if last_hold is True:
+                        # A BUSY LANE'S BOX IS NOT THE RECORD (measured 2026-10-24:
+                        # two sends to a claude lane reported "did not submit" and
+                        # the receiving lane showed both as turns). If the agent
+                        # started working, the submit landed and the reader is
+                        # looking at our own echo in the transcript.
+                        if self._turn_started(pane_id):
+                            if attempt > 1:
+                                self._submit_key[pane_id] = key
+                            self.metrics.record("submit.attempt", pane_id=pane_id,
+                                                outcome="ok-turn", attempts=attempt,
+                                                bytes=len((text or "").encode("utf-8")))
+                            return True, "sent (confirmed by the turn it started)"
                         break        # our text returned; another Enter is safe
             if last_hold is not True:
                 return False, "submission unconfirmed: input box unreadable or changing"
+            # The box still shows our text. That is only evidence of failure if the
+            # lane is NOT working: a busy pane keeps an echo in the transcript.
+            if self._turn_started(pane_id):
+                if attempt > 1:
+                    self._submit_key[pane_id] = "Enter"
+                self.metrics.record("submit.attempt", pane_id=pane_id,
+                                    outcome="ok-turn", attempts=attempt,
+                                    bytes=len((text or "").encode("utf-8")))
+                return True, "sent (confirmed by the turn it started)"
             log.info("%s: still in the input box after Enter #%d; pressing again",
                      pane_id, attempt)
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
+
+    def _turn_started(self, pane_id):
+        """True when the agent is demonstrably working: a turn began.
+
+        The second confirmation, for the case the box read cannot decide: a busy
+        pane's composer may still show our text (or its echo) after a successful
+        submit. A turn starting is evidence the text arrived; a box that looks
+        full is not evidence it did not.
+        """
+        status = None
+        try:
+            status = (self.herdr.agent_status(pane_id) or "").strip().lower()
+        except Exception:                        # noqa: BLE001 - never fail a send on a probe
+            return False
+        return status in ("working", "busy", "running", "processing")
 
     def _remember_typed(self, pane_id, text):
         with self._lock:

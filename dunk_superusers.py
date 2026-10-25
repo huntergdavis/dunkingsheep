@@ -51,8 +51,30 @@ class Superusers:
         self.path = path
         self.panes = set()
         self.names = set()
+        self._stamp = None
         if create:
             self.load(create=True)
+
+    def _file_stamp(self):
+        try:
+            stat = os.stat(self.path)
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+
+    def refresh(self):
+        """Re-read the allowlist if the file changed under us.
+
+        The VP edited the file and the daemon kept serving its in-memory copy,
+        so a pane that was on the list was not a superuser until the next restart
+        (2026-10-24). A stat per check costs nothing; a restart does not.
+        """
+        stamp = self._file_stamp()
+        if stamp == self._stamp:
+            return False
+        self.load()
+        self._stamp = stamp
+        return True
 
     # -- loading ------------------------------------------------------------
 
@@ -75,6 +97,7 @@ class Superusers:
             (panes if kind == "pane" else names).append(value)
         self.panes = {str(value).strip() for value in panes if str(value).strip()}
         self.names = {str(value).strip() for value in names if str(value).strip()}
+        self._stamp = self._file_stamp()
 
     def seed_defaults(self):
         """First run: the VP name, the owner name, and any panes the setup set.

@@ -339,7 +339,8 @@ class InboxThroughTheFlockTests(unittest.TestCase):
                                           mailbox="dunky pi")
         pane_id = made["pane_id"]
         self.assertTrue(pane_id)
-        self.assertEqual("dunky pi", self.flock._lane_registry().get(pane_id))
+        self.assertEqual("dunky pi",
+                         self.flock._row_identity(self.flock._lane_registry()[pane_id])[0])
         key, label, resolved = self.flock.resolve_mailbox("dunky pi")
         self.assertEqual(pane_id, resolved, "mail for the lane must reach its new pane")
         self.assertEqual("dunky pi", key, "the key is the recorded name, not the title")
@@ -360,6 +361,23 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(pane_id, resolved)
         self.assertEqual("skies-android", key)
 
+    def test_reading_and_acking_a_dead_name_still_works(self):
+        """Regression 2026-10-24: fail-closed leaked into the READ path, so 78
+        stranded messages became unreadable and the triage could not run. Only a
+        send refuses; a dead name is still a mailbox name."""
+        self.inbox.send("w9:pS", "from the void", sender="pm")
+        self.inbox.send("PM (par-a) (wW:p1)", "decorated", sender="pm")
+        self.inbox.send("w9:pS", "a second one to archive", sender="pm")
+        count = self.flock.inbox_count("w9:pS")
+        self.assertEqual(2, count["unread"])
+        first = [m["body"] for m in self.flock.inbox_read("w9:pS", limit=1)["messages"]]
+        self.assertEqual(["from the void"], first)
+        self.assertEqual(1, self.flock.inbox_count("PM (par-a) (wW:p1)")["unread"])
+        self.assertEqual(1, self.flock.inbox_archive("w9:pS")["archived"],
+                         "the unread one is still archivab1e after the read")
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.inbox_send("w9:pS", "no", notify=False)
+
     def test_a_dead_herdr_pane_id_is_not_a_mailbox_either(self):
         """The vp lane's id ends in a letter (w9:pH), so the narrow numeric
         pattern let it through and the send was accepted as a NEW mailbox name -
@@ -367,14 +385,14 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         from dunk_core import DunkError as _DunkError
         for dead in ("w9:pH", "wR:p5", "w11:p1"):
             with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
-                self.flock.resolve_mailbox(dead)
+                self.flock.resolve_mailbox(dead, strict=True)
 
     def test_a_dead_tmux_pane_id_is_not_a_mailbox(self):
         """Both backends' ids are identities; neither is allowed to become a
         mailbox name just because its pane is gone."""
         from dunk_core import DunkError as _DunkError
         with self.assertRaisesRegex(_DunkError, "dead pane id is not a mailbox"):
-            self.flock.resolve_mailbox("%99")
+            self.flock.resolve_mailbox("%99", strict=True)
 
     def test_a_mailbox_named_after_a_live_tmux_pane_resolves(self):
         made = self.flock.create_workspace(label="tmuxish", cwd="/tmp")
@@ -404,6 +422,107 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(0, self.inbox.count("not-started-yet")["total"],
                          "a refused send must not leave a mailbox behind")
 
+    def test_capability_reads_an_observed_poll_not_a_harness_name(self):
+        """An independent review found the first version wrong twice: a manual
+        `owner take` conferred capability, and a poller draining EMPTY queues never
+        wrote a row so a healthy lane looked dead. Only the poller's own heartbeat
+        counts, empty polls included."""
+        import dunk_owner
+        made = self.flock.create_workspace(label="pi lane", cwd="/tmp",
+                                          mailbox="dunky pi lane")["pane_id"]
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == made:
+                pane["agent"] = "pi"
+        store = dunk_owner.OwnerPush()
+        before = self.flock.delivery_capability("dunky pi lane")
+        self.assertFalse(before["drains"], before["drain_evidence"])
+        self.assertEqual("guarded", before["send"])
+        store.poll(made, by="pi-extension")          # an EMPTY poll still counts
+        after = self.flock.delivery_capability("dunky pi lane")
+        self.assertTrue(after["drains"], after["drain_evidence"])
+        self.assertEqual("owner_push", after["send"])
+        # A manual take of nothing must not confer capability.
+        import time as _t
+        store.db.execute("DELETE FROM owner_poll"); store.db.commit()
+        store.take(made, by="manual")
+        self.assertFalse(self.flock.delivery_capability("dunky pi lane")["drains"])
+
+    def test_delivery_capability_says_push_or_guarded_per_harness(self):
+        """The desk routes on this: pi lanes drain a push queue, claude/codex lanes
+        have no drain hook and must get an immediate guarded send."""
+        pi = self.flock.create_workspace(label="pi lane", cwd="/tmp",
+                                        mailbox="dunky")["pane_id"]
+        claude = self.flock.create_workspace(label="claude lane", cwd="/tmp",
+                                             mailbox="PM (par-a)")["pane_id"]
+        for pane in self.herdr.panes:                 # the fake's agent field
+            if pane["pane_id"] == pi:
+                pane["agent"] = "pi"
+            if pane["pane_id"] == claude:
+                pane["agent"] = "claude"
+        import dunk_owner
+        dunk_owner.OwnerPush().poll(pi, by="pi-extension")   # the harness is polling
+        a = self.flock.delivery_capability("dunky")
+        self.assertTrue(a["drains"], a["drain_evidence"])
+        self.assertEqual("owner_push", a["send"])
+        self.assertEqual("dunky", a["mailbox"], "the declared name is what the desk shows")
+        b = self.flock.delivery_capability("PM (par-a)")
+        self.assertFalse(b["drains"])
+        self.assertEqual("guarded", b["send"])
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.delivery_capability("%99")
+
+    def test_two_live_panes_declaring_one_name_are_refused_not_split(self):
+        """A restore that duplicates a lane must not split its mail silently."""
+        a = self.flock.create_workspace(label="one", cwd="/tmp", mailbox="par-b")["pane_id"]
+        b = self.flock.create_workspace(label="two", cwd="/tmp", mailbox="par-b")["pane_id"]
+        from dunk_core import AmbiguousTarget as _Ambiguous
+        with self.assertRaisesRegex(_Ambiguous, "DECLARED by more than one live pane"):
+            self.flock.resolve_mailbox("par-b", strict=True)
+        self.flock.lane_set(b, "par-b-2")
+        self.assertEqual(a, self.flock.resolve_mailbox("par-b", strict=True)[2])
+
+    def test_direct_delivery_addresses_a_pane_or_a_pinned_name_and_refuses_loudly(self):
+        """The desk's call (owner push / keystrokes) asks the same question as the
+        inbox: who is this, are they alive. It gets the same tokens."""
+        from dunk_core import DunkError as _DunkError
+        made = self.flock.create_workspace(label="poolrad-pm", cwd="/tmp",
+                                          mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        self.assertEqual(pane_id, self.flock.delivery_target(pane_id)["pane_id"])
+        self.assertEqual(pane_id, self.flock.delivery_target("PM (par-a)")["pane_id"],
+                         "the pinned name must be as good as the pane id")
+        with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
+            self.flock.delivery_target("%99")
+        with self.assertRaisesRegex(_DunkError, "reason=unknown_name"):
+            self.flock.delivery_target("nobody at all")
+
+    def test_a_declared_lane_name_survives_the_agent_renaming_its_pane(self):
+        """Measured 2026-10-24: `new-workspace --as 'PM (par-a)'` was replaced by
+        claude's own conversation title minutes later and the lane became
+        unaddressable by the name it had been given. A name the agent can rename
+        away is not a registration."""
+        made = self.flock.create_workspace(label="poolrad-pm", cwd="/tmp",
+                                          mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        for pane in self.herdr.panes:            # the agent renames itself
+            if pane["pane_id"] == pane_id:
+                pane["terminal_title"] = "✳ PR #1188 acceptance review"
+                pane["terminal_title_stripped"] = "✳ PR #1188 acceptance review"
+                pane["label"] = "✳ PR #1188 acceptance review"
+        key, label, resolved = self.flock.resolve_mailbox("PM (par-a)")
+        self.assertEqual(pane_id, resolved, "the declared name must still deliver")
+        self.assertEqual("PM (par-a)", key)
+        row = self.flock._lane_registry()[pane_id]
+        self.assertTrue(self.flock._row_identity(row)[1], "the row stays declared")
+        self.assertEqual("PM (par-a)", self.flock._row_identity(row)[0])
+
+    def test_an_inferred_name_never_overwrites_a_declared_one(self):
+        made = self.flock.create_workspace(label="pm", cwd="/tmp", mailbox="PM (par-a)")
+        pane_id = made["pane_id"]
+        self.assertFalse(self.flock._remember_lane(pane_id, "✳ some title"))
+        self.assertEqual("PM (par-a)", self.flock._row_identity(
+            self.flock._lane_registry()[pane_id])[0])
+
     def test_a_registered_lane_with_no_live_pane_refuses_a_send(self):
         """Three states, three tokens (VP ruling 2026-10-24): a name that was never
         a lane is unknown_name, a lane marked dead at a known time is dead_lane,
@@ -417,8 +536,10 @@ class InboxThroughTheFlockTests(unittest.TestCase):
 
     def test_a_lane_the_registry_marks_dead_alarms_with_the_date(self):
         from dunk_core import DunkError as _DunkError
-        self.flock._remember_lane("w9:pY", {"mailbox": "gone lane", "alive": False,
-                                            "dead_since": "2026-10-24 08:00"})
+        self.flock._remember_lane("w9:pY", "gone lane", declared=True)
+        data = self.flock._lane_registry()
+        data["w9:pY"].update({"alive": False, "dead_since": "2026-10-24 08:00"})
+        self.flock._write_lane_registry(data)
         with self.assertRaisesRegex(_DunkError, "reason=dead_lane"):
             self.flock.resolve_mailbox("gone lane", strict=True)
         with self.assertRaisesRegex(_DunkError, "dead since 2026-10-24 08:00"):
@@ -445,8 +566,10 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         self.assertEqual(["for codex"], [m["body"] for m in read["messages"]])
 
     def test_sending_to_a_dead_pane_id_errors(self):
+        # The SEND contract (strict). A read of the same name is allowed: that is
+        # where stranded mail lives.
         with self.assertRaisesRegex(DunkError, "no live pane"):
-            self.flock.resolve_mailbox("w9:p8")
+            self.flock.resolve_mailbox("w9:p8", strict=True)
         with self.assertRaisesRegex(DunkError, "no live pane"):
             self.flock.inbox_send("w9:p8", "lost")
         self.assertEqual(0, self.inbox.count("w9:p8")["total"],
@@ -713,7 +836,7 @@ class MailboxRoutingTests(unittest.TestCase):
 
     def test_a_decorated_address_for_a_dead_pane_is_refused(self):
         with self.assertRaises(self.dunk_core.DunkError) as caught:
-            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)")
+            self.flock.resolve_mailbox("codex-poolrad2 (wR:p9)", strict=True)
         self.assertIn("wR:p9", str(caught.exception))
         self.assertIn("not live", str(caught.exception))
 
@@ -726,7 +849,7 @@ class MailboxRoutingTests(unittest.TestCase):
 
     def test_a_bare_dead_pane_id_is_not_a_mailbox_even_for_a_letter_workspace(self):
         with self.assertRaises(self.dunk_core.DunkError):
-            self.flock.resolve_mailbox("wR:p9")
+            self.flock.resolve_mailbox("wR:p9", strict=True)
 
 
 class SurfaceParityTests(unittest.TestCase):
@@ -763,6 +886,9 @@ class SurfaceParityTests(unittest.TestCase):
             "cancel_message": "cancel-message", "list_panes": "panes",
             "read_pane": "read", "list_workspaces": "workspaces",
             "create_workspace": "new-workspace", "create_tab": "new-tab",
+            "lanes": "lane", "lane_set": "lane",
+            "delivery_capability": "capability", "desk_token": "desk-token",
+            "owner_poll": "poll",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",

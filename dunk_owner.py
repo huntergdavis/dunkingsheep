@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS owner_push (
     taken_by TEXT
 );
 CREATE INDEX IF NOT EXISTS owner_push_pane ON owner_push(pane_id, taken_at);
+
+-- A DRAIN HEARTBEAT, separate from the messages. A take proves a message was read
+-- once; it does not prove a poller is running now (a manual `owner take` would
+-- confer "healthy" for ever) and an idle poller draining EMPTY queues writes no
+-- row at all (so a healthy lane would look dead). The extension records every
+-- successful poll here, empty or not, and that is what capability reads.
+CREATE TABLE IF NOT EXISTS owner_poll (
+    pane_id   TEXT NOT NULL,
+    at        REAL NOT NULL,
+    by        TEXT,
+    PRIMARY KEY (pane_id)
+);
 """
 
 
@@ -51,6 +63,16 @@ class OwnerPush:
         with self._lock:
             self.db.executescript(SCHEMA)
             self.db.commit()
+
+    def close(self):
+        """Close the connection. A caller that opens a store per query must be able
+        to hand the handle back; without this a capability probe leaked one per
+        fleet row per refresh (independent review, 2026-10-24)."""
+        with self._lock:
+            try:
+                self.db.close()
+            except Exception:                    # noqa: BLE001 - closing twice is fine
+                pass
 
     def push(self, pane_id, body, *, target=None, subject=None, now=None):
         body = (body or "").strip()
@@ -76,6 +98,37 @@ class OwnerPush:
                                 (now, by or pane_id, row["id"]))
             self.db.commit()
         return rows
+
+    def poll(self, pane_id, by=None, now=None):
+        """Record a successful poll by the lane's own harness (empty polls count)."""
+        now = now or time.time()
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO owner_poll (pane_id, at, by) VALUES (?,?,?) "
+                "ON CONFLICT(pane_id) DO UPDATE SET at=excluded.at, by=excluded.by",
+                (pane_id, now, by or "harness"))
+            self.db.commit()
+        return {"pane_id": pane_id, "at": now, "by": by or "harness"}
+
+    def last_poll(self, pane_id):
+        """When this pane's harness last polled, or None. THE drain fact."""
+        with self._lock:
+            row = self.db.execute(
+                "SELECT at FROM owner_poll WHERE pane_id = ?", (pane_id,)).fetchone()
+        return row["at"] if row is not None and row["at"] else None
+
+    def last_take(self, pane_id):
+        """When this pane last drained a push, or None. The OBSERVED drain fact.
+
+        A harness name is not evidence: %2 is pi and still went blind for a day
+        because its session started before the extension existed and never loaded
+        it (measured 2026-10-24). Only a take proves a drainer is running.
+        """
+        with self._lock:
+            row = self.db.execute(
+                "SELECT MAX(taken_at) AS at FROM owner_push WHERE pane_id = ?",
+                (pane_id,)).fetchone()
+        return (row["at"] if row is not None and row["at"] else None)
 
     def pending(self, pane_id=None):
         with self._lock:

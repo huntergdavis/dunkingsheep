@@ -166,6 +166,7 @@ def build_parser():
                    help="block up to S seconds for delivery before returning (default 10)")
     p.add_argument("--ignore-typing", action="store_true",
                    help="send even while someone is typing (default: queue it)")
+    p.add_argument("--desk-token", help="narrow desk credential (send to a listed pane only)")
 
     p.add_argument("--no-enter", action="store_true",
                    help="leave the text in the box without pressing Enter")
@@ -178,6 +179,7 @@ def build_parser():
                    help="block up to S seconds for delivery before returning (default 10)")
     p.add_argument("--ignore-typing", action="store_true",
                    help="press them even while someone is typing (default: queue)")
+    p.add_argument("--desk-token", help="narrow desk credential (listed panes only)")
 
     p = sub.add_parser("install", help="put `dunkingsheep` on PATH as a plain command",
                        description="Install a launcher so agents can run `dunkingsheep "
@@ -562,6 +564,10 @@ def build_parser():
     q.add_argument("target")
     q.add_argument("body", nargs="+")
     q.add_argument("--subject", "-s")
+    q = osub.add_parser("poll",
+                        help="drain heartbeat: this lane polls, even when the queue is empty")
+    q.add_argument("pane_id")
+    q.add_argument("--by", default="harness")
     q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
     q.add_argument("pane_id")
     q.add_argument("--by")
@@ -585,6 +591,20 @@ def build_parser():
     p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8792)
+    p = sub.add_parser("desk-token", help="issue the narrow desk credential (send only, listed panes)")
+    p.add_argument("--panes", required=True, help="comma-separated pane ids, e.g. %%1,%%2,%%4")
+    p = sub.add_parser("capability", aliases=["capabilities"],
+                       help="how a target can receive: push queue (pi) or immediate guarded send",
+                       epilog="example: dunkingsheep capability '%9'")
+    p.add_argument("target")
+    p = sub.add_parser("lane", aliases=["lanes"],
+                       help="the lane registry: who each pane IS, declared or inferred",
+                       epilog="examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'")
+    lsub = p.add_subparsers(dest="lane_command", metavar="<action>")
+    lsub.add_parser("list", help="every lane row: pane, name, declared?, alive?")
+    q = lsub.add_parser("set", help="declare who a pane IS (superuser); overrides any title")
+    q.add_argument("pane")
+    q.add_argument("mailbox")
     p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
     rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
     q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
@@ -1271,6 +1291,32 @@ def print_message(result):
         print(f"FAILED for {result['target_label']} ({result['pane_id']}): {result.get('message')}")
 
 
+def print_capability(result):
+    print(f"{result['pane_id']}  mailbox={result['mailbox']!r}"
+          f"  declared={'yes' if result['declared'] else '-'}"
+          f"  agent={result['agent'] or '-'}")
+    print(f"  drains={'yes' if result['drains'] else 'no'}  send={result['send']}"
+          f"  evidence={result.get('drain_evidence') or '-'}")
+    print(f"  {result['expect']}")
+
+
+def print_lanes(result):
+    rows = result.get("lanes") or []
+    if not rows:
+        print("the lane registry is empty")
+        return
+    print(f"{'PANE':<8} {'MAILBOX':<42} {'DECLARED':<9} ALIVE")
+    for row in rows:
+        declared = "yes" if row.get("declared") else "-"
+        alive = {True: "yes", False: "NO"}.get(row.get("alive"), "-")
+        name = (row.get("mailbox") or "-")[:42]
+        print(f"{row['pane_id']:<8} {name:<42} {declared:<9} {alive}")
+
+
+def print_lane(result):
+    print(f"{result['pane_id']} is {result['mailbox']!r} (declared)")
+
+
 def print_retired(result):
     if "retired" in result:
         records = result["retired"]
@@ -1786,7 +1832,13 @@ def main(argv=None):
         report = dunk_watchdog.run(config, now, dry_run_flag=args.dry_run)
         print(json.dumps(report, indent=2, sort_keys=True, default=str) if args.json
               else dunk_watchdog.render_text(report))
-        return 1 if report["delivery_error"] else 0
+        # EXIT 0 EVEN WHEN THE ESCALATION FAILED (VP ruling 2026-10-24, after the
+        # watchdog died on a stale mailbox and the fleet lost its observer for nine
+        # minutes). The failure is not hidden: the run's output says DELIVERY FAILED
+        # with target and reason, the state file keeps delivery_failure, and the
+        # heartbeat is deliberately NOT refreshed so the dead-man pages through an
+        # observer that does not depend on this delivery path.
+        return 0
     if command == "usage":
         import dunk_usage
         try:
@@ -1900,6 +1952,14 @@ def main(argv=None):
         print(json.dumps(result, indent=2))
     else:
         printer(result)
+    # THE EXIT CODE IS A CONTRACT, and it used to lie: a send that printed FAILED
+    # still exited 0, so a caller trusting the code recorded a delivery that never
+    # happened (cos measured it, 2026-10-24). Anything the daemon answers with
+    # ok=false is a non-zero exit, whatever the prose says.
+    if isinstance(result, dict) and result.get("ok") is False:
+        # 2 is this CLI's existing "named refusal" code (see the DunkError path
+        # below). A failed send is a refusal with a reason, not a new kind of exit.
+        return 2
     return 0
 
 
@@ -1919,7 +1979,7 @@ def run_context_command(dunk_context, args):
             try:
                 body = open(args.file).read()
             except FileNotFoundError:
-                raise SystemExit(
+                raise Refused(
                     f"no such file: {args.file!r} - the body comes from --text, stdin or a "
                     f"file; for text inline use: dunkingsheep context add --text "
                     f"'<claim>' --class ... --subject ...")
@@ -2038,6 +2098,22 @@ def _check_send_body(args):
                                literal=bool(getattr(args, "literal", False)))
 
 
+class Refused(SystemExit):
+    """A named refusal: the message is the reason, the code is 2.
+
+    `SystemExit("message")` exits 1 and loses the distinction between "refused,
+    with a reason" and "crashed", which this CLI has kept for everything else
+    (VP ruling 2026-10-24, after three tests caught the difference).
+    """
+
+    def __init__(self, message, code=2):
+        self.message = str(message)
+        super().__init__(code)
+
+    def __str__(self):
+        return self.message
+
+
 def _refuse_shell_substitution(body, subject=None, *, literal=False):
     """Refuse a body the sending shell was free to rewrite.
 
@@ -2062,12 +2138,12 @@ def _refuse_shell_substitution(body, subject=None, *, literal=False):
             if index < 0:
                 continue
             around = text[max(0, index - 30):index + 30].replace("\n", " ")
-            raise SystemExit(
+            raise Refused(
                 f"inbox send: the {label} contains shell-substitution syntax {fragment!r} "
                 f"(...{around}...). An unquoted shell may have already rewritten it, and a "
                 f"backtick pair deletes the word between them before this command runs. "
                 f"Use single quotes, or pass --literal to send these characters as text, "
-                f"or --body-file PATH to bypass the shell entirely.")
+                  f"or --body-file PATH to bypass the shell entirely.")
 
 
 def run_client_command(client, args):
@@ -2158,11 +2234,13 @@ def run_client_command(client, args):
     if command == "send":
         result = client.call("send_text", target=args.target, text=" ".join(args.text),
                              hold_while_typing=not args.ignore_typing, wait_s=args.wait,
-                             press_enter=not args.no_enter)
+                             press_enter=not args.no_enter,
+                             desk_token=getattr(args, "desk_token", None))
         return result, print_message
     if command == "send-keys":
         result = client.call("send_keys", target=args.target, keys=" ".join(args.keys),
-                             hold_while_typing=not args.ignore_typing, wait_s=args.wait)
+                             hold_while_typing=not args.ignore_typing, wait_s=args.wait,
+                             desk_token=getattr(args, "desk_token", None))
         return result, print_message
     if command == "inbox":
         sub = args.inbox_command
@@ -2208,7 +2286,7 @@ def run_client_command(client, args):
         try:
             return run_context_command(dunk_context, args)
         except dunk_context.ContextError as error:
-            raise SystemExit(f"context: {error}")
+            raise Refused(f"context: {error}")
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
@@ -2327,6 +2405,10 @@ def run_client_command(client, args):
         if sub == "push":
             return client.call("owner_push", target=args.target, body=" ".join(args.body),
                                subject=args.subject), print_owner_push
+        if sub == "poll":
+            return client.call("owner_poll", pane_id=args.pane_id,
+                               by=args.by), lambda r: print(
+                f"poll recorded for {r['pane_id']} by {r['by']}")
         if sub == "take":
             return client.call("owner_take", pane_id=args.pane_id,
                                by=args.by), print_owner_take
@@ -2353,6 +2435,17 @@ def run_client_command(client, args):
     if command == "api":
         import dunk_http
         return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
+    if command == "desk-token":
+        return client.call("desk_token", panes=args.panes), \
+            lambda r: print(r["token"])
+    if command in ("capability", "capabilities"):
+        return client.call("delivery_capability", target=args.target), print_capability
+    if command in ("lane", "lanes"):
+        action = args.lane_command or "list"
+        if action == "set":
+            return client.call("lane_set", pane=args.pane,
+                               mailbox=args.mailbox), print_lane
+        return client.call("lanes"), print_lanes
     if command == "retired":
         return client.call("retire_pane", action=args.retire_command,
                            pane=getattr(args, "pane", None),
@@ -2481,4 +2574,9 @@ def run_client_command(client, args):
 
 
 if __name__ == "__main__":
-    sys.exit(_run(sys.argv[1:]))
+    try:
+        code = _run(sys.argv[1:])
+    except Refused as refusal:          # message to stderr, code 2 for "refused"
+        print(str(refusal), file=sys.stderr)
+        code = 2
+    sys.exit(code)

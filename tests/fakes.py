@@ -59,6 +59,9 @@ class FakeHerdr:
         self.text_only = []
         self.box = {}                # pane_id -> text sitting in the input box
         self.enters_needed = {}      # pane_id -> Enter presses a submit takes
+        # Panes whose composer ignores Enter and submits only on the carriage
+        # return. Measured on six claude lanes 2026-10-24.
+        self.cm_only = set()
         self.enter_presses = {}
         self.statuses = {}
         self.screens = {}
@@ -311,6 +314,10 @@ class FakeHerdr:
                 return False, "boom"
             keys = [keys] if isinstance(keys, str) else list(keys)
             self.keys.append((pane_id, keys))
+            if pane_id in self.cm_only and "C-m" in keys:
+                keys = ["Enter"]        # the carriage return submits, Enter does not
+            elif pane_id in self.cm_only:
+                keys = []               # Enter is a no-op in this composer
             if "Enter" in keys and self.box.get(pane_id):
                 self.enter_presses[pane_id] = self.enter_presses.get(pane_id, 0) + 1
                 if self.enter_presses[pane_id] >= self.enters_needed.get(pane_id, 1):

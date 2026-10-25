@@ -274,7 +274,41 @@ def h_fire_dunk(flock, args, self_pane_id):
     )
 
 
+def h_desk_token(flock, args, self_pane_id):
+    """Create the narrow desk credential. Returns the token exactly once."""
+    import dunk_desk
+    panes = [part.strip() for part in str(args.get("panes") or "").split(",")
+             if part.strip()]
+    token = dunk_desk.DeskCredential().issue(panes)
+    return {"token": token, "panes": panes,
+            "permits": sorted(dunk_desk.DESK_VERBS),
+            "note": "store it in the desk's environment; it can only type into "
+                    "these panes, and it is not a superuser entry"}
+
+
+def _authorise_send(flock, command, args):
+    """Refuse a desk token used for anything but a listed verb on a listed pane.
+
+    A valid desk credential skips the self-only rule below; it never skips the
+    pane list, and it cannot be used for any other command because the token is
+    only inspected on these two paths.
+    """
+    token = (args.get("desk_token") or "").strip()
+    if not token:
+        return False
+    import dunk_desk
+    try:
+        dunk_desk.DeskCredential().permits(command, args.get("target"), token)
+    except dunk_desk.DeskError as error:
+        raise DunkError(f"desk credential refused: {error}") from None
+    # Per-request, per-thread: a process-wide flag would leak the permission into
+    # the next request handled by the same thread.
+    flock._caller_state.desk_send = True
+    return True
+
+
 def h_send_text(flock, args, self_pane_id):
+    _authorise_send(flock, "send_text", args)
     flock.require_send_self(args["target"], self_pane_id, "send_text")
     return flock.send_now(args["target"], args["text"], self_pane_id=self_pane_id,
                           hold_while_typing=_bool(args.get("hold_while_typing"), True),
@@ -283,6 +317,7 @@ def h_send_text(flock, args, self_pane_id):
 
 
 def h_send_keys(flock, args, self_pane_id):
+    _authorise_send(flock, "send_keys", args)
     flock.require_send_self(args["target"], self_pane_id, "send_keys")
     return flock.send_keys_now(args["target"], args["keys"], self_pane_id=self_pane_id,
                                hold_while_typing=_bool(args.get("hold_while_typing"), True),
@@ -358,12 +393,44 @@ def h_owner_push(flock, args, self_pane_id):
     import dunk_owner
     # A pane id is already the answer: resolving it costs a terminal-backend round
     # trip (~250ms) and the owner's budget is two seconds for the whole path.
-    target = str(args["target"]).strip()
-    pane = ({"pane_id": target} if PANE_ID_RE.match(target)
-            else flock.resolve_target(target, self_pane_id))
+    # One seam for direct delivery, with tokenised refusals the desk can render
+    # (dead_lane / unhoused_lane / unknown_name) instead of a generic error.
+    pane = flock.delivery_target(args["target"], self_pane_id)
     store = dunk_owner.OwnerPush()
-    return store.push(pane["pane_id"], args["body"],
-                      target=args.get("target"), subject=args.get("subject"))
+    result = store.push(pane["pane_id"], args["body"],
+                        target=args.get("target"), subject=args.get("subject"))
+    # "stored" is its own outcome (VP ruling 2026-10-24): the message is durable and
+    # the LANE drains it, so it has not been read - a caller that treats this as
+    # delivered would be reporting a delivery nobody has made.
+    result["outcome"] = "stored"
+    result["expect"] = ("the lane's own harness drains it (owner_take); no inbox row, "
+                        "nothing typed into the pane")
+    return result
+
+
+def h_owner_poll(flock, args, self_pane_id):
+    """The lane's harness says "I am polling" - including when there was nothing.
+
+    Empty polls are the point: an idle drainer that only wrote rows when it took
+    something would look dead, and a manual `owner take` would look alive for ever.
+    """
+    import dunk_owner
+    claimed = (args.get("pane_id") or "").strip()
+    # A HEARTBEAT MUST COME FROM THE PANE IT CLAIMS. Otherwise one lane can declare
+    # another lane healthy and revive routing to a poller that is not running - the
+    # exact lie this field exists to prevent (independent review, 2026-10-24).
+    if not self_pane_id:
+        raise DunkError("owner_poll needs a caller pane: a heartbeat without an "
+                        "identity is a declaration, not an observation")
+    if claimed and claimed != self_pane_id:
+        raise DunkError(
+            f"owner_poll for {claimed!r} refused: this call comes from {self_pane_id!r}. "
+            "Only a lane may report its own polling.")
+    store = dunk_owner.OwnerPush()
+    try:
+        return store.poll(self_pane_id, by=args.get("by") or "harness")
+    finally:
+        store.close()
 
 
 def h_owner_take(flock, args, self_pane_id):
@@ -800,6 +867,35 @@ def h_list_workspaces(flock, args, self_pane_id):
     return {"self": own, "workspaces": flock.list_workspaces()}
 
 
+def h_delivery_capability(flock, args, self_pane_id):
+    """What the desk may do with this target: push queue or immediate send."""
+    target = (args.get("target") or "").strip()
+    if not target:
+        raise DunkError("delivery_capability must be given a target (a pane id like "
+                        "%9 or a pinned lane name)")
+    return flock.delivery_capability(target, self_pane_id)
+
+
+def h_lanes(flock, args, self_pane_id):
+    action = (args.get("action") or "list").strip().lower()
+    if action == "set":
+        # Same gate as the lane_set command: a name that decides who receives
+        # mail is not something any lane may assert about another.
+        flock.require_superuser(self_pane_id, "lane_set")
+        return flock.lane_set(args.get("pane"), args.get("mailbox"),
+                              self_pane_id=self_pane_id)
+    if action != "list":
+        raise ValueError("lanes action must be list or set")
+    rows = flock.lanes()
+    return {"lanes": rows, "count": len(rows)}
+
+
+def h_lane_set(flock, args, self_pane_id):
+    # No KeyError for a parameterless call: the refusal names what is missing.
+    return flock.lane_set(args.get("pane"), args.get("mailbox"),
+                          self_pane_id=self_pane_id)
+
+
 def h_create_workspace(flock, args, self_pane_id):
     return flock.create_workspace(
         label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
@@ -989,12 +1085,23 @@ COMMANDS = [
     Command(
         "owner_push",
         "Deliver an OWNER message to an agent with no inbox row and no typing: it is "
-        "pushed for the pane and the harness extension reads it. Use for owner -> CoS.",
+        "pushed for the pane and the harness extension reads it. Use for owner -> CoS. "
+        "The result carries outcome='stored' (a durable queue row the LANE drains - not "
+        "read yet, which is a different fact from 'sent'), expect=how it will be drained.",
         h_owner_push,
         params={"target": {"type": "string"},
                 "body": {"type": "string"},
                 "subject": {"type": "string"}},
         required=("target", "body")),
+    Command(
+        "owner_poll",
+        "Record a drain heartbeat: the lane's harness polls for owner messages "
+        "(even when the queue is empty). This, and only this, is what "
+        "delivery_capability reads to decide a lane drains - a manual owner take "
+        "must not confer capability.",
+        h_owner_poll,
+        params={"pane_id": {"type": "string", "description": "the pane that polled"},
+                "by": {"type": "string", "description": "who polled, e.g. pi-extension"}}),
     Command(
         "owner_take",
         "Drain the owner messages waiting for a pane (called by the harness extension "
@@ -1046,6 +1153,25 @@ COMMANDS = [
         h_project_summary,
         params={"project": {"type": "string", "description": "Project name, or omit for global."},
                 "path": {"type": "string", "description": "Explicit project directory."}}),
+    Command(
+        "lanes",
+        "The lane registry: which pane is which lane, whether that name was "
+        "DECLARED (new-workspace --as, lane_set) or inferred from a title, and "
+        "whether the lane is alive. action=list (default) or set.",
+        h_lanes,
+        params={"action": {"type": "string", "enum": ["list", "set"],
+                           "description": "list (default) or set"},
+                "pane": {"type": "string", "description": "set: the pane id"},
+                "mailbox": {"type": "string",
+                            "description": "set: the lane name this pane IS"}}),
+    Command(
+        "lane_set",
+        "Declare who a pane IS, after the fact, in the registry's immutable field. "
+        "Repairs a lane whose declared name was overwritten by an agent's pane "
+        "title. Refuses a pane that does not exist. Superuser-gated.",
+        h_lane_set,
+        params={"pane": {"type": "string", "description": "the pane id"},
+                "mailbox": {"type": "string", "description": "the lane name"}}),
     Command(
         "retire_pane",
         "Retire a pane we deliberately stopped feeding (superseded, or its job "
@@ -1253,6 +1379,14 @@ COMMANDS = [
         required=["id"],
     ),
     Command(
+        "desk_token",
+        "Issue (or rotate) the desk credential: one token that may send_text/"
+        "send_keys to an explicit list of panes and do NOTHING else. Not a "
+        "superuser entry. Superuser-gated because it hands out typing rights.",
+        h_desk_token,
+        params={"panes": {"type": "string",
+                          "description": "comma-separated pane ids, e.g. %1,%2,%4"}}),
+    Command(
         "send_text",
         "Send a direct message or instruction to a pane: type text + Enter once, "
         "with no dunk created. Use it to talk to another agent (target its pane) "
@@ -1279,7 +1413,11 @@ COMMANDS = [
                 "press_enter": {
                     "type": "boolean",
                     "description": ("Press Enter after the text (default true). false "
-                                    "leaves it in the box unsubmitted.")}},
+                                    "leaves it in the box unsubmitted.")},
+                "desk_token": {"type": "string",
+                               "description": ("Narrow desk credential: permits this "
+                                               "verb on an explicitly listed pane and "
+                                               "nothing else. Not a superuser entry.")}},
         required=["target", "text"],
     ),
     Command(
@@ -1297,7 +1435,11 @@ COMMANDS = [
                     "type": "boolean",
                     "description": "Queue behind a human who is typing (default true)."},
                 "wait_s": {"type": "number", "minimum": 0, "maximum": 3600,
-                           "description": "Block up to this many seconds for delivery (default 3)."}},
+                           "description": "Block up to this many seconds for delivery (default 3)."},
+                "desk_token": {"type": "string",
+                               "description": ("Narrow desk credential: permits this "
+                                               "verb on an explicitly listed pane and "
+                                               "nothing else. Not a superuser entry.")}},
         required=["target", "keys"],
     ),
     Command(
@@ -1817,6 +1959,20 @@ COMMANDS = [
     ),
     # -- herdr layout control: build the herd, then dunk on it ---------------
     Command(
+        "delivery_capability",
+        "Outcome vocabulary for every send: ok (submitted and confirmed), stored (a "
+        "durable queue row the lane drains itself - NOT read), queued (held behind a "
+        "human typing), unconfirmed (neither witness fired; do not resend blindly), "
+        "refused (named refusal, nothing written or typed). "
+        "How the desk may deliver to this target: does its harness drain a push "
+        "queue (pi) or must the message go as an immediate guarded send (claude, "
+        "codex)? Returns pane_id, mailbox (the PINNED name when declared), agent, "
+        "alive, drains, send ('owner_push' or 'guarded') and expect. Refusals use "
+        "the same tokens as a send: dead_lane / unhoused_lane / unknown_name.",
+        h_delivery_capability,
+        params={"target": {"type": "string",
+                           "description": "pane id (%9) or pinned lane name"}}),
+    Command(
         "list_workspaces",
         "List herdr workspaces with their tabs (ids, labels, agent status). "
         "`self` is the caller's own workspace/tab. Use it to pick where to "
@@ -2039,7 +2195,8 @@ MCP_GROUPS = (
     ("views",
      "Read-only compositions for the Command Center: roster, message_state, "
      "reply_stats, project_summary. All queries, no model, no pane writes.",
-     (("push", "owner_push"), ("take", "owner_take"), ("stats", "owner_stats"),
+     (("push", "owner_push"), ("take", "owner_take"), ("poll", "owner_poll"),
+      ("stats", "owner_stats"),
       ("roster", "roster"), ("message_state", "message_state"),
       ("reply_stats", "reply_stats"), ("project_summary", "project_summary"),
       ("capture", "state_capture"), ("latest", "state_latest"))),
@@ -2049,7 +2206,8 @@ MCP_GROUPS = (
      "is ready AND has no unread mail; the tick reports idle lanes, dispatched "
      "this hour, and blocked lanes with reasons.",
      (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
-      ("retired", "retire_pane"))),
+      ("retired", "retire_pane"),
+      ("lanes", "lanes"), ("lane_set", "lane_set"), ("desk_token", "desk_token"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
@@ -2058,6 +2216,7 @@ MCP_GROUPS = (
      "queued=true and is delivered later. flush submits a stranded draft; "
      "clear_box DESTROYS one (superuser only). Prefer the inbox for agents.",
      (("list", "list_panes"), ("read", "read_pane"), ("delivery", "delivery"),
+      ("capability", "delivery_capability"),
       ("send", "send_text"),
       ("send_keys", "send_keys"), ("flush", "flush_box"),
       ("clear_box", "clear_box"),
@@ -2168,6 +2327,7 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
+    "lane_set", "desk_token",
     "memory_backfill",
 }
 
@@ -2177,6 +2337,9 @@ def dispatch(flock, name, args=None, self_pane_id=None):
     command = COMMANDS_BY_NAME.get(name)
     if command is None:
         raise DunkError(f"unknown command {name!r}")
+    # Each dispatch starts from "no desk credential used", whatever the last
+    # request on this thread did.
+    flock._caller_state.desk_send = False
     if name in SUPERUSER_ONLY:
         flock.require_superuser(self_pane_id, name)
     args = dict(args or {})

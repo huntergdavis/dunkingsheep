@@ -244,6 +244,16 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertIn("no dunkingsheep daemon", proc.stderr)
         self.assertEqual(0, self.run_json("status")["dunkers"])
 
+    def test_a_failed_send_exits_non_zero(self):
+        """A send that prints FAILED must not exit 0: a caller that trusts the exit
+        code otherwise records a delivery that never happened (cos, 2026-10-24)."""
+        proc = subprocess.run([sys.executable, CLI, "send", "%99", "nobody home"],
+                              env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(0, proc.returncode,
+                            msg=(proc.stdout or "") + (proc.stderr or ""))
+        self.assertIn("%99", (proc.stdout or "") + (proc.stderr or ""),
+                      "the refusal must name the target")
+
     def test_a_coalesced_call_returns_the_cached_answer_with_a_marker(self):
         import os, subprocess, sys
         base = [sys.executable, CLI, "--json", "inbox", "count"]

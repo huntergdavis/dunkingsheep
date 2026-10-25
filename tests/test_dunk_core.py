@@ -1074,6 +1074,47 @@ class SendRaceTests(unittest.TestCase):
         self.assertEqual([("w2:p1", "hello")], self.herdr.sends)
         self.assertEqual(1, len(self.herdr.keys), "no needless extra Enter")
 
+    def test_the_send_result_carries_a_machine_readable_outcome(self):
+        """A caller must not have to parse prose to tell sent from queued from
+        unconfirmed from refused (cos measured all three arriving as sentences)."""
+        import dunk_core as dc
+        sent = self.flock.send_now("w2:p1", "one", wait_s=3)
+        self.assertEqual("ok", sent["outcome"])
+        self.assertTrue(sent["ok"])
+        probe = dc.Message("m1", "w2:p1", "claude", "x", "send_text", lambda: None)
+        probe.status, probe.detail = "queued", None
+        self.assertEqual("queued", probe.to_dict()["outcome"])
+        self.assertIsNone(probe.to_dict()["ok"], "queued is neither sent nor failed")
+        probe.status, probe.detail = "failed", "submission unconfirmed: box unreadable"
+        self.assertEqual("unconfirmed", probe.to_dict()["outcome"])
+        probe.status, probe.detail = "failed", "no such pane"
+        self.assertEqual("refused", probe.to_dict()["outcome"])
+        self.assertIn("stored", dc.Message.OUTCOMES,
+                      "a durable queue row is its own outcome, not 'ok'")
+
+    def test_a_busy_lane_confirms_by_the_turn_it_started(self):
+        """The false negative cos measured: two sends to a claude lane reported
+        "did not submit" and the receiving lane showed both as turns. A busy box
+        is not evidence of failure; a turn starting is evidence of success."""
+        self.herdr.statuses["w2:p1"] = "working"      # a turn is running
+        # The reader keeps seeing our text (its echo in the transcript): the exact
+        # misreading that produced the false negative.
+        with mock.patch.object(type(self.flock), "_box_holds", return_value=True):
+            ok, detail = self.flock.submit_text("w2:p1", "a nudge")
+        self.assertTrue(ok, detail)
+        self.assertIn("confirmed by the turn", detail)
+
+    def test_a_composer_that_needs_carriage_return_still_submits(self):
+        """Measured 2026-10-24: five of six revived claude lanes sat with our text
+        in the composer for four minutes while the send reported success, and
+        `tmux send-keys C-m` submitted at once. Enter is not the submit key for
+        every TUI, so the retries alternate instead of pressing Enter forever."""
+        self.herdr.cm_only.add("w2:p1")
+        ok, detail = self.flock.submit_text("w2:p1", "a nudge")
+        self.assertTrue(ok, detail)
+        pressed = [keys for pane, keys in self.herdr.keys if pane == "w2:p1"]
+        self.assertIn(["C-m"], pressed, "the retry must try the carriage return")
+
     def test_a_pane_that_needs_two_enters_still_submits(self):
         # What a large paste does on Codex: the first Enter is swallowed.
         self.herdr.enters_needed["w2:p1"] = 2

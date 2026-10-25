@@ -749,7 +749,13 @@ class WatchdogDeliveryTests(WatchdogCase):
         self.assertIsNone(report["delivery_error"])
         self.assertTrue(sent, "the digest must actually be handed to a sender")
 
-    def test_a_delivery_failure_still_writes_the_heartbeat(self):
+    def test_a_delivery_failure_leaves_the_heartbeat_stale_on_purpose(self):
+        """VP ruling 2026-10-24: the watchdog stays up and the DEAD-MAN pages.
+
+        Supersedes the earlier rule ("write the heartbeat even when delivery
+        failed"). That rule kept writing a fresh heartbeat, so nothing paged, and
+        the unit exited 1 - the observer died and the silence looked like health.
+        """
         cfg = self.load_cfg()
         self.fleet.hosts = {"/": {"load1": 40.0, "load5": 40.0, "cpus": 8},
                             "/tmp": {"used_fraction": 0.5}}
@@ -763,11 +769,13 @@ class WatchdogDeliveryTests(WatchdogCase):
                         owner_channel=FakeOwner(), panes_provider=lambda: list(self.fleet.panes),
                         host_sampler=self.fleet.host)
         self.assertIn("daemon down", report["delivery_error"] or "")
-        self.assertTrue(os.path.exists(heartbeat),
-                        "the heartbeat says the watchdog RAN; delivery is a separate fact")
+        self.assertFalse(os.path.exists(heartbeat),
+                         "a failed escalation must leave the heartbeat stale: the "
+                         "dead-man is the observer that does not depend on delivery")
+        # The failure is recorded, with what was pending, so the next run and the
+        # operator can see it without reading the journal.
+        self.assertIn("DELIVERY FAILED (source=watchdog-self)", wd.render_text(report))
 
-
-class LiveNowRefusalTests(WatchdogCase):
     def test_now_is_refused_on_a_live_run_and_allowed_on_a_dry_run(self):
         cfg = self.fleet.config()
         cfg.update(enabled=True, dry_run=False)
@@ -1039,10 +1047,19 @@ class VpDeliveryTests(WatchdogCase):
                         host_sampler=self.fleet.host)
         self.assertEqual(1, len(calls))
         self.assertIn("daemon down", report["delivery_error"])
-        # The heartbeat says the watchdog RAN, so it is written even when delivery
-        # failed - otherwise a delivery bug silences the dead-man that reports it.
-        self.assertTrue(os.path.exists(cfg["heartbeat_path"]),
-                        "a delivery failure must not look like a watchdog that never ran")
+        # VP RULING 2026-10-24 (after the watchdog died on a stale mailbox and the
+        # fleet lost its observer for nine minutes): a failed escalation must NOT
+        # refresh the heartbeat. The dead-man is the observer that does not depend
+        # on this delivery path, and a stale heartbeat is how it learns to page.
+        self.assertFalse(os.path.exists(cfg["heartbeat_path"]),
+                         "a failed escalation must leave the heartbeat stale so the "
+                         "dead-man pages instead of the watchdog dying")
+        state = json.load(open(cfg["state_path"]))
+        failure = state.get("delivery_failure") or {}
+        self.assertIn("daemon down", failure.get("reason") or "")
+        self.assertTrue(failure.get("target"), "the record names the target")
+        self.assertGreaterEqual(failure.get("pending") or 0, 1, "what was pending is recorded")
+        self.assertEqual(1, state.get("delivery_failure_count"))
         self.assertIn("DELIVERY FAILED (source=watchdog-self)", wd.render_text(report))
 
     def test_recovery_line_goes_to_vp(self):
