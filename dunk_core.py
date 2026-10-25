@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.37"
+VERSION = "2.70.39"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -189,6 +189,9 @@ MESSAGE_HISTORY = 50
 # these gaps a 2.2k message submits; the long tail only costs time when a send
 # is actually stuck, since a normal one is confirmed on the first press.
 SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
+# How many press-and-check rounds the GUARDED (nudge) path may spend before refusing.
+# Three is deliberate: the first press often lands while a codex composer is mid-redraw.
+GUARDED_PRESS_ATTEMPTS = 3
 # Enter is a line feed to some TUIs and does nothing in their composer; the
 # carriage return (C-m) is what submits. Measured 2026-10-24 on six revived
 # claude lanes: five sat with the text visible for four minutes and the send
@@ -4300,29 +4303,42 @@ class Flock:
                 # A bare shell has no chat input box to read back.
                 return True, "sent"
         if guarded:
-            # SHORT: one check, one extra press, no long sleeps. The caller re-attempts.
+            # THE NUDGE PATH IS THIS ONE. Two rounds of "press, wait, check", not one:
+            # measured on an idle codex lane (%31) right after 2.70.37 shipped - the text
+            # stayed in the composer and the log showed send_text then nothing, because a
+            # single extra press landed while the TUI was mid-redraw and was swallowed.
+            # The VP's hand-submitted Enter worked because it came seconds later, so the
+            # missing ingredient is TIME, not the key name.
             #
-            # THE NUDGE PATH IS THIS ONE, and it used to press Enter exactly once and
-            # give up - which is why fixing the retry ladder changed nothing for the
-            # six idle codex lanes (t130): their composer ignores Enter and submits on
-            # the carriage return, and this branch never tried it.
-            time.sleep(SUBMIT_POLL_S[0])
-            held = self._box_holds(pane_id, text)
-            if held is False:
-                return True, "sent"
-            if self._turn_started(pane_id):
-                return True, "sent (confirmed by the turn it started)"
-            key = self._submit_key.get(pane_id) or "C-m"
-            with self._typing(pane_id):
-                ok, _detail = self.herdr.send_keys(pane_id, key)
-            if ok:
-                time.sleep(SUBMIT_POLL_S[0])
-                if self._box_holds(pane_id, text) is False:
-                    self._submit_key[pane_id] = key
-                    return True, f"sent ({key})"
+            # Still bounded: at most GUARDED_PRESS_ATTEMPTS presses with short waits, then
+            # the honest refusal. The guard's contract is "no long blocking"; the queue
+            # re-attempts.
+            for attempt in range(GUARDED_PRESS_ATTEMPTS):
+                time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
+                held = self._box_holds(pane_id, text)
+                if held is False:
+                    return True, ("sent" if attempt == 0 else
+                                  f"sent (confirmed after {attempt + 1} checks)")
                 if self._turn_started(pane_id):
-                    self._submit_key[pane_id] = key
                     return True, "sent (confirmed by the turn it started)"
+                key = self._submit_key.get(pane_id) or ("Enter" if attempt == 0 else "C-m")
+                with self._typing(pane_id):
+                    ok, _detail = self.herdr.send_keys(pane_id, key)
+                if not ok:
+                    continue
+                if key != "Enter":
+                    log.info("guarded nudge: Enter did not submit on %s; pressed %s "
+                             "(round %d of %d)", pane_id, key, attempt + 1,
+                             GUARDED_PRESS_ATTEMPTS)
+                # Do NOT remember a key until it CONFIRMS: remembering after every
+                # successful send_keys call made attempt 1 reuse the key that had just
+                # failed, so the carriage return was never tried (found by the test).
+            # The failure must be VISIBLE from the sender's side: a recurrence then shows
+            # up in the journal as this line, not as an idle lane somebody infers hours
+            # later (VP i25123).
+            log.warning("guarded nudge: typed, not submitted on %s after %d rounds; the "
+                        "text is in the composer and the lane has not started a turn",
+                        pane_id, GUARDED_PRESS_ATTEMPTS)
             return False, "text did not submit; it is still in the pane's input box"
         return self._press_until_submitted(pane_id, text, first_pressed=True)
 

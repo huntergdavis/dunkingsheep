@@ -34,6 +34,24 @@ class GuardedNudgeTests(unittest.TestCase):
         self.assertIn(["C-m"], pressed,
                       "the guarded path never tried the key that submits")
 
+    def test_the_log_says_which_key_took(self):
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.flock.send_now("w2:p1", "a nudge", wait_s=3)
+        self.assertTrue(any("pressed C-m" in line for line in captured.output),
+                        captured.output)
+
+    def test_a_failure_is_visible_from_the_senders_side(self):
+        """The observable the VP asked for: a recurrence appears in the journal, not as
+        an idle lane somebody infers."""
+        self.herdr.cm_only.discard("w2:p1")
+        # A pane whose composer never submits at all.
+        self.herdr.enters_needed["w2:p1"] = 99
+        with self.assertLogs("dunkingsheep", level="WARNING") as captured:
+            result = self.flock.send_now("w2:p1", "a nudge", wait_s=3)
+        self.assertNotEqual("ok", result.get("outcome"), result)
+        self.assertTrue(any("typed, not submitted" in line for line in captured.output),
+                        captured.output)
+
     def test_a_nudge_to_a_composer_that_takes_enter_still_works(self):
         self.herdr.cm_only.discard("w2:p1")
         result = self.flock.send_now("w2:p1", "a nudge", wait_s=3)
