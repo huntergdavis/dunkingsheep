@@ -1451,6 +1451,7 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
                                            "config enabled=false" if not config["enabled"] else "config dry_run=true"),
         "now": now, "findings": result["findings"], "skipped": skipped, "decisions": decisions,
         "recovered": recovered, "problems": problems, "sent": [], "delivery_error": None,
+        "carried_failure": state.get("delivery_failure") or None,
     }
     vp_send = [d for d in decisions if d["vp"] == "no"]
     owner_send = [d for d in decisions if d["owner"] == "no"]
@@ -1501,12 +1502,25 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
             report["sent"].append("vp")
         except Exception as error:  # noqa: BLE001 - reported to stderr; never re-sent through the inbox
             report["delivery_error"] = f"{type(error).__name__}: {error}"
-            # The heartbeat says the WATCHDOG RAN. Whether the alert was delivered is
-            # a different fact, and tying them together silences the dead-man with the
-            # very bug it exists to report.
+            # THE HEARTBEAT IS THE DEAD-MAN'S INPUT, so a failed escalation must NOT
+            # refresh it: that is the only way the failure reaches a human when the
+            # channel itself is the thing that broke. The comment here used to say
+            # this while the code wrote the heartbeat anyway - the dead-man stayed
+            # quiet and the unit died instead (VP ruling 2026-10-24).
             state["last_run"] = now
+            state["delivery_failure"] = {
+                "at": now,
+                "target": config["escalation"]["vp"]["mailbox"],
+                "reason": report["delivery_error"],
+                "pending": len(vp_lines),
+                "lines": vp_lines[:5],
+            }
+            state.setdefault("delivery_failure_count", 0)
+            state["delivery_failure_count"] = int(state["delivery_failure_count"]) + 1
             save_state(state_path, state)
-            write_heartbeat(_expand(config["heartbeat_path"]), now, config["cadence_minutes"])
+            # This module imports nothing for logging by design (a deterministic rule
+            # engine): the facts live in report["delivery_error"] (printed by the
+            # caller as DELIVERY FAILED) and in the state record written above.
             return report
 
     for decision in vp_send:
@@ -1556,6 +1570,15 @@ def render_text(report):
     if report["delivery_error"]:
         lines.append(f"DELIVERY FAILED (source={SOURCE_SELF}): {report['delivery_error']}; "
                      "heartbeat not touched, so the dead-man check will report it")
+    # THE NEXT RUN MUST CARRY THE PREVIOUS FAILURE. A delivery that failed once and
+    # then worked leaves no trace in the run that succeeds, and "it works now" is not
+    # the same claim as "you got everything" (VP ruling 2026-10-24).
+    carried = report.get("carried_failure") or {}
+    if carried and not report["delivery_error"]:
+        lines.insert(0, f"CARRIED: escalation to {carried.get('target')!r} failed at "
+                        f"{int(carried.get('at') or 0)} ({carried.get('reason')}); "
+                        f"{carried.get('pending')} line(s) were pending - resend them "
+                        "from the state record if they still matter")
     return "\n".join(lines)
 
 

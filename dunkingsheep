@@ -1832,7 +1832,13 @@ def main(argv=None):
         report = dunk_watchdog.run(config, now, dry_run_flag=args.dry_run)
         print(json.dumps(report, indent=2, sort_keys=True, default=str) if args.json
               else dunk_watchdog.render_text(report))
-        return 1 if report["delivery_error"] else 0
+        # EXIT 0 EVEN WHEN THE ESCALATION FAILED (VP ruling 2026-10-24, after the
+        # watchdog died on a stale mailbox and the fleet lost its observer for nine
+        # minutes). The failure is not hidden: the run's output says DELIVERY FAILED
+        # with target and reason, the state file keeps delivery_failure, and the
+        # heartbeat is deliberately NOT refreshed so the dead-man pages through an
+        # observer that does not depend on this delivery path.
+        return 0
     if command == "usage":
         import dunk_usage
         try:
