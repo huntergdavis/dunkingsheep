@@ -183,12 +183,40 @@ class Tasks:
         self._lock = threading.RLock()
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        # ONE CONNECTION PER THREAD, because a sqlite3 connection is not safe to use
+        # from two threads at once even with check_same_thread=False: cursors and
+        # statement state are shared, and the damage shows up as somebody else's
+        # error. Measured 2026-10-24/25: with twelve threads on one connection the
+        # daemon logged "InterfaceError: bad parameter or other API misuse", and
+        # `leases_for` once saw rows as plain tuples (IndexError: tuple index out of
+        # range) because a concurrent statement had reset the cursor under it. The
+        # lock alone could not prevent it: several paths (list, stats, metrics,
+        # leases_for_pane, _record, _next_id) never took it.
+        self._local = threading.local()
+        self._connections = []
+        self._connections_lock = threading.Lock()
+        self.db = self._connect()          # the creating thread's connection
         with self._lock:
             self.db.executescript(SCHEMA)
             self._migrate()
             self.db.commit()
+
+    def _connect(self):
+        """This thread's connection, opened on first use and kept for its lifetime."""
+        connection = getattr(self._local, "db", None)
+        if connection is not None:
+            return connection
+        connection = sqlite3.connect(self.path, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        self._local.db = connection
+        with self._connections_lock:
+            self._connections.append(connection)
+        return connection
+
+    def __getattribute__(self, name):
+        if name == "db":
+            return object.__getattribute__(self, "_connect")()
+        return object.__getattribute__(self, name)
 
     def _migrate(self):
         """Add columns introduced after the first database was created."""
@@ -205,8 +233,15 @@ class Tasks:
                 self.db.execute(f"ALTER TABLE task_leases ADD COLUMN {name} {ddl}")
 
     def close(self):
-        with self._lock:
-            self.db.close()
+        """Close every thread's connection (the store is shared by the daemon)."""
+        with self._connections_lock:
+            connections, self._connections = self._connections, []
+        for connection in connections:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+        self._local = threading.local()
 
     # -- ids ----------------------------------------------------------------
 
