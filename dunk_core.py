@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.20"
+VERSION = "2.70.21"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -293,6 +293,9 @@ PLACEHOLDER_PATTERNS = (
     # reader already ignores it), but a bright redraw of the same words is not a
     # draft either.
     re.compile(r"^\s*ask (codex|claude|open ?code) to do anything", re.I),
+    # codex's other composer hints, measured on pane %17 (2026-10-24): 'tab' is
+    # drawn bold and the rest plain, so the reader must match after stripping ANSI.
+    re.compile(r"^\s*tab to (queue message|send|interrupt|search)\b", re.I),
     re.compile(r"^\s*(send a message|type a message|ask anything)\b", re.I),
 )
 # How long a "busy" report from another process may block delivery while the pane
@@ -5106,6 +5109,9 @@ def _modal_open(screen):
 
 # The composer lives at the bottom of a pane. Sigil lines above that are old
 # prompts in the scrollback, not the box someone is typing into.
+# How many rows at the bottom of a pane are searched for the harness's empty-box
+# hint. codex draws it as a bare line two rows above the status footer.
+COMPOSER_HINT_TAIL_ROWS = 5
 BOX_REGION_ROWS = 14
 # Box borders and padding sit BEFORE the prompt sigil on a bordered composer, so a
 # raw first-character test missed '│ ❯ check your inbox' entirely - which is
@@ -5155,6 +5161,8 @@ def box_text(screen):
     region_end = len(rows)
     sigils = [(index, row) for index, row in enumerate(rows)
               if _prompt_body(row) is not None]
+    # Where the "the box is empty" hint can be drawn: the tail of the pane.
+    hint_from = max(0, len(rows) - COMPOSER_HINT_TAIL_ROWS)
     # Submitted prompts use the same sigil as drafts. When the live composer
     # has borders, use those boundaries rather than including nearby transcript
     # in the last 14 rows. Keep EVERY prompt inside it: a multiline draft can
@@ -5173,6 +5181,27 @@ def box_text(screen):
         body = _prompt_body(row)
         if body:
             candidates.append((index, body))
+    if candidates:
+        # A HINT UNDER THE CANDIDATE, WITH NO PROMPT BELOW IT, MEANS THE TEXT ABOVE
+        # IS TRANSCRIPT. codex echoes submitted messages into the transcript with the
+        # same '›' sigil its composer uses and draws a BARE hint ('tab to queue
+        # message') where a draft would be; the reader took a wrapped line of the
+        # previous instruction for a live draft and held every send as "someone is
+        # typing" (pane %17, m1843/m1844, 5+ minutes on a ready lane). The condition
+        # matters: a real draft above a TRAILING EMPTY PROMPT still has that prompt
+        # row under it, which is the fixture this repository requires to survive.
+        first_index = candidates[0][0]
+        hint_rows = [index for index, row in enumerate(rows[hint_from:], start=hint_from)
+                     if _is_placeholder(row)]
+        # AND the hint is not directly under it: the hint lives IN the composer, one
+        # row below the line being typed. A hint two or more rows below the candidate
+        # means the candidate is somewhere else on screen (codex's transcript).
+        near_hint = [index for index in hint_rows if index - first_index >= 2]
+        if near_hint and not any(first_index < index for index, _ in sigils):
+            return "", (f"the composer hint on row {near_hint[0] + 1} of {len(rows)} "
+                        f"('{_collapse(_strip_ansi(rows[near_hint[0]]))[:40]}') sits below "
+                        f"the text on row {first_index + 1} with no prompt after it, so "
+                        "that text is transcript, not a draft")
     if candidates:
         # The draft STARTS at the first prompt line that carries text. A later prompt
         # line with text is a continuation (a pasted multi-line draft draws a sigil on
