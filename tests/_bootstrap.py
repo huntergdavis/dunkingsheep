@@ -16,6 +16,11 @@ os.environ.setdefault("DUNKINGSHEEP_SOCKET", os.path.join(_TMP, "test.sock"))
 os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")
 os.environ.setdefault("DUNKINGSHEEP_MIN_POLL_S", "0")  # tests call the CLI repeatedly
 
+# Identity by TTY is a LIVE probe (tmux list-panes). A test must not consult the
+# developer's terminal to decide who it is, so it is off here and the identity
+# tests inject the lookup explicitly (tests/test_dunk_identity_tty.py).
+os.environ.setdefault("DUNKINGSHEEP_TTY_IDENTITY", "0")
+
 # The CLI auto-starts a detached daemon on its temp socket. A detached daemon
 # outlives the test process, so every run of the suite used to leak one: 44 had
 # accumulated at ~34 MB each before anyone looked. Sweep them at exit.

@@ -410,6 +410,20 @@ class InboxThroughTheFlockTests(unittest.TestCase):
             self.assertEqual("ghost lane", key, "an unstarted agent still gets mail")
             self.assertIsNone(pane)
 
+    def test_a_system_sender_is_not_killed_by_a_fail_closed_refusal(self):
+        """The watchdog escalates to a lane that may have been handed over minutes
+        ago. Raising took the exception watchdog down twice on 2026-10-24 and the
+        fleet ran blind for nine minutes: the alert is stored, marked undeliverable,
+        and the sender is told. An AGENT still gets the hard refusal."""
+        result = self.flock.inbox_send("nobody-at-all", "alert body", notify=False,
+                                       system_sender="watchdog")
+        self.assertEqual("undeliverable", result.get("outcome"))
+        self.assertIn("unknown_name", result.get("reason") or "")
+        self.assertEqual(1, self.inbox.count("nobody-at-all")["total"],
+                         "the alert is kept, not dropped")
+        with self.assertRaisesRegex(DunkError, "reason=unknown_name"):
+            self.flock.inbox_send("nobody-at-all", "agent mail", notify=False)
+
     def test_an_unknown_name_is_refused_rather_than_becoming_a_mailbox(self):
         """FAIL CLOSED (VP ruling 2026-10-24): a mailbox created as a fallback
         swallowed the message and reported success. Three real targets did that:
@@ -720,7 +734,7 @@ class MailboxIdentityTests(unittest.TestCase):
 
     def test_client_uses_the_exported_pane_id_without_asking_herdr(self):
         from dunk_client import FlockClient
-        env = {"HERDR_PANE_ID": "wR:p4"}
+        env = {"HERDR_PANE_ID": "wR:p4", "DUNKINGSHEEP_TTY_IDENTITY": "0"}
         with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch("dunk_client._current_pane_id") as current:
             self.assertEqual("wR:p4", FlockClient().self_pane_id)
@@ -731,7 +745,8 @@ class MailboxIdentityTests(unittest.TestCase):
         that lane's HERDR_PANE_ID, so every tmux lane believed it was its dead
         herdr twin - this lane wrote and was credited as the vp lane."""
         from dunk_client import FlockClient
-        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4",
+               "DUNKINGSHEEP_TTY_IDENTITY": "0"}
         with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch("dunk_client._current_pane_id") as current:
             self.assertEqual("%4", FlockClient().self_pane_id)
@@ -739,13 +754,16 @@ class MailboxIdentityTests(unittest.TestCase):
 
     def test_an_explicit_self_pane_still_wins_over_the_environment(self):
         from dunk_client import FlockClient
-        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4"}
+        env = {"HERDR_PANE_ID": "w9:pH", "TMUX_PANE": "%4",
+               "DUNKINGSHEEP_TTY_IDENTITY": "0"}
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual("%2", FlockClient(self_pane_id="%2").self_pane_id)
 
     def test_client_uses_tmux_pane_when_herdr_is_absent(self):
         from dunk_client import FlockClient
-        with mock.patch.dict(os.environ, {"TMUX_PANE": "%3"}, clear=True), \
+        with mock.patch.dict(os.environ, {"TMUX_PANE": "%3",
+                                          "DUNKINGSHEEP_TTY_IDENTITY": "0"},
+                             clear=True), \
                 mock.patch("dunk_client._current_pane_id") as current:
             self.assertEqual("%3", FlockClient().self_pane_id)
             current.assert_not_called()
@@ -761,7 +779,8 @@ class MailboxIdentityTests(unittest.TestCase):
 
     def test_no_exported_pane_falls_back_to_detection(self):
         from dunk_client import FlockClient
-        with mock.patch.dict(os.environ, {}, clear=True), \
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_TTY_IDENTITY": "0"},
+                             clear=True), \
                 mock.patch("dunk_client._current_pane_id", return_value="wS:p1"):
             self.assertEqual("wS:p1", FlockClient().self_pane_id)
 

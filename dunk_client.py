@@ -85,6 +85,70 @@ def _current_pane_id():
         return None
 
 
+class IdentityRefused(DunkError):
+    """The caller's identity could not be established without guessing.
+
+    A separate class from a plain DunkError so a caller can tell "you are not a
+    lane" from "the thing you asked for is wrong", and so tests can assert the
+    refusal without matching prose.
+    """
+
+
+def controlling_tty(pid=None, max_depth=12):
+    """The /dev/pts/N of the nearest process in this chain that has one.
+
+    An agent's command runner often has NO controlling terminal of its own (the
+    harness gives it a pipe), while the agent process above it owns the pane's
+    pty. So the search walks up the parent chain - the same shape as the caller
+    identity in dunk_callers - rather than reading fd 0, which is a pipe here
+    (measured 2026-10-24: fd0 was "pipe:[...]" while the agent process sat on
+    /dev/pts/58).
+    """
+    pid = pid or os.getpid()
+    for _ in range(int(max_depth)):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as handle:
+                parts = handle.read().rsplit(b")", 1)[1].split()
+            tty_nr = int(parts[4])
+            ppid = int(parts[1])
+        except (OSError, IndexError, ValueError):
+            return None
+        if tty_nr:
+            major, minor = os.major(tty_nr), os.minor(tty_nr)
+            return f"/dev/pts/{minor}" if 136 <= major <= 143 else None
+        if ppid <= 1:
+            return None
+        pid = ppid
+    return None
+
+
+def pane_for_tty(tty=None, runner=None):
+    """(pane_id, reason): which tmux pane owns this terminal, or why we cannot say.
+
+    Refuses on zero matches and on more than one: a TTY that names two panes is
+    not an identity, it is a question, and guessing is how a lane gets another
+    lane's mail.
+    """
+    tty = tty or controlling_tty()
+    if not tty:
+        return None, "no controlling terminal found in this process chain"
+    run = runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True,
+                                                 timeout=5))
+    try:
+        result = run(["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"could not ask tmux for panes: {error}"
+    if getattr(result, "returncode", 1) != 0:
+        return None, f"tmux refused: {(getattr(result, 'stderr', '') or '').strip()}"
+    matches = [line.split()[0] for line in (result.stdout or "").splitlines()
+               if len(line.split()) == 2 and line.split()[1] == tty]
+    if len(matches) == 1:
+        return matches[0], f"resolved by {tty}"
+    if not matches:
+        return None, f"no tmux pane owns {tty}"
+    return None, f"{tty} is claimed by {len(matches)} panes ({', '.join(matches)})"
+
+
 def exported_pane_id(environ=None):
     """The pane this process is actually in, per the terminal that owns it.
 
@@ -100,14 +164,57 @@ def exported_pane_id(environ=None):
     return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
 
 
+def resolve_identity(explicit=None, environ=None, tty_lookup=None):
+    """(pane_id, note) for this caller, refusing rather than guessing.
+
+    The terminal we are IN beats a claim inherited from somewhere else, and a claim
+    that disagrees with the terminal is refused rather than preferred: an inherited
+    TMUX_PANE is exactly how this lane spent a day reading another lane's mail
+    (2026-10-24). Refusals, each with its reason:
+
+      - TMUX_PANE set, TTY says a DIFFERENT pane   -> refuse (a forged/stale claim)
+      - no TMUX_PANE, TTY says zero panes          -> refuse (not a lane)
+      - no TMUX_PANE, TTY says two panes           -> refuse (a question, not an id)
+
+    The TTY fallback is for IDENTITY ONLY: it confers no superuser and no
+    capability (drains stays observed), so a codex runner that strips TMUX_PANE
+    gets a name, not authority.
+    """
+    env = os.environ if environ is None else environ
+    if explicit is not None:
+        return explicit, "explicit"
+    claimed = (env.get("TMUX_PANE") or "").strip()
+    if env.get("DUNKINGSHEEP_TTY_IDENTITY", "1") == "0":
+        return (claimed or env.get("HERDR_PANE_ID") or None), "env only (tty check off)"
+    lookup = tty_lookup or pane_for_tty
+    try:
+        pane, note = lookup()
+    except Exception as error:                  # noqa: BLE001 - identity must not crash
+        pane, note = None, f"tty lookup failed: {error}"
+    if claimed:
+        if pane and pane != claimed:
+            raise IdentityRefused(
+                f"identity refused: TMUX_PANE says {claimed!r} but this terminal is "
+                f"pane {pane!r} ({note}). The terminal you are in wins, and a claim "
+                "that disagrees with it is not corrected silently - if you inherited "
+                "TMUX_PANE from another lane, unset it or set it to yours.")
+        return claimed, (f"env, confirmed by {note}" if pane else
+                         f"env only ({note})")
+    if pane:
+        return pane, f"resolved by terminal ({note})"
+    raise IdentityRefused(
+        f"identity refused: no TMUX_PANE and the terminal did not identify a pane "
+        f"({note}). Set TMUX_PANE, or run inside a tmux pane.")
+
+
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
         explicit = self_pane_id is not None
-        self.self_pane_id = (
-            self_pane_id if explicit
-            else exported_pane_id()
-        )
+        if explicit:
+            self.self_pane_id, self.identity_note = self_pane_id, "explicit"
+        else:
+            self.self_pane_id, self.identity_note = resolve_identity()
         # The terminal already exported our identity. Only pay for a
         # `pane current` round-trip when asked to verify a possibly-stale env.
         if not explicit and (
