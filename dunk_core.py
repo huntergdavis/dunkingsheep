@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.24"
+VERSION = "2.70.25"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -3937,6 +3937,16 @@ class Flock:
             return False
         shown = _typed_text(screen)
         if not shown:            # empty box, or no box at all
+            # "EMPTY" IS NOT ALWAYS PROOF. When the reader decided the last prompt
+            # row is TRANSCRIPT (the footer-adjacency rule), the box may be empty -
+            # or it may hold a multi-line draft whose blank lines look like the gap
+            # an echo leaves. That distinction is invisible from here, and reporting
+            # "sent" on it typed three messages into one composer without submitting
+            # them for twenty minutes (VP i24194: 'sent', lane idle since 07:21).
+            # So: unknown, which the submit ladder treats as "wait for a turn".
+            text_seen, detail = box_text(screen)
+            if not text_seen and "transcript" in (detail or ""):
+                return None
             return False
         return _is_our_send(shown, text, True)
 
@@ -4056,6 +4066,15 @@ class Flock:
                             return True, "sent (confirmed by the turn it started)"
                         break        # our text returned; another Enter is safe
             if last_hold is not True:
+                # UNKNOWN IS NOT FAILURE IF THE LANE STARTED WORKING: the turn is the
+                # other witness, and it is the one that survives an ambiguous box read.
+                if self._turn_started(pane_id):
+                    if attempt > 1:
+                        self._submit_key[pane_id] = key
+                    self.metrics.record("submit.attempt", pane_id=pane_id,
+                                        outcome="ok-turn", attempts=attempt,
+                                        bytes=len((text or "").encode("utf-8")))
+                    return True, "sent (confirmed by the turn it started)"
                 return False, "submission unconfirmed: input box unreadable or changing"
             # The box still shows our text. That is only evidence of failure if the
             # lane is NOT working: a busy pane keeps an echo in the transcript.
