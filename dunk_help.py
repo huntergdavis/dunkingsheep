@@ -416,6 +416,10 @@ def guide(markdown=False):
       "code. A plain `dunkingsheep inbox read` is the supported shape, and an\n"
       "allow rule for `Bash(dunkingsheep *)` in ~/.claude/settings.json lets auto\n"
       "mode run it without prompting.\n")
+    w("Since 2.70.32 a batch is marked read only after the result is built, so a\n"
+      "read that fails no longer consumes the mail. A REPEATED batch after an error\n"
+      "is the fix working, not a bug: the same messages are offered again until a\n"
+      "read completes. `--peek` still marks nothing at all.\n")
     w("An agent whose MCP connection predates the inbox has a stale tool list and\n"
       "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
       "is why the launcher is the first thing to install.\n")
