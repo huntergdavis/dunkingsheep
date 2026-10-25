@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.40"
+VERSION = "2.70.41"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.

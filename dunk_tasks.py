@@ -206,7 +206,8 @@ class Tasks:
         connection = getattr(self._local, "db", None)
         if connection is not None:
             return connection
-        connection = sqlite3.connect(self.path, check_same_thread=False)
+        from dunk_inbox import connect as _connect
+        connection = _connect(self.path)
         connection.row_factory = sqlite3.Row
         self._local.db = connection
         with self._connections_lock:

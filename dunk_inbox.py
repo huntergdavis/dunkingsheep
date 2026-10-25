@@ -131,6 +131,33 @@ def mailbox_where(mailbox, column="mailbox"):
             [plain, escaped + " (%"])
 
 
+def connect(path, *, timeout=None, wal=True):
+    """Open a sqlite connection that waits instead of raising 'database is locked'.
+
+    Two settings, both learned the hard way (VP t142):
+    - busy_timeout: without it a reader that arrives during a write raises
+      "database is locked (5)" immediately, and that raw SQLite text reaches a lane;
+    - journal_mode=WAL: with DELETE, writers block readers. The inbox is now opened by
+      several threads (one connection each), so DELETE turned normal concurrency into
+      lock errors on plain reads.
+    WAL requires the file to be on a local filesystem and is set once per database; the
+    pragma is idempotent.
+    """
+    import os as _os
+    import sqlite3 as _sqlite3
+    wait = 10.0 if timeout is None else float(timeout)
+    connection = _sqlite3.connect(path, check_same_thread=False, timeout=wait)
+    try:
+        connection.execute(f"PRAGMA busy_timeout = {int(wait * 1000)}")
+        if wal and _os.path.exists(path) and _os.path.getsize(path) >= 0:
+            connection.execute("PRAGMA journal_mode = WAL")
+    except _sqlite3.Error:
+        # A read-only or exotic filesystem must not stop the store from opening: the
+        # busy timeout is the part that prevents the raw error.
+        pass
+    return connection
+
+
 class InboxError(ValueError):
     """A caller mistake (unknown id, missing file, too big). Safe to show."""
 
@@ -151,7 +178,7 @@ class Inbox:
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
         os.makedirs(self.blob_dir, exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = connect(path)
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)

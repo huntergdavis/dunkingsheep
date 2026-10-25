@@ -54,7 +54,7 @@ class StateStore:
         self._lock = threading.RLock()
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = __import__("dunk_inbox").connect(path)
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)
