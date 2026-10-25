@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.30"
+VERSION = "2.70.31"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -1265,7 +1265,7 @@ class Flock:
         self._own_mailbox_cache[self_pane_id] = (key, now)
         # Only a REAL resolution is worth remembering: recording a fallback would
         # poison the registry with 'pane id -> pane id' and lose the lane's name.
-        if self_pane_id and resolved:
+        if self_pane_id and resolved and self._plain_lane_name(key):
             self._remember_lane(self_pane_id, key)
         return key
 
@@ -1281,6 +1281,45 @@ class Flock:
         except (OSError, ValueError):
             return {}
 
+    # A NAME A TITLE MAY BECOME. Auto-declaration reads whatever a pane carries, and a
+    # tmux title is written by anything that talks to the pane - including an inbox
+    # nudge: pane %28 was auto-declared as 'OC | OpenCode inbox message from %15'
+    # (VP, t115 side effect). A title is only allowed to name a lane when it looks
+    # like a name: one token, no spaces, no pipes, no notice text.
+    _PLAIN_LANE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    _NOT_A_NAME_MARKERS = ("[inbox]", "read it with", "|", "\u2502", "\u203a")
+
+    @classmethod
+    def _plain_lane_name(cls, name):
+        """True when this string may become a lane's identity BY INFERENCE.
+
+        Strict on purpose: a title is written by anything that talks to the pane, so
+        inference only accepts one token (or a pane id). Declared names are a separate
+        question - 'dunky pi' and 'PM (par-a)' are declared, never inferred.
+        """
+        text = str(name or "").strip()
+        if not text or len(text) > 64:
+            return False
+        lowered = text.lower()
+        if any(marker in lowered for marker in cls._NOT_A_NAME_MARKERS):
+            return False
+        if _PANE_ID_RE.match(text) or _HERDR_ID_RE.match(text):
+            return True
+        return bool(cls._PLAIN_LANE_NAME.match(text))
+
+    @classmethod
+    def _usable_declared_name(cls, name):
+        """True when a DECLARED row holds something a lane could be called.
+
+        Looser than inference - a declared name may contain a space or parentheses -
+        but a row carrying notice text or a pipe is corruption, not a name.
+        """
+        text = str(name or "").strip()
+        if not text or len(text) > 64:
+            return False
+        lowered = text.lower()
+        return not any(marker in lowered for marker in cls._NOT_A_NAME_MARKERS)
+
     @staticmethod
     def _row_identity(value):
         """(mailbox, declared) for a registry row, however it is spelled.
@@ -1291,7 +1330,15 @@ class Flock:
         """
         if isinstance(value, dict):
             name = str(value.get("mailbox") or value.get("name") or "").strip()
-            return (name or None), bool(value.get("declared"))
+            declared = bool(value.get("declared"))
+            if declared and not Flock._usable_declared_name(name):
+                # A DECLARED ROW THAT IS NOT A NAME is corruption, not an identity:
+                # fail closed and say so, rather than hand a lane a mailbox called
+                # 'OC | OpenCode inbox message from %15'.
+                log.warning("lane registry row is not a usable name (%r); ignoring it. "
+                            "Repair with: dunkingsheep lane set <pane> <name>", name)
+                return None, False
+            return (name or None), declared
         name = str(value or "").strip()
         return (name or None), False
 
