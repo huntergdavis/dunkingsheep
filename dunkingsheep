@@ -1979,7 +1979,7 @@ def run_context_command(dunk_context, args):
             try:
                 body = open(args.file).read()
             except FileNotFoundError:
-                raise SystemExit(
+                raise Refused(
                     f"no such file: {args.file!r} - the body comes from --text, stdin or a "
                     f"file; for text inline use: dunkingsheep context add --text "
                     f"'<claim>' --class ... --subject ...")
@@ -2098,6 +2098,22 @@ def _check_send_body(args):
                                literal=bool(getattr(args, "literal", False)))
 
 
+class Refused(SystemExit):
+    """A named refusal: the message is the reason, the code is 2.
+
+    `SystemExit("message")` exits 1 and loses the distinction between "refused,
+    with a reason" and "crashed", which this CLI has kept for everything else
+    (VP ruling 2026-10-24, after three tests caught the difference).
+    """
+
+    def __init__(self, message, code=2):
+        self.message = str(message)
+        super().__init__(code)
+
+    def __str__(self):
+        return self.message
+
+
 def _refuse_shell_substitution(body, subject=None, *, literal=False):
     """Refuse a body the sending shell was free to rewrite.
 
@@ -2122,12 +2138,12 @@ def _refuse_shell_substitution(body, subject=None, *, literal=False):
             if index < 0:
                 continue
             around = text[max(0, index - 30):index + 30].replace("\n", " ")
-            raise SystemExit(
+            raise Refused(
                 f"inbox send: the {label} contains shell-substitution syntax {fragment!r} "
                 f"(...{around}...). An unquoted shell may have already rewritten it, and a "
                 f"backtick pair deletes the word between them before this command runs. "
                 f"Use single quotes, or pass --literal to send these characters as text, "
-                f"or --body-file PATH to bypass the shell entirely.")
+                  f"or --body-file PATH to bypass the shell entirely.")
 
 
 def run_client_command(client, args):
@@ -2270,7 +2286,7 @@ def run_client_command(client, args):
         try:
             return run_context_command(dunk_context, args)
         except dunk_context.ContextError as error:
-            raise SystemExit(f"context: {error}")
+            raise Refused(f"context: {error}")
     if command == "load":
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
@@ -2558,4 +2574,9 @@ def run_client_command(client, args):
 
 
 if __name__ == "__main__":
-    sys.exit(_run(sys.argv[1:]))
+    try:
+        code = _run(sys.argv[1:])
+    except Refused as refusal:          # message to stderr, code 2 for "refused"
+        print(str(refusal), file=sys.stderr)
+        code = 2
+    sys.exit(code)
