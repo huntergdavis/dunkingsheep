@@ -464,3 +464,40 @@ class CallerLivenessTests(unittest.TestCase):
         finally:
             old.close()
 
+
+
+class RowFactoryDriftTests(unittest.TestCase):
+    """The guard added in 2.70.21 must FAIL without it.
+
+    Reviewer's requirement (PR #14): a test that fails when dunk_tasks.py is
+    reverted is the only evidence the guard does anything. So this clears the
+    connection's row factory behind the module's back and asserts a read with ROWS
+    still returns rows addressable by column name - which is what raised
+    IndexError in the daemon log on 2026-10-24. An empty result cannot show this:
+    with no rows there is nothing to index, and the guard has nothing to fix.
+    """
+
+    def test_a_cleared_row_factory_does_not_break_a_lease_read(self):
+        import sqlite3
+        import tempfile
+        import time as _time
+        from dunk_tasks import Tasks
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Tasks(path=os.path.join(tmp, "tasks.db"))
+            try:
+                task = tasks.add("global", "a task", priority="high")
+                now = _time.time()
+                tasks.db.execute(
+                    "INSERT INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, "
+                    "expires_at) VALUES (?,?,?,?,?)",
+                    (task["id"], "%4", now, now, now + 600))
+                tasks.db.commit()
+                tasks.db.row_factory = None       # exactly the drift observed
+                leases = tasks.leases_for(task["id"])
+                self.assertEqual(1, len(leases), "a tuple row must not raise here")
+                self.assertEqual("%4", leases[0]["pane_id"],
+                                 "the row must be readable by column name")
+                self.assertEqual(sqlite3.Row, tasks.db.row_factory,
+                                 "the factory is re-asserted so later reads work too")
+            finally:
+                tasks.close()
