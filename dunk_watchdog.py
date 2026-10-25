@@ -190,7 +190,11 @@ RULE_PARAMS = {
     "inbox.unread_live": {"age_minutes": POSITIVE, "min_messages": POSITIVE_INT,
                           "idle_statuses": _enum_list("idle", "done", "blocked", "unknown",
                                                       allow_empty=False)},
-    "inbox.unread_dead": {"min_messages": POSITIVE_INT},
+    # min_age_minutes: mail must be OLD before "this lane is gone" is worth saying.
+    # Measured 2026-10-24: the rule fired on the vp mailbox with a message 0.0h old,
+    # because the mailbox's recorded pane had just been superseded - a lane that is
+    # being handed over looks exactly like a dead one for the first few minutes.
+    "inbox.unread_dead": {"min_messages": POSITIVE_INT, "min_age_minutes": POSITIVE},
     "inbox.ambiguous_sender": {"lookback_hours": POSITIVE, "sample_ids": _num(1, 50, integer=True),
                                "require_live_pane": _bool},
     "lane.working_without_task": {"quiet_minutes": POSITIVE},
@@ -699,7 +703,11 @@ def rule_inbox_unread_live(inputs, rule):
 
 def rule_inbox_unread_dead(inputs, rule):
     panes = inputs.panes()
-    rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs) if pane and pane not in panes]
+    # ONLY MAIL THAT HAS HAD TIME TO BE READ. A message delivered 30 seconds ago is
+    # not evidence its lane is dead; a message nobody has touched for ten minutes is.
+    older_than = inputs.now - rule.get("min_age_minutes", 10) * 60
+    rows = [(i, m, c, None) for i, m, c, pane in _queued(inputs, older_than)
+            if pane and pane not in panes]
     rows = [row for row in rows if not _retired_mailbox(inputs, row[1])]
     out = []
     for mailbox, group in sorted(_mailbox_groups(rows).items()):
