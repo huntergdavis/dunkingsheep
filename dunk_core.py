@@ -306,7 +306,7 @@ PLACEHOLDER_PATTERNS = (
 # How long a zero-wait nudge may take to finish before its state is recorded as
 # "queued". Small: a notice is one short line, and the value only decides what the
 # inbox records about it.
-NOTIFY_SETTLE_S = float(os.environ.get("DUNKINGSHEEP_NOTIFY_SETTLE_S", "1.0"))
+NOTICE_WAIT_S = float(os.environ.get("DUNKINGSHEEP_NOTICE_WAIT_S", "5.0"))
 CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
 # The typing mutex: short by design, loud when contended.
 TYPING_LOCK_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "10"))
@@ -1711,8 +1711,21 @@ class Flock:
                     # message's notify state follows that notice from here.
                     with self._lock:
                         existing.notify_for.append(message["message_id"])
-                    self.inbox.record_notify(message["message_id"], "queued",
-                                             f"folded into {existing.id}")
+                        # IF THE NOTICE HAS ALREADY GONE, the fold must not wait for a
+                        # delivery that has happened: _deliver walks notify_for when it
+                        # finishes, so an id appended AFTER that walk stays "queued" for
+                        # ever. That is the race the stress run found - the first message
+                        # said "sent" while the folded one said "queued" in the same
+                        # instant.
+                        already = existing.status
+                    if already in ("sent", "failed"):
+                        self.inbox.record_notify(
+                            message["message_id"],
+                            "sent" if already == "sent" else "failed",
+                            f"folded into {existing.id} ({already})")
+                    else:
+                        self.inbox.record_notify(message["message_id"], "queued",
+                                                 f"folded into {existing.id}")
                     message["notified"] = True
                     raise _NoticeFolded
                 nudge = self.send_now(pane_id, text, wait_s=0,
@@ -1723,13 +1736,12 @@ class Flock:
                 # later and the snapshot said "queued" for a notice that had in fact
                 # gone out. Wait for the notice's own outcome, briefly, and record that.
                 if nudge.get("queued") and nudge.get("message_id"):
-                    deadline = time.time() + NOTIFY_SETTLE_S
-                    while time.time() < deadline:
-                        current = self.get_message(nudge["message_id"])
-                        if current and not current.get("queued"):
-                            nudge = current
-                            break
-                        time.sleep(0.02)
+                    # WAIT ON THE SEND'S OWN RESULT, not on a clock (VP i25038). The
+                    # notice is a Message with a done event; waiting for it records the
+                    # FINAL outcome instead of sampling a zero-wait send and sometimes
+                    # calling a delivered notice "queued".
+                    nudge = self.wait_for_message(nudge["message_id"],
+                                                  timeout=NOTICE_WAIT_S) or nudge
                 self.inbox.record_notify(message["message_id"],
                                          "queued" if nudge.get("queued") else "sent",
                                          nudge.get("message"))
@@ -3611,6 +3623,10 @@ class Flock:
             duration_ms=int((message.finished_at - message.created_at) * 1000),
             attempts=message.holds or None,
             bytes=len((message.text or "").encode("utf-8")))
+        # A SECOND PASS, because a fold can append its id while this delivery is in
+        # flight: the first walk below happens once, and an id added a millisecond later
+        # would keep "queued" for ever (the race the stress run found). Re-walking costs
+        # one list copy and makes the folded message's state follow its notice.
         for inbox_id in list(message.notify_for):
             # The inbox record said "queued" when the notice was created; say
             # what actually happened, so a status query is not stale. After
@@ -3620,6 +3636,17 @@ class Flock:
                 if not self.closed:
                     self.inbox.record_notify(inbox_id, "sent" if ok else "failed", detail)
             except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
+        for inbox_id in list(message.notify_for):
+            try:
+                if self.closed:
+                    break
+                state = self.inbox.status(inbox_id).get("notify", {}).get("state")
+                if state == "queued":
+                    self.inbox.record_notify(
+                        inbox_id, "sent" if ok else "failed",
+                        f"folded into {message.id} (late fold)")
+            except Exception:                   # noqa: BLE001 - bookkeeping only
                 pass
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
                  "sent" if ok else f"FAILED {detail}")
@@ -3761,6 +3788,29 @@ class Flock:
                     else "guarded send pending" if self._looks_like_ours(pane, content)
                     else "input box contains a draft")
         return {"queued": queued, "recent": recent[::-1]}
+
+    def wait_for_message(self, message_id, timeout=5.0):
+        """The message's FINAL state: wait on its own done event, then report it.
+
+        A zero-wait send returns while delivery is still in flight, so any bookkeeping
+        that reads it immediately is a snapshot. This waits for the send itself to finish
+        (its Event), then returns to_dict() - or None if the message is unknown.
+        """
+        with self._lock:
+            pending = None
+            for queue in self.outbox.values():
+                for message in queue:
+                    if message.id == message_id:
+                        pending = message
+                        break
+                if pending:
+                    break
+            if pending is None:
+                for message in self.message_history:
+                    if message.id == message_id:
+                        return message.to_dict()
+        pending.done.wait(timeout)
+        return pending.to_dict()
 
     def get_message(self, message_id):
         with self._lock:
