@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.48"
+VERSION = "2.70.49"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -2886,9 +2886,15 @@ class Flock:
     # never ran. A shell's "not found" arrives in milliseconds; a working agent prints its
     # banner in the same window.
     AGENT_VERIFY_S = float(os.environ.get("DUNKINGSHEEP_AGENT_VERIFY_S", "2.0"))
+    # SHELL-SHAPED ONLY (reviewer, i28041): a bare 'not found' is not evidence of anything -
+    # "theme cache not found, rebuilding" is a working agent's own startup line. What a shell
+    # says when a command is missing is these shapes, and only these are refusals.
     AGENT_FAILURE_MARKERS = (
-        "command not found", "not found", "no such file or directory",
-        "permission denied", "cannot execute",
+        "command not found",        # bash/zsh: "foo: command not found"
+        ": not found",              # dash/sh: "/bin/sh: 1: opencode: not found"
+        "no such file or directory",
+        "permission denied",
+        "cannot execute",
     )
 
     def _verify_agent_started(self, name, pane_id):
@@ -2897,6 +2903,12 @@ class Flock:
         Fail closed: if the pane's first lines name a missing command, or the pane is already
         gone, raise with that line as the evidence. A start line that reports success for a dead
         agent is worse than a refusal, because nobody looks again.
+
+        KNOWN LIMITS, named rather than implied:
+        - a bare shell prompt that simply sits idle looks like a working agent's idle UI and
+          passes; nothing on the screen distinguishes "agent at rest" from "shell at rest".
+        - a refusal leaves the pane up (pane-safety: this code never closes a pane). The refusal
+          names its id so a superuser can close it.
         """
         if not pane_id:
             raise DunkError(f"agent {name!r} was launched without a pane id")

@@ -48,6 +48,27 @@ class StartAgentVerifyTests(unittest.TestCase):
         self.assertEqual("probe", result["name"])
         self.assertTrue(result["pane_id"])
 
+    def test_a_benign_startup_line_containing_not_found_still_starts(self):
+        """The control the reviewer asked for: an agent's own 'not found' is not a refusal."""
+        self.herdr.screen_after_create = ("\u273b theme cache not found, rebuilding\n"
+                                          "\u273b ready\n\u276f \n")
+        result = self._start(self.herdr.screen_after_create)
+        self.assertEqual("probe", result["name"])
+
+    def test_shell_shaped_failures_are_still_refused(self):
+        for line in ("/bin/sh: 1: opencode: not found\n",
+                     "bash: opencode: command not found\n",
+                     "sh: cannot execute opencode\n"):
+            self.herdr.screen_after_create = line
+            with self.assertRaisesRegex(DunkError, "never ran|not found|cannot execute"):
+                self._start(line)
+
+    def test_the_refusal_names_the_pane_it_left_behind(self):
+        self.herdr.screen_after_create = "/bin/sh: 1: opencode: not found\n"
+        with self.assertRaises(DunkError) as caught:
+            self._start(self.herdr.screen_after_create)
+        self.assertRegex(str(caught.exception), r"w\d+:p\d+|%\d+")
+
     def test_a_pane_that_vanishes_is_refused(self):
         self.herdr.screen_after_create = "starting...\n"
         self.herdr.vanish_panes = True
