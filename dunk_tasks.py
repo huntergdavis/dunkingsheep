@@ -193,7 +193,9 @@ class Tasks:
         # lock alone could not prevent it: several paths (list, stats, metrics,
         # leases_for_pane, _record, _next_id) never took it.
         self._local = threading.local()
-        self._connections = []
+        # thread ident -> connection. A dict, not a list: pruning needs to know whose
+        # connection it is closing.
+        self._connections = {}
         self._connections_lock = threading.Lock()
         self.db = self._connect()          # the creating thread's connection
         with self._lock:
@@ -202,16 +204,63 @@ class Tasks:
             self.db.commit()
 
     def _connect(self):
-        """This thread's connection, opened on first use and kept for its lifetime."""
+        """This thread's connection, opened on first use and CLOSED when the thread ends.
+
+        Pruning happens on EVERY access, including the early return for a thread that
+        already has one (reviewer i27680: pruning only on first-open left a burst-then-quiet
+        workload holding every dead thread's connection).
+
+        A per-thread connection that is never closed is a leak the moment threads are
+        short-lived, and the daemon's are: an outbox worker, a push worker and a reaper
+        per pane. Measured 2026-10-25/26: 5,478 open handles on tasks.db with nine live
+        threads, ~11 per minute, and the Errno 24 that broke 'send-keys'. So the pool is
+        PRUNED on every access: any connection whose thread is no longer alive is closed
+        and dropped. The bound is then the number of LIVE threads, not the number of
+        threads the process has ever had.
+        """
         connection = getattr(self._local, "db", None)
         if connection is not None:
+            # PRUNE BEFORE THE EARLY RETURN (reviewer, i27680): returning straight away
+            # meant the pool was only cleaned when a NEW thread opened its first
+            # connection, so a burst-then-quiet pattern kept every dead thread's
+            # connection open. The check is a scan of a dict that stays small BECAUSE it
+            # is pruned here.
+            with self._connections_lock:
+                self._prune_locked(current=id(threading.current_thread()))
             return connection
         connection = sqlite3.connect(self.path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         self._local.db = connection
+        # KEYED BY THE THREAD OBJECT, not by its ident: idents are REUSED, and a reused
+        # ident overwrote the previous entry in a dict keyed by ident - dropping that
+        # connection without closing it. That was the leak inside the fix (21 fds open,
+        # 2 dict entries, measured 2026-10-26).
+        thread = threading.current_thread()
         with self._connections_lock:
-            self._connections.append(connection)
+            self._connections[id(thread)] = (thread, connection)
+            self._prune_locked(current=id(thread))
         return connection
+
+    def _prune_locked(self, current=None):
+        """Close connections whose owning thread has exited. Caller holds the lock."""
+        for key, (thread, connection) in list(self._connections.items()):
+            if key == current or thread.is_alive():
+                continue
+            self._connections.pop(key, None)
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+
+    def connection_count(self):
+        """How many connections are open right now, WITHOUT pruning.
+
+        Measuring must not repair the thing being measured: the reviewer's point (i27680)
+        is that a counter which prunes as a side effect makes a leaking pool look clean
+        exactly when you look at it.
+        """
+        with self._connections_lock:
+            return len(self._connections)
 
     def __getattribute__(self, name):
         if name == "db":
@@ -235,7 +284,9 @@ class Tasks:
     def close(self):
         """Close every thread's connection (the store is shared by the daemon)."""
         with self._connections_lock:
-            connections, self._connections = self._connections, []
+            connections = [connection for _thread, connection
+                           in self._connections.values()]
+            self._connections = {}
         for connection in connections:
             try:
                 connection.close()
