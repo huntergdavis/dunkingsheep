@@ -133,6 +133,25 @@ class TmuxLiveTests(unittest.TestCase):
         time.sleep(0.2)
         self.tmp.cleanup()
 
+    @staticmethod
+    def _server_missing(code, err):
+        """True when `list-sessions` failed because there is no server on this socket.
+
+        The predicate used to look for "no server running" alone, which is what tmux says when a
+        socket EXISTS and no server owns it. A FRESH socket says something else:
+
+            error connecting to /tmp/tmux-1000/dsh-test-abc (No such file or directory)
+
+        with exit 1 - so the guard never fired in exactly the bare-sandbox case it was written
+        for (reviewer pi-review-1). Any non-zero exit means "no server I can use": both spellings
+        are accepted, and the caller puts stderr in the skip reason so the skip is diagnosable.
+        """
+        # ANY non-zero exit means "no server I can use" (reviewer's option 1): the two spellings
+        # below are the ones observed, and a permission error or a silent failure is no more
+        # usable than either. The caller puts stderr in the skip reason, so the skip stays
+        # diagnosable instead of swallowing the cause.
+        return code != 0
+
     def _require_server(self):
         """Skip with a REASON when this host has no tmux server to test against.
 
@@ -141,8 +160,9 @@ class TmuxLiveTests(unittest.TestCase):
         processes is not.
         """
         code, _out, err = self.backend._run(["list-sessions"], timeout=5)
-        if code != 0 and "no server running" in (err or "").lower():
-            self.skipTest(f"no live tmux server on socket {self.socket!r}: "
+        if self._server_missing(code, err):
+            self.skipTest(f"no live tmux server on socket {self.socket!r} "
+                          f"(list-sessions exit {code}: {(err or '').strip()[:160]!r}): "
                           "these are live-server tests")
 
     def _workspace(self, label="dsh-live"):
