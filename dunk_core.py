@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.51"
+VERSION = "2.70.52"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -946,7 +946,57 @@ class Flock:
         panes = self.herdr.list_panes_grouped()
         for pane in panes:
             pane["is_self"] = bool(self_pane_id) and pane.get("pane_id") == self_pane_id
+            pane["agent_status"] = self.lane_status(pane)
         return panes
+
+    # How long an ENDED turn keeps supporting an "idle" claim. Past this, the lane is silent and
+    # None is more honest than idle.
+    IDLE_CLAIM_S = float(os.environ.get("DUNKINGSHEEP_IDLE_CLAIM_S", str(6 * 3600)))
+
+    def lane_status(self, pane):
+        """What the lane is DOING, from the best evidence this backend has.
+
+        The tmux backend has no agent-status API, so it reports "unknown" for every pane and
+        the ops board showed 'unknown' for all of them (owner t227). But we do have a turn
+        signal: the harness calls turn start/end, and turn_end deliberately keeps the ended
+        state because that is the only evidence of IDLENESS we get. So:
+
+            a declared, unexpired turn -> "working"
+            an ENDED turn             -> "idle"
+            no turn signal at all     -> None  (the desk renders an em dash, not "unknown")
+
+        None, not "unknown": a backend that cannot answer should say nothing rather than
+        answer wrongly, and the difference between "we do not know" and "the lane is unknown"
+        is exactly what the board was missing.
+        """
+        backend = (pane.get("agent_status") or "").strip().lower()
+        if backend and backend not in ("unknown", ""):
+            return backend                    # a backend that can answer, answers
+        pane_id = pane.get("pane_id")
+        if not pane_id:
+            return None
+        with self._lock:
+            state = dict(self.turns.get(pane_id) or {})
+        if not state:
+            return None
+        now = time.time()
+        if state.get("expires_at", 0) > now:
+            return "working"
+        ended_at = state.get("ended_at")
+        if ended_at:
+            # "IDLE" IS A CLAIM ABOUT NOW, so it has an age (reviewer ask on t227). A turn that
+            # ended days ago describes a lane nobody has heard from since; reporting it as idle
+            # today would be a claim about the present made from old evidence. Past the window
+            # the honest answer is None. In practice this cannot exceed the daemon's uptime -
+            # turns are in-memory and not persisted - but the bound is here so that a persisted
+            # or restored turn can never make the board assert a stale idleness.
+            if now - ended_at <= self.IDLE_CLAIM_S:
+                return "idle"
+            return None
+        # An EXPIRED turn with no end is neither: the agent declared work and never said it
+        # finished. The TTL exists so a crashed agent cannot hold mail forever - not so that we
+        # can call it idle. None is the truthful answer.
+        return None
 
     # -- inboxes ------------------------------------------------------------
     # Machine-to-machine messaging that never types into a terminal. See
