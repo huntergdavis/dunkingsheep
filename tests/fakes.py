@@ -62,6 +62,10 @@ class FakeHerdr:
         # Panes whose composer ignores Enter and submits only on the carriage
         # return. Measured on six claude lanes 2026-10-24.
         self.cm_only = set()
+        # t215: what a freshly started agent's pane shows, and whether it vanishes at once.
+        # A real pane prints its banner (or its failure) within milliseconds.
+        self.screen_after_create = None
+        self.vanish_panes = False
         self.enter_presses = {}
         self.statuses = {}
         self.screens = {}
@@ -180,6 +184,11 @@ class FakeHerdr:
             self.panes.remove(next(p for p in self.panes
                                    if p["pane_id"] == created["root_pane"]["pane_id"]))
         pane = self._new_pane(workspace_id, tab_id, cwd)
+        if self.vanish_panes:
+            self.panes = [p for p in self.panes if p["pane_id"] != pane["pane_id"]]
+            return True, {"agent": {"pane_id": pane["pane_id"], "agent": name}, "pane_id": pane["pane_id"]}
+        if self.screen_after_create is not None:
+            self.screens[pane["pane_id"]] = self.screen_after_create
         for stored in self.panes:
             if stored["pane_id"] == pane["pane_id"]:
                 stored["label"] = name

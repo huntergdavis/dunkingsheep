@@ -64,7 +64,7 @@ from dunk_terminal import get_backend
 from dunk_callers import process_alive
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.47"
+VERSION = "2.70.48"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -2864,6 +2864,12 @@ class Flock:
         if not ok:
             raise DunkError(f"herdr could not start agent {name!r}: {result}")
         agent = result.get("agent") or {}
+        # VERIFY BEFORE CLAIMING "STARTED" (t215): eight opencode panes were reported started
+        # and had actually died with 'opencode: not found' (rc=127) because the pane's PATH
+        # lacked /snap/bin. "The pane exists" is not "the agent runs": read what the pane says
+        # before reporting success, and refuse with the captured line if it says the command
+        # never started.
+        self._verify_agent_started(name, agent.get("pane_id"))
         session = agent.get("agent_session") or {}
         self._record_launch(
             agent.get("pane_id"), agent=name, argv=list(argv),
@@ -2875,6 +2881,50 @@ class Flock:
         log.info("started agent %s -> %s: %s", name, agent.get("pane_id"), argv)
         return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
                 "argv": result.get("argv") or argv}
+
+    # How long a freshly started agent gets to show a failure, and the lines that mean it
+    # never ran. A shell's "not found" arrives in milliseconds; a working agent prints its
+    # banner in the same window.
+    AGENT_VERIFY_S = float(os.environ.get("DUNKINGSHEEP_AGENT_VERIFY_S", "2.0"))
+    AGENT_FAILURE_MARKERS = (
+        "command not found", "not found", "no such file or directory",
+        "permission denied", "cannot execute",
+    )
+
+    def _verify_agent_started(self, name, pane_id):
+        """Refuse to report 'started' for a pane whose command never ran.
+
+        Fail closed: if the pane's first lines name a missing command, or the pane is already
+        gone, raise with that line as the evidence. A start line that reports success for a dead
+        agent is worse than a refusal, because nobody looks again.
+        """
+        if not pane_id:
+            raise DunkError(f"agent {name!r} was launched without a pane id")
+        deadline = time.time() + self.AGENT_VERIFY_S
+        captured = ""
+        while time.time() < deadline:
+            pane = self.herdr.get_pane(pane_id)
+            if pane is None:
+                raise DunkError(
+                    f"agent {name!r} did not stay up: pane {pane_id} is already gone"
+                    + (f"; captured: {captured.strip()[:200]!r}" if captured.strip() else ""))
+            captured = self.herdr.read_pane(pane_id, lines=20) or ""
+            lowered = captured.lower()
+            for marker in self.AGENT_FAILURE_MARKERS:
+                if marker in lowered:
+                    line = next((row for row in captured.splitlines()
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
+                        "The pane is up but the command never ran - check the PATH the pane "
+                        "inherits.")
+            # An agent that is drawing its own UI has started; a bare shell that has printed
+            # nothing yet is neither. Keep waiting for the rest of the window.
+            if "[agent exited rc=" in lowered:
+                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
+                raise DunkError(
+                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
+            time.sleep(0.1)
 
     # -- post-upgrade recovery ------------------------------------------------
 
