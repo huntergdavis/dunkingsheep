@@ -12,9 +12,43 @@ THE RULE, and the reason this module exists: an ABSENT signal is UNKNOWN, never
 idle. "Assume idle" has cost us four stalls in one day; "unknown" costs a lane one
 question.
 """
+import os
 import time
 
 STATES = ("working", "waiting", "idle", "unknown")
+
+# How long an ENDED turn keeps supporting an "idle" claim. "Idle" is a claim about NOW: past
+# this window the lane is silent, and silence is unknown rather than idle.
+IDLE_CLAIM_S = float(os.environ.get("DUNKINGSHEEP_IDLE_CLAIM_S", str(6 * 3600)))
+
+
+def turn_state(state, now=None, idle_claim_s=None):
+    """THE one rule for what a pi turn means. Returns (state_or_None, since, reason).
+
+    There must be exactly one derivation of this, because the desk and the dispatcher read the
+    same turn and must not disagree about it (reviewer on t227: the roster said IDLE for a turn
+    that had EXPIRED without ever ending, which is the case the TTL exists to prevent us from
+    calling idle). `None` means "no answer", and the callers that need a word for that use
+    "unknown" while the ones that can render a dash use null.
+    """
+    now = time.time() if now is None else now
+    idle_claim_s = IDLE_CLAIM_S if idle_claim_s is None else idle_claim_s
+    if not state:
+        return None, None, ("no pi turn has ever been recorded for this pane (extension not "
+                            "loaded, or the lane has not taken a turn since it started)")
+    if state.get("expires_at", 0) > now:
+        return "working", state.get("started_at"), None
+    ended = state.get("ended_at")
+    if ended:
+        if now - ended <= idle_claim_s:
+            return "idle", ended, None
+        return None, ended, ("the last turn ended %dh ago: idle is a claim about now, and this "
+                             "lane has been silent since" % int((now - ended) / 3600))
+    # A turn that EXPIRED without an end is neither: the agent declared work and never said it
+    # finished. The TTL exists so a crashed agent cannot hold mail forever - not so that we can
+    # call it idle.
+    return None, state.get("expires_at"), ("the last turn expired without an end: the agent "
+                                           "declared work and never reported finishing")
 
 
 def activity(pane, *, claude_status=None, turns=None, now=None):
@@ -66,20 +100,10 @@ def _pi(pane, turns, now):
     if turns is None:
         return {"state": "unknown", "since": None, "source": "pi turn events",
                 "reason": "no turn state available"}
-    state = turns.get(pane_id) or {}
-    if state and state.get("expires_at", 0) > now:
-        return {"state": "working", "since": state.get("started_at"),
-                "source": "pi turn events", "reason": None}
-    if state:
-        # A turn that has ENDED is the only evidence of idleness here, and its end
-        # time is exact: the extension posted it.
-        return {"state": "idle", "since": state.get("ended_at") or state.get("expires_at"),
-                "source": "pi turn events", "reason": None}
-    # pi docs no times are recorded for this pane at all: no turn has ever started,
-    # or the extension is not loaded. Both are unknown, not idle.
-    return {"state": "unknown", "since": None, "source": "pi turn events",
-            "reason": "no pi turn has ever been recorded for this pane (extension "
-                      "not loaded, or the lane has not taken a turn since it started)"}
+    state, since, reason = turn_state(turns.get(pane_id) or {}, now=now)
+    # An absent or unusable signal is UNKNOWN, never idle - the rule this module exists for.
+    return {"state": state or "unknown", "since": since,
+            "source": "pi turn events", "reason": reason}
 
 
 def say(record):

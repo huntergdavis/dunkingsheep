@@ -19,13 +19,23 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
+import dunk_activity  # noqa: E402
 from dunk_core import Flock  # noqa: E402
+from dunk_views import roster  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
+
+
+def tmux_shaped(herdr):
+    """A backend that cannot answer a status says 'unknown' - that is the tmux case t227 is
+    about. The fake ships herdr-ish values, so the tests impose the shape they mean."""
+    for pane in herdr.panes:
+        pane["agent_status"] = "unknown"
+    return herdr
 
 
 class LaneStatusTests(unittest.TestCase):
     def setUp(self):
-        self.herdr = FakeHerdr()
+        self.herdr = tmux_shaped(FakeHerdr())
         self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
 
     def tearDown(self):
@@ -75,6 +85,24 @@ class LaneStatusTests(unittest.TestCase):
         pane = {"pane_id": "%1", "agent": "pi", "agent_status": "done"}
         self.assertEqual("done", self.flock.lane_status(pane))
 
+    def test_the_roster_and_the_lane_status_agree_on_an_expired_turn(self):
+        """Reviewer's bad case: the roster used to say IDLE for a turn that never ended."""
+        pane = {"pane_id": "%1", "agent": "pi", "agent_status": "unknown"}
+        self.flock.turn_start("%1", source="test", ttl_s=1)
+        self.flock.turns["%1"]["expires_at"] = time.time() - 3600
+        self.assertIsNone(self.flock.lane_status(pane), "lane_status must not call it idle")
+        doing = dunk_activity.activity(pane, turns=self.flock.turns)
+        self.assertEqual("unknown", doing["state"], "nor may the roster")
+        self.assertIn("expired", doing["reason"])
+
+    def test_the_roster_emits_null_not_unknown_for_a_silent_lane(self):
+        """Reviewer's (b): roster() re-materialised 'unknown' on the desk's path."""
+        rows = roster(self.flock)["lanes"]
+        self.assertTrue(rows, "the fake has lanes")
+        for row in rows:
+            self.assertIsNone(row["pane_status"],
+                              "a lane with no status signal must emit null, not 'unknown'")
+
     def test_the_pane_list_carries_the_derived_status(self):
         pane_id = self.herdr.panes[0]["pane_id"]
         self.flock.turn_start(pane_id, source="test")
@@ -84,3 +112,31 @@ class LaneStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DispatchEligibilityTests(unittest.TestCase):
+    """The other half of t227 (reviewer): before this change NO lane was dispatch-eligible.
+
+    The dispatch tick filters `agent_status not in (None, "unknown")`. While every pane reported
+    'unknown' that list was empty, so the tick had no lane to feed. This pins the new shape: a
+    lane with a turn signal becomes eligible, a silent lane does not.
+    """
+
+    def setUp(self):
+        self.herdr = tmux_shaped(FakeHerdr())
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def _eligible(self):
+        return [pane["pane_id"] for pane in self.flock.resolve_lanes()
+                if pane.get("agent_status") not in (None, "unknown")]
+
+    def test_a_lane_with_no_signal_is_not_dispatch_eligible(self):
+        self.assertEqual([], self._eligible())
+
+    def test_a_working_lane_is_dispatch_eligible(self):
+        pane_id = self.herdr.panes[0]["pane_id"]
+        self.flock.turn_start(pane_id, source="test")
+        self.assertEqual([pane_id], self._eligible())

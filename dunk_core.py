@@ -62,9 +62,10 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
+import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.52"
+VERSION = "2.70.53"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -949,9 +950,9 @@ class Flock:
             pane["agent_status"] = self.lane_status(pane)
         return panes
 
-    # How long an ENDED turn keeps supporting an "idle" claim. Past this, the lane is silent and
-    # None is more honest than idle.
-    IDLE_CLAIM_S = float(os.environ.get("DUNKINGSHEEP_IDLE_CLAIM_S", str(6 * 3600)))
+    # The age bound lives with the rule (dunk_activity.IDLE_CLAIM_S); this alias exists so tests
+    # and callers can read it off the flock.
+    IDLE_CLAIM_S = dunk_activity.IDLE_CLAIM_S
 
     def lane_status(self, pane):
         """What the lane is DOING, from the best evidence this backend has.
@@ -977,26 +978,12 @@ class Flock:
             return None
         with self._lock:
             state = dict(self.turns.get(pane_id) or {})
-        if not state:
-            return None
-        now = time.time()
-        if state.get("expires_at", 0) > now:
-            return "working"
-        ended_at = state.get("ended_at")
-        if ended_at:
-            # "IDLE" IS A CLAIM ABOUT NOW, so it has an age (reviewer ask on t227). A turn that
-            # ended days ago describes a lane nobody has heard from since; reporting it as idle
-            # today would be a claim about the present made from old evidence. Past the window
-            # the honest answer is None. In practice this cannot exceed the daemon's uptime -
-            # turns are in-memory and not persisted - but the bound is here so that a persisted
-            # or restored turn can never make the board assert a stale idleness.
-            if now - ended_at <= self.IDLE_CLAIM_S:
-                return "idle"
-            return None
-        # An EXPIRED turn with no end is neither: the agent declared work and never said it
-        # finished. The TTL exists so a crashed agent cannot hold mail forever - not so that we
-        # can call it idle. None is the truthful answer.
-        return None
+        # ONE derivation (reviewer on t227): dunk_activity.turn_state owns the rule, so the desk
+        # (which reads activity()) and this (which feeds the CLI and the dispatcher) cannot
+        # disagree about what the same turn means.
+        derived, _since, _reason = dunk_activity.turn_state(state, now=time.time(),
+                                                            idle_claim_s=self.IDLE_CLAIM_S)
+        return derived
 
     # -- inboxes ------------------------------------------------------------
     # Machine-to-machine messaging that never types into a terminal. See
@@ -4556,7 +4543,11 @@ class Flock:
                           "agent_name": (pane.get("agent_name") or pane.get("tab_label")
                                          or pane.get("label") or pane["pane_id"]),
                           "tab_label": pane.get("tab_label"),
-                          "agent_status": pane.get("agent_status")})
+                          # The DERIVED status, not the backend's raw field: resolve_lanes feeds
+                          # the roster and the dispatch tick, and both must read the same answer
+                          # as the CLI (reviewer on t227 - the desk and the dispatcher may not
+                          # disagree about what the same turn means).
+                          "agent_status": self.lane_status(pane)})
         return lanes
 
     def delivery_state(self, pane_id, status=None, pane=None, screen=None):
