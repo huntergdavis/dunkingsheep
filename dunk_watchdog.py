@@ -1023,6 +1023,23 @@ def rule_resource_would_kill(inputs, rule):
     return out
 
 
+# How long a failed escalation is carried into later runs. Past this it is history: the
+# state file keeps it, the digest stops repeating it.
+CARRIED_FAILURE_MAX_AGE_S = float(os.environ.get("DUNKINGSHEEP_CARRIED_FAILURE_MAX_S", "43200"))
+
+
+def _recent_failure(failure, now):
+    """A delivery failure worth carrying: recent, and not already superseded by a success."""
+    if not failure:
+        return None
+    at = failure.get("at")
+    try:
+        at = float(at)
+    except (TypeError, ValueError):
+        return None
+    return failure if now - at <= CARRIED_FAILURE_MAX_AGE_S else None
+
+
 def rule_host_heavy_slot_stale(inputs, rule):
     """A poolrad-heavy slot is stale only when its holder is gone.
 
@@ -1476,7 +1493,7 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
                                            "config enabled=false" if not config["enabled"] else "config dry_run=true"),
         "now": now, "findings": result["findings"], "skipped": skipped, "decisions": decisions,
         "recovered": recovered, "problems": problems, "sent": [], "delivery_error": None,
-        "carried_failure": state.get("delivery_failure") or None,
+        "carried_failure": _recent_failure(state.get("delivery_failure"), now),
     }
     vp_send = [d for d in decisions if d["vp"] == "no"]
     owner_send = [d for d in decisions if d["owner"] == "no"]
@@ -1525,6 +1542,12 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
                                    f"watchdog: {len(vp_send)} alert(s)" + (" + self-error" if problems else ""),
                                    digest("VP digest", vp_lines))
             report["sent"].append("vp")
+            # A CARRIED FAILURE IS CLEARED BY A SUCCESS. Otherwise a delivery that failed once
+            # is reported as "CARRIED" for ever - the digest carried a day-old IdentityRefused
+            # from the 2026-10-24 restart window on every run (VP i26310), which reads as a
+            # live failure and is not one.
+            if state.get("delivery_failure"):
+                state.pop("delivery_failure", None)
         except Exception as error:  # noqa: BLE001 - reported to stderr; never re-sent through the inbox
             report["delivery_error"] = f"{type(error).__name__}: {error}"
             # THE HEARTBEAT IS THE DEAD-MAN'S INPUT, so a failed escalation must NOT
