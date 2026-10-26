@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.56"
+VERSION = "2.70.60"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -2407,11 +2407,18 @@ class Flock:
                                  "older than 24h", archived)
                 except Exception:  # noqa: BLE001
                     log.exception("inbox auto-archive failed")
+            if not getattr(self.herdr, "live", False):
+                # A FIXTURE BACKEND CANNOT REAP, and it must not try (t247). reap() refuses a
+                # pane list that is not tagged live - correctly - so every fixture-backed Flock
+                # used to log a TaskError traceback from this thread on every pass. That is what
+                # made a green suite look like it aborted, and what sent a reviewer chasing a
+                # state bug: the traceback is a REFUSAL WORKING, printed as if it were a fault.
+                # Skipping here keeps the guard intact and stops the noise.
+                log.debug("task reaper: %r backend is not live; not reaping",
+                          getattr(self.herdr, "name", "fixture"))
+                continue
             try:
-                source = ("live" if getattr(self.herdr, "live", False)
-                          else "fixture")
-                requeued = self.tasks.reap(alive_panes=panes,
-                                           alive_source=source,
+                requeued = self.tasks.reap(alive_panes=panes, alive_source="live",
                                            caller_alive=process_alive)
             except Exception:
                 log.exception("task reaper failed")

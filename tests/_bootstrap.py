@@ -6,20 +6,70 @@ Flock tests used the real tasks/inbox databases and their fake reaper requeued
 real t6/t29 claims (the 2026-10-21 false-reap incident).
 """
 import os
+import sys
 import tempfile
 
 _TMP = tempfile.mkdtemp(prefix="dunkingsheep-tests-")
-os.environ.setdefault("DUNKINGSHEEP_DIR", _TMP)
-os.environ.setdefault("DUNKINGSHEEP_SOCKET", os.path.join(_TMP, "test.sock"))
 
-# Tests must not shell out to `claude agents --json` (2.9 s per call).
-os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")
-os.environ.setdefault("DUNKINGSHEEP_MIN_POLL_S", "0")  # tests call the CLI repeatedly
+# THE SUITE OWNS ITS STATE DIRECTORY (t247). This used to be setdefault(), which meant a run
+# inherited whatever the operator's shell had: with DUNKINGSHEEP_DIR pointing at the live config,
+# a full run read the REAL tasks/inbox databases - and the fixture reaper then refused with
+# "alive_panes must be tagged alive_source='live'" (pi-review-1 saw a run abort that way, and it
+# was not reproducible precisely because it depended on the caller's environment). Hermetic means
+# hermetic: the ambient value is overridden, and said out loud so nobody wonders why their
+# scratch dir was ignored.
+#
+# DUNKINGSHEEP_TESTS_OWN_ENV=1 restores the old behaviour for a deliberate trial against a
+# scratch directory you named yourself.
+_OWN_ENV = os.environ.get("DUNKINGSHEEP_TESTS_OWN_ENV") == "1"
+def _is_another_suite_run(value):
+    """True when the ambient value came from ANOTHER run of this suite, not from the operator.
 
-# Identity by TTY is a LIVE probe (tmux list-panes). A test must not consult the
-# developer's terminal to decide who it is, so it is off here and the identity
-# tests inject the lookup explicitly (tests/test_dunk_identity_tty.py).
-os.environ.setdefault("DUNKINGSHEEP_TTY_IDENTITY", "0")
+    A child process inherits its parent's DUNKINGSHEEP_DIR, which is itself a
+    /tmp/dunkingsheep-tests-* directory. Announcing the override there is noise about noise - and a
+    message that fires on every normal case stops being read (reviewer measured three lines per
+    child on #41). Only a value that is NOT ours is worth a line.
+    """
+    return os.path.basename(str(value).rstrip(os.sep)).startswith("dunkingsheep-tests-")
+
+
+for _name in ("DUNKINGSHEEP_DIR", "DUNKINGSHEEP_SOCKET"):
+    _ambient = os.environ.get(_name)
+    if _ambient and not _OWN_ENV:
+        _wanted = _TMP if _name == "DUNKINGSHEEP_DIR" else os.path.join(_TMP, "test.sock")
+        if (os.path.realpath(_ambient) != os.path.realpath(_wanted)
+                and not _is_another_suite_run(_ambient)):
+            print(f"tests: ignoring ambient {_name}={_ambient!r}; the suite owns its state dir "
+                  f"({_TMP}). Set DUNKINGSHEEP_TESTS_OWN_ENV=1 to use the ambient one.",
+                  file=sys.stderr)
+if not _OWN_ENV:
+    os.environ["DUNKINGSHEEP_DIR"] = _TMP
+    os.environ["DUNKINGSHEEP_SOCKET"] = os.path.join(_TMP, "test.sock")
+
+# A test that lets the CLI AUTO-START a daemon must say which tmux server that daemon is for.
+# THE SAME RULE FOR THE FLAGS (reviewer on #41): these are performance/behaviour flags rather than
+# state, so none of them can move real work - but an ambient value still won for each, which means
+# a caller could make the suite shell out to `claude agents --json` (~2.9 s per call), make the CLI
+# poll-cache aggressively, or make identity consult the developer's own terminal. If the principle
+# is "the suite owns its environment and says so", it applies to the flags too.
+#
+# DUNKINGSHEEP_TMUX_SOCKET is here because a test that lets the CLI AUTO-START a daemon must say
+# which tmux server that daemon is for: the client refuses to spawn a tmux daemon without it (a
+# guard that only now actually fires, because the client used to assume the backend was herdr -
+# fixed in 2.70.59). The value is a tmux SOCKET NAME for -L, never a path.
+_SUITE_DEFAULTS = {
+    "DUNKINGSHEEP_TMUX_SOCKET": "default",
+    "DUNKINGSHEEP_CLAUDE_STATUS": "0",
+    "DUNKINGSHEEP_MIN_POLL_S": "0",
+    "DUNKINGSHEEP_TTY_IDENTITY": "0",
+}
+for _name, _default in _SUITE_DEFAULTS.items():
+    _ambient = os.environ.get(_name)
+    if _ambient is not None and _ambient != _default and not _OWN_ENV:
+        print(f"tests: ignoring ambient {_name}={_ambient!r}; the suite sets {_default!r}. "
+              f"Set DUNKINGSHEEP_TESTS_OWN_ENV=1 to keep the ambient value.", file=sys.stderr)
+    if not _OWN_ENV:
+        os.environ[_name] = _default
 
 # The CLI auto-starts a detached daemon on its temp socket. A detached daemon
 # outlives the test process, so every run of the suite used to leak one: 44 had
