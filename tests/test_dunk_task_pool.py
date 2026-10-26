@@ -35,11 +35,38 @@ class BoundedConnectionTests(unittest.TestCase):
                     thread = threading.Thread(target=work)
                     thread.start()
                     thread.join()
-                # One more access prunes every connection whose thread has gone.
+                # Assert on the POOL, not on connection_count(): a counter that prunes
+                # as a side effect would make a leaking pool look clean exactly when it
+                # is measured (reviewer i27680).
                 tasks.list(scope="global")
-                self.assertLessEqual(tasks.connection_count(), 2,
-                                     f"{tasks.connection_count()} connections after 50 "
+                self.assertLessEqual(len(tasks._connections), 2,
+                                     f"{len(tasks._connections)} connections after 50 "
                                      "short-lived threads")
+            finally:
+                tasks.close()
+
+    def test_a_burst_then_quiet_workload_does_not_hold_the_tail(self):
+        """The reviewer's failing case: three threads run and join, then three ordinary
+        reads. On the first head the pool kept all four connections because pruning only
+        ran when a NEW thread opened its first connection."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Tasks(path=os.path.join(tmp, "tasks.db"))
+            try:
+                tasks.add("global", "probe")
+
+                def work():
+                    tasks.list(scope="global")
+
+                threads = [threading.Thread(target=work) for _ in range(3)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                for _ in range(3):
+                    tasks.list(scope="global")
+                self.assertLessEqual(len(tasks._connections), 1,
+                                     f"burst-then-quiet kept {len(tasks._connections)} "
+                                     "connections for dead threads")
             finally:
                 tasks.close()
 
@@ -63,6 +90,23 @@ class BoundedConnectionTests(unittest.TestCase):
                     thread.join()
                 self.assertEqual(3, len(set(seen.values())),
                                  "live threads must not share one connection")
+            finally:
+                tasks.close()
+
+    def test_the_counter_does_not_prune(self):
+        """Measuring must not repair the defect being measured."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tasks = Tasks(path=os.path.join(tmp, "tasks.db"))
+            try:
+                def work():
+                    tasks.list(scope="global")
+                for _ in range(5):
+                    thread = threading.Thread(target=work)
+                    thread.start()
+                    thread.join()
+                before = tasks.connection_count()
+                self.assertGreaterEqual(before, 2,
+                                        "connection_count() pruned as a side effect")
             finally:
                 tasks.close()
 

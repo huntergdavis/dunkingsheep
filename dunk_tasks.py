@@ -206,6 +206,10 @@ class Tasks:
     def _connect(self):
         """This thread's connection, opened on first use and CLOSED when the thread ends.
 
+        Pruning happens on EVERY access, including the early return for a thread that
+        already has one (reviewer i27680: pruning only on first-open left a burst-then-quiet
+        workload holding every dead thread's connection).
+
         A per-thread connection that is never closed is a leak the moment threads are
         short-lived, and the daemon's are: an outbox worker, a push worker and a reaper
         per pane. Measured 2026-10-25/26: 5,478 open handles on tasks.db with nine live
@@ -216,6 +220,13 @@ class Tasks:
         """
         connection = getattr(self._local, "db", None)
         if connection is not None:
+            # PRUNE BEFORE THE EARLY RETURN (reviewer, i27680): returning straight away
+            # meant the pool was only cleaned when a NEW thread opened its first
+            # connection, so a burst-then-quiet pattern kept every dead thread's
+            # connection open. The check is a scan of a dict that stays small BECAUSE it
+            # is pruned here.
+            with self._connections_lock:
+                self._prune_locked(current=id(threading.current_thread()))
             return connection
         connection = sqlite3.connect(self.path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
@@ -242,9 +253,13 @@ class Tasks:
                 pass
 
     def connection_count(self):
-        """How many connections are open right now (the fd bound, as a number)."""
+        """How many connections are open right now, WITHOUT pruning.
+
+        Measuring must not repair the thing being measured: the reviewer's point (i27680)
+        is that a counter which prunes as a side effect makes a leaking pool look clean
+        exactly when you look at it.
+        """
         with self._connections_lock:
-            self._prune_locked()
             return len(self._connections)
 
     def __getattribute__(self, name):

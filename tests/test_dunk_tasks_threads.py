@@ -77,8 +77,13 @@ class ThreadedConnectionTests(unittest.TestCase):
             tasks = Tasks(path=os.path.join(tmp, "tasks.db"))
             try:
                 seen = {}
+                held = []          # keep the connections ALIVE: ids of freed objects are
+                                   # recycled, so recording id() alone compares addresses,
+                                   # not identity (the PR's own docstring warns about it)
                 def record():
-                    seen[threading.get_ident()] = id(tasks.db)
+                    connection = tasks.db
+                    held.append(connection)
+                    seen[threading.get_ident()] = id(connection)
                 threads = [threading.Thread(target=record) for _ in range(3)]
                 for thread in threads:
                     thread.start()
