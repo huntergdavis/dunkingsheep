@@ -66,6 +66,25 @@ class HeavySlotTests(unittest.TestCase):
         self.write("slot.backup", age_minutes=1981)
         self.assertEqual([], self.findings())
 
+    def test_a_numeric_name_that_is_a_symlink_is_not_a_slot(self):
+        """The reviewer's probe: 'slot.sh' does not exercise the numeric-name guard, because
+        it fails the pattern anyway. A symlink that IS named slot.1 must still be skipped."""
+        self.write("slot.1", age_minutes=120, symlink=True)
+        self.assertEqual([], self.findings())
+
+    def test_a_fifo_named_like_a_slot_is_not_a_slot(self):
+        self.write("slot.2", age_minutes=120)
+        fifo = os.path.join(self.tmp.name, "slot.3")
+        os.mkfifo(fifo)
+        os.utime(fifo, (self.now - 120 * 60, self.now - 120 * 60))
+        names = [str(f.get("subject") or f.get("key") or "") for f in self.findings()]
+        self.assertFalse(any("slot.3" in name for name in names), names)
+
+    def test_the_separator_must_be_literal_and_the_name_whole(self):
+        for name in ("slot1", "slot.1.bak", "slot."):
+            self.write(name, age_minutes=120)
+        self.assertEqual([], self.findings())
+
     def test_a_real_stale_slot_is_still_reported(self):
         self.write("slot.1", age_minutes=120)
         found = self.findings()

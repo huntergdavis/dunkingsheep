@@ -1037,8 +1037,15 @@ def rule_host_heavy_slot_stale(inputs, rule):
     # the live wrapper is SYMLINKED into /tmp as '/tmp/poolrad-heavy.sh' - not a slot -
     # and a prefix match alone reported it as "legacy slot, age 1981min, holder null"
     # on every check-in. A rule that pages about a symlink is a rule nobody reads.
+    # <prefix>.<digits>, WHOLE NAME, literal separator (reviewer's correction on #33): an
+    # optional dot accepted 'slot1' for the prefix 'slot', and match() with a $ anchor
+    # accepts a trailing newline, so 'slot.1\n' passed too. fullmatch on an explicit '\d+'
+    # accepts exactly the contract.
     base = rule["prefix"].rstrip(".")
-    slot_pattern = re.compile(re.escape(base) + r"\.?[0-9]+$")
+    # '\Z' is end-of-string: unlike '$' it does NOT accept a trailing newline, which is the
+    # half of the reviewer's correction that '$' got wrong. (The other half is the literal
+    # separator, above.)
+    slot_pattern = re.compile(re.escape(base) + r"\.[0-9]+\Z")
     for name in sorted(os.listdir(directory)):
         if not slot_pattern.match(name):
             continue
