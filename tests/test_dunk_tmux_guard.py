@@ -12,6 +12,27 @@ import dunk_tmux_guard
 from dunk_terminal import TmuxBackend
 
 
+def _kill_cwd(directory):
+    """SIGTERM every process whose cwd is `directory`. Test cleanup only."""
+    real = os.path.realpath(directory)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            if os.path.realpath(os.readlink(f"/proc/{entry}/cwd")) != real:
+                continue
+        except OSError:
+            continue
+        try:
+            os.kill(int(entry), 15)
+        except OSError:
+            pass
+
+
 class GuardClassificationTests(unittest.TestCase):
     def test_global_options_are_split_from_the_command(self):
         globals_, command, rest = dunk_tmux_guard.split_global(
@@ -172,6 +193,10 @@ class InstallTests(unittest.TestCase):
                 guard_dir=guard_dir,
                 registry_path=os.path.join(tmp, "reg.json"))
             self.addCleanup(lambda: backend._run(["kill-server"], timeout=5))
+            # t212: a FAILING assertion here used to leave the server and the agent behind
+            # (ppid=1, cwd = this temp dir). Kill anything still running in the directory
+            # before it is removed, whether the test passed or not.
+            self.addCleanup(_kill_cwd, tmp)
             ok, created = backend.create_workspace("path-test", cwd=tmp)
             self.assertTrue(ok, created)
             fake = os.path.join(tmp, "claude")
