@@ -138,6 +138,38 @@ dunkingsheep dispatch status             # the last tick's numbers
 A brief is one line. The lane is sent `[standby t6] advance strict C from 240 to
 250 bodies`, so its reply can cite the task without guessing.
 
+## Nobody is fed unless a lane is named (the allowlist)
+
+The tick has **no role concept**: it cannot tell a worker lane from a reviewer, the
+chief of staff, or the VP's own pane. Until t227 that did not matter, because every
+pane reported its status as `unknown` and the candidate list was always empty. Once
+lane status is derived from a real signal, that same code would have become live for
+**every** ready, mail-free agent lane at once - including the ones nobody wants
+auto-nudged with board work.
+
+So the allowlist is **empty by default, and empty means nothing is fed**. Three ways
+to opt a lane in, in order of precedence:
+
+```bash
+# 1. one tick, explicitly
+dunkingsheep dispatch tick --lanes %4,codex-worker
+
+# 2. persistent, ~/.config/dunkingsheep/dispatch_lanes.json
+{"lanes": ["%4", "codex-worker"]}
+
+# 3. environment
+DUNKINGSHEEP_DISPATCH_LANES=%4,codex-worker
+```
+
+Entries are pane ids **or** lane names; names are resolved to pane ids at tick time,
+so a list of names survives a restart that renumbers panes. An unreadable config
+feeds nothing (it fails closed and says so on stderr) rather than falling back to
+"everyone".
+
+The gate is still two conditions on top of this: a lane must be **ready** and have
+**no unread mail**. The allowlist decides *who may ever be considered*; the gate
+decides *whether, right now*.
+
 ## Retired panes: silence with a reason
 
 A pane can be superseded (`par-d2` started in `wW:p7` because `wW:p4` is stuck on a

@@ -15,6 +15,10 @@ own herdr pane id (so `target: "self"` means the *caller's* pane, not the
 daemon's). Handlers return JSON-serialisable data or raise `DunkError`.
 """
 
+import json
+import os
+import sys
+
 from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE
 from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
@@ -473,6 +477,62 @@ def h_project_summary(flock, args, self_pane_id):
     return dunk_views.project_summary(flock, args.get("project"), args.get("path"))
 
 
+from dunk_core import CONFIG_DIR as _CONFIG_DIR
+
+DISPATCH_LANES_PATH = os.path.join(_CONFIG_DIR, "dispatch_lanes.json")
+
+
+def _dispatch_allowlist(flock, args=None):
+    """Which lanes the dispatcher may feed. EMPTY by default, and empty means nothing.
+
+    Sources, in order: an explicit `--lane`/`lanes` argument for one tick, then
+    ~/.config/dunkingsheep/dispatch_lanes.json ({"lanes": ["%4", "codex-worker"]}), then
+    DUNKINGSHEEP_DISPATCH_LANES (comma separated). A pane id or a lane/agent name both work:
+    the value is matched against pane_id and against agent_name below.
+
+    An empty result is the safe default, not an oversight: an unlisted lane is never nudged, so
+    upgrading cannot start feeding reviewers or the VP's own pane.
+    """
+    wanted = []
+    raw = (args or {}).get("lanes")
+    if isinstance(raw, str):
+        wanted.extend(part.strip() for part in raw.split(",") if part.strip())
+    elif raw:
+        wanted.extend(str(part).strip() for part in raw if str(part).strip())
+    if not wanted:
+        try:
+            with open(DISPATCH_LANES_PATH) as handle:
+                loaded = json.load(handle) or {}
+            lanes = loaded.get("lanes") if isinstance(loaded, dict) else loaded
+            if isinstance(lanes, str):
+                lanes = [part.strip() for part in lanes.split(",")]
+            wanted.extend(str(part).strip() for part in (lanes or []) if str(part).strip())
+        except FileNotFoundError:
+            pass
+        except Exception as error:                  # noqa: BLE001 - a bad config must not crash
+            # A bad allowlist must fail CLOSED: warn on stderr, feed nothing.
+            print(f"dispatch: dispatch_lanes.json unreadable ({error}); feeding nothing",
+                  file=sys.stderr)
+            return set()
+    if not wanted:
+        env = os.environ.get("DUNKINGSHEEP_DISPATCH_LANES") or ""
+        wanted.extend(part.strip() for part in env.split(",") if part.strip())
+    if not wanted:
+        return set()
+    # Resolve names to pane ids, so the allowlist survives a restart that renumbers panes.
+    resolved = set()
+    by_name = {}
+    try:
+        for lane in flock.resolve_lanes():
+            by_name[str(lane.get("agent_name") or "").lower()] = lane["pane_id"]
+            by_name[str(lane.get("pane_id") or "").lower()] = lane["pane_id"]
+    except Exception:                               # noqa: BLE001 - ids still work without it
+        pass
+    for entry in wanted:
+        resolved.add(by_name.get(entry.lower(), entry))
+    return resolved
+
+
 def h_dispatch(flock, args, self_pane_id):
     """The deterministic feeder: standby queue + a tick that fills idle lanes.
 
@@ -496,8 +556,14 @@ def h_dispatch(flock, args, self_pane_id):
     if action != "tick":
         raise ValueError("dispatch action must be add, list, remove, tick or status")
     import dunk_panes
+    # NOBODY IS FED UNLESS NAMED (reviewer + VP on #38): this dispatcher has no role concept,
+    # and before t227 its candidate list was empty only because every pane read "unknown". Now
+    # that a turn signal makes lanes eligible, an empty-by-default allowlist is what keeps a
+    # merge or an upgrade from silently auto-nudging reviewer, CoS and VP lanes with board work.
+    allow = _dispatch_allowlist(flock, args)
     panes = [pane for pane in flock.resolve_lanes()
              if (pane.get("agent_status") not in (None, "unknown"))
+             and pane["pane_id"] in allow
              and not dunk_panes.is_retired(pane["pane_id"])]
     inbox = flock.inbox
 
@@ -528,7 +594,10 @@ def h_dispatch(flock, args, self_pane_id):
                                else flock.delivery_state(pane["pane_id"],
                                                          pane.get("agent_status"), pane=pane)),
         unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
-        send=send, dry_run=bool(args.get("dry_run")))
+        send=send, dry_run=bool(args.get("dry_run")),
+        # Belt and braces: the filter above already reduced `panes`, and lane_plan applies the
+        # allowlist again so a future caller cannot widen it by accident.
+        lanes=allow)
     state["retired"] = len(dunk_panes.all_retired())
     state["board_open"] = sum(1 for task in tasks if str(task.get("status")) == "open")
     state["coarse_tasks"] = coarse
@@ -1194,6 +1263,10 @@ COMMANDS = [
                 "task_id": {"type": "string", "description": "Task this assignment advances (add)."},
                 "lane": {"type": "string", "description": "Reserve the item for one lane (add)."},
                 "id": {"type": "integer", "description": "Standby item id (remove)."},
+                "lanes": {"type": "string",
+                          "description": "Comma-separated pane ids or lane names the tick may "
+                                         "feed. Default is dispatch_lanes.json, then "
+                                         "DUNKINGSHEEP_DISPATCH_LANES, then NOTHING."},
                 "dry_run": {"type": "boolean", "description": "Plan the tick, send nothing."}}),
     Command(
         "clear_box",
