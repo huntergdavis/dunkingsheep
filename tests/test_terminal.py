@@ -93,11 +93,52 @@ class TmuxLiveTests(unittest.TestCase):
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
+        # A FAILING TEST MUST NOT LEAVE A SERVER OR AN AGENT BEHIND (t212). The kill-server
+        # call was already here, but a server that survived a failed assertion kept its panes,
+        # and the agents inside them outlived the test with ppid=1 - pi-review-2 found 18
+        # orphaned 'dunkingsheep serve' processes across three review directories. So cleanup
+        # is now: kill the server, then kill anything still running in this test's directory,
+        # then remove the directory.
         try:
             self.backend._run(["kill-server"], timeout=5)
         except Exception:  # noqa: BLE001 - best effort test cleanup
             pass
+        self._kill_leftovers()
+
+    def _kill_leftovers(self):
+        """SIGTERM anything whose cwd is this test's temp dir: agents and servers alike."""
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return
+        mine = os.path.realpath(self.tmp.name)
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                cwd = os.path.realpath(os.readlink(f"/proc/{entry}/cwd"))
+            except OSError:
+                continue
+            if cwd != mine:
+                continue
+            try:
+                os.kill(int(entry), 15)
+            except OSError:
+                pass
+        time.sleep(0.2)
         self.tmp.cleanup()
+
+    def _require_server(self):
+        """Skip with a REASON when this host has no tmux server to test against.
+
+        Without it the eight tmux tests fail in a bare sandbox and (before t212) left the
+        server and its agents behind; a skip that says why is honest, a red test that leaks
+        processes is not.
+        """
+        code, _out, err = self.backend._run(["list-sessions"], timeout=5)
+        if code != 0 and "no server running" in (err or "").lower():
+            self.skipTest(f"no live tmux server on socket {self.socket!r}: "
+                          "these are live-server tests")
 
     def _workspace(self, label="dsh-live"):
         ok, result = self.backend.create_workspace(label, cwd=self.tmp.name)
