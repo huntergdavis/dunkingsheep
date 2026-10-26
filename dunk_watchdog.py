@@ -1494,6 +1494,7 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
         "now": now, "findings": result["findings"], "skipped": skipped, "decisions": decisions,
         "recovered": recovered, "problems": problems, "sent": [], "delivery_error": None,
         "carried_failure": _recent_failure(state.get("delivery_failure"), now),
+        "delivery_failure_count": int(state.get("delivery_failure_count") or 0),
     }
     vp_send = [d for d in decisions if d["vp"] == "no"]
     owner_send = [d for d in decisions if d["owner"] == "no"]
@@ -1623,10 +1624,17 @@ def render_text(report):
     # the same claim as "you got everything" (VP ruling 2026-10-24).
     carried = report.get("carried_failure") or {}
     if carried and not report["delivery_error"]:
+        # `delivery_failure_count` is a LIFETIME count, not a consecutive one, and it is
+        # printed so it is not a number nobody reads (reviewer i26418). It survives
+        # successes on purpose: it answers "how often has escalation failed on this host",
+        # which is a different question from "is it failing now".
+        count = report.get("delivery_failure_count")
+        suffix = (f" [{count} failed escalation(s) since this state file began]"
+                  if count else "")
         lines.insert(0, f"CARRIED: escalation to {carried.get('target')!r} failed at "
                         f"{int(carried.get('at') or 0)} ({carried.get('reason')}); "
                         f"{carried.get('pending')} line(s) were pending - resend them "
-                        "from the state record if they still matter")
+                        f"from the state record if they still matter{suffix}")
     return "\n".join(lines)
 
 
