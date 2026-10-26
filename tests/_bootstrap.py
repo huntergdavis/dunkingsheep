@@ -6,11 +6,33 @@ Flock tests used the real tasks/inbox databases and their fake reaper requeued
 real t6/t29 claims (the 2026-10-21 false-reap incident).
 """
 import os
+import sys
 import tempfile
 
 _TMP = tempfile.mkdtemp(prefix="dunkingsheep-tests-")
-os.environ.setdefault("DUNKINGSHEEP_DIR", _TMP)
-os.environ.setdefault("DUNKINGSHEEP_SOCKET", os.path.join(_TMP, "test.sock"))
+
+# THE SUITE OWNS ITS STATE DIRECTORY (t247). This used to be setdefault(), which meant a run
+# inherited whatever the operator's shell had: with DUNKINGSHEEP_DIR pointing at the live config,
+# a full run read the REAL tasks/inbox databases - and the fixture reaper then refused with
+# "alive_panes must be tagged alive_source='live'" (pi-review-1 saw a run abort that way, and it
+# was not reproducible precisely because it depended on the caller's environment). Hermetic means
+# hermetic: the ambient value is overridden, and said out loud so nobody wonders why their
+# scratch dir was ignored.
+#
+# DUNKINGSHEEP_TESTS_OWN_ENV=1 restores the old behaviour for a deliberate trial against a
+# scratch directory you named yourself.
+_OWN_ENV = os.environ.get("DUNKINGSHEEP_TESTS_OWN_ENV") == "1"
+for _name in ("DUNKINGSHEEP_DIR", "DUNKINGSHEEP_SOCKET"):
+    _ambient = os.environ.get(_name)
+    if _ambient and not _OWN_ENV:
+        _wanted = _TMP if _name == "DUNKINGSHEEP_DIR" else os.path.join(_TMP, "test.sock")
+        if os.path.realpath(_ambient) != os.path.realpath(_wanted):
+            print(f"tests: ignoring ambient {_name}={_ambient!r}; the suite owns its state dir "
+                  f"({_TMP}). Set DUNKINGSHEEP_TESTS_OWN_ENV=1 to use the ambient one.",
+                  file=sys.stderr)
+if not _OWN_ENV:
+    os.environ["DUNKINGSHEEP_DIR"] = _TMP
+    os.environ["DUNKINGSHEEP_SOCKET"] = os.path.join(_TMP, "test.sock")
 
 # Tests must not shell out to `claude agents --json` (2.9 s per call).
 os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")
