@@ -1033,10 +1033,20 @@ def rule_host_heavy_slot_stale(inputs, rule):
     """
     out = []
     directory = rule["directory"]
+    # A SLOT IS <prefix>.<digits>, AND IT IS A FILE. Two false positives taught this:
+    # the live wrapper is SYMLINKED into /tmp as '/tmp/poolrad-heavy.sh' - not a slot -
+    # and a prefix match alone reported it as "legacy slot, age 1981min, holder null"
+    # on every check-in. A rule that pages about a symlink is a rule nobody reads.
+    base = rule["prefix"].rstrip(".")
+    slot_pattern = re.compile(re.escape(base) + r"\.?[0-9]+$")
     for name in sorted(os.listdir(directory)):
-        if not name.startswith(rule["prefix"]):
+        if not slot_pattern.match(name):
             continue
         slot = os.path.join(directory, name)
+        # A slot is a DIRECTORY (holding its pid file) or a file, but never a symlink:
+        # the live wrapper is symlinked into /tmp and is not a slot.
+        if os.path.islink(slot) or not (os.path.isdir(slot) or os.path.isfile(slot)):
+            continue
         age = inputs.now - os.stat(slot).st_mtime
         holder = _slot_holder_alive(slot)
         if holder is True:
