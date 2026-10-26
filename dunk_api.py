@@ -482,7 +482,7 @@ from dunk_core import CONFIG_DIR as _CONFIG_DIR
 DISPATCH_LANES_PATH = os.path.join(_CONFIG_DIR, "dispatch_lanes.json")
 
 
-def _dispatch_allowlist(flock, args=None):
+def _dispatch_allowlist(flock, args=None, lanes=None):
     """Which lanes the dispatcher may feed. EMPTY by default, and empty means nothing.
 
     Sources, in order: an explicit `--lane`/`lanes` argument for one tick, then
@@ -503,10 +503,23 @@ def _dispatch_allowlist(flock, args=None):
         try:
             with open(DISPATCH_LANES_PATH) as handle:
                 loaded = json.load(handle) or {}
-            lanes = loaded.get("lanes") if isinstance(loaded, dict) else loaded
-            if isinstance(lanes, str):
-                lanes = [part.strip() for part in lanes.split(",")]
-            wanted.extend(str(part).strip() for part in (lanes or []) if str(part).strip())
+            # NOTE: this local must not be called `lanes` - it would shadow the parameter that
+            # carries the pane listing, and name resolution would then iterate over config
+            # strings, raise, and be swallowed by the except below (a real bug this test caught).
+            listed = loaded.get("lanes") if isinstance(loaded, dict) else loaded
+            if isinstance(listed, str):
+                listed = [part.strip() for part in listed.split(",")]
+            if loaded and not listed:
+                # A READABLE but wrong-shaped file ({"lane": ["%4"]} for "lanes") is a silent
+                # disable unless it says so - and a silent disable is the exact failure this
+                # allowlist exists to prevent (reviewer note 1).
+                print(f"dispatch: {DISPATCH_LANES_PATH} has no lanes list; feeding nothing",
+                      file=sys.stderr)
+            # One entry per line is the documented form, but "a,b" in a single string is a
+            # natural mistake and the env/argument forms already split on commas - so split here
+            # too rather than letting the comma become part of a lane name that matches nothing.
+            for part in (listed or []):
+                wanted.extend(piece.strip() for piece in str(part).split(",") if piece.strip())
         except FileNotFoundError:
             pass
         except Exception as error:                  # noqa: BLE001 - a bad config must not crash
@@ -522,14 +535,30 @@ def _dispatch_allowlist(flock, args=None):
     # Resolve names to pane ids, so the allowlist survives a restart that renumbers panes.
     resolved = set()
     by_name = {}
+    listing_error = None
     try:
-        for lane in flock.resolve_lanes():
-            by_name[str(lane.get("agent_name") or "").lower()] = lane["pane_id"]
-            by_name[str(lane.get("pane_id") or "").lower()] = lane["pane_id"]
-    except Exception:                               # noqa: BLE001 - ids still work without it
-        pass
+        for lane in (lanes if lanes is not None else flock.resolve_lanes()):
+            # A name may match more than one pane (two lanes called "shell"); every match is
+            # allowed rather than the last one winning, because "name the lane" is what the
+            # operator wrote and silently dropping all but one would be a different list.
+            if lane.get("agent_name"):
+                by_name.setdefault(str(lane["agent_name"]).lower(), set()).add(lane["pane_id"])
+            if lane.get("pane_id"):
+                by_name.setdefault(str(lane["pane_id"]).lower(), set()).add(lane["pane_id"])
+    except Exception as error:                      # noqa: BLE001 - ids still work without it
+        listing_error = error
     for entry in wanted:
-        resolved.add(by_name.get(entry.lower(), entry))
+        matches = by_name.get(entry.lower())
+        resolved.update(matches if matches else {entry})
+    if listing_error is not None:
+        # SILENT DEGRADATION IS THE SAME DEFECT AS A SILENT DISABLE (reviewer): if the pane
+        # listing fails, a names-only allowlist degrades to literal strings that match no pane
+        # and NOTHING is fed, with no explanation. Say so, and say which entries are affected.
+        names = [entry for entry in wanted if not PANE_ID_RE.match(entry)]
+        if names:
+            print(f"dispatch: cannot resolve lane names ({listing_error}); these entries are not "
+                  f"pane ids and match nothing, so nothing is fed: {', '.join(names)}",
+                  file=sys.stderr)
     return resolved
 
 
@@ -560,8 +589,11 @@ def h_dispatch(flock, args, self_pane_id):
     # and before t227 its candidate list was empty only because every pane read "unknown". Now
     # that a turn signal makes lanes eligible, an empty-by-default allowlist is what keeps a
     # merge or an upgrade from silently auto-nudging reviewer, CoS and VP lanes with board work.
-    allow = _dispatch_allowlist(flock, args)
-    panes = [pane for pane in flock.resolve_lanes()
+    # ONE pane listing per tick (reviewer note 2): the allowlist resolves names against the same
+    # lanes the candidate filter uses, instead of asking the backend twice.
+    lanes_now = flock.resolve_lanes()
+    allow = _dispatch_allowlist(flock, args, lanes=lanes_now)
+    panes = [pane for pane in lanes_now
              if (pane.get("agent_status") not in (None, "unknown"))
              and pane["pane_id"] in allow
              and not dunk_panes.is_retired(pane["pane_id"])]

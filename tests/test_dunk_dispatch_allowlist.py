@@ -102,6 +102,71 @@ class AllowlistTests(unittest.TestCase):
         self._write([lane["agent_name"]])
         self.assertIn(pane_id, dunk_api._dispatch_allowlist(self.flock, {}))
 
+    def test_an_id_entry_resolves_to_itself(self):
+        pane_id = self._working_lane()
+        self._write([pane_id])
+        self.assertEqual({pane_id}, dunk_api._dispatch_allowlist(self.flock, {}))
+
+    def test_the_allowlist_does_not_shadow_the_pane_listing(self):
+        """Regression: a local named `lanes` inside the resolver shadowed the parameter that
+        carries the pane listing, so name resolution iterated config strings, raised, and was
+        swallowed - every name silently passed through unresolved."""
+        pane_id = self._working_lane()
+        lane = next(p for p in self.flock.resolve_lanes() if p["pane_id"] == pane_id)
+        self._write([lane["agent_name"]])
+        self.assertIn(pane_id, dunk_api._dispatch_allowlist(self.flock, {}))
+
+    def test_a_failed_pane_listing_says_the_names_could_not_be_resolved(self):
+        """Reviewer: a names-only allowlist must not degrade to literals SILENTLY when the pane
+        listing fails - ids keep working, names match nothing, and the operator is told why."""
+        import contextlib
+        import io
+
+        class BrokenLanes:
+            def resolve_lanes(self):
+                raise RuntimeError("cannot list panes: 'tab_id'")
+
+        self._write(["codex-worker,%4"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            resolved = dunk_api._dispatch_allowlist(BrokenLanes(), {})
+        self.assertIn("%4", resolved, "an id must still work")
+        self.assertIn("codex-worker", resolved)
+        message = err.getvalue()
+        self.assertIn("cannot resolve lane names", message)
+        self.assertIn("codex-worker", message)
+
+    def test_a_working_listing_prints_nothing_about_names(self):
+        import contextlib
+        import io
+        pane_id = self._working_lane()
+        self._write([pane_id])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            dunk_api._dispatch_allowlist(self.flock, {})
+        self.assertEqual("", err.getvalue())
+
+    def test_a_wrong_shaped_config_says_it_is_feeding_nothing(self):
+        """Reviewer note 1: {"lane": [...]} is a typo for "lanes" - a silent disable is the
+        failure this allowlist exists to prevent."""
+        import contextlib
+        import io
+        with open(self.tmp.name, "w") as handle:
+            json.dump({"lane": ["%4"]}, handle)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(set(), dunk_api._dispatch_allowlist(self.flock, {}))
+        self.assertIn("no lanes list", err.getvalue())
+
+    def test_an_absent_config_is_silent(self):
+        """Absent is normal, not an error: nothing is fed and nothing is printed."""
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(set(), dunk_api._dispatch_allowlist(self.flock, {}))
+        self.assertEqual("", err.getvalue())
+
     def test_an_unreadable_config_feeds_nothing(self):
         with open(self.tmp.name, "w") as handle:
             handle.write("{not json")
