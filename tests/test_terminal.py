@@ -91,6 +91,11 @@ class TmuxLiveTests(unittest.TestCase):
             socket_name=self.socket,
             registry_path=os.path.join(self.tmp.name, "tmux-panes.json"))
         self.addCleanup(self._cleanup)
+        # WIRE THE SKIP IN (reviewer, i28076): _require_server() existed but had no call site,
+        # so the eight live-server tests still failed red in a sandbox instead of skipping with
+        # a reason. It runs here, before any test body, and skips only when there is genuinely
+        # no server on this socket.
+        self._require_server()
 
     def _cleanup(self):
         # A FAILING TEST MUST NOT LEAVE A SERVER OR AN AGENT BEHIND (t212). The kill-server
