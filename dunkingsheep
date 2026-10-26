@@ -623,8 +623,11 @@ def build_parser():
     q = dsub.add_parser("list", help="the standby queue, in order")
     q = dsub.add_parser("remove", help="drop an item")
     q.add_argument("id", type=int)
-    q = dsub.add_parser("tick", help="fill every ready lane that has no mail (run on a timer)")
+    q = dsub.add_parser("tick", help="fill every ALLOWLISTED ready lane that has no mail")
     q.add_argument("--dry-run", action="store_true")
+    q.add_argument("--lanes", help="comma-separated pane ids or lane names to allow for this "
+                                   "tick (default: dispatch_lanes.json, else DUNKINGSHEEP_DISPATCH_LANES, "
+                                   "else nothing is fed)")
     q = dsub.add_parser("status", help="the last tick's numbers")
     p = sub.add_parser("clear-box", help="DESTRUCTIVE, superuser: clear an unsubmitted draft (Ctrl-U)")
     p.add_argument("target")

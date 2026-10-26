@@ -62,9 +62,10 @@ from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from dunk_terminal import get_backend
 from dunk_callers import process_alive
+import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.51"
+VERSION = "2.70.54"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -946,7 +947,43 @@ class Flock:
         panes = self.herdr.list_panes_grouped()
         for pane in panes:
             pane["is_self"] = bool(self_pane_id) and pane.get("pane_id") == self_pane_id
+            pane["agent_status"] = self.lane_status(pane)
         return panes
+
+    # The age bound lives with the rule (dunk_activity.IDLE_CLAIM_S); this alias exists so tests
+    # and callers can read it off the flock.
+    IDLE_CLAIM_S = dunk_activity.IDLE_CLAIM_S
+
+    def lane_status(self, pane):
+        """What the lane is DOING, from the best evidence this backend has.
+
+        The tmux backend has no agent-status API, so it reports "unknown" for every pane and
+        the ops board showed 'unknown' for all of them (owner t227). But we do have a turn
+        signal: the harness calls turn start/end, and turn_end deliberately keeps the ended
+        state because that is the only evidence of IDLENESS we get. So:
+
+            a declared, unexpired turn -> "working"
+            an ENDED turn             -> "idle"
+            no turn signal at all     -> None  (the desk renders an em dash, not "unknown")
+
+        None, not "unknown": a backend that cannot answer should say nothing rather than
+        answer wrongly, and the difference between "we do not know" and "the lane is unknown"
+        is exactly what the board was missing.
+        """
+        backend = (pane.get("agent_status") or "").strip().lower()
+        if backend and backend not in ("unknown", ""):
+            return backend                    # a backend that can answer, answers
+        pane_id = pane.get("pane_id")
+        if not pane_id:
+            return None
+        with self._lock:
+            state = dict(self.turns.get(pane_id) or {})
+        # ONE derivation (reviewer on t227): dunk_activity.turn_state owns the rule, so the desk
+        # (which reads activity()) and this (which feeds the CLI and the dispatcher) cannot
+        # disagree about what the same turn means.
+        derived, _since, _reason = dunk_activity.turn_state(state, now=time.time(),
+                                                            idle_claim_s=self.IDLE_CLAIM_S)
+        return derived
 
     # -- inboxes ------------------------------------------------------------
     # Machine-to-machine messaging that never types into a terminal. See
@@ -4506,7 +4543,11 @@ class Flock:
                           "agent_name": (pane.get("agent_name") or pane.get("tab_label")
                                          or pane.get("label") or pane["pane_id"]),
                           "tab_label": pane.get("tab_label"),
-                          "agent_status": pane.get("agent_status")})
+                          # The DERIVED status, not the backend's raw field: resolve_lanes feeds
+                          # the roster and the dispatch tick, and both must read the same answer
+                          # as the CLI (reviewer on t227 - the desk and the dispatcher may not
+                          # disagree about what the same turn means).
+                          "agent_status": self.lane_status(pane)})
         return lanes
 
     def delivery_state(self, pane_id, status=None, pane=None, screen=None):

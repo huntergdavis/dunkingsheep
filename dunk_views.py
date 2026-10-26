@@ -58,7 +58,10 @@ def roster(flock, now=None):
     rows = []
     for lane in lanes:
         pane_id = lane["pane_id"]
-        status = (lane.get("agent_status") or "unknown")
+        # NULL, not the string "unknown" (reviewer on t227): the owner asked for a dash where
+        # there is no status, and re-materialising "unknown" here put the word back on the desk's
+        # path even when lane_status() had correctly refused to answer.
+        status = lane.get("agent_status")
         leases = []
         try:
             leases = flock.tasks.leases_for_pane(pane_id, now=now)
