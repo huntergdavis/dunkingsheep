@@ -686,6 +686,17 @@ class TmuxBackend(TerminalBackend):
         return out.lstrip("\n")
 
 
+# The backend name the daemon uses when nothing is set. One constant, because a refusal message
+# that repeats a default is a message that can drift from the default (it did: "herdr" survived
+# here long after tmux became the default, so GATE 5 could name a backend nobody was running).
+DEFAULT_BACKEND_NAME = "tmux"
+
+
+def backend_name():
+    """The backend that would be selected now: the env override, else the default."""
+    return (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or DEFAULT_BACKEND_NAME).strip().lower()
+
+
 def get_backend(herdr=None):
     """Return the configured terminal backend.
 
@@ -706,7 +717,7 @@ def get_backend(herdr=None):
     #
     # herdr is still selectable, explicitly, for the week-long rollback:
     #   DUNKINGSHEEP_TERMINAL_BACKEND=herdr
-    name = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "tmux").strip().lower()
+    name = backend_name()
     if name in ("", "tmux"):
         return TmuxBackend()
     if name == "herdr":
