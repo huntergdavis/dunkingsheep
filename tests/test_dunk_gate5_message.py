@@ -91,3 +91,46 @@ class BackendNameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpawnGuardOrderingTests(unittest.TestCase):
+    """The tmux-socket guard belongs to the SPAWN path, not the systemd handoff.
+
+    The historical failure was a client SPAWNING a trial daemon with a guessed environment. A unit
+    started by systemd carries its own environment, so requiring DUNKINGSHEEP_TMUX_SOCKET in the
+    caller would refuse the handoff to a correctly configured daemon - a fleet-wide outage caused
+    by a fix. Ordering is the whole test.
+    """
+
+    def _source(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return open(os.path.join(root, "dunk_client.py"), encoding="utf-8").read()
+
+    def test_the_systemd_handoff_comes_before_the_spawn_guard(self):
+        source = self._source()
+        body = source[source.index("def start_daemon"):]
+        handoff = body.index("_systemd_installed()")
+        guard = body.index('not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET")')
+        self.assertLess(handoff, guard,
+                        "the guard must not refuse a handoff to the supervised unit")
+
+    def test_the_guard_still_guards_the_spawn_path(self):
+        source = self._source()
+        body = source[source.index("def start_daemon"):]
+        guard = body.index('not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET")')
+        spawn = body.index("subprocess.Popen(")
+        self.assertLess(guard, spawn, "the guard must still run before a spawned daemon")
+
+    def test_the_guard_refuses_a_spawn_without_the_socket(self):
+        """Behavioural, not just positional: an unsupervised client with no socket refuses."""
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from dunk_client import DaemonUnavailable, FlockClient
+        client = FlockClient(socket_path="/tmp/definitely-not-the-default.sock",
+                             self_pane_id=None)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DUNKINGSHEEP_TMUX_SOCKET", None)
+            os.environ.pop("DUNKINGSHEEP_TERMINAL_BACKEND", None)
+            with self.assertRaises(DaemonUnavailable) as caught:
+                client.start_daemon()
+        self.assertIn("DUNKINGSHEEP_TMUX_SOCKET", str(caught.exception))

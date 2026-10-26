@@ -336,17 +336,6 @@ class FlockClient:
         herdr backend, where it silently saw the wrong panes. A component that
         guesses its environment produces a plausible wrong answer.
         """
-        # The backend the DAEMON would use, from the one place that defines the default. This
-        # carried its own literal "herdr" long after tmux became the default, and it had teeth:
-        # with the variable unset the guard below never fired, so auto-start proceeded without the
-        # tmux-socket requirement - the very failure its own docstring describes (reviewer on #40).
-        from dunk_terminal import backend_name as resolve_backend_name
-        backend = resolve_backend_name()
-        if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
-            raise DaemonUnavailable(
-                "refusing to auto-start a tmux daemon without "
-                "DUNKINGSHEEP_TMUX_SOCKET; start it explicitly with the full "
-                "backend environment")
         # The literal default socket belongs to the unit, even when a parent
         # service exported DUNKINGSHEEP_SOCKET to that same path.
         supervised = self.socket_path == DEFAULT_SOCKET
@@ -360,6 +349,23 @@ class FlockClient:
             raise DaemonUnavailable(
                 "the dunkingsheep.service unit is installed but could not be "
                 "started; run `systemctl --user start dunkingsheep.service`")
+        # The backend the DAEMON would use, from the one place that defines the default. This
+        # carried its own literal "herdr" long after tmux became the default, and it had teeth:
+        # with the variable unset the guard below never fired, so auto-start proceeded without the
+        # tmux-socket requirement - the very failure its own docstring describes (reviewer on #40).
+        #
+        # THE GUARD APPLIES TO THE SPAWN PATH ONLY, and that ordering is deliberate: the historical
+        # failure was a client SPAWNING a trial daemon with a guessed environment. A unit started by
+        # systemd carries its own environment, so requiring DUNKINGSHEEP_TMUX_SOCKET in the CALLER
+        # would refuse the handoff to a correctly configured daemon - a fleet-wide outage caused by
+        # a fix. The guard belongs where the guess would happen.
+        from dunk_terminal import backend_name as resolve_backend_name
+        backend = resolve_backend_name()
+        if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
+            raise DaemonUnavailable(
+                "refusing to auto-start a tmux daemon without "
+                "DUNKINGSHEEP_TMUX_SOCKET; start it explicitly with the full "
+                "backend environment")
         os.makedirs(CONFIG_DIR, exist_ok=True)
         env = dict(os.environ)
         env["DUNKINGSHEEP_SOCKET"] = self.socket_path
