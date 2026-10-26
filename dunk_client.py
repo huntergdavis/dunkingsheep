@@ -336,8 +336,12 @@ class FlockClient:
         herdr backend, where it silently saw the wrong panes. A component that
         guesses its environment produces a plausible wrong answer.
         """
-        backend = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND")
-                   or "herdr").strip().lower()
+        # The backend the DAEMON would use, from the one place that defines the default. This
+        # carried its own literal "herdr" long after tmux became the default, and it had teeth:
+        # with the variable unset the guard below never fired, so auto-start proceeded without the
+        # tmux-socket requirement - the very failure its own docstring describes (reviewer on #40).
+        from dunk_terminal import backend_name as resolve_backend_name
+        backend = resolve_backend_name()
         if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
             raise DaemonUnavailable(
                 "refusing to auto-start a tmux daemon without "

@@ -693,8 +693,14 @@ DEFAULT_BACKEND_NAME = "tmux"
 
 
 def backend_name():
-    """The backend that would be selected now: the env override, else the default."""
-    return (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or DEFAULT_BACKEND_NAME).strip().lower()
+    """The backend that would be selected now: the env override, else the default.
+
+    The final `or` is not redundant: a WHITESPACE-ONLY value ("   ") strips to "", and
+    get_backend() maps "" to the default - so without it this function would report "" while the
+    daemon ran tmux, and GATE 5 would name a backend that is not what runs (reviewer on #40).
+    """
+    return ((os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "").strip().lower()
+            or DEFAULT_BACKEND_NAME)
 
 
 def get_backend(herdr=None):
