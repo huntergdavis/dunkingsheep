@@ -307,6 +307,9 @@ PLACEHOLDER_PATTERNS = (
 # "queued". Small: a notice is one short line, and the value only decides what the
 # inbox records about it.
 NOTICE_WAIT_S = float(os.environ.get("DUNKINGSHEEP_NOTICE_WAIT_S", "5.0"))
+# How long a fold waits for the notice it folded into to finish, so it can record that
+# notice's FINAL state instead of a snapshot. Rare path; a few seconds is plenty.
+NOTICE_FOLD_WAIT_S = float(os.environ.get("DUNKINGSHEEP_NOTICE_FOLD_WAIT_S", "3.0"))
 CLAUDE_BUSY_TTL_S = float(os.environ.get("DUNKINGSHEEP_CLAUDE_BUSY_TTL_S", "600"))
 # The typing mutex: short by design, loud when contended.
 TYPING_LOCK_TIMEOUT_S = float(os.environ.get("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "10"))
@@ -1718,11 +1721,17 @@ class Flock:
                         # said "sent" while the folded one said "queued" in the same
                         # instant.
                         already = existing.status
-                    if already in ("sent", "failed"):
+                    # (a) on top of (b): WAIT for the notice's own end, then record ITS
+                    # final state. Snapshotting `status` here is what kept the folded
+                    # message at "queued" - the notice could finish between the read and
+                    # the delivery's bookkeeping walks, and nothing updated it afterwards.
+                    existing.done.wait(NOTICE_FOLD_WAIT_S)
+                    final = existing.status
+                    if final in ("sent", "failed"):
                         self.inbox.record_notify(
                             message["message_id"],
-                            "sent" if already == "sent" else "failed",
-                            f"folded into {existing.id} ({already})")
+                            "sent" if final == "sent" else "failed",
+                            f"folded into {existing.id} ({final})")
                     else:
                         self.inbox.record_notify(message["message_id"], "queued",
                                                  f"folded into {existing.id}")
@@ -3623,6 +3632,12 @@ class Flock:
             duration_ms=int((message.finished_at - message.created_at) * 1000),
             attempts=message.holds or None,
             bytes=len((message.text or "").encode("utf-8")))
+        # THE SEND IS OVER BEFORE THE BOOKKEEPING (VP i25653, candidate (b)): the done
+        # event means "the send finished", and a fold that lands while the walks below are
+        # running can then settle itself from a FINISHED notice instead of racing a walk
+        # that has already passed its id. Without this, the folded message kept "queued"
+        # while its notice said "sent" - the race the flaky test was reporting.
+        message.done.set()
         # A SECOND PASS, because a fold can append its id while this delivery is in
         # flight: the first walk below happens once, and an id added a millisecond later
         # would keep "queued" for ever (the race the stress run found). Re-walking costs
@@ -3650,7 +3665,6 @@ class Flock:
                 pass
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
                  "sent" if ok else f"FAILED {detail}")
-        message.done.set()
         return True
 
     def _remember(self, message):
