@@ -25,7 +25,12 @@ class CoalesceFreshnessTests(unittest.TestCase):
         self.env = dict(os.environ, DUNKINGSHEEP_DIR=os.path.join(self.tmp.name, "cfg"),
                         DUNKINGSHEEP_SOCKET=os.path.join(self.tmp.name, "ds.sock"),
                         DUNKINGSHEEP_MIN_POLL_S="60", TMUX_PANE="",
-                        DUNKINGSHEEP_TTY_IDENTITY="0", DUNKINGSHEEP_CLAUDE_STATUS="0")
+                        DUNKINGSHEEP_TTY_IDENTITY="0", DUNKINGSHEEP_CLAUDE_STATUS="0",
+                        # This test SPAWNS a daemon, so it names the backend environment the
+                        # client now insists on: without it, auto-start is refused (correctly -
+                        # that refusal is what stops a tmux trial daemon on the wrong server).
+                        # A tmux SOCKET NAME (-L), not a path.
+                        DUNKINGSHEEP_TMUX_SOCKET="default")
 
     def tearDown(self):
         subprocess.run([sys.executable, CLI, "shutdown"], env=self.env,

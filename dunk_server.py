@@ -235,7 +235,12 @@ def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
     # that sees NO panes would run, answer status, and fail every delivery with
     # 'no server running on /tmp/tmux-1000/default'. That is not a degraded mode, it is
     # a wrong environment - refuse to start and name it.
-    backend_name = (os.environ.get("DUNKINGSHEEP_TERMINAL_BACKEND") or "herdr").strip().lower()
+    # The name in this REFUSAL must be the backend the daemon would actually use. It defaulted
+    # to "herdr" long after tmux became the code default (2.70.29), so a refusal could name a
+    # backend nobody was running - in a message whose whole purpose is to say what to fix.
+    # dunk_terminal owns the default, so ask it rather than repeating it.
+    from dunk_terminal import DEFAULT_BACKEND_NAME, backend_name as resolve_backend_name
+    backend_name = resolve_backend_name()
     if os.environ.get("DUNKINGSHEEP_ALLOW_EMPTY_BACKEND") != "1":
         from dunk_terminal import get_backend
         try:
