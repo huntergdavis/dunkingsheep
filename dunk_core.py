@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.71"
+VERSION = "2.70.74"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -192,6 +192,9 @@ MESSAGE_RECHECK_S = 5
 TYPING_SETTLE_S = 1.0
 # Delivered / failed / cancelled messages kept for list_messages.
 MESSAGE_HISTORY = 50
+# How many decided message ids travel with the state file (t249). The file only ever holds
+# QUEUED rows, so a verdict older than this cannot correspond to a row still in it.
+DECIDED_KEPT = 500
 # Pressing Enter once does not reliably submit. Measured on a live Codex pane
 # 2026-10-10: a ~2.2k-character message stayed in the input box 3 times out of
 # 3, at every pre-Enter delay from 0.2 s to 2 s and every paste chunk size from
@@ -641,6 +644,10 @@ class Flock:
         # Direct-message outbox: pane_id -> [Message], plus the per-pane
         # delivery thread and a bounded history of finished messages.
         self.outbox = {}
+        # Ids whose outcome is already decided, carried ACROSS restarts (t249). message_history is
+        # per-process, so a restore that consulted only it would always see an empty set on the
+        # path it exists to protect - the verdict has to be persisted, or read from the inbox.
+        self.decided = {}
         self.outbox_threads = {}
         self._claude_busy_since = {}
         self.started_at = time.time()
@@ -719,6 +726,12 @@ class Flock:
                 self.dunkers.append(dunker)
                 self.next_id = max(self.next_id, _numeric_id(dunker.id) + 1)
             self.next_message_id = int(payload.get("next_message_id") or self.next_message_id)
+            for key, value in (payload.get("decided") or {}).items():
+                if isinstance(value, dict):
+                    self.decided[str(key)] = {"status": str(value.get("status") or "unknown"),
+                                              "created_at": value.get("created_at")}
+                else:                       # a file written by the first version of this change
+                    self.decided[str(key)] = {"status": str(value), "created_at": None}
             self._restore_outbox(payload.get("outbox") or [])
             for dunker in list(self.dunkers):
                 if dunker.running:
@@ -755,6 +768,10 @@ class Flock:
                      "created_at": message.created_at}
                     for queue in self.outbox.values() for message in queue
                     if message.status == "queued"],
+                # The verdicts, so the NEXT process can tell a stale snapshot row from a held one.
+                # Bounded: an id older than the last DECIDED_KEPT outcomes cannot be in a file that
+                # only ever holds queued rows.
+                "decided": dict(list(self.decided.items())[-DECIDED_KEPT:]),
             }
         try:
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
@@ -788,9 +805,75 @@ class Flock:
         thing to persist: a restore that resends a *different* string would be a
         new message wearing an old id.
         """
+        # A ROW THE FILE STILL HOLDS MAY ALREADY HAVE BEEN DELIVERED (t249): the save used to
+        # happen only on enqueue, so a message that finished after the last save stayed in the
+        # file. Anything already in message_history has had its outcome decided; restoring it
+        # would type it again. The file is a snapshot, the history is the verdict.
+        already_decided = {m.id for m in self.message_history
+                           if getattr(m, "status", None) in ("sent", "failed", "cancelled")}
+        # THE PERSISTED VERDICTS (t249): message_history is empty in a fresh process, so this is
+        # what actually protects a restart. The inbox record is consulted too - the notice path
+        # writes its outcome there, so a row whose inbox notices were all delivered is decided
+        # even if this daemon never saw the delivery.
+        def verdict_for(row):
+            """The persisted verdict for THIS row, or None when the id was reused.
+
+            A verdict is about a message, so it needs the message's identity: same id AND same
+            created_at. A mismatch means the id was reused by a later message (or the file was
+            paired with a counter that went backwards), and refusing it would drop a new message
+            while logging a clean restore. Unverifiable (either side missing) is also a mismatch:
+            restoring is recoverable, silently dropping is not.
+            """
+            entry = self.decided.get(row.get("id"))
+            if not entry:
+                return None
+            status = entry.get("status") if isinstance(entry, dict) else entry
+            if status not in ("sent", "failed", "cancelled"):
+                return None
+            stamped = entry.get("created_at") if isinstance(entry, dict) else None
+            row_stamp = row.get("created_at")
+            if stamped is None or row_stamp is None:
+                log.warning("message %s has a %s verdict but no timestamp to match it against; "
+                            "restoring it rather than dropping it", row.get("id"), status)
+                return None
+            try:
+                if abs(float(stamped) - float(row_stamp)) > 1e-3:
+                    log.warning("message %s was reused (verdict %s for created_at %s, this row is "
+                                "%s); restoring it", row.get("id"), status, stamped, row_stamp)
+                    return None
+            except (TypeError, ValueError):
+                return None
+            return status
+
+        already_decided |= {row.get("id") for row in rows if verdict_for(row)}
+        for row in rows:
+            notify_ids = [str(x) for x in (row.get("notify_for") or [])]
+            if not notify_ids:
+                continue
+            try:
+                states = [(self.inbox.status(inbox_id).get("notify") or {}).get("state")
+                          for inbox_id in notify_ids]
+            except Exception:                      # noqa: BLE001 - a read must not lose mail
+                continue
+            # "cancelled" belongs here too (reviewer, PR #43): it is a real message status
+            # (dunk_core.py:3917), and a notice cancelled in the inbox must not be typed later.
+            if states and all(state in ("sent", "failed", "cancelled") for state in states):
+                already_decided.add(row.get("id"))
         restored = []
         for row in rows:
             try:
+                if row.get("id") in already_decided:
+                    # The reason comes from the verdict we ALREADY have. Reading it out of
+                    # message_history raised StopIteration on a real restart (the history is empty
+                    # there), the per-row except caught it, and the log said "could not restore a
+                    # held message:" with an EMPTY reason - a refusal reported as a failure, which
+                    # is how a correct skip sends the next reader hunting a bug (reviewer, PR #43).
+                    verdict = (verdict_for(row)
+                               or next((m.status for m in self.message_history
+                                        if m.id == row.get("id")), "decided"))
+                    log.info("not restoring message %s: it already %s before the restart",
+                             row.get("id"), verdict)
+                    continue
                 pane_id = row["pane_id"]
                 text = row.get("text") or ""
                 kind = row.get("kind") or "text"
@@ -3701,6 +3784,12 @@ class Flock:
             self.last_message = (f"Sent to {message.target_label}" if ok
                                  else f"Send failed: {detail}")
             self._remember(message)
+        # PERSIST ON THE WAY OUT TOO, not only on the way in (t249). _enqueue() saves when a
+        # message becomes held; nothing saved when it stopped being held, so dunks.json kept the
+        # last snapshot and a restart re-queued messages that had already been SENT - typed a
+        # second time under their old id, which is exactly what _restore_outbox's docstring
+        # forbids. Measured 2026-10-26: m6361 had been delivered and was still in the file.
+        self._save()
         self.metrics.record(
             "message.sent" if ok else "message.failed",
             pane_id=message.pane_id, mailbox=message.target_label,
@@ -3727,6 +3816,16 @@ class Flock:
     def _remember(self, message):
         self.message_history.append(message)
         del self.message_history[:-MESSAGE_HISTORY]
+        # Keep the verdict where the NEXT process can find it, not only where this one can - and
+        # keep the message's CREATED_AT with it (reviewer, PR #43): message ids are reused across
+        # daemons (the live log has m6379 sent on 2026-10-15 to wN:p1 and again on 2026-10-26 to
+        # %4), so an id alone is a claim about a NUMBER, not about a message. A verdict that
+        # refused a brand-new message on an id match would be a lost message that looks like a
+        # clean restore - the opposite of the defect this fixes.
+        self.decided[message.id] = {"status": getattr(message, "status", None) or "unknown",
+                                    "created_at": getattr(message, "created_at", None)}
+        while len(self.decided) > DECIDED_KEPT:
+            self.decided.pop(next(iter(self.decided)), None)
 
     def _enqueue(self, message):
         """Queue a message for its pane and make sure a delivery thread runs.
