@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.63"
+VERSION = "2.70.74"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -773,12 +773,18 @@ class Flock:
                 # only ever holds queued rows.
                 "decided": dict(list(self.decided.items())[-DECIDED_KEPT:]),
             }
+        # SERIALISE SNAPSHOT AND REPLACEMENT (from %35's #45, adopted here): two concurrent saves can
+        # otherwise interleave so that an OLDER snapshot wins, undoing a delivery or a cancellation
+        # that happened in between - the same "state only this process believes" defect one layer
+        # down. The lock is an RLock and _save() is called from paths that already hold it, so this is
+        # safe from re-entry.
         try:
             os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-            tmp = self.state_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-            os.replace(tmp, self.state_file)
+            with self._lock:
+                tmp = self.state_file + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+                os.replace(tmp, self.state_file)
         except OSError as error:
             log.warning("could not save %s: %s", self.state_file, error)
 
@@ -904,7 +910,12 @@ class Flock:
                                or verdict_for(row)
                                or next((m.status for m in self.message_history
                                         if m.id == row.get("id")), "decided"))
-                    log.info("not restoring message %s: it already %s before the restart",
+                    # The template carries the reason as a CLAUSE, not as a status word: the old
+                    # "it already %s before the restart" fitted "decided" and produced "it already
+                    # every notice is sent, so the nudge arrived before the restart" (reviewer, PR
+                    # #43). The sentence has to read as prose, because it is the only account a
+                    # vanished row gets.
+                    log.info("not restoring message %s: %s (decided before the restart)",
                              row.get("id"), verdict)
                     continue
                 pane_id = row["pane_id"]

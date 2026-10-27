@@ -118,7 +118,7 @@ class OutboxRestartTests(unittest.TestCase):
             finally:
                 flock.close()
         text = "\n".join(captured.output)
-        self.assertIn("not restoring message m1: it already sent", text)
+        self.assertRegex(text, r"not restoring message m1: sent \(decided before the restart\)")
         self.assertNotIn("could not restore", text)
 
     def test_a_failed_notice_whose_mail_is_still_unread_does_not_drop_the_row(self):
@@ -181,8 +181,14 @@ class OutboxRestartTests(unittest.TestCase):
             finally:
                 second.close()
         text = "\n".join(captured.output)
-        self.assertIn("every notice is sent", text)
-        self.assertNotIn("it already decided", text)
+        # Assert the RENDERED LINE, not a token (reviewer, PR #43): a substring assertion passed on a
+        # garbled sentence ("it already every notice is sent ... before the restart"), so the next
+        # person could re-break the prose without a red test.
+        self.assertRegex(
+            text,
+            r"not restoring message m1: every notice is sent, so the nudge arrived "
+            r"\(decided before the restart\)")
+        self.assertNotIn("it already", text)
 
     def test_a_cancelled_inbox_verdict_also_decides_the_row(self):
         """Reviewer, PR #43: cancelled is a real status; a cancelled notice must not be typed."""
@@ -217,6 +223,33 @@ class OutboxRestartTests(unittest.TestCase):
             second.close()
 
     # -- the fix itself: the production delivery path persists the departure ---------------
+
+    def test_the_state_replace_happens_under_the_state_lock(self):
+        """Adopted from %35's #45: the snapshot AND the os.replace must run under the state lock, or
+        two concurrent saves can interleave so an OLDER snapshot wins and undoes a delivery.
+
+        A timing test cannot pin this reliably (I tried: it passes either way), so the assertion is
+        about the invariant itself - the replace is performed while the lock is held.
+        """
+        import dunk_core as core
+        flock = self._flock()
+        held = []
+        real_replace = core.os.replace
+
+        def checking_replace(src, dst):
+            held.append(flock._lock._is_owned())
+            return real_replace(src, dst)
+
+        core.os.replace = checking_replace
+        try:
+            message = flock._new_message("w1:p2", "Claude Proj", "under the lock",
+                                         source="test", deliver=lambda: None)
+            flock._enqueue(message)
+        finally:
+            core.os.replace = real_replace
+            flock.close()
+        self.assertTrue(held, "the save must replace the file at least once")
+        self.assertTrue(all(held), "every replace must happen while the state lock is held")
 
     def test_a_cancellation_leaves_the_file(self):
         """t255, third instance: cancel_message() mutated state and never saved, so a cancelled row
