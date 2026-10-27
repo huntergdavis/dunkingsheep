@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.74"
+VERSION = "2.70.62"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -851,14 +851,35 @@ class Flock:
             if not notify_ids:
                 continue
             try:
-                states = [(self.inbox.status(inbox_id).get("notify") or {}).get("state")
-                          for inbox_id in notify_ids]
+                records = [self.inbox.status(inbox_id) for inbox_id in notify_ids]
             except Exception:                      # noqa: BLE001 - a read must not lose mail
                 continue
+            states = [(rec.get("notify") or {}).get("state") for rec in records]
+            mail_states = [rec.get("state") for rec in records]
             # "cancelled" belongs here too (reviewer, PR #43): it is a real message status
             # (dunk_core.py:3917), and a notice cancelled in the inbox must not be typed later.
-            if states and all(state in ("sent", "failed", "cancelled") for state in states):
+            #
+            # "failed" IS NOT THE SAME AS "SENT" (reviewer, PR #43): in the delivery loop it means
+            # "this attempt failed, retrying", so a row whose notices all say failed may still be the
+            # ONLY nudge for mail nobody has read. Refusing to restore it would end a retry loop by
+            # silently dropping the message - the failure mode this whole change exists to prevent,
+            # arriving from the other side. So a failed notice only decides the row when the mail it
+            # announced is no longer waiting: every one of those inbox messages has left the queue
+            # (read, archived or cancelled). Otherwise the row is RESTORED and the reason logged.
+            if states and all(state in ("sent", "cancelled") for state in states):
                 already_decided.add(row.get("id"))
+            elif states and all(state in ("sent", "failed", "cancelled") for state in states):
+                if mail_states and all(state != "queued" for state in mail_states):
+                    already_decided.add(row.get("id"))
+                    log.info("message %s is decided: every notice is %s and its mail is no longer "
+                             "waiting (states %s)", row.get("id"),
+                             "/".join(sorted({str(x) for x in states})),
+                             "/".join(sorted({str(x) for x in mail_states})))
+                else:
+                    log.warning("message %s has %d failed notice(s) but its mail is STILL UNREAD "
+                                "(states %s); restoring it rather than dropping the only nudge",
+                                row.get("id"), len(notify_ids),
+                                "/".join(sorted({str(x) for x in mail_states})))
         restored = []
         for row in rows:
             try:
@@ -3984,6 +4005,12 @@ class Flock:
                         self._remember(message)
                         message.done.set()
                         log.info("message %s -> %s cancelled", message.id, pane_id)
+                        # PERSIST THE CANCELLATION (t255, third instance of the same class): the
+                        # outbox is written from memory on enqueue, so a cancelled message stayed in
+                        # dunks.json and a restart would restore it - the cancel looked done and was
+                        # not durable. Measured 2026-10-27: `cancel-message m862` reported "cancelled"
+                        # and the file still held m862.
+                        self._save()
                         return message.to_dict()
             for message in self.message_history:
                 if message.id == message_id:

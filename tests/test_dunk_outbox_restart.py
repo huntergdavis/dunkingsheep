@@ -121,6 +121,48 @@ class OutboxRestartTests(unittest.TestCase):
         self.assertIn("not restoring message m1: it already sent", text)
         self.assertNotIn("could not restore", text)
 
+    def test_a_failed_notice_whose_mail_is_still_unread_does_not_drop_the_row(self):
+        """Reviewer, PR #43: "failed" in the delivery loop means "this attempt failed, retrying", not
+        "delivered". Dropping a failed notice whose mail nobody has read removes the only nudge."""
+        flock = self._flock()
+        try:
+            sent = flock.inbox.send("Claude Proj", "nobody has read this", sender="%4")
+            inbox_id = sent["message_id"]
+            flock.inbox.record_notify(inbox_id, "failed")
+        finally:
+            flock.close()
+        self._write_state([self._row("m1", notify=[inbox_id])])
+        with self.assertLogs("dunkingsheep", level="WARNING") as captured:
+            second = self._flock()
+            try:
+                self.assertEqual(["m1"], self._held_ids(second),
+                                 "an unread failed notice must be restored, not dropped")
+            finally:
+                second.close()
+        self.assertIn("STILL UNREAD", "\n".join(captured.output))
+
+    def test_a_failed_notice_whose_mail_is_read_decides_the_row(self):
+        """The other half: the retry loop is obsolete once the mail it announced is no longer
+        waiting, so the row is dropped WITH the reason logged."""
+        flock = self._flock()
+        try:
+            sent = flock.inbox.send("Claude Proj", "already read", sender="%4")
+            inbox_id = sent["message_id"]
+            flock.inbox.record_notify(inbox_id, "failed")
+            flock.inbox.mark_read([inbox_id])
+        finally:
+            flock.close()
+        self._write_state([self._row("m1", notify=[inbox_id])])
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            second = self._flock()
+            try:
+                self.assertEqual([], self._held_ids(second))
+            finally:
+                second.close()
+        text = "\n".join(captured.output)
+        self.assertIn("is decided", text)
+        self.assertIn("no longer waiting", text)
+
     def test_a_cancelled_inbox_verdict_also_decides_the_row(self):
         """Reviewer, PR #43: cancelled is a real status; a cancelled notice must not be typed."""
         flock = self._flock()
@@ -154,6 +196,24 @@ class OutboxRestartTests(unittest.TestCase):
             second.close()
 
     # -- the fix itself: the production delivery path persists the departure ---------------
+
+    def test_a_cancellation_leaves_the_file(self):
+        """t255, third instance: cancel_message() mutated state and never saved, so a cancelled row
+        stayed in dunks.json and a restart restored it. Measured 2026-10-27 on the live host:
+        `cancel-message m862` reported "cancelled" while the file still held m862."""
+        flock = self._flock()
+        try:
+            message = flock._new_message("w1:p2", "Claude Proj", "cancel me",
+                                         source="test", deliver=lambda: None)
+            flock._enqueue(message)
+            with open(self.state) as handle:
+                self.assertIn(message.id, [row["id"] for row in json.load(handle)["outbox"]])
+            flock.cancel_message(message.id)
+            with open(self.state) as handle:
+                self.assertNotIn(message.id, [row["id"] for row in json.load(handle)["outbox"]],
+                                 "a cancelled message must leave the file a restart reads")
+        finally:
+            flock.close()
 
     def test_delivery_through_the_production_path_removes_it_from_the_file(self):
         flock = self._flock()
