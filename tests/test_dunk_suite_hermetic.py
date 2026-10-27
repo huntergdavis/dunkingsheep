@@ -75,3 +75,70 @@ class HermeticStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AmbientFlagTests(unittest.TestCase):
+    """Reviewer on #41: the flags were the remaining setdefaults.
+
+    None of them can move real work, but an ambient value still won: a caller could make the suite
+    shell out to `claude agents --json` (~2.9 s per call), change the CLI's poll cache, or make
+    identity consult the developer's own terminal.
+    """
+
+    def test_an_ambient_flag_is_overridden_and_reported(self):
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap, os; "
+                "print(os.environ['DUNKINGSHEEP_CLAUDE_STATUS'])")
+        result = _child({"DUNKINGSHEEP_CLAUDE_STATUS": "1"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ignoring ambient DUNKINGSHEEP_CLAUDE_STATUS", result.stderr)
+        self.assertIn("0", result.stdout.split())
+
+    def test_the_tmux_socket_default_is_a_socket_name_not_a_path(self):
+        """A path here made the backend ask for /tmp/tmux-1000//tmp/tmux-1000/default, see zero
+        panes, and GATE 5 refuse for the wrong reason."""
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap, os; "
+                "print(os.environ['DUNKINGSHEEP_TMUX_SOCKET'])")
+        result = _child({"DUNKINGSHEEP_TMUX_SOCKET": "/tmp/tmux-1000/default"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("default", result.stdout.split())
+        self.assertNotIn("/tmp/", result.stdout)
+
+    def test_an_ambient_flag_equal_to_the_default_is_not_noise(self):
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap")
+        result = _child({"DUNKINGSHEEP_CLAUDE_STATUS": "0"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("DUNKINGSHEEP_CLAUDE_STATUS", result.stderr)
+
+    def test_a_parent_suite_dir_is_not_announced(self):
+        """A child inherits its parent's /tmp/dunkingsheep-tests-* dir; announcing that is noise
+        about noise, and a message that fires on the normal case stops being read."""
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap")
+        result = _child({"DUNKINGSHEEP_DIR": "/tmp/dunkingsheep-tests-parent123"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("ignoring ambient DUNKINGSHEEP_DIR", result.stderr)
+
+    def test_a_parent_suite_socket_is_not_announced(self):
+        """Reviewer on #42: the DIR case was silenced but the SOCKET case was not, because
+        _is_another_suite_run() tested the basename and the socket value's basename is
+        "test.sock". A child process therefore still emitted one noise line per run."""
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap")
+        result = _child({"DUNKINGSHEEP_SOCKET": "/tmp/dunkingsheep-tests-parent123/test.sock"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertNotIn("ignoring ambient DUNKINGSHEEP_SOCKET", result.stderr)
+
+    def test_a_real_operator_dir_is_still_announced(self):
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap")
+        result = _child({"DUNKINGSHEEP_DIR": "/home/somebody/.config/dunkingsheep"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("ignoring ambient DUNKINGSHEEP_DIR", result.stderr)
+
+    def test_the_opt_out_keeps_every_ambient_value(self):
+        code = ("import sys; sys.path.insert(0, 'tests'); import _bootstrap, os; "
+                "print(os.environ['DUNKINGSHEEP_CLAUDE_STATUS'], "
+                "os.environ['DUNKINGSHEEP_TTY_IDENTITY'])")
+        result = _child({"DUNKINGSHEEP_TESTS_OWN_ENV": "1",
+                         "DUNKINGSHEEP_CLAUDE_STATUS": "1",
+                         "DUNKINGSHEEP_TTY_IDENTITY": "1"}, code)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("1 1", result.stdout)
+        self.assertEqual("", result.stderr.strip())
