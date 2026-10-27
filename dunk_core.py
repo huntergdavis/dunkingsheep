@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.62"
+VERSION = "2.70.63"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -846,6 +846,7 @@ class Flock:
             return status
 
         already_decided |= {row.get("id") for row in rows if verdict_for(row)}
+        decided_reason = {}
         for row in rows:
             notify_ids = [str(x) for x in (row.get("notify_for") or [])]
             if not notify_ids:
@@ -868,9 +869,19 @@ class Flock:
             # (read, archived or cancelled). Otherwise the row is RESTORED and the reason logged.
             if states and all(state in ("sent", "cancelled") for state in states):
                 already_decided.add(row.get("id"))
+                # Keep WHY, not just THAT (reviewer, PR #43): the skip's log used to fall through to
+                # the word "decided", which is grammatical and uninformative. The reason is computed
+                # here, so it travels from here.
+                decided_reason[row.get("id")] = (
+                    "every notice is %s, so the nudge arrived"
+                    % "/".join(sorted({str(x) for x in states})))
             elif states and all(state in ("sent", "failed", "cancelled") for state in states):
                 if mail_states and all(state != "queued" for state in mail_states):
                     already_decided.add(row.get("id"))
+                    decided_reason[row.get("id")] = (
+                        "every notice is %s and its mail is no longer waiting (%s)"
+                        % ("/".join(sorted({str(x) for x in states})),
+                           "/".join(sorted({str(x) for x in mail_states}))))
                     log.info("message %s is decided: every notice is %s and its mail is no longer "
                              "waiting (states %s)", row.get("id"),
                              "/".join(sorted({str(x) for x in states})),
@@ -889,7 +900,8 @@ class Flock:
                     # there), the per-row except caught it, and the log said "could not restore a
                     # held message:" with an EMPTY reason - a refusal reported as a failure, which
                     # is how a correct skip sends the next reader hunting a bug (reviewer, PR #43).
-                    verdict = (verdict_for(row)
+                    verdict = (decided_reason.get(row.get("id"))
+                               or verdict_for(row)
                                or next((m.status for m in self.message_history
                                         if m.id == row.get("id")), "decided"))
                     log.info("not restoring message %s: it already %s before the restart",

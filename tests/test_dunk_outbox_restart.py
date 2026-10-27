@@ -163,6 +163,27 @@ class OutboxRestartTests(unittest.TestCase):
         self.assertIn("is decided", text)
         self.assertIn("no longer waiting", text)
 
+    def test_the_sent_branch_logs_why_not_just_that(self):
+        """Reviewer, PR #43: the skip used to read "it already decided before the restart", which is
+        grammatical and says nothing about WHY. The reason is computed where the row is added."""
+        flock = self._flock()
+        try:
+            sent = flock.inbox.send("Claude Proj", "already delivered", sender="%4")
+            inbox_id = sent["message_id"]
+            flock.inbox.record_notify(inbox_id, "sent")
+        finally:
+            flock.close()
+        self._write_state([self._row("m1", notify=[inbox_id])])
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            second = self._flock()
+            try:
+                self.assertEqual([], self._held_ids(second))
+            finally:
+                second.close()
+        text = "\n".join(captured.output)
+        self.assertIn("every notice is sent", text)
+        self.assertNotIn("it already decided", text)
+
     def test_a_cancelled_inbox_verdict_also_decides_the_row(self):
         """Reviewer, PR #43: cancelled is a real status; a cancelled notice must not be typed."""
         flock = self._flock()
