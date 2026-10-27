@@ -6,7 +6,7 @@ because its transcript quoted the marker. Each harness now exposes its own truth
 
     claude  `claude agents --json --cwd <dir>` -> busy / waiting / idle (+ waitingFor)
     pi      its extension's turn events        -> a declared turn with a TTL
-    codex   turn/started and turn/completed on its local socket (NOT WIRED YET)
+    codex/opencode declared turns when supplied; automatic producers NOT WIRED YET
 
 THE RULE, and the reason this module exists: an ABSENT signal is UNKNOWN, never
 idle. "Assume idle" has cost us four stalls in one day; "unknown" costs a lane one
@@ -22,8 +22,8 @@ STATES = ("working", "waiting", "idle", "unknown")
 IDLE_CLAIM_S = float(os.environ.get("DUNKINGSHEEP_IDLE_CLAIM_S", str(6 * 3600)))
 
 
-def turn_state(state, now=None, idle_claim_s=None):
-    """THE one rule for what a pi turn means. Returns (state_or_None, since, reason).
+def turn_state(state, now=None, idle_claim_s=None, harness="pi"):
+    """THE one rule for a declared turn. Returns (state_or_None, since, reason).
 
     There must be exactly one derivation of this, because the desk and the dispatcher read the
     same turn and must not disagree about it (reviewer on t227: the roster said IDLE for a turn
@@ -34,7 +34,7 @@ def turn_state(state, now=None, idle_claim_s=None):
     now = time.time() if now is None else now
     idle_claim_s = IDLE_CLAIM_S if idle_claim_s is None else idle_claim_s
     if not state:
-        return None, None, ("no pi turn has ever been recorded for this pane (extension not "
+        return None, None, (f"no activity source: no {harness} turn has ever been recorded for this pane (extension not "
                             "loaded, or the lane has not taken a turn since it started)")
     if state.get("expires_at", 0) > now:
         return "working", state.get("started_at"), None
@@ -63,10 +63,12 @@ def activity(pane, *, claude_status=None, turns=None, now=None):
         return _claude(pane, claude_status, now)
     if harness == "pi":
         return _pi(pane, turns, now)
-    if harness == "codex":
-        return {"state": "unknown", "since": None, "source": "codex",
-                "reason": "codex has no activity source wired yet (its turns arrive "
-                          "on a local socket; this daemon does not subscribe)"}
+    if harness in ("codex", "opencode"):
+        state, since, reason = turn_state(
+            (turns or {}).get(pane.get("pane_id")), now=now, harness=harness)
+        return {"state": state or "unknown", "since": since,
+                "source": f"{harness} declared turns", "reason": reason,
+                "inferred": True}
     return {"state": "unknown", "since": None, "source": harness or "none",
             "reason": f"no activity source for harness {harness!r}"}
 

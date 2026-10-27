@@ -75,6 +75,25 @@ class PiActivityTests(unittest.TestCase):
 
 
 class UnknownIsNeverIdleTests(unittest.TestCase):
+    def test_codex_and_opencode_use_declared_turns_with_explicit_provenance(self):
+        now = time.time()
+        for harness in ("codex", "opencode"):
+            pane = {"pane_id": "%1", "agent": harness}
+            for turn, expected in (
+                ({"started_at": now - 1, "expires_at": now + 60}, "working"),
+                ({"ended_at": now - 1, "expires_at": 0}, "idle"),
+                ({"expires_at": now - 1}, "unknown"),
+                ({"ended_at": now - dunk_activity.IDLE_CLAIM_S - 1}, "unknown"),
+                ({}, "unknown"),
+            ):
+                with self.subTest(harness=harness, turn=turn):
+                    record = dunk_activity.activity(pane, turns={"%1": turn}, now=now)
+                    self.assertEqual(expected, record["state"])
+                    self.assertEqual(f"{harness} declared turns", record["source"])
+                    self.assertTrue(record["inferred"])
+                    if expected == "unknown":
+                        self.assertTrue(record["reason"])
+
     def test_every_missing_signal_reads_unknown_with_a_reason(self):
         cases = [
             ({"pane_id": "w1:p1", "agent": "codex"}, {}),

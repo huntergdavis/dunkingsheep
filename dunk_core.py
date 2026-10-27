@@ -947,7 +947,11 @@ class Flock:
         panes = self.herdr.list_panes_grouped()
         for pane in panes:
             pane["is_self"] = bool(self_pane_id) and pane.get("pane_id") == self_pane_id
-            pane["agent_status"] = self.lane_status(pane)
+            activity = self.lane_activity(pane)
+            pane["agent_status"] = activity["state"]
+            pane["agent_status_source"] = activity["source"]
+            pane["agent_status_reason"] = activity["reason"]
+            pane["agent_status_inferred"] = activity["inferred"]
         return panes
 
     # The age bound lives with the rule (dunk_activity.IDLE_CLAIM_S); this alias exists so tests
@@ -955,6 +959,9 @@ class Flock:
     IDLE_CLAIM_S = dunk_activity.IDLE_CLAIM_S
 
     def lane_status(self, pane):
+        return self.lane_activity(pane)["state"]
+
+    def lane_activity(self, pane):
         """What the lane is DOING, from the best evidence this backend has.
 
         The tmux backend has no agent-status API, so it reports "unknown" for every pane and
@@ -972,18 +979,22 @@ class Flock:
         """
         backend = (pane.get("agent_status") or "").strip().lower()
         if backend and backend not in ("unknown", ""):
-            return backend                    # a backend that can answer, answers
+            return {"state": backend, "source": "terminal backend",
+                    "reason": None, "inferred": False}
         pane_id = pane.get("pane_id")
         if not pane_id:
-            return None
+            return {"state": None, "source": "none",
+                    "reason": "no activity source: pane identity missing", "inferred": True}
         with self._lock:
             state = dict(self.turns.get(pane_id) or {})
         # ONE derivation (reviewer on t227): dunk_activity.turn_state owns the rule, so the desk
         # (which reads activity()) and this (which feeds the CLI and the dispatcher) cannot
         # disagree about what the same turn means.
-        derived, _since, _reason = dunk_activity.turn_state(state, now=time.time(),
-                                                            idle_claim_s=self.IDLE_CLAIM_S)
-        return derived
+        harness = pane.get("agent") or "lane"
+        derived, _since, reason = dunk_activity.turn_state(
+            state, now=time.time(), idle_claim_s=self.IDLE_CLAIM_S, harness=harness)
+        return {"state": derived, "source": f"{harness} declared turns",
+                "reason": reason, "inferred": True}
 
     # -- inboxes ------------------------------------------------------------
     # Machine-to-machine messaging that never types into a terminal. See
