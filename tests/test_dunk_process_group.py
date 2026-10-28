@@ -56,7 +56,40 @@ def _cmdline(pid):
         return ""
 
 
+CONTROL_LEADER = """\
+import os, subprocess, sys, time
+# PRE-FIX SHAPE: a plain session leader - no PDEATHSIG, no die-with-parent, no group kill.
+subprocess.Popen(["/bin/sh", "-c", {child!r}])
+time.sleep(120)
+"""
+
+
 class ProcessGroupTests(unittest.TestCase):
+    def test_the_fixture_discriminates_old_code_leaves_survivors(self):
+        """THE CONTROL, pinned as a test rather than as a message (CoS i29180).
+
+        Measured 2026-10-27 by hand: pre-fix code leaves THREE tagged survivors at +6 s - the leader,
+        the sh child and the grandchild. If this control ever passes with zero survivors, the fixture
+        has stopped reproducing the leak and every other result in this file is meaningless.
+        """
+        tmp = tempfile.mkdtemp(prefix="pgctl-")
+        subprocess.run(["cp", "/bin/sleep", os.path.join(tmp, "tagged-sleep")], check=True)
+        leader_code = CONTROL_LEADER.format(child=tmp + "/tagged-sleep 600 & wait")
+        spawner_code = SPAWNER.format(leader=leader_code)
+        watched = subprocess.Popen([sys.executable, "-c", spawner_code],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self._kill_tagged, tmp, watched.pid)
+        watched.stdout.readline()
+        time.sleep(3)
+        os.kill(watched.pid, signal.SIGKILL)
+        watched.wait(timeout=10)
+        time.sleep(6)
+        survivors = [(p, _cmdline(p)[:60]) for p in os.listdir("/proc")
+                     if p.isdigit() and tmp in _cmdline(p)]
+        self.assertGreaterEqual(len(survivors), 2,
+                                f"the fixture no longer reproduces the leak - only {survivors} survived "
+                                "old code, so it cannot protect the fix")
+
     def test_tagged_children_die_when_the_watched_parent_is_sigkilled(self):
         tmp = tempfile.mkdtemp(prefix="pg-")
         # A copy of sleep whose argv[0] carries the temp dir: a survivor must be identifiable, or
