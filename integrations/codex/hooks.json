@@ -1,0 +1,27 @@
+{
+  "_comment": "Fragment installed into ~/.codex/hooks.json. Keep the command strings identical to the trusted entries when replacing an existing script; changing this file itself invalidates Codex's persisted hook trust. Add the missing UserPromptSubmit/Stop entries only on a fresh install, then approve them once in the Codex TUI.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"$HOME/.codex/dunkingsheep-turn.sh\" start",
+            "timeout": 15,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "bash \"$HOME/.codex/dunkingsheep-turn.sh\" end",
+            "timeout": 15,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

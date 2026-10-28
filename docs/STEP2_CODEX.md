@@ -19,6 +19,30 @@ a delay, and the owner feels delays.
 
 ## What the work is
 
+**Updated 2026-10-28 (t264): the app-server client below was the original plan and
+is NOT the implementation.**  A client of the shared app-server daemon is detached
+from the pane (`3639953 -> 3493002 -> 1` with the pane root absent), so
+`require_turn_caller` refuses it, correctly.  A detached adapter asserting a
+pane/session/cwd label would need a new ownership proof and is not wanted.
+
+The implementation lives in `integrations/codex/`: Codex's `UserPromptSubmit` /
+`Stop` hooks call a token-aware producer, and Codex is launched with
+`codex --no-daemon`.  With that flag the app-server runs in the pane's own Codex
+process, so the hook is a child of the pane root and the existing ancestry check
+authenticates it.  Measured with an isolated `CODEX_HOME`: hook -> codex TUI ->
+... -> pane root.  Existing lanes need a respawn with `--no-daemon`; a lane on the
+shared daemon keeps reporting `unknown` and the daemon refuses the event rather
+than guessing.  See `integrations/codex/README.md` for the contract and the
+refusals (stale/replayed turn, replaced root, expired token, missing start).
+
+OpenCode is the other half: its plugins run inside the OpenCode server process,
+so `integrations/opencode/dunkingsheep-turn.js` starts on `chat.message` and ends
+on `session.idle` for the exact root session.  A shared/detached server is
+refused by the same ancestry check; disconnect/reconnect is covered by the TTL,
+not by an idle guess.  See `integrations/opencode/README.md`.
+
+### Original app-server plan (kept for the record; superseded)
+
 A small JSON-RPC-over-stdio client: start `codex app-server`, list threads, subscribe
 to `turn/started`/`turn/completed`, map a thread to a pane (cwd + session id from
 `launches.json`), and feed `dunk_activity.activity()` a codex branch. Then the hold can
@@ -73,3 +97,21 @@ The interface is marked experimental by its own authors, it requires a live busy
 lane to test against, and a half-wired socket would replace a *known* hold with an
 *unknown* signal - the exact trade this project has been refusing all night. The hold
 (rule 15) is the safe default in the meantime, and it reports its own failures.
+
+## t264 acceptance map (2026-10-28)
+
+| # | requirement | evidence |
+|---|---|---|
+| a | real start/completed updates only the exact bound pane, dispatch once | isolated test panes: Codex `%73` and OpenCode `%76` each showed `working` then one accepted end; daemon log had exactly one `turn.end` for each; dispatch returned `skip: no_open_work` (the pane held no task) |
+| b | detached or forged callers refuse | `dunkingsheep --self-pane %15 --json turn start --pane %15` from a pi pane refused `pane_not_in_ancestry`; the Codex producer refuses `no_codex_ancestor`; existing `test_turn_auth_diagnostics` covers every sub-condition |
+| c | ambiguous sessions refuse | OpenCode plugin ignores child sessions and refuses a second non-child root while active (`tests/test_opencode_turn_generation.mjs`); Codex binds the exact hook `session_id` + `turn_id` |
+| d | stale or replayed turns refuse | Codex token is matched to the hook `turn_id` and consumed before the end RPC; stale/replaced/expired/replayed cases are in `tests/test_codex_turn_generation.py`; the daemon rejects duplicate/foreign turns in `tests/test_dunk_turn_end_dispatch.py` |
+| e | a replaced pane root refuses, never falls back to a label | Codex producer stores starter pid/start and refuses `replaced_root` without touching the new token (`test_replaced_root_refuses...`); the daemon is the final gate (`pane_not_in_ancestry`) |
+| f | disconnect behaviour stated | Codex token is on local state and the TTL expires a crashed turn; OpenCode token is in memory, and `opencode run`/reconnect loses it, so the TTL expires the turn; neither path reports idle on expiry (`turn_state` in `dunk_activity.py`) |
+
+**Deployment limits (not claimed):** the Codex producer is in-pane only with
+`codex --no-daemon`; existing shared-daemon lanes need a respawn.  The
+installers were exercised on temporary Codex/OpenCode homes, not the live owner
+homes.  No live lane was restarted, and no live task-bearing lane was used to
+test dispatch delivery.  The Codex install trust approval for a *fresh*
+hooks.json is an operator step.
