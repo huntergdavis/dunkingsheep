@@ -555,13 +555,19 @@ def validate(receipt):
                 failures.append(f"{lane}: handoff has no transport_id")
             if handoff.get("delivered_at") is None:
                 failures.append(f"{lane}: handoff has no delivered_at")
+            attempt_at = handoff.get("attempt_at")
+            if attempt_at is None:
+                failures.append(f"{lane}: handoff has no transport attempt_at")
             turn_started = handoff.get("turn_started_at")
             if not handoff.get("turn_id") or turn_started is None:
                 failures.append(f"{lane}: handoff has no producer turn binding")
             else:
-                if handoff.get("delivered_at") is not None and \
-                        float(turn_started) <= float(handoff["delivered_at"]):
-                    failures.append(f"{lane}: B turn started before its delivery")
+                # delivered_at is message.finished_at (after submit_text returns).
+                # A valid exact-token fast turn can start AFTER attempt_at and
+                # BEFORE delivered_at/notify_at; do not require it after the
+                # send confirmation.
+                if attempt_at is not None and float(turn_started) <= float(attempt_at):
+                    failures.append(f"{lane}: B turn started before the transport attempt")
                 if b_at is not None and float(turn_started) > float(b_at):
                     failures.append(f"{lane}: only turn start is AFTER B completion")
             turn_caller = handoff.get("turn_caller") or {}

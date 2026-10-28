@@ -129,15 +129,25 @@ an approval file matches the running daemon version/code and the repo head.
 | B claim | one `task_events` `claimed` on B, after A complete and after the handoff |
 | B delivery | `inbox.db` `nj-` row: `sender=next-job`, `notify_state=sent`, `notify_at`, `notify_transport_id`, `notify_attempt`; handoff `transport_id`/`attempt`/`delivered_at` agree |
 | B consumption | the same inbox row has `read_at` or `acked_at` |
-| B start | handoff `state=started`, `turn_id`, `turn_started_at > delivered_at`, `turn_caller.name` = lane; producer echoed `--handoff-id nj-...`; matching `metrics` `turn.start` |
+| B start | handoff `state=started`, `turn_id`, `turn_started_at > attempt_at` and `<= B completion`, `turn_caller.name` = lane; producer echoed `--handoff-id nj-...`; matching `metrics` `turn.start`; independent sent receipt still required |
 | B complete | `tasks.db` `task_events` `completed` on B at/after the turn start; B artifact prefix |
 | no human nudge | zero `send_text` messages to the lane during the run |
 | no duplicate B | exactly one handoff message id, one B claim, one `nj-` receipt |
 | no work after B | a `next_job_decision` record on B with `reason=no_assigned_work`; no C claimed or invented |
 
+**Fast-turn ordering:** `delivered_at` is `message.finished_at`, set after
+`submit_text` returns, and `notify_at` is later still.  A valid exact-token turn
+can start after `attempt_at` and **before** `delivered_at`/`notify_at` (measured
+on dd243b4: attempt_at < turn_started_at < delivered_at < notify_at for the same
+`nj-` id and attempt).  The validator therefore requires
+`turn_started_at > attempt_at` and `<= B completion`, not after the send
+confirmation; the independent sent receipt and the bound turn id are still
+required.
+
 The validator also rejects B claimed before A completed, a handoff without a
-`message_id`, a wrong `from_task`, a duplicate B claim/delivery, a missing B
-turn start, a missing artifact, and any human send.
+`message_id`, a wrong `from_task`, a duplicate B claim/delivery, a turn before
+the transport attempt, a turn only after B completion, a missing B turn start,
+a missing artifact, and any human send.
 
 ## Negative probes
 

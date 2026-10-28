@@ -29,9 +29,9 @@ def lane_fixture(lane="pi", pane="%90", a="tA", b="tB"):
         "message_id": MID, "from_task": a, "completion_at": 2.0,
         "caller": {"name": lane, "pid": 10, "start": "s"},
         "attempt": 1, "state": "started", "trigger": "completion",
-        "transport_id": MID + ":1", "delivered_at": 3.0,
-        "turn_id": "turn-1", "turn_started_at": 4.0, "turn_source": lane,
-        "turn_caller": {"name": lane, "pid": 10, "start": "s"}, "at": 4.0,
+        "attempt_at": 2.079, "transport_id": MID + ":1", "delivered_at": 2.092,
+        "turn_id": "turn-1", "turn_started_at": 2.086, "turn_source": lane,
+        "turn_caller": {"name": lane, "pid": 10, "start": "s"}, "at": 2.2,
     }
     return {
         "pane": pane, "A": a, "B": b,
@@ -46,14 +46,14 @@ def lane_fixture(lane="pi", pane="%90", a="tA", b="tB"):
         "handoff": handoff, "handoff_first_at": 2.0,
         "B_receipt": {
             "id": MID, "pane_id": pane, "sender": "next-job",
-            "notify_state": "sent", "notify_at": 3.0,
+            "notify_state": "sent", "notify_at": 2.0926,
             "notify_transport_id": MID + ":1", "notify_attempt": 1,
             "read_at": 3.5, "acked_at": None,
             "body": f"TASK {b} [urgent] test\nhandoff: {MID} from {a}",
         },
         "next_job_decisions": [{"at": 5.0, "reason": "no_assigned_work",
                                 "actor": pane}],
-        "turn_starts": [{"kind": "turn.start", "at": 4.0, "pane_id": pane}],
+        "turn_starts": [{"kind": "turn.start", "at": 2.086, "pane_id": pane}],
         "human_sends": [],
         "A_artifact": {"exists": True, "prefix_ok": True},
         "B_artifact": {"exists": True, "prefix_ok": True},
@@ -79,6 +79,14 @@ class ValidatorTests(unittest.TestCase):
     def test_good_chain_passes(self):
         self.assertEqual([], self.failures(receipt()))
 
+    def test_early_causal_turn_before_delivery_but_after_attempt_passes(self):
+        value = receipt()
+        h = value["lanes"]["pi"]["handoff"]
+        self.assertLess(h["attempt_at"], h["turn_started_at"])
+        self.assertLess(h["turn_started_at"], h["delivered_at"])
+        self.assertLess(h["delivered_at"], value["lanes"]["pi"]["B_receipt"]["notify_at"])
+        self.assertEqual([], self.failures(value))
+
     def test_unrelated_receipt_id_fails(self):
         value = receipt()
         value["lanes"]["pi"]["B_receipt"]["id"] = "nj-" + "b" * 32
@@ -88,6 +96,21 @@ class ValidatorTests(unittest.TestCase):
         value = receipt()
         value["lanes"]["pi"]["handoff"]["turn_started_at"] = 1000.0
         self.assert_fails(value, "only turn start is AFTER B completion")
+
+    def test_turn_before_transport_attempt_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["handoff"]["turn_started_at"] = 2.0
+        self.assert_fails(value, "before the transport attempt")
+
+    def test_missing_attempt_at_fails(self):
+        value = receipt()
+        del value["lanes"]["pi"]["handoff"]["attempt_at"]
+        self.assert_fails(value, "no transport attempt_at")
+
+    def test_early_turn_without_sent_receipt_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_receipt"]["notify_state"] = "queued"
+        self.assert_fails(value, "notify_state")
 
     def test_foreign_a_claim_actor_fails(self):
         value = receipt()
@@ -138,7 +161,7 @@ class ValidatorTests(unittest.TestCase):
 
     def test_b_completed_before_turn_start_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["B_completed"]["at"] = 3.5
+        value["lanes"]["pi"]["B_completed"]["at"] = 2.0
         self.assert_fails(value, "B completed before its own turn started")
 
     def test_b_claimed_before_a_completed_fails(self):
@@ -256,14 +279,16 @@ class CollectorTests(unittest.TestCase):
                          "attempt": 1, "state": "pending", "trigger": "completion"}
             for at, state, extra in (
                     (base + 1, "pending", {}),
-                    (base + 2, "sent", {"transport_id": mid + ":1",
-                                         "delivered_at": base + 2}),
-                    (base + 3, "started", {"transport_id": mid + ":1",
-                                            "delivered_at": base + 2,
-                                            "turn_id": f"turn-{lane}",
-                                            "turn_started_at": base + 3,
-                                            "turn_source": lane,
-                                            "turn_caller": {"name": lane, "pid": 1}})):
+                    (base + 1.10, "sent", {"attempt_at": base + 1.05,
+                                            "transport_id": mid + ":1",
+                                            "delivered_at": base + 1.10}),
+                    (base + 1.20, "started", {"attempt_at": base + 1.05,
+                                               "transport_id": mid + ":1",
+                                               "delivered_at": base + 1.10,
+                                               "turn_id": f"turn-{lane}",
+                                               "turn_started_at": base + 1.08,
+                                               "turn_source": lane,
+                                               "turn_caller": {"name": lane, "pid": 1}})):
                 meta = dict(base_meta, state=state, **extra)
                 tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
                               "VALUES (?, 'next_job_handoff', ?, ?, ?)",
