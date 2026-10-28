@@ -22,11 +22,28 @@ _TMP = tempfile.mkdtemp(prefix="dunkingsheep-tests-")
 # DUNKINGSHEEP_TESTS_OWN_ENV=1 restores the old behaviour for a deliberate trial against a
 # scratch directory you named yourself.
 _OWN_ENV = os.environ.get("DUNKINGSHEEP_TESTS_OWN_ENV") == "1"
+def _is_another_suite_run(value):
+    """True when the ambient value came from ANOTHER run of this suite, not from the operator.
+
+    A child process inherits its parent's DUNKINGSHEEP_DIR, which is itself a
+    /tmp/dunkingsheep-tests-* directory. Announcing the override there is noise about noise - and a
+    message that fires on every normal case stops being read (reviewer measured three lines per
+    child on #41). Only a value that is NOT ours is worth a line.
+    """
+    # ANY path component, not just the basename: DUNKINGSHEEP_SOCKET's value is
+    # /tmp/dunkingsheep-tests-XXXX/test.sock, whose BASENAME is "test.sock" - so a basename test
+    # silenced the DIR line and left the SOCKET line firing, one noise line per child (reviewer on
+    # #42). A suite dir anywhere in the path means the value came from another run of this suite.
+    return any(part.startswith("dunkingsheep-tests-")
+               for part in str(value).replace(os.sep, "/").split("/") if part)
+
+
 for _name in ("DUNKINGSHEEP_DIR", "DUNKINGSHEEP_SOCKET"):
     _ambient = os.environ.get(_name)
     if _ambient and not _OWN_ENV:
         _wanted = _TMP if _name == "DUNKINGSHEEP_DIR" else os.path.join(_TMP, "test.sock")
-        if os.path.realpath(_ambient) != os.path.realpath(_wanted):
+        if (os.path.realpath(_ambient) != os.path.realpath(_wanted)
+                and not _is_another_suite_run(_ambient)):
             print(f"tests: ignoring ambient {_name}={_ambient!r}; the suite owns its state dir "
                   f"({_TMP}). Set DUNKINGSHEEP_TESTS_OWN_ENV=1 to use the ambient one.",
                   file=sys.stderr)
@@ -42,13 +59,28 @@ os.environ.setdefault("DUNKINGSHEEP_TEST_SPAWN", "1")
 # ...and it watches THIS process (the suite), not the short-lived CLI call that happens to spawn it.
 os.environ.setdefault("DUNKINGSHEEP_DIE_WITH_PARENT", str(os.getpid()))
 
-os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")
-os.environ.setdefault("DUNKINGSHEEP_MIN_POLL_S", "0")  # tests call the CLI repeatedly
+# THE SUITE OWNS ITS FLAGS TOO (#42): these are performance/behaviour flags rather than state, so none
+# can move real work - but an ambient value could make the suite shell out to `claude agents --json`
+# (~2.9 s per call), change the CLI's poll cache, or make identity consult the developer's own terminal.
+# Overridden and announced, with an ambient value equal to the default staying quiet.
+_SUITE_DEFAULTS = {
+    "DUNKINGSHEEP_TMUX_SOCKET": "default",
+    "DUNKINGSHEEP_CLAUDE_STATUS": "0",
+    "DUNKINGSHEEP_MIN_POLL_S": "0",
+    "DUNKINGSHEEP_TTY_IDENTITY": "0",
+}
+_OWN_ENV = os.environ.get("DUNKINGSHEEP_TESTS_OWN_ENV") == "1"
+for _name, _default in _SUITE_DEFAULTS.items():
+    _ambient = os.environ.get(_name)
+    if _ambient is not None and _ambient != _default and not _OWN_ENV:
+        print(f"tests: ignoring ambient {_name}={_ambient!r}; the suite sets {_default!r}. "
+              f"Set DUNKINGSHEEP_TESTS_OWN_ENV=1 to keep the ambient value.", file=sys.stderr)
+    if not _OWN_ENV:
+        os.environ[_name] = _default
 
 # Identity by TTY is a LIVE probe (tmux list-panes). A test must not consult the
 # developer's terminal to decide who it is, so it is off here and the identity
 # tests inject the lookup explicitly (tests/test_dunk_identity_tty.py).
-os.environ.setdefault("DUNKINGSHEEP_TTY_IDENTITY", "0")
 
 # The CLI auto-starts a detached daemon on its temp socket. A detached daemon
 # outlives the test process, so every run of the suite used to leak one: 44 had
