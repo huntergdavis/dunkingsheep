@@ -39,9 +39,26 @@ MAX_POST_BYTES = 4096
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    """An answer that is not a success, carrying what the caller needs to act on it.
+
+    `context` is echoed back verbatim and is deliberately LIMITED: for a refused
+    resize it holds the name and the size that was ASKED FOR (`requested`) and never a
+    measured geometry field. A caller must not be able to read a refusal as applied,
+    so the response shape is the other half of the "a refusal moves nothing" promise -
+    the first half is that tmux is never asked.
+    """
+
+    def __init__(self, status, message, context=None):
         super().__init__(message)
         self.status = status
+        self.context = dict(context or {})
+
+
+def error_body(error, message=None):
+    """The JSON a client sees for a refusal: error first, then only echoed context."""
+    payload = {"error": message if message is not None else str(error)}
+    payload.update(getattr(error, "context", {}) or {})
+    return payload
 
 
 def _client():
@@ -186,9 +203,14 @@ def resize_terminal(name, payload):
     ok, result = backend.resize(target.get("pane_id"), payload.get("cols"),
                                 payload.get("rows"))
     if not ok:
-        # A refused size (tmux 'width too small', a non-integer, a missing pane) is the
-        # caller's problem, and the backend's own words are more useful than a rewrite.
-        raise ApiError(400, str(result))
+        # A refused size (a non-integer, our bounds, tmux's own 'width too large', a
+        # missing pane) is the caller's problem, and the backend's own words are more
+        # useful than a rewrite. The body echoes the ASK only - no measured geometry,
+        # no resized_panes - so a refusal cannot be misread as a partial success.
+        raise ApiError(400, str(result),
+                       {"name": name, "pane_id": target.get("pane_id"),
+                        "requested": {"cols": payload.get("cols"),
+                                      "rows": payload.get("rows")}})
     return {"as_of": _now(), "name": name, **result}
 
 
@@ -206,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = route(parsed.path, parse_qs(parsed.query))
             status = 200
         except ApiError as error:
-            payload, status = {"error": str(error)}, error.status
+            payload, status = error_body(error), error.status
         except (socket.timeout, OSError) as error:
             payload, status = {"error": f"daemon call failed: {error}"}, 503
         except Exception as error:                      # noqa: BLE001 - answer, never crash
@@ -232,7 +254,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "body must be JSON")
             body, status = json.dumps(route_post(parsed.path, payload), indent=2), 200
         except ApiError as error:
-            body, status = json.dumps({"error": str(error)}), error.status
+            body, status = json.dumps(error_body(error), indent=2), error.status
         except Exception as error:                      # noqa: BLE001 - answer, never crash
             body, status = json.dumps({"error": f"internal error: {error}"}), 500
         data = body.encode("utf-8")

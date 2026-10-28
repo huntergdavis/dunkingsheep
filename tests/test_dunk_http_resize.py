@@ -105,6 +105,35 @@ class ResizeRoute(unittest.TestCase):
             dunk_http.route_post("/api/terminals/cos/resize", {"cols": 0, "rows": 30})
         self.assertEqual(400, caught.exception.status)
         self.assertIn("width too small", str(caught.exception))
+        # ... and it names what was refused, so a caller knows WHICH request failed.
+        self.assertEqual("cos", caught.exception.context["name"])
+        self.assertEqual({"cols": 0, "rows": 30}, caught.exception.context["requested"])
+
+    def test_a_refusal_body_carries_no_geometry_at_all(self):
+        """The reviewer's other half: a refusal must not LOOK like an applied resize.
+
+        The unit tests already prove the window does not move. This one proves the
+        RESPONSE cannot be misread: a refusal body is {error, name, pane_id, requested}
+        and nothing else - no cols/rows/window_pane_count/resized_panes.
+        """
+        self._install(FakeBackend([pane("%1", "cos")],
+                                  result=(False, "cols and rows must be between 1 and 1000")))
+        with self.assertRaises(dunk_http.ApiError) as caught:
+            dunk_http.route_post("/api/terminals/cos/resize", {"cols": 0, "rows": 24})
+        body = dunk_http.error_body(caught.exception)
+        self.assertEqual({"error", "name", "pane_id", "requested"}, set(body))
+        for key in ("cols", "rows", "window_pane_count", "resized_panes", "as_of"):
+            self.assertNotIn(key, body, key)
+        self.assertEqual({"cols": 0, "rows": 24}, body["requested"])
+
+    def test_the_error_body_helper_is_the_single_shape(self):
+        """Every refusal path - route misuse included - goes through one shaper."""
+        self._install(FakeBackend([pane("%1", "cos")]))
+        with self.assertRaises(dunk_http.ApiError) as caught:
+            dunk_http.route_post("/api/terminals/nope/resize", {"cols": 80, "rows": 24})
+        body = dunk_http.error_body(caught.exception)
+        self.assertIn("error", body)
+        self.assertNotIn("cols", body)
 
     def test_backend_without_the_capability_is_501(self):
         self._install(FakeBackend([pane("%1", "cos")], capabilities=()))
