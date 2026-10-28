@@ -14,7 +14,7 @@ presses a key, never calls `send_text`/`send_keys`, and never fabricates a turn.
 The release verifier pins one bundle per run:
 
 ```sh
-python3 tools/t374_bundle.py --out <run>/bundle --source-ref <PR72-head>
+python3 tools/t374_bundle.py --out <run>/bundle --source-ref <ACCEPTED-PR72-head>
 ```
 
 It writes `bundle/pi/extensions/dunkingsheep.ts` (installed extension, prior
@@ -153,10 +153,12 @@ turn start, a missing artifact, and any human send.
 
 ## Current state (2026-10-28)
 
-Prepared only.  The dedicated bundle was generated from PR72 head
-`dd243b421ad4cab7b7cbb5fb33d6d3956885eacb`; that head is not yet the accepted
-release.  If PR72 moves, regenerate the bundle and cite the new head/checksums.
-PR71's corrected head is pending.  No agent has been started.  No live pi/Codex acceptance run has
+Prepared only.  The existing bundle artifact is **PROVISIONAL**: it was generated
+from `dd243b4`, which is now superseded (a later PR72 correction is pending
+review).  Do not use it for a live run.  When the integrated release is accepted,
+regenerate once with `--source-ref <accepted head>`; the producer files may be
+byte-identical, but the manifest must name the accepted source.  PR71's corrected
+head is also pending.  No agent has been started.  No live pi/Codex acceptance run has
 been executed against an approved integrated release; no owner-home installation
 or live-lane respawn has been done.  This runbook and the tool are the
 preparation artifact.

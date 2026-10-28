@@ -141,8 +141,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--source-ref", default="dd243b421ad4cab7b7cbb5fb33d6d3956885eacb",
-                        help="PR72 head containing the handoff echo producers")
+    parser.add_argument("--source-ref", required=True,
+                        help="the ACCEPTED PR72/integrated head containing the producers")
     parser.add_argument("--installed-extension",
                         default=os.path.expanduser("~/.pi/agent/extensions/dunkingsheep.ts"))
     parser.add_argument("--owner-codex-config",
