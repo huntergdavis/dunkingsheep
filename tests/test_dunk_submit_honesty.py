@@ -54,8 +54,13 @@ class SubmitHonestyTests(unittest.TestCase):
         self.assertIn("unconfirmed", detail.lower())
 
     def test_a_turn_starting_still_counts_as_delivered(self):
-        self.herdr.statuses["w2:p1"] = "working"
-        ok, detail = self.flock.submit_text("w2:p1", "another line")
+        """t363: "a turn started" means a TRANSITION during this send - idle at
+        send start, working after. A pre-existing working state is stale evidence
+        (the negative regression lives in test_dunk_turn_confirmation.py)."""
+        reads = iter(["idle"])
+        with mock.patch.object(type(self.flock), "_read_status",
+                               side_effect=lambda pane_id: next(reads, "working")):
+            ok, detail = self.flock.submit_text("w2:p1", "another line")
         self.assertTrue(ok, detail)
         self.assertIn("turn", detail)
 

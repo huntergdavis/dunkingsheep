@@ -4606,6 +4606,11 @@ class Flock:
             # One honest refusal naming the pane's own state, instead of four
             # Enter presses into a dead composer and a misleading "did not submit".
             return False, f"agent session is dead ({dead}); not submitting into a dead composer"
+        # t363: the turn evidence must belong to THIS send. A lane that was already
+        # working before we sent is running SOMEONE's turn - possibly an earlier
+        # message's - so its current "working" proves nothing about ours. Baseline
+        # first; only a transition to working during the ladder may confirm.
+        pre_status = self._read_status(pane_id)
         key = "Enter"          # what the press inside the mutex used, if any
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
@@ -4654,10 +4659,11 @@ class Flock:
                     if last_hold is True:
                         # A BUSY LANE'S BOX IS NOT THE RECORD (measured 2026-10-24:
                         # two sends to a claude lane reported "did not submit" and
-                        # the receiving lane showed both as turns). If the agent
-                        # started working, the submit landed and the reader is
-                        # looking at our own echo in the transcript.
-                        if self._turn_started(pane_id):
+                        # the receiving lane showed both as turns). If OUR send
+                        # STARTED the turn - working now, not working at send start
+                        # (t363) - the submit landed and the reader is looking at our
+                        # own echo in the transcript.
+                        if self._turn_started(pane_id, pre_status):
                             if attempt > 1:
                                 self._submit_key[pane_id] = key
                             self.metrics.record("submit.attempt", pane_id=pane_id,
@@ -4668,7 +4674,7 @@ class Flock:
             if last_hold is not True:
                 # UNKNOWN IS NOT FAILURE IF THE LANE STARTED WORKING: the turn is the
                 # other witness, and it is the one that survives an ambiguous box read.
-                if self._turn_started(pane_id):
+                if self._turn_started(pane_id, pre_status):
                     if attempt > 1:
                         self._submit_key[pane_id] = key
                     self.metrics.record("submit.attempt", pane_id=pane_id,
@@ -4686,7 +4692,7 @@ class Flock:
                 continue
             # The box still shows our text. That is only evidence of failure if the
             # lane is NOT working: a busy pane keeps an echo in the transcript.
-            if self._turn_started(pane_id):
+            if self._turn_started(pane_id, pre_status):
                 if attempt > 1:
                     self._submit_key[pane_id] = "Enter"
                 self.metrics.record("submit.attempt", pane_id=pane_id,
@@ -4702,23 +4708,42 @@ class Flock:
             return False, (f"submission unconfirmed: input box unreadable or changing "
                            f"after {SUBMIT_ATTEMPTS} presses; the lane may or may not "
                            "have taken it - check the pane before resending")
+        if pre_status in ("working", "busy", "running", "processing"):
+            # t363: the lane was ALREADY working when this send began, so the turn
+            # we can see is not necessarily ours and the busy echo proves nothing
+            # either way. UNCONFIRMED - not "did not submit" (a claim the echo
+            # cannot support) and not "sent" (a claim the stale turn cannot support).
+            return False, (f"submission unconfirmed: the lane was already working "
+                           f"before this send ({SUBMIT_ATTEMPTS} presses); status "
+                           "alone cannot confirm a new message - check the pane")
         return False, (f"text did not submit after {SUBMIT_ATTEMPTS} Enter presses; "
                        "it is still in the pane's input box")
 
-    def _turn_started(self, pane_id):
-        """True when the agent is demonstrably working: a turn began.
-
-        The second confirmation, for the case the box read cannot decide: a busy
-        pane's composer may still show our text (or its echo) after a successful
-        submit. A turn starting is evidence the text arrived; a box that looks
-        full is not evidence it did not.
-        """
-        status = None
+    def _read_status(self, pane_id):
+        """Quiet status read: None on any probe failure (never fails a send)."""
         try:
-            status = (self.herdr.agent_status(pane_id) or "").strip().lower()
+            return (self.herdr.agent_status(pane_id) or "").strip().lower() or None
         except Exception:                        # noqa: BLE001 - never fail a send on a probe
+            return None
+
+    def _turn_started(self, pane_id, pre_status=None):
+        """True when a turn STARTED during this send: working now, not working before.
+
+        t363: the second confirmation, for the case the box read cannot decide, is
+        only valid as a TRANSITION. A lane that was already working when the send
+        began is running some earlier message's turn; confirming ours with it is
+        the false delivery that the PR63 review reproduced (status "working",
+        composer still holding the full text, sends=[]). A readable pre-send
+        baseline that was NOT working is therefore required; an unreadable
+        baseline (probe failure, missing pane) cannot confirm either - silence is
+        not a baseline."""
+        status = self._read_status(pane_id)
+        if status not in ("working", "busy", "running", "processing"):
             return False
-        return status in ("working", "busy", "running", "processing")
+        if pre_status is None or pre_status in ("working", "busy", "running", "processing"):
+            # No readable baseline, or the turn predates this send: stale evidence.
+            return False
+        return True
 
     def _remember_typed(self, pane_id, text):
         with self._lock:
@@ -4843,6 +4868,9 @@ class Flock:
             # Still bounded: at most GUARDED_PRESS_ATTEMPTS presses with short waits, then
             # the honest refusal. The guard's contract is "no long blocking"; the queue
             # re-attempts.
+            # t363: baseline before any press, so "working" can only confirm a
+            # transition - a lane already working is running an earlier turn.
+            pre_status = self._read_status(pane_id)
             for attempt in range(GUARDED_PRESS_ATTEMPTS):
                 time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
                 held = self._box_holds(pane_id, text)
@@ -4863,7 +4891,7 @@ class Flock:
                                  pane_id, key, attempt)
                     return True, ("sent" if attempt == 0 else
                                   f"sent (confirmed after {attempt + 1} checks)")
-                if self._turn_started(pane_id):
+                if self._turn_started(pane_id, pre_status):
                     log.info("guarded nudge: %s submitted, the lane started a turn%s",
                              pane_id, f" after {key} at round {attempt}" if attempt else "")
                     return True, "sent (confirmed by the turn it started)"
@@ -4878,6 +4906,11 @@ class Flock:
             log.warning("guarded nudge: typed, not submitted on %s after %d rounds; the "
                         "text is in the composer and the lane has not started a turn",
                         pane_id, GUARDED_PRESS_ATTEMPTS)
+            if pre_status in ("working", "busy", "running", "processing"):
+                # t363: stale working state cannot confirm OR condemn this send.
+                return False, ("submission unconfirmed: the lane was already working "
+                               "before this send; status alone cannot confirm a new "
+                               "message - check the pane")
             return False, "text did not submit; it is still in the pane's input box"
         return self._press_until_submitted(pane_id, text, first_pressed=True)
 
