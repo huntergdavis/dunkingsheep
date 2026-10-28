@@ -4816,6 +4816,20 @@ class Flock:
                 return True
         return False
 
+    def composer_region_is_owned(self, pane_id, screen):
+        """PUBLIC (t377 seam, Owner2282): the exact-owned full-composer check.
+
+        Extracts the complete visible composer from `screen` (last prompt-sigil
+        row plus continuation lines, footer excluded) and returns True only when
+        it EQUALS - after _collapse normalisation of wrapping - text we typed or
+        are queuing for `pane_id`. Appended human lines, edits, truncations and
+        foreign drafts are refused. Stable name: the watchdog depends on this,
+        not on the private helpers."""
+        region = _composer_region_text(screen)
+        if not region:
+            return False
+        return self._region_is_ours(pane_id, region)
+
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
         when there is no box to read."""

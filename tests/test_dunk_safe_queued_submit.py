@@ -212,3 +212,29 @@ class SafeQueuedSubmitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicSeamTests(unittest.TestCase):
+    """Owner2282/t377: the watchdog depends on composer_region_is_owned."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_public_wrapper_is_exact_and_names_stable(self):
+        self.flock.sent_text_by_pane["w2:p1"] = [FEDERATE_TEXT]
+        self.herdr.set_screen("w2:p1", _ambiguous_frame(FEDERATE_TEXT))
+        self.assertTrue(self.flock.composer_region_is_owned(
+            "w2:p1", self.herdr.screens["w2:p1"]))
+        self.herdr.set_screen("w2:p1", _ambiguous_frame(
+            FEDERATE_TEXT, continuation_lines=("  HUMAN EDIT: do not run",)))
+        self.assertFalse(self.flock.composer_region_is_owned(
+            "w2:p1", self.herdr.screens["w2:p1"]))
+
+    def test_public_wrapper_is_false_without_ownership(self):
+        self.herdr.set_screen("w2:p1", _ambiguous_frame(FEDERATE_TEXT))
+        self.assertFalse(self.flock.composer_region_is_owned(
+            "w2:p1", self.herdr.screens["w2:p1"]))
