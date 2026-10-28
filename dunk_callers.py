@@ -153,22 +153,49 @@ def caller_belongs_to_pane(caller, pane_pid):
     PID/start time and the ancestry leading to the pane process must match.
     Missing proc/backend information fails closed; no environment label is used.
     """
-    if not caller or not caller.get("start") or not pane_pid:
-        return False
+    return caller_pane_auth_failure(caller, pane_pid) is None
+
+
+def caller_pane_auth_failure(caller, pane_pid):
+    """Return the first failed binding condition, or None on authentication.
+
+    Keep the same fail-closed walk as caller_belongs_to_pane. Reasons describe
+    observations, not guesses about why a process disappeared or was reparented.
+    """
+    if not caller:
+        return "caller_missing"
+    if not caller.get("start"):
+        return "caller_start_missing"
+    if not pane_pid:
+        return "pane_pid_missing"
     try:
-        pid, root = int(caller["pid"]), int(pane_pid)
+        pid = int(caller["pid"])
     except (KeyError, TypeError, ValueError):
-        return False
+        return "caller_pid_invalid"
+    try:
+        root = int(pane_pid)
+    except (KeyError, TypeError, ValueError):
+        return "pane_pid_invalid"
     info = _stat(pid)
-    if not info or info["state"] in DEAD_STATES or str(info["start"]) != str(caller["start"]):
-        return False
+    if not info:
+        return "caller_proc_missing"
+    if info["state"] in DEAD_STATES:
+        return "caller_dead"
+    if str(info["start"]) != str(caller["start"]):
+        return "caller_start_mismatch"
     seen = set()
     for _ in range(64):
-        if not info or info["state"] in DEAD_STATES or pid <= 1 or pid in seen:
-            return False
+        if not info:
+            return "ancestry_proc_missing"
+        if info["state"] in DEAD_STATES:
+            return "ancestry_dead"
+        if pid <= 1:
+            return "pane_not_in_ancestry"
+        if pid in seen:
+            return "ancestry_cycle"
         if pid == root:
-            return True
+            return None
         seen.add(pid)
         pid = info["ppid"]
         info = _stat(pid)
-    return False
+    return "ancestry_depth_exceeded"
