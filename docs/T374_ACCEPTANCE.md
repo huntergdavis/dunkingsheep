@@ -154,7 +154,7 @@ turn start, a missing artifact, and any human send.
 ## Current state (2026-10-28)
 
 Prepared only.  The dedicated bundle was generated from PR72 head
-`c4042b5d8c36eb7426fd2a04653d13751fbecc4b`; that head is not yet the accepted
+`dd243b421ad4cab7b7cbb5fb33d6d3956885eacb`; that head is not yet the accepted
 release.  If PR72 moves, regenerate the bundle and cite the new head/checksums.
 PR71's corrected head is pending.  No agent has been started.  No live pi/Codex acceptance run has
 been executed against an approved integrated release; no owner-home installation

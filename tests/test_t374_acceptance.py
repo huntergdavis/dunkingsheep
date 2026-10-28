@@ -298,6 +298,18 @@ class CollectorTests(unittest.TestCase):
         receipt = self.tool.collect(self.run)
         self.assertEqual([], self.tool.validate(receipt))
 
+    def test_collect_rejects_a_guarded_enter_record(self):
+        # The real send_keys_now path records source=send_keys, text=Enter.
+        # This is a collector-level negative, not a hand-written validator field.
+        self.tool._messages = lambda: [{
+            "message_id": "m-manual-enter", "pane_id": "%90",
+            "source": "send_keys", "status": "sent", "created_at": 2.5,
+            "text": "Enter"}]
+        receipt = self.tool.collect(self.run)
+        failures = self.tool.validate(receipt)
+        self.assertTrue(any("no human nudge" in f for f in failures), failures)
+        self.assertEqual(1, len(receipt["lanes"]["pi"]["human_sends"]))
+
 
 if __name__ == "__main__":
     unittest.main()

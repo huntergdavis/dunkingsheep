@@ -452,7 +452,8 @@ def collect(run_dir):
         receipt_row = _inbox_row(handoff["message_id"]) if handoff else None
         lane_messages = [m for m in messages if str(m.get("pane_id")) == str(pane)]
         human = None if messages is None else [
-            m for m in lane_messages if m.get("source") == "send_text"
+            m for m in lane_messages
+            if str(m.get("source") or "") in ("send_text", "send_keys", "send_key")
             and float(m.get("created_at") or 0) >= start]
         metrics = _metrics_for(pane, start, end)
         decisions = _decisions(events_a + events_b)
