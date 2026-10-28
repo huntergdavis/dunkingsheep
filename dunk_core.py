@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.87"
+VERSION = "2.70.88"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -602,6 +602,16 @@ class Message:
         self.status = "queued"        # queued | sent | failed | cancelled
         self.hold_while_typing = True
         self.kind = "text"            # "keys" presses are how a panel is dismissed
+        # t377: whether this message was SUPPOSED to be submitted. `send --no-enter`
+        # is a deliberate instruction to leave the text in the box, so it is not a
+        # stalled delivery and the standalone observer must not "recover" it. Only a
+        # message that asked for Enter and did not get it is eligible.
+        self.press_enter = True
+        # t377 (CoS i31809): the pane generation of the ATTEMPT - captured immediately
+        # before the guarded delivery types anything, never read back from the pane after
+        # the outcome. If the pane is replaced during the attempt, this still names the
+        # process the text went into, which is the only identity the recovery may trust.
+        self.attempt_generation = None
         self.is_notice = False        # an inbox notice: one per pane, never stacked
         self.notify_for = []          # inbox message ids whose notice this is
         self.detail = None
@@ -726,6 +736,12 @@ class Flock:
         # that makes it bounded (attempts, cooldown, terminal) and it is persisted
         # with the outbox so a restart cannot duplicate an Enter.
         self.stuck = dunk_stuck.Tracker()
+        # t377: the ELIGIBILITY QUEUE, separate from message_history. message_history is
+        # a 50-row display buffer, so ordinary fleet traffic would push a failed
+        # delivery out of it and the watchdog would forget its own work (CoS i31795 #3).
+        # One entry per pane, updated on every decided delivery, retired on consumption,
+        # cancellation or a newer intent for the same pane, and persisted with the state.
+        self.stuck_candidates = {}
         self.stuck_config = dunk_stuck.Config.from_mapping(
             self._stuck_config_source(stuck_config))
         # A CONFIG THAT WAS DECLARED WINS OVER THE ONE IN THE STATE FILE, otherwise the
@@ -819,6 +835,22 @@ class Flock:
             return
         with self._lock:
             self.next_id = int(payload.get("next_id") or 1)
+            candidates = payload.get("stuck_candidates")
+            if isinstance(candidates, dict):
+                self.stuck_candidates = {str(pane): dict(entry) for pane, entry in
+                                         candidates.items() if isinstance(entry, dict)}
+                # REHYDRATE THE OWNERSHIP EVIDENCE (CoS i31802 #1). `_region_is_ours`
+                # and `_looks_like_ours` read sent_text_by_pane / the queued outbox,
+                # and a restart empties both, so a persisted candidate could never
+                # satisfy the REAL matcher - the recovery was dead after a restart even
+                # though the record survived. This text is what the daemon actually
+                # typed (it was persisted from that very delivery), so re-adding it as
+                # remembered-send evidence is truthful, and equality against the
+                # complete composer still has to hold for a press.
+                # NO BLIND REHYDRATION HERE: the persisted text becomes ownership
+                # evidence only once the observer has bound the candidate to the LIVE
+                # pane generation (below). Old, ineligible or unbound text must never
+                # be injected as new authority.
             if payload.get("stuck"):
                 # t377: the attempt accounting crosses restarts, so a restart cannot
                 # buy the same stuck message a second guarded Enter. from_state carries
@@ -873,6 +905,7 @@ class Flock:
                 # told anything.
                 # t377: what the stuck-message recovery knows, so a restart does not
                 # re-press Enter on a message that already used its attempts.
+                "stuck_candidates": dict(self.stuck_candidates),
                 "stuck": self.stuck.as_state(),
                 "stuck_config": {"enabled": self.stuck_config.enabled,
                                  "threshold_s": self.stuck_config.threshold_s,
@@ -2853,6 +2886,9 @@ class Flock:
             threading.Thread(target=self._task_push_loop,
                              name="task-push", daemon=True),
         ]
+        self._stuck_thread = threading.Thread(target=self._stuck_observer_loop,
+                                              name="stuck-observer", daemon=True)
+        self._task_threads = list(self._task_threads) + [self._stuck_thread]
         for thread in self._task_threads:
             thread.start()
 
@@ -4139,6 +4175,7 @@ class Flock:
             pane["pane_id"], label, str(text), source=source,
             deliver=lambda: self.submit_text(pane["pane_id"], message.text,
                                              press_enter=press_enter))
+        message.press_enter = bool(press_enter)
         message.is_notice = is_notice or str(text).startswith(NOTICE_PREFIX)
         if notify_for:
             message.notify_for.append(notify_for)
@@ -4189,6 +4226,10 @@ class Flock:
         with self._lock:
             if message.status == "cancelled":
                 return True
+            if getattr(message, "attempt_generation", None) is None:
+                # BEFORE the guarded call: the identity of the attempt, not of its
+                # aftermath. A pane swapped after this point cannot rewrite it.
+                message.attempt_generation = self._pane_generation(message.pane_id)
         sent, ok, detail = self.send_guarded(
             message.pane_id, message.deliver,
             hold_while_typing=message.hold_while_typing,
@@ -4240,7 +4281,51 @@ class Flock:
         message.done.set()
         return True
 
+    def _note_stuck_candidate(self, message):
+        """Keep the pane's LATEST delivery intent for the stuck observer (t377).
+
+        Latest intent wins, whichever way it went: a newer SENT or CANCELLED message, or
+        an explicit `send --no-enter`, supersedes an older failed candidate with the same
+        text. Only a delivery that asked for Enter and was reported unconfirmed stays
+        eligible. Bounded to one entry per pane by construction.
+        """
+        pane_id = getattr(message, "pane_id", None)
+        if not pane_id:
+            return
+        attempt_generation = getattr(message, "attempt_generation", None)
+        eligible = (getattr(message, "status", None) == "failed"
+                    and bool(getattr(message, "press_enter", True))
+                    and getattr(message, "kind", "text") == "text"
+                    and bool(attempt_generation))     # unknown attempt identity: fail closed
+        entry = {"message_id": message.id,
+                 "created_at": getattr(message, "created_at", 0),
+                 "press_enter": bool(getattr(message, "press_enter", True)),
+                 "status": getattr(message, "status", None),
+                 "kind": getattr(message, "kind", "text"),
+                 # The exact delivery-owned content, so ownership can be proven after a
+                 # restart (message_history and sent_text_by_pane do not survive one).
+                 "text": getattr(message, "text", "") or "",
+                 "label": getattr(message, "target_label", None),
+                 # The pane/process generation this delivery belongs to, captured when
+                 # the outcome was decided. Without it a restart would adopt whatever
+                 # pane is at that id NOW and press in a replacement (CoS i31806).
+                 # The ATTEMPT identity recorded before the keys went out. Deriving this
+                 # from the pane after the outcome adopted a replacement (CoS i31809).
+                 "generation": attempt_generation,
+                 "eligible": eligible, "superseded_by": message.id}
+        with self._lock:
+            existing = self.stuck_candidates.get(pane_id)
+            if existing and _intent_order(existing) > _intent_order(entry):
+                # A decision for a NEWER message is already recorded. Its intent stands
+                # even though it is ineligible: a late, older FAILED decision must not
+                # resurrect work the newer send/cancel/no-enter already superseded.
+                return
+            # Always keep the latest intent as a TOMBSTONE when ineligible, so ordering
+            # does not depend on the entry staying eligible.
+            self.stuck_candidates[pane_id] = entry
+
     def _remember(self, message):
+        self._note_stuck_candidate(message)
         self.message_history.append(message)
         del self.message_history[:-MESSAGE_HISTORY]
         # Keep the verdict where the NEXT process can find it, not only where this one can - and
@@ -4270,7 +4355,8 @@ class Flock:
         # and its delivery used to discard the message silently.
         self._save()
 
-    def _unwedge(self, pane_id, content, since, message=None):
+    def _unwedge(self, pane_id, content, since, message=None, now=None,
+                 expect_message_id=None, require_intent=False):
         """t377: recovery for text WE typed that is still sitting in the composer.
 
         Deterministic, one actor, no model in the loop. The policy is `dunk_stuck`
@@ -4292,7 +4378,9 @@ class Flock:
         """
         if not self.stuck_config.enabled:
             return False
-        now = time.time()
+        # The clock is injectable so the WORKER (not just the state machine) can be
+        # regression-tested on a fake timeline; production passes nothing.
+        now = time.time() if now is None else float(now)
         # The worker ticks every MESSAGE_RECHECK_S; a longer requested observation
         # interval is honoured here rather than merely validated.
         last = self._stuck_last_check.get(pane_id)
@@ -4300,7 +4388,8 @@ class Flock:
             return False
         self._stuck_last_check[pane_id] = now
         head = message if message is not None else self._stranded_message(pane_id, content)
-        identity = getattr(head, "id", None) or self._text_identity(content)
+        identity = (getattr(head, "id", None) or expect_message_id
+                    or self._text_identity(content))
         generation = self._pane_generation(pane_id)
         if not generation:
             # No pid/start identity: we cannot prove this is the pane we observed.
@@ -4362,7 +4451,7 @@ class Flock:
         pressed, detail = self._press_stuck_enter(
             pane_id, expected_fingerprint=dunk_stuck.fingerprint(content or ""),
             generation=generation, message_id=identity, tracked_text=tracked,
-            message=head)
+            message=head, require_intent=require_intent)
         if not pressed:
             log.warning("%s: no key pressed (%s)", pane_id, detail)
             self.metrics.record("stuck.recover", pane_id=pane_id, source="stuck_watchdog",
@@ -4393,7 +4482,7 @@ class Flock:
         return outcome == "consumed"
 
     def _press_stuck_enter(self, pane_id, expected_fingerprint, generation, message_id,
-                           tracked_text, message=None):
+                           tracked_text, message=None, require_intent=False):
         """Exactly ONE Enter, under the shared locks, re-validated immediately before.
 
         The observation and this press are separated by time; a person can type in
@@ -4408,6 +4497,29 @@ class Flock:
                 return False, "the pane could not be read at press time"
             if self._pane_generation(pane_id) != generation:
                 return False, "the pane changed between observation and press"
+            # THE LATEST INTENT, re-checked at the final boundary - for the STANDALONE
+            # observer, whose authority is the eligibility registry. A newer delivery for
+            # this pane (a SENT notice, a cancellation, an explicit `--no-enter`) must
+            # supersede an older failed candidate even with the same composer text. The
+            # queued/outbox and dunk call paths keep their accepted behaviour: their
+            # authority is the message they are holding, not this registry.
+            if require_intent:
+                with self._lock:
+                    live = dict(self.stuck_candidates.get(pane_id) or {})
+                if live.get("message_id") != message_id:
+                    return False, "a newer delivery intent superseded this stalled message"
+                if not live.get("press_enter", True):
+                    return False, "the tracked delivery was an explicit no-enter send"
+                if live.get("generation") != self._pane_generation(pane_id):
+                    return False, "the pane generation changed since the decision"
+                if live.get("eligible") is not True or live.get("status") != "failed":
+                    # The authority can be REVOKED between the decision and the press
+                    # (CoS i31802 #2): a cancellation or a newer outcome that arrived
+                    # while the attempt was being reserved. Naming the id is not
+                    # authorising it.
+                    return False, (f"the registry no longer authorises this press "
+                                   f"(status={live.get('status')!r}, "
+                                   f"eligible={live.get('eligible')!r})")
             # CANCELLATION AND IDENTITY, re-checked at the final boundary: the sender can
             # cancel between the observation and this lock.
             if message is not None:
@@ -4550,6 +4662,128 @@ class Flock:
         except (OSError, ValueError, IndexError):
             start = None                        # a fake/absent pid has no start time
         return f"pid:{pid}:start:{start}" if start else None
+
+    STUCK_OBSERVE_TICK_S = 5.0
+
+    def _stuck_observer_step(self, now=None):
+        """ONE periodic scan for a stalled delivery nobody else is watching (t377).
+
+        The outbox worker only exists while a message is QUEUED for a pane, so a
+        message that was typed, reported unconfirmed and then left in the composer had
+        no observer at all once its queue drained - measured by CoS: the two-send probe
+        flushed through `_ensure_box_clear` in 1.81 s with zero recoveries. This actor
+        exists so a LONE stalled delivery is observed by a timer, not by the arrival of
+        another message.
+
+        Eligibility is deliberately narrow and truthful:
+          - a message we typed, that ASKED for Enter (`press_enter`), and whose submit
+            was reported FAILED - an explicit `send --no-enter` is an instruction, not a
+            stall, and is never recovered;
+          - the pane has no queued message (so no outbox worker is already watching it:
+            exactly one observer per pane);
+          - the composer still holds that text, is readable, and the pane generation is
+            known. Consumption, cancellation, a dead or unknown pane, a dialog or a busy
+            turn all stop it - the state machine in `dunk_stuck` owns those decisions, so
+            this scan cannot invent a second policy.
+        """
+        try:
+            with self._lock:
+                candidates = dict(self.stuck_candidates)
+                busy_panes = set(self.outbox_threads)
+                queued_panes = {pane for pane, queue in self.outbox.items()
+                                if any(m.status == "queued" for m in queue)}
+                history = {message.pane_id: message for message in self.message_history}
+            acted = 0
+            for pane_id, entry in candidates.items():
+                if not entry.get("eligible"):
+                    continue                            # a tombstone: newer intent wins
+                current_generation = self._pane_generation(pane_id)
+                saved_generation = entry.get("generation")
+                if not saved_generation or not current_generation:
+                    # UNBOUND identity: fail closed and keep the watermark. Acting would
+                    # adopt a pane we cannot prove is the one the delivery belonged to.
+                    self.stuck.forget(pane_id)
+                    continue
+                if saved_generation != current_generation:
+                    # THE PANE WAS REPLACED. Retire the candidate; never adopt the
+                    # replacement generation as the baseline.
+                    with self._lock:
+                        live = self.stuck_candidates.get(pane_id)
+                        if live is not None and \
+                                live.get("message_id") == entry.get("message_id"):
+                            retired = dict(live)
+                            retired.update({"eligible": False,
+                                            "status": "generation-changed",
+                                            "retired_at": time.time()})
+                            self.stuck_candidates[pane_id] = retired
+                    self.stuck.forget(pane_id)
+                    log.info("%s: stuck candidate retired: the pane generation changed "
+                             "(saved %s, now %s)", pane_id, saved_generation,
+                             current_generation)
+                    continue
+                text = (entry or {}).get("text")
+                if text:
+                    # BOUND ownership evidence: this exact text, belonging to THIS
+                    # generation, is what the daemon typed.
+                    with self._lock:
+                        remembered = self.sent_text_by_pane.setdefault(pane_id, [])
+                        if text not in remembered:
+                            remembered.append(text)
+                            del remembered[:-REMEMBERED_SENDS]
+                if pane_id in busy_panes or pane_id in queued_panes:
+                    continue                            # exactly one observer per pane
+                message = history.get(pane_id)
+                if message is not None and getattr(message, "id", None) != entry.get("message_id"):
+                    message = None                      # display row is a different message
+                if message is None and entry.get("text"):
+                    # POST-RESTART: there is no history row and no remembered send, so the
+                    # persisted exact text IS the ownership evidence. A stand-in keeps the
+                    # single `_unwedge` path, with the same equality test.
+                    message = Message(entry["message_id"], pane_id,
+                                      entry.get("label") or pane_id, entry["text"],
+                                      "send_text", lambda: (True, "ok"))
+                    message.status = entry.get("status") or "failed"
+                    message.press_enter = entry.get("press_enter", True)
+                    message.created_at = entry.get("created_at") or 0
+                content = self._box_text(pane_id)
+                if content is None:
+                    # AN UNREADABLE PANE IS NOT "STILL STALLED": it resets the clock, so a
+                    # fresh stable window is required after the pane becomes readable
+                    # again (the original guard contract; CoS i31795 #2).
+                    self.stuck.forget(pane_id)
+                    continue
+                if not content:
+                    self.stuck.forget(pane_id)          # consumed: stop observing
+                    # RETIRE BY IDENTITY, UNDER THE LOCK (CoS i31804): a NEW failed
+                    # message can be remembered while `_box_text` is reading, and
+                    # deleting by pane from the stale snapshot would erase it. Only the
+                    # entry we actually observed is retired, and it stays as a
+                    # watermark so a late, older FAILED decision cannot resurrect it.
+                    with self._lock:
+                        live = self.stuck_candidates.get(pane_id)
+                        if live is not None and \
+                                live.get("message_id") == entry.get("message_id"):
+                            retired = dict(live)
+                            retired.update({"eligible": False, "status": "consumed",
+                                            "consumed_at": time.time()})
+                            self.stuck_candidates[pane_id] = retired
+                    continue
+                if self._unwedge(pane_id, content, None, message=message, now=now,
+                                 expect_message_id=entry.get("message_id"),
+                                 require_intent=True):
+                    acted += 1
+            return acted
+        except Exception:                               # noqa: BLE001 - never kill the daemon
+            log.exception("stuck observer step crashed")
+            return 0
+
+    def _stuck_observer_loop(self):
+        while not self._task_stop.wait(self.STUCK_OBSERVE_TICK_S):
+            if self.closed:
+                return
+            if not self.stuck_config.enabled:
+                continue                                # disabled: no observation at all
+            self._stuck_observer_step()
 
     def _outbox_worker(self, pane_id):
         """Deliver a pane's queued messages in order, each only once the box
@@ -5993,6 +6227,24 @@ class Flock:
             thread.join(timeout=2)
         for thread in list(getattr(self, "outbox_threads", {}).values()):
             thread.join(timeout=2)
+
+
+def _intent_order(entry):
+    """Order two delivery intents: created_at, then the message id as a tie-break.
+
+    CoS i31799 #2: completion order is not decision order. A newer SENT / no-enter /
+    cancel must win even if the older FAILED message finishes (and is remembered) later.
+    """
+    try:
+        created = float((entry or {}).get("created_at") or 0)
+    except (TypeError, ValueError):
+        created = 0.0
+    message_id = str((entry or {}).get("message_id") or "")
+    digits = re.sub(r"\D", "", message_id)
+    # Message ids are m<sequence> from one monotone counter, so the NUMBER is the
+    # creation order. Comparing the string form made "m10" older than "m9"
+    # (CoS i31802 #3), which let an older failure win a same-timestamp tie.
+    return (created, int(digits) if digits else -1, message_id)
 
 
 def _looks_like_usage(text):

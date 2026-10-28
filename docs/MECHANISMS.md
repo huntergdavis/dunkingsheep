@@ -28,6 +28,7 @@ one line. That was proven by adding one.
 | `supersede` | superseding an entry on the same day with the same subject | `test_a_supersede_within_the_same_day_gets_its_own_slug` | tested |
 | `retire` | retiring a pane that is already gone (superseded) | `test_retiring_a_pane_that_no_longer_exists_still_records_it` | tested |
 | `unretire` | bringing back a pane that was retired under a decorated mailbox | `test_unretire_brings_a_pane_back` | tested |
+| `recovers` | a state-machine decision that means "act now" (the stuck watchdog's single action) | `test_at_the_threshold_exactly_one_attempt_is_decided` | tested |
 | `clear_box` | a lane blocked on a full context with a draft in the box | `test_clear_box_works_on_the_case_it_exists_for_a_full_context` | tested |
 | `flush_box` | our own text stranded in the box after a failed submit | `test_our_stranded_text_is_flushed_before_the_next_send` | tested |
 | `memory_backfill` | a second run over a corpus that was partly done | `test_a_second_start_does_not_re_enqueue_and_limit_is_respected` | tested |
