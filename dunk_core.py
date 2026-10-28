@@ -4936,7 +4936,16 @@ class Flock:
                                "not submitting into a dead composer")
         pane = next((item for item in self.herdr.list_panes()
                      if item.get("pane_id") == pane_id), None)
-        shell = pane is not None and not pane.get("agent")
+        # t130 (%81 live, CoS i31705/i31707): pane metadata can report an EMPTY
+        # agent field for a real agent lane (measured: both t374 lanes read
+        # agent:"" while codex ran). Treating an unknown agent as a bare shell
+        # made submit_text return "sent" with NO box confirmation - the shell
+        # bypass behind the false-SENT canary. A pane is a bare shell only when
+        # it POSITIVELY says so (_is_empty_shell: no agent, unknown status,
+        # user@host:title title). An unknown agent takes the confirmed path; a
+        # genuine shell still confirms instantly (it has no input box, so the
+        # box read is clear).
+        shell = pane is not None and self._is_empty_shell(pane)
         with self._typing(pane_id):
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
