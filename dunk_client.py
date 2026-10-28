@@ -392,8 +392,15 @@ class FlockClient:
         #     on shutdown, so its children go with it.
         # Both are limited to test spawns: a lane's auto-started daemon must outlive the call.
         test_spawn = env.get("DUNKINGSHEEP_TEST_SPAWN") == "1"
+        # PR_SET_PDEATHSIG arms against the process that FORKS, so it is only correct when that process
+        # is the one being watched. In the CLI path the forker is a short-lived CLI call, so arming it
+        # SIGTERMs the daemon the moment the call returns - the daemon then dies between commands and
+        # every later command auto-starts a fresh one (reviewer pi-review-2 measured this as
+        # test_cli's send_count reading 0 and a socket reset mid-line). It is defence in depth for a
+        # DIRECT spawn, where the forker is the suite; the userspace watch covers the CLI path.
+        watched_pid = env.get("DUNKINGSHEEP_DIE_WITH_PARENT") or ""
         preexec = None
-        if test_spawn:
+        if test_spawn and watched_pid == str(os.getpid()):
             def preexec():                      # runs in the child, before exec
                 try:
                     import ctypes
