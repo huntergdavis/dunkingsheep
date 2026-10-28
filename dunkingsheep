@@ -2266,6 +2266,24 @@ def _refuse_shell_substitution(body, subject=None, *, literal=False):
                   f"or --body-file PATH to bypass the shell entirely.")
 
 
+def print_turn_end(result):
+    """Say what the turn end DID, not only that it was recorded.
+
+    Ending a turn now can prompt the lane immediately (trigger=turn.end). A one-line
+    report that hid that would make the new mechanism invisible at the one place a
+    person looks right after a turn ends, and a HELD nudge must read as held.
+    """
+    line = f"turn end {result['pane_id']} (ended={result['ended']})"
+    dispatch = result.get("dispatch") or {}
+    if dispatch.get("action") == "nudge":
+        line += (f"; trigger=turn.end nudged {dispatch.get('task_id')}: "
+                 + ("delivered" if dispatch.get("delivered")
+                    else f"HELD, not delivered ({dispatch.get('outcome')})"))
+    elif dispatch:
+        line += f"; trigger=turn.end no nudge ({dispatch.get('reason')})"
+    print(line)
+
+
 def run_client_command(client, args):
     """Map CLI args onto a registry command; return (result, human printer)."""
     command = args.command
@@ -2277,8 +2295,7 @@ def run_client_command(client, args):
                                source=args.source), \
                 lambda r: print(f"turn start {r['pane_id']} ttl {r['ttl_s']}s")
         return client.call("turn_end", pane=args.pane,
-                           reason=args.reason), \
-            lambda r: print(f"turn end {r['pane_id']} (ended={r['ended']})")
+                           reason=args.reason), print_turn_end
     if command == "poll":
         payload = {"limit": args.limit, "panes": args.panes, "tasks": args.tasks,
                    "include_done": args.include_done,

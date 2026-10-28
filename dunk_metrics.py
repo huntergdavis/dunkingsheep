@@ -72,6 +72,8 @@ KINDS = {
     "dunk.skipped": "a scheduled send was skipped as unconsumed",
     "dunk.held": "a scheduled send was held because the pane was not ready",
     "panel.blocking": "a dialog was open with a delivery waiting behind it",
+    "turn.end.dispatch": ("the turn-end trigger fired: a lane that ended a turn was "
+                          "prompted, or skipped with the reason it named"),
 }
 
 OUTCOMES = {
@@ -86,6 +88,13 @@ REASONS = {
     "dialog": "a dialog was open, waiting for a person to answer",
     "stranded": "our own earlier text was still sitting unsubmitted",
     "unconfirmed": "the submit could not be confirmed from the pane",
+    "no_open_work": "the lane had no CLAIMED (leased) task, so it was left alone",
+    "unread_mail": "the lane already had unread mail: it was fed",
+    "unread_unknown": "the lane's unread count could not be read, so it was not fed",
+    "cooldown": "the same pane was prompted moments ago",
+    "task_cooldown": "every claimed task was prompted recently",
+    "held_delivery_pending": "a prompt for the pane was already queued undelivered",
+    "disabled": "the turn-end trigger is switched off",
 }
 
 

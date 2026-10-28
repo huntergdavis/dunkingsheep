@@ -153,6 +153,22 @@ TASK_REAP_S = float(os.environ.get("DUNKINGSHEEP_REAP_S", "15"))
 # turn-end (crash/force-quit) must never hold mail forever: the state expires,
 # the hold releases, and turn.expired is recorded with the reason.
 TURN_TTL_S = float(os.environ.get("DUNKINGSHEEP_TURN_TTL_S", "1800"))
+# THE TURN-END TRIGGER (owner's top priority, t276). A turn lasts 33-448 s while a
+# keep-moving dunk fires every 60-120 MINUTES, so a lane sat unprompted ~95% of the time
+# by construction. turn.end is a signal the daemon already receives and did nothing
+# with; now it hands the lane its next prompt while it is still warm. This does NOT
+# touch the timer cadence (faster timers against dialogs only make more blocked sends),
+# and it is not the codex/opencode hook (that is t264): it fires only where a harness
+# already reports a turn end.
+TURN_END_DISPATCH = os.environ.get(
+    "DUNKINGSHEEP_TURN_END_DISPATCH", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+# How long turn_end waits for its nudge to land before answering. The pi extension
+# calls `turn end` with a 10 s timeout and never reads the answer, so this is a bound on
+# the REQUEST, not on the send: anything not delivered by then stays in the outbox and
+# the worker retries it once the box clears. It is deliberately not longer - a turn end
+# must never become a slow request.
+TURN_END_WAIT_S = float(os.environ.get("DUNKINGSHEEP_TURN_END_WAIT_S", "4"))
 # The sidebar poll resolves the caller's own mailbox by walking the pane list
 # every time; that walk is the ~2-4 s cost, not the inbox SQL. Cache only the
 # self->mailbox mapping, briefly.
@@ -628,6 +644,10 @@ class Flock:
         self._view_cache = {"at": 0.0, "pane": None, "data": None}
         # pane_id -> {started_at, expires_at, ttl_s, source, caller}
         self.turns = {}
+        # Turn-end dispatch bookkeeping, both to stop a nudge loop: pane_id -> when, and
+        # (pane_id, task_id) -> when that task was last prompted on a turn end.
+        self.turn_end_nudges = {}
+        self.turn_end_task_nudges = {}
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
         # seconds when an agent will not take Enter. With a single lock that
@@ -2222,7 +2242,117 @@ class Flock:
         self.metrics.record("turn.end", pane_id=pane_id, reason=reason,
                             outcome="ok" if state else "unknown", at=now,
                             duration_ms=duration)
-        return {"pane_id": pane_id, "ended": bool(state), "reason": reason}
+        result = {"pane_id": pane_id, "ended": bool(state), "reason": reason}
+        # THE TRIGGER. The turn just ended and the lane is idle: if it still holds open
+        # work, this is the moment to prompt it - seconds, not the next 60-120 minute
+        # dunk. It never raises and never makes turn.end slow (see TURN_END_WAIT_S).
+        result["dispatch"] = self._dispatch_on_turn_end(pane_id)
+        return result
+
+    def _dispatch_on_turn_end(self, pane_id):
+        """Prompt a lane that ended its turn still holding work. Returns its record.
+
+        Every guardrail the task names, in order, and each one is a code the caller and
+        the log can read:
+
+          disabled                the trigger is off (DUNKINGSHEEP_TURN_END_DISPATCH=0)
+          unread_unknown          the mailbox could not be read
+          unread_mail             the lane is already fed (unread mail waiting)
+          no_open_work            no assigned/held task: an idle lane is left alone
+          cooldown/task_cooldown  the same pane or task was just prompted
+          held_delivery_pending   a prompt for this pane is already queued, not delivered
+
+        And the delivery distinction the task insists on: a send that is HELD (box would
+        not clear, dead session, unconfirmed submit) is recorded as held/failed and does
+        NOT count as delivered, and does not start the cooldown clock.
+        """
+        import dunk_dispatch
+        now = time.time()
+        record = {"trigger": "turn.end", "pane_id": pane_id, "action": "skip",
+                  "reason": None, "delivered": False}
+        if not TURN_END_DISPATCH:
+            record["reason"] = "disabled"
+            return record
+        with self._lock:
+            last_nudge = self.turn_end_nudges.get(pane_id)
+        try:
+            # `None` + the pane as the reader: that path uses the briefly cached
+            # self-mailbox resolution, so a turn end does not cost an extra pane listing.
+            unread = (self.inbox_count(None, self_pane_id=pane_id) or {}).get("unread")
+        except Exception as error:                  # noqa: BLE001 - unknown is a skip
+            unread = None
+            record["error"] = f"inbox count failed: {error}"
+        try:
+            tasks = (self.task_list(include_done=False, limit=500,
+                                    self_pane_id=pane_id).get("tasks") or [])
+        except Exception as error:                  # noqa: BLE001 - unknown is a skip
+            tasks = []
+            record["error"] = f"task list failed: {error}"
+        with self._lock:
+            # task id -> when this pane was last prompted about it, for the tasks it holds
+            nudges = {str(task.get("id")): self.turn_end_task_nudges[(pane_id, str(task.get("id")))]
+                      for task in tasks
+                      if (pane_id, str(task.get("id"))) in self.turn_end_task_nudges}
+        plan = dunk_dispatch.turn_end_plan(
+            pane_id=pane_id, tasks=tasks, unread=unread, last_nudge_at=last_nudge,
+            task_nudges=nudges, now=now)
+        if plan["action"] != "nudge":
+            record["reason"] = plan["reason"]
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="held", reason=plan["reason"])
+            log.info("turn.end %s: no nudge (trigger=turn.end reason=%s)",
+                     pane_id, plan["reason"])
+            return record
+        # One prompt at a time per pane: something we typed is still waiting for the box
+        # to clear, and stacking a second one behind it is how a lane gets three
+        # contradictory prompts after one turn.
+        with self._lock:
+            pending = [m for m in (self.outbox.get(pane_id) or []) if m.status == "queued"]
+        if pending:
+            record["reason"] = "held_delivery_pending"
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="held", reason=record["reason"])
+            log.info("turn.end %s: no nudge (trigger=turn.end reason=held_delivery_pending "
+                     "message=%s)", pane_id, pending[0].id)
+            return record
+        task = plan["item"]
+        record.update(action="nudge", task_id=str(task.get("id")),
+                      item=f"board:{task.get('id')}")
+        text = dunk_dispatch.turn_end_text(task)
+        try:
+            message = self.send_now(pane_id, text, wait_s=TURN_END_WAIT_S,
+                                    source="turn_end")
+        except Exception as error:                  # noqa: BLE001 - never break turn_end
+            record.update(delivered=False, outcome="refused", error=str(error))
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="failed", reason="refused")
+            log.warning("turn.end %s: trigger=turn.end nudge REFUSED for task %s (%s); "
+                        "not counted as delivered", pane_id, record["task_id"], error)
+            return record
+        outcome = message.get("outcome") or "unknown"
+        delivered = outcome == "ok"
+        record.update(message_id=message.get("message_id"), delivered=delivered,
+                      outcome=outcome, message=message.get("message"))
+        if delivered:
+            with self._lock:
+                self.turn_end_nudges[pane_id] = now
+                self.turn_end_task_nudges[(pane_id, record["task_id"])] = now
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="ok", bytes=len(text.encode("utf-8")))
+            log.info("turn.end %s: trigger=turn.end nudge DELIVERED task=%s item=%s",
+                     pane_id, record["task_id"], record["item"])
+        else:
+            # HELD, NOT DELIVERED. The message stays in the outbox and the worker retries
+            # when the box clears; saying "delivered" here would be the exact claim the
+            # task forbids ("never count a held delivery as delivered").
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="held", reason=outcome,
+                                bytes=len(text.encode("utf-8")))
+            log.warning("turn.end %s: trigger=turn.end nudge NOT delivered for task %s "
+                        "(outcome=%s message=%s); held, not counted as delivered",
+                        pane_id, record["task_id"], outcome,
+                        record.get("message_id"))
+        return record
 
     def turn_active(self, pane_id):
         """True only for an unexpired declared turn. Expiry is the safety."""
@@ -3762,7 +3892,7 @@ class Flock:
             return {"id": dunker.id, "ok": False, "message": str(error)}
 
     def send_now(self, target, text, self_pane_id=None, hold_while_typing=True, wait_s=0,
-                 press_enter=True, is_notice=False, notify_for=None):
+                 press_enter=True, is_notice=False, notify_for=None, source="send_text"):
         """One-off send to any pane, no dunk involved. Like a dunk, it never
         types over a human: if someone is composing in the target's box (or
         earlier messages to that pane are still waiting), the message is queued
@@ -3774,7 +3904,7 @@ class Flock:
             raise DunkError("text is required")
         label = pane.get("tab_label") or pane["pane_id"]
         message = self._new_message(
-            pane["pane_id"], label, str(text), source="send_text",
+            pane["pane_id"], label, str(text), source=source,
             deliver=lambda: self.submit_text(pane["pane_id"], message.text,
                                              press_enter=press_enter))
         message.is_notice = is_notice or str(text).startswith(NOTICE_PREFIX)

@@ -30,6 +30,65 @@ not a reason to keep a parallel hand-written list.
 With this, `queue empty` means **no open unblocked work anywhere** — a real
 finding — instead of "somebody forgot to top it up".
 
+## Dispatch on turn.end, not on a timer (pi lanes first)
+
+Measured 2026-10-27: the last 20 turns lasted **33-448 seconds** while the keep-moving
+dunks fire every **60-120 minutes**. So a lane was unprompted ~95% of the time *by
+construction* — the timer was never the mechanism, it was the only thing we had. The
+harness already reports `turn.start`/`turn.end` for pi/claude panes, and the daemon
+received every `turn.end` and did nothing with it.
+
+So `turn_end` now dispatches. When a lane ends a turn and it still holds an open task,
+it is prompted **then**, with `trigger=turn.end` in the log, the metric and the text the
+lane reads:
+
+```text
+2026-10-27 19:15:50 INFO dunkingsheep: turn.end %51: trigger=turn.end nudge DELIVERED task=t1 item=board:t1
+2026-10-27 19:15:39 INFO dunkingsheep: turn.end %51: no nudge (trigger=turn.end reason=no_open_work)
+```
+
+**Claimed, not assigned** (CoS ruling, 2026-10-27): the trigger fires only for a task the
+lane has **claimed** — `in_progress` with a live lease held by that pane — never for a task
+merely assigned to it. An umbrella or programme task sits assigned-and-open for days, so
+assigning it to a lane says nothing about what that lane is doing now; prompting on it would
+make the trigger a loop in exactly the lanes that must stay quiet (reviewer, CoS, VP). The
+same rule stops double-prompting: a task another pane has leased is that pane's.
+
+The policy is pure and lives in `dunk_dispatch.turn_end_plan` / `claimed_tasks`, so the
+guardrails are readable and testable without a daemon:
+
+| skip code | meaning |
+|---|---|
+| `no_open_work` | the lane has no CLAIMED task (assigned-but-unclaimed work does not count) |
+| `unread_mail` | it already has unread mail — it is fed; a second assignment is noise |
+| `unread_unknown` | the unread count could not be read, so "already fed" is unknown |
+| `cooldown` | this pane was prompted under `DUNKINGSHEEP_TURN_END_MIN_GAP_S` (30 s) ago |
+| `task_cooldown` | every task it has claimed was prompted under 5 min ago |
+| `held_delivery_pending` | a prompt for this pane is still queued undelivered |
+| `disabled` | `DUNKINGSHEEP_TURN_END_DISPATCH=0` |
+
+**Held is not delivered.** If the trigger fires but the guarded send would hold (a box
+that will not clear, a dead session, an unconfirmed submit), the record says
+`delivered: false` with the message outcome, the log line says it was held, and the
+cooldown clock does **not** start. Counting a held send as delivered is the exact claim
+this work exists to stop.
+
+The cooldowns are loop guards, not a cadence, and both are configurable:
+`DUNKINGSHEEP_TURN_END_MIN_GAP_S` (30 s per pane) and
+`DUNKINGSHEEP_TURN_END_TASK_COOLDOWN_S` (300 s per task). They are deliberately **short**:
+a long value would re-create the hourly-timer problem one layer down, and a cooldown can
+only ever *suppress* a prompt. The worst case for one lane and one task is 12 prompts an
+hour, each of which is a turn; a different claimed task is not suppressed by it. Note the
+trigger only ever evaluates **at a turn end** — it cannot wake an already-idle lane, so the
+timer remains the fallback for that.
+
+**The timer cadence is unchanged.** Raising it first would be the wrong order:
+1,541 dunks recently held on an open dialog and 738 on a draft, so a faster timer would
+only produce more blocked sends. The timer remains the fallback for lanes whose harness
+reports no turns. The codex/opencode hook is **t264**, deliberately not this change, and
+the allowlist that keeps the timer from feeding reviewer/CoS/VP lanes is untouched — this
+trigger only ever prompts a lane about a task that lane already holds.
+
 ## Step 2 ordering: codex's turn socket first
 
 Codex is the harness whose mail depends on a short hold: it does not queue typed text,

@@ -8,6 +8,10 @@ receive a message right now.
 The gate is `delivery_state` (ready / working / blocked / dead) plus an empty
 mailbox. "Ready with unread mail" is NOT dispatchable - the lane already has an
 assignment waiting; handing it a second one is how a queue becomes noise.
+
+The timer is the fallback, not the mechanism: `turn_end_plan` dispatches on the
+turn end the harness already reports, because turns last seconds and timers fire
+in hours.
 """
 import json
 import os
@@ -210,6 +214,155 @@ def dispatch_text(item):
     prefix = f"[standby {item['task_id']}] " if item.get("task_id") else "[standby] "
     first = " ".join(str(item["brief"]).split())
     return prefix + first
+
+
+# -- the turn-end trigger ------------------------------------------------------
+#
+# Measured 2026-10-27: a lane's turns lasted 33-448 s while the keep-moving dunks
+# fired every 60-120 MINUTES, so a lane sat unprompted ~95% of the time BY
+# CONSTRUCTION. The harness already tells us when a turn ends (pi/claude emit
+# turn.start/turn.end today); the fix is to act on that instead of waiting for a
+# timer. Do NOT shorten the timers instead: 1,541 dunks recently held on an open
+# dialog and 738 on a draft, so a faster timer only makes more blocked sends.
+#
+# The policy lives here, pure, so the guardrails can be read and tested without a
+# daemon: a turn end earns ONE prompt, only when the lane has CLAIMED work (a live
+# lease held by that pane), only when it has no unread mail (it is already fed), and
+# not twice in a row for the same task. The delivery itself goes through the same
+# guarded send as everything else, so a human typing is never typed over.
+TURN_END_MIN_GAP_S = float(os.environ.get("DUNKINGSHEEP_TURN_END_MIN_GAP_S", "30"))
+# THE SAME TASK IS NOT RE-PROMPTED ON EVERY TURN END: a lane that ends a 20-second turn
+# 30 times while holding one task must not become a nudge loop. This is a LOOP GUARD, not
+# a cadence, and it is deliberately SHORT (5 minutes): a long value would re-create the
+# hourly-timer problem one layer down, because a cooldown only suppresses prompts - it
+# cannot wake an idle lane. Worst case per lane and task is therefore 12 prompts/hour,
+# each of which is one turn; a different held task is not suppressed by it at all.
+TURN_END_TASK_COOLDOWN_S = float(
+    os.environ.get("DUNKINGSHEEP_TURN_END_TASK_COOLDOWN_S", "300"))
+
+
+def claimed_tasks(tasks, pane_id):
+    """The tasks `pane_id` has CLAIMED (holds a live lease on), in the order to offer them.
+
+    CLAIMED, NOT ASSIGNED (CoS ruling, 2026-10-27). An umbrella or programme task sits
+    assigned-and-open for days, so prompting every lane that is named as an assignee
+    would turn the trigger into a loop in exactly the lanes that must stay quiet
+    (reviewer, CoS, VP). A live lease held by THIS pane means the lane said "I am
+    working on this now" - the condition under which prompting it again is useful. The
+    same rule excludes double-prompting: a task another pane has leased is that pane's,
+    whoever else is named on it.
+
+    Every other exclusion is a reason a nudge would be noise rather than work: a task
+    that is not in_progress is not claimed work; a declared block reason means it waits
+    on somebody else; an unfinished dependency makes it inactionable.
+
+    Order: priority, then age (every task here is in_progress, so "already started" is
+    not a distinction any more).
+    """
+    pane_id = str(pane_id or "")
+    if not pane_id:
+        return []
+    finished = {str(task.get("id")) for task in tasks
+                if str(task.get("status") or "") in ("done", "cancelled")}
+    claimed = []
+    for task in tasks:
+        if str(task.get("status") or "") != "in_progress":
+            continue
+        if str(task.get("block_reason") or "").strip():
+            continue
+        holders = {str(lease.get("pane_id"))
+                   for lease in (task.get("leases") or []) if isinstance(lease, dict)}
+        if pane_id not in holders:
+            continue
+        if any(str(dep) not in finished for dep in (task.get("depends_on") or [])):
+            continue
+        claimed.append(task)
+    claimed.sort(key=lambda task: (PRIORITY_ORDER.get(str(task.get("priority")), 9),
+                                   task.get("created_at") or 0))
+    return claimed
+
+
+def claimed_work(tasks, pane_id):
+    """The first task the lane has claimed (see `claimed_tasks`), or None."""
+    claimed = claimed_tasks(tasks, pane_id)
+    return claimed[0] if claimed else None
+
+
+def turn_end_plan(*, pane_id, tasks, unread, last_nudge_at=None,
+                  task_nudges=None, now=None, min_gap_s=None,
+                  task_cooldown_s=None):
+    """Decide whether a turn end earns a prompt. Pure: everything is injected.
+
+    Returns {"trigger", "pane_id", "action", "reason", "item"}, where action is
+    "nudge" or "skip" and `reason` is a machine-readable code on a skip:
+
+        no_pane           nothing to decide about
+        unread_unknown    the mailbox could not be read, so "already fed" is unknown
+        unread_mail       the lane already has unread mail; it is fed, do not stack
+        no_open_work      no CLAIMED task: assigned-but-unclaimed work is not prompted,
+                          so a leader lane holding programme tasks stays quiet
+        cooldown          this pane was prompted < min_gap_s ago
+        task_cooldown     every task the lane holds was prompted < task_cooldown_s ago
+
+    `unread=None` means the count could not be established, and an unknown is a
+    skip: sending a second assignment because a count could not be read is exactly
+    how a queue becomes noise.
+    """
+    now = _now() if now is None else now
+    min_gap_s = TURN_END_MIN_GAP_S if min_gap_s is None else float(min_gap_s)
+    task_cooldown_s = (TURN_END_TASK_COOLDOWN_S if task_cooldown_s is None
+                       else float(task_cooldown_s))
+    plan = {"trigger": "turn.end", "pane_id": str(pane_id or ""),
+            "action": "skip", "reason": None, "item": None}
+    if not pane_id:
+        plan["reason"] = "no_pane"
+        return plan
+    if unread is None:
+        plan["reason"] = "unread_unknown"
+        return plan
+    if unread:
+        plan["reason"] = "unread_mail"
+        return plan
+    held = claimed_tasks(tasks or (), pane_id)
+    if not held:
+        plan["reason"] = "no_open_work"
+        return plan
+    if last_nudge_at is not None and min_gap_s > 0 and now - float(last_nudge_at) < min_gap_s:
+        plan["reason"] = "cooldown"
+        return plan
+    # A task prompted a moment ago is being worked on already; a DIFFERENT task the lane
+    # also holds has not been mentioned, so it is still eligible.
+    nudges = task_nudges or {}
+    if task_cooldown_s > 0:
+        held = [task for task in held
+                if not (nudges.get(str(task.get("id"))) is not None
+                        and now - float(nudges[str(task.get("id"))]) < task_cooldown_s)]
+        if not held:
+            plan["reason"] = "task_cooldown"
+            return plan
+    plan.update(action="nudge", item=held[0])
+    return plan
+
+
+def turn_end_text(task):
+    """What a lane that ended its turn holding work is sent.
+
+    The task id leads so the reply can cite it, and the trigger is stated in the
+    text the lane reads: a prompt that arrives seconds after a turn ended should
+    say why it is not a timer.
+    """
+    task_id = str(task.get("id"))
+    title = " ".join(str(task.get("title") or "").split())
+    status = str(task.get("status") or "open")
+    priority = str(task.get("priority") or "medium")
+    return "\n".join([
+        f"[turn-end {task_id}] {title}",
+        f"trigger: turn.end - you ended your turn still holding this task "
+        f"({status}, priority {priority}).",
+        "Carry on, or close it out:",
+        f"  dunkingsheep task note {task_id} --reason \"<what you did / did NOT verify>\"",
+        f"  dunkingsheep task complete {task_id}",
+    ])
 
 
 def tick(queue, panes, *, delivery, unread, send, now=None, dry_run=False,
