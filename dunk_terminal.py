@@ -101,6 +101,12 @@ class TerminalBackend:
     def self_pane_id():
         return os.environ.get("HERDR_PANE_ID") or os.environ.get("TMUX_PANE") or None
 
+    # -- geometry ----------------------------------------------------------
+
+    def resize(self, pane_id, cols, rows):
+        """Backends that cannot size a pane say so instead of pretending."""
+        return False, "this terminal backend cannot resize panes"
+
 
 class HerdrBackend(TerminalBackend):
     """herdr, unchanged: the current default."""
@@ -222,7 +228,7 @@ class TmuxBackend(TerminalBackend):
     def capabilities(self):
         return frozenset({
             "screen", "scrollback", "send", "layout", "pane_identity",
-            "pane_pid", "close_guard",
+            "pane_pid", "close_guard", "resize",
         })
 
     # -- process -----------------------------------------------------------
@@ -647,6 +653,88 @@ class TmuxBackend(TerminalBackend):
 
     def run_command(self, pane_id, command):
         return self.send_text_and_enter(pane_id, command)
+
+    # -- geometry ----------------------------------------------------------
+
+    # tmux's own refusal thresholds are the authority ('width too small', 'width too
+    # large'), measured on 2026-10-28: -x 0 -> rc 1 'width too small', -x 99999 -> rc 1
+    # 'width too large', -x 1 -y 1 -> accepted. These bounds only stop nonsense before
+    # it reaches tmux; they are not a claim about what tmux allows.
+    RESIZE_MIN = 1
+    RESIZE_MAX = 1000
+
+    def resize(self, pane_id, cols, rows):
+        """Size the pane's WINDOW with tmux, then report what tmux actually did.
+
+        tmux has no absolute per-pane size: `resize-window -x/-y` sets the window grid
+        and every pane in it re-lays-out. So the return value carries the geometry
+        READ BACK after the call, never the request echoed.
+
+        An attached client is reported, not treated as an error: measured on
+        2026-10-28, `resize-window` succeeds with a client attached (80x24 client,
+        window became 120x40). With window-size=latest that client's next resize event
+        will win, so the caller is told `clients_attached` rather than being refused -
+        and never told a size held when it may not.
+        """
+        try:
+            cols, rows = int(cols), int(rows)
+        except (TypeError, ValueError):
+            return False, "cols and rows must be integers"
+        if not (self.RESIZE_MIN <= cols <= self.RESIZE_MAX
+                and self.RESIZE_MIN <= rows <= self.RESIZE_MAX):
+            return False, (f"cols and rows must be between {self.RESIZE_MIN} "
+                           f"and {self.RESIZE_MAX}")
+        before = self.get_pane(pane_id)
+        if before is None:
+            return False, f"no such pane {pane_id}"
+        window = before.get("tab_id")
+        geometry_before = self._window_geometry(window)
+        attached = self._client_count(before.get("workspace_id"))
+        code, out, err = self._tmux("resize-window", "-t", pane_id,
+                                    "-x", str(cols), "-y", str(rows))
+        if code != 0:
+            # tmux refuses a size before touching the layout (measured: dims unchanged
+            # after 'width too small' and 'width too large'), so a refusal reports no
+            # geometry at all rather than a before/after that implies a partial result.
+            return False, (err.strip() or out.strip() or "tmux refused the resize")
+        geometry_after = self._window_geometry(window)
+        target = geometry_after.get(pane_id) or {}
+        return True, {
+            "pane_id": pane_id,
+            "requested": {"cols": cols, "rows": rows},
+            "cols": target.get("cols"),
+            "rows": target.get("rows"),
+            # A resize sizes the WINDOW, so say which panes the re-layout actually
+            # moved. A caller that asked about one pane otherwise cannot tell that its
+            # neighbours changed shape too.
+            "window_pane_count": len(geometry_after),
+            "resized_panes": [
+                {"pane_id": pid, "cols": size["cols"], "rows": size["rows"],
+                 "cols_before": (geometry_before.get(pid) or {}).get("cols"),
+                 "rows_before": (geometry_before.get(pid) or {}).get("rows")}
+                for pid, size in geometry_after.items()
+                if size != geometry_before.get(pid)
+            ],
+            "clients_attached": attached,
+            "overridable_by_client": bool(attached),
+        }
+
+    def _window_geometry(self, window_id):
+        """Measured cols/rows of every pane in one window, keyed by pane id."""
+        if not window_id:
+            return {}
+        return {pane["pane_id"]: {"cols": pane.get("cols"), "rows": pane.get("rows")}
+                for pane in self.list_panes() if pane.get("tab_id") == window_id}
+
+    def _client_count(self, session_id):
+        """How many clients are attached to the pane's session (unknown -> None)."""
+        if not session_id:
+            return None
+        code, out, err = self._tmux("list-clients", "-t", session_id,
+                                    "-F", "#{client_name}")
+        if code != 0:
+            return None
+        return len([line for line in out.splitlines() if line.strip()])
 
     # -- sending -----------------------------------------------------------
 
