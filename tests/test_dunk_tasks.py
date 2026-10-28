@@ -332,6 +332,60 @@ class FlockTaskTests(unittest.TestCase):
         self.assertEqual(GLOBAL, task["scope"])
         self.assertEqual(["w9:p9"], task["assignees"])
 
+    def test_t145_characterisation_pane_id_as_scope_claims_nothing(self):
+        """CHARACTERISATION of the observed CLI trap, NOT a desired-behaviour
+        assertion (t145). `task next <pane id>` reads that argument as a SCOPE
+        (Flock.task_next -> _task_scope), so an agent passing its own pane id
+        scans its empty private queue, gets no task, and is silently subscribed
+        to follow that empty scope while the global task it is assigned stays
+        open. The documented call (no argument = scope global) claims it.
+
+        This pins today's behaviour so the report is reproducible; a fix that
+        refuses a pane id as a scope (or reinterprets it as the caller) must
+        REPLACE this test rather than delete it, and the replacement fails
+        against this revision."""
+        task = self.flock.task_add("assigned work", priority="high",
+                                   assignees=["w2:p1"], self_pane_id="w2:p1")
+        trap = self.flock.task_next(scope="w2:p1", self_pane_id="w2:p1")
+        self.assertIsNone(trap["task"],
+                          "the pane's own id was read as a scope, not a caller")
+        self.assertTrue(trap.get("following"))
+        self.assertEqual("w2:p1", self.flock.task_waiters["w2:p1"],
+                         "the pane now follows its empty private scope")
+        still = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.assertEqual("open", still["status"], "the assigned task was never claimed")
+        self.assertEqual([], still["leases"])
+        claimed = self.flock.task_next(self_pane_id="w2:p1")
+        self.assertEqual(task["id"], claimed["task"]["id"],
+                         "the documented call claims the task it is assigned")
+        self.assertEqual("in_progress", claimed["task"]["status"])
+
+    def test_t145_cli_handler_reads_the_positional_as_a_scope(self):
+        """The exact CLI shape that produced the report: `task next %58`
+        arrives at h_task_next as {"scope": "%58"}, so the pane id is a scope.
+        This is the handler-level reproduction of the characterisation above."""
+        task = self.flock.task_add("assigned work", assignees=["%58"],
+                                   self_pane_id="%58")
+        trap = dunk_api.h_task_next(self.flock, {"scope": "%58"}, "%58")
+        self.assertIsNone(trap["task"])
+        self.assertTrue(trap.get("following"))
+        self.assertEqual("open",
+                         self.flock.task_read(task["id"], self_pane_id="%58")["status"])
+        claimed = dunk_api.h_task_next(self.flock, {}, "%58")
+        self.assertEqual(task["id"], claimed["task"]["id"])
+
+    def test_an_unleased_task_assigned_to_another_pane_is_not_claimable(self):
+        """t145 guard: after a lease is reaped the task has no lease row but
+        still names its owner, so a different pane must not be handed it."""
+        task = self.flock.task_add("owned elsewhere", assignees=["w9:p9"],
+                                   self_pane_id="w9:p9")
+        self.assertIsNone(self.flock.task_next(self_pane_id="w2:p1")["task"],
+                          "a foreign pane claimed work owned by w9:p9")
+        mine = self.flock.task_next(self_pane_id="w9:p9")
+        self.assertEqual(task["id"], mine["task"]["id"],
+                         "the named assignee could not claim its own task")
+
+
     def test_inbox_read_appends_global_and_pane_tasks(self):
         self.flock.inbox.send("Codex Site", "hello", sender="pm")
         self.flock.task_add("global work", self_pane_id="w2:p1")
