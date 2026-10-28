@@ -44,6 +44,16 @@ time.sleep(1.5)
         result = subprocess.run([sys.executable, "-c", spawner], capture_output=True, text=True, timeout=60)
         self.assertEqual(0, result.returncode, result.stderr)
         daemon_pid = int(result.stdout.split()[0])
+        # THE DAEMON MUST HAVE COME UP, or the assertions below are vacuous (reviewer, PR #48): on a
+        # host without tmux, GATE 5 refuses to start and "it died with its parent" would be true of a
+        # process that never ran.
+        sock = os.path.join(tmp, "ds.sock")
+        deadline = time.time() + 15
+        while time.time() < deadline and not os.path.exists(sock):
+            time.sleep(0.2)
+        self.assertTrue(os.path.exists(sock),
+                        "the test daemon never came up (GATE 5 refuses a pane-less backend), so this "
+                        "test would be vacuous on this host")
         # NEVER LEAVE A STRAY BEHIND, even when the assertion fails: a failing assertion raises before
         # any later cleanup line, which is how three of these leaked while I was testing this very fix.
         self.addCleanup(self._kill_if_alive, daemon_pid)
