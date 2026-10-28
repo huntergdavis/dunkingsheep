@@ -17,6 +17,7 @@ the children. Killing the leader itself would prove nothing.
 """
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -73,6 +74,8 @@ class ProcessGroupTests(unittest.TestCase):
         has stopped reproducing the leak and every other result in this file is meaningless.
         """
         tmp = tempfile.mkdtemp(prefix="pgctl-")
+        self.addCleanup(shutil.rmtree, tmp, True)   # a suite that grows a dir per run is the same
+                                                    # untidiness t212 is about (%20's note)
         subprocess.run(["cp", "/bin/sleep", os.path.join(tmp, "tagged-sleep")], check=True)
         leader_code = CONTROL_LEADER.format(child=tmp + "/tagged-sleep 600 & wait")
         spawner_code = SPAWNER.format(leader=leader_code)
@@ -92,6 +95,7 @@ class ProcessGroupTests(unittest.TestCase):
 
     def test_tagged_children_die_when_the_watched_parent_is_sigkilled(self):
         tmp = tempfile.mkdtemp(prefix="pg-")
+        self.addCleanup(shutil.rmtree, tmp, True)
         # A copy of sleep whose argv[0] carries the temp dir: a survivor must be identifiable, or
         # "sleep 600" says nothing about where it came from.
         subprocess.run(["cp", "/bin/sleep", os.path.join(tmp, "tagged-sleep")], check=True)

@@ -24,21 +24,30 @@ class PollFloorTests(unittest.TestCase):
         self.assertGreaterEqual(dunk_core.MIN_IDLE_POLL_S, 0.25,
                                 "a zero floor is a fork storm when a daemon is leaked")
 
-    def test_the_poll_loop_uses_the_floor(self):
-        """The constant is worthless if the loop waits on IDLE_POLL_S alone."""
+    def test_the_poll_loop_calls_the_floored_helper(self):
+        """A spelling pin, kept only as a cheap tripwire next to the behavioural test above."""
         source = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                    "dunk_core.py")).read()
-        self.assertIn("max(IDLE_POLL_S, MIN_IDLE_POLL_S)", source,
-                      "the poll loop must apply the floor, not just define it")
+        self.assertIn("idle_poll_wait(stop_event)", source,
+                      "the poll loop must call the floored helper, not wait on IDLE_POLL_S alone")
 
-    def test_a_zero_interval_is_lifted(self):
-        saved = dunk_core.IDLE_POLL_S
-        try:
-            dunk_core.IDLE_POLL_S = 0
-            self.assertGreaterEqual(max(dunk_core.IDLE_POLL_S, dunk_core.MIN_IDLE_POLL_S), 0.5,
-                                    "a zero interval must be lifted to the floor")
-        finally:
-            dunk_core.IDLE_POLL_S = saved
+    def test_a_zero_interval_is_lifted_by_the_code_the_loop_calls(self):
+        """BEHAVIOURAL, not a tautology (reviewer, PR #48): the fake event records the argument it was
+        given, so this fails if the loop stops applying the floor. Computing max() in the test and
+        asserting a property of Python's max() would stay green with the floor removed."""
+        class RecordingStop:
+            def __init__(self):
+                self.arg = None
+            def wait(self, seconds):
+                self.arg = seconds
+                return False
+        stop = RecordingStop()
+        dunk_core.idle_poll_wait(stop, idle_poll_s=0)
+        self.assertGreaterEqual(stop.arg, dunk_core.MIN_IDLE_POLL_S,
+                                "a zero interval must be lifted to the floor by the shipped helper")
+        stop2 = RecordingStop()
+        dunk_core.idle_poll_wait(stop2, idle_poll_s=30)
+        self.assertEqual(30, stop2.arg, "a long interval must not be shortened")
 
 
 if __name__ == "__main__":

@@ -129,6 +129,18 @@ IDLE_POLL_S = 5
 # through the guard shim that is two more processes. A leaked test daemon with a zero delay is a fork
 # storm - 218 guards were measured at load 78 on 2026-10-27.
 MIN_IDLE_POLL_S = 0.5
+
+
+def idle_poll_wait(stop_event, idle_poll_s=None):
+    """One idle-poll wait, floored (t212).
+
+    Extracted so it can be tested BEHAVIOURALLY: a fake stop event records the argument it was given,
+    so a loop that stops applying the floor fails the test. A test that computes max() itself and
+    asserts a property of Python's max() is a tautology - it stays green if the loop never consults the
+    floor (reviewer, PR #48).
+    """
+    interval = IDLE_POLL_S if idle_poll_s is None else idle_poll_s
+    return stop_event.wait(max(interval, MIN_IDLE_POLL_S))
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
 DEFAULT_TEXT = "continue"
@@ -4929,7 +4941,7 @@ class Flock:
                             if agent_status not in BUSY_STATUSES:
                                 break
                             dunker.status = f"Busy ({agent_status})"
-                            if stop_event.wait(max(IDLE_POLL_S, MIN_IDLE_POLL_S)):
+                            if idle_poll_wait(stop_event):
                                 return
                     if not dunker.hold_while_typing or self._clear_to_send(
                             dunker.target_pane_id, dunker.last_sent_text,
