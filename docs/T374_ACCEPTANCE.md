@@ -9,6 +9,23 @@ The tool is `tools/t374_acceptance.py`.  It prepares the jobs and launch
 commands, collects the live store records, and validates the chain.  It never
 presses a key, never calls `send_text`/`send_keys`, and never fabricates a turn.
 
+## Dedicated producer bundle
+
+The release verifier pins one bundle per run:
+
+```sh
+python3 tools/t374_bundle.py --out <run>/bundle --source-ref <PR72-head>
+```
+
+It writes `bundle/pi/extensions/dunkingsheep.ts` (installed extension, prior
+patch reversed, PR72 patch applied, with `pi/PATCH-APPLICATION.txt` and a
+SHA-256), `bundle/codex/` (PR72 helper/wrapper/hooks + the owner-default
+`config.toml`; auth is linked at run time, never copied), and
+`bundle/opencode/dunkingsheep-turn.js`.  `bundle/manifest.json` records the
+source head and every file checksum.  The launch commands use the bundle paths
+and no model override.  The bundle does not start agents and does not edit the
+installed pi extension or `~/.codex`.
+
 ## What is prepared, and what is not
 
 Prepared now:
@@ -62,7 +79,9 @@ an approval file matches the running daemon version/code and the repo head.
    created before the agent claims A.
 
 3. Within that window, create the pane-private tasks.  The tasks must be created
-   before the agent's `task next` runs; the `sleep 30` prompt is the window:
+   before the agent's `task next` runs; the `sleep 30` prompt is the window.
+   The initial `dunkingsheep task next "$TMUX_PANE"` is valid **only** because
+   A/B are pane-private scopes; it is not a general job-claim instruction:
 
    ```sh
    python3 tools/t374_acceptance.py prepare \
@@ -134,8 +153,10 @@ turn start, a missing artifact, and any human send.
 
 ## Current state (2026-10-28)
 
-Prepared only.  Main has t372 steps 1/2a and t264; the final t372 wiring and the
-t130 safe-submit fix are still unmerged.  No live pi/Codex acceptance run has
+Prepared only.  The dedicated bundle was generated from PR72 head
+`c4042b5d8c36eb7426fd2a04653d13751fbecc4b`; that head is not yet the accepted
+release.  If PR72 moves, regenerate the bundle and cite the new head/checksums.
+PR71's corrected head is pending.  No agent has been started.  No live pi/Codex acceptance run has
 been executed against an approved integrated release; no owner-home installation
 or live-lane respawn has been done.  This runbook and the tool are the
 preparation artifact.

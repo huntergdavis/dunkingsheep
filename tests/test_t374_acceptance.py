@@ -171,6 +171,18 @@ class ValidatorTests(unittest.TestCase):
         value["lanes"]["pi"]["B_completed"]["actor"] = "%OTHER"
         self.assert_fails(value, "B completion actor")
 
+    def test_unavailable_human_send_evidence_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["human_sends"] = None
+        self.assert_fails(value, "human-send evidence unavailable")
+
+    def test_duplicate_b_completion_event_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_completeds"] = [
+            value["lanes"]["pi"]["B_completed"],
+            dict(value["lanes"]["pi"]["B_completed"])]
+        self.assert_fails(value, "exactly 1 B completion event")
+
 
 class CollectorTests(unittest.TestCase):
     """The collector reads PR72's SQL shapes, not a hand-written receipt."""

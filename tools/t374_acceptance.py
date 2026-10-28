@@ -153,7 +153,7 @@ def _launch_prompt(run_id, lane, wait_seconds=20):
     )
 
 
-def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex_state="", wait_seconds=20):
+def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex_state="", wait_seconds=20, pi_extension=""):
     run_id = run_id or time.strftime("%Y%m%dT%H%M%S")
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -197,7 +197,8 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
         model = pi_model if lane == "pi" else codex_model
         prompt = _launch_prompt(run_id, lane, wait_seconds)
         launch = {
-            "pi": ("pi" + (f" --model {shlex.quote(model)}" if model else "")
+            "pi": ("pi" + (f" --no-extensions -e {shlex.quote(pi_extension)}" if pi_extension else "")
+                   + (f" --model {shlex.quote(model)}" if model else "")
                    + f" {shlex.quote(prompt)}"),
             "codex": (f"env CODEX_HOME={shlex.quote(codex_home) if codex_home else '<approved-dedicated-codex-home>'} "
                       f"DUNKINGSHEEP_CODEX_STATE_DIR={shlex.quote(codex_state) if codex_state else '<run>/<lane>/codex-state'} "
@@ -212,6 +213,7 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
             "launch_command": launch,
             "prompt": prompt,
             "wait_seconds": int(wait_seconds),
+            "pi_extension": pi_extension or None,
             "tasks": _task_specs(run_id, out, lane),
         }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -219,7 +221,17 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
         {"version": "FILL-ME", "code_hash": "FILL-ME",
          "repo_head": "FILL-ME", "approved_by": "CoS2/reviewer19"},
         indent=2) + "\n")
-    lines = [f"# t374 acceptance run {run_id}", ""]
+    lines = [f"# t374 acceptance run {run_id}", "",
+             "## Sequence (unambiguous)",
+             f"1. Prepare the dedicated producer bundle; link the Codex auth at runtime "
+             f"(never copy it into the artifact).",
+             f"2. Launch BOTH dedicated lanes with the commands below; each sleeps "
+             f"{int(wait_seconds)}s.",
+             "3. Within that window run `t374_acceptance.py prepare --run <this-run> "
+             "--execute --approval <approval.json> --pi-pane <pane> --codex-pane <pane>` "
+             "to create the pane-private A/B tasks.",
+             "4. Do not send any further prompt or key. A is the only initial prompt; "
+             "B must arrive from the automatic handoff.", ""]
     for lane in LANES:
         info = manifest["lanes"][lane]
         lines += [f"## {lane}", "",
@@ -328,7 +340,9 @@ def _metrics_for(pane, start, end):
 
 
 def _messages():
-    data = _json(_cli("messages", "--json").stdout) or {}
+    data = _json(_cli("messages", "--json").stdout)
+    if not isinstance(data, dict):
+        return None
     out = []
     for section in ("queued", "recent", "sent", "messages"):
         out.extend(data.get(section) or [])
@@ -437,8 +451,9 @@ def collect(run_dir):
         handoff = (history[handoff_ids[0]]["latest"] if len(handoff_ids) == 1 else None)
         receipt_row = _inbox_row(handoff["message_id"]) if handoff else None
         lane_messages = [m for m in messages if str(m.get("pane_id")) == str(pane)]
-        human = [m for m in lane_messages if m.get("source") == "send_text"
-                 and float(m.get("created_at") or 0) >= start]
+        human = None if messages is None else [
+            m for m in lane_messages if m.get("source") == "send_text"
+            and float(m.get("created_at") or 0) >= start]
         metrics = _metrics_for(pane, start, end)
         decisions = _decisions(events_a + events_b)
         receipt["lanes"][lane] = {
@@ -448,6 +463,8 @@ def collect(run_dir):
             "A_claims": _claims(events_a), "B_claims": _claims(events_b),
             "A_completed": _last(events_a, "completed"),
             "B_completed": _last(events_b, "completed"),
+            "A_completeds": [e for e in events_a if e.get("event") == "completed"],
+            "B_completeds": [e for e in events_b if e.get("event") == "completed"],
             "handoffs": [history[mid] for mid in handoff_ids],
             "handoff": handoff,
             "handoff_first_at": history[handoff_ids[0]]["first_at"] if len(handoff_ids) == 1 else None,
@@ -491,11 +508,14 @@ def validate(receipt):
             failures.append(f"{lane}: missing or duplicate A/B task ids")
         if not a_claims:
             failures.append(f"{lane}: A was not claimed")
-        elif _meta(a_claims[-1]).get("caller_name") != lane:
-            failures.append(f"{lane}: A claim caller is "
-                            f"{_meta(a_claims[-1]).get('caller_name')!r}, not {lane!r}")
-        if a_claims and a_claims[-1].get("actor") != pane:
-            failures.append(f"{lane}: A claim actor is not the lane pane")
+        for claim in a_claims:
+            if _meta(claim).get("caller_name") != lane:
+                failures.append(f"{lane}: A claim caller is "
+                                f"{_meta(claim).get('caller_name')!r}, not {lane!r}")
+            if claim.get("actor") != pane:
+                failures.append(f"{lane}: A claim actor is not the lane pane")
+        if len(row.get("A_completeds") or [a_completed]) != 1:
+            failures.append(f"{lane}: expected exactly 1 A completion event")
         if not a_completed or not a_at:
             failures.append(f"{lane}: A was not completed")
         else:
@@ -597,6 +617,8 @@ def validate(receipt):
 
         if not row.get("B_artifact", {}).get("prefix_ok"):
             failures.append(f"{lane}: B artifact missing or wrong prefix")
+        if len(row.get("B_completeds") or [b_completed]) != 1:
+            failures.append(f"{lane}: expected exactly 1 B completion event")
         if not b_completed or not b_at:
             failures.append(f"{lane}: B was not completed")
         else:
@@ -615,7 +637,9 @@ def validate(receipt):
                    <= 2.0 for e in row.get("turn_starts") or []):
             failures.append(f"{lane}: no matching turn.start metric for the bound B turn")
 
-        if row.get("human_sends"):
+        if row.get("human_sends") is None:
+            failures.append(f"{lane}: human-send evidence unavailable (messages --json failed)")
+        elif row.get("human_sends"):
             failures.append(f"{lane}: {len(row['human_sends'])} send_text/send_keys "
                             "message(s) to the lane; the acceptance requires no human nudge")
 
@@ -659,6 +683,7 @@ def main(argv=None):
     p.add_argument("--codex-home", default="")
     p.add_argument("--codex-state", default="")
     p.add_argument("--wait-seconds", type=int, default=20)
+    p.add_argument("--pi-extension", default="")
     p = sub.add_parser("prepare")
     p.add_argument("--run", required=True)
     p.add_argument("--execute", action="store_true")
@@ -675,7 +700,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "plan":
         plan(args.out, args.run_id, args.pi_model, args.codex_model,
-             args.codex_home, args.codex_state, args.wait_seconds)
+             args.codex_home, args.codex_state, args.wait_seconds,
+             args.pi_extension)
     elif args.command == "prepare":
         prepare(args.run, args.execute, args.approval, args.pi_pane, args.codex_pane)
     elif args.command == "collect":
