@@ -5260,7 +5260,14 @@ class Flock:
                                "not submitting into a dead composer")
         pane = next((item for item in self.herdr.list_panes()
                      if item.get("pane_id") == pane_id), None)
-        shell = pane is not None and not pane.get("agent")
+        # t130 (VP t386 adversarial review + CoS i31749): the metadata-based
+        # early "sent" for "shell" panes is REMOVED. Pane metadata cannot
+        # positively identify a shell - agent fields are empty on managed
+        # agents (measured %80/%81), titles are not process identity, and
+        # lease evidence is missing/expired/unreadable exactly when it would
+        # matter. Every send now takes the bounded confirmation path; a
+        # genuine shell still confirms instantly and truthfully (no input box
+        # -> box read clear -> sent).
         with self._typing(pane_id):
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
@@ -5274,9 +5281,6 @@ class Flock:
             ok, detail = self.herdr.send_keys(pane_id, "Enter")
             if not ok:
                 return False, detail
-            if shell:
-                # A bare shell has no chat input box to read back.
-                return True, "sent"
         if guarded:
             # THE NUDGE PATH IS THIS ONE. Two rounds of "press, wait, check", not one:
             # measured on an idle codex lane (%31) right after 2.70.37 shipped - the text
