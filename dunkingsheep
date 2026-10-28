@@ -59,16 +59,21 @@ def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help=argparse.SUPPRESS)
+    # `--json` is also accepted after the subcommand (agents tend to put it last) - at ANY depth.
+    # The top-level subparsers get `parents=[common]` explicitly; nested ones used to default to
+    # type(parent), which is a plain ArgumentParser WITHOUT the flag, so `dispatch tick --json` and
+    # `owner stats --json` were rejected with "unrecognized arguments: --json" (pi-review-1, t257).
+    # One class for every level means the flag's position stops mattering.
+    json_parser_class = lambda **kw: argparse.ArgumentParser(parents=[common], **kw)
     sub = parser.add_subparsers(dest="command", metavar="<command>",
-                                parser_class=lambda **kw: argparse.ArgumentParser(
-                                    parents=[common], **kw))
+                                parser_class=json_parser_class)
     sub.required = True
 
     p = sub.add_parser("status", help="daemon health and counts")
     p.add_argument("--check-herdr", action="store_true",
                    help="probe the terminal backend (slow; default off)")
     p = sub.add_parser("turn", help="declare a busy turn (pi/claude hooks)")
-    tsub = p.add_subparsers(dest="turn_command", metavar="<start|end>")
+    tsub = p.add_subparsers(dest="turn_command", metavar="<start|end>", parser_class=json_parser_class)
     tsub.required = True
     q = tsub.add_parser("start", help="mark the pane busy until turn end")
     q.add_argument("--pane", help="pane id (default: the caller's)")
@@ -209,7 +214,7 @@ def build_parser():
                                        "for the recipient agent to read, so it cannot "
                                        "collide with a human typing, cannot stick "
                                        "half-sent, and has no size limit.")
-    isub = inbox.add_subparsers(dest="inbox_command", metavar="<subcommand>")
+    isub = inbox.add_subparsers(dest="inbox_command", metavar="<subcommand>", parser_class=json_parser_class)
     isub.required = True
     q = isub.add_parser("count", help="how many messages are waiting")
     q.add_argument("mailbox", nargs="?", help="agent name, pane id or 'self' (default self)")
@@ -258,7 +263,7 @@ def build_parser():
     context = sub.add_parser("context", help="declarative context store: files are truth, index is a cache",
                              description=".dunkingsheep/ per project plus one global. Ground truths never "
                                          "expire; only the owner promotes one; supersede keeps both entries linked.")
-    csub = context.add_subparsers(dest="context_command", metavar="<subcommand>")
+    csub = context.add_subparsers(dest="context_command", metavar="<subcommand>", parser_class=json_parser_class)
     csub.required = True
     q = csub.add_parser("init", help="create the store layout")
     q.add_argument("--global", dest="global_store", action="store_true")
@@ -329,7 +334,7 @@ def build_parser():
                         description="A PM publishes ONE digest per project per window "
                                     "under a stable id, and lanes report to their PM "
                                     "instead of the VP.")
-    psub = pm.add_subparsers(dest="pm_command", metavar="<subcommand>")
+    psub = pm.add_subparsers(dest="pm_command", metavar="<subcommand>", parser_class=json_parser_class)
     psub.required = True
     q = psub.add_parser("digest", help="publish/update one project digest",
                         epilog="example: echo '{\"changed\":[\"t6 240/286\"],\"numbers\":[]}' | "
@@ -346,7 +351,7 @@ def build_parser():
         description="Tasks are global (fleet-wide) by default, or scoped to one "
                     "pane. `task next` claims atomically; `task follow` asks the "
                     "daemon to push work to you when idle.")
-    tsub = task.add_subparsers(dest="task_command", metavar="<subcommand>")
+    tsub = task.add_subparsers(dest="task_command", metavar="<subcommand>", parser_class=json_parser_class)
     tsub.required = True
 
     q = tsub.add_parser("add", help="create a task")
@@ -449,7 +454,7 @@ def build_parser():
         help="who may close panes/tabs/workspaces, stop the daemon or manage dunks",
         description="Superusers may perform destructive or affecting-others "
                     "operations. Everyone else uses the inbox and task queue.")
-    ssub = superuser.add_subparsers(dest="superuser_command", metavar="<subcommand>")
+    ssub = superuser.add_subparsers(dest="superuser_command", metavar="<subcommand>", parser_class=json_parser_class)
     ssub.required = True
     ssub.add_parser("status", help="show the allowlist and whether this pane is on it")
     q = ssub.add_parser("add", help="add a pane id or name")
@@ -464,7 +469,7 @@ def build_parser():
         "memory", help="memory/recall over past agent sessions",
         description="Ranked recall over Claude/Codex/opencode/pi sessions, backed "
                     "by SQLite + FTS5. Queries never reindex or wait for ingest.")
-    msub = memory.add_subparsers(dest="memory_command", metavar="<subcommand>")
+    msub = memory.add_subparsers(dest="memory_command", metavar="<subcommand>", parser_class=json_parser_class)
     msub.required = True
     for name, help_text in (("recall", "ranked snippets"),
                             ("search", "filtered search (same engine)")):
@@ -559,7 +564,7 @@ def build_parser():
                    help="post-upgrade doctor: herdr surfaces + dunk target metadata")
 
     p = sub.add_parser("owner", help="owner -> agent delivery: pushed, never typed")
-    osub = p.add_subparsers(dest="owner_command", metavar="<action>")
+    osub = p.add_subparsers(dest="owner_command", metavar="<action>", parser_class=json_parser_class)
     q = osub.add_parser("push", help="push an owner message to a pane (no inbox row, no typing)")
     q.add_argument("target")
     q.add_argument("body", nargs="+")
@@ -573,7 +578,7 @@ def build_parser():
     q.add_argument("--by")
     q = osub.add_parser("stats", help="owner-push counts and latency")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
-    ssub = p.add_subparsers(dest="state_command", metavar="<action>")
+    ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
     q = ssub.add_parser("capture", help="record one row per agent lane now")
     q.add_argument("--source", default="periodic", help="why this capture ran")
     q = ssub.add_parser("latest", help="the most recent captured rows")
@@ -600,13 +605,13 @@ def build_parser():
     p = sub.add_parser("lane", aliases=["lanes"],
                        help="the lane registry: who each pane IS, declared or inferred",
                        epilog="examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'")
-    lsub = p.add_subparsers(dest="lane_command", metavar="<action>")
+    lsub = p.add_subparsers(dest="lane_command", metavar="<action>", parser_class=json_parser_class)
     lsub.add_parser("list", help="every lane row: pane, name, declared?, alive?")
     q = lsub.add_parser("set", help="declare who a pane IS (superuser); overrides any title")
     q.add_argument("pane")
     q.add_argument("mailbox")
     p = sub.add_parser("retired", help="retired panes: kept as the record, excluded from alerts and feeding")
-    rsub = p.add_subparsers(dest="retire_command", metavar="<action>")
+    rsub = p.add_subparsers(dest="retire_command", metavar="<action>", parser_class=json_parser_class)
     q = rsub.add_parser("retire", help="stop paging about a pane and stop feeding it (superuser)")
     q.add_argument("pane")
     q.add_argument("--reason", required=True, help="why, e.g. superseded-by:wW:p7")
@@ -615,7 +620,7 @@ def build_parser():
     q = rsub.add_parser("list", help="the retired panes")
     p = sub.add_parser("dispatch", help="standby queue + a deterministic tick that fills idle lanes",
                        epilog="examples: dispatch add t6 'advance strict C to 250' / dispatch tick")
-    dsub = p.add_subparsers(dest="dispatch_command", metavar="<action>")
+    dsub = p.add_subparsers(dest="dispatch_command", metavar="<action>", parser_class=json_parser_class)
     q = dsub.add_parser("add", help="queue a one-line assignment")
     q.add_argument("brief", nargs="+")
     q.add_argument("--task-id", "-t", help="the task this assignment advances")
