@@ -593,9 +593,10 @@ class FlockTests(unittest.TestCase):
         self.assertFalse(state["skip_if_unconsumed"])
         self.assertEqual(0, state["skip_count"])
         self.assertGreaterEqual(state["send_count"], 2)
-        # With both gates off nothing polls the agent's status. The pane is
-        # still read, but only to confirm each send actually left the box.
-        self.assertEqual(0, self.herdr.status_calls)
+        # With both gates off no GATE polls the agent's status. t363 adds exactly
+        # one pre-send status baseline PER SEND: turn confirmation needs a
+        # before/after, so one cheap probe per send is the cost of the proof.
+        self.assertGreaterEqual(self.herdr.status_calls, state["send_count"])
         self.assertTrue(all(source == "visible" for _pane, source in self.herdr.reads))
 
     # ---- never type over a human: the classifier, on styled screens ----
@@ -700,7 +701,8 @@ class FlockTests(unittest.TestCase):
         # Three reads: clear, still clear a second later (the settle window),
         # then one last look with the send lock held, just before typing.
         self.assertEqual(["w2:p1", "w2:p1", "w2:p1"], self.herdr.ansi_reads)
-        self.assertEqual(0, self.herdr.status_calls, "no idle gate when asked for any time")
+        # t363: no idle gate, but one pre-send status baseline per send.
+        self.assertEqual(1, self.herdr.status_calls, "no idle gate when asked for any time")
 
     def test_hold_while_typing_toggle_round_trip_and_old_files_default_on(self):
         dunk = self.flock.add(target="w2:p1")
@@ -1095,11 +1097,17 @@ class SendRaceTests(unittest.TestCase):
     def test_a_busy_lane_confirms_by_the_turn_it_started(self):
         """The false negative cos measured: two sends to a claude lane reported
         "did not submit" and the receiving lane showed both as turns. A busy box
-        is not evidence of failure; a turn starting is evidence of success."""
-        self.herdr.statuses["w2:p1"] = "working"      # a turn is running
-        # The reader keeps seeing our text (its echo in the transcript): the exact
-        # misreading that produced the false negative.
-        with mock.patch.object(type(self.flock), "_box_holds", return_value=True):
+        is not evidence of failure; A TURN STARTING DURING THE SEND (t363: a
+        transition - idle at send start, working after) is evidence of success.
+        The stale form of this test (working set BEFORE the send) encoded the
+        false-success bug the PR63 review reproduced; the negative regression for
+        it lives in tests/test_dunk_turn_confirmation.py."""
+        # Baseline read returns "idle"; every later probe (the turn checks inside
+        # the ladder) sees "working": a transition, not a pre-existing state.
+        reads = iter(["idle"])
+        with mock.patch.object(type(self.flock), "_read_status",
+                               side_effect=lambda pane_id: next(reads, "working")), \
+             mock.patch.object(type(self.flock), "_box_holds", return_value=True):
             ok, detail = self.flock.submit_text("w2:p1", "a nudge")
         self.assertTrue(ok, detail)
         self.assertIn("confirmed by the turn", detail)
