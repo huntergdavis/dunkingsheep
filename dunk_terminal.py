@@ -189,11 +189,14 @@ class TmuxBackend(TerminalBackend):
     name = "tmux"
     live = True
     PANE_SEP = "\x1f"
+    # The last two fields are APPENDED, never inserted: every earlier field keeps
+    # its position, and _parse_panes still accepts a 12-field line (a fixture, an
+    # older capture) with cols/rows absent rather than guessing a size.
     PANE_FORMAT = PANE_SEP.join([
         "#{pane_id}", "#{session_id}", "#{window_id}", "#{pane_current_path}",
         "#{pane_current_command}", "#{pane_title}", "#{pane_active}",
         "#{session_name}", "#{window_name}", "#{window_index}",
-        "#{session_index}", "#{pane_pid}",
+        "#{session_index}", "#{pane_pid}", "#{pane_width}", "#{pane_height}",
     ])
     TAB_FORMAT = PANE_SEP.join([
         "#{window_id}", "#{session_id}", "#{window_name}", "#{window_index}",
@@ -340,6 +343,10 @@ class TmuxBackend(TerminalBackend):
             number = _int(window_index, 0)
             workspace_number = _int(session_index, 0)
             pid = None if str(pane_pid).strip() in ("", "None") else _int(pane_pid, None)
+            # Geometry, so a caller can report the cell grid a lane is being drawn
+            # into (and, later, ask for a resize). None when the line did not carry it.
+            cols = _int(fields[12], None) if len(fields) > 12 else None
+            rows = _int(fields[13], None) if len(fields) > 13 else None
             panes.append({
                 "pane_id": pane_id,
                 "terminal_id": pane_id,
@@ -355,6 +362,8 @@ class TmuxBackend(TerminalBackend):
                 "terminal_title_stripped": label,
                 "terminal_title": title,
                 "pane_pid": pid,
+                "cols": cols,
+                "rows": rows,
                 "managed": pane_id in data["panes"],
                 "tab_label": window_name,
                 "workspace_label": session_name,
