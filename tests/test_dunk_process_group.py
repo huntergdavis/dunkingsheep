@@ -154,5 +154,88 @@ class ProcessGroupTests(unittest.TestCase):
             pass
 
 
+class ClientTestSpawnGateTests(unittest.TestCase):
+    def test_no_preexec_when_the_forker_is_not_the_watched_pid(self):
+        """THE POSITIVE HALF (reviewer %20, PR #51): the d456781 bug needed TEST_SPAWN SET and the forker
+        being someone other than the watched pid. A probe that only runs with TEST_SPAWN unset cannot see
+        it - the arming mutant survives the whole suite without this assertion."""
+        tmp = tempfile.mkdtemp(prefix="gate2-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        probe = f'''
+import json, os, sys
+sys.path.insert(0, {ROOT!r})
+import dunk_client
+seen = {{}}
+def fake_popen(*args, **kwargs):
+    seen["preexec"] = kwargs.get("preexec_fn")
+    class Done:
+        pid = 0
+    return Done()
+dunk_client.subprocess.Popen = fake_popen
+client = dunk_client.FlockClient(socket_path=os.path.join({tmp!r}, "ds.sock"), self_pane_id="%99")
+try:
+    client.start_daemon()
+except Exception:
+    pass
+print(json.dumps({{"preexec": "FUNCTION" if seen.get("preexec") else None}}))
+'''
+        env = dict(os.environ)
+        env["DUNKINGSHEEP_TEST_SPAWN"] = "1"
+        # a watched pid that is NOT this process, which is the d456781 shape
+        env["DUNKINGSHEEP_DIE_WITH_PARENT"] = "1"
+        env["DUNKINGSHEEP_TMUX_SOCKET"] = env.get("DUNKINGSHEEP_TMUX_SOCKET") or "default"
+        result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                                timeout=60, env=env, cwd=ROOT)
+        self.assertEqual(0, result.returncode, result.stderr)
+        import json as _json
+        seen = _json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertIsNone(seen.get("preexec"),
+                          "PR_SET_PDEATHSIG must not be armed when the forker is not the watched pid")
+
+    """The CLIENT's gate, not the helper's (reviewer %20, PR #48).
+
+    dunk_client.start_daemon decides whether to pass DUNKINGSHEEP_DIE_WITH_PARENT and whether to arm
+    PR_SET_PDEATHSIG. That decision is what went wrong on d456781 - the prctl was armed against a
+    short-lived CLI call - and ProductionNoOpTests pins a different gate in a different file.
+    """
+
+    def test_the_client_passes_no_parent_binding_without_test_spawn(self):
+        """Behavioural: spawn the client's daemon path with TEST_SPAWN unset and read the child env."""
+        tmp = tempfile.mkdtemp(prefix="gate-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        probe = f'''
+import json, os, sys
+sys.path.insert(0, {ROOT!r})
+import dunk_client
+seen = {{}}
+real_popen = dunk_client.subprocess.Popen
+def fake_popen(*args, **kwargs):
+    seen["env"] = {{k: v for k, v in (kwargs.get("env") or {{}}).items()
+                   if k.startswith("DUNKINGSHEEP_")}}
+    seen["preexec"] = kwargs.get("preexec_fn")
+    class Done:
+        pid = 0
+    return Done()
+dunk_client.subprocess.Popen = fake_popen
+client = dunk_client.FlockClient(socket_path=os.path.join({tmp!r}, "ds.sock"), self_pane_id="%99")
+try:
+    client.start_daemon()
+except Exception:
+    pass                      # the point is the env it WOULD have passed
+print(json.dumps(seen))
+'''
+        env = dict(os.environ)
+        env.pop("DUNKINGSHEEP_TEST_SPAWN", None)
+        env.pop("DUNKINGSHEEP_DIE_WITH_PARENT", None)
+        result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                                timeout=60, env=env, cwd=ROOT)
+        self.assertEqual(0, result.returncode, result.stderr)
+        import json as _json
+        seen = _json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertNotIn("DUNKINGSHEEP_DIE_WITH_PARENT", seen.get("env") or {},
+                         "a normal spawn must not be bound to its caller's life")
+        self.assertIsNone(seen.get("preexec"),
+                          "a normal spawn must not arm PR_SET_PDEATHSIG against the caller")
+
 if __name__ == "__main__":
     unittest.main()
