@@ -242,6 +242,17 @@ TOP = {
                   "approved_by": _opt_str, "max_pages_per_hour": POSITIVE_INT,
                   "confirm_within_minutes": POSITIVE, "confirm_path": _str},
     },
+    # t377 (owner2281/2282): the ONE action this watchdog may take on a pane, and it
+    # is narrow by construction - the daemon performs a single guarded Enter and
+    # verifies consumption; the watchdog only observes, accounts and reports. No
+    # model, no agent judgement: the numbers below are the whole policy.
+    "stuck_recovery": {
+        "enabled": _bool,
+        "threshold_s": POSITIVE,            # CoS default 120 in the shipped example
+        "max_attempts": POSITIVE_INT,       # bounded: 0 would mean "never act"
+        "cooldown_s": POSITIVE,
+        "observation_interval_s": POSITIVE,  # must be <= threshold; checked below
+    },
     "rules": {rule: dict(RULE_COMMON, **params) for rule, params in RULE_PARAMS.items()},
 }
 
@@ -267,6 +278,12 @@ def _validate(spec, value, prefix):
 def validate_config(config):
     """Raise ConfigError naming the first bad key; return the config unchanged."""
     _validate(TOP, config, "")
+    stuck = config.get("stuck_recovery") or {}
+    if stuck.get("enabled") and stuck["observation_interval_s"] > stuck["threshold_s"]:
+        raise ConfigError("stuck_recovery.observation_interval_s",
+                          "must be <= threshold_s, or the 120 s bound cannot be honoured")
+    if stuck.get("enabled") and stuck["max_attempts"] < 1:
+        raise ConfigError("stuck_recovery.max_attempts", "must be at least 1")
     owner = config["escalation"]["owner"]
     if owner["enabled"]:
         if not owner["approved_by"]:
