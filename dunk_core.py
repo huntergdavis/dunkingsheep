@@ -121,6 +121,7 @@ def code_status():
 
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
+import dunk_stuck
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
 from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
@@ -656,7 +657,7 @@ class Flock:
     def __init__(self, herdr=None, state_file=STATE_FILE,
                  launches_file=LAUNCHES_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
-                 superusers=None, memory=None):
+                 superusers=None, memory=None, stuck_config=None):
         self.herdr = get_backend(herdr)
         self.state_file = state_file
         self.launches_file = launches_file
@@ -721,6 +722,21 @@ class Flock:
         self._submit_key = {}
         self._warned_wedged = {}
         self._warned_modal = {}
+        # t377: the deterministic stuck-message recovery. The tracker is the memory
+        # that makes it bounded (attempts, cooldown, terminal) and it is persisted
+        # with the outbox so a restart cannot duplicate an Enter.
+        self.stuck = dunk_stuck.Tracker()
+        self.stuck_config = dunk_stuck.Config.from_mapping(
+            self._stuck_config_source(stuck_config))
+        # A CONFIG THAT WAS DECLARED WINS OVER THE ONE IN THE STATE FILE, otherwise the
+        # advertised precedence (argument > env > state > defaults) is false: a restart
+        # would silently replace an operator's env setting with the last saved value.
+        self._stuck_config_declared = bool(
+            stuck_config is not None or os.environ.get("DUNKINGSHEEP_STUCK_CONFIG"))
+        # The observation interval is a real knob: the worker ticks every
+        # MESSAGE_RECHECK_S, and a requested interval longer than that is honoured by
+        # skipping panes until their interval has elapsed.
+        self._stuck_last_check = {}
         # Why the most recent refusal happened, per pane, so a held event can
         # say which of draft / dialog / stranded it was.
         self._last_block_reason = {}
@@ -759,6 +775,37 @@ class Flock:
         if self.persist_enabled:
             self._start_task_workers()
 
+    @staticmethod
+    def _stuck_config_source(explicit=None):
+        """Where the runtime stuck-recovery config comes from, in one documented order.
+
+        explicit argument (tests, embedding) > DUNKINGSHEEP_STUCK_CONFIG, which may be
+        inline JSON or a path to a JSON file > the persisted `stuck_config` state key >
+        the documented defaults. The watchdog's `stuck_recovery` block uses the same
+        keys, so one file can serve both.
+        """
+        if explicit is not None:
+            return explicit
+        raw = os.environ.get("DUNKINGSHEEP_STUCK_CONFIG")
+        if raw:
+            text = raw.strip()
+            if text.startswith("{"):
+                try:
+                    return json.loads(text)
+                except ValueError as error:
+                    log.warning("ignoring DUNKINGSHEEP_STUCK_CONFIG (bad JSON): %s", error)
+                    return None
+            try:
+                with open(os.path.expanduser(text), "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, ValueError) as error:
+                log.warning("ignoring DUNKINGSHEEP_STUCK_CONFIG (%s): %s", text, error)
+                return None
+            if isinstance(payload, dict) and isinstance(payload.get("stuck_recovery"), dict):
+                return payload["stuck_recovery"]
+            return payload if isinstance(payload, dict) else None
+        return None
+
     # -- persistence --------------------------------------------------------
 
     def _restore(self):
@@ -772,6 +819,16 @@ class Flock:
             return
         with self._lock:
             self.next_id = int(payload.get("next_id") or 1)
+            if payload.get("stuck"):
+                # t377: the attempt accounting crosses restarts, so a restart cannot
+                # buy the same stuck message a second guarded Enter. from_state carries
+                # BOTH halves - the per-pane records and the durable spent ledger.
+                self.stuck = dunk_stuck.Tracker.from_state(payload.get("stuck"))
+            if payload.get("stuck_config") and not getattr(self, "_stuck_config_declared", False):
+                try:
+                    self.stuck_config = dunk_stuck.Config.from_mapping(payload["stuck_config"])
+                except ValueError as error:
+                    log.warning("ignoring persisted stuck config: %s", error)
             for data in payload.get("dunkers", []):
                 try:
                     dunker = Dunker.from_dict(data)
@@ -800,7 +857,7 @@ class Flock:
     def _save(self):
         self._invalidate_view()
         if not self.persist_enabled:
-            return
+            return True
         with self._lock:
             payload = {
                 "version": 1,
@@ -814,6 +871,15 @@ class Flock:
                 # than delaying it: on 2026-10-23 a restart to clear a stuck hold
                 # silently discarded every held message and three lanes were never
                 # told anything.
+                # t377: what the stuck-message recovery knows, so a restart does not
+                # re-press Enter on a message that already used its attempts.
+                "stuck": self.stuck.as_state(),
+                "stuck_config": {"enabled": self.stuck_config.enabled,
+                                 "threshold_s": self.stuck_config.threshold_s,
+                                 "max_attempts": self.stuck_config.max_attempts,
+                                 "cooldown_s": self.stuck_config.cooldown_s,
+                                 "observation_interval_s":
+                                     self.stuck_config.observation_interval_s},
                 "outbox": [
                     {"id": message.id, "pane_id": message.pane_id,
                      "target_label": message.target_label, "text": message.text,
@@ -843,6 +909,13 @@ class Flock:
                 os.replace(tmp, self.state_file)
         except OSError as error:
             log.warning("could not save %s: %s", self.state_file, error)
+            # t377: the stuck recovery RESERVES an attempt here before it presses a key.
+            # A save that did not land means the reservation is not durable, so the
+            # caller must be able to refuse rather than press on a hope.
+            self._last_save_failed = str(error)
+            return False
+        self._last_save_failed = None
+        return True
 
     # -- launch memory (post-upgrade recovery) --------------------------------
 
@@ -4197,35 +4270,272 @@ class Flock:
         # and its delivery used to discard the message silently.
         self._save()
 
-    def _unwedge(self, pane_id, content, since):
-        """Last resort when a box has held the same text, unchanged, for
-        STALE_BOX_S while messages wait behind it.
+    def _unwedge(self, pane_id, content, since, message=None):
+        """t377: recovery for text WE typed that is still sitting in the composer.
 
-        Only text we typed is ever submitted this way. Unchanged text we do
-        not recognise is far more likely to be a person who started a sentence
-        and walked away, and submitting half a thought on their behalf is
-        worse than a queue that waits: the wedge is visible in `messages` and
-        `flush` resolves it deliberately. Our own stranded text is a different
-        matter - it is ours to clean up, and recognising it is what the
-        remembered-sends list exists for."""
-        if not content or time.time() - since < STALE_BOX_S:
+        Deterministic, one actor, no model in the loop. The policy is `dunk_stuck`
+        (fake-clock tested); this method supplies its inputs and, when it says
+        RECOVER, RESERVES the attempt durably, presses exactly ONE key under the
+        shared locks after re-validating everything, then verifies consumption
+        independently.
+
+        What it will never do:
+          - submit text it cannot prove it owns, including when the pane cannot be
+            READ (an unreadable pane is unknown, not empty);
+          - act on a busy, dialogged, blocked, dead or unknown pane, on a replaced
+            pane, or on a cancelled message;
+          - act at all when `stuck_recovery.enabled` is false;
+          - press twice for the same message: the attempt is reserved in the persisted
+            ledger BEFORE the key, so a crash cannot refund it, and a reset (busy
+            turn, edit) does not return the budget;
+          - claim success from "still working" or from a read that failed.
+        """
+        if not self.stuck_config.enabled:
             return False
-        if not self._looks_like_ours(pane_id, content):
-            if not self._warned_wedged.get(pane_id):
-                self._warned_wedged[pane_id] = True
-                log.warning("%s: input box has held text we did not type for %ds with "
-                            "messages waiting. Not submitting someone's draft; run "
-                            "`dunkingsheep flush %s` to release it: %r",
-                            pane_id, int(time.time() - since), pane_id, content[:80])
+        now = time.time()
+        # The worker ticks every MESSAGE_RECHECK_S; a longer requested observation
+        # interval is honoured here rather than merely validated.
+        last = self._stuck_last_check.get(pane_id)
+        if last is not None and now - last < self.stuck_config.observation_interval_s:
             return False
-        self._warned_wedged.pop(pane_id, None)
-        log.warning("%s: our own text has sat unsubmitted for %ds with messages "
-                    "waiting; submitting it to unwedge the queue: %r",
-                    pane_id, int(time.time() - since), content[:80])
-        ok, detail = self._press_until_submitted(pane_id, content)
-        if not ok:
-            log.error("%s: could not unwedge the input box: %s", pane_id, detail)
-        return ok
+        self._stuck_last_check[pane_id] = now
+        head = message if message is not None else self._stranded_message(pane_id, content)
+        identity = getattr(head, "id", None) or self._text_identity(content)
+        generation = self._pane_generation(pane_id)
+        if not generation:
+            # No pid/start identity: we cannot prove this is the pane we observed.
+            self.stuck.forget(pane_id)
+            log.info("%s: no pane generation evidence; not recovering anything", pane_id)
+            return False
+        observation = dunk_stuck.Observation(
+            pane_id=pane_id, message_id=identity, text=content or "",
+            status=self._stuck_status(pane_id),
+            owned=self._stuck_text_is_ours(pane_id, getattr(head, "text", None), content),
+            generation=generation, dialog=False,
+            cancelled=getattr(head, "status", None) == "cancelled")
+        if since and pane_id not in self.stuck.records:
+            # The clock starts when the text was first SEEN stranded, not when this
+            # tick happened to run, so a 5 s worker and a 120 s bound still mean 120 s.
+            self.stuck.decide(observation, self.stuck_config, now=min(since, now))
+        decision = self.stuck.decide(observation, self.stuck_config, now=now)
+        if decision.action != "recover":
+            if decision.action == "reset" and decision.reason not in (
+                    "the composer is empty", "no tracked message for this pane"):
+                log.info("%s: stuck recovery reset: %s", pane_id, decision.reason)
+            return False
+        # THE COMPLETE TEXT MUST BE OURS. A partial buffer is not the whole notice.
+        tracked = getattr(head, "text", None)
+        if tracked and dunk_stuck.collapse(content) != dunk_stuck.collapse(tracked):
+            self.stuck.mark_terminal(pane_id, "the composer holds only part of our text")
+            self._save()
+            log.warning("%s: not submitting a partial composer (%d vs %d chars): %r",
+                        pane_id, len(content or ""), len(tracked), (content or "")[:80])
+            return False
+        # RESERVE BEFORE THE KEY, DURABLY. If the process dies after the keypress the
+        # attempt is already spent; the opposite ordering refunds crashed attempts. A
+        # save that FAILS means no durable reservation, so nothing is pressed.
+        if not self._save():
+            log.error("%s: refusing to press: the attempt reservation could not be "
+                      "persisted (%s)", pane_id, getattr(self, "_last_save_failed", None))
+            self.metrics.record("stuck.recover", pane_id=pane_id, source="stuck_watchdog",
+                                outcome="refused", reason="reservation not durable",
+                                attempts=decision.attempts)
+            return False
+        log.warning("%s: our own text sat unsubmitted for %ds (attempt %d of %d); "
+                    "one guarded key: %r", pane_id, int(decision.stale_for),
+                    decision.attempts, self.stuck_config.max_attempts,
+                    (content or "")[:80])
+        pressed, detail = self._press_stuck_enter(
+            pane_id, expected_fingerprint=dunk_stuck.fingerprint(content or ""),
+            generation=generation, message_id=identity, tracked_text=tracked,
+            message=head)
+        if not pressed:
+            log.warning("%s: no key pressed (%s)", pane_id, detail)
+            self.metrics.record("stuck.recover", pane_id=pane_id, source="stuck_watchdog",
+                                outcome="refused", reason=detail, attempts=decision.attempts)
+            self._save()
+            return False
+        after_text = self._box_text(pane_id)         # None means UNREADABLE, not clear
+        after = dunk_stuck.Observation(
+            pane_id=pane_id, message_id=identity, text=after_text,
+            status=self._stuck_status(pane_id), owned=False,
+            generation=self._pane_generation(pane_id))
+        if after.generation != generation:
+            outcome, why = "unverified", "the pane was replaced during the press"
+        else:
+            outcome, why = dunk_stuck.verify(observation, after)
+        self.metrics.record("stuck.recover", pane_id=pane_id,
+                            mailbox=getattr(head, "target_label", None),
+                            source="stuck_watchdog", outcome=outcome, reason=why,
+                            attempts=decision.attempts)
+        if outcome == "consumed":
+            self.stuck.forget(pane_id)
+            log.warning("%s: stuck message recovered (attempt %d): %s",
+                        pane_id, decision.attempts, why)
+        else:
+            log.warning("%s: stuck attempt %d did not consume the text (%s): %s",
+                        pane_id, decision.attempts, outcome, why)
+        self._save()
+        return outcome == "consumed"
+
+    def _press_stuck_enter(self, pane_id, expected_fingerprint, generation, message_id,
+                           tracked_text, message=None):
+        """Exactly ONE Enter, under the shared locks, re-validated immediately before.
+
+        The observation and this press are separated by time; a person can type in
+        that gap. So everything is re-read inside the same lock the typed sends use:
+        the pane is readable, the generation and message are the same, the target is
+        still not busy/dialogged/cancelled, the text is still provably ours, and the
+        fingerprint is the one the clock was measured on. Any disagreement refuses.
+        """
+        with self._lock_for(pane_id), self._typing(pane_id):
+            screen = self.read_screen(pane_id)
+            if screen is None:
+                return False, "the pane could not be read at press time"
+            if self._pane_generation(pane_id) != generation:
+                return False, "the pane changed between observation and press"
+            # CANCELLATION AND IDENTITY, re-checked at the final boundary: the sender can
+            # cancel between the observation and this lock.
+            if message is not None:
+                if getattr(message, "status", None) == "cancelled":
+                    return False, "the message was cancelled before the press"
+                if getattr(message, "id", None) != message_id:
+                    return False, "a different message is now tracked for this pane"
+            # Only a message that HAS an outbox row can be checked there: the dunk path
+            # (and an explicitly passed identity) has no row, and demanding one would
+            # refuse the very case this exists to recover.
+            with self._lock:
+                rows = [m for m in (self.outbox.get(pane_id) or []) if m.id == message_id]
+            if rows and not any(m.status == "queued" for m in rows):
+                return False, "the message is no longer queued"
+            # STATUS at the final boundary, not just when the clock started.
+            status = self._stuck_status(pane_id)
+            if status != "ready":
+                return False, f"the target is {status} at press time"
+            if _modal_open(screen):
+                return False, "a dialog opened before the press"
+            content = self._box_text(pane_id)
+            if content is None:
+                return False, "the composer could not be read at press time"
+            if dunk_stuck.fingerprint(content) != expected_fingerprint:
+                return False, "the composer text changed between observation and press"
+            if tracked_text and dunk_stuck.collapse(content) != dunk_stuck.collapse(tracked_text):
+                return False, "the composer no longer holds exactly our text"
+            matcher = getattr(self, "composer_region_is_owned", None)
+            if matcher is not None:
+                try:
+                    if not matcher(pane_id, screen):
+                        return False, "t130's matcher says the composer is not ours"
+                except Exception:               # noqa: BLE001 - fail closed
+                    return False, "t130's matcher failed; not pressing"
+            try:
+                result = self.herdr.send_keys(pane_id, ["Enter"])
+            except Exception as error:          # noqa: BLE001 - report, never crash
+                return False, f"the key could not be sent: {error}"
+            # THE BACKEND'S VERDICT COUNTS. A (False, reason) tuple was being ignored,
+            # so a refused keypress reported success and the caller "verified" a pane
+            # nothing had been typed into.
+            if isinstance(result, tuple) and result and result[0] is False:
+                reason = result[1] if len(result) > 1 else "no reason given"
+                return False, f"the backend refused the key: {reason}"
+            self._last_stuck_press = (pane_id, message_id, time.time())
+            return True, "one Enter"
+
+    def _stranded_message(self, pane_id, content):
+        """Which message is actually stuck in this box?
+
+        The queued HEAD is not it: a person's earlier draft can wedge the queue, and a
+        dunk's notice has no Message row at all. So the box text decides: the queued
+        row whose text IS the composer, else None and the caller falls back to a text
+        identity (see `_text_identity`), never to "the head of the queue".
+        """
+        if not content:
+            return None
+        want = dunk_stuck.collapse(content)
+        with self._lock:
+            rows = [m for m in (self.outbox.get(pane_id) or []) if m.status == "queued"]
+        for row in reversed(rows):                  # newest first: the last typed is the one in the box
+            if row.text and dunk_stuck.collapse(row.text) == want:
+                return row
+        for row in reversed(rows):
+            if row.text and dunk_stuck.collapse(row.text).startswith(want[:40]):
+                return row                            # a wrapped prefix of a long notice
+        return None
+
+    @staticmethod
+    def _text_identity(content):
+        """A stable identity for text with no Message row (a dunk's own notice)."""
+        flat = dunk_stuck.collapse(content)
+        return f"text:{dunk_stuck.fingerprint(flat)}" if flat else None
+
+    def _stuck_text_is_ours(self, pane_id, tracked_text, content):
+        """EXACT ownership for the recovery path - never the prefix matcher.
+
+        Two gates, both required:
+          1. t130's exact full-composer matcher (`composer_region_is_owned`) when the
+             merged tree has it - complete visible composer vs owned text;
+          2. equality-after-collapse against the tracked message text, or, for text
+             with no row (a dunk notice), against what this pane was last sent.
+        An unreadable screen is NOT ownership: it fails closed.
+        """
+        if not content:
+            return False
+        owned_text = tracked_text
+        if not owned_text:
+            with self._lock:
+                candidates = list(self.sent_text_by_pane.get(pane_id, []))
+            for candidate in reversed(candidates):
+                if candidate and dunk_stuck.collapse(candidate) == dunk_stuck.collapse(content):
+                    owned_text = candidate
+                    break
+        if not owned_text:
+            return False
+        if dunk_stuck.collapse(content) != dunk_stuck.collapse(owned_text):
+            return False
+        matcher = getattr(self, "composer_region_is_owned", None)
+        if matcher is not None:
+            try:
+                screen = self.read_screen(pane_id)
+                if screen is None:
+                    return False                 # unreadable is not "ours"
+                if not matcher(pane_id, screen):
+                    return False
+            except Exception:                   # noqa: BLE001 - a matcher error fails closed
+                return False
+        return True
+
+    def _stuck_status(self, pane_id):
+        """The delivery state for the recovery decision: deliverable is not enough,
+        a busy/unknown pane must RESET the clock rather than be acted on."""
+        try:
+            state = self.delivery_state(pane_id)
+            name = str(state.get("state") or "")
+            if not state.get("deliverable") and name == "unknown":
+                return "unknown"
+            return name or "unknown"
+        except Exception:                       # noqa: BLE001 - never crash a worker
+            return "unknown"
+
+    def _pane_generation(self, pane_id):
+        """Pane identity that changes when a pane is replaced: pid AND process start.
+
+        A pid alone is reused by the OS; the pair is what makes "the same pane" a
+        checkable claim. Absent evidence returns None, and the recovery fails closed.
+        """
+        try:
+            pane = self.herdr.get_pane(pane_id) or {}
+        except Exception:                       # noqa: BLE001
+            return None
+        pid = pane.get("pane_pid") or pane.get("pid")
+        if not pid:
+            return None
+        try:
+            with open(f"/proc/{int(pid)}/stat", "r", encoding="utf-8") as handle:
+                fields = handle.read().rsplit(") ", 1)[-1].split()
+            start = fields[19]                  # field 22 from the start of stat
+        except (OSError, ValueError, IndexError):
+            start = None                        # a fake/absent pid has no start time
+        return f"pid:{pid}:start:{start}" if start else None
 
     def _outbox_worker(self, pane_id):
         """Deliver a pane's queued messages in order, each only once the box

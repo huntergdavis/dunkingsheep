@@ -199,3 +199,41 @@ WARNING flushed pane wS:p2 by w9:pH (owner asked: nudge stuck): dead -> ready
 Clearing someone's draft is destructive even when the draft is our own text, so it
 is never automatic: the daemon reports `blocked` and names the command, and a human
 or a superuser decides.
+
+### The ONE automatic action: unchanged text we typed, after two minutes (t377)
+
+An owner-authorized exception, and a narrow one. When the daemon typed a message and
+the lane never took it, the text can sit in the composer while the lane is idle; the
+old fixes were both manual. The recovery is now automatic and **deterministic - no
+model, no agent judgement in the loop** (`dunk_stuck.py`, one actor: the daemon, which
+already holds the typing lock and the composer matcher):
+
+| input | rule |
+|---|---|
+| identity | the tracked message id, the pane generation (pid), the COMPLETE composer fingerprint |
+| stability | the same fingerprint for `threshold_s` (default **120 s**, configurable) |
+| target state | idle and not accepting the text - `working`, `blocked`, `dead`, `unknown` all reset |
+| action | **one** guarded submit attempt, then independent verification: the composer cleared, or a NEW turn started |
+| retries | `max_attempts` (default 2) with `cooldown_s`; the count is persisted, so a restart cannot duplicate it |
+| terminal | attempts exhausted ⇒ a named terminal reason in the log and `stuck.recover` metrics; never a silent loop |
+
+It never submits text it cannot prove it owns. Ownership is **exact**: the complete
+visible composer must equal the complete text of that tracked message (whitespace and
+wrapping normalised), so an appended human continuation, a mid-line edit, a truncation
+or a foreign draft all reset the clock. "Still working" is never success evidence.
+
+Every non-action is a reset with a reason: text edit, appended continuation, replaced
+pane, cancelled message, busy turn, open dialog, unknown state, missing ownership.
+
+Config (watchdog `stuck_recovery`, and the same numbers on the daemon):
+
+```json
+"stuck_recovery": {"enabled": true, "threshold_s": 120, "max_attempts": 2,
+                   "cooldown_s": 60, "observation_interval_s": 20}
+```
+
+`observation_interval_s` must be `<= threshold_s`; the validator refuses a config that
+cannot honour the bound. The packaged watchdog timer runs every 10 minutes, which is
+too slow to gate a 120 s bound - the **actor is the daemon's outbox worker**, which
+re-checks every `MESSAGE_RECHECK_S` (5 s), so the bound holds whether or not the
+watchdog is running at all.
