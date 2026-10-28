@@ -4816,19 +4816,36 @@ class Flock:
                 return True
         return False
 
+    def _composer_ownership(self, pane_id, screen):
+        """(owned, region) for an ambiguous frame - THE shared decision path.
+
+        Used by BOTH _ensure_box_clear and the public composer_region_is_owned
+        seam (CoS i31512: the watchdog must not bypass the guards). Strict
+        full-composer equality PLUS geometry guards: footer = last non-blank
+        row; immediately-adjacent sigil rows refuse (nested/unresolvable); a
+        duplicate matched echo above the composer refuses.
+        KNOWN RESIDUAL RISK, flagged to CoS rather than hidden: a blank-separated
+        inserted echo above which the real composer holds a human draft is
+        indistinguishable from the wedge positive (transcript sigil above) by
+        both geometry and content - the positive's transcript sigil is equally
+        unaccounted. Only adjacency is provable; deeper separation needs a
+        renderer ground truth that does not exist yet."""
+        region = _composer_region_text(screen)
+        if not region:
+            return False, ""
+        return self._region_is_ours(pane_id, region), region
+
     def composer_region_is_owned(self, pane_id, screen):
         """PUBLIC (t377 seam, Owner2282): the exact-owned full-composer check.
 
-        Extracts the complete visible composer from `screen` (last prompt-sigil
-        row plus continuation lines, footer excluded) and returns True only when
-        it EQUALS - after _collapse normalisation of wrapping - text we typed or
-        are queuing for `pane_id`. Appended human lines, edits, truncations and
-        foreign drafts are refused. Stable name: the watchdog depends on this,
-        not on the private helpers."""
-        region = _composer_region_text(screen)
-        if not region:
-            return False
-        return self._region_is_ours(pane_id, region)
+        Returns True only when the complete visible composer - extracted with
+        the same geometry rules the delivery guard uses - EQUALS, after
+        _collapse normalisation of wrapping, text we typed or are queuing for
+        `pane_id`. Appended human lines, edits, truncations, foreign drafts and
+        nested/adjacent sigil rows are refused. Stable name: the watchdog
+        depends on this, not on the private helpers."""
+        owned, _region = self._composer_ownership(pane_id, screen)
+        return owned
 
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
@@ -5168,14 +5185,13 @@ class Flock:
         if detail.startswith(AMBIGUOUS_COMPOSER):
             # t130 (Owner2277): the geometry rule cannot tell pending input from
             # transcript - but CONTENT can, when the pending text is OURS. The
-            # comparison is over the WHOLE composer region (sigil row plus any
-            # continuation lines below it, CoS finding): our text is ours only if
-            # the region is a PREFIX of it - any human-added or edited line makes
-            # the comparison fail, and the refusal stands. Arbitrary draft text
-            # is not made safe by this; the human-draft control is the strict
-            # region match, not the geometry.
-            region = _composer_region_text(screen)
-            if region and self._region_is_ours(pane_id, region):
+            # decision lives in ONE shared path (_composer_ownership) so the
+            # delivery guard and the public watchdog seam cannot drift (CoS
+            # i31512): strict full-composer equality, footer = last non-blank
+            # row, adjacent/nested sigil rows refuse, duplicate matched echoes
+            # refuse.
+            owned, region = self._composer_ownership(pane_id, screen)
+            if owned:
                 self._last_block_reason[pane_id] = "stranded"
                 log.info("%s: ambiguous composer holds OUR queued text; submitting it",
                          pane_id)
@@ -5931,32 +5947,46 @@ def _prompt_body(row):
 
 
 def _composer_region_text(screen):
-    """The live composer's visible content, or "" if there is no prompt row.
+    """The live composer's visible content, or "" when it cannot be delimited
+    (FAIL CLOSED - CoS i31543/i31555: never submit on an undelimited frame).
 
-    t130 (Owner2277/CoS finding): the LAST prompt-sigil row alone is not the
-    composer - a human can have typed continuation lines below our queued body.
-    The region is the last sigil row PLUS every non-blank line below it, up to
-    the status footer (excluded - footer text is never part of a draft). The
-    caller compares this whole region against what we sent; any extra line makes
-    the comparison fail, which is the continuation negative."""
+    Rules, deliberately conservative because a single frame cannot distinguish
+    transcript prompt echoes from edited composer content (the JSON read path
+    carries no style, so no brightness or colour evidence may be assumed):
+    - the status footer must be the LAST non-blank row of the screen AND look
+      like one (" · " separator, no prompt sigil). A human line holding a
+      middle dot is then NOT a footer - it stays inside the region;
+    - exactly ONE prompt-sigil row may exist above that footer: it is the
+      composer. A second sigil row - a transcript echo, a human continuation
+      with a sigil, an inserted copy of our text - is indistinguishable from
+      edited composer content, so the frame fails closed;
+    - the region is the sigil row's body plus every non-blank row below it, up
+      to the footer. LIMIT (documented, not hidden): a real transcript echo of
+      a previously submitted prompt makes the frame a refusal too - those
+      frames need a renderer ground truth that does not exist yet.
+    """
     if not screen:
         return ""
     raw = screen.splitlines()
-    sigils = [index for index, row in enumerate(raw)
-              if _prompt_body(row) is not None]
-    if not sigils:
+    nonblank = [index for index, row in enumerate(raw)
+                if _strip_ansi(row).strip()]
+    if not nonblank:
         return ""
-    last = sigils[-1]
-    footers = [index for index, row in enumerate(raw)
-               if " \u00b7 " in _strip_ansi(row) and _prompt_body(row) is None]
-    end = min([footer for footer in footers if footer > last] or [len(raw)])
+    last_row = nonblank[-1]
+    last_plain = _strip_ansi(raw[last_row])
+    if " \u00b7 " not in last_plain or _prompt_body(raw[last_row]) is not None:
+        return ""          # the last visible row is not a status footer
+    sigils = [index for index, row in enumerate(raw)
+              if _prompt_body(row) is not None and index < last_row]
+    if len(sigils) != 1:
+        return ""          # zero or several sigil candidates: fail closed
+    composer = sigils[0]
     parts = []
-    body = _prompt_body(raw[last])
+    body = _prompt_body(raw[composer])
     if body:
         parts.append(body)
-    for row in raw[last + 1:end]:
-        nested = _prompt_body(row)
-        text = (nested if nested is not None else _strip_ansi(row).strip())
+    for row in raw[composer + 1:last_row]:
+        text = _strip_ansi(row).strip()
         if text:
             parts.append(text)
     return " ".join(parts)
