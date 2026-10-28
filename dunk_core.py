@@ -4596,24 +4596,6 @@ class Flock:
             return False
         return _is_our_send(shown, text, True)
 
-    def _managed_lane_process_alive(self, pane_id):
-        """True when the pane holds an active task lease whose caller process
-        is alive: process identity that outranks the pane metadata heuristics
-        (t130/CoS i31723 - an agent lane with agent:"" and a shell-like title
-        is still a managed agent while its caller runs)."""
-        try:
-            leases = self.tasks.leases_for_pane(pane_id)
-        except Exception:                   # noqa: BLE001
-            return False
-        for lease in leases:
-            pid = lease.get("caller_pid")
-            if not pid:
-                continue
-            from dunk_callers import process_alive
-            if process_alive(int(pid), lease.get("caller_start")):
-                return True
-        return False
-
     def _session_process_gone(self, pane_id):
         """True when the lane's own recorded process is no longer running.
 
@@ -4954,22 +4936,14 @@ class Flock:
                                "not submitting into a dead composer")
         pane = next((item for item in self.herdr.list_panes()
                      if item.get("pane_id") == pane_id), None)
-        # t130 (%81 live, CoS i31705/i31707): pane metadata can report an EMPTY
-        # agent field for a real agent lane (measured: both t374 lanes read
-        # agent:"" while codex ran). Treating an unknown agent as a bare shell
-        # made submit_text return "sent" with NO box confirmation - the shell
-        # bypass behind the false-SENT canary. A pane is a bare shell only when
-        # it POSITIVELY says so (_is_empty_shell: no agent, unknown status,
-        # user@host:title title). An unknown agent takes the confirmed path; a
-        # genuine shell still confirms instantly (it has no input box, so the
-        # box read is clear).
-        # CoS i31723: the title/status heuristic is not process identity - the
-        # raw backend reports agent_status unknown for managed agents, and a
-        # managed agent can retain a user@host:title. A live task lease
-        # (caller_pid + caller_start, the same evidence _session_process_gone
-        # uses) is process identity and outranks the heuristics.
-        shell = (pane is not None and self._is_empty_shell(pane)
-                 and not self._managed_lane_process_alive(pane_id))
+        # t130 (VP t386 adversarial review + CoS i31749): the metadata-based
+        # early "sent" for "shell" panes is REMOVED. Pane metadata cannot
+        # positively identify a shell - agent fields are empty on managed
+        # agents (measured %80/%81), titles are not process identity, and
+        # lease evidence is missing/expired/unreadable exactly when it would
+        # matter. Every send now takes the bounded confirmation path; a
+        # genuine shell still confirms instantly and truthfully (no input box
+        # -> box read clear -> sent).
         with self._typing(pane_id):
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
@@ -4983,9 +4957,6 @@ class Flock:
             ok, detail = self.herdr.send_keys(pane_id, "Enter")
             if not ok:
                 return False, detail
-            if shell:
-                # A bare shell has no chat input box to read back.
-                return True, "sent"
         if guarded:
             # THE NUDGE PATH IS THIS ONE. Two rounds of "press, wait, check", not one:
             # measured on an idle codex lane (%31) right after 2.70.37 shipped - the text
