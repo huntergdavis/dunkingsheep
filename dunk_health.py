@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import time
 
 WAL_WARN_BYTES = 64 * 1024 * 1024
@@ -29,7 +30,7 @@ HEALTH_PATH = os.path.expanduser("~/.config/dunkingsheep/health.json")
 
 def _stale_leases(path, now):
     """Count ingest rows a dead worker left behind. Read-only, fixed query."""
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite_connect(path, readonly=True)
     try:
         expired = conn.execute(
             "SELECT COUNT(*) FROM ingest_queue WHERE state='leased' "
@@ -44,7 +45,7 @@ def _stale_leases(path, now):
 
 
 def _quick_check(path):
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite_connect(path, readonly=True)
     try:
         return conn.execute("PRAGMA quick_check").fetchone()[0]
     finally:

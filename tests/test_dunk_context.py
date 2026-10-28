@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from tests import _bootstrap  # noqa: F401
 
@@ -15,6 +16,52 @@ class ContextTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = Store(Path(self.tmp.name) / ".dunkingsheep")
+
+    def test_chain_head_is_the_only_live_article_across_views(self):
+        from dunk_context import digest_both
+        from dunk_views import project_summary
+        first = self.store.add("obsolete-one", cls="fact", subject="chain",
+                               type_="reference", authority="measured")
+        self.store.supersede(first["slug"], "obsolete-two")
+        head = self.store.supersede(first["slug"], "current-three")
+        retired = self.store.add("retired-claim", cls="fact", subject="retired",
+                                 type_="reference", authority="measured")
+        self.store.retire(retired["slug"], "withdrawn")
+        for key in (first["slug"], "chain", head["slug"]):
+            self.assertEqual("current-three", self.store.resolve(key)["body"])
+        self.assertIsNone(self.store.resolve(retired["slug"]))
+        self.assertTrue(self.store.find(retired["slug"])["retired_at"])
+        self.assertEqual(4, len(self.store.entries()), "history must survive")
+        for text in (self.store.digest(), digest_both(self.store.root, which="project")):
+            self.assertIn("current-three", text)
+            for excluded in ("obsolete-one", "obsolete-two", "retired-claim"):
+                self.assertNotIn(excluded, text)
+        self.assertEqual([head["slug"]], self.store.stats()["never_read"])
+        self.assertEqual(1, self.store.stats()["counts"]["fact"])
+        self.assertEqual([head["slug"]], [e["slug"] for e in self.store.entry_stats()])
+        flock = Mock()
+        flock.resolve_lanes.return_value = []
+        flock.task_list.return_value = {"tasks": []}
+        with patch("dunk_context.GLOBAL_DIR", Path(self.tmp.name) / "empty-global"):
+            summary = project_summary(flock, project="synthetic", path=self.tmp.name)
+        self.assertEqual(1, summary["knowledge"]["articles_total"])
+        self.assertEqual(head["slug"], summary["knowledge"]["articles"][0]["slug"])
+        self.store.retire(first["slug"], "retire the current head")
+        self.assertIsNone(self.store.resolve("chain"))
+        self.assertEqual([], self.store.live_entries())
+
+    def test_legacy_retirement_and_corrupt_chains_fail_closed(self):
+        from dunk_context import _render
+        old = self.store.add("old\n\n**Retired 2026-10-01**: withdrawn", cls="fact",
+                             subject="legacy", type_="reference")
+        self.assertIsNone(self.store.resolve(old["slug"]))
+        self.assertEqual([], self.store.live_entries())
+        for successor in ("missing", old["slug"]):
+            entry = self.store.find(old["slug"])
+            entry["superseded_by"] = successor
+            Path(entry["path"]).write_text(_render(entry, entry["body"]))
+            with self.assertRaises(ContextError):
+                self.store.resolve(old["slug"])
 
     def test_an_agent_ground_truth_is_refused_by_check_and_index(self):
         self.store.add("agents may propose but never promote", cls="ground-truth",
@@ -204,3 +251,17 @@ class ContextCliTests(unittest.TestCase):
         self.assertEqual(2, bad.returncode)
         self.assertIn("authority must be one of", bad.stderr)
         self.assertNotIn("Traceback", bad.stderr)
+
+    def test_get_original_slug_and_subject_resolve_three_revision_head(self):
+        store = Store(Path(self.tmp.name) / ".dunkingsheep")
+        first = store.add("old-body", cls="fact", subject="chain", type_="reference")
+        store.supersede(first["slug"], "middle-body")
+        head = store.supersede(first["slug"], "newest-body")
+        for key in (first["slug"], "chain"):
+            result = self.run_cli("context", "get", key)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("newest-body", result.stdout)
+            self.assertNotIn("old-body", result.stdout)
+        store.retire(head["slug"], "withdrawn")
+        result = self.run_cli("context", "get", first["slug"])
+        self.assertNotIn("newest-body", result.stdout)

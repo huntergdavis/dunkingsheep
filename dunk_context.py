@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -80,7 +81,8 @@ def _parse_front(text):
 def _render(meta, body):
     lines = ["---"]
     for key in ("class", "subject", "type", "scope", "authority", "stated",
-                "source", "recheck_after", "supersedes", "superseded_by"):
+                "source", "recheck_after", "supersedes", "superseded_by",
+                "retired_at", "retired_reason"):
         value = meta.get(key)
         lines.append(f"{key}: {value if value is not None else 'null'}")
     lines.append("---")
@@ -119,7 +121,7 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     stores = select_stores(project_path, which=which)
     truths, relevant = [], []
     for name, store in stores.items():
-        for entry in store.entries():
+        for entry in store.live_entries():
             if entry.get("error"):
                 continue
             if entry["class"] == "ground-truth":
@@ -166,7 +168,7 @@ def report(project_path=None, *, which=None):
     for name, store in select_stores(project_path, which=which).items():
         out[name] = {"path": str(store.root),
                      "stats": store.stats(), "check": store.check(),
-                     "entries": len([e for e in store.entries() if not e.get("error")])}
+                     "entries": len(store.live_entries())}
     return out
 
 
@@ -214,9 +216,44 @@ class Store:
         return out
 
     def find(self, subject_or_slug):
-        for entry in self.entries():
-            if entry.get("slug") == subject_or_slug or entry.get("subject") == subject_or_slug:
+        entries = self.entries()
+        for entry in entries:
+            if entry.get("slug") == subject_or_slug:
                 return entry
+        for entry in entries:
+            if entry.get("subject") == subject_or_slug:
+                return entry
+        return None
+
+    @staticmethod
+    def is_retired(entry):
+        # Older retire commands wrote only this exact, dated body marker.
+        return bool(entry.get("retired_at") or re.search(
+            r"^\*\*Retired \d{4}-\d{2}-\d{2}\*\*:",
+            entry.get("body", ""), re.MULTILINE))
+
+    def live_entries(self):
+        """Current heads only; entries()/find() retain the historical audit trail."""
+        return [e for e in self.entries() if not e.get("error")
+                and not e.get("superseded_by") and not self.is_retired(e)]
+
+    def resolve(self, subject_or_slug):
+        """Resolve a subject or historical slug to its non-retired chain head."""
+        entry = self.find(subject_or_slug)
+        visited = set()
+        while entry is not None:
+            slug = entry["slug"]
+            if slug in visited:
+                raise ContextError(f"supersession cycle at {slug}")
+            visited.add(slug)
+            if entry.get("error"):
+                raise ContextError(entry["error"])
+            successor = entry.get("superseded_by")
+            if not successor:
+                return None if self.is_retired(entry) else entry
+            entry = next((e for e in self.entries() if e["slug"] == successor), None)
+            if entry is None:
+                raise ContextError(f"supersession target {successor} not found")
         return None
 
     # -- writes -----------------------------------------------------------
@@ -244,9 +281,10 @@ class Store:
             slug = f"{slug}-{counter}"
             path = folder / f"{slug}.md"
         if supersedes:
-            old = self.find(supersedes)
+            old = self.resolve(supersedes)
             if old is None:
                 raise ContextError(f"supersede target {supersedes} not found")
+            supersedes = old["slug"]
             old["superseded_by"] = slug
             Path(old["path"]).write_text(_render(old, old["body"]))
         meta = {"class": cls, "subject": subject, "type": type_, "scope": self.scope,
@@ -258,7 +296,7 @@ class Store:
         return {"slug": slug, "path": str(path), "class": cls}
 
     def supersede(self, slug, new_body, **meta):
-        old = self.find(slug)
+        old = self.resolve(slug)
         if old is None:
             raise ContextError(f"entry {slug} not found")
         return self.add(new_body, cls=old["class"], subject=old["subject"],
@@ -269,9 +307,11 @@ class Store:
                         supersedes=old["slug"])
 
     def retire(self, slug, reason=""):
-        entry = self.find(slug)
+        entry = self.resolve(slug)
         if entry is None:
             raise ContextError(f"entry {slug} not found")
+        entry["retired_at"] = _today()
+        entry["retired_reason"] = reason.replace("\n", " ")
         body = entry["body"] + f"\n\n**Retired {_today()}**: {reason}\n"
         path = Path(entry["path"])
         path.write_text(_render(entry, body))
@@ -316,7 +356,7 @@ class Store:
         path = self.index_path()
         if path.exists():
             path.unlink()
-        conn = sqlite3.connect(path)
+        conn = sqlite_connect(path)
         conn.execute("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, class UNINDEXED, scope UNINDEXED)")
         for entry in self.entries():
             if entry.get("error"):
@@ -335,7 +375,7 @@ class Store:
         path = self.index_path()
         if not path.exists():
             self.index()
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite_connect(path, readonly=True)
         sql = "SELECT slug, subject, class, scope FROM entries WHERE entries MATCH ?"
         params = [query]
         if cls:
@@ -376,7 +416,7 @@ class Store:
             return []
 
     def stats(self):
-        entries = [e for e in self.entries() if not e.get("error")]
+        entries = self.live_entries()
         counts = {name: sum(1 for e in entries if e["class"] == name) for name in CLASSES}
         ages = {name: sorted((date.today() - date.fromisoformat(e["stated"])).days
                              for e in entries if e["class"] == name) for name in CLASSES}
@@ -424,9 +464,7 @@ class Store:
             if at and (slot[key] is None or at > slot[key]):
                 slot[key] = at
         rows = []
-        for entry in self.entries():
-            if entry.get("error"):
-                continue
+        for entry in self.live_entries():
             slot = counters.get(entry["slug"], {})
             rows.append({"slug": entry["slug"], "class": entry["class"],
                          "subject": entry.get("subject"), "authority": entry.get("authority"),
@@ -439,7 +477,7 @@ class Store:
 
     # -- digest -----------------------------------------------------------
     def digest(self, *, max_bytes=DEFAULT_CAP, subject=None):
-        entries = [e for e in self.entries() if not e.get("error")]
+        entries = self.live_entries()
         truths = [e for e in entries if e["class"] == "ground-truth"]
         others = [e for e in entries if e["class"] != "ground-truth"
                   and (subject is None or e.get("subject") == subject)]

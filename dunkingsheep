@@ -2130,7 +2130,7 @@ def run_context_command(dunk_context, args):
         stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
         if sub == "get":
             for name, target in stores.items():
-                entry = target.find(args.key)
+                entry = target.resolve(args.key)
                 if entry is not None:
                     target.log_access(entry["slug"])
                     return entry, lambda r: print(

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import threading
 
 import dunk_activity
@@ -54,7 +55,7 @@ class StateStore:
         self._lock = threading.RLock()
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = sqlite_connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)

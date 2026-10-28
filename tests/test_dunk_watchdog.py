@@ -1490,7 +1490,7 @@ class NoModelTests(unittest.TestCase):
     # sampler sees; neither spawns a process nor opens a socket (checked below).
     ALLOWED_IMPORTS = {"__future__", "hashlib", "json", "os", "re", "sqlite3", "sys", "time", "pathlib",
                        "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy",
-                       "dunk_panes", "dunk_telegram_routing"}
+                       "dunk_panes", "dunk_telegram_routing", "dunk_sqlite"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -1526,7 +1526,7 @@ class NoModelTests(unittest.TestCase):
         no network - because it legitimately imports `signal` to send TERM.
         """
         INERT_FORBIDDEN = {"subprocess", "urllib", "requests", "http", "socket", "ssl"}
-        for name in ("dunk_load.py", "dunk_policy.py", "dunk_panes.py"):
+        for name in ("dunk_load.py", "dunk_policy.py", "dunk_panes.py", "dunk_sqlite.py"):
             tree = ast.parse(read(os.path.join(ROOT, name)))
             imported = set()
             for node in ast.walk(tree):
@@ -1544,6 +1544,16 @@ class NoModelTests(unittest.TestCase):
     def test_watchdog_modules_import_and_name_nothing_model_related(self):
         for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py", "dunk_telegram_routing.py"):
             self.assertEqual([], self.violations(read(os.path.join(ROOT, name))), name)
+
+    def test_sqlite_helper_only_imports_its_three_stdlib_dependencies(self):
+        tree = ast.parse(read(os.path.join(ROOT, "dunk_sqlite.py")))
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports.add(node.module)
+        self.assertLessEqual(imports, {"pathlib", "re", "sqlite3"})
 
     def test_the_guard_catches_a_model_call(self):
         self.assertTrue(self.violations("import anthropic\n"))

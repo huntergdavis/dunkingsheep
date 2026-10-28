@@ -19,6 +19,7 @@ import os
 import queue
 import re
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import threading
 import time
 
@@ -298,7 +299,7 @@ class MemoryStore:
         if path != ":memory:":
             os.makedirs(directory, exist_ok=True)
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False, timeout=5.0)
+        self.db = sqlite_connect(path, check_same_thread=False, timeout=5.0)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA wal_autocheckpoint = 200")
@@ -331,7 +332,7 @@ class MemoryStore:
     # -- connections --------------------------------------------------------
 
     def _new_read_connection(self):
-        conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True,
+        conn = sqlite_connect(self.path, readonly=True,
                                check_same_thread=False, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only = ON")
@@ -787,7 +788,7 @@ class MemoryStore:
 
     def _ingest_codex_history(self, path, project=None, should_stop=None,
                               throttle_s=0.0):
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite_connect(path, readonly=True)
         conn.row_factory = sqlite3.Row
         chunk_count = 0
         sessions = set()
@@ -841,7 +842,7 @@ class MemoryStore:
 
     def _ingest_opencode(self, path, project=None, should_stop=None,
                          throttle_s=0.0):
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite_connect(path, readonly=True)
         conn.row_factory = sqlite3.Row
         chunk_count = 0
         sessions = set()

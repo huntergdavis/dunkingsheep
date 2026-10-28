@@ -43,6 +43,7 @@ import json
 import os
 import re
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import time
 from pathlib import Path
 
@@ -308,7 +309,7 @@ def _expand(path):
 def _ro(path):
     if not os.path.exists(path):
         raise FileNotFoundError(path)
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    return sqlite_connect(path, readonly=True)
 
 
 def _load_json(path):
