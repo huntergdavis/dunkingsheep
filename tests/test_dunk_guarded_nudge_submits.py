@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
 from dunk_core import Flock  # noqa: E402
-from fakes import FakeHerdr  # noqa: E402
+from fakes import FakeHerdr, claude_box_empty_ansi  # noqa: E402
 
 
 class GuardedNudgeTests(unittest.TestCase):
@@ -64,6 +64,36 @@ class GuardedNudgeTests(unittest.TestCase):
         self.herdr.cm_only.discard("w2:p1")
         result = self.flock.send_now("w2:p1", "a nudge", wait_s=3)
         self.assertEqual("ok", result.get("outcome"), result)
+
+    def transient_empty_frame(self):
+        """One redraw looks empty even though the fake composer still holds text."""
+        original = self.herdr.read_pane
+        emitted = False
+
+        def read(pane_id, lines=40, source=None, ansi=False):
+            nonlocal emitted
+            if ansi and self.herdr.box.get(pane_id) and not emitted:
+                emitted = True
+                return claude_box_empty_ansi()
+            return original(pane_id, lines=lines, source=source, ansi=ansi)
+
+        self.herdr.read_pane = read
+
+    def test_transient_empty_frame_does_not_strand_the_nudge(self):
+        self.transient_empty_frame()
+        result = self.flock.send_now("w2:p1", "redraw nudge", wait_s=5)
+        self.assertEqual("ok", result.get("outcome"), result)
+        self.assertEqual([("w2:p1", "redraw nudge")], self.herdr.sends)
+        self.assertFalse(self.herdr.box.get("w2:p1"))
+
+    def test_transient_empty_frame_cannot_confirm_an_unsubmitted_nudge(self):
+        self.herdr.cm_only.clear()
+        self.herdr.enters_needed["w2:p1"] = 99
+        self.transient_empty_frame()
+        result = self.flock.send_now("w2:p1", "still pending", wait_s=5)
+        self.assertNotEqual("ok", result.get("outcome"), result)
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("still pending", self.herdr.box["w2:p1"])
 
 
 if __name__ == "__main__":

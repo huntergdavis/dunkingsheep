@@ -257,6 +257,9 @@ SUBMIT_GAPS = (0.2, 1.0, 3.0, 6.0)
 # How many press-and-check rounds the GUARDED (nudge) path may spend before refusing.
 # Three is deliberate: the first press often lands while a codex composer is mid-redraw.
 GUARDED_PRESS_ATTEMPTS = 3
+# A single empty redraw is not submission evidence. Keep the guarded path
+# bounded, but require two later reads before accepting an empty composer.
+GUARDED_VERIFY_GAPS = (0.2, 0.4)
 # Enter is a line feed to some TUIs and does nothing in their composer; the
 # carriage return (C-m) is what submits. Measured 2026-10-24 on six revived
 # claude lanes: five sat with the text visible for four minutes and the send
@@ -4844,11 +4847,17 @@ class Flock:
                 time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
                 held = self._box_holds(pane_id, text)
                 if held is False:
+                    for verify_gap in GUARDED_VERIFY_GAPS:
+                        time.sleep(verify_gap)
+                        held = self._box_holds(pane_id, text)
+                        if held is not False:
+                            break
+                if held is False:
                     # ONE LINE PER GUARDED DELIVERY, naming how it went (VP i25315): a
                     # clear box used to leave no trace at all, so the only evidence of a
                     # guarded nudge was the generic "message sent" line.
                     if attempt == 0:
-                        log.info("guarded nudge: %s submitted, box already clear", pane_id)
+                        log.info("guarded nudge: %s submitted, box stayed clear", pane_id)
                     else:
                         log.info("guarded nudge: %s submitted, %s took at round %d",
                                  pane_id, key, attempt)
