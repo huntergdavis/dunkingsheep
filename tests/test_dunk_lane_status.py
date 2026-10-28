@@ -109,6 +109,21 @@ class LaneStatusTests(unittest.TestCase):
         panes = {p["pane_id"]: p for p in self.flock.list_panes()}
         self.assertEqual("working", panes[pane_id]["agent_status"])
 
+    def test_pane_list_preserves_source_and_missing_signal_reason(self):
+        for harness in ("codex", "opencode"):
+            pane = self.herdr.panes[0]
+            pane["agent"] = harness
+            pane_id = pane["pane_id"]
+            self.flock.turns.pop(pane_id, None)
+            rows = {p["pane_id"]: p for p in self.flock.list_panes()}
+            self.assertIsNone(rows[pane_id]["agent_status"])
+            self.assertIn("no activity source", rows[pane_id]["agent_status_reason"])
+            self.flock.turn_start(pane_id, source="test")
+            rows = {p["pane_id"]: p for p in self.flock.list_panes()}
+            self.assertEqual("working", rows[pane_id]["agent_status"])
+            self.assertEqual(f"{harness} declared turns", rows[pane_id]["agent_status_source"])
+            self.assertTrue(rows[pane_id]["agent_status_inferred"])
+
 
 if __name__ == "__main__":
     unittest.main()
