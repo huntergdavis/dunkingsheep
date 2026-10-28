@@ -4461,12 +4461,14 @@ class Flock:
             return ("dead", f"dead session ({marker})")
         if self._session_process_gone(pane_id):
             return ("dead", "the lane's recorded process is gone")
-        screen, text, _detail = self.read_box(pane_id)
+        screen, text, detail = self.read_box(pane_id)
         if screen is not None and _modal_open(screen):
             # A panel is not a draft. Its selected row sits where a draft would, and
             # keys/Enter are how a panel is dismissed - holding them behind it is how
             # a queued Escape waited for ever.
             return None
+        if detail.startswith(AMBIGUOUS_COMPOSER):
+            return ("unknown", detail)
         # NO 'A HUMAN IS TYPING' HOLD. Every message the owner sends goes through this
         # daemon (web, phone, Telegram) - none of those paths type into a pane - so a
         # non-empty box is not evidence of a person. Foreign text is PRESERVED at send
@@ -4884,6 +4886,10 @@ class Flock:
         if screen is None:
             raise DunkError(f"could not read the input box of {pane_id}")
         label = pane.get("tab_label") or pane_id
+        if detail.startswith(AMBIGUOUS_COMPOSER):
+            return {"pane_id": pane_id, "target_label": label, "flushed": False,
+                    "state": "unknown", "text": None, "detail": detail,
+                    "message": f"refused to submit: {detail}"}
         if not shown:
             # Say WHAT was read, not just 'nothing to do': the box that survived two
             # hours did so behind a bare 'already clear'.
@@ -4999,6 +5005,9 @@ class Flock:
             return {"state": "unknown", "reason": "pane unreadable"}
         typed = None if _modal_open(screen) else _typed_text(screen)
         state, reason = classify_delivery(screen, status, typed=typed)
+        _text, detail = box_text(screen)
+        if state in ("ready", "working") and detail.startswith(AMBIGUOUS_COMPOSER):
+            state, reason = "unknown", detail
         foreign = bool(typed) and not self._looks_like_ours(pane_id, typed)
         # A hold that the classifier cannot see (a declared turn, a stale busy
         # report) is still a hold: report it as blocked with that reason, so
@@ -5067,6 +5076,10 @@ class Flock:
             # a panel is dismissed, so they go through.
             self._last_block_reason[pane_id] = "dialog"
             return allow_modal
+        _text, detail = box_text(screen)
+        if detail.startswith(AMBIGUOUS_COMPOSER):
+            self._last_block_reason[pane_id] = "ambiguous-composer"
+            return False
         shown = _typed_text(screen)
         if shown is None or not shown:
             return True
@@ -5781,6 +5794,9 @@ def _modal_open(screen):
 # hint. codex draws it as a bare line two rows above the status footer.
 COMPOSER_HINT_TAIL_ROWS = 5
 BOX_REGION_ROWS = 14
+# Stable discriminator for callers: empty text with this detail is NOT empty-box
+# evidence and must never authorise a send/flush. Keep the public two-value API.
+AMBIGUOUS_COMPOSER = "ambiguous composer/transcript:"
 # Box borders and padding sit BEFORE the prompt sigil on a bordered composer, so a
 # raw first-character test missed '│ ❯ check your inbox' entirely - which is
 # exactly the row a stuck draft sits on.
@@ -5821,6 +5837,9 @@ def box_text(screen):
     - return a sentence describing what was read, so a caller that finds nothing
       can say *what it looked at* instead of 'already clear'. A checker that reports
       'nothing to do' without its evidence is how a stuck box survives two hours.
+
+    Empty text with detail starting AMBIGUOUS_COMPOSER is an unknown boundary,
+    not an empty-box assertion; guarded callers must refuse keys in that case.
     """
     if not screen:
         return "", "the pane could not be read"
@@ -5832,21 +5851,18 @@ def box_text(screen):
     # Where the "the box is empty" hint can be drawn: the tail of the pane.
     hint_from = max(0, len(rows) - COMPOSER_HINT_TAIL_ROWS)
 
-    # THE COMPOSER IS THE PROMPT ROW THAT TOUCHES THE STATUS FOOTER; an echo is
-    # separated from it by blank rows. This is the discriminator that fits every
-    # frame captured so far, including the two that broke in the DANGEROUS direction
-    # (a human's 3-line draft read as an empty box would have typed over it):
+    # Footer proximity identifies the contiguous composer in these captures:
     #
-    #   idle echo frame      last prompt 19, footer 22, 2 blanks  -> transcript
-    #   transcript+hint      last prompt 15, footer 22, 2 blanks  -> transcript
+    #   idle echo frame      last prompt 19, footer 22, 2 blanks  -> ambiguous
+    #   transcript+hint      last prompt 15, footer 22, 2 blanks  -> ambiguous
     #   busy lane            last prompt 20, footer 23, 1 blank   -> composer (hint)
     #   working + draft x3   last prompt 34, footer 38, 1 blank   -> composer (draft)
     #   idle + draft x3      last prompt 34, footer 38, 1 blank   -> composer (draft)
     #
-    # So: >= 2 blank rows between the last prompt row and the footer means that row
-    # is transcript and the box is empty; <= 1 means it is the composer, and its body
-    # decides. Structural, no wording, and it is the direction that matters: a false
-    # "empty" types over a human, a false "draft" only holds a message.
+    # Two blank rows do NOT prove emptiness: pending text and human drafts can
+    # have the same geometry as transcript. Keep that case ambiguous (not a
+    # draft guess or permission to press keys). Only an explicit placeholder
+    # without other visible content in that region establishes an empty box.
     # BLANK ROWS MATTER HERE, and `rows` has them filtered out - so this rule reads
     # the raw lines. Getting that wrong made the rule silently unreachable: every
     # count came out 0 and every echo still read as a draft.
@@ -5867,9 +5883,16 @@ def box_text(screen):
         blanks = sum(1 for index in range(last_prompt_index + 1, footer_index)
                      if not _strip_ansi(raw_rows[index]).strip())
         if blanks >= 2:
-            return "", (f"the last prompt row ({last_prompt_index + 1}) is {blanks} blank "
-                        f"rows above the status footer ({footer_index + 1}), so it is "
-                        "transcript and the box is empty")
+            other_content = any(
+                _strip_ansi(raw_rows[index]).strip()
+                for index in range(last_prompt_index + 1, footer_index))
+            if _is_placeholder(last_prompt_row) and not other_content:
+                return "", (f"the composer at row {last_prompt_index + 1} holds only "
+                            "the explicit harness hint, so the box is empty")
+            return "", (f"{AMBIGUOUS_COMPOSER} prompt row {last_prompt_index + 1} "
+                        f"is separated from footer row {footer_index + 1} by "
+                        f"{blanks} blank rows; visible prompt content may be pending "
+                        "input or transcript, so no keys are authorised")
         body = _prompt_body(last_prompt_row)
         if body:
             return body, (f"composer: the prompt row at {last_prompt_index + 1} is "
