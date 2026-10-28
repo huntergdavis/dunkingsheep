@@ -2229,11 +2229,19 @@ class Flock:
 
     def require_turn_caller(self, pane_id, self_pane_id):
         """Authenticate socket turn events; request pane labels alone prove nothing."""
-        from dunk_callers import caller_belongs_to_pane
+        from dunk_callers import caller_pane_auth_failure
         if not self_pane_id or (pane_id and pane_id != self_pane_id):
+            log.warning("turn authentication refused reason=target_mismatch pane=%r self_pane=%r",
+                        pane_id, self_pane_id)
             raise DunkError("turn event must target the caller's own pane")
         pane = self.herdr.get_pane(self_pane_id) or {}
-        if not caller_belongs_to_pane(self.current_caller(), pane.get("pane_pid")):
+        caller = self.current_caller()
+        reason = caller_pane_auth_failure(caller, pane.get("pane_pid"))
+        if reason is not None:
+            log.warning("turn authentication refused reason=%s pane=%r caller_pid=%r "
+                        "caller_source=%r pane_pid=%r", reason, self_pane_id,
+                        (caller or {}).get("pid"), (caller or {}).get("source"),
+                        pane.get("pane_pid"))
             raise DunkError("turn event caller is not authenticated to this pane")
 
     def turn_start(self, pane_id=None, ttl_s=None, source=None,

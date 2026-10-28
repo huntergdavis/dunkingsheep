@@ -49,6 +49,24 @@ day, so both halves are decided here, before any code:
 The mapping key is `(cwd, session id)` from `launches.json` - the same pair a restore
 would use, so a wrong mapping shows up here first rather than after a reboot.
 
+## Turn RPC authentication is a separate requirement
+
+An exact thread-to-pane mapping does not authenticate a turn producer. The current
+`turn_start`/`turn_end` RPC guard resolves a stable caller from the kernel socket
+peer, checks its PID/start time, and walks its parents toward the backend's current
+`pane_pid`. The pane root must occur in that ancestry. A detached central adapter
+cannot satisfy that requirement merely by supplying a pane label, cwd or session
+id. A producer using this RPC needs a caller within the pane ancestry (for example
+an in-pane bridge), or a separately reviewed authentication design.
+
+Refusals keep the existing client error and emit one daemon warning with
+`reason=...`, pane id, stable caller PID/source and backend pane PID. The reason
+distinguishes missing pane PID, missing/dead caller, start-time mismatch, and
+missing/dead/cyclic/too-deep ancestry. `pane_not_in_ancestry` means the walk reached
+PID 1 without the pane root; it does not guess why the process was reparented.
+Turn tokens and message contents are not logged. These diagnostics do not relax
+authentication or establish that a live activity producer has been implemented.
+
 ## Why it waits for a fresh session
 
 The interface is marked experimental by its own authors, it requires a live busy codex
