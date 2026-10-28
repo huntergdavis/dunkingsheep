@@ -23,6 +23,16 @@ With `--no-daemon` the app-server runs in the pane's own Codex process, so the
 hook is a child of the pane root.  A detached adapter that asserts a pane label,
 cwd or session id is **not** a substitute and is not provided here.
 
+## Deployment trade-off (owner decision)
+
+`--no-daemon` gives each Codex lane its own app-server inside the pane instead
+of the shared background daemon.  That is what makes the ancestry check pass,
+but it also means `codex agents` in another lane cannot browse that lane's
+sessions through the shared daemon.  The per-lane memory cost was **not**
+measured here.  This is a fleet policy choice, not something this producer
+should decide silently; existing lanes stay on the shared daemon (and `unknown`)
+until the owner/VP chooses to respawn them.
+
 ## Install
 
 ```sh

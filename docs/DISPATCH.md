@@ -136,7 +136,9 @@ is delivered within N seconds of `turn/completed`, with the hold reason gone.
 the lane is launched with `codex --no-daemon` (default shared app-server hooks are
 detached; measured).  Existing lanes therefore need a respawn with that flag before
 they report real transitions; until then their activity stays `unknown` and the hold
-remains.  OpenCode plugins run in-process and need only the plugin install.  Neither
+remains.  The trade is a per-lane app-server instead of the shared daemon (cross-lane
+`codex agents` browsing is not shared); that is an owner/VP fleet decision, and the
+memory cost was not measured.  OpenCode plugins run in-process and need only the plugin install.  Neither
 producer falls back to a label, and a failed/expired start never produces an end.
 
 ## A tick has a budget, and a dead feeder is a number

@@ -110,7 +110,9 @@ lane to test against, and a half-wired socket would replace a *known* hold with 
 | f | disconnect behaviour stated | Codex token is on local state and the TTL expires a crashed turn; OpenCode token is in memory, and `opencode run`/reconnect loses it, so the TTL expires the turn; neither path reports idle on expiry (`turn_state` in `dunk_activity.py`) |
 
 **Deployment limits (not claimed):** the Codex producer is in-pane only with
-`codex --no-daemon`; existing shared-daemon lanes need a respawn.  The
+`codex --no-daemon`; existing shared-daemon lanes need a respawn.  `--no-daemon`
+also gives each lane its own app-server, so cross-lane `codex agents` browsing of
+those sessions is not shared; the per-lane memory cost was not measured.  The
 installers were exercised on temporary Codex/OpenCode homes, not the live owner
 homes.  No live lane was restarted, and no live task-bearing lane was used to
 test dispatch delivery.  The Codex install trust approval for a *fresh*
