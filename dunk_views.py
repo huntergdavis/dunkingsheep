@@ -9,6 +9,7 @@ import os
 import time
 
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import subprocess
 
 import dunk_activity
@@ -139,7 +140,7 @@ def _cpu_for(flock, leases, now):
 def _app_row(message_id):
     """One row from the application's log, or None. Never raises on a missing DB."""
     try:
-        conn = sqlite3.connect(f"file:{APP_DB}?mode=ro", uri=True)
+        conn = sqlite_connect(APP_DB, readonly=True)
         conn.row_factory = sqlite3.Row
     except sqlite3.Error:
         return None
@@ -216,7 +217,7 @@ def _app_state(row, now):
 def app_messages(channel=None, limit=50):
     """Recent application messages, newest first: what the owner chat renders."""
     try:
-        conn = sqlite3.connect(f"file:{APP_DB}?mode=ro", uri=True)
+        conn = sqlite_connect(APP_DB, readonly=True)
         conn.row_factory = sqlite3.Row
     except sqlite3.Error as error:
         return {"error": f"application message log unavailable: {error}", "messages": []}
@@ -383,7 +384,7 @@ def project_summary(flock, project=None, path=None, now=None):
         project_dir = os.path.abspath(os.path.expanduser(path or f"~/workspace/{project}"))
         store = dunk_context.Store(os.path.join(project_dir, ".dunkingsheep"))
         label = project
-    stores = dunk_context.select_stores(project_dir) if project_dir else {"global": store}
+    stores = dunk_context.select_stores(store.root) if project_dir else {"global": store}
     counts, truths, articles = {}, [], []
     for name, target in stores.items():
         if not target.exists():
@@ -391,7 +392,7 @@ def project_summary(flock, project=None, path=None, now=None):
         stats = target.stats()
         for cls, count in stats["counts"].items():
             counts[cls] = counts.get(cls, 0) + count
-        for entry in target.entries():
+        for entry in target.live_entries():
             if entry.get("error"):
                 continue
             item = {"store": name, "class": entry["class"], "slug": entry["slug"],

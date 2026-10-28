@@ -23,6 +23,7 @@ deleted outright without touching anything a person is waiting to read.
 
 import os
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 import threading
 import time
 
@@ -109,7 +110,7 @@ class Metrics:
         self.started_at = time.time()
         if path != ":memory:":
             os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = sqlite_connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         with self._lock:
             self.db.executescript(SCHEMA)

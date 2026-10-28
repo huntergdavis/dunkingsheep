@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sqlite3
+from dunk_sqlite import connect as sqlite_connect
 
 log = logging.getLogger("dunkingsheep.tasks")
 import threading
@@ -228,7 +229,7 @@ class Tasks:
             with self._connections_lock:
                 self._prune_locked(current=id(threading.current_thread()))
             return connection
-        connection = sqlite3.connect(self.path, check_same_thread=False)
+        connection = sqlite_connect(self.path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         self._local.db = connection
         # KEYED BY THE THREAD OBJECT, not by its ident: idents are REUSED, and a reused

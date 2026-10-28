@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import sys
 import time
@@ -178,6 +179,11 @@ class FlockServer:
             except DunkError as error:
                 return {"id": req_id, "ok": False, "error": str(error)}, False
             except Exception as error:  # noqa: BLE001
+                if (isinstance(error, sqlite3.OperationalError)
+                        and (getattr(error, "sqlite_errorcode", 0) & 255)
+                        in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)):
+                    return {"id": req_id, "ok": False, "retryable": True,
+                            "error": "database busy; retry the request"}, False
                 log.exception("command %s failed", name)
                 return {"id": req_id, "ok": False,
                         "error": f"internal error: {error}"}, False
