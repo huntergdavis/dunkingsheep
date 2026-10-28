@@ -76,3 +76,40 @@ class OwnerReceiptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TruncationTests(unittest.TestCase):
+    """t319: an oversized request must not look like 'those ids do not exist'.
+
+    The cap stays (it protects the store), but the RESPONSE says how many ids were asked for and whether the
+    answer was cut, so a caller can distinguish 'I asked too much' from 'unknown ids'.
+    """
+
+    def setUp(self):
+        self.store = dunk_owner.OwnerPush(":memory:")
+
+    def test_a_small_request_is_not_truncated(self):
+        ids = [self.store.push("%9", f"m{i}")["id"] for i in range(3)]
+        self.assertEqual(3, len(self.store.receipts(ids)))
+        self.assertFalse(self.store.last_receipts_meta["truncated"])
+        self.assertEqual(3, self.store.last_receipts_meta["requested"])
+
+    def test_an_oversized_request_says_it_was_truncated(self):
+        ids = list(range(1, 251))
+        self.store.receipts(ids)
+        meta = self.store.last_receipts_meta
+        self.assertTrue(meta["truncated"], "a silent cap is indistinguishable from unknown ids")
+        self.assertEqual(250, meta["requested"])
+        self.assertLessEqual(meta["returned"], 100)
+
+    def test_the_handler_reports_requested_returned_and_truncated(self):
+        source = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "dunk_api.py")).read()
+        handler = source.split("def h_owner_receipts")[1].split("\ndef ")[0]
+        for key in ('"requested"', '"returned"', '"truncated"'):
+            self.assertIn(key, handler, "the response must state complete-vs-truncated explicitly")
+
+    def test_the_cap_still_protects_the_store(self):
+        ids = list(range(1, 251))
+        self.store.receipts(ids)
+        self.assertLessEqual(self.store.last_receipts_meta["returned"], 100)

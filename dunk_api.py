@@ -464,7 +464,15 @@ def h_owner_receipts(flock, args, self_pane_id):
     ids = args.get("push_ids") or []
     if isinstance(ids, str):
         ids = [part.strip() for part in ids.split(",") if part.strip()]
-    return {"receipts": dunk_owner.shared().receipts(ids)}
+    store = dunk_owner.shared()
+    receipts = store.receipts(ids)
+    meta = getattr(store, "last_receipts_meta", {}) or {}
+    # COMPLETE vs TRUNCATED is stated, not implied (t319): a caller that asked for more ids than the cap
+    # must be able to tell that from the response, rather than guessing why fewer receipts came back.
+    return {"receipts": receipts,
+            "requested": meta.get("requested", len(receipts)),
+            "returned": len(receipts),
+            "truncated": bool(meta.get("truncated"))}
 
 
 def h_roster(flock, args, self_pane_id):

@@ -127,8 +127,12 @@ class OwnerPush:
         Unknown ids are ABSENT from the result rather than null: "no such push" and "a push with no
         timestamps" are different answers and the caller should be able to tell them apart.
         """
-        ids = [int(i) for i in (push_ids or []) if str(i).strip().isdigit()]
-        ids = [i for i in ids if i > 0][:100]
+        requested = [int(i) for i in (push_ids or []) if str(i).strip().isdigit()]
+        requested = [i for i in requested if i > 0]
+        # A SILENT cap is indistinguishable from "those pushes do not exist" (t319): the caller sees fewer
+        # receipts than ids and cannot tell whether it asked too much or the ids are unknown. Keep the cap -
+        # it protects the store - but SAY SO, by returning the count asked for and a truncated flag.
+        ids = requested[:100]
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
@@ -136,6 +140,8 @@ class OwnerPush:
             rows = self.db.execute(
                 "SELECT id, pane_id, created_at, taken_at FROM owner_push "
                 f"WHERE id IN ({placeholders}) ORDER BY id", ids).fetchall()
+        self.last_receipts_meta = {"requested": len(requested), "returned": len(rows),
+                                   "truncated": len(requested) > len(ids)}
         return [{"id": row["id"], "pane_id": row["pane_id"],
                  "created_at": row["created_at"], "taken_at": row["taken_at"]} for row in rows]
 
