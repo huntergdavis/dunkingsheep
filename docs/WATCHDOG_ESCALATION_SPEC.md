@@ -134,18 +134,17 @@ say the same thing.
   nothing. The independent dead-man (its own unit, its own `--to`, its own
   cooldown) carries that text in its VP alert. There is no second, hard-coded
   recipient.
-- **The OWNER channel in code.** A page is a VP desk brief. Delivery is
+- **The OWNER channel in code.** A page is a CoS desk brief after the Telegram cutover. Delivery is
   confirmed through the bridge's non-secret
   `vp-of-agentry/data/telegram-status.json`
-  `{"last_brief_id": int, "updated_at": float}`, written after forwarding
-  (bridge 55829f2). DELIVERED means `last_brief_id >= posted id`. A null value
+  `{"channel": "cos", "last_brief_id": int, "updated_at": float}`, written after forwarding
+  (desk PR74). DELIVERED requires a CoS status channel, a CoS pending-page channel, and `last_brief_id >= posted id`. Legacy pending pages without a channel belong to VP; a CoS watermark never confirms them. A null value
   is pending; an unparseable file is unconfirmed plus a self error. The
   watchdog never opens `telegram.json`.
   - Posting needs the desk API token, and how the watchdog may hold it is
     undecided. Until then the post fails toward not paging.
-- **Every desk 'vp' brief reaches the owner's phone.** The dunkingsheep inbox is
-  therefore the only VP-only channel, and nothing addressed to VP goes through
-  the desk.
+- **CoS desk briefs reach the owner's phone** with the bridge configured to cos.
+  VP desk briefs remain separate; watchdog coordination still uses the dunkingsheep inbox.
 - **Bridge-down and inbox-down fallbacks.** No desk banner exists. The interim
   is the dunkingsheep inbox first; if that send fails, a status file
   (`watchdog_deadman_status.json`), a journal line and a non-zero exit, so the

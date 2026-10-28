@@ -27,16 +27,16 @@ Tier 2 re-review (VP i19817).
 
 ## Channels
 
-- **VP** is the dunkingsheep inbox. It is the **only** VP-only channel. Alerts
+- **VP** is the dunkingsheep inbox. Use it for watchdog coordination alerts. Alerts
   arrive from sender `watchdog` (see below).
-- **OWNER** is anything that reaches the owner's phone. Today that is a VP desk
+- **OWNER** is anything that reaches the owner's phone. With the CoS Telegram cutover, that is a CoS desk
   brief (`POST /api/brief`), which `telegram_bridge.send_briefs` forwards.
-  **Every desk 'vp' brief reaches the owner**, so nothing meant for VP alone may
-  go through the desk.
+  **CoS desk briefs reach the owner** with the bridge configured to cos;
+  VP desk briefs remain separate. Do not put agent-only coordination into CoS briefs.
 - **Delivery.** A page is DELIVERED only when the bridge's non-secret status
   file `vp-of-agentry/data/telegram-status.json`
-  `{"last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
-  posted brief id`. Until then the page is pending: it is never re-posted and no
+  `{"channel": "cos", "last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
+  posted brief id` and the pending page also belongs to CoS. Until then the page is pending: it is never re-posted and no
   cooldown starts.
   - A page still unconfirmed after `confirm_within_minutes` is reported to VP as
     UNDELIVERED.
@@ -472,3 +472,5 @@ systemctl --user enable --now dunkingsheep-watchdog-deadman.timer dunkingsheep-w
 
 The daemon must be restarted to pick up `system_sender` before the first live
 send.
+
+Telegram cutover (t282 / desk PR74): the built-in confirmation consumer is explicitly CoS-only. Missing or non-CoS channel status is a self-error, not delivery. New pending pages retain their desk channel; historical pages without it are VP pages and cannot be confirmed by a CoS watermark. If the bridge is configured back to VP or another channel, this consumer refuses confirmation until its contract is deliberately updated. It never reads the private bridge configuration. Owner posting remains unwired; this check does not enable owner paging.
