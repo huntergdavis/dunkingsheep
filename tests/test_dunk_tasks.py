@@ -345,7 +345,9 @@ class FlockTaskTests(unittest.TestCase):
         self.assertIn("local work", titles)
 
     def test_next_claims_and_auto_follows_when_empty(self):
-        task = self.flock.task_add("work", self_pane_id="w2:p1")
+        # t110: an unassigned add is owned by its CREATOR, so the claimer here has
+        # to be the creator (a task owned by w2:p1 is not w2:p2's to pull).
+        task = self.flock.task_add("work", self_pane_id="w2:p2")
         claimed = self.flock.task_next(self_pane_id="w2:p2")
         self.assertEqual(task["id"], claimed["task"]["id"])
         self.assertEqual("in_progress", claimed["task"]["status"])
@@ -418,6 +420,76 @@ class FlockTaskTests(unittest.TestCase):
         heartbeat = dunk_api.dispatch(self.flock, "task_heartbeat",
                                       {"id": added["id"]}, self_pane_id="w2:p1")
         self.assertGreater(heartbeat["expires_at"], 0)
+
+
+class TaskAddOwnershipTests(unittest.TestCase):
+    """t110 / owner #1708 wiring (b): `task add` creates work OWNED.
+
+    A task with no assignee is nobody's work - it shows in the list, is counted
+    against no one, and every lane can tell itself it is someone else's. So the
+    creating pane owns what it creates, an explicit `--assign` is delegation and
+    wins, and a caller with no pane needs a DECLARED leader rather than a guess.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.flock = Flock(
+            herdr=self.herdr,
+            state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")))
+        self._leader = os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
+
+    def tearDown(self):
+        if self._leader is not None:
+            os.environ["DUNKINGSHEEP_LEADER_PANE"] = self._leader
+        else:
+            os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_no_assign_is_owned_by_the_creating_pane(self):
+        task = self.flock.task_add("work nobody asked for", self_pane_id="w2:p1")
+        self.assertEqual(["w2:p1"], task["assignees"],
+                         "an unassigned add must still have an owner")
+        self.assertEqual("w2:p1", task["created_by"])
+        self.assertEqual(["w2:p1"], self.flock.task_read(task["id"],
+                                                          self_pane_id="w2:p1")["assignees"])
+
+    def test_an_explicit_assign_is_delegation_and_is_kept(self):
+        task = self.flock.task_add("for someone else", assignees=["w1:p2"],
+                                   self_pane_id="w2:p1")
+        self.assertEqual(["w1:p2"], task["assignees"],
+                         "delegation is an explicit write; the default must not overwrite it")
+
+    def test_assign_self_still_names_the_caller(self):
+        task = self.flock.task_add("mine", assignees=["self"], self_pane_id="w2:p1")
+        self.assertEqual(["w2:p1"], task["assignees"])
+
+    def test_a_declared_leader_owns_work_created_without_a_pane(self):
+        # The pane-less creators: systemd units, HTTP/web callers, the watchdog.
+        os.environ["DUNKINGSHEEP_LEADER_PANE"] = "w9:pV"
+        task = self.flock.task_add("raised by the daemon")
+        self.assertEqual(["w9:pV"], task["assignees"])
+
+    def test_no_pane_and_no_declared_leader_refuses_instead_of_writing_an_orphan(self):
+        os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
+        before = self.flock.task_list(scope="all")["tasks"]
+        # The message has to name the way out: this is a refusal, not a puzzle.
+        with self.assertRaisesRegex(DunkError, "must have an owner"):
+            self.flock.task_add("orphan")
+        with self.assertRaisesRegex(DunkError, "DUNKINGSHEEP_LEADER_PANE"):
+            self.flock.task_add("orphan")
+        with self.assertRaisesRegex(DunkError, "--assign"):
+            self.flock.task_add("orphan")
+        after = self.flock.task_list(scope="all")["tasks"]
+        self.assertEqual([t["id"] for t in before], [t["id"] for t in after],
+                         "the refusal must not leave a row behind")
 
 
 if __name__ == "__main__":

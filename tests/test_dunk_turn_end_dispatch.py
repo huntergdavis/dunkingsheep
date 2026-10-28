@@ -183,7 +183,7 @@ class TurnEndChainTests(unittest.TestCase):
 
     def hold(self, title="vitals row colour"):
         """Create work and CLAIM it for the pane, the way a producer lane does."""
-        added = self.flock.task_add(title)
+        added = self.flock.task_add(title, self_pane_id=PANE)
         claimed = self.flock.tasks.claim_next(scope="global", pane_id=PANE)
         self.assertEqual(added["id"], claimed["task"]["id"], "the fixture must claim it")
         return added
@@ -281,8 +281,10 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertEqual("not_allowed", result["dispatch"]["reason"])
 
     def test_completed_dependency_is_not_lost_from_open_task_view(self):
-        parent = self.flock.task_add("finished prerequisite", status="done")
-        added = self.flock.task_add("ready dependent", depends_on=[parent["id"]])
+        parent = self.flock.task_add("finished prerequisite", status="done",
+                                     self_pane_id=PANE)
+        added = self.flock.task_add("ready dependent", depends_on=[parent["id"]],
+                                    self_pane_id=PANE)
         claimed = self.flock.tasks.claim_next(scope="global", pane_id=PANE)
         self.assertEqual(added["id"], claimed["task"]["id"])
         dispatch = self.end_turn()["dispatch"]
@@ -325,7 +327,7 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertIn("action=claim", "\n".join(captured.output))
 
     def test_a_task_another_pane_has_claimed_is_not_mine_to_be_prompted_about(self):
-        self.flock.task_add("their work", assignees=[PANE, "w1:p2"])
+        self.flock.task_add("their work", assignees=[PANE, "w1:p2"], self_pane_id=PANE)
         self.flock.tasks.claim_next(scope="global", pane_id="w1:p2")
         result = self.end_turn()
         self.assertEqual(("skip", "no_open_work"),
