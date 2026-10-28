@@ -1,15 +1,20 @@
 """t374 acceptance validator: the checks must be able to fail.
 
-These are fixture receipts, not acceptance evidence.  The live run uses
-tools/t374_acceptance.py collect, which reads tasks.db / metrics.db / messages.
+Fixtures mirror PR72's actual records: one next_job_handoff message id with
+several state rows, an inbox `nj-` receipt with notify_at/transport_id/attempt,
+a producer-bound turn id, and no_assigned_work on B.  The live run uses
+tools/t374_acceptance.py collect.
 """
 import importlib.util
 import json
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "t374_acceptance.py"
+MID = "nj-" + "a" * 32
 
 
 def load_tool():
@@ -19,36 +24,45 @@ def load_tool():
     return module
 
 
-def handoff(meta=None, at=3):
-    return {"id": 10, "event": "next_job_handoff", "at": at,
-            "meta": json.dumps(meta or {"from_task": "tA", "message_id": "m1",
-                                        "attempt": 0})}
-
-
-def lane_fixture():
+def lane_fixture(lane="pi", pane="%90", a="tA", b="tB"):
+    handoff = {
+        "message_id": MID, "from_task": a, "completion_at": 2.0,
+        "caller": {"name": lane, "pid": 10, "start": "s"},
+        "attempt": 1, "state": "started", "trigger": "completion",
+        "transport_id": MID + ":1", "delivered_at": 3.0,
+        "turn_id": "turn-1", "turn_started_at": 4.0, "turn_source": lane,
+        "turn_caller": {"name": lane, "pid": 10, "start": "s"}, "at": 4.0,
+    }
     return {
-        "pane": "%90", "A": "tA", "B": "tB",
-        "A_state": {"events": [
-            {"event": "claimed", "at": 1}, {"event": "completed", "at": 2}]},
-        "B_state": {"events": [
-            handoff(), {"event": "claimed", "at": 4},
-            {"event": "completed", "at": 6}]},
-        "A_completed_at": 2, "B_completed_at": 6,
+        "pane": pane, "A": a, "B": b,
+        "A_task": {"completed_by": pane}, "B_task": {"completed_by": pane},
+        "A_claims": [{"event": "claimed", "at": 1.0, "actor": pane,
+                      "meta": json.dumps({"caller_name": lane, "caller_pid": 10})}],
+        "B_claims": [{"event": "claimed", "at": 2.0, "actor": pane,
+                      "meta": json.dumps({"caller_name": lane, "caller_pid": 10})}],
+        "A_completed": {"event": "completed", "at": 2.0, "actor": pane},
+        "B_completed": {"event": "completed", "at": 5.0, "actor": pane},
+        "handoffs": [{"message_id": MID, "first_at": 2.0, "latest": handoff}],
+        "handoff": handoff, "handoff_first_at": 2.0,
+        "B_receipt": {
+            "id": MID, "pane_id": pane, "sender": "next-job",
+            "notify_state": "sent", "notify_at": 3.0,
+            "notify_transport_id": MID + ":1", "notify_attempt": 1,
+            "read_at": 3.5, "acked_at": None,
+            "body": f"TASK {b} [urgent] test\nhandoff: {MID} from {a}",
+        },
+        "next_job_decisions": [{"at": 5.0, "reason": "no_assigned_work",
+                                "actor": pane}],
+        "turn_starts": [{"kind": "turn.start", "at": 4.0, "pane_id": pane}],
+        "human_sends": [],
         "A_artifact": {"exists": True, "prefix_ok": True},
         "B_artifact": {"exists": True, "prefix_ok": True},
-        "handoffs": [handoff()],
-        "B_claims": [{"event": "claimed", "at": 4}],
-        "B_sent": [{"message_id": "m1", "source": "turn_end", "status": "sent"}],
-        "B_messages": [{"message_id": "m1", "status": "sent"}],
-        "human_sends": [],
-        "B_turn_starts_after_claim": [{"kind": "turn.start", "at": 5}],
-        "no_work": [{"kind": "turn.end.dispatch", "reason": "no_assigned_work", "at": 7}],
     }
 
 
 def receipt():
-    return {"run_id": "fixture", "lanes": {"pi": lane_fixture(),
-                                           "codex": lane_fixture()}}
+    return {"run_id": "fixture", "lanes": {"pi": lane_fixture("pi", "%90", "tA1", "tB1"),
+                                           "codex": lane_fixture("codex", "%91", "tA2", "tB2")}}
 
 
 class ValidatorTests(unittest.TestCase):
@@ -58,70 +72,112 @@ class ValidatorTests(unittest.TestCase):
     def failures(self, value):
         return self.tool.validate(value)
 
+    def assert_fails(self, value, needle):
+        failures = self.failures(value)
+        self.assertTrue(any(needle in f for f in failures), failures)
+
     def test_good_chain_passes(self):
         self.assertEqual([], self.failures(receipt()))
 
-    def test_missing_handoff_fails(self):
+    def test_unrelated_receipt_id_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["handoffs"] = []
-        value["lanes"]["pi"]["B_state"]["events"] = [
-            {"event": "claimed", "at": 4}, {"event": "completed", "at": 6}]
-        self.assertTrue(any("no next_job_handoff" in f for f in self.failures(value)))
+        value["lanes"]["pi"]["B_receipt"]["id"] = "nj-" + "b" * 32
+        self.assert_fails(value, "receipt id is not the handoff")
 
-    def test_wrong_from_task_fails(self):
+    def test_turn_only_after_b_completion_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["handoffs"] = [
-            handoff({"from_task": "tOTHER", "message_id": "m1"})]
-        value["lanes"]["pi"]["B_state"]["events"][0] = value["lanes"]["pi"]["handoffs"][0]
-        self.assertTrue(any("from_task != A" in f for f in self.failures(value)))
+        value["lanes"]["pi"]["handoff"]["turn_started_at"] = 1000.0
+        self.assert_fails(value, "only turn start is AFTER B completion")
 
-    def test_duplicate_b_claim_fails(self):
+    def test_foreign_a_claim_actor_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["B_claims"].append({"event": "claimed", "at": 4.5})
-        self.assertTrue(any("exactly 1 B claim" in f for f in self.failures(value)))
+        value["lanes"]["pi"]["A_claims"][0] = {
+            "event": "claimed", "at": 1.0, "actor": "%OTHER",
+            "meta": json.dumps({"caller_name": "intruder"})}
+        self.assert_fails(value, "A claim caller")
 
-    def test_duplicate_b_delivery_fails(self):
+    def test_foreign_b_claim_actor_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["B_sent"].append(
-            {"message_id": "m2", "source": "turn_end", "status": "sent"})
-        self.assertTrue(any("exactly 1 sent B message" in f for f in self.failures(value)))
+        value["lanes"]["pi"]["B_claims"][0]["meta"] = json.dumps(
+            {"caller_name": "intruder"})
+        self.assert_fails(value, "B claim caller")
+
+    def test_duplicate_handoff_message_fails(self):
+        value = receipt()
+        other = dict(value["lanes"]["pi"]["handoff"])
+        other["message_id"] = "nj-" + "c" * 32
+        value["lanes"]["pi"]["handoffs"].append(
+            {"message_id": other["message_id"], "first_at": 2.1, "latest": other})
+        self.assert_fails(value, "exactly 1 handoff message id")
+
+    def test_handoff_not_started_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["handoff"]["state"] = "sent"
+        self.assert_fails(value, "not 'started'")
+
+    def test_unread_receipt_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_receipt"]["read_at"] = None
+        value["lanes"]["pi"]["B_receipt"]["acked_at"] = None
+        self.assert_fails(value, "never read/acked")
+
+    def test_unsent_receipt_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_receipt"]["notify_state"] = "queued"
+        self.assert_fails(value, "notify_state")
+
+    def test_transport_mismatch_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_receipt"]["notify_transport_id"] = MID + ":2"
+        self.assert_fails(value, "transport_id")
+
+    def test_missing_no_work_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["next_job_decisions"] = []
+        self.assert_fails(value, "no_assigned_work")
+
+    def test_b_completed_before_turn_start_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_completed"]["at"] = 3.5
+        self.assert_fails(value, "B completed before its own turn started")
 
     def test_b_claimed_before_a_completed_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["B_claims"][0]["at"] = 1.5
-        self.assertTrue(any("before A completed" in f for f in self.failures(value)))
+        value["lanes"]["pi"]["B_claims"][0]["at"] = 1.0
+        self.assert_fails(value, "before A completed")
+
+    def test_b_claim_not_in_completion_transaction_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["B_claims"][0]["at"] = 10.0
+        self.assert_fails(value, "not in A's completion transaction")
+
+    def test_missing_turn_start_metric_fails(self):
+        value = receipt()
+        value["lanes"]["pi"]["turn_starts"] = []
+        self.assert_fails(value, "no matching turn.start")
 
     def test_human_send_fails(self):
         value = receipt()
         value["lanes"]["pi"]["human_sends"] = [{"message_id": "m9"}]
-        self.assertTrue(any("no human nudge" in f for f in self.failures(value)))
-
-    def test_missing_no_work_fails(self):
-        value = receipt()
-        value["lanes"]["pi"]["no_work"] = []
-        self.assertTrue(any("no_assigned_work" in f for f in self.failures(value)))
+        self.assert_fails(value, "no human nudge")
 
     def test_bad_artifact_fails(self):
         value = receipt()
         value["lanes"]["pi"]["B_artifact"]["prefix_ok"] = False
-        self.assertTrue(any("B artifact" in f for f in self.failures(value)))
+        self.assert_fails(value, "B artifact")
 
-    def test_missing_b_turn_start_fails(self):
+    def test_completion_actor_mismatch_fails(self):
         value = receipt()
-        value["lanes"]["pi"]["B_turn_starts_after_claim"] = []
-        self.assertTrue(any("no B turn start" in f for f in self.failures(value)))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        value["lanes"]["pi"]["B_completed"]["actor"] = "%OTHER"
+        self.assert_fails(value, "B completion actor")
 
 
 class CollectorTests(unittest.TestCase):
-    """The collector reads the real SQL shapes, not a hand-written receipt."""
+    """The collector reads PR72's SQL shapes, not a hand-written receipt."""
 
     def setUp(self):
         self.tool = load_tool()
-        self.tmp = Path(self._tmp())
+        self.tmp = Path(tempfile.mkdtemp(prefix="t374-collect-"))
         self.addCleanup(self._rm)
         self.run = self.tmp / "run"
         self.tool.plan(self.run, run_id="fixture", wait_seconds=1)
@@ -130,36 +186,36 @@ class CollectorTests(unittest.TestCase):
         (self.run / "manifest.json").write_text(json.dumps(manifest))
         self.manifest = manifest
         self.tasks = {"pi": {"pane": "%90", "A": "tA1", "B": "tB1"},
-                      "codex": {"pane": "%91", "A": "tA2", "B": "tB2"}}
+                      "codex": {"pane": "%91", "A": "tA2", "B": "tB2"},
+                      }
         (self.run / "tasks.json").write_text(json.dumps(self.tasks))
-        self._seed_db()
-        self._seed_artifacts()
+        self._seed()
         self.tool.TASKS_DB = self.tmp / "tasks.db"
         self.tool.METRICS_DB = self.tmp / "metrics.db"
-        self.tool._messages = lambda: [
-            {"message_id": f"m-{lane}", "pane_id": row["pane"],
-             "source": "turn_end", "status": "sent", "created_at": 3.5,
-             "text": f"[turn-end {row['B']}] next job"}
-            for lane, row in self.tasks.items()]
-
-    def _tmp(self):
-        import tempfile
-        return tempfile.mkdtemp(prefix="t374-collect-")
+        self.tool.CONFIG_DIR = self.tmp
+        self.tool._messages = lambda: []
 
     def _rm(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _seed_db(self):
-        import sqlite3
+    def _seed(self):
         tasks = sqlite3.connect(self.tmp / "tasks.db")
         tasks.executescript("""
         CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT, assignees TEXT,
-            created_at REAL, updated_at REAL, cancelled_at REAL);
+            created_at REAL, updated_at REAL, cancelled_at REAL, completed_by TEXT);
         CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, event TEXT,
             at REAL, actor TEXT, status_from TEXT, status_to TEXT, meta TEXT);
         CREATE TABLE task_leases (task_id TEXT, pane_id TEXT, claimed_at REAL,
             heartbeat_at REAL, expires_at REAL, caller_pid INTEGER, caller_name TEXT);
+        """)
+        inbox = sqlite3.connect(self.tmp / "inbox.db")
+        inbox.executescript("""
+        CREATE TABLE messages (id TEXT PRIMARY KEY, mailbox TEXT, mailbox_label TEXT,
+            pane_id TEXT, sender TEXT, subject TEXT, body TEXT, state TEXT,
+            created_at REAL, read_at REAL, acked_at REAL, notify_state TEXT,
+            notify_reason TEXT, notify_at REAL, notify_transport_id TEXT,
+            notify_attempt INTEGER);
         """)
         metrics = sqlite3.connect(self.tmp / "metrics.db")
         metrics.executescript("""
@@ -168,44 +224,57 @@ class CollectorTests(unittest.TestCase):
         """)
         for index, (lane, row) in enumerate(self.tasks.items()):
             base = 10 * (index + 1)
-            pane = row["pane"]
-            for task_id, name in ((row["A"], "A"), (row["B"], "B")):
-                tasks.execute("INSERT INTO tasks VALUES (?,?,?,?,?,NULL)",
-                              (task_id, "in_progress", json.dumps([pane]), 1, 1))
+            pane, a, b = row["pane"], row["A"], row["B"]
+            mid = f"nj-{index:032x}"
+            for task_id in (a, b):
+                tasks.execute("INSERT INTO tasks VALUES (?,?,?,?,?,NULL,?)",
+                              (task_id, "done", json.dumps([pane]), 1, 1, pane))
             tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
-                          "VALUES (?, 'claimed', ?, ?, NULL)", (row["A"], base, pane))
+                          "VALUES (?, 'claimed', ?, ?, ?)",
+                          (a, base, pane,
+                           json.dumps({"caller_name": lane, "caller_pid": 1})))
             tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
-                          "VALUES (?, 'completed', ?, ?, NULL)",
-                          (row["A"], base + 1, pane))
+                          "VALUES (?, 'completed', ?, ?, NULL)", (a, base + 1, pane))
             tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
-                          "VALUES (?, 'next_job_handoff', ?, ?, ?)",
-                          (row["B"], base + 2, pane,
-                           json.dumps({"from_task": row["A"],
-                                        "message_id": f"m-{lane}", "attempt": 0})))
+                          "VALUES (?, 'claimed', ?, ?, ?)",
+                          (b, base + 1, pane,
+                           json.dumps({"caller_name": lane, "caller_pid": 1})))
+            base_meta = {"message_id": mid, "from_task": a, "completion_at": base + 1,
+                         "caller": {"name": lane, "pid": 1},
+                         "attempt": 1, "state": "pending", "trigger": "completion"}
+            for at, state, extra in (
+                    (base + 1, "pending", {}),
+                    (base + 2, "sent", {"transport_id": mid + ":1",
+                                         "delivered_at": base + 2}),
+                    (base + 3, "started", {"transport_id": mid + ":1",
+                                            "delivered_at": base + 2,
+                                            "turn_id": f"turn-{lane}",
+                                            "turn_started_at": base + 3,
+                                            "turn_source": lane,
+                                            "turn_caller": {"name": lane, "pid": 1}})):
+                meta = dict(base_meta, state=state, **extra)
+                tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
+                              "VALUES (?, 'next_job_handoff', ?, ?, ?)",
+                              (b, at, pane, json.dumps(meta)))
             tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
-                          "VALUES (?, 'claimed', ?, ?, NULL)",
-                          (row["B"], base + 3, pane))
+                          "VALUES (?, 'completed', ?, ?, NULL)", (b, base + 4, pane))
             tasks.execute("INSERT INTO task_events (task_id,event,at,actor,meta) "
-                          "VALUES (?, 'completed', ?, ?, NULL)",
-                          (row["B"], base + 5, pane))
-            tasks.execute("INSERT INTO task_leases VALUES (?,?,?,?,?,?,?)",
-                          (row["B"], pane, base + 3, base + 3, 9999, 1, lane))
-            for at, kind, reason in ((base, "turn.start", None),
-                                     (base + 1, "turn.end", "stop"),
-                                     (base + 2, "turn.end.dispatch", "queued"),
-                                     (base + 2.5, "message.sent", None),
-                                     (base + 4, "turn.start", None),
-                                     (base + 5, "turn.end", "stop"),
-                                     (base + 6, "turn.end.dispatch", "no_assigned_work")):
-                metrics.execute("INSERT INTO events (at,kind,pane_id,source,outcome,reason) "
-                                "VALUES (?,?,?,?,?,?)",
-                                (at, kind, pane, "turn_end", "ok", reason))
+                          "VALUES (?, 'next_job_decision', ?, ?, ?)",
+                          (b, base + 4, pane,
+                           json.dumps({"reason": "no_assigned_work"})))
+            inbox.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (mid, "lane", "lane", pane, "next-job", f"TASK {b}",
+                           f"TASK {b} test\nhandoff: {mid}", "read", base + 1,
+                           base + 3.5, None, "sent", None, base + 2, mid + ":1", 1))
+            metrics.execute("INSERT INTO events (at,kind,pane_id,source,outcome) "
+                            "VALUES (?, 'turn.start', ?, ?, 'ok')",
+                            (base + 3, pane, lane))
         tasks.commit()
+        inbox.commit()
         metrics.commit()
         tasks.close()
+        inbox.close()
         metrics.close()
-
-    def _seed_artifacts(self):
         for lane, row in self.tasks.items():
             for key in ("A", "B"):
                 spec = self.manifest["lanes"][lane]["tasks"][key]
@@ -213,6 +282,10 @@ class CollectorTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(spec["expect_prefix"] + " " + lane + "\n")
 
-    def test_collect_then_validate_passes_on_real_sql_shapes(self):
+    def test_collect_then_validate_passes_on_pr72_shapes(self):
         receipt = self.tool.collect(self.run)
         self.assertEqual([], self.tool.validate(receipt))
+
+
+if __name__ == "__main__":
+    unittest.main()

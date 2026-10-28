@@ -61,7 +61,8 @@ an approval file matches the running daemon version/code and the repo head.
    command in `LAUNCH.md`.  The prompt includes `sleep 20` so the tasks can be
    created before the agent claims A.
 
-3. Within that window, create the pane-private tasks:
+3. Within that window, create the pane-private tasks.  The tasks must be created
+   before the agent's `task next` runs; the `sleep 30` prompt is the window:
 
    ```sh
    python3 tools/t374_acceptance.py prepare \
@@ -85,7 +86,13 @@ an approval file matches the running daemon version/code and the repo head.
    python3 tools/t374_acceptance.py validate --receipt <run-dir>/receipt.json
    ```
 
-6. Clean up with the guarded task CLI (the tool prints the commands):
+6. The producer must echo the handoff id.  The B prompt contains
+   `Handoff nj-... .`; the pi patch / Codex hook / OpenCode plugin from PR72
+   extracts it and sends `turn start --handoff-id nj-...`.  A producer without
+   that echo leaves the handoff at `sent`, and validation fails.  Do not fake
+   the echo in the test harness.
+
+7. Clean up with the guarded task CLI (the tool prints the commands):
 
    ```sh
    python3 tools/t374_acceptance.py cleanup --run <run-dir>
@@ -101,12 +108,13 @@ an approval file matches the running daemon version/code and the repo head.
 | A complete | `tasks.db` `task_events` `completed` |
 | handoff | `tasks.db` `task_events` event `next_job_handoff` on B, meta `{from_task: A, message_id: <id>}` |
 | B claim | one `task_events` `claimed` on B, after A complete and after the handoff |
-| B delivery | live message store: one message to the pane, `source=turn_end`, `status=sent`; `metrics` `message.sent` for the pane |
-| B start | `metrics` `turn.start` for the pane after the B claim |
-| B complete | `tasks.db` `task_events` `completed` on B; B artifact prefix |
+| B delivery | `inbox.db` `nj-` row: `sender=next-job`, `notify_state=sent`, `notify_at`, `notify_transport_id`, `notify_attempt`; handoff `transport_id`/`attempt`/`delivered_at` agree |
+| B consumption | the same inbox row has `read_at` or `acked_at` |
+| B start | handoff `state=started`, `turn_id`, `turn_started_at > delivered_at`, `turn_caller.name` = lane; producer echoed `--handoff-id nj-...`; matching `metrics` `turn.start` |
+| B complete | `tasks.db` `task_events` `completed` on B at/after the turn start; B artifact prefix |
 | no human nudge | zero `send_text` messages to the lane during the run |
-| no duplicate B | exactly one B claim, one handoff, one sent message |
-| no work after B | a `no_assigned_work` decision after B; no C claimed or invented |
+| no duplicate B | exactly one handoff message id, one B claim, one `nj-` receipt |
+| no work after B | a `next_job_decision` record on B with `reason=no_assigned_work`; no C claimed or invented |
 
 The validator also rejects B claimed before A completed, a handoff without a
 `message_id`, a wrong `from_task`, a duplicate B claim/delivery, a missing B
@@ -117,8 +125,9 @@ turn start, a missing artifact, and any human send.
 - **Repeated completion:** after A is complete, re-run
   `dunkingsheep --self-pane <pane> task complete <A>` once.  The chain must still
   show exactly one B handoff/claim/delivery; a second is a failure.
-- **No-work:** after B completes, allow the loop to make its decision and record
-  `no_assigned_work`.  No C task or prompt may appear.
+- **No-work:** after B completes, the same completion trigger records a
+  `next_job_decision` with `reason=no_assigned_work`.  No C task or prompt may
+  appear.
 - **No-human-nudge:** the launch prompt is the only human input; the runbook
   forbids any `send`, `send-keys`, or Enter during A/B.  The receipt counts
   `send_text` messages to the lane and must show zero.

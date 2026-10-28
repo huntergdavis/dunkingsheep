@@ -157,10 +157,21 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
     run_id = run_id or time.strftime("%Y%m%dT%H%M%S")
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
+    tool = {"path": str(Path(__file__).resolve())}
+    try:
+        tool["head"] = _run(["git", "-C", str(Path(__file__).resolve().parents[1]),
+                             "rev-parse", "HEAD"]).stdout.strip()
+    except OSError:
+        tool["head"] = None
+    try:
+        tool["sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        tool["sha256"] = None
     manifest = {
         "run_id": run_id,
         "created_at": _now(),
         "status": "planned",
+        "tool": tool,
         "release": {"version": None, "code_hash": None, "repo_head": None,
                     "approval_file": None},
         "lanes": {},
@@ -344,6 +355,68 @@ def _first(events, name):
     return None
 
 
+def _inbox_row(message_id):
+    db = _db(CONFIG_DIR / "inbox.db")
+    try:
+        rows = _rows(db, "SELECT * FROM messages WHERE id = ?", (message_id,))
+    finally:
+        if db:
+            db.close()
+    return rows[0] if rows else None
+
+
+def _meta(event):
+    try:
+        value = json.loads((event or {}).get("meta") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _last(events, name):
+    found = [e for e in events if e.get("event") == name]
+    return found[-1] if found else None
+
+
+def _claims(events):
+    return [e for e in events if e.get("event") == "claimed"]
+
+
+def _handoff_history(events):
+    """First and latest durable record per nj- message id.
+
+    PR72 appends a next_job_handoff row for every state transition, so the
+    number of ROWS is not the number of handoffs.  The message id is.
+    """
+    history = {}
+    for event in events:
+        if event.get("event") != "next_job_handoff":
+            continue
+        meta = _meta(event)
+        message_id = meta.get("message_id")
+        if not message_id:
+            continue
+        record = history.setdefault(str(message_id), {
+            "message_id": str(message_id), "first_at": event.get("at"),
+            "latest": None, "rows": 0})
+        record["rows"] += 1
+        record["first_at"] = min(float(record["first_at"] or event.get("at") or 0),
+                                 float(event.get("at") or 0))
+        record["latest"] = dict(meta, at=event.get("at"),
+                                event_id=event.get("id"), actor=event.get("actor"))
+    return history
+
+
+def _decisions(events):
+    out = []
+    for event in events:
+        if event.get("event") != "next_job_decision":
+            continue
+        meta = _meta(event)
+        out.append(dict(meta, at=event.get("at"), actor=event.get("actor")))
+    return out
+
+
 def collect(run_dir):
     run = Path(run_dir)
     manifest = json.loads((run / "manifest.json").read_text())
@@ -352,55 +425,41 @@ def collect(run_dir):
     end = _now() + 5
     messages = _messages()
     receipt = {"run_id": manifest["run_id"], "collected_at": _now(),
-               "release": manifest.get("release"), "lanes": {}}
+               "release": manifest.get("release"), "tool": manifest.get("tool"),
+               "lanes": {}}
     for lane in LANES:
         ids = tasks[lane]
         pane = ids["pane"]
         a, b = _task_rows(ids["A"]), _task_rows(ids["B"])
-        events_a = a["events"]
-        events_b = b["events"]
-        handoffs = [e for e in events_b if e.get("event") == "next_job_handoff"]
-        claimed_b = [e for e in events_b if e.get("event") == "claimed"]
-        completed_a = _first(events_a, "completed")
-        completed_b = _first(events_b, "completed")
-        b_ids = {str(ids["B"])}
-        if b.get("task") and b["task"].get("id"):
-            b_ids.add(str(b["task"]["id"]))
-        handoff_message_ids = set()
-        for event in handoffs:
-            try:
-                meta = json.loads(event.get("meta") or "{}")
-            except (TypeError, ValueError):
-                meta = {}
-            if isinstance(meta, dict) and meta.get("message_id"):
-                handoff_message_ids.add(str(meta["message_id"]))
-        lane_messages = [m for m in messages if str(m.get("pane_id")) == str(pane)
-                         and (str(m.get("message_id")) in handoff_message_ids
-                              or any(t in str(m.get("text", "")) for t in b_ids))]
-        sent = [m for m in lane_messages if m.get("status") == "sent"]
-        human = [m for m in messages if str(m.get("pane_id")) == str(pane)
-                 and m.get("source") == "send_text"
+        events_a, events_b = a["events"], b["events"]
+        history = _handoff_history(events_b)
+        handoff_ids = list(history)
+        handoff = (history[handoff_ids[0]]["latest"] if len(handoff_ids) == 1 else None)
+        receipt_row = _inbox_row(handoff["message_id"]) if handoff else None
+        lane_messages = [m for m in messages if str(m.get("pane_id")) == str(pane)]
+        human = [m for m in lane_messages if m.get("source") == "send_text"
                  and float(m.get("created_at") or 0) >= start]
         metrics = _metrics_for(pane, start, end)
-        b_start = [e for e in metrics if e.get("kind") == "turn.start"
-                   and float(e.get("at") or 0) >= float((claimed_b[0] if claimed_b else {}).get("at") or end)]
-        no_work = [e for e in metrics if e.get("reason") == "no_assigned_work"
-                   and (not completed_b or float(e.get("at") or 0) >= float(completed_b["at"]))]
+        decisions = _decisions(events_a + events_b)
         receipt["lanes"][lane] = {
             "pane": pane, "A": ids["A"], "B": ids["B"],
             "A_state": a, "B_state": b,
+            "A_task": a["task"], "B_task": b["task"],
+            "A_claims": _claims(events_a), "B_claims": _claims(events_b),
+            "A_completed": _last(events_a, "completed"),
+            "B_completed": _last(events_b, "completed"),
+            "handoffs": [history[mid] for mid in handoff_ids],
+            "handoff": handoff,
+            "handoff_first_at": history[handoff_ids[0]]["first_at"] if len(handoff_ids) == 1 else None,
+            "B_receipt": receipt_row,
+            "next_job_decisions": decisions,
             "A_artifact": _artifact(manifest["lanes"][lane]["tasks"]["A"]["artifact"],
                                     manifest["lanes"][lane]["tasks"]["A"]["expect_prefix"]),
             "B_artifact": _artifact(manifest["lanes"][lane]["tasks"]["B"]["artifact"],
                                     manifest["lanes"][lane]["tasks"]["B"]["expect_prefix"]),
-            "A_completed_at": completed_a.get("at") if completed_a else None,
-            "B_completed_at": completed_b.get("at") if completed_b else None,
-            "handoffs": handoffs, "B_claims": claimed_b,
-            "B_messages": lane_messages, "B_sent": sent,
-            "human_sends": human,
             "metrics": metrics,
-            "B_turn_starts_after_claim": b_start,
-            "no_work": no_work,
+            "turn_starts": [e for e in metrics if e.get("kind") == "turn.start"],
+            "human_sends": human,
         }
     (run / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"wrote {run / 'receipt.json'}")
@@ -414,56 +473,157 @@ def validate(receipt):
         if not row:
             failures.append(f"{lane}: missing lane receipt")
             continue
-        a_events = (row.get("A_state") or {}).get("events") or []
-        b_events = (row.get("B_state") or {}).get("events") or []
-        a_completed = _first(a_events, "completed")
-        a_claimed = _first(a_events, "claimed")
-        b_claimed = (row.get("B_claims") if isinstance(row.get("B_claims"), list)
-                     else [e for e in b_events if e.get("event") == "claimed"])
+        pane = str(row.get("pane") or "")
+        a_id, b_id = str(row.get("A") or ""), str(row.get("B") or "")
+        a_claims = row.get("A_claims") or []
+        b_claims = row.get("B_claims") or []
+        a_completed = row.get("A_completed") or {}
+        b_completed = row.get("B_completed") or {}
+        a_task = row.get("A_task") or {}
+        b_task = row.get("B_task") or {}
         handoffs = row.get("handoffs") or []
-        if not a_claimed:
+        handoff = row.get("handoff") or {}
+        receipt_row = row.get("B_receipt") or {}
+        a_at = a_completed.get("at")
+        b_at = b_completed.get("at")
+
+        if not a_id or not b_id or a_id == b_id:
+            failures.append(f"{lane}: missing or duplicate A/B task ids")
+        if not a_claims:
             failures.append(f"{lane}: A was not claimed")
-        if not a_completed:
+        elif _meta(a_claims[-1]).get("caller_name") != lane:
+            failures.append(f"{lane}: A claim caller is "
+                            f"{_meta(a_claims[-1]).get('caller_name')!r}, not {lane!r}")
+        if a_claims and a_claims[-1].get("actor") != pane:
+            failures.append(f"{lane}: A claim actor is not the lane pane")
+        if not a_completed or not a_at:
             failures.append(f"{lane}: A was not completed")
+        else:
+            if a_completed.get("actor") != pane:
+                failures.append(f"{lane}: A completion actor is not the lane pane")
+            if a_task.get("completed_by") not in (None, pane):
+                failures.append(f"{lane}: A task completed_by is "
+                                f"{a_task.get('completed_by')!r}, not {pane!r}")
         if not row.get("A_artifact", {}).get("prefix_ok"):
             failures.append(f"{lane}: A artifact missing or wrong prefix")
-        if not handoffs:
-            failures.append(f"{lane}: no next_job_handoff event on B")
+
         if len(handoffs) != 1:
-            failures.append(f"{lane}: expected exactly 1 next_job_handoff, got {len(handoffs)}")
-        if len(b_claimed) != 1:
-            failures.append(f"{lane}: expected exactly 1 B claim, got {len(b_claimed)}")
-        if handoffs and b_claimed:
-            meta = handoffs[0].get("meta") or {}
-            if isinstance(meta, str):
-                try:
-                    meta = json.loads(meta)
-                except ValueError:
-                    meta = {}
-            if meta.get("from_task") != row.get("A"):
+            failures.append(f"{lane}: expected exactly 1 handoff message id, got "
+                            f"{len(handoffs)}")
+        if not handoff:
+            failures.append(f"{lane}: no next_job_handoff record")
+        else:
+            message_id = str(handoff.get("message_id") or "")
+            if not message_id.startswith("nj-"):
+                failures.append(f"{lane}: handoff message_id is not an nj- id")
+            if handoff.get("from_task") != a_id:
                 failures.append(f"{lane}: handoff from_task != A")
-            if not meta.get("message_id"):
-                failures.append(f"{lane}: handoff has no message_id")
-            if float(b_claimed[0].get("at") or 0) < float(handoffs[0].get("at") or 0):
-                failures.append(f"{lane}: B was claimed before the handoff record")
-        if a_completed and b_claimed:
-            if float(b_claimed[0].get("at") or 0) < float(a_completed.get("at") or 0):
+            caller = handoff.get("caller") or {}
+            if not isinstance(caller, dict) or caller.get("name") != lane:
+                failures.append(f"{lane}: handoff completion caller is "
+                                f"{caller.get('name') if isinstance(caller, dict) else caller!r}, "
+                                f"not {lane!r}")
+            completion = handoff.get("completion_at")
+            if a_at is None or completion is None or abs(float(completion) - float(a_at)) > 0.5:
+                failures.append(f"{lane}: handoff completion_at does not match A completion")
+            if handoff.get("state") != "started":
+                failures.append(f"{lane}: handoff state is {handoff.get('state')!r}, not 'started'")
+            if int(handoff.get("attempt") or 0) < 1:
+                failures.append(f"{lane}: handoff has no transport attempt")
+            if not handoff.get("transport_id"):
+                failures.append(f"{lane}: handoff has no transport_id")
+            if handoff.get("delivered_at") is None:
+                failures.append(f"{lane}: handoff has no delivered_at")
+            turn_started = handoff.get("turn_started_at")
+            if not handoff.get("turn_id") or turn_started is None:
+                failures.append(f"{lane}: handoff has no producer turn binding")
+            else:
+                if handoff.get("delivered_at") is not None and \
+                        float(turn_started) <= float(handoff["delivered_at"]):
+                    failures.append(f"{lane}: B turn started before its delivery")
+                if b_at is not None and float(turn_started) > float(b_at):
+                    failures.append(f"{lane}: only turn start is AFTER B completion")
+            turn_caller = handoff.get("turn_caller") or {}
+            if not isinstance(turn_caller, dict) or turn_caller.get("name") != lane:
+                failures.append(f"{lane}: B turn caller is not {lane!r}")
+
+        if len(b_claims) != 1:
+            failures.append(f"{lane}: expected exactly 1 B claim, got {len(b_claims)}")
+        else:
+            b_claim = b_claims[0]
+            b_meta = _meta(b_claim)
+            if b_meta.get("caller_name") != lane:
+                failures.append(f"{lane}: B claim caller is "
+                                f"{b_meta.get('caller_name')!r}, not {lane!r}")
+            if b_claim.get("actor") != pane:
+                failures.append(f"{lane}: B claim actor is not the lane pane")
+            if a_at is not None and float(b_claim.get("at") or 0) < float(a_at) - 0.5:
                 failures.append(f"{lane}: B was claimed before A completed")
+            if float(b_claim.get("at") or 0) > float(a_at or 0) + 1.5:
+                failures.append(f"{lane}: B claim is not in A's completion transaction")
+
+        if not receipt_row:
+            failures.append(f"{lane}: no inbox receipt row for the handoff")
+        else:
+            if str(receipt_row.get("id")) != str(handoff.get("message_id")):
+                failures.append(f"{lane}: receipt id is not the handoff message id")
+            if str(receipt_row.get("pane_id")) != pane:
+                failures.append(f"{lane}: receipt pane is not the lane pane")
+            if str(receipt_row.get("sender")) != "next-job":
+                failures.append(f"{lane}: receipt sender is not 'next-job'")
+            if receipt_row.get("notify_state") != "sent":
+                failures.append(f"{lane}: receipt notify_state is "
+                                f"{receipt_row.get('notify_state')!r}, not 'sent'")
+            if receipt_row.get("notify_at") is None:
+                failures.append(f"{lane}: receipt has no notify_at")
+            if not receipt_row.get("notify_transport_id"):
+                failures.append(f"{lane}: receipt has no notify_transport_id")
+            if int(receipt_row.get("notify_attempt") or 0) < 1:
+                failures.append(f"{lane}: receipt has no notify_attempt")
+            if str(receipt_row.get("notify_transport_id")) != str(handoff.get("transport_id")):
+                failures.append(f"{lane}: receipt transport_id != handoff transport_id")
+            if int(receipt_row.get("notify_attempt") or 0) != int(handoff.get("attempt") or 0):
+                failures.append(f"{lane}: receipt attempt != handoff attempt")
+            if handoff.get("delivered_at") is not None and receipt_row.get("notify_at") is not None:
+                if abs(float(receipt_row["notify_at"]) - float(handoff["delivered_at"])) > 2.0:
+                    failures.append(f"{lane}: receipt notify_at is not the handoff delivery time")
+            if not receipt_row.get("read_at") and not receipt_row.get("acked_at"):
+                failures.append(f"{lane}: receipt was never read/acked by the lane")
+            body = str(receipt_row.get("body") or "")
+            if b_id and b_id not in body:
+                failures.append(f"{lane}: receipt body does not name B")
+            if handoff.get("message_id") and str(handoff["message_id"]) not in body:
+                failures.append(f"{lane}: receipt body does not echo the handoff id")
+
         if not row.get("B_artifact", {}).get("prefix_ok"):
             failures.append(f"{lane}: B artifact missing or wrong prefix")
-        if not row.get("B_completed_at"):
+        if not b_completed or not b_at:
             failures.append(f"{lane}: B was not completed")
-        sent = row.get("B_sent") or []
-        if len(sent) != 1:
-            failures.append(f"{lane}: expected exactly 1 sent B message, got {len(sent)}")
-        if sent and str(sent[0].get("source")) != "turn_end":
-            failures.append(f"{lane}: B message source is {sent[0].get('source')!r}, not turn_end")
+        else:
+            if b_completed.get("actor") != pane:
+                failures.append(f"{lane}: B completion actor is not the lane pane")
+            if b_task.get("completed_by") not in (None, pane):
+                failures.append(f"{lane}: B task completed_by is "
+                                f"{b_task.get('completed_by')!r}, not {pane!r}")
+            if handoff.get("turn_started_at") is not None and \
+                    float(b_at) <= float(handoff["turn_started_at"]):
+                failures.append(f"{lane}: B completed before its own turn started")
+            if receipt_row.get("notify_at") is not None and \
+                    float(b_at) < float(receipt_row["notify_at"]):
+                failures.append(f"{lane}: B completed before delivery")
+        if not any(abs(float(e.get("at") or 0) - float(handoff.get("turn_started_at") or -999))
+                   <= 2.0 for e in row.get("turn_starts") or []):
+            failures.append(f"{lane}: no matching turn.start metric for the bound B turn")
+
         if row.get("human_sends"):
-            failures.append(f"{lane}: {len(row['human_sends'])} send_text/send_keys message(s) "
-                            "to the lane; the acceptance requires no human nudge")
-        if not row.get("B_turn_starts_after_claim"):
-            failures.append(f"{lane}: no B turn start after the B claim")
-        if not row.get("no_work"):
+            failures.append(f"{lane}: {len(row['human_sends'])} send_text/send_keys "
+                            "message(s) to the lane; the acceptance requires no human nudge")
+
+        decisions = row.get("next_job_decisions") or []
+        no_work = [d for d in decisions
+                   if d.get("reason") == "no_assigned_work"
+                   and (b_at is None or float(d.get("at") or 0) >= float(b_at) - 0.1)]
+        if not no_work:
             failures.append(f"{lane}: no explicit no_assigned_work after B")
     return failures
 
