@@ -5387,7 +5387,7 @@ class Flock:
                         self._save()
                     self.metrics.record("dunk.skipped", pane_id=dunker.target_pane_id,
                                         mailbox=dunker.target_label(), source=dunker.id,
-                                        outcome="held", reason="stranded")
+                                        outcome="held", reason=dunker.last_skip_reason)
                     log.info("%s -> %s: skipped, previous send not consumed",
                              dunker.id, dunker.target_pane_id)
                     if stop_event.wait(1.0):
