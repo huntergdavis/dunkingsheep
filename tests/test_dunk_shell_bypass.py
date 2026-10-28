@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
 import dunk_core  # noqa: E402
+from dunk_tasks import GLOBAL as TASKS_GLOBAL  # noqa: E402
 from dunk_core import Flock  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
@@ -98,6 +99,153 @@ class ShellBypassTests(unittest.TestCase):
         ok, detail = self.flock.submit_text("w2:p1", "a nudge")
         self.assertTrue(ok, detail)
         self.assertEqual("sent", detail)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class GuardedPathAndProcessEvidenceTests(unittest.TestCase):
+    """CoS i31723: the repro must run through the ACTUAL guarded path (not a
+    bare submit_text with no _box_ctx), and the title/status heuristic must not
+    be treated as process identity - a live task lease (caller pid) outranks it."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.0, 0.0, 0.0))
+        self.verify = mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.0, 0.0))
+        self.poll = mock.patch.object(dunk_core, "SUBMIT_POLL_S", (0.0,))
+        for p in (self.gaps, self.verify, self.poll):
+            p.start()
+
+    def tearDown(self):
+        for p in (self.gaps, self.verify, self.poll):
+            p.stop()
+        self.flock.close()
+
+    def _lane_pane(self, title="t374-codex-ceb136c", status="idle"):
+        return {"pane_id": "w2:p1", "agent": "", "agent_status": status,
+                "terminal_title_stripped": title, "tab_label": "lane"}
+
+    def test_guarded_path_unknown_agent_lane_is_never_sent_without_confirmation(self):
+        """The CoS repro shape through the REAL guarded path: _box_ctx enabled,
+        box check on, agent='' lane, nothing submits -> the guard's box check
+        holds the send (BOX_HOLD / unconfirmed), never a false SENT."""
+        self.herdr.panes = [self._lane_pane()]
+        self.herdr.enters_needed["w2:p1"] = 99
+        # A live caller lease: this is a managed agent lane (t374's %81 held
+        # exactly such a lease when the bypass fired).
+        self.flock.tasks.claim("tX", scope=TASKS_GLOBAL,
+                               assignees=["w2:p1"], caller={
+                                   "pane_id": "w2:p1", "pid": 999999,
+                                   "start": "1036810548", "name": "codex"})
+        holds = mock.patch.object(type(self.flock), "_box_holds",
+                                  side_effect=self.flock._box_holds)
+        with holds as holds_mock, \
+                self.flock.send_guarded("w2:p1",
+                                        lambda: self.flock.submit_text(
+                                            "w2:p1", NJ_TEXT)) as (sent, _m, detail):
+            pass
+        self.assertFalse(sent, f"false SENT through the guarded path: {detail}")
+        self.assertTrue(holds_mock.call_count > 0,
+                        "the box reader never ran: the shell bypass fired")
+
+    def test_managed_agent_with_shell_like_title_is_not_a_shell(self):
+        """A managed native agent can retain a user@host:title; the live lease
+        (process identity) must win over the title/status heuristic."""
+        self.herdr.panes = [self._lane_pane(title=SHELL_TITLE, status="unknown")]
+        self.flock.tasks.claim("tX", scope=TASKS_GLOBAL,
+                               assignees=["w2:p1"], caller={
+                                   "pane_id": "w2:p1", "pid": 999999,
+                                   "start": "1036810548", "name": "codex"})
+        self.assertFalse(self.flock._managed_lane_process_alive("w2:p1") is False
+                         and self.flock._is_empty_shell(self.herdr.panes[0])
+                         and True or False,
+                         "sanity: helper wiring broken")
+        # Directly: the shell decision must be False for this pane.
+        pane = self.herdr.panes[0]
+        shell = (self.flock._is_empty_shell(pane)
+                 and not self.flock._managed_lane_process_alive("w2:p1"))
+        self.assertFalse(shell, "managed agent misclassified as a shell")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class GuardedPathAndProcessEvidenceTests(unittest.TestCase):
+    """CoS i31723: the repro must run through the ACTUAL guarded path (not a
+    bare submit_text with no _box_ctx), and the title/status heuristic must not
+    be treated as process identity - a live task lease (caller pid) outranks it."""
+
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.0, 0.0, 0.0))
+        self.verify = mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.0, 0.0))
+        self.poll = mock.patch.object(dunk_core, "SUBMIT_POLL_S", (0.0,))
+        for p in (self.gaps, self.verify, self.poll):
+            p.start()
+
+    def tearDown(self):
+        for p in (self.gaps, self.verify, self.poll):
+            p.stop()
+        self.flock.close()
+
+    def _lane_pane(self, title="t374-codex-ceb136c", status="idle"):
+        return {"pane_id": "w2:p1", "agent": "", "agent_status": status,
+                "terminal_title_stripped": title, "tab_label": "lane"}
+
+    def _hold_lease(self):
+        """A live caller lease on the lane: process identity for the guard.
+        The caller is THIS test process (real pid + real starttime), so
+        process_alive is genuinely true without mocking."""
+        info = open(f"/proc/{os.getpid()}/stat").read().rsplit(")", 1)[1].split()
+        start = info[19]                      # field 22: process starttime
+        self.flock.tasks.add(TASKS_GLOBAL, "lease holder probe",
+                             assignees=["w2:p1"])
+        claimed = self.flock.tasks.claim_next(
+            scope=TASKS_GLOBAL, pane_id="w2:p1",
+            caller={"pane_id": "w2:p1", "pid": os.getpid(), "start": start,
+                    "name": "codex"})
+        assert claimed and claimed.get("task"), claimed
+
+    def test_guarded_path_unknown_agent_lane_is_never_sent_without_confirmation(self):
+        """The CoS repro shape through the REAL guarded path: _box_ctx enabled,
+        box check on, agent='' lane, nothing submits -> the guard holds the send
+        (BOX_HOLD / unconfirmed), never a false SENT."""
+        self.herdr.panes = [self._lane_pane()]
+        self.herdr.enters_needed["w2:p1"] = 99
+        self._hold_lease()
+        outcome = {}
+        with mock.patch.object(type(self.flock), "_box_holds",
+                               side_effect=self.flock._box_holds) as holds:
+            sent, _msg, detail = self.flock.send_guarded(
+                "w2:p1",
+                lambda: outcome.update(
+                    zip(("ok", "detail"),
+                        self.flock.submit_text("w2:p1", NJ_TEXT))))
+        # sent=True only means the callable typed; the DELIVERY outcome is the
+        # inner submit result, and it must NOT be a false sent.
+        self.assertFalse(outcome["ok"],
+                         f"false SENT through the guarded path: {outcome}")
+        self.assertTrue(holds.call_count > 0,
+                        "the box reader never ran: the shell bypass fired")
+
+    def test_managed_agent_with_shell_like_title_is_not_a_shell(self):
+        """A managed native agent can retain a user@host:title; the live lease
+        (process identity) must win over the title/status heuristic."""
+        pane = self._lane_pane(title=SHELL_TITLE, status="unknown")
+        self.herdr.panes = [pane]
+        self._hold_lease()
+        self.assertTrue(self.flock._managed_lane_process_alive("w2:p1"))
+        # The heuristic alone would call it a shell; the decision with the
+        # lease evidence must not:
+        # Directly: the submit_text shell decision must be False for this pane.
+        shell = (self.flock._is_empty_shell(pane)
+                 and not self.flock._managed_lane_process_alive("w2:p1"))
+        self.assertFalse(shell, "managed agent misclassified as a shell")
 
 
 if __name__ == "__main__":

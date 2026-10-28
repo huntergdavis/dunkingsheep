@@ -4596,6 +4596,24 @@ class Flock:
             return False
         return _is_our_send(shown, text, True)
 
+    def _managed_lane_process_alive(self, pane_id):
+        """True when the pane holds an active task lease whose caller process
+        is alive: process identity that outranks the pane metadata heuristics
+        (t130/CoS i31723 - an agent lane with agent:"" and a shell-like title
+        is still a managed agent while its caller runs)."""
+        try:
+            leases = self.tasks.leases_for_pane(pane_id)
+        except Exception:                   # noqa: BLE001
+            return False
+        for lease in leases:
+            pid = lease.get("caller_pid")
+            if not pid:
+                continue
+            from dunk_callers import process_alive
+            if process_alive(int(pid), lease.get("caller_start")):
+                return True
+        return False
+
     def _session_process_gone(self, pane_id):
         """True when the lane's own recorded process is no longer running.
 
@@ -4945,7 +4963,13 @@ class Flock:
         # user@host:title title). An unknown agent takes the confirmed path; a
         # genuine shell still confirms instantly (it has no input box, so the
         # box read is clear).
-        shell = pane is not None and self._is_empty_shell(pane)
+        # CoS i31723: the title/status heuristic is not process identity - the
+        # raw backend reports agent_status unknown for managed agents, and a
+        # managed agent can retain a user@host:title. A live task lease
+        # (caller_pid + caller_start, the same evidence _session_process_gone
+        # uses) is process identity and outranks the heuristics.
+        shell = (pane is not None and self._is_empty_shell(pane)
+                 and not self._managed_lane_process_alive(pane_id))
         with self._typing(pane_id):
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
