@@ -44,6 +44,9 @@ import os
 import re
 import sqlite3
 import time
+from pathlib import Path
+
+from dunk_telegram_routing import resolve_telegram_channel
 
 SCHEMA_ID = "dunkingsheep-watchdog/2"
 SEVERITIES = ("info", "warning", "critical")
@@ -1423,19 +1426,19 @@ def inbox_sender(to, subject, body):
 
 
 class DeskBriefChannel:
-    """OWNER confirmation is explicitly CoS-only after the Telegram cutover.
-    The bridge's non-secret status file must name channel="cos" as well as
-    last_brief_id. A wrong or missing channel is unconfirmed, never a fallback
-    to VP. This consumer never opens telegram.json, which holds the bot token.
+    """Confirm only the route selected by the bridge's shared routing reader.
 
-    Posting needs the desk API token, and how the watchdog may hold it is not yet
-    decided, so `post` fails toward not paging: nothing is posted, and the
-    failure is a VP self error."""
-
-    desk_channel = "cos"
+    Both callers read telegram-routing.json and the same environment override;
+    neither the resolver nor this consumer opens bot credentials. Posting still
+    fails closed until the desk API credential policy is decided.
+    """
 
     def __init__(self, confirm_path):
         self.confirm_path = confirm_path
+
+    @property
+    def desk_channel(self):
+        return resolve_telegram_channel(Path(self.confirm_path).parent)
 
     def post(self, body):
         raise OwnerChannelUnavailable("desk brief post not wired: desk API token handling awaits VP decision")
@@ -1444,7 +1447,7 @@ class DeskBriefChannel:
         with open(self.confirm_path, encoding="utf-8") as handle:
             status = json.load(handle)
         if not isinstance(status, dict) or status.get("channel") != self.desk_channel:
-            raise ValueError("Telegram confirmation channel must be cos; wrong or missing channel")
+            raise ValueError("Telegram confirmation channel differs from configured route or is missing")
         value = status.get("last_brief_id")
         if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
             raise ValueError(f"last_brief_id is not an integer: {value!r}")

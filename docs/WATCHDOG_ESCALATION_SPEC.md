@@ -138,7 +138,7 @@ say the same thing.
   confirmed through the bridge's non-secret
   `vp-of-agentry/data/telegram-status.json`
   `{"channel": "cos", "last_brief_id": int, "updated_at": float}`, written after forwarding
-  (desk PR74). DELIVERED requires a CoS status channel, a CoS pending-page channel, and `last_brief_id >= posted id`. Legacy pending pages without a channel belong to VP; a CoS watermark never confirms them. A null value
+  (desk PR74). DELIVERED requires the status and pending-page channels to match the shared routing resolver, and `last_brief_id >= posted id`. Legacy pending pages without a channel belong to VP; a CoS watermark never confirms them. Bridge and watchdog use one resolver: VP_TELEGRAM_CHANNEL > nonsecret telegram-routing.json channel > cos; absent routing files use that same default path. They must share routing inputs/environment; neither routing reader opens credentials. A null value
   is pending; an unparseable file is unconfirmed plus a self error. The
   watchdog never opens `telegram.json`.
   - Posting needs the desk API token, and how the watchdog may hold it is

@@ -36,7 +36,7 @@ Tier 2 re-review (VP i19817).
 - **Delivery.** A page is DELIVERED only when the bridge's non-secret status
   file `vp-of-agentry/data/telegram-status.json`
   `{"channel": "cos", "last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
-  posted brief id` and the pending page also belongs to CoS. Until then the page is pending: it is never re-posted and no
+  posted brief id` and both the status and pending page match the route selected by the shared reader. Until then the page is pending: it is never re-posted and no
   cooldown starts.
   - A page still unconfirmed after `confirm_within_minutes` is reported to VP as
     UNDELIVERED.
@@ -473,4 +473,17 @@ systemctl --user enable --now dunkingsheep-watchdog-deadman.timer dunkingsheep-w
 The daemon must be restarted to pick up `system_sender` before the first live
 send.
 
-Telegram cutover (t282 / desk PR74): the built-in confirmation consumer is explicitly CoS-only. Missing or non-CoS channel status is a self-error, not delivery. New pending pages retain their desk channel; historical pages without it are VP pages and cannot be confirmed by a CoS watermark. If the bridge is configured back to VP or another channel, this consumer refuses confirmation until its contract is deliberately updated. It never reads the private bridge configuration. Owner posting remains unwired; this check does not enable owner paging.
+Telegram cutover (t282 / desk PR74): bridge and consumer import the same
+dunk_telegram_routing.resolve_telegram_channel function. It reads the nonsecret
+telegram-routing.json beside telegram-status.json, with precedence
+VP_TELEGRAM_CHANNEL > routing file channel > cos. An absent file takes the
+same default path in both callers. The route must exist in the desk channel
+registry (VP_CHANNELS_FILE, or channels.json / channels.example.json in the
+desk root). Both services must share the routing directory and environment
+overrides. Neither reader opens credential-only telegram.json.
+
+Missing or different status channel is a self-error, not delivery. New pending
+pages retain their desk channel; historical pages without it belong to VP and
+cannot be confirmed by a CoS watermark. Owner posting remains unwired; this
+change does not enable paging. A previous channel field in telegram.json must
+be moved to the separate routing file before starting the revised bridge.

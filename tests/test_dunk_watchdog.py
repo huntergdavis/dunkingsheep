@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -986,7 +987,19 @@ class OwnerPagingTests(WatchdogCase):
 
 
 class DeskBriefChannelTests(WatchdogCase):
-    """Confirmation must match the explicit CoS bridge and the pending page."""
+    """Confirmation must match the shared bridge route and pending page."""
+
+    def setUp(self):
+        super().setUp()
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("VP_TELEGRAM_CHANNEL", None)
+        registry = os.path.join(self.tmp, "channels.json")
+        with open(registry, "w") as handle:
+            json.dump([{"id": "cos"}, {"id": "vp"}], handle)
+        os.environ["VP_CHANNELS_FILE"] = registry
+
 
     def channel(self, text):
         path = os.path.join(self.tmp, "telegram-status.json")
