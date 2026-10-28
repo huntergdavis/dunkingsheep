@@ -13,6 +13,7 @@ import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
+import dunk_tasks  # noqa: E402
 from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
@@ -199,6 +200,38 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, metrics["current"]["by_status"]["done"])
         self.assertEqual(1, metrics["current"]["by_status"]["blocked"])
         self.assertGreaterEqual(metrics["coverage"]["events_total"], 5)
+
+    def test_leader_held_counts_unowned_global_actives_with_deterministic_age(self):
+        # Owner #1708: unowned means leader-owned. Only active global tasks with
+        # no assignees count; assigned, pane-scoped and done tasks do not.
+        real_now = dunk_tasks._now
+        state = {"calls": 0}
+        def fake_now():
+            state["calls"] += 1
+            return 1000.0 if state["calls"] == 1 else 2000.0
+        dunk_tasks._now = fake_now
+        try:
+            old = self.store.add(GLOBAL, "carried")
+            self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
+            self.store.add("w9:lane", "private")
+            done = self.store.add(GLOBAL, "finished")
+            self.store.complete(done["id"], by="w1:p1")
+        finally:
+            dunk_tasks._now = real_now
+        metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(1, held["count"])
+        self.assertEqual(1000.0, held["oldest_created_at"])
+        self.assertEqual(4000.0, held["oldest_age_s"])
+        self.assertEqual(old["id"], self.store.get(old["id"])["id"])
+
+    def test_leader_held_empty_when_everything_is_owned(self):
+        self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
+        metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(0, held["count"])
+        self.assertIsNone(held["oldest_created_at"])
+        self.assertIsNone(held["oldest_age_s"])
 
     def test_metrics_bucket_throughput_by_hour(self):
         self.store.add(GLOBAL, "one")

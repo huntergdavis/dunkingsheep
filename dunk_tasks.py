@@ -1051,11 +1051,16 @@ class Tasks:
         by_priority = {priority: 0 for priority in PRIORITIES}
         by_scope = {"global": 0, "pane": 0}
         by_assignee = {}
+        leader_held = []
         for task in tasks:
             by_status[task["status"]] = by_status.get(task["status"], 0) + 1
             by_priority[task["priority"]] = by_priority.get(task["priority"], 0) + 1
             by_scope["global" if task["is_global"] else "pane"] += 1
             if task["status"] in ("open", "in_progress", "blocked"):
+                if not task["assignees"] and task["is_global"]:
+                    # owner #1708: unowned means leader-owned, so an active global
+                    # task with no assignee is work the leader is carrying.
+                    leader_held.append(task)
                 for assignee in task["assignees"]:
                     by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
 
@@ -1125,6 +1130,14 @@ class Tasks:
                     for assignee, count in sorted(
                         by_assignee.items(), key=lambda item: (-item[1], item[0]))
                 ],
+                "leader_held": {
+                    "count": len(leader_held),
+                    "oldest_created_at": (min(task["created_at"] for task in leader_held)
+                                          if leader_held else None),
+                    "oldest_age_s": (round(until - min(task["created_at"]
+                                                       for task in leader_held), 1)
+                                     if leader_held else None),
+                },
             },
             "throughput": {
                 "created": counts.get("created", 0),
