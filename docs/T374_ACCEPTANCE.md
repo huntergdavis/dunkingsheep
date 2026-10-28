@@ -34,13 +34,12 @@ Prepared now:
   directory;
 - exact launch commands for a dedicated pi lane and a dedicated
   `codex --no-daemon` lane with the t264 producer hook;
-- a `prepare` step that requires the authentic **operator pane** and creates
-  **global tasks exclusively assigned** to the dedicated pane.  The guarded CLI
-  refuses cross-pane private-task creation (`per-pane tasks are private to
-  <target>; caller runs in <operator>`), so a global task with the target as the
-  sole assignee is the supported no-impersonation path.  It is not actionable by
-  any other lane; the privacy trade is explicit and was reviewed as a delta from
-  589e20c;
+- `setup-<lane>.sh` scripts the LANE runs as its first command.  Each script
+  creates A/B in `--scope self --assign self` under the lane's authentic caller,
+  records the ids in `tasks-<lane>.json`, claims A once with `task next self`,
+  and prints A.  The operator never writes a task and never impersonates the
+  lane.  `prepare` only re-writes these reviewed scripts after approval; it
+  creates no tasks;
 - a read-only `collect` step over `tasks.db`, `metrics.db` and the live message
   store, and a `validate` step whose checks are themselves tested to fail.
 
@@ -60,9 +59,9 @@ an approval file matches the running daemon version/code and the repo head.
   used.  Do not add production lanes to the list for this run.
 - The Codex lane has an isolated `CODEX_HOME` with the t264 hook installed and
   `--dangerously-bypass-hook-trust` only for the dedicated test lane.
-- A/B are global-scope but **exclusively assigned** to the dedicated pane.  If
-  the integrated loop cannot see an assigned global task, that is a blocker to
-  report and fix; do not weaken the run to unassigned or shared work.
+- A/B are **private self-scope** tasks created by the lane's own bootstrap.  If
+  the integrated loop cannot see a private assigned task, that is a blocker to
+  report and fix; do not weaken the run to global or unassigned work.
 
 ## Run
 
@@ -84,22 +83,19 @@ an approval file matches the running daemon version/code and the repo head.
    command in `LAUNCH.md`.  The prompt includes `sleep 20` so the tasks can be
    created before the agent claims A.
 
-3. Within that window, the authentic operator creates the global, exclusively
-   assigned tasks.  The tasks must be created before the agent's `task next`
-   runs; the `sleep 30` prompt is the window.  The operator lane is passed
-   explicitly and must differ from both dedicated target panes:
+3. No operator task write and no prepare window.  Each launch prompt runs
+   `bash <run>/setup-<lane>.sh` as its first command; the lane creates its own
+   private A/B, writes `tasks-<lane>.json`, claims A once with `task next self`,
+   and prints A.  `prepare` may be used only to re-write the reviewed setup
+   scripts after approval; it creates no tasks:
 
    ```sh
    python3 tools/t374_acceptance.py prepare \
-       --run <run-dir> --execute --approval <approval.json> \
-       --operator-pane %2 --pi-pane <pi-pane> --codex-pane <codex-pane>
+       --run <run-dir> --execute --approval <approval.json>
    ```
 
-   It creates A and B for each pane with `--scope <pane> --assign <pane>` and
-   prints the ids.  It does not launch or nudge anything.
-
 4. Do **not** send any further prompt or key.  Each agent runs
-   `dunkingsheep task next` once, claims its assigned A, writes
+   `dunkingsheep task next self` once, claims its private A, writes
    `<run>/<lane>/A.artifact`, completes A.  The automatic handoff must claim B,
    deliver it as a `[turn-end ...]` prompt, start a new turn, and the agent must
    write `<run>/<lane>/B.artifact` and complete B.
@@ -120,8 +116,9 @@ an approval file matches the running daemon version/code and the repo head.
 7. Clean up with the guarded task CLI (the tool prints the commands):
 
    ```sh
-   python3 tools/t374_acceptance.py cleanup --run <run-dir> --operator-pane %2
-   python3 tools/t374_acceptance.py cleanup --run <run-dir> --operator-pane %2 --execute
+   python3 tools/t374_acceptance.py cleanup --run <run-dir>
+   # Then the LANE runs <run>/cleanup-<lane>.sh.  The operator must not
+   # impersonate the private owner; cleanup.json records the owned ids.
    ```
 
 ## What the receipt must show, per lane
@@ -140,6 +137,12 @@ an approval file matches the running daemon version/code and the repo head.
 | no human nudge | zero `send_text` messages to the lane during the run |
 | no duplicate B | exactly one handoff message id, one B claim, one `nj-` receipt |
 | no work after B | a `next_job_decision` record on B with `reason=no_assigned_work`; no C claimed or invented |
+
+**Bootstrap privacy:** the lane creates its own A/B in `--scope self`, so
+`task next self` can only see its own two tasks.  There is no global `task next`
+and no operator-created task; `tasks-<lane>.json` receipts are per lane, so the
+two bootstraps cannot overwrite each other.  A failed-run cleanup is recorded in
+`cleanup.json` and must be run by the owning lane.
 
 **Fast-turn ordering:** `delivered_at` is `message.finished_at`, set after
 `submit_text` returns, and `notify_at` is later still.  A valid exact-token turn

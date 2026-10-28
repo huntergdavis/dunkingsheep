@@ -223,7 +223,8 @@ class CollectorTests(unittest.TestCase):
         self.tasks = {"pi": {"pane": "%90", "A": "tA1", "B": "tB1"},
                       "codex": {"pane": "%91", "A": "tA2", "B": "tB2"},
                       }
-        (self.run / "tasks.json").write_text(json.dumps(self.tasks))
+        for lane, row in self.tasks.items():
+            (self.run / f"tasks-{lane}.json").write_text(json.dumps(row))
         self._seed()
         self.tool.TASKS_DB = self.tmp / "tasks.db"
         self.tool.METRICS_DB = self.tmp / "metrics.db"
@@ -336,62 +337,62 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(1, len(receipt["lanes"]["pi"]["human_sends"]))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-class OperatorBoundaryTests(unittest.TestCase):
-    """Task writes must use the authentic operator, never the target lane."""
+class LaneBootstrapTests(unittest.TestCase):
+    """Private A/B are created by the lane itself, not the operator."""
 
     def setUp(self):
         self.tool = load_tool()
-        self.calls = []
-        self.result = None
+        self.tmp = Path(tempfile.mkdtemp(prefix="t374-bootstrap-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.run = self.tmp / "run"
+        self.tool.plan(self.run, run_id="fixture", wait_seconds=1)
+        self.manifest = json.loads((self.run / "manifest.json").read_text())
 
-    def cli(self, *args, **kwargs):
-        self.calls.append(list(args))
-        return self.result
+    def script(self, lane):
+        return (self.run / f"setup-{lane}.sh").read_text()
 
-    def test_create_task_uses_operator_and_global_exclusive_assign(self):
-        from types import SimpleNamespace
-        self.result = SimpleNamespace(returncode=0, stdout=json.dumps({"id": "tA"}),
-                                      stderr="")
-        self.tool._cli = self.cli
-        spec = {"title": "A", "body": "b"}
-        tid = self.tool._create_task("%2", "%90", spec)
-        self.assertEqual("tA", tid)
-        args = self.calls[0]
-        self.assertEqual("%2", args[args.index("--self-pane") + 1])
-        self.assertEqual("global", args[args.index("--scope") + 1])
-        self.assertEqual("%90", args[args.index("--assign") + 1])
-        self.assertNotEqual("%90", args[args.index("--self-pane") + 1])
+    def test_setup_scripts_are_private_self_and_do_not_impersonate(self):
+        for lane in ("pi", "codex"):
+            text = self.script(lane)
+            self.assertIn("--scope self --assign self", text)
+            self.assertNotIn("--scope global", text)
+            self.assertNotIn("--self-pane", text)
+            self.assertEqual(1, text.count("task next self"))
+            self.assertEqual(0, text.count("task next $TMUX_PANE"))
+            self.assertIn("tasks-$lane.json", text)
 
-    def test_create_task_refuses_same_operator_and_target(self):
+    def test_launch_prompt_runs_the_lane_bootstrap(self):
+        prompt = self.manifest["lanes"]["pi"]["prompt"]
+        self.assertIn("/setup-pi.sh", prompt)
+        self.assertNotIn("task next .", prompt)
+        self.assertIn("Do NOT run task next again", prompt)
+
+    def test_collector_combines_lane_receipt_files(self):
+        for lane in ("pi", "codex"):
+            (self.run / f"tasks-{lane}.json").write_text(json.dumps(
+                {"pane": f"%9{lane == 'codex'}", "A": f"tA{lane}", "B": f"tB{lane}"}))
+        tasks = self.tool._load_tasks(self.run)
+        self.assertEqual({"pi", "codex"}, set(tasks))
+        self.assertEqual("tApi", tasks["pi"]["A"])
+
+    def test_cleanup_writes_lane_scripts_without_operator_impersonation(self):
+        for lane in ("pi", "codex"):
+            (self.run / f"tasks-{lane}.json").write_text(json.dumps(
+                {"pane": f"%9{lane == 'codex'}", "A": f"tA{lane}", "B": f"tB{lane}"}))
+        paths = self.tool.cleanup(self.run)
+        self.assertEqual(2, len(paths))
+        for lane in ("pi", "codex"):
+            text = (self.run / f"cleanup-{lane}.sh").read_text()
+            self.assertIn(f"tA{lane}", text)
+            self.assertIn(f"tB{lane}", text)
+            self.assertNotIn("--self-pane", text)
+            self.assertNotIn("%9", text)
+        receipt = json.loads((self.run / "cleanup.json").read_text())
+        self.assertTrue(receipt["requires_lane_execution"])
+        self.assertTrue(receipt["operator_must_not_impersonate"])
         with self.assertRaises(SystemExit):
-            self.tool._create_task("%90", "%90", {"title": "A", "body": "b"})
+            self.tool.cleanup(self.run, execute=True)
 
-    def test_task_add_failure_names_the_target(self):
-        from types import SimpleNamespace
-        self.result = SimpleNamespace(returncode=2, stdout="", stderr="refused")
-        self.tool._cli = self.cli
-        with self.assertRaises(SystemExit) as caught:
-            self.tool._create_task("%2", "%90", {"title": "A", "body": "b"})
-        self.assertIn("%90", str(caught.exception))
 
-    def test_cleanup_uses_operator_never_target(self):
-        tmp = Path(tempfile.mkdtemp(prefix="t374-cleanup-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        (tmp / "tasks.json").write_text(json.dumps({
-            "pi": {"pane": "%90", "A": "tA1", "B": "tB1"},
-            "codex": {"pane": "%91", "A": "tA2", "B": "tB2"}}))
-        commands = self.tool.cleanup(tmp, execute=False, operator_pane="%2")
-        for command in commands:
-            self.assertEqual("%2", command[command.index("--self-pane") + 1])
-            self.assertNotIn("%90", command)
-            self.assertNotIn("%91", command)
-
-    def test_cleanup_requires_operator_before_any_mutation(self):
-        tmp = Path(tempfile.mkdtemp(prefix="t374-cleanup-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
-        with self.assertRaises(SystemExit):
-            self.tool.cleanup(tmp, execute=True, operator_pane=None)
+if __name__ == "__main__":
+    unittest.main()

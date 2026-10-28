@@ -137,12 +137,11 @@ def _task_specs(run_id, run_dir, lane):
     }
 
 
-def _launch_prompt(run_id, lane, wait_seconds=20):
+def _launch_prompt(run_id, lane, setup_path):
     return (
         f"You are the t374 acceptance lane for {lane} (run {run_id}). "
-        f"First run the shell command `sleep {int(wait_seconds)}` once (a one-time "
-        "wait for your tasks to be created), then "
-        "run exactly once: dunkingsheep task next . "
+        f"Run this exact shell command once: bash {shlex.quote(str(setup_path))} . "
+        "It creates your own private A/B tasks and claims A for you. "
         "Read the claimed task with: dunkingsheep task read <id> . "
         "Do exactly what its body says, then complete it with: "
         "dunkingsheep task complete <id> . "
@@ -151,6 +150,43 @@ def _launch_prompt(run_id, lane, wait_seconds=20):
         "lane. When a [turn-end] task arrives, read it with task read before "
         "acting."
     )
+
+
+def _setup_script(out, lane, spec, run_id):
+    """A script the LANE runs under its own caller identity.
+
+    It creates A and B in the lane's private `self` scope (no operator writes,
+    no target impersonation), writes the ids for the collector, claims A once,
+    and prints A.  B remains private and assigned to the lane for the automatic
+    handoff.
+    """
+    path = Path(out) / f"setup-{lane}.sh"
+
+    def add(item):
+        return (f"dunkingsheep --json task add {shlex.quote(item['title'])} "
+                f"--scope self --assign self -p urgent -b {shlex.quote(item['body'])}")
+
+    template = '''#!/bin/sh
+set -eu
+run_dir={run_dir}
+run_id={run_id}
+lane={lane}
+pane=${{TMUX_PANE:?}}
+a_json=$({add_a})
+a_id=$(printf '%s' "$a_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+b_json=$({add_b})
+b_id=$(printf '%s' "$b_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+printf '{{"pane":"%s","A":"%s","B":"%s"}}\\n' "$pane" "$a_id" "$b_id" > "$run_dir/tasks-$lane.json"
+dunkingsheep task next self
+echo "T374_CLAIMED_A=$a_id B=$b_id"
+dunkingsheep task read "$a_id"
+'''
+    script = template.format(run_dir=shlex.quote(str(out)), run_id=shlex.quote(run_id),
+                             lane=shlex.quote(lane), add_a=add(spec["A"]),
+                             add_b=add(spec["B"]))
+    path.write_text(script)
+    path.chmod(0o700)
+    return path
 
 
 def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex_state="", wait_seconds=20, pi_extension=""):
@@ -176,13 +212,13 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
                     "approval_file": None},
         "lanes": {},
         "acceptance": [
-            "A claimed by the lane's own agent (lease caller_name pi/codex)",
+            "A created and claimed by the lane's own agent in its private scope",
             "A artifact exists and starts with the run/lane token",
             "A completed",
             "next_job_handoff event on B: from_task=A, message_id non-empty",
             "B claimed only after A completed and after the handoff event",
-            "B delivery message source=turn_end status=sent (or metrics message.sent)",
-            "B turn start after delivery, B artifact exists, B completed",
+            "B delivery inbox nj- receipt sent/read; producer turn bound before B completion",
+            "B artifact exists, B completed",
             "exactly one B claim/handoff/delivery (no duplicate under repeated completion)",
             "zero send_text/send_keys messages to the lane during the run",
             "after B: explicit no_assigned_work / no invented C",
@@ -195,7 +231,21 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
     }
     for lane in LANES:
         model = pi_model if lane == "pi" else codex_model
-        prompt = _launch_prompt(run_id, lane, wait_seconds)
+        manifest["lanes"][lane] = {
+            "pane": None,
+            "harness": lane,
+            "model": model or None,
+            "pi_extension": pi_extension or None,
+            "tasks": _task_specs(run_id, out, lane),
+        }
+    for lane in LANES:
+        setup = _setup_script(out, lane, manifest["lanes"][lane]["tasks"], run_id)
+        manifest["lanes"][lane]["setup_script"] = str(setup)
+        manifest["lanes"][lane]["prompt"] = _launch_prompt(run_id, lane, setup)
+    for lane in LANES:
+        info = manifest["lanes"][lane]
+        model = info["model"] or ""
+        prompt = info["prompt"]
         launch = {
             "pi": ("pi" + (f" --no-extensions -e {shlex.quote(pi_extension)}" if pi_extension else "")
                    + (f" --model {shlex.quote(model)}" if model else "")
@@ -206,16 +256,7 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
                       f"{'--model ' + shlex.quote(model) if model else ''} "
                       f"-C /home/hunter/workspace {shlex.quote(prompt)}"),
         }[lane]
-        manifest["lanes"][lane] = {
-            "pane": None,
-            "harness": lane,
-            "model": model or None,
-            "launch_command": launch,
-            "prompt": prompt,
-            "wait_seconds": int(wait_seconds),
-            "pi_extension": pi_extension or None,
-            "tasks": _task_specs(run_id, out, lane),
-        }
+        info["launch_command"] = launch
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (out / "approval.example.json").write_text(json.dumps(
         {"version": "FILL-ME", "code_hash": "FILL-ME",
@@ -223,23 +264,18 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
         indent=2) + "\n")
     lines = [f"# t374 acceptance run {run_id}", "",
              "## Sequence (unambiguous)",
-             f"1. Prepare the dedicated producer bundle; link the Codex auth at runtime "
-             f"(never copy it into the artifact).",
-             f"2. Launch BOTH dedicated lanes with the commands below; each sleeps "
-             f"{int(wait_seconds)}s.",
-             "3. Within that window run `t374_acceptance.py prepare --run <this-run> "
-             "--execute --approval <approval.json> --operator-pane <operator-pane> "
-             "--pi-pane <pane> --codex-pane <pane>` to create the global A/B tasks "
-             "assigned to the dedicated panes.",
-             "4. Do not send any further prompt or key. A is the only initial prompt; "
-             "B must arrive from the automatic handoff.", ""]
+             "1. Prepare the dedicated producer bundle; link the Codex auth at runtime "
+             "(never copy it into the artifact).",
+             "2. Launch BOTH dedicated lanes with the commands below.  Each lane runs "
+             "its own setup-<lane>.sh as its first command: it creates its private A/B "
+             "tasks, claims A, and prints A.",
+             "3. Do not send any further prompt or key.  A is the lane's own initial "
+             "work; B must arrive from the automatic handoff.  There is no operator "
+             "prepare step and no cross-pane task write.",
+             ""]
     for lane in LANES:
         info = manifest["lanes"][lane]
-        lines += [f"## {lane}", "",
-                  f"Launch this shared-pane command first; it waits {info['wait_seconds']}s. "
-                  "Run `prepare` within that window to create the tasks, then do not "
-                  "send any further prompt or key.",
-                  "```sh", info["launch_command"], "```", ""]
+        lines += [f"## {lane}", "", "Launch:", "```sh", info["launch_command"], "```", ""]
     (out / "LAUNCH.md").write_text("\n".join(lines) + "\n")
     print(json.dumps({"run_id": run_id, "out": str(out),
                       "manifest": str(out / "manifest.json"),
@@ -273,62 +309,41 @@ def _approval(approval_path):
     return approval, status
 
 
-def _create_task(operator, target, spec):
-    """Create a global task exclusively assigned to the dedicated pane.
-
-    The authenticated caller is the OPERATOR (CoS %2); the target pane is only
-    an assignee.  The guarded CLI refuses cross-pane private-task creation
-    ("per-pane tasks are private to <target>; caller runs in <operator>"), so
-    the supported no-impersonation path is a global task assigned to the lane.
-    """
-    if not operator or not target or operator == target:
-        raise SystemExit("prepare requires an operator pane distinct from the target")
-    result = _cli("--json", "--self-pane", operator, "task", "add",
-                  spec["title"], "--scope", "global", "--assign", target,
-                  "-p", "urgent", "-b", spec["body"])
-    data = _json(result.stdout)
-    if result.returncode != 0 or not isinstance(data, dict) or not data.get("id"):
-        raise SystemExit(f"task add failed for {target}: {result.stderr or result.stdout}")
-    return data["id"]
-
-
 def prepare(run_dir, execute=False, approval=None, operator_pane=None,
             pi_pane=None, codex_pane=None):
-    manifest = json.loads((Path(run_dir) / "manifest.json").read_text())
-    panes = {"pi": pi_pane, "codex": codex_pane}
+    """Prepare specs only: write the lane setup scripts; create NO tasks.
+
+    The operator never writes a task.  Each lane's first command runs its own
+    setup-<lane>.sh, which creates A/B in --scope self / --assign self under that
+    lane's authentic caller and claims A once.  The operator's only job here is
+    to verify the approved runtime and (re)write the reviewed setup scripts.
+    """
+    run = Path(run_dir)
+    manifest = json.loads((run / "manifest.json").read_text())
     if not execute:
-        raise SystemExit("prepare is write-capable; pass --execute after the "
-                         "approved release and dedicated lanes exist")
-    if not operator_pane:
-        raise SystemExit("--operator-pane is required (the CoS/trusted operator's own pane)")
-    if operator_pane in panes.values():
-        raise SystemExit("operator pane must differ from both target panes; "
-                         "do not impersonate the dedicated lane")
+        raise SystemExit("prepare writes setup scripts; pass --execute after approval")
     approval_data, _status = _approval(approval)
     manifest["release"] = {"version": approval_data["version"],
                            "code_hash": approval_data.get("code_hash") or approval_data.get("code"),
                            "repo_head": approval_data.get("repo_head"),
                            "approval_file": str(approval)}
-    tasks = {}
+    if operator_pane:
+        manifest["operator_pane"] = operator_pane
+    paths = []
     for lane in LANES:
-        pane = panes.get(lane)
-        if not pane:
-            raise SystemExit(f"--{lane}-pane is required")
-        spec = manifest["lanes"][lane]["tasks"]
-        a_id = _create_task(operator_pane, pane, spec["A"])
-        b_id = _create_task(operator_pane, pane, spec["B"])
-        tasks[lane] = {"pane": pane, "A": a_id, "B": b_id}
-        manifest["lanes"][lane]["pane"] = pane
-        print(f"{lane}: pane {pane} A={a_id} B={b_id}")
+        path = _setup_script(run, lane, manifest["lanes"][lane]["tasks"], manifest["run_id"])
+        manifest["lanes"][lane]["setup_script"] = str(path)
+        manifest["lanes"][lane]["prompt"] = _launch_prompt(manifest["run_id"], lane, path)
+        paths.append(str(path))
     manifest["status"] = "prepared"
-    manifest["operator_pane"] = operator_pane
-    manifest["task_scope"] = "global assigned to the dedicated pane (no impersonation)"
+    manifest["task_scope"] = "private self, created by the lane bootstrap; no operator task writes"
     manifest["prepared_at"] = _now()
-    (Path(run_dir) / "tasks.json").write_text(json.dumps(tasks, indent=2) + "\n")
-    (Path(run_dir) / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print("tasks created. Launch each dedicated lane with the command in LAUNCH.md; "
-          "do not send any further prompt or key.")
-    return tasks
+    (run / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print("setup scripts written; no tasks created. Launch the lanes; each "
+          "bootstrap creates its own private A/B and claims A.")
+    for path in paths:
+        print(path)
+    return paths
 
 
 def _task_rows(task_id):
@@ -449,10 +464,26 @@ def _decisions(events):
     return out
 
 
+def _load_tasks(run):
+    """Combine the per-lane bootstrap receipt files; fall back to the old single file."""
+    run = Path(run)
+    tasks = {}
+    for lane in LANES:
+        path = run / f"tasks-{lane}.json"
+        if path.is_file():
+            tasks[lane] = json.loads(path.read_text())
+    if not tasks and (run / "tasks.json").is_file():
+        tasks = json.loads((run / "tasks.json").read_text())
+    missing = [lane for lane in LANES if lane not in tasks]
+    if missing:
+        raise SystemExit(f"missing lane task receipt(s): {', '.join(missing)}")
+    return tasks
+
+
 def collect(run_dir):
     run = Path(run_dir)
     manifest = json.loads((run / "manifest.json").read_text())
-    tasks = json.loads((run / "tasks.json").read_text())
+    tasks = _load_tasks(run)
     start = float(manifest.get("prepared_at") or manifest.get("created_at") or 0)
     end = _now() + 5
     messages = _messages()
@@ -677,25 +708,38 @@ def validate(receipt):
     return failures
 
 
-def cleanup(run_dir, execute=False, operator_pane=None):
-    if not operator_pane:
-        raise SystemExit("cleanup requires --operator-pane (the authentic operator)")
+def cleanup(run_dir, execute=False):
+    """Write per-lane cleanup scripts; never impersonate the private owner.
+
+    A/B are created in the lane's private self scope.  The operator cannot see
+    or cancel them, so cleanup is a script the LANE runs (or a failed-run record
+    for the rollout coordinator).  This function performs no mutation.
+    """
     run = Path(run_dir)
-    tasks = json.loads((run / "tasks.json").read_text())
-    commands = []
+    tasks = _load_tasks(run)
+    if execute:
+        raise SystemExit("cleanup scripts must be run by the lane that owns the "
+                         "private tasks; the operator must not impersonate it")
+    paths = []
     for lane in LANES:
         row = tasks[lane]
-        for key in ("A", "B"):
-            commands.append(["dunkingsheep", "--self-pane", operator_pane,
-                             "task", "cancel", row[key], "--reason",
-                             f"t374 acceptance cleanup {run.name}"])
-    for cmd in commands:
-        print(shlex.join(cmd))
-    if execute:
-        for cmd in commands:
-            result = _run(cmd)
-            print(result.stdout.strip() or result.stderr.strip())
-    return commands
+        path = run / f"cleanup-{lane}.sh"
+        ids = " ".join(shlex.quote(str(row[key])) for key in ("A", "B"))
+        path.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f"# Run as the {lane} lane; these tasks are private to its scope.\n"
+            f"for id in {ids}; do dunkingsheep task cancel \"$id\" || true; done\n")
+        path.chmod(0o700)
+        paths.append(str(path))
+        print(path)
+    (run / "cleanup.json").write_text(json.dumps({
+        "requires_lane_execution": True,
+        "operator_must_not_impersonate": True,
+        "lanes": {lane: {"pane": tasks[lane]["pane"],
+                         "A": tasks[lane]["A"], "B": tasks[lane]["B"],
+                         "script": str(run / f"cleanup-{lane}.sh")}
+                  for lane in LANES}}, indent=2) + "\n")
+    return paths
 
 
 def main(argv=None):
@@ -715,16 +759,15 @@ def main(argv=None):
     p.add_argument("--run", required=True)
     p.add_argument("--execute", action="store_true")
     p.add_argument("--approval", required=True)
-    p.add_argument("--operator-pane", required=True)
-    p.add_argument("--pi-pane", required=True)
-    p.add_argument("--codex-pane", required=True)
+    p.add_argument("--operator-pane", default="")
+    p.add_argument("--pi-pane", default="")
+    p.add_argument("--codex-pane", default="")
     p = sub.add_parser("collect")
     p.add_argument("--run", required=True)
     p = sub.add_parser("validate")
     p.add_argument("--receipt", required=True)
     p = sub.add_parser("cleanup")
     p.add_argument("--run", required=True)
-    p.add_argument("--operator-pane", required=True)
     p.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "plan":
@@ -746,7 +789,7 @@ def main(argv=None):
             return 1
         print("PASS: real A->B chain satisfies t372 clauses")
     elif args.command == "cleanup":
-        cleanup(args.run, args.execute, args.operator_pane)
+        cleanup(args.run, args.execute)
     return 0
 
 
