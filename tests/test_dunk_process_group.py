@@ -116,7 +116,15 @@ class ProcessGroupTests(unittest.TestCase):
                 break
             time.sleep(0.2)
         else:
-            self.fail("fixture never reached the grandchild; the result would be vacuous")
+            # DISTINGUISH "broken fixture" FROM "slow box" (CoS i29225): a phantom red sends the next
+            # reader hunting a leak that is not there. If the binary is missing the fixture is broken;
+            # if it is present but never ran, the box was slow and the deadline is the suspect.
+            if not os.path.exists(sleep_path):
+                self.fail(f"FIXTURE BROKEN: {sleep_path} does not exist, so nothing could ever run")
+            self.fail(
+                "SLOW BOX, not a leak: the tagged child never started within 20 s although its binary "
+                f"exists ({sleep_path}). Re-run; if it persists, raise the deadline - this is a red "
+                "about timing, not about surviving processes.")
 
         os.kill(watched.pid, signal.SIGKILL)      # the watched parent: unhandleable
         watched.wait(timeout=10)
