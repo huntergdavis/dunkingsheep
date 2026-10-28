@@ -263,7 +263,7 @@ def claimed_tasks(tasks, pane_id):
     if not pane_id:
         return []
     finished = {str(task.get("id")) for task in tasks
-                if str(task.get("status") or "") in ("done", "cancelled")}
+                if str(task.get("status") or "") == "done"}
     claimed = []
     for task in tasks:
         if str(task.get("status") or "") != "in_progress":
@@ -274,7 +274,12 @@ def claimed_tasks(tasks, pane_id):
                    for lease in (task.get("leases") or []) if isinstance(lease, dict)}
         if pane_id not in holders:
             continue
-        if any(str(dep) not in finished for dep in (task.get("depends_on") or [])):
+        # The task store resolves dependencies outside the current view. A completed
+        # prerequisite is absent from an open-task list; absence is not a blocker.
+        blocked = (task["blocked_by"] if "blocked_by" in task else
+                   [dep for dep in (task.get("depends_on") or [])
+                    if str(dep) not in finished])
+        if blocked:
             continue
         claimed.append(task)
     claimed.sort(key=lambda task: (PRIORITY_ORDER.get(str(task.get("priority")), 9),

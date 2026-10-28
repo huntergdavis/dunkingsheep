@@ -38,9 +38,9 @@ construction* — the timer was never the mechanism, it was the only thing we ha
 harness already reports `turn.start`/`turn.end` for pi/claude panes, and the daemon
 received every `turn.end` and did nothing with it.
 
-So `turn_end` now dispatches. When a lane ends a turn and it still holds an open task,
-it is prompted **then**, with `trigger=turn.end` in the log, the metric and the text the
-lane reads:
+`turn_end` can now dispatch to an opted-in lane holding a live task claim, after
+the shared readiness/mail gate passes. The following log is historical scratch
+evidence from the original author, not acceptance of the corrected head on a live pi lane:
 
 ```text
 2026-10-27 19:15:50 INFO dunkingsheep: turn.end %51: trigger=turn.end nudge DELIVERED task=t1 item=board:t1
@@ -54,6 +54,14 @@ assigning it to a lane says nothing about what that lane is doing now; prompting
 make the trigger a loop in exactly the lanes that must stay quiet (reviewer, CoS, VP). The
 same rule stops double-prompting: a task another pane has leased is that pane's.
 
+**Correction to PR49's original policy:** a claim does not bypass the dispatch
+allowlist. The turn-end path now uses the same configuration resolver and
+`lane_plan` readiness gate as the timer path. The persistent file or environment
+must opt the lane in; an empty allowlist feeds nothing. A one-tick `--lanes`
+argument does not configure future turn-end events. Dependency readiness comes
+from the task store's `blocked_by` field, including prerequisites absent from the
+open-task view. The ended turn remains available as evidence of idleness.
+
 The policy is pure and lives in `dunk_dispatch.turn_end_plan` / `claimed_tasks`, so the
 guardrails are readable and testable without a daemon:
 
@@ -66,6 +74,11 @@ guardrails are readable and testable without a daemon:
 | `task_cooldown` | every task it has claimed was prompted under 5 min ago |
 | `held_delivery_pending` | a prompt for this pane is still queued undelivered |
 | `disabled` | `DUNKINGSHEEP_TURN_END_DISPATCH=0` |
+| `not_allowed` | the lane is not in the persistent/environment dispatch allowlist |
+| `unavailable_lane` | the lane is missing, retired, or has unknown activity |
+| `blocked` / `dead` / `working` | the shared readiness gate prevents dispatch |
+| `readiness_unknown` | readiness could not be established; nothing is sent |
+| `dispatch_in_progress` | a concurrent turn-end dispatch already reserved this pane |
 
 **Held is not delivered.** If the trigger fires but the guarded send would hold (a box
 that will not clear, a dead session, an unconfirmed submit), the record says
@@ -77,8 +90,10 @@ The cooldowns are loop guards, not a cadence, and both are configurable:
 `DUNKINGSHEEP_TURN_END_MIN_GAP_S` (30 s per pane) and
 `DUNKINGSHEEP_TURN_END_TASK_COOLDOWN_S` (300 s per task). They are deliberately **short**:
 a long value would re-create the hourly-timer problem one layer down, and a cooldown can
-only ever *suppress* a prompt. The worst case for one lane and one task is 12 prompts an
-hour, each of which is a turn; a different claimed task is not suppressed by it. Note the
+only ever *suppress* a prompt. They are set when the send is confirmed during this
+request. Later outbox completion does not currently update these clocks, so this is
+not a hard hourly limit across delayed deliveries or daemon restarts. A different
+claimed task is not suppressed by the task cooldown. Note the
 trigger only ever evaluates **at a turn end** — it cannot wake an already-idle lane, so the
 timer remains the fallback for that.
 
@@ -86,8 +101,9 @@ timer remains the fallback for that.
 1,541 dunks recently held on an open dialog and 738 on a draft, so a faster timer would
 only produce more blocked sends. The timer remains the fallback for lanes whose harness
 reports no turns. The codex/opencode hook is **t264**, deliberately not this change, and
-the allowlist that keeps the timer from feeding reviewer/CoS/VP lanes is untouched — this
-trigger only ever prompts a lane about a task that lane already holds.
+the same allowlist also gates this trigger. The continuation tests use a fake backend
+and the real API-to-turn-end-to-send chain with timer ticks forbidden. Live pi
+delivery and both skip observations remain a separate operator acceptance gate.
 
 ## Step 2 ordering: codex's turn socket first
 

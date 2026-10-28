@@ -20,13 +20,16 @@ called from this path and `flock.list()` stays empty), that codex/opencode emit 
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _bootstrap  # noqa: E402,F401
 
 import dunk_core  # noqa: E402
+import dunk_api  # noqa: E402
 import dunk_dispatch as dd  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 from dunk_tasks import Tasks  # noqa: E402
@@ -153,6 +156,12 @@ class TurnEndChainTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(dunk_api, "DISPATCH_LANES_PATH",
+                          os.path.join(self.tmp.name, "dispatch-lanes.json")).start()
+        mock.patch.dict(os.environ, {"DUNKINGSHEEP_DISPATCH_LANES": PANE}).start()
+        self.timer = mock.patch.object(dd, "tick", side_effect=AssertionError(
+            "turn.end must not depend on a timer tick")).start()
         self.herdr = FakeHerdr()
         self.herdr.panes[0]["agent"] = "pi"
         self.herdr.panes[0]["agent_status"] = "idle"
@@ -175,13 +184,38 @@ class TurnEndChainTests(unittest.TestCase):
         return added
 
     def end_turn(self):
-        self.flock.turn_start(PANE, source="test")
-        return self.flock.turn_end(PANE)
+        dunk_api.h_turn_start(self.flock, {"source": "test"}, PANE)
+        return dunk_api.h_turn_end(self.flock, {}, PANE)
+
+    def test_empty_allowlist_never_prompts_a_claimed_lane(self):
+        self.hold()
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DISPATCH_LANES": ""}):
+            result = self.end_turn()
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("not_allowed", result["dispatch"]["reason"])
+
+    def test_another_allowed_lane_does_not_authorize_this_one(self):
+        self.hold()
+        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DISPATCH_LANES": "w1:p2"}):
+            result = self.end_turn()
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("not_allowed", result["dispatch"]["reason"])
+
+    def test_completed_dependency_is_not_lost_from_open_task_view(self):
+        parent = self.flock.task_add("finished prerequisite", status="done")
+        added = self.flock.task_add("ready dependent", depends_on=[parent["id"]])
+        claimed = self.flock.tasks.claim_next(scope="global", pane_id=PANE)
+        self.assertEqual(added["id"], claimed["task"]["id"])
+        dispatch = self.end_turn()["dispatch"]
+        self.assertTrue(dispatch["delivered"], dispatch)
+        self.assertEqual(added["id"], dispatch["task_id"])
 
     def test_a_lane_that_ends_a_turn_holding_work_is_prompted_at_once(self):
         added = self.hold()
-        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+        with mock.patch.object(dunk_core.log, "info", wraps=dunk_core.log.info) as captured:
             result = self.end_turn()
+        self.assertEqual(1, len(self.herdr.sends),
+                         "turn.end must invoke delivery without any timer tick")
         dispatch = result["dispatch"]
         self.assertEqual("turn.end", dispatch["trigger"])
         self.assertTrue(dispatch["delivered"], dispatch)
@@ -191,11 +225,12 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertEqual(PANE, pane_id)
         self.assertIn(f"[turn-end {added['id']}] vitals row colour", text)
         self.assertIn("trigger: turn.end", text)
-        log = "\n".join(captured.output)
+        log = "\n".join(call.args[0] % call.args[1:] for call in captured.call_args_list)
         self.assertIn("trigger=turn.end nudge DELIVERED", log)
         self.assertNotIn("NOT delivered", log)
         # No timer was touched: the trigger is not a dunk.
         self.assertEqual([], self.flock.list())
+        self.timer.assert_not_called()
 
     def test_a_lane_holding_only_an_assigned_programme_task_is_not_prompted(self):
         """CoS ruling: assigned-and-open umbrella work is not 'working on it now'."""
@@ -234,10 +269,14 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertEqual([], self.herdr.sends)
 
     def test_a_held_prompt_is_never_counted_as_delivered(self):
-        """A human is mid-sentence: the send is HELD, and the record must say so."""
+        """A human starts typing after preflight: the guarded send still holds."""
         self.hold()
-        self.herdr.screens[PANE] = HUMAN_DRAFT
-        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+        original_send = self.flock.send_now
+        def draft_then_send(*args, **kwargs):
+            self.herdr.screens[PANE] = HUMAN_DRAFT
+            return original_send(*args, **kwargs)
+        with mock.patch.object(self.flock, "send_now", side_effect=draft_then_send), \
+                self.assertLogs("dunkingsheep", level="INFO") as captured:
             result = self.end_turn()
         dispatch = result["dispatch"]
         self.assertEqual("nudge", dispatch["action"])
@@ -255,12 +294,54 @@ class TurnEndChainTests(unittest.TestCase):
     def test_a_prompt_still_waiting_is_not_stacked_by_the_next_turn_end(self):
         self.hold()
         self.herdr.screens[PANE] = HUMAN_DRAFT
-        self.assertEqual("nudge", self.end_turn()["dispatch"]["action"])
+        # Simulate a readiness snapshot taken just before the human began typing.
+        with mock.patch.object(self.flock, "delivery_state", return_value={"state": "ready"}):
+            self.assertEqual("nudge", self.end_turn()["dispatch"]["action"])
         second = self.end_turn()["dispatch"]
         self.assertEqual(("skip", "held_delivery_pending"),
                          (second["action"], second["reason"]))
         queued = [m for queue in self.flock.outbox.values() for m in queue]
         self.assertEqual(1, len(queued), "one prompt at a time per pane")
+
+    def test_shared_gate_blocks_paused_goal_without_queuing(self):
+        self.hold()
+        self.herdr.screens[PANE] = "Goal paused (/goal resume)\n"
+        result = self.end_turn()["dispatch"]
+        self.assertEqual(("skip", "blocked", False),
+                         (result["action"], result["reason"], result["delivered"]))
+        self.assertEqual([], self.herdr.sends)
+        self.assertFalse(any(self.flock.outbox.values()))
+
+    def test_concurrent_turn_ends_cannot_enqueue_twice(self):
+        self.hold()
+        entered, release = threading.Event(), threading.Event()
+        results = []
+        def slow_send(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release send")
+            return {"outcome": "ok", "message_id": "fake-confirmed"}
+        with mock.patch.object(self.flock, "send_now", side_effect=slow_send) as send:
+            first = threading.Thread(target=lambda: results.append(self.end_turn()))
+            first.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                second = self.end_turn()["dispatch"]
+                self.assertEqual("dispatch_in_progress", second["reason"])
+                self.assertFalse(second["delivered"])
+            finally:
+                release.set()
+                first.join(5)
+            self.assertFalse(first.is_alive())
+            self.assertTrue(results[0]["dispatch"]["delivered"])
+            self.assertEqual(1, send.call_count)
+
+    def test_unreadable_lane_fails_closed(self):
+        self.hold()
+        with mock.patch.object(self.flock, "resolve_lanes", side_effect=RuntimeError("offline")):
+            result = self.end_turn()["dispatch"]
+        self.assertEqual("readiness_unknown", result["reason"])
+        self.assertEqual([], self.herdr.sends)
 
     def test_one_turn_end_prompts_once(self):
         self.hold()

@@ -648,6 +648,7 @@ class Flock:
         # (pane_id, task_id) -> when that task was last prompted on a turn end.
         self.turn_end_nudges = {}
         self.turn_end_task_nudges = {}
+        self.turn_end_dispatching = set()
         # One lock per pane, not one for the whole flock. A send holds its
         # lock across the confirm-and-retry sequence, which can run for tens of
         # seconds when an agent will not take Enter. With a single lock that
@@ -2245,11 +2246,25 @@ class Flock:
         result = {"pane_id": pane_id, "ended": bool(state), "reason": reason}
         # THE TRIGGER. The turn just ended and the lane is idle: if it still holds open
         # work, this is the moment to prompt it - seconds, not the next 60-120 minute
-        # dunk. It never raises and never makes turn.end slow (see TURN_END_WAIT_S).
+        # dunk. The send wait is bounded; backend/SQLite lookups have their own timeouts.
         result["dispatch"] = self._dispatch_on_turn_end(pane_id)
         return result
 
     def _dispatch_on_turn_end(self, pane_id):
+        # Check-and-send spans backend calls: do not hold the global lock, but
+        # reserve this pane so concurrent end notifications cannot enqueue twice.
+        with self._lock:
+            if pane_id in self.turn_end_dispatching:
+                return {"trigger": "turn.end", "pane_id": pane_id, "action": "skip",
+                        "reason": "dispatch_in_progress", "delivered": False}
+            self.turn_end_dispatching.add(pane_id)
+        try:
+            return self._dispatch_claimed_turn_end(pane_id)
+        finally:
+            with self._lock:
+                self.turn_end_dispatching.discard(pane_id)
+
+    def _dispatch_claimed_turn_end(self, pane_id):
         """Prompt a lane that ended its turn still holding work. Returns its record.
 
         Every guardrail the task names, in order, and each one is a code the caller and
@@ -2258,7 +2273,9 @@ class Flock:
           disabled                the trigger is off (DUNKINGSHEEP_TURN_END_DISPATCH=0)
           unread_unknown          the mailbox could not be read
           unread_mail             the lane is already fed (unread mail waiting)
-          no_open_work            no assigned/held task: an idle lane is left alone
+          no_open_work            no claimed task: an idle lane is left alone
+          not_allowed             the lane has not opted in to dispatch
+          blocked/dead/working    the shared lane_plan gate refuses delivery
           cooldown/task_cooldown  the same pane or task was just prompted
           held_delivery_pending   a prompt for this pane is already queued, not delivered
 
@@ -2283,8 +2300,10 @@ class Flock:
             unread = None
             record["error"] = f"inbox count failed: {error}"
         try:
-            tasks = (self.task_list(include_done=False, limit=500,
-                                    self_pane_id=pane_id).get("tasks") or [])
+            # Read this lane's live claims directly: a fleet-wide limited list can
+            # omit its task, and the decorated record carries resolved blocked_by.
+            tasks = [self.task_read(lease["task_id"], self_pane_id=pane_id)
+                     for lease in self.tasks.leases_for_pane(pane_id)]
         except Exception as error:                  # noqa: BLE001 - unknown is a skip
             tasks = []
             record["error"] = f"task list failed: {error}"
@@ -2314,6 +2333,37 @@ class Flock:
                                 outcome="held", reason=record["reason"])
             log.info("turn.end %s: no nudge (trigger=turn.end reason=held_delivery_pending "
                      "message=%s)", pane_id, pending[0].id)
+            return record
+        # PR49 bypassed the opt-in allowlist. Claiming a task is necessary but does
+        # not opt a reviewer/leader lane into automatic prompts. Reuse the SAME
+        # configuration resolver and readiness gate as the timer dispatcher.
+        import dunk_api
+        import dunk_panes
+        try:
+            lanes = self.resolve_lanes()
+            allowed = dunk_api._dispatch_allowlist(self, lanes=lanes)
+            candidates = [p for p in lanes if p["pane_id"] == pane_id
+                          and p.get("agent_status") not in (None, "unknown")
+                          and not dunk_panes.is_retired(pane_id)]
+            gate = dunk_dispatch.lane_plan(
+                candidates, lanes=allowed, unread=lambda pane: unread,
+                delivery=lambda pane: self.delivery_state(
+                    pane_id, pane.get("agent_status"), pane=pane))
+            if pane_id not in allowed:
+                record["reason"] = "not_allowed"
+            elif not candidates:
+                record["reason"] = "unavailable_lane"
+            elif not gate["ready"]:
+                record["reason"] = next(name for name in
+                                        ("has_mail", "blocked", "dead", "working")
+                                        if gate[name])
+        except Exception as error:                  # unknown readiness fails closed
+            record.update(reason="readiness_unknown", error=str(error))
+        if record["reason"]:
+            self.metrics.record("turn.end.dispatch", pane_id=pane_id, source="turn.end",
+                                outcome="held", reason=record["reason"])
+            log.info("turn.end %s: no nudge (trigger=turn.end reason=%s)",
+                     pane_id, record["reason"])
             return record
         task = plan["item"]
         record.update(action="nudge", task_id=str(task.get("id")),
