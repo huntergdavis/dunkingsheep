@@ -4820,16 +4820,16 @@ class Flock:
         """(owned, region) for an ambiguous frame - THE shared decision path.
 
         Used by BOTH _ensure_box_clear and the public composer_region_is_owned
-        seam (CoS i31512: the watchdog must not bypass the guards). Strict
-        full-composer equality PLUS geometry guards: footer = last non-blank
-        row; immediately-adjacent sigil rows refuse (nested/unresolvable); a
-        duplicate matched echo above the composer refuses.
-        KNOWN RESIDUAL RISK, flagged to CoS rather than hidden: a blank-separated
-        inserted echo above which the real composer holds a human draft is
-        indistinguishable from the wedge positive (transcript sigil above) by
-        both geometry and content - the positive's transcript sigil is equally
-        unaccounted. Only adjacency is provable; deeper separation needs a
-        renderer ground truth that does not exist yet."""
+        seam (CoS i31512: the watchdog must not bypass the guards). The complete
+        fail-closed rule: the composer region is delimited only when the status
+        footer is the LAST non-blank row and EXACTLY ONE prompt-sigil row exists
+        above it; ownership is STRICT EQUALITY of the whole region against what
+        we typed or are queuing (no prefix, no shape rule, no brightness
+        assumption). Any other sigil row - adjacent or blank-separated, a
+        transcript echo, a human continuation or edit, an inserted copy of our
+        text - makes the boundary undelimitable and the frame is refused with
+        zero keys. The sigil-free-transcript wedge positive is the one recovery
+        case; sigil'd transcript echoes fail closed (DocumentedLimitTests)."""
         region = _composer_region_text(screen)
         if not region:
             return False, ""
