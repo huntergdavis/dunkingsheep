@@ -942,8 +942,13 @@ def h_metrics(flock, args, self_pane_id):
 
 def h_list_panes(flock, args, self_pane_id):
     panes = flock.list_panes(self_pane_id=self_pane_id)
+    # PROVENANCE TRAVELS WITH THE STATUS (t299). core.list_panes() computes these three and the desk
+    # projects them, but this filter dropped them, so the endpoint reported a status with no account of
+    # where it came from. Contract kept as before: a key is present only when the core supplies it (the
+    # `if key in pane` below), so a pane that carries no provenance gains no null keys.
     keep = ("pane_id", "is_self", "workspace_label", "tab_label", "agent",
-            "agent_status", "cwd", "terminal_title_stripped", "terminal_id",
+            "agent_status", "agent_status_source", "agent_status_reason",
+            "agent_status_inferred", "cwd", "terminal_title_stripped", "terminal_id",
             "workspace_id", "tab_id")
     return {
         "self_pane_id": self_pane_id,
