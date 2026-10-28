@@ -2202,6 +2202,15 @@ class Flock:
         return self.tasks.note(task_id, event=event, actor=self_pane_id,
                                meta={"reason": reason} if reason else {})
 
+    def require_turn_caller(self, pane_id, self_pane_id):
+        """Authenticate socket turn events; request pane labels alone prove nothing."""
+        from dunk_callers import caller_belongs_to_pane
+        if not self_pane_id or (pane_id and pane_id != self_pane_id):
+            raise DunkError("turn event must target the caller's own pane")
+        pane = self.herdr.get_pane(self_pane_id) or {}
+        if not caller_belongs_to_pane(self.current_caller(), pane.get("pane_pid")):
+            raise DunkError("turn event caller is not authenticated to this pane")
+
     def turn_start(self, pane_id=None, ttl_s=None, source=None,
                    self_pane_id=None):
         """Declare a busy turn for `pane_id` (pi/claude hook or extension).
@@ -2217,16 +2226,20 @@ class Flock:
         if ttl <= 0:
             raise DunkError("ttl_s must be positive")
         now = time.time()
+        import secrets
         state = {"started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
+                 "turn_id": secrets.token_hex(16),
                  "source": source, "caller": self.current_caller()}
         with self._lock:
             self.turns[pane_id] = state
         self.metrics.record("turn.start", pane_id=pane_id, source=source,
                             outcome="ok", at=now)
         return {"pane_id": pane_id, "started_at": now,
-                "expires_at": now + ttl, "ttl_s": ttl, "source": source}
+                "expires_at": now + ttl, "ttl_s": ttl, "source": source,
+                "turn_id": state["turn_id"]}
 
-    def turn_end(self, pane_id=None, reason="turn_end", self_pane_id=None):
+    def turn_end(self, pane_id=None, reason="turn_end", self_pane_id=None,
+                 turn_id=None, authenticated=False):
         pane_id = pane_id or self_pane_id
         if not pane_id:
             raise DunkError("turn end requires a pane")
@@ -2236,9 +2249,22 @@ class Flock:
             # evidence of IDLENESS the pi extension will ever give us. Popping it
             # made every pi lane read 'unknown' between turns.
             state = self.turns.get(pane_id)
-            if state is not None:
-                state["ended_at"] = now
-                state["expires_at"] = 0.0
+            invalid = ("no_active_turn" if state is None else
+                       "already_ended" if state.get("ended_at") is not None else
+                       "expired_turn" if state["expires_at"] <= now else None)
+            if authenticated and not invalid:
+                caller, starter = self.current_caller() or {}, state.get("caller") or {}
+                if not turn_id or turn_id != state.get("turn_id"):
+                    invalid = "turn_mismatch"
+                elif not caller.get("pid") or any(caller.get(k) != starter.get(k)
+                                                   for k in ("pid", "start")):
+                    invalid = "foreign_turn"
+            if invalid:
+                return {"pane_id": pane_id, "ended": False, "reason": invalid,
+                        "dispatch": {"trigger": "turn.end", "action": "skip",
+                                     "reason": invalid, "delivered": False}}
+            state["ended_at"] = now
+            state["expires_at"] = 0.0
         duration = int((now - state["started_at"]) * 1000) if state else None
         self.metrics.record("turn.end", pane_id=pane_id, reason=reason,
                             outcome="ok" if state else "unknown", at=now,
@@ -2247,7 +2273,11 @@ class Flock:
         # THE TRIGGER. The turn just ended and the lane is idle: if it still holds open
         # work, this is the moment to prompt it - seconds, not the next 60-120 minute
         # dunk. The send wait is bounded; backend/SQLite lookups have their own timeouts.
-        result["dispatch"] = self._dispatch_on_turn_end(pane_id)
+        if authenticated:
+            result["dispatch"] = self._dispatch_on_turn_end(pane_id)
+        else:
+            result["dispatch"] = {"trigger": "turn.end", "action": "skip",
+                                  "reason": "unauthenticated", "delivered": False}
         return result
 
     def _dispatch_on_turn_end(self, pane_id):

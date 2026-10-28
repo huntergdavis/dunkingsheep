@@ -62,6 +62,24 @@ argument does not configure future turn-end events. Dependency readiness comes
 from the task store's `blocked_by` field, including prerequisites absent from the
 open-task view. The ended turn remains available as evidence of idleness.
 
+Turn RPCs now require kernel-attributed caller PID/start-time ancestry under the
+backend's pane process. A requested pane label is not authentication. Start
+returns a random `turn_id`; end must present that token from the same stable
+caller. Missing, foreign, expired, duplicate and old-generation ends cannot
+dispatch or manufacture new idle evidence.
+
+**Paired producer deployment is required (owner task t296).** The pi producer is
+an owner-managed extension outside this repository. The reviewable
+`integrations/pi/turn-generation.patch` updates its event function to serialize
+commands, parse `--json turn start`, and pass the token with `turn end --turn-id`.
+It does not edit or install anything automatically. The input extension SHA256 is
+`5583a23a50d49dde58e139ff1664c5b608a61ddb96b81bef24d79fe6cecd8f7c`.
+Review/apply it only against the intended owner file and deploy coherently with
+the daemon. A legacy tokenless end is refused, leaving the hold until its TTL;
+other legacy turn producers also require migration before using this contract.
+Unavailable pane PIDs fail closed. Tests execute the patch's function with a fake
+exec; the real pi reload and event-to-delivery path remain operator acceptance.
+
 The policy is pure and lives in `dunk_dispatch.turn_end_plan` / `claimed_tasks`, so the
 guardrails are readable and testable without a daemon:
 

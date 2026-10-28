@@ -18,6 +18,7 @@ called from this path and `flock.list()` stays empty), that codex/opencode emit 
 (they do not - that hook is t264), and anything about a live pane on the real backend.
 """
 import os
+import json
 import sys
 import tempfile
 import threading
@@ -33,6 +34,8 @@ import dunk_api  # noqa: E402
 import dunk_dispatch as dd  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 from dunk_tasks import Tasks  # noqa: E402
+from dunk_server import FlockServer  # noqa: E402
+from dunk_callers import caller_from_peer  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 PANE = "w1:p1"
@@ -165,12 +168,14 @@ class TurnEndChainTests(unittest.TestCase):
         self.herdr = FakeHerdr()
         self.herdr.panes[0]["agent"] = "pi"
         self.herdr.panes[0]["agent_status"] = "idle"
+        self.herdr.panes[0]["pane_pid"] = caller_from_peer(os.getpid())["pid"]
         self.herdr.screens[PANE] = CLEAN_BOX
         self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
                            blob_dir=os.path.join(self.tmp.name, "blobs"))
         self.tasks = Tasks(path=os.path.join(self.tmp.name, "tasks.db"))
         self.flock = dunk_core.Flock(herdr=self.herdr, persist=False, restore=False,
                                      inbox=self.inbox, tasks=self.tasks)
+        self.server = FlockServer(self.flock)
 
     def tearDown(self):
         self.flock.close()
@@ -184,8 +189,82 @@ class TurnEndChainTests(unittest.TestCase):
         return added
 
     def end_turn(self):
-        dunk_api.h_turn_start(self.flock, {"source": "test"}, PANE)
-        return dunk_api.h_turn_end(self.flock, {}, PANE)
+        started = self.rpc("turn_start", {"source": "test"})
+        return self.rpc("turn_end", {"turn_id": started["turn_id"]})
+
+    def raw_rpc(self, cmd, args=None, pane=PANE):
+        response, _ = self.server.handle_line(json.dumps({
+            "cmd": cmd, "args": args or {}, "self_pane_id": pane}), peer_pid=os.getpid())
+        return response
+
+    def rpc(self, cmd, args=None):
+        response = self.raw_rpc(cmd, args)
+        self.assertTrue(response["ok"], response)
+        return response["result"]
+
+    def test_foreign_explicit_target_cannot_end_or_dispatch(self):
+        self.hold()
+        self.rpc("turn_start")
+        result = self.raw_rpc("turn_end", {"pane": PANE}, pane="w1:p2")
+        self.assertFalse(result["ok"], result)
+        self.assertNotIn("ended_at", self.flock.turns[PANE])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_forging_both_pane_labels_does_not_authenticate_a_foreign_process(self):
+        self.hold()
+        started = self.rpc("turn_start")
+        self.herdr.panes[0]["pane_pid"] = 99_999_999
+        result = self.raw_rpc("turn_end", {"pane": PANE, "turn_id": started["turn_id"]})
+        self.assertFalse(result["ok"], result)
+        self.assertNotIn("ended_at", self.flock.turns[PANE])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_missing_turn_never_dispatches_claimed_work(self):
+        self.hold()
+        result = self.rpc("turn_end")
+        self.assertFalse(result["ended"], result)
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual("no_active_turn", result["dispatch"]["reason"])
+
+    def test_missing_token_cannot_end_a_valid_turn(self):
+        self.hold()
+        self.rpc("turn_start")
+        result = self.rpc("turn_end")
+        self.assertFalse(result["ended"], result)
+        self.assertEqual("turn_mismatch", result["dispatch"]["reason"])
+        self.assertNotIn("ended_at", self.flock.turns[PANE])
+
+    def test_ended_token_cannot_be_replayed_even_with_cooldowns_disabled(self):
+        self.hold()
+        started = self.rpc("turn_start")
+        with mock.patch.object(dd, "TURN_END_MIN_GAP_S", 0), \
+                mock.patch.object(dd, "TURN_END_TASK_COOLDOWN_S", 0):
+            self.assertTrue(self.rpc("turn_end", {"turn_id": started["turn_id"]})["ended"])
+            result = self.rpc("turn_end", {"turn_id": started["turn_id"]})
+        self.assertFalse(result["ended"])
+        self.assertEqual("already_ended", result["dispatch"]["reason"])
+        self.assertEqual(1, len(self.herdr.sends))
+
+    def test_old_token_cannot_end_a_new_turn_from_the_same_process(self):
+        self.hold()
+        first = self.rpc("turn_start")
+        second = self.rpc("turn_start")
+        result = self.rpc("turn_end", {"turn_id": first["turn_id"]})
+        self.assertFalse(result["ended"])
+        self.assertEqual("turn_mismatch", result["dispatch"]["reason"])
+        self.assertEqual(second["turn_id"], self.flock.turns[PANE]["turn_id"])
+        self.assertNotIn("ended_at", self.flock.turns[PANE])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_expired_turn_cannot_supply_idle_evidence_or_dispatch(self):
+        self.hold()
+        started = self.rpc("turn_start")
+        self.flock.turns[PANE]["expires_at"] = 1
+        result = self.rpc("turn_end", {"turn_id": started["turn_id"]})
+        self.assertFalse(result["ended"])
+        self.assertEqual("expired_turn", result["dispatch"]["reason"])
+        self.assertNotIn("ended_at", self.flock.turns[PANE])
+        self.assertEqual([], self.herdr.sends)
 
     def test_empty_allowlist_never_prompts_a_claimed_lane(self):
         self.hold()

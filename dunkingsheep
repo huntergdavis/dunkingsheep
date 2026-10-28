@@ -82,6 +82,7 @@ def build_parser():
     q = tsub.add_parser("end", help="end the busy turn and release the hold")
     q.add_argument("--pane", help="pane id (default: the caller's)")
     q.add_argument("--reason")
+    q.add_argument("--turn-id", help="generation returned by --json turn start")
     p = sub.add_parser("poll", help="one batched read for sidebars: status + inbox + dunks",
                        description="Read-only batch used by the sidebar poller. "
                                    "It does not mark mail read; panes/tasks are opt-in.")
@@ -2295,7 +2296,7 @@ def run_client_command(client, args):
                                source=args.source), \
                 lambda r: print(f"turn start {r['pane_id']} ttl {r['ttl_s']}s")
         return client.call("turn_end", pane=args.pane,
-                           reason=args.reason), print_turn_end
+                           reason=args.reason, turn_id=args.turn_id), print_turn_end
     if command == "poll":
         payload = {"limit": args.limit, "panes": args.panes, "tasks": args.tasks,
                    "include_done": args.include_done,

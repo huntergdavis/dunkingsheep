@@ -1,0 +1,41 @@
+--- a/dunkingsheep.ts
++++ b/dunkingsheep.ts
+@@ -261,12 +261,32 @@
+ 		return lines.join("\n");
+ 	}
+ 
+-	async function turn(kind: "start" | "end", cwd: string): Promise<void> {
+-		try {
+-			await pi.exec(DUNK_BIN, ["turn", kind], { cwd, timeout: 10_000 });
+-		} catch {
+-			// A turn signal must never break the agent; the TTL is the backstop.
+-		}
++	// Serialize hook commands: a fast settled event must wait for start's token.
++	let turnEvents = Promise.resolve();
++	let activeTurnId: string | undefined;
++	function turn(kind: "start" | "end", cwd: string): Promise<void> {
++		turnEvents = turnEvents.then(async () => {
++			try {
++				if (kind === "start") {
++					activeTurnId = undefined;
++					const result = await pi.exec(DUNK_BIN, ["--json", "turn", "start"], { cwd, timeout: 10_000 });
++					const response = JSON.parse(result.stdout);
++					if (result.code === 0 && typeof response.turn_id === "string" && response.turn_id) {
++						activeTurnId = response.turn_id;
++					}
++				} else {
++					const turnId = activeTurnId;
++					activeTurnId = undefined;
++					if (turnId) {
++						await pi.exec(DUNK_BIN, ["turn", "end", "--turn-id", turnId], { cwd, timeout: 10_000 });
++					}
++				}
++			} catch {
++				activeTurnId = undefined;
++				// Failed/missing start evidence never becomes an unbound end; TTL is the backstop.
++			}
++		});
++		return turnEvents;
+ 	}
+ 
+ 	pi.on("agent_start", (_event, ctx) => {
