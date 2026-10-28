@@ -41,6 +41,14 @@ A skip reschedules `next_send_at`, bumps `skip_count`, sets status
 `Skipped (unconsumed)`, and leaves `send_count`, `last_sent_at` and
 `last_error` alone. The first send always proceeds.
 
+The `dunk.skipped` metric uses the schedule's `last_skip_reason`: `unconsumed`
+for detected pending input, or `unrecognised` when the box cannot be classified.
+Both keep outcome `held`; send counters, rescheduling and guards are unchanged.
+These are additive reason values in metrics schema 1. Historical skip events
+were mislabeled `stranded` and are not rewritten; their exact classification
+cannot be recovered from that label alone. Actual stranded-text guard holds
+and dead-session refusals retain their existing classifications.
+
 Surfaces: `skip_if_unconsumed` / `--skip-if-unconsumed` (CLI add/update),
 `skip_if_unconsumed` in the MCP schemas, and the TUI key **`u`** (the idle gate
 is **`o`**). Persisted in `dunks.json`; old files default to `false`.

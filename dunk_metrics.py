@@ -70,7 +70,7 @@ KINDS = {
     "inbox.read": "a recipient read a message, with how long it had waited",
     "inbox.acked": "a recipient finished with a message, with how long it held it",
     "dunk.sent": "a scheduled send went out",
-    "dunk.skipped": "a scheduled send was skipped as unconsumed",
+    "dunk.skipped": "backpressure skipped a send: pending or unrecognised input",
     "dunk.held": "a scheduled send was held because the pane was not ready",
     "panel.blocking": "a dialog was open with a delivery waiting behind it",
     "turn.end.dispatch": ("the turn-end trigger fired: a lane that ended a turn was "
@@ -88,6 +88,8 @@ REASONS = {
     "draft": "someone was writing in the input box",
     "dialog": "a dialog was open, waiting for a person to answer",
     "stranded": "our own earlier text was still sitting unsubmitted",
+    "unconsumed": "the previous scheduled send is still pending in the input box",
+    "unrecognised": "backpressure could not read or recognise the input box",
     "unconfirmed": "the submit could not be confirmed from the pane",
     "no_open_work": "the lane had no CLAIMED (leased) task, so it was left alone",
     "unread_mail": "the lane already had unread mail: it was fed",
