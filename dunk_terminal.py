@@ -687,20 +687,44 @@ class TmuxBackend(TerminalBackend):
         before = self.get_pane(pane_id)
         if before is None:
             return False, f"no such pane {pane_id}"
+        window = before.get("tab_id")
+        geometry_before = self._window_geometry(window)
         attached = self._client_count(before.get("workspace_id"))
         code, out, err = self._tmux("resize-window", "-t", pane_id,
                                     "-x", str(cols), "-y", str(rows))
         if code != 0:
+            # tmux refuses a size before touching the layout (measured: dims unchanged
+            # after 'width too small' and 'width too large'), so a refusal reports no
+            # geometry at all rather than a before/after that implies a partial result.
             return False, (err.strip() or out.strip() or "tmux refused the resize")
-        after = self.get_pane(pane_id) or {}
+        geometry_after = self._window_geometry(window)
+        target = geometry_after.get(pane_id) or {}
         return True, {
             "pane_id": pane_id,
             "requested": {"cols": cols, "rows": rows},
-            "cols": after.get("cols"),
-            "rows": after.get("rows"),
+            "cols": target.get("cols"),
+            "rows": target.get("rows"),
+            # A resize sizes the WINDOW, so say which panes the re-layout actually
+            # moved. A caller that asked about one pane otherwise cannot tell that its
+            # neighbours changed shape too.
+            "window_pane_count": len(geometry_after),
+            "resized_panes": [
+                {"pane_id": pid, "cols": size["cols"], "rows": size["rows"],
+                 "cols_before": (geometry_before.get(pid) or {}).get("cols"),
+                 "rows_before": (geometry_before.get(pid) or {}).get("rows")}
+                for pid, size in geometry_after.items()
+                if size != geometry_before.get(pid)
+            ],
             "clients_attached": attached,
             "overridable_by_client": bool(attached),
         }
+
+    def _window_geometry(self, window_id):
+        """Measured cols/rows of every pane in one window, keyed by pane id."""
+        if not window_id:
+            return {}
+        return {pane["pane_id"]: {"cols": pane.get("cols"), "rows": pane.get("rows")}
+                for pane in self.list_panes() if pane.get("tab_id") == window_id}
 
     def _client_count(self, session_id):
         """How many clients are attached to the pane's session (unknown -> None)."""

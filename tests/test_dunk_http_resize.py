@@ -66,12 +66,17 @@ class ResizeRoute(unittest.TestCase):
             [pane("%28", "cos")],
             result=(True, {"pane_id": "%28", "requested": {"cols": 100, "rows": 30},
                            "cols": 99, "rows": 29, "clients_attached": 0,
-                           "overridable_by_client": False})))
+                           "overridable_by_client": False,
+                           "window_pane_count": 2,
+                           "resized_panes": [{"pane_id": "%28", "cols": 99, "rows": 29,
+                                              "cols_before": 80, "rows_before": 24}]})))
         out = dunk_http.route_post("/api/terminals/cos/resize", {"cols": 100, "rows": 30})
         self.assertEqual("%28", out["pane_id"])
         self.assertEqual(99, out["cols"], "must report tmux's size, not the request")
         self.assertEqual(29, out["rows"])
         self.assertIn("as_of", out)
+        self.assertEqual(2, out["window_pane_count"])
+        self.assertEqual("%28", out["resized_panes"][0]["pane_id"])
         self.assertEqual([("%28", 100, 30)], backend.calls)
 
     def test_a_collision_name_addresses_the_pane_the_get_list_named(self):
@@ -189,6 +194,59 @@ class TmuxResize(unittest.TestCase):
         ok, message = self.backend.resize(pane_id, 99999, 24)
         self.assertFalse(ok)
         self.assertIn("width too large", message)
+
+    def test_a_failed_resize_leaves_the_window_exactly_as_it_was(self):
+        """A refusal must not report a half-done re-layout - or do one.
+
+        This is the reviewer's first question: if the resize fails, is the window
+        untouched? tmux refuses before touching the layout; this test proves it through
+        the API AND reads the geometry independently, twice (our own refusals and
+        tmux's).
+        """
+        pane_id = self._pane()
+        ok, _ = self.backend.resize(pane_id, 90, 30)
+        self.assertTrue(ok)
+        before = self.backend._tmux("list-panes", "-F", "#{pane_width}x#{pane_height}")[1]
+        self.assertEqual("90x30", before.strip())
+
+        self.backend.RESIZE_MAX = 100000                    # let tmux refuse, not us
+        ok, message = self.backend.resize(pane_id, 99999, 30)
+        self.assertFalse(ok)
+        self.assertIn("width too large", message)
+        after = self.backend._tmux("list-panes", "-F", "#{pane_width}x#{pane_height}")[1]
+        self.assertEqual(before, after, "a refused resize moved the window")
+
+        ok, message = self.backend.resize(pane_id, 0, 30)   # our guard
+        self.assertFalse(ok)
+        self.assertEqual(before, self.backend._tmux(
+            "list-panes", "-F", "#{pane_width}x#{pane_height}")[1])
+
+    def test_a_multi_pane_window_says_which_panes_it_moved(self):
+        """The reviewer's second question: a caller must not need tmux's vocabulary.
+
+        Resizing one pane sizes the WINDOW, so the neighbour re-lays-out too. The answer
+        carries window_pane_count and the panes whose geometry changed (with their
+        before values), so a caller that asked about one pane learns what else moved.
+        """
+        panes = self.backend.list_panes()
+        first = panes[0]["pane_id"]
+        self.backend._tmux("split-window", "-t", first, "-d")
+        panes = self.backend.list_panes()
+        self.assertEqual(2, len(panes), "the split did not create a second pane")
+        before = {p["pane_id"]: (p["cols"], p["rows"]) for p in panes}
+
+        ok, result = self.backend.resize(first, 120, 40)
+        self.assertTrue(ok, result)
+        self.assertEqual(2, result["window_pane_count"])
+        moved = {item["pane_id"]: item for item in result["resized_panes"]}
+        self.assertIn(first, moved, "the target itself must appear among the moved panes")
+        for pane_id, item in moved.items():
+            self.assertEqual(before[pane_id], (item["cols_before"], item["rows_before"]))
+        # Every pane tmux now reports as changed must be in the report - nothing silent.
+        now = {p["pane_id"]: (p["cols"], p["rows"])
+               for p in self.backend.list_panes()}
+        changed = {pid for pid, size in now.items() if size != before[pid]}
+        self.assertEqual(changed, set(moved), "a pane changed shape without being reported")
 
     def test_a_non_integer_size_is_refused_before_tmux(self):
         ok, message = self.backend.resize(self._pane(), "abc", 24)
