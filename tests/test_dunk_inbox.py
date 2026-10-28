@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
+import dunk_core  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox, InboxError  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
@@ -644,6 +645,131 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         stats = {m["mailbox"]: m["unread"] for m in self.flock.inbox_stats()["mailboxes"]}
         self.assertEqual({"Codex Site": 1, "Claude Proj": 2}, stats)
         self.assertEqual(3, self.flock.status()["inbox_unread"])
+
+
+class _RecordingMetrics:
+    """Metrics stand-in that keeps every event, so a hold can be asserted ABSENT.
+
+    `Flock` calls `.prune()` at construction and `.record(event, **fields)` on every
+    interesting path; a real `Metrics` row per event would be a second database to
+    read back in a fixture whose whole point is "nothing was held".
+    """
+
+    def __init__(self):
+        self.events = []
+
+    def record(self, event, **fields):
+        self.events.append(dict(fields, event=event))
+
+    def prune(self, *_args, **_kwargs):
+        return 0
+
+    def close(self):
+        return None
+
+
+class WorkingLaneAcceptsMailTests(unittest.TestCase):
+    """t271: 'working' is INFORMATION, not a hold reason.
+
+    A lane mid-turn queues the message typed at it - claude and pi both do, measured -
+    so holding mail behind 'the target reports working' only added latency and put a
+    wrong reason in the hold stream (2.58.0 removed it; `_last_block_reason` used to
+    be set to "working"). These tests fail on that old rule: the send is held with
+    reason 'working' and no nudge is ever typed.
+
+    The hold that DOES remain is a different, measured fact - a harness that LOSES
+    text typed during a turn (codex) - and it must say the harness, never the status.
+    """
+
+    WORKING_SCREEN = ("│ ✻ Working (55m) · esc to interrupt\n❯\u00a0\n"
+                      "\x1b[2mAsk Pi to do anything\x1b[0m\n──────────────\n")
+    # A REAL human draft in the same working lane. The dim hint above is a placeholder
+    # and reads as an empty box; this is a sentence, and it must still hold.
+    WORKING_WITH_DRAFT = "│ ✻ Working (55m) · esc to interrupt\n❯ half a sentence I am typing\n──────────────\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           inbox=self.inbox, metrics=self.metrics)
+
+    def tearDown(self):
+        self.flock.close()
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def busy_pane(self, harness):
+        """w2:p1 mid-turn on `harness`: a working banner AND a working status."""
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == "w2:p1":
+                pane["agent"] = harness
+                pane["agent_status"] = "working"
+        self.herdr.screens["w2:p1"] = self.WORKING_SCREEN
+        self.herdr.statuses["w2:p1"] = "working"
+        return self.herdr.get_pane("w2:p1")
+
+    def held_events(self):
+        return [event for event in self.metrics.events if event["event"] == "message.held"]
+
+    def test_a_working_lane_receives_mail_instead_of_being_held(self):
+        self.busy_pane("pi")
+        sent = self.flock.inbox_send("w2:p1", "a nudge for a lane that is mid-turn",
+                                     notify=True, self_pane_id="w1:p1")
+        self.assertTrue(sent["notified"])
+        self.assertTrue(self.herdr.sent.wait(5), "the nudge to a working lane was never typed")
+        self.assertEqual([], self.held_events(),
+                         "a working lane must not produce a message.held event")
+        self.assertNotIn("working",
+                         [event.get("reason") for event in self.held_events()],
+                         "reason=working is the rule this task removed")
+        self.assertEqual(1, self.flock.inbox_count("w2:p1")["unread"],
+                         "the mail is stored whether or not the nudge is typed")
+
+    def test_the_working_status_is_deliverable_and_not_a_gate(self):
+        pane = self.busy_pane("pi")
+        state = self.flock.delivery_state("w2:p1", "working", pane=pane)
+        self.assertEqual("working", state["state"])
+        self.assertTrue(state["deliverable"],
+                        "working must carry deliverable=true; a gate would starve the lane")
+        self.assertIsNone(self.flock.send_blocker("w2:p1"),
+                          "pi queues text typed during a turn, so nothing may hold")
+        state, reason = dunk_core.classify_delivery(self.WORKING_SCREEN, "working")
+        self.assertEqual("working", state)
+        self.assertNotIn(reason, ("blocked", "dead"),
+                         "the classification is information about the pane, not a refusal")
+
+    def test_the_remaining_working_hold_names_the_harness_not_the_status(self):
+        # codex loses notices typed during a turn (measured 2026-10-24: four accepted,
+        # none processed). That hold is preserved - but it is a harness fact, and the
+        # reason must say so rather than reporting the status 'working'.
+        self.busy_pane("codex")
+        blocker = self.flock.send_blocker("w2:p1")
+        self.assertIsNotNone(blocker, "a harness that loses text must still be held")
+        state, reason = blocker
+        self.assertEqual("blocked", state)
+        self.assertIn("does not queue", reason)
+        self.assertNotEqual("working", reason)
+
+    def test_a_human_draft_in_a_working_lane_is_still_held(self):
+        # t271 removes the STATUS from the hold reasons and nothing else: a person
+        # mid-sentence in that box is a separate, still-valid hold. The draft guard
+        # lives in the send path (not in send_blocker), so this drives a real send.
+        self.busy_pane("pi")
+        self.herdr.screens["w2:p1"] = self.WORKING_WITH_DRAFT
+        self.flock.inbox_send("w2:p1", "held behind a person", notify=True,
+                              self_pane_id="w1:p1")
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.held_events():
+            time.sleep(0.05)
+        held = self.held_events()
+        self.assertTrue(held, "a real draft must still hold the queue")
+        self.assertNotEqual("working", held[0].get("reason"),
+                            "the reason is the draft, not the status")
+        self.assertFalse(self.herdr.sent.is_set(),
+                         "nothing may be typed over a person's half-written sentence")
 
 
 class MailboxIdentityTests(unittest.TestCase):
