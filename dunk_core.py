@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.86"
+VERSION = "2.70.87"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -4313,11 +4313,25 @@ class Flock:
             owned=self._stuck_text_is_ours(pane_id, getattr(head, "text", None), content),
             generation=generation, dialog=False,
             cancelled=getattr(head, "status", None) == "cancelled")
+        first_observation = pane_id not in self.stuck.records
         if since and pane_id not in self.stuck.records:
             # The clock starts when the text was first SEEN stranded, not when this
             # tick happened to run, so a 5 s worker and a 120 s bound still mean 120 s.
             self.stuck.decide(observation, self.stuck_config, now=min(since, now))
         decision = self.stuck.decide(observation, self.stuck_config, now=now)
+        if first_observation and pane_id in self.stuck.records:
+            # THE CLOCK START, ON THE RECORD (t377 follow-up, CoS i31729). A recovery
+            # needs an independently observable T0; the reset and key lines are not it,
+            # and the tracker is not persisted until an action path saves. So the FIRST
+            # creation of a record emits one line, from the tracker's own stored state -
+            # exactly once per record (the record exists afterwards, so a repeated WAIT
+            # cannot re-log it), with no composer text in it.
+            record = self.stuck.records.get(pane_id) or {}
+            log.info("%s: stuck recovery clock starts: message=%s generation=%s "
+                     "fingerprint=%s first_seen=%.3f observed=%.3f threshold=%.0fs",
+                     pane_id, record.get("message_id"), record.get("generation"),
+                     record.get("fingerprint"), float(record.get("first_seen") or 0.0),
+                     now, self.stuck_config.threshold_s)
         if decision.action != "recover":
             if decision.action == "reset" and decision.reason not in (
                     "the composer is empty", "no tracked message for this pane"):

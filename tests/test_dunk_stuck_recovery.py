@@ -692,6 +692,90 @@ class FinalBoundaryGuardTests(unittest.TestCase):
         self.assertEqual([], self.presses(), "a different tracked message is not ours to press")
 
 
+class FirstObservationEvidenceTests(unittest.TestCase):
+    """CoS i31729: the clock start must be observable from the record itself.
+
+    A recovery's pass/fail needs T0, and neither the reset line nor the eventual key
+    line can define it. So the FIRST creation of a tracker record emits one line built
+    from the stored record - once per record, never per tick, and without any composer
+    text (the log is not a place for pane content).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": 600, "max_attempts": 2, "cooldown_s": 60,
+                          "observation_interval_s": 0.01})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+        self.message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT,
+                                              "send_text", lambda: (True, "ok"))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def observe(self):
+        return self.flock._unwedge(PANE, OUR_TEXT, time.time() - 30, message=self.message)
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_the_first_observation_emits_one_evidence_line_before_any_press(self):
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.assertFalse(self.observe(), "a 600 s threshold cannot act")
+        lines = [line for line in captured.output if "stuck recovery clock starts" in line]
+        self.assertEqual(1, len(lines), captured.output)
+        line = lines[0]
+        record = self.flock.stuck.records[PANE]
+        for expected in (PANE, record["message_id"], record["generation"],
+                         record["fingerprint"], "threshold=600s"):
+            self.assertIn(str(expected), line)
+        self.assertIn(f'first_seen={float(record["first_seen"]):.3f}', line)
+        self.assertIn("observed=", line)
+        self.assertEqual([], self.presses(), "evidence, and no action")
+
+    def test_the_line_carries_no_composer_text(self):
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.observe()
+        self.assertNotIn(OUR_TEXT[:40], "\n".join(captured.output),
+                         "pane content must not be logged by the evidence line")
+
+    def test_the_logged_first_seen_is_the_stored_one_not_the_tick_clock(self):
+        since = time.time() - 300
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.flock._unwedge(PANE, OUR_TEXT, since, message=self.message)
+        line = [l for l in captured.output if "stuck recovery clock starts" in l][0]
+        record = self.flock.stuck.records[PANE]
+        self.assertIn(f'first_seen={float(record["first_seen"]):.3f}', line)
+        self.assertAlmostEqual(since, record["first_seen"], delta=2.0,
+                               msg="the clock starts at the first sighting, not at this tick")
+        self.assertGreater(record["first_seen"], 0.0)
+
+    def test_repeated_waits_do_not_spam_the_evidence_line(self):
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            for _ in range(4):
+                self.flock._stuck_last_check.pop(PANE, None)   # bypass the interval gate
+                self.observe()
+        lines = [line for line in captured.output if "stuck recovery clock starts" in line]
+        self.assertEqual(1, len(lines),
+                         f"one line per record, not per tick: {lines}")
+
+
 def screen_lines(screen):
     """The composer text as the pane reader sees it (last prompt line content)."""
     return OUR_TEXT + " and one more thing I was typing"
