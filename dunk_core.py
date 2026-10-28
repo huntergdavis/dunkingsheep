@@ -4797,6 +4797,39 @@ class Flock:
                 return True
         return any(_is_our_send(shown, text, True) for text in candidates)
 
+    def _region_is_ours(self, pane_id, region):
+        """t130: STRICT ownership for the ambiguous-frame flush. The complete
+        normalized visible composer must EQUAL the complete owned text - a
+        human deletion or a short draft (candidate "F", "FEDERATE NOW") is not
+        a prefix exemption (CoS i31447): truncation needs explicit proof, not an
+        arbitrary prefix. A human continuation or edit below our body breaks the
+        equality and the frame is refused."""
+        candidate = _collapse(region)
+        if not candidate:
+            return False
+        with self._lock:
+            candidates = list(self.sent_text_by_pane.get(pane_id, []))
+            candidates += [m.text for m in self.outbox.get(pane_id) or []
+                           if m.status == "queued" and m.text]
+        for text in candidates:
+            if _collapse(text) == candidate:
+                return True
+        return False
+
+    def composer_region_is_owned(self, pane_id, screen):
+        """PUBLIC (t377 seam, Owner2282): the exact-owned full-composer check.
+
+        Extracts the complete visible composer from `screen` (last prompt-sigil
+        row plus continuation lines, footer excluded) and returns True only when
+        it EQUALS - after _collapse normalisation of wrapping - text we typed or
+        are queuing for `pane_id`. Appended human lines, edits, truncations and
+        foreign drafts are refused. Stable name: the watchdog depends on this,
+        not on the private helpers."""
+        region = _composer_region_text(screen)
+        if not region:
+            return False
+        return self._region_is_ours(pane_id, region)
+
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
         when there is no box to read."""
@@ -5133,6 +5166,23 @@ class Flock:
             return allow_modal
         _text, detail = box_text(screen)
         if detail.startswith(AMBIGUOUS_COMPOSER):
+            # t130 (Owner2277): the geometry rule cannot tell pending input from
+            # transcript - but CONTENT can, when the pending text is OURS. The
+            # comparison is over the WHOLE composer region (sigil row plus any
+            # continuation lines below it, CoS finding): our text is ours only if
+            # the region is a PREFIX of it - any human-added or edited line makes
+            # the comparison fail, and the refusal stands. Arbitrary draft text
+            # is not made safe by this; the human-draft control is the strict
+            # region match, not the geometry.
+            region = _composer_region_text(screen)
+            if region and self._region_is_ours(pane_id, region):
+                self._last_block_reason[pane_id] = "stranded"
+                log.info("%s: ambiguous composer holds OUR queued text; submitting it",
+                         pane_id)
+                if self._flush_once(pane_id, region):
+                    return True
+                self._last_block_reason[pane_id] = "stranded-will-not-submit"
+                return False
             self._last_block_reason[pane_id] = "ambiguous-composer"
             return False
         shown = _typed_text(screen)
@@ -5878,6 +5928,38 @@ def _prompt_body(row):
         # is how codex's "Ask Codex to do anything" became 'a human is typing here'.
         return ""
     return body
+
+
+def _composer_region_text(screen):
+    """The live composer's visible content, or "" if there is no prompt row.
+
+    t130 (Owner2277/CoS finding): the LAST prompt-sigil row alone is not the
+    composer - a human can have typed continuation lines below our queued body.
+    The region is the last sigil row PLUS every non-blank line below it, up to
+    the status footer (excluded - footer text is never part of a draft). The
+    caller compares this whole region against what we sent; any extra line makes
+    the comparison fail, which is the continuation negative."""
+    if not screen:
+        return ""
+    raw = screen.splitlines()
+    sigils = [index for index, row in enumerate(raw)
+              if _prompt_body(row) is not None]
+    if not sigils:
+        return ""
+    last = sigils[-1]
+    footers = [index for index, row in enumerate(raw)
+               if " \u00b7 " in _strip_ansi(row) and _prompt_body(row) is None]
+    end = min([footer for footer in footers if footer > last] or [len(raw)])
+    parts = []
+    body = _prompt_body(raw[last])
+    if body:
+        parts.append(body)
+    for row in raw[last + 1:end]:
+        nested = _prompt_body(row)
+        text = (nested if nested is not None else _strip_ansi(row).strip())
+        if text:
+            parts.append(text)
+    return " ".join(parts)
 
 
 def box_text(screen):
