@@ -85,6 +85,8 @@ class WiringTests(unittest.TestCase):
         lease = other.execute('SELECT pane_id,caller_pid,caller_start FROM task_leases WHERE task_id=?', (self.b,)).fetchone()
         self.assertEqual((PANE, CALLER['pid'], CALLER['start']), lease)
         h = self.handoff()
+        claimed_at = other.execute('SELECT claimed_at FROM task_leases WHERE task_id=?', (self.b,)).fetchone()[0]
+        self.assertGreaterEqual(h['at'], claimed_at)
         self.assertEqual(result['completed_at'], h['completion_at'])
         self.assertEqual(self.a, h['from_task'])
         self.assertEqual('queued', self.f.inbox.status(h['message_id'])['state'])
@@ -240,6 +242,21 @@ os._exit(0)
         self.assertEqual('pending', self.handoff()['state'])
         self.assertEqual('not_allowed', self.handoff()['reason'])
         self.assertEqual([], self.herdr.sends)
+
+    def test_permission_rechecked_inside_final_typing_lock(self):
+        self.complete()
+        original = self.f.send_guarded
+        def guarded(*args, **kwargs):
+            # Permission is withdrawn after the worker's outer checks. The
+            # check under send_guarded's lock must run before even a box flush.
+            with mock.patch.object(dunk_core, 'TURN_END_DISPATCH', False):
+                return original(*args, **kwargs)
+        with mock.patch.object(self.f, 'send_guarded', side_effect=guarded):
+            self.f.next_jobs.tick()
+        self.assertEqual('pending', self.handoff()['state'])
+        self.assertEqual('disabled', self.handoff()['reason'])
+        self.assertEqual([], self.herdr.sends)
+        self.assertEqual([], self.herdr.keys)
 
     def test_unlisted_lane_cannot_materialise_a_committed_intent(self):
         self.tasks.advance_next_job(PANE, trigger='completion', from_task=self.a,

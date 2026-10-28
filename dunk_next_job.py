@@ -199,6 +199,7 @@ class NextJobs:
                                   lambda: f.submit_text(h["pane_id"], text))
                 message.notify_for = [h["message_id"]]
                 message.preserve_draft = True
+                message.permission = lambda: self.gate(h["pane_id"])
                 f.inbox.record_notify(h["message_id"], "queued", transport_id=message.id,
                                       attempt=h["attempt"])
                 reason = self.gate(h["pane_id"])

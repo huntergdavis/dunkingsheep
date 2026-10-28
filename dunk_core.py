@@ -4120,7 +4120,8 @@ class Flock:
             message.pane_id, message.deliver,
             hold_while_typing=message.hold_while_typing,
             allow_modal=(message.kind == "keys"),
-            preserve_draft=getattr(message, "preserve_draft", False))
+            preserve_draft=getattr(message, "preserve_draft", False),
+            permission=getattr(message, "permission", None))
         if not sent:
             with self._lock:
                 message.holds += 1
@@ -5200,7 +5201,8 @@ class Flock:
             return lock
 
     def send_guarded(self, pane_id, send, last_sent_text=None, awaiting_consumption=False,
-                     hold_while_typing=True, allow_modal=False, preserve_draft=False):
+                     hold_while_typing=True, allow_modal=False, preserve_draft=False,
+                     permission=None):
         """Run `send` (a callable that types into `pane_id`) with the send lock
         held, after one final look at the input box under that same lock.
 
@@ -5226,6 +5228,10 @@ class Flock:
         # The dead check here is read-free (a plain read, not the styled one) so the
         # styled-read budget is unchanged; the box check happens inside the burst.
         with self._lock_for(pane_id), self._typing(pane_id):
+            if permission is not None:
+                refusal = permission()
+                if refusal:
+                    return False, None, refusal
             if hold_while_typing:
                 marker = self._dead_session(pane_id)
                 if marker:

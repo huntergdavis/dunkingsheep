@@ -698,7 +698,7 @@ class Tasks:
                                        caller=caller)
                         self.record_next_job_handoff(
                             chosen["id"], pane_id=pane_id, from_task=from_task,
-                            message_id=handoff["message_id"], now=now, details=handoff)
+                            message_id=handoff["message_id"], now=_now(), details=handoff)
                         plan["handoff"] = dict(handoff, task_id=chosen["id"], pane_id=pane_id)
                 self._record(from_task or "", "next_job_decision", at=now,
                              actor=pane_id, meta={k: v for k, v in plan.items() if k != "handoff"})
