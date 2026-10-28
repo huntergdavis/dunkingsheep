@@ -454,6 +454,21 @@ def h_owner_stats(flock, args, self_pane_id):
     return {"stats": store.stats(), "pending": store.pending()}
 
 
+def h_owner_receipts(flock, args, self_pane_id):
+    """READ-ONLY: arrival timestamps for specific owner pushes (t66).
+
+    A receipt must never consume what it reports on, so this cannot call take(): it reads created_at and
+    taken_at and mutates nothing.
+    """
+    import dunk_owner
+    ids = args.get("push_ids") or []
+    if isinstance(ids, str):
+        ids = [part.strip() for part in ids.split(",") if part.strip()]
+    # COMPLETE vs TRUNCATED is stated, not implied (t319), and the counts come back WITH the rows: no
+    # shared attribute, so nothing can be stale on the empty path or cross between concurrent calls.
+    return dunk_owner.shared().receipts(ids)
+
+
 def h_roster(flock, args, self_pane_id):
     import dunk_views
     return dunk_views.roster(flock)
@@ -1220,6 +1235,13 @@ COMMANDS = [
         "Owner-push counts and delivery latency (p50/p90/max) in the last day.",
         h_owner_stats,
         params={}),
+    Command(
+        "owner_receipts",
+        "READ-ONLY: created_at/taken_at for specific owner pushes (max 100 ids), no body and no "
+        "mutation, so a caller can prove a particular message arrived without consuming it.",
+        h_owner_receipts,
+        params={"push_ids": {"type": "array", "items": {"type": "integer"},
+                             "description": "owner_push ids to report on (max 100)."}}),
     Command(
         "state_capture",
         "Record one row per agent lane: project, harness, argv, session, model, thinking, "

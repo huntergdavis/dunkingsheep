@@ -116,6 +116,38 @@ class OwnerPush:
             self.db.commit()
             return {"id": cursor.lastrowid, "pane_id": pane_id, "at": now}
 
+    def receipts(self, push_ids):
+        """READ-ONLY arrival receipts for specific pushes (t66, %33's request).
+
+        The desk can see that a push is pending or that the counters moved, but neither proves that a
+        PARTICULAR message arrived: created_at/taken_at do. This returns exactly those two timestamps for
+        the ids asked for, and nothing else - no body, no subject, no target, and no mutation of taken_at
+        (a receipt must never consume the message it reports on).
+
+        Unknown ids are ABSENT from the result rather than null: "no such push" and "a push with no
+        timestamps" are different answers and the caller should be able to tell them apart.
+
+        The counts travel WITH the rows rather than being stashed on the store (t319 review): a shared
+        attribute was (a) stale on the empty/junk path, so a caller who asked for nothing was told it had
+        asked for 150 and been truncated, and (b) read after the call, so two concurrent calls could report
+        each other's counts. Returning them makes both impossible.
+        """
+        requested = [int(i) for i in (push_ids or []) if str(i).strip().isdigit()]
+        requested = [i for i in requested if i > 0]
+        ids = requested[:100]
+        meta = {"requested": len(requested), "returned": 0,
+                "truncated": len(requested) > len(ids)}
+        if not ids:
+            return {"receipts": [], **meta}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, pane_id, created_at, taken_at FROM owner_push "
+                f"WHERE id IN ({placeholders}) ORDER BY id", ids).fetchall()
+        receipts = [{"id": row["id"], "pane_id": row["pane_id"],
+                     "created_at": row["created_at"], "taken_at": row["taken_at"]} for row in rows]
+        return {"receipts": receipts, **meta, "returned": len(receipts)}
+
     def take(self, pane_id, *, by=None, limit=20, now=None):
         """Hand over what is waiting for this pane, oldest first."""
         now = now or time.time()
