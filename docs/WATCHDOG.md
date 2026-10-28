@@ -487,3 +487,5 @@ pages retain their desk channel; historical pages without it belong to VP and
 cannot be confirmed by a CoS watermark. Owner posting remains unwired; this
 change does not enable paging. A previous channel field in telegram.json must
 be moved to the separate routing file before starting the revised bridge.
+
+A pending-page channel mismatch is recorded once as terminal status undelivered, with timestamp and reason. It never sets confirmed_at, never produces a delivered recovery, and is not automatically re-posted; resolving that terminal record requires operator review. This prevents a cutover mismatch from emitting the same self-error every tick.

@@ -161,3 +161,5 @@ say the same thing.
   - CI and pin checks are deferred. The accounting pin check **is** runnable
     locally without network (`tools/overlay/function_queue_audit.py` in
     poolrad-decomp exits 2 on drift).
+
+A pending-page channel mismatch is recorded once as terminal status undelivered, with timestamp and reason. It never sets confirmed_at, never produces a delivered recovery, and is not automatically re-posted; resolving that terminal record requires operator review. This prevents a cutover mismatch from emitting the same self-error every tick.

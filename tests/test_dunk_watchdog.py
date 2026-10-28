@@ -1040,6 +1040,24 @@ class DeskBriefChannelTests(WatchdogCase):
         self.assertEqual(2, len(problems))
         self.assertTrue(all("UNDELIVERED" in p for p in problems))
 
+    def test_mismatched_page_is_terminal_and_reported_once_across_restart(self):
+        channel = self.channel('{"channel": "cos", "last_brief_id": 999999}')
+        state = {"owner_pages": {
+            "legacy": {"brief_id": 1, "posted_at": NOW, "confirmed_at": None},
+        }}
+        counts = []
+        for tick in range(3):
+            problems = []
+            wd._confirm_pending(self.fleet.config(), state, channel, NOW + tick, problems)
+            counts.append(len(problems))
+            state = json.loads(json.dumps(state))  # persisted state, next process
+        page = state["owner_pages"]["legacy"]
+        self.assertEqual([1, 0, 0], counts)
+        self.assertIsNone(page["confirmed_at"])
+        self.assertEqual("undelivered", page["status"])
+        self.assertEqual(NOW, page["undelivered_at"])
+        self.assertEqual("channel-mismatch", page["undelivered_reason"])
+
     def test_post_fails_toward_not_paging(self):
         with self.assertRaises(wd.OwnerChannelUnavailable):
             self.channel(None).post("page")
@@ -1472,7 +1490,7 @@ class NoModelTests(unittest.TestCase):
     # sampler sees; neither spawns a process nor opens a socket (checked below).
     ALLOWED_IMPORTS = {"__future__", "hashlib", "json", "os", "re", "sqlite3", "sys", "time", "pathlib",
                        "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy",
-                       "dunk_panes"}
+                       "dunk_panes", "dunk_telegram_routing"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -1524,7 +1542,7 @@ class NoModelTests(unittest.TestCase):
             self.assertEqual([], bad, name)
 
     def test_watchdog_modules_import_and_name_nothing_model_related(self):
-        for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py"):
+        for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py", "dunk_telegram_routing.py"):
             self.assertEqual([], self.violations(read(os.path.join(ROOT, name))), name)
 
     def test_the_guard_catches_a_model_call(self):

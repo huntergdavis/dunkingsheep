@@ -1457,7 +1457,8 @@ class DeskBriefChannel:
 def _confirm_pending(config, state, owner_channel, now, problems):
     """Mark pending owner pages confirmed when the forwarder has passed them;
     report pages that stay unconfirmed past confirm_within_minutes."""
-    pending = {k: p for k, p in state["owner_pages"].items() if p.get("confirmed_at") is None}
+    pending = {k: p for k, p in state["owner_pages"].items()
+               if p.get("confirmed_at") is None and p.get("status") != "undelivered"}
     if not pending:
         return
     try:
@@ -1471,6 +1472,9 @@ def _confirm_pending(config, state, owner_channel, now, problems):
         page_channel = page.get("desk_channel", "vp")
         confirmation_channel = getattr(owner_channel, "desk_channel", "vp")
         if page_channel != confirmation_channel:
+            page.update(status="undelivered", undelivered_at=now,
+                        undelivered_reason="channel-mismatch",
+                        confirmation_channel=confirmation_channel)
             problems.append(f"owner page {key} (brief {page['brief_id']}) channel "
                             f"{page_channel} differs from confirmation channel "
                             f"{confirmation_channel}; recorded as UNDELIVERED")
