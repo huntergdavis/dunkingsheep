@@ -318,6 +318,15 @@ Python 3.8+ and herdr 0.7.4+ with a running server (`herdr` on `PATH` or at
 - **no herdr pane matches** — `dunkingsheep panes`, then use the pane id.
 - **target 'self' needs HERDR_PANE_ID** — not inside a herdr pane; pass a pane id or `--self-pane`.
 - **Daemon** — log at `~/.config/dunkingsheep/daemon.log`; `dunkingsheep shutdown` then any command restarts it with saved dunks.
+- **Code identity** — `status` and the polling API compare a frozen import-time
+  source manifest with disk. It covers every top-level Python module and the
+  `dunkingsheep` entrypoint, including modules not yet loaded; tests, tools,
+  integrations and third-party libraries are excluded. `code_hash` identifies
+  that captured tree, `code_changed_modules` names added, removed or changed
+  files, and unreadable source produces `code_stale: null` plus
+  `code_identity_errors` (the CLI prints `UNKNOWN`). A fresh process captures
+  the new tree. This assumes source stays stable during startup; it does not
+  attest loaded bytecode or detect stale bytecode caches.
 - **Send failed** — pane was closed; `update <id> -T …` or `c` in the TUI.
 
 ---

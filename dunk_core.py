@@ -54,6 +54,71 @@ import time
 
 from pathlib import Path
 
+VERSION = "2.70.83"
+
+def code_identity(path=None):
+    """Hash the flat application module tree, not just dunk_core.py.
+
+    All top-level Python modules plus the CLI entrypoint are included, even if
+    lazily imported. Tests, tools, integrations and third-party libraries are
+    outside this application tree. A file path remains supported for callers
+    asking for a single-file identity. Mtimes are informational only.
+    """
+    target = Path(path) if path is not None else Path(__file__).resolve().parent
+    modules, mtimes, errors = {}, [], []
+    try:
+        files = sorted(target.glob("*.py")) if target.is_dir() else [target]
+        if target.is_dir() and (target / "dunkingsheep").exists():
+            files.append(target / "dunkingsheep")
+        if not files:
+            raise OSError("empty application module tree")
+        for source in files:
+            try:
+                modules[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+                mtimes.append(source.stat().st_mtime)
+            except OSError:
+                modules[source.name] = None
+                errors.append(source.name)
+    except OSError:
+        errors.append("<module tree>")
+    digest = (hashlib.sha256(json.dumps(modules, sort_keys=True).encode()).hexdigest()[:12]
+              if not errors else None)
+    return {"code_hash": digest, "code_mtime": max(mtimes, default=None),
+            "code_modules": modules, "code_errors": sorted(errors)}
+
+
+# Freeze once, before importing application dependencies. Status must compare
+# this process's import-time tree with disk, never two fresh disk snapshots.
+# As with Python imports themselves, deployment must not rewrite source during
+# startup; this is a source-tree identity, not attestation of loaded bytecode.
+CODE_IDENTITY = code_identity()
+
+
+def code_is_stale(identity=None, current=None):
+    """Compare the import-time application tree with the current disk tree."""
+    identity = CODE_IDENTITY if identity is None else identity
+    current = code_identity() if current is None else current
+    if not identity.get("code_hash") or not current.get("code_hash"):
+        return None
+    if "code_modules" in identity and "code_modules" in current:
+        return identity["code_modules"] != current["code_modules"]
+    return identity["code_hash"] != current["code_hash"]
+
+
+def code_status():
+    """One disk read per status request, including names and read failures."""
+    current = code_identity()
+    before, after = CODE_IDENTITY["code_modules"], current["code_modules"]
+    errors = sorted(set(CODE_IDENTITY["code_errors"] + current["code_errors"]))
+    changed = sorted(name for name in before.keys() | after.keys()
+                     if name not in errors and before.get(name) != after.get(name))
+    return {"code_hash": CODE_IDENTITY["code_hash"],
+            "code_mtime": CODE_IDENTITY["code_mtime"],
+            "code_stale": code_is_stale(CODE_IDENTITY, current),
+            "code_changed_modules": changed,
+            "code_identity_errors": errors}
+
+
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
@@ -65,42 +130,6 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.83"
-
-def code_identity(path=None):
-    """The code's own identity: a short hash of this file, and its mtime.
-
-    A hand-maintained version constant answers "is my fix live?" wrong in the
-    reassuring direction: this file said 2.37.4 for eight commits whose messages
-    claimed 2.38 through 2.51, and the daemon printed the constant. The constant is
-    now checked against the commit subject by a test, and the hash + mtime are
-    derived so the answer never depends on someone remembering to edit a string.
-    """
-    target = Path(path or __file__)
-    try:
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()[:12]
-        mtime = target.stat().st_mtime
-    except OSError:
-        return {"code_hash": None, "code_mtime": None}
-    return {"code_hash": digest, "code_mtime": mtime}
-
-
-CODE_IDENTITY = code_identity()
-
-
-def code_is_stale(identity=None, current=None):
-    """True when the code ON DISK is not the code this process is running.
-
-    The comparison has to be between the hash this process imported and the hash of
-    the file as it is now. Comparing a captured mtime to the process start time was
-    a comparison of a value with itself, and it said 'no' while the daemon ran four
-    commits behind the file - the exact lie this exists to prevent.
-    """
-    identity = identity or CODE_IDENTITY
-    current = current if current is not None else code_identity()
-    if not identity.get("code_hash") or not current.get("code_hash"):
-        return None
-    return identity["code_hash"] != current["code_hash"]
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -1051,10 +1080,8 @@ class Flock:
         available = self.herdr.is_available() if check_herdr else None
         return {
             "version": VERSION,
-            "code_hash": CODE_IDENTITY["code_hash"],
-            "code_mtime": CODE_IDENTITY["code_mtime"],
+            **code_status(),
             "started_at": self.started_at,
-            "code_stale": code_is_stale(),
             "pid": os.getpid(),
             "dunkers": total,
             "running": running,
@@ -1084,10 +1111,8 @@ class Flock:
             message = self.last_message
         return {
             "version": VERSION,
-            "code_hash": CODE_IDENTITY["code_hash"],
-            "code_mtime": CODE_IDENTITY["code_mtime"],
+            **code_status(),
             "started_at": self.started_at,
-            "code_stale": code_is_stale(),
             "pid": os.getpid(),
             "dunkers": total,
             "running": running,
