@@ -104,6 +104,31 @@ def _poll_path():
                         "dunk_poll.py")
 
 
+def resolve_real_tmux(guard_dir=None):
+    """Resolve an executable outside the guard chain, without launching it.
+
+    Used only for installation and explicit fixture-controller selection.
+    Resolve symlinks before returning: reinstalling must not link to a wrapper
+    or to a symlink that the installer is about to replace.
+    """
+    from dunk_tmux_guard import is_guard
+    directory = guard_dir or TMUX_GUARD_DIR
+    candidates = [os.environ.get("DUNKINGSHEEP_TMUX_BIN"),
+                  os.path.join(directory, "tmux-real")]
+    candidates.extend(os.path.join(part, "tmux")
+                      for part in os.environ.get("PATH", "").split(os.pathsep)
+                      if part and os.path.realpath(part) != os.path.realpath(directory))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = os.path.realpath(candidate)
+        if (os.path.isfile(resolved) and os.access(resolved, os.X_OK)
+                and not is_guard(resolved)):
+            return resolved
+    raise FileNotFoundError("no executable non-guard tmux found; configure "
+                            "DUNKINGSHEEP_TMUX_BIN or install tmux on PATH")
+
+
 def tmux_status():
     """What the tmux guard looks like right now."""
     wrapper = os.path.join(TMUX_GUARD_DIR, "tmux")
@@ -123,17 +148,22 @@ def install_tmux():
     must never wrap the user's own tmux. `TmuxBackend.start_agent` puts this
     directory first on the agent pane's PATH.
     """
-    real = shutil.which("tmux")
-    if not real:
-        raise RuntimeError("tmux is not installed; cannot install the tmux guard")
+    real = resolve_real_tmux(guard_dir=TMUX_GUARD_DIR)
+    target = os.path.join(TMUX_GUARD_DIR, "tmux")
+    if os.path.exists(target) and os.path.samefile(target, real):
+        raise RuntimeError("cannot replace the selected real tmux with its guard")
     os.makedirs(TMUX_GUARD_DIR, exist_ok=True)
     link = os.path.join(TMUX_GUARD_DIR, "tmux-real")
-    if os.path.lexists(link):
-        os.remove(link)
-    try:
-        os.symlink(real, link)
-    except OSError:
-        shutil.copy2(real, link)
+    # A prior symlink fallback may have copied the binary here. Preserve that
+    # regular file on reinstall instead of replacing it with a link to itself.
+    if not (os.path.isfile(link) and not os.path.islink(link)
+            and os.path.samefile(link, real)):
+        if os.path.lexists(link):
+            os.remove(link)
+        try:
+            os.symlink(real, link)
+        except OSError:
+            shutil.copy2(real, link)
     with open(TMUX_WRAPPER_PATH, "r", encoding="utf-8") as handle:
         source = handle.read()
     source = source.replace(

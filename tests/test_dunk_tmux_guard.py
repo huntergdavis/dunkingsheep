@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import tempfile
 import time
 import unittest
@@ -10,6 +9,15 @@ import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_guard
 import dunk_tmux_guard
 from dunk_terminal import TmuxBackend
+
+
+# The fixture controller must not inherit the agent-facing PATH guard. Agent
+# panes still receive that guard from start_agent; this selects only the test
+# controller's executable and never launches a process during resolution.
+try:
+    CONTROLLER_TMUX = dunk_guard.resolve_real_tmux()
+except FileNotFoundError:
+    CONTROLLER_TMUX = None
 
 
 def _kill_cwd(directory):
@@ -163,7 +171,7 @@ class GuardClassificationTests(unittest.TestCase):
 
 class InstallTests(unittest.TestCase):
     def test_install_writes_a_wrapper_and_a_real_binary(self):
-        if not shutil.which("tmux"):
+        if not CONTROLLER_TMUX:
             self.skipTest("tmux is not installed")
         with tempfile.TemporaryDirectory() as tmp:
             guard_dir = os.path.join(tmp, "tmux-guard")
@@ -182,14 +190,14 @@ class InstallTests(unittest.TestCase):
             self.assertNotIn("__DUNKINGSHEEP__", text)
 
     def test_backend_prepends_the_guard_only_for_agent_panes(self):
-        if not shutil.which("tmux"):
+        if not CONTROLLER_TMUX:
             self.skipTest("tmux is not installed")
         with tempfile.TemporaryDirectory() as tmp:
             guard_dir = os.path.join(tmp, "tmux-guard")
             with mock.patch.object(dunk_guard, "TMUX_GUARD_DIR", guard_dir):
                 dunk_guard.install_tmux()
             backend = TmuxBackend(
-                socket_name=f"dsh-guardpath-{os.getpid()}", tmux_bin="tmux",
+                socket_name=f"dsh-guardpath-{os.getpid()}", tmux_bin=CONTROLLER_TMUX,
                 guard_dir=guard_dir,
                 registry_path=os.path.join(tmp, "reg.json"))
             self.addCleanup(lambda: backend._run(["kill-server"], timeout=5))
@@ -218,7 +226,7 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(backend.close("pane", result["pane_id"])[0])
 
 
-@unittest.skipUnless(shutil.which("tmux"), "tmux is not installed")
+@unittest.skipUnless(CONTROLLER_TMUX, "non-guard tmux is not installed")
 class LiveGuardTests(unittest.TestCase):
     """The guard as the agent actually sees it: PATH-first, real tmux beside.
 
@@ -234,7 +242,7 @@ class LiveGuardTests(unittest.TestCase):
             dunk_guard.install_tmux()
         self.socket = f"dsh-live-guard-{os.getpid()}-{id(self)}"
         self.backend = TmuxBackend(
-            socket_name=self.socket, guard_dir=self.guard_dir,
+            socket_name=self.socket, tmux_bin=CONTROLLER_TMUX, guard_dir=self.guard_dir,
             registry_path=os.path.join(self.tmp.name, "reg.json"))
         self.addCleanup(self._cleanup)
 
