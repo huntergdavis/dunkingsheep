@@ -338,3 +338,60 @@ class CollectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OperatorBoundaryTests(unittest.TestCase):
+    """Task writes must use the authentic operator, never the target lane."""
+
+    def setUp(self):
+        self.tool = load_tool()
+        self.calls = []
+        self.result = None
+
+    def cli(self, *args, **kwargs):
+        self.calls.append(list(args))
+        return self.result
+
+    def test_create_task_uses_operator_and_global_exclusive_assign(self):
+        from types import SimpleNamespace
+        self.result = SimpleNamespace(returncode=0, stdout=json.dumps({"id": "tA"}),
+                                      stderr="")
+        self.tool._cli = self.cli
+        spec = {"title": "A", "body": "b"}
+        tid = self.tool._create_task("%2", "%90", spec)
+        self.assertEqual("tA", tid)
+        args = self.calls[0]
+        self.assertEqual("%2", args[args.index("--self-pane") + 1])
+        self.assertEqual("global", args[args.index("--scope") + 1])
+        self.assertEqual("%90", args[args.index("--assign") + 1])
+        self.assertNotEqual("%90", args[args.index("--self-pane") + 1])
+
+    def test_create_task_refuses_same_operator_and_target(self):
+        with self.assertRaises(SystemExit):
+            self.tool._create_task("%90", "%90", {"title": "A", "body": "b"})
+
+    def test_task_add_failure_names_the_target(self):
+        from types import SimpleNamespace
+        self.result = SimpleNamespace(returncode=2, stdout="", stderr="refused")
+        self.tool._cli = self.cli
+        with self.assertRaises(SystemExit) as caught:
+            self.tool._create_task("%2", "%90", {"title": "A", "body": "b"})
+        self.assertIn("%90", str(caught.exception))
+
+    def test_cleanup_uses_operator_never_target(self):
+        tmp = Path(tempfile.mkdtemp(prefix="t374-cleanup-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        (tmp / "tasks.json").write_text(json.dumps({
+            "pi": {"pane": "%90", "A": "tA1", "B": "tB1"},
+            "codex": {"pane": "%91", "A": "tA2", "B": "tB2"}}))
+        commands = self.tool.cleanup(tmp, execute=False, operator_pane="%2")
+        for command in commands:
+            self.assertEqual("%2", command[command.index("--self-pane") + 1])
+            self.assertNotIn("%90", command)
+            self.assertNotIn("%91", command)
+
+    def test_cleanup_requires_operator_before_any_mutation(self):
+        tmp = Path(tempfile.mkdtemp(prefix="t374-cleanup-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        with self.assertRaises(SystemExit):
+            self.tool.cleanup(tmp, execute=True, operator_pane=None)

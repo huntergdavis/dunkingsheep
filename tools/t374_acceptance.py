@@ -142,7 +142,7 @@ def _launch_prompt(run_id, lane, wait_seconds=20):
         f"You are the t374 acceptance lane for {lane} (run {run_id}). "
         f"First run the shell command `sleep {int(wait_seconds)}` once (a one-time "
         "wait for your tasks to be created), then "
-        "run exactly once: dunkingsheep task next \"$TMUX_PANE\" . "
+        "run exactly once: dunkingsheep task next . "
         "Read the claimed task with: dunkingsheep task read <id> . "
         "Do exactly what its body says, then complete it with: "
         "dunkingsheep task complete <id> . "
@@ -228,8 +228,9 @@ def plan(out_dir, run_id=None, pi_model="", codex_model="", codex_home="", codex
              f"2. Launch BOTH dedicated lanes with the commands below; each sleeps "
              f"{int(wait_seconds)}s.",
              "3. Within that window run `t374_acceptance.py prepare --run <this-run> "
-             "--execute --approval <approval.json> --pi-pane <pane> --codex-pane <pane>` "
-             "to create the pane-private A/B tasks.",
+             "--execute --approval <approval.json> --operator-pane <operator-pane> "
+             "--pi-pane <pane> --codex-pane <pane>` to create the global A/B tasks "
+             "assigned to the dedicated panes.",
              "4. Do not send any further prompt or key. A is the only initial prompt; "
              "B must arrive from the automatic handoff.", ""]
     for lane in LANES:
@@ -272,22 +273,37 @@ def _approval(approval_path):
     return approval, status
 
 
-def _create_task(pane, spec):
-    result = _cli("--json", "--self-pane", pane, "task", "add",
-                  spec["title"], "--scope", pane, "--assign", pane,
+def _create_task(operator, target, spec):
+    """Create a global task exclusively assigned to the dedicated pane.
+
+    The authenticated caller is the OPERATOR (CoS %2); the target pane is only
+    an assignee.  The guarded CLI refuses cross-pane private-task creation
+    ("per-pane tasks are private to <target>; caller runs in <operator>"), so
+    the supported no-impersonation path is a global task assigned to the lane.
+    """
+    if not operator or not target or operator == target:
+        raise SystemExit("prepare requires an operator pane distinct from the target")
+    result = _cli("--json", "--self-pane", operator, "task", "add",
+                  spec["title"], "--scope", "global", "--assign", target,
                   "-p", "urgent", "-b", spec["body"])
     data = _json(result.stdout)
     if result.returncode != 0 or not isinstance(data, dict) or not data.get("id"):
-        raise SystemExit(f"task add failed for {pane}: {result.stderr or result.stdout}")
+        raise SystemExit(f"task add failed for {target}: {result.stderr or result.stdout}")
     return data["id"]
 
 
-def prepare(run_dir, execute=False, approval=None, pi_pane=None, codex_pane=None):
+def prepare(run_dir, execute=False, approval=None, operator_pane=None,
+            pi_pane=None, codex_pane=None):
     manifest = json.loads((Path(run_dir) / "manifest.json").read_text())
     panes = {"pi": pi_pane, "codex": codex_pane}
     if not execute:
         raise SystemExit("prepare is write-capable; pass --execute after the "
                          "approved release and dedicated lanes exist")
+    if not operator_pane:
+        raise SystemExit("--operator-pane is required (the CoS/trusted operator's own pane)")
+    if operator_pane in panes.values():
+        raise SystemExit("operator pane must differ from both target panes; "
+                         "do not impersonate the dedicated lane")
     approval_data, _status = _approval(approval)
     manifest["release"] = {"version": approval_data["version"],
                            "code_hash": approval_data.get("code_hash") or approval_data.get("code"),
@@ -299,12 +315,14 @@ def prepare(run_dir, execute=False, approval=None, pi_pane=None, codex_pane=None
         if not pane:
             raise SystemExit(f"--{lane}-pane is required")
         spec = manifest["lanes"][lane]["tasks"]
-        a_id = _create_task(pane, spec["A"])
-        b_id = _create_task(pane, spec["B"])
+        a_id = _create_task(operator_pane, pane, spec["A"])
+        b_id = _create_task(operator_pane, pane, spec["B"])
         tasks[lane] = {"pane": pane, "A": a_id, "B": b_id}
         manifest["lanes"][lane]["pane"] = pane
         print(f"{lane}: pane {pane} A={a_id} B={b_id}")
     manifest["status"] = "prepared"
+    manifest["operator_pane"] = operator_pane
+    manifest["task_scope"] = "global assigned to the dedicated pane (no impersonation)"
     manifest["prepared_at"] = _now()
     (Path(run_dir) / "tasks.json").write_text(json.dumps(tasks, indent=2) + "\n")
     (Path(run_dir) / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -659,14 +677,16 @@ def validate(receipt):
     return failures
 
 
-def cleanup(run_dir, execute=False):
+def cleanup(run_dir, execute=False, operator_pane=None):
+    if not operator_pane:
+        raise SystemExit("cleanup requires --operator-pane (the authentic operator)")
     run = Path(run_dir)
     tasks = json.loads((run / "tasks.json").read_text())
     commands = []
     for lane in LANES:
         row = tasks[lane]
         for key in ("A", "B"):
-            commands.append(["dunkingsheep", "--self-pane", row["pane"],
+            commands.append(["dunkingsheep", "--self-pane", operator_pane,
                              "task", "cancel", row[key], "--reason",
                              f"t374 acceptance cleanup {run.name}"])
     for cmd in commands:
@@ -695,6 +715,7 @@ def main(argv=None):
     p.add_argument("--run", required=True)
     p.add_argument("--execute", action="store_true")
     p.add_argument("--approval", required=True)
+    p.add_argument("--operator-pane", required=True)
     p.add_argument("--pi-pane", required=True)
     p.add_argument("--codex-pane", required=True)
     p = sub.add_parser("collect")
@@ -703,6 +724,7 @@ def main(argv=None):
     p.add_argument("--receipt", required=True)
     p = sub.add_parser("cleanup")
     p.add_argument("--run", required=True)
+    p.add_argument("--operator-pane", required=True)
     p.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "plan":
@@ -710,7 +732,8 @@ def main(argv=None):
              args.codex_home, args.codex_state, args.wait_seconds,
              args.pi_extension)
     elif args.command == "prepare":
-        prepare(args.run, args.execute, args.approval, args.pi_pane, args.codex_pane)
+        prepare(args.run, args.execute, args.approval, args.operator_pane,
+                args.pi_pane, args.codex_pane)
     elif args.command == "collect":
         collect(args.run)
     elif args.command == "validate":
@@ -723,7 +746,7 @@ def main(argv=None):
             return 1
         print("PASS: real A->B chain satisfies t372 clauses")
     elif args.command == "cleanup":
-        cleanup(args.run, args.execute)
+        cleanup(args.run, args.execute, args.operator_pane)
     return 0
 
 
