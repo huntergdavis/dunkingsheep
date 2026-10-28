@@ -115,9 +115,11 @@ class NextJobs:
                         return f.tasks.update_next_job(h, state="pending",
                                                        reason="interrupted_before_transport")
                     if receipt["state"] == "sent" and receipt["attempt"] == h["attempt"]:
-                        return f.tasks.update_next_job(h, state="sent", reason=None,
-                                                       transport_id=receipt["transport_id"],
-                                                       delivered_at=receipt["at"])
+                        recovered = f.tasks.update_next_job(h, state="sent", reason=None,
+                                                           transport_id=receipt["transport_id"],
+                                                           delivered_at=receipt["at"])
+                        self.bind_turn(h["pane_id"])
+                        return recovered
                     # Crash in the external-side-effect window: never manufacture
                     # a receipt or send the same execution request twice.
                     f.inbox.record_notify(h["message_id"], "undeliverable", "delivery_interrupted")
@@ -125,6 +127,7 @@ class NextJobs:
                                                    reason="delivery_interrupted")
                 return h
             if h["state"] == "sent":
+                self.bind_turn(h["pane_id"])
                 return h  # delivery confirmed; waiting for an actual producer turn
             now = time.time()
             with f._lock:
@@ -186,6 +189,24 @@ class NextJobs:
                 f.inbox.record_notify(h["message_id"], "undeliverable", reason)
                 return f.tasks.update_next_job(h, state="undeliverable", reason=reason)
 
+    def observe_turn(self, pane, turn):
+        """Persist the producer's exact generation without claiming delivery.
+
+        This callback must not wait for the transport's pane lock: the submit
+        ladder may itself be waiting for the producer hook to return.
+        """
+        if not turn.get("handoff_id"):
+            return
+        for h in self.flock.tasks.next_job_handoffs(pane):
+            if (h["message_id"] == turn["handoff_id"]
+                    and h["state"] in ("sending", "sent")
+                    and turn["started_at"] >= h.get("attempt_at", float("inf"))):
+                self.flock.tasks.update_next_job(
+                    h, expected={"attempt": h["attempt"], "observed_turn": None},
+                    observed_turn={k: turn.get(k) for k in
+                                   ("turn_id", "started_at", "source", "caller", "handoff_id")})
+        self.bind_turn(pane)
+
     def bind_turn(self, pane):
         """Link a confirmed message to a new producer generation, never busy status."""
         f = self.flock
@@ -193,12 +214,10 @@ class NextJobs:
         if not lock.acquire(blocking=False):
             return  # the sender binds this generation after writing its receipt
         try:
-            with f._lock:
-                turn = dict(f.turns.get(pane) or {})
-            if not turn.get("turn_id") or turn.get("ended_at"):
-                return
             for h in f.tasks.next_job_handoffs(pane):
+                turn = h.get("observed_turn") or {}
                 if (h["state"] != "sent" or not h.get("delivered_at")
+                        or not turn.get("turn_id")
                         or turn.get("handoff_id") != h["message_id"]
                         or turn["started_at"] < h.get("attempt_at", float("inf"))):
                     continue

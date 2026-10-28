@@ -2294,7 +2294,7 @@ class Flock:
             self.turns[pane_id] = state
         self.metrics.record("turn.start", pane_id=pane_id, source=source,
                             outcome="ok", at=now)
-        self.next_jobs.bind_turn(pane_id)
+        self.next_jobs.observe_turn(pane_id, state)
         return {"pane_id": pane_id, "started_at": now,
                 "expires_at": now + ttl, "ttl_s": ttl, "source": source,
                 "turn_id": state["turn_id"]}

@@ -284,6 +284,24 @@ os._exit(0)
         self.f.turn_start(PANE, source='pi-test', handoff_id='nj-' + '0' * 32)
         self.assertEqual('sent', self.handoff()['state'])
 
+    def test_fast_turn_evidence_survives_until_delivery_is_confirmed(self):
+        self.complete()
+        actual = {}
+        def submit(pane, text):
+            token = self.f.turn_start(pane, source='pi-test', handoff_id=self.handoff()['message_id'])
+            actual.update(token)
+            # This generation ended and was replaced before the submit ladder
+            # returned. The persisted observed turn must still name B exactly.
+            self.f.turns[pane]['ended_at'] = time.time()
+            self.f.turn_start(pane, source='unrelated')
+            self.assertEqual('sending', self.handoff()['state'])
+            self.assertNotIn('turn_id', self.handoff())
+            return True, 'fixture submitted'
+        with mock.patch.object(self.f, 'submit_text', side_effect=submit):
+            self.f.next_jobs.tick()
+        self.assertEqual('started', self.handoff()['state'])
+        self.assertEqual(actual['turn_id'], self.handoff()['turn_id'])
+
     def test_unconfirmed_submit_never_becomes_success(self):
         self.complete()
         with mock.patch.object(self.f, 'submit_text', return_value=(False, 'submission unconfirmed')):
