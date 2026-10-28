@@ -27,16 +27,16 @@ Tier 2 re-review (VP i19817).
 
 ## Channels
 
-- **VP** is the dunkingsheep inbox. It is the **only** VP-only channel. Alerts
+- **VP** is the dunkingsheep inbox. Use it for watchdog coordination alerts. Alerts
   arrive from sender `watchdog` (see below).
-- **OWNER** is anything that reaches the owner's phone. Today that is a VP desk
+- **OWNER** is anything that reaches the owner's phone. With the CoS Telegram cutover, that is a CoS desk
   brief (`POST /api/brief`), which `telegram_bridge.send_briefs` forwards.
-  **Every desk 'vp' brief reaches the owner**, so nothing meant for VP alone may
-  go through the desk.
+  **CoS desk briefs reach the owner** with the bridge configured to cos;
+  VP desk briefs remain separate. Do not put agent-only coordination into CoS briefs.
 - **Delivery.** A page is DELIVERED only when the bridge's non-secret status
   file `vp-of-agentry/data/telegram-status.json`
-  `{"last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
-  posted brief id`. Until then the page is pending: it is never re-posted and no
+  `{"channel": "cos", "last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the
+  posted brief id` and both the status and pending page match the route selected by the shared reader. Until then the page is pending: it is never re-posted and no
   cooldown starts.
   - A page still unconfirmed after `confirm_within_minutes` is reported to VP as
     UNDELIVERED.
@@ -472,3 +472,20 @@ systemctl --user enable --now dunkingsheep-watchdog-deadman.timer dunkingsheep-w
 
 The daemon must be restarted to pick up `system_sender` before the first live
 send.
+
+Telegram cutover (t282 / desk PR74): bridge and consumer import the same
+dunk_telegram_routing.resolve_telegram_channel function. It reads the nonsecret
+telegram-routing.json beside telegram-status.json, with precedence
+VP_TELEGRAM_CHANNEL > routing file channel > cos. An absent file takes the
+same default path in both callers. The route must exist in the desk channel
+registry (VP_CHANNELS_FILE, or channels.json / channels.example.json in the
+desk root). Both services must share the routing directory and environment
+overrides. Neither reader opens credential-only telegram.json.
+
+Missing or different status channel is a self-error, not delivery. New pending
+pages retain their desk channel; historical pages without it belong to VP and
+cannot be confirmed by a CoS watermark. Owner posting remains unwired; this
+change does not enable paging. A previous channel field in telegram.json must
+be moved to the separate routing file before starting the revised bridge.
+
+A pending-page channel mismatch is recorded once as terminal status undelivered, with timestamp and reason. It never sets confirmed_at, never produces a delivered recovery, and is not automatically re-posted; resolving that terminal record requires operator review. This prevents a cutover mismatch from emitting the same self-error every tick.

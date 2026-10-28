@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -919,10 +920,12 @@ class OwnerPagingTests(WatchdogCase):
     def test_delivered_only_when_confirmed(self):
         cfg = self.disk_config(hold=1)
         owner = FakeOwner(through=None)
+        owner.desk_channel = "cos"
         self.fleet.run(cfg, owner=owner)
         state, _ = wd.load_state(cfg["state_path"])
         page = state["owner_pages"]["host.disk_full|/:0.98"]
         self.assertIsNone(page["confirmed_at"], "posted is not delivered")
+        self.assertEqual("cos", page["desk_channel"])
         self.fleet.run(cfg, now=NOW + 60, owner=owner)
         self.assertEqual(1, len(owner.posts), "a pending page is never re-posted")
         owner.through = page["brief_id"]
@@ -984,7 +987,19 @@ class OwnerPagingTests(WatchdogCase):
 
 
 class DeskBriefChannelTests(WatchdogCase):
-    """The agreed bridge status contract: {"last_brief_id": int, "updated_at": float} (VP i19825)."""
+    """Confirmation must match the shared bridge route and pending page."""
+
+    def setUp(self):
+        super().setUp()
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("VP_TELEGRAM_CHANNEL", None)
+        registry = os.path.join(self.tmp, "channels.json")
+        with open(registry, "w") as handle:
+            json.dump([{"id": "cos"}, {"id": "vp"}], handle)
+        os.environ["VP_CHANNELS_FILE"] = registry
+
 
     def channel(self, text):
         path = os.path.join(self.tmp, "telegram-status.json")
@@ -994,13 +1009,54 @@ class DeskBriefChannelTests(WatchdogCase):
         return wd.DeskBriefChannel(path)
 
     def test_reads_last_brief_id_and_treats_null_as_unconfirmed(self):
-        self.assertEqual(1065, self.channel('{"last_brief_id": 1065, "updated_at": 1.5}').confirmed_through())
-        self.assertIsNone(self.channel('{"last_brief_id": null, "updated_at": 1.5}').confirmed_through())
+        self.assertEqual(1065, self.channel('{"channel": "cos", "last_brief_id": 1065, "updated_at": 1.5}').confirmed_through())
+        self.assertIsNone(self.channel('{"channel": "cos", "last_brief_id": null, "updated_at": 1.5}').confirmed_through())
 
     def test_unparseable_or_missing_status_is_an_error_never_delivered(self):
-        for text in ("{ trunc", '{"last_brief_id": "1065"}', '{"last_brief_id": true}', None):
+        for text in ("{ trunc", '{"channel": "cos", "last_brief_id": "1065"}', '{"channel": "cos", "last_brief_id": true}', None):
             with self.assertRaises((ValueError, OSError)):
                 self.channel(text).confirmed_through()
+
+    def test_wrong_or_missing_channel_never_confirms_a_high_watermark(self):
+        for value in ("vp", None, "", True):
+            status = {"last_brief_id": 999999, "updated_at": 1.5}
+            if value is not None:
+                status["channel"] = value
+            with self.subTest(channel=value), self.assertRaisesRegex(ValueError, "channel"):
+                self.channel(json.dumps(status)).confirmed_through()
+
+    def test_cos_watermark_only_confirms_cos_pending_pages(self):
+        channel = self.channel('{"channel": "cos", "last_brief_id": 999999, "updated_at": 1.5}')
+        state = {"owner_pages": {
+            "legacy": {"brief_id": 1, "posted_at": NOW, "confirmed_at": None},
+            "vp": {"brief_id": 2, "posted_at": NOW, "confirmed_at": None, "desk_channel": "vp"},
+            "cos": {"brief_id": 3, "posted_at": NOW, "confirmed_at": None, "desk_channel": "cos"},
+        }}
+        problems = []
+        wd._confirm_pending(self.fleet.config(), state, channel, NOW + 1, problems)
+        self.assertIsNone(state["owner_pages"]["legacy"]["confirmed_at"])
+        self.assertIsNone(state["owner_pages"]["vp"]["confirmed_at"])
+        self.assertEqual(NOW + 1, state["owner_pages"]["cos"]["confirmed_at"])
+        self.assertEqual(2, len(problems))
+        self.assertTrue(all("UNDELIVERED" in p for p in problems))
+
+    def test_mismatched_page_is_terminal_and_reported_once_across_restart(self):
+        channel = self.channel('{"channel": "cos", "last_brief_id": 999999}')
+        state = {"owner_pages": {
+            "legacy": {"brief_id": 1, "posted_at": NOW, "confirmed_at": None},
+        }}
+        counts = []
+        for tick in range(3):
+            problems = []
+            wd._confirm_pending(self.fleet.config(), state, channel, NOW + tick, problems)
+            counts.append(len(problems))
+            state = json.loads(json.dumps(state))  # persisted state, next process
+        page = state["owner_pages"]["legacy"]
+        self.assertEqual([1, 0, 0], counts)
+        self.assertIsNone(page["confirmed_at"])
+        self.assertEqual("undelivered", page["status"])
+        self.assertEqual(NOW, page["undelivered_at"])
+        self.assertEqual("channel-mismatch", page["undelivered_reason"])
 
     def test_post_fails_toward_not_paging(self):
         with self.assertRaises(wd.OwnerChannelUnavailable):
@@ -1434,7 +1490,7 @@ class NoModelTests(unittest.TestCase):
     # sampler sees; neither spawns a process nor opens a socket (checked below).
     ALLOWED_IMPORTS = {"__future__", "hashlib", "json", "os", "re", "sqlite3", "sys", "time", "pathlib",
                        "herdr_client", "dunk_client", "dunk_inbox", "dunk_load", "dunk_policy",
-                       "dunk_panes"}
+                       "dunk_panes", "dunk_telegram_routing"}
     FORBIDDEN = ("anthropic", "openai", "claude", "codex", "gemini", "llm", "gpt", "ollama", "mistral",
                  "completion", "subprocess", "urllib", "requests", "http", "socket")
 
@@ -1486,7 +1542,7 @@ class NoModelTests(unittest.TestCase):
             self.assertEqual([], bad, name)
 
     def test_watchdog_modules_import_and_name_nothing_model_related(self):
-        for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py"):
+        for name in ("dunk_watchdog.py", "dunk_watchdog_deadman.py", "dunk_telegram_routing.py"):
             self.assertEqual([], self.violations(read(os.path.join(ROOT, name))), name)
 
     def test_the_guard_catches_a_model_call(self):

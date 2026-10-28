@@ -134,18 +134,17 @@ say the same thing.
   nothing. The independent dead-man (its own unit, its own `--to`, its own
   cooldown) carries that text in its VP alert. There is no second, hard-coded
   recipient.
-- **The OWNER channel in code.** A page is a VP desk brief. Delivery is
+- **The OWNER channel in code.** A page is a CoS desk brief after the Telegram cutover. Delivery is
   confirmed through the bridge's non-secret
   `vp-of-agentry/data/telegram-status.json`
-  `{"last_brief_id": int, "updated_at": float}`, written after forwarding
-  (bridge 55829f2). DELIVERED means `last_brief_id >= posted id`. A null value
+  `{"channel": "cos", "last_brief_id": int, "updated_at": float}`, written after forwarding
+  (desk PR74). DELIVERED requires the status and pending-page channels to match the shared routing resolver, and `last_brief_id >= posted id`. Legacy pending pages without a channel belong to VP; a CoS watermark never confirms them. Bridge and watchdog use one resolver: VP_TELEGRAM_CHANNEL > nonsecret telegram-routing.json channel > cos; absent routing files use that same default path. They must share routing inputs/environment; neither routing reader opens credentials. A null value
   is pending; an unparseable file is unconfirmed plus a self error. The
   watchdog never opens `telegram.json`.
   - Posting needs the desk API token, and how the watchdog may hold it is
     undecided. Until then the post fails toward not paging.
-- **Every desk 'vp' brief reaches the owner's phone.** The dunkingsheep inbox is
-  therefore the only VP-only channel, and nothing addressed to VP goes through
-  the desk.
+- **CoS desk briefs reach the owner's phone** with the bridge configured to cos.
+  VP desk briefs remain separate; watchdog coordination still uses the dunkingsheep inbox.
 - **Bridge-down and inbox-down fallbacks.** No desk banner exists. The interim
   is the dunkingsheep inbox first; if that send fails, a status file
   (`watchdog_deadman_status.json`), a journal line and a non-zero exit, so the
@@ -162,3 +161,5 @@ say the same thing.
   - CI and pin checks are deferred. The accounting pin check **is** runnable
     locally without network (`tools/overlay/function_queue_audit.py` in
     poolrad-decomp exits 2 on drift).
+
+A pending-page channel mismatch is recorded once as terminal status undelivered, with timestamp and reason. It never sets confirmed_at, never produces a delivered recovery, and is not automatically re-posted; resolving that terminal record requires operator review. This prevents a cutover mismatch from emitting the same self-error every tick.

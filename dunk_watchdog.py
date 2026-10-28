@@ -44,6 +44,9 @@ import os
 import re
 import sqlite3
 import time
+from pathlib import Path
+
+from dunk_telegram_routing import resolve_telegram_channel
 
 SCHEMA_ID = "dunkingsheep-watchdog/2"
 SEVERITIES = ("info", "warning", "critical")
@@ -1423,17 +1426,19 @@ def inbox_sender(to, subject, body):
 
 
 class DeskBriefChannel:
-    """OWNER = a VP desk brief, which the Telegram bridge forwards. Delivery is
-    confirmed through the bridge's non-secret status file
-    {"last_brief_id": int, "updated_at": float} (VP i19821/i19822); the watchdog
-    never opens telegram.json, which holds the bot token.
+    """Confirm only the route selected by the bridge's shared routing reader.
 
-    Posting needs the desk API token, and how the watchdog may hold it is not yet
-    decided, so `post` fails toward not paging: nothing is posted, and the
-    failure is a VP self error."""
+    Both callers read telegram-routing.json and the same environment override;
+    neither the resolver nor this consumer opens bot credentials. Posting still
+    fails closed until the desk API credential policy is decided.
+    """
 
     def __init__(self, confirm_path):
         self.confirm_path = confirm_path
+
+    @property
+    def desk_channel(self):
+        return resolve_telegram_channel(Path(self.confirm_path).parent)
 
     def post(self, body):
         raise OwnerChannelUnavailable("desk brief post not wired: desk API token handling awaits VP decision")
@@ -1441,7 +1446,9 @@ class DeskBriefChannel:
     def confirmed_through(self):
         with open(self.confirm_path, encoding="utf-8") as handle:
             status = json.load(handle)
-        value = status.get("last_brief_id") if isinstance(status, dict) else None
+        if not isinstance(status, dict) or status.get("channel") != self.desk_channel:
+            raise ValueError("Telegram confirmation channel differs from configured route or is missing")
+        value = status.get("last_brief_id")
         if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
             raise ValueError(f"last_brief_id is not an integer: {value!r}")
         return value
@@ -1450,7 +1457,8 @@ class DeskBriefChannel:
 def _confirm_pending(config, state, owner_channel, now, problems):
     """Mark pending owner pages confirmed when the forwarder has passed them;
     report pages that stay unconfirmed past confirm_within_minutes."""
-    pending = {k: p for k, p in state["owner_pages"].items() if p.get("confirmed_at") is None}
+    pending = {k: p for k, p in state["owner_pages"].items()
+               if p.get("confirmed_at") is None and p.get("status") != "undelivered"}
     if not pending:
         return
     try:
@@ -1460,6 +1468,17 @@ def _confirm_pending(config, state, owner_channel, now, problems):
         return
     limit = config["escalation"]["owner"]["confirm_within_minutes"] * 60
     for key, page in sorted(pending.items()):
+        # Existing persisted pages predate the cutover and belong to VP.
+        page_channel = page.get("desk_channel", "vp")
+        confirmation_channel = getattr(owner_channel, "desk_channel", "vp")
+        if page_channel != confirmation_channel:
+            page.update(status="undelivered", undelivered_at=now,
+                        undelivered_reason="channel-mismatch",
+                        confirmation_channel=confirmation_channel)
+            problems.append(f"owner page {key} (brief {page['brief_id']}) channel "
+                            f"{page_channel} differs from confirmation channel "
+                            f"{confirmation_channel}; recorded as UNDELIVERED")
+            continue
         if through is not None and page["brief_id"] <= through:
             page["confirmed_at"] = now
         elif now - page["posted_at"] > limit:
@@ -1516,7 +1535,8 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
                             "recorded as UNDELIVERED")
             decision["owner"] = "transport-error"
             continue
-        state["owner_pages"][dedupe_key(item)] = {"brief_id": brief_id, "posted_at": now, "confirmed_at": None}
+        state["owner_pages"][dedupe_key(item)] = {"brief_id": brief_id, "posted_at": now, "confirmed_at": None,
+                                                  "desk_channel": getattr(owner_channel, "desk_channel", "vp")}
         state["owner_page_times"].append(now)
         page_lines.append(line("PAGE OWNER (pending confirmation)", item, "no"))
     for key in recovered["owner"]:
