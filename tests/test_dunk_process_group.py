@@ -103,15 +103,20 @@ class ProcessGroupTests(unittest.TestCase):
         self.addCleanup(self._kill_tagged, tmp, watched.pid)
         leader_pid = int(watched.stdout.readline().split()[0])
 
-        deadline = time.time() + 15
-        tagged = []
+        # GATE ON THE GRANDCHILD (reviewer, PR #48). The previous gate - "two processes whose argv
+        # embeds the temp dir" - was satisfied INSTANTLY by the spawner and the leader themselves, both
+        # of which carry the whole `python -c` code in argv. The SIGKILL then landed before the sh child
+        # was ever forked, so nothing could survive and the assertion passed with the helper
+        # neutralised. Wait for the tagged-sleep binary itself.
+        sleep_path = os.path.join(tmp, "tagged-sleep")
+        deadline = time.time() + 20
         while time.time() < deadline:
-            tagged = [p for p in os.listdir("/proc") if p.isdigit() and tmp in _cmdline(p)]
-            if len(tagged) >= 2:
+            if any(_cmdline(p).startswith(sleep_path)
+                   for p in os.listdir("/proc") if p.isdigit()):
                 break
-            time.sleep(0.3)
-        self.assertGreaterEqual(len(tagged), 2,
-                                f"fixture never reached child+grandchild: {tagged}")
+            time.sleep(0.2)
+        else:
+            self.fail("fixture never reached the grandchild; the result would be vacuous")
 
         os.kill(watched.pid, signal.SIGKILL)      # the watched parent: unhandleable
         watched.wait(timeout=10)
