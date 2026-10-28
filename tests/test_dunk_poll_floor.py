@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
 import dunk_core  # noqa: E402
+import dunk_server  # noqa: E402
 
 
 class PollFloorTests(unittest.TestCase):
@@ -49,6 +50,29 @@ class PollFloorTests(unittest.TestCase):
         dunk_core.idle_poll_wait(stop2, idle_poll_s=30)
         self.assertEqual(30, stop2.arg, "a long interval must not be shortened")
 
+
+class ProductionNoOpTests(unittest.TestCase):
+    """The group kill must be a NO-OP outside a test spawn (reviewer %20, PR #48).
+
+    %20 verified it by instrumenting os.killpg once; a future edit that drops the TEST_SPAWN guard would
+    not be caught by the suite, so this pins it permanently with killpg monkeypatched.
+    """
+
+    def test_no_killpg_without_test_spawn(self):
+        import signal as _signal
+        calls = []
+        saved_env = os.environ.pop("DUNKINGSHEEP_TEST_SPAWN", None)
+        # dunk_server.os IS the global os module, so the original attribute has to be RESTORED, not
+        # deleted: `del os.killpg` removes it for every later test in the process (owner finding).
+        real_killpg = os.killpg
+        try:
+            os.killpg = lambda *a: calls.append(a)
+            self.assertFalse(dunk_server.kill_own_process_group("prod"))
+        finally:
+            os.killpg = real_killpg
+            if saved_env is not None:
+                os.environ["DUNKINGSHEEP_TEST_SPAWN"] = saved_env
+        self.assertEqual([], calls, "production must never be group-killed by this helper")
 
 if __name__ == "__main__":
     unittest.main()
