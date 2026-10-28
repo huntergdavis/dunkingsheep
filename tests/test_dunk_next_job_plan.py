@@ -82,6 +82,12 @@ class NextJobPlanTests(unittest.TestCase):
     def test_no_pane_is_a_skip(self):
         self.assertEqual("no_pane", plan(pane_id=None)["reason"])
 
+    def test_dispatch_controls_are_inputs_to_the_shared_decision(self):
+        for trigger in ("completion", "turn.end", "restart"):
+            for reason in ("disabled", "not_allowed", "readiness_unknown"):
+                out = plan(trigger=trigger, dispatch_reason=reason)
+                self.assertEqual(("skip", reason), (out["action"], out["reason"]))
+
     # -- rate inputs, not load tests -------------------------------------------------
     def test_a_recent_prompt_holds_the_lane(self):
         self.assertEqual("cooldown", plan(last_nudge_at=1999.0, min_gap_s=60)["reason"])

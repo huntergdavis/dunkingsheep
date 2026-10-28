@@ -501,7 +501,7 @@ def summary(state):
 
 def next_job_plan(*, trigger, pane_id, tasks, unread, pending_delivery=False,
                   last_nudge_at=None, task_nudges=None, now=None,
-                  min_gap_s=None, task_cooldown_s=None):
+                  min_gap_s=None, task_cooldown_s=None, dispatch_reason=None):
     """Decide what a lane does the moment it goes free. Pure: everything is injected.
 
     t372: the TRIGGER changes, not the eligibility rule (pi-review-1 i31321). On a task
@@ -514,6 +514,8 @@ def next_job_plan(*, trigger, pane_id, tasks, unread, pending_delivery=False,
     "claim" or "skip". Skip reasons are machine-readable and are the contract:
 
         no_pane            nothing to decide about
+        disabled/not_allowed  existing operator dispatch controls refuse the lane
+        readiness_unknown/unavailable_lane  lane resolution failed closed
         unread_unknown     the mailbox could not be read; unknown is a skip
         unread_mail        already fed; do not stack a second assignment
         pending_delivery   a prompt is still waiting for the box to clear
@@ -533,6 +535,9 @@ def next_job_plan(*, trigger, pane_id, tasks, unread, pending_delivery=False,
             "action": "skip", "reason": None, "task_id": None}
     if not pane_id:
         plan["reason"] = "no_pane"
+        return plan
+    if dispatch_reason:
+        plan["reason"] = dispatch_reason
         return plan
     if unread is None:
         plan["reason"] = "unread_unknown"
@@ -580,5 +585,20 @@ def assigned_open_tasks(tasks, pane_id):
         if wanted and wanted in assignees:
             out.append(task)
     out.sort(key=lambda t: (PRIORITY_ORDER.get(str(t.get("priority")), 9),
-                            float(t.get("created_at") or 0)))
+                            float(t.get("created_at") or 0), str(t.get("id"))))
     return out
+
+
+def delivery_retry_plan(*, attempt, last_at, now, max_attempts, min_gap_s=None):
+    """One bounded retry policy, with the dispatch rate floor and submit ceiling.
+
+    The caller supplies SUBMIT_ATTEMPTS; no second submit ladder lives here.
+    A crash after reserving an attempt consumes that attempt, never resets it.
+    """
+    gap = TURN_END_MIN_GAP_S if min_gap_s is None else float(min_gap_s)
+    if attempt >= max_attempts:
+        return {"action": "stop", "reason": "retry_exhausted"}
+    next_at = float(last_at or 0) + max(gap, 0) * (2 ** max(0, attempt - 1))
+    if attempt and now < next_at:
+        return {"action": "wait", "reason": "retry_backoff", "next_at": next_at}
+    return {"action": "attempt", "reason": None}

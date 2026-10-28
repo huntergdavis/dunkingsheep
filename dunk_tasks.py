@@ -310,7 +310,7 @@ class Tasks:
     NEXT_JOB_EVENT = "next_job_handoff"
 
     def record_next_job_handoff(self, task_id, *, pane_id, from_task, message_id=None,
-                                attempt=0, reason=None, now=None):
+                                attempt=0, reason=None, now=None, details=None):
         """Record that `pane_id` was handed `task_id` after completing `from_task` (t372).
 
         This is the durable record clauses 1 and 4 are checked against, so it is written
@@ -331,6 +331,7 @@ class Tasks:
                 "message_id": str(message_id) if message_id else None,
                 "attempt": int(attempt or 0),
                 "reason": reason}
+        meta.update(details or {})
         self._record(task_id, self.NEXT_JOB_EVENT, at=now, actor=str(pane_id or ""),
                      scope=task.get("scope"), priority=task.get("priority"),
                      status_from=None, status_to=task.get("status"), meta=meta)
@@ -612,6 +613,126 @@ class Tasks:
             return self.get(row["id"])
         return self.update(row["id"], status="done", updated_by=by)
 
+    def next_job_handoffs(self, pane_id=None):
+        """Latest durable state of each handoff, including terminal receipts."""
+        rows = self.db.execute(
+            "SELECT * FROM task_events WHERE event = ? ORDER BY id",
+            (self.NEXT_JOB_EVENT,)).fetchall()
+        latest = {}
+        for row in rows:
+            meta = json.loads(row["meta"] or "{}")
+            if not meta.get("message_id") or "state" not in meta:
+                continue  # older notes are not executable intents
+            if pane_id is not None and row["actor"] != pane_id:
+                continue
+            latest[meta["message_id"]] = dict(meta, task_id=row["task_id"],
+                                              pane_id=row["actor"], at=row["at"])
+        return list(latest.values())
+
+    def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
+                         unread=0, pending_delivery=False, dispatch_reason=None):
+        """Complete A, choose/claim B and journal its inbox id in ONE transaction.
+
+        Clauses 1/4: every trigger uses the same decision while holding SQLite's
+        writer lock. No socket or terminal I/O occurs inside this transaction.
+        The journal is an outbox intent: inbox materialisation is idempotent.
+        """
+        import uuid
+        from dunk_dispatch import next_job_plan
+        caller = caller or {}
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                now = _now()
+                completion = None
+                if trigger == "completion":
+                    row = self._require(from_task)
+                    if row["status"] == "done":
+                        self.db.commit()
+                        return {"action": "skip", "reason": "already_completed",
+                                "task": self.get(from_task)}
+                    self.db.execute(
+                        "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
+                        "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
+                        (now, pane_id, now, from_task))
+                    self._record(from_task, "completed", at=now, actor=pane_id,
+                                 scope=row["scope"], priority=row["priority"],
+                                 status_from=row["status"], status_to="done",
+                                 duration_ms=int((now - row["created_at"]) * 1000))
+                    completion = now
+                elif from_task:
+                    completion = self._require(from_task)["completed_at"]
+                else:
+                    previous = self.db.execute(
+                        "SELECT task_id,at FROM task_events WHERE event='completed' "
+                        "AND actor=? ORDER BY id DESC LIMIT 1", (pane_id,)).fetchone()
+                    if previous:
+                        from_task, completion = previous["task_id"], previous["at"]
+
+                # A concurrent end/restart sees the committed handoff and cannot
+                # advance past it, even when delivery failed or its lease expired.
+                rows = self.db.execute(
+                    "SELECT * FROM tasks WHERE scope IN (?, ?) "
+                    "AND status IN ('open','in_progress') ORDER BY created_at,id",
+                    (GLOBAL, pane_id)).fetchall()
+                tasks = [self._decorate(r, pane_id) for r in rows]
+                owned = {t["id"] for t in tasks if pane_id in t["assignees"]}
+                active = [h for h in self.next_job_handoffs(pane_id) if h["task_id"] in owned]
+                held = any(t["status"] == "in_progress" and pane_id in t["claimed_by"]
+                           for t in tasks)
+                plan = next_job_plan(trigger=trigger, pane_id=pane_id, tasks=tasks,
+                                     unread=unread, pending_delivery=(pending_delivery or
+                                                                     bool(active) or held),
+                                     now=now, dispatch_reason=dispatch_reason)
+                plan.update(from_task=from_task, completion_at=completion, caller=caller)
+                if plan["action"] == "claim":
+                    chosen = next(t for t in tasks if t["id"] == plan["task_id"])
+                    # Revalidate the policy choice with the existing claim rules.
+                    if not self._claimable(chosen, pane_id):
+                        plan.update(action="skip", reason="claim_unavailable")
+                    else:
+                        self._claim_locked(chosen, pane_id, DEFAULT_LEASE_S, caller, _now())
+                        handoff = dict(from_task=from_task, completion_at=completion,
+                                       message_id="nj-" + uuid.uuid4().hex, attempt=0,
+                                       reason=None, state="pending", trigger=trigger,
+                                       caller=caller)
+                        self.record_next_job_handoff(
+                            chosen["id"], pane_id=pane_id, from_task=from_task,
+                            message_id=handoff["message_id"], now=_now(), details=handoff)
+                        plan["handoff"] = dict(handoff, task_id=chosen["id"], pane_id=pane_id)
+                self._record(from_task or "", "next_job_decision", at=now,
+                             actor=pane_id, meta={k: v for k, v in plan.items() if k != "handoff"})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        if trigger == "completion":
+            plan["task"] = self.get(from_task)
+        return plan
+
+    def update_next_job(self, handoff, *, expected=None, **changes):
+        """Append progress under the writer lock, preserving the immutable chain."""
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                latest = next(h for h in self.next_job_handoffs(handoff["pane_id"])
+                              if h["message_id"] == handoff["message_id"])
+                if expected and any(latest.get(k) != v for k, v in expected.items()):
+                    self.db.commit()
+                    return None
+                latest.update(changes)
+                self.record_next_job_handoff(
+                    latest["task_id"], pane_id=latest["pane_id"],
+                    from_task=latest["from_task"], message_id=latest["message_id"],
+                    attempt=latest["attempt"], reason=latest.get("reason"),
+                    details={k: v for k, v in latest.items()
+                             if k not in ("task_id", "pane_id", "at")})
+                self.db.commit()
+                return latest
+            except Exception:
+                self.db.rollback()
+                raise
+
     def block(self, task_id, reason=None):
         return self.update(task_id, status="blocked", block_reason=reason)
 
@@ -852,32 +973,8 @@ class Tasks:
                     self.db.commit()
                     return {"task": None, "scope": target, "pane_id": pane_id}
 
-                assignees = list(chosen["assignees"])
-                if pane_id not in assignees:
-                    assignees.append(pane_id)
                 now = _now()
-                expires = now + lease_s
-                self.db.execute(
-                    "INSERT OR REPLACE INTO task_leases "
-                    "(task_id, pane_id, claimed_at, heartbeat_at, expires_at, "
-                    "caller_pid, caller_start, caller_name) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (chosen["id"], pane_id, now, now, expires,
-                     caller_pid, caller_start, caller_name),
-                )
-                self.db.execute(
-                    "UPDATE tasks SET status = 'in_progress', assignees = ?, "
-                    "attempts = attempts + 1, updated_at = ?, block_reason = NULL "
-                    "WHERE id = ?",
-                    (_encode(assignees), now, chosen["id"]),
-                )
-                self._record(
-                    chosen["id"], "claimed", at=now, actor=pane_id,
-                    scope=target, priority=chosen["priority"],
-                    status_from=chosen["status"], status_to="in_progress",
-                    duration_ms=int((now - chosen["created_at"]) * 1000),
-                    meta={"lease_seconds": lease_s, "caller_pid": caller_pid,
-                          "caller_name": caller_name})
+                self._claim_locked(chosen, pane_id, lease_s, caller, now)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -887,6 +984,36 @@ class Tasks:
                 "expires_at": now + lease_s,
                 "caller": {"pid": caller_pid, "start": caller_start,
                            "name": caller_name}}
+
+    def _claim_locked(self, chosen, pane_id, lease_s, caller, now):
+        """Shared atomic lease write; caller owns BEGIN IMMEDIATE."""
+        target = chosen["scope"]
+        caller_pid, caller_start, caller_name = (caller.get(k) for k in ("pid", "start", "name"))
+        assignees = list(chosen["assignees"])
+        if pane_id not in assignees:
+            assignees.append(pane_id)
+        expires = now + lease_s
+        self.db.execute(
+            "INSERT OR REPLACE INTO task_leases "
+            "(task_id, pane_id, claimed_at, heartbeat_at, expires_at, "
+            "caller_pid, caller_start, caller_name) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (chosen["id"], pane_id, now, now, expires,
+             caller_pid, caller_start, caller_name),
+        )
+        self.db.execute(
+            "UPDATE tasks SET status = 'in_progress', assignees = ?, "
+            "attempts = attempts + 1, updated_at = ?, block_reason = NULL "
+            "WHERE id = ?",
+            (_encode(assignees), now, chosen["id"]),
+        )
+        self._record(
+            chosen["id"], "claimed", at=now, actor=pane_id,
+            scope=target, priority=chosen["priority"],
+            status_from=chosen["status"], status_to="in_progress",
+            duration_ms=int((now - chosen["created_at"]) * 1000),
+            meta={"lease_seconds": lease_s, "caller_pid": caller_pid,
+                  "caller_name": caller_name})
 
     def heartbeat(self, task_id, pane_id, lease_seconds=None, caller=None):
         """Extend a live lease. Raises when the caller does not hold one.
