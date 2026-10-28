@@ -302,6 +302,35 @@ os._exit(0)
         self.assertEqual('started', self.handoff()['state'])
         self.assertEqual(actual['turn_id'], self.handoff()['turn_id'])
 
+    def test_producer_after_final_bind_before_unlock_wakes_worker(self):
+        self.complete()
+        checked, release = threading.Event(), threading.Event()
+        original_bind = self.f.next_jobs.bind_turn
+        worker = threading.Thread(target=self.f._task_push_loop)
+        def bind(pane):
+            original_bind(pane)
+            if threading.current_thread() is worker and not checked.is_set():
+                checked.set()
+                release.wait(5)
+        with mock.patch.object(self.f.next_jobs, 'bind_turn', side_effect=bind):
+            worker.start()
+            try:
+                self.assertTrue(checked.wait(5))
+                self.f._next_job_wake.clear()
+                token = self.f.turn_start(PANE, source='pi-test',
+                                          handoff_id=self.handoff()['message_id'])
+                self.assertEqual('sent', self.handoff()['state'])
+                self.assertTrue(self.f._next_job_wake.is_set())
+                release.set()
+                deadline = time.monotonic() + 2
+                while self.handoff()['state'] != 'started' and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(token['turn_id'], self.handoff().get('turn_id'))
+            finally:
+                release.set()
+                self.f.close()
+                worker.join(5)
+
     def test_unconfirmed_submit_never_becomes_success(self):
         self.complete()
         with mock.patch.object(self.f, 'submit_text', return_value=(False, 'submission unconfirmed')):

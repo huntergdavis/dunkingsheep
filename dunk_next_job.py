@@ -205,6 +205,10 @@ class NextJobs:
                     h, expected={"attempt": h["attempt"], "observed_turn": None},
                     observed_turn={k: turn.get(k) for k in
                                    ("turn_id", "started_at", "source", "caller", "handoff_id")})
+                # A producer can arrive just AFTER the sender's final bind but
+                # BEFORE it releases the pane lock. Retry promptly after that
+                # lock is released, rather than losing the edge or waiting a tick.
+                self.flock._next_job_wake.set()
         self.bind_turn(pane)
 
     def bind_turn(self, pane):
