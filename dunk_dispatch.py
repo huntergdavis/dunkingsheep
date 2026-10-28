@@ -497,3 +497,88 @@ def summary(state):
     if state.get("queue_empty"):
         lines.append(f"the standby queue is empty and {len(idle)} lane(s) are idle")
     return "\n".join(lines)
+
+
+def next_job_plan(*, trigger, pane_id, tasks, unread, pending_delivery=False,
+                  last_nudge_at=None, task_nudges=None, now=None,
+                  min_gap_s=None, task_cooldown_s=None):
+    """Decide what a lane does the moment it goes free. Pure: everything is injected.
+
+    t372: the TRIGGER changes, not the eligibility rule (pi-review-1 i31321). On a task
+    COMPLETION (and on a genuine turn end) a lane looks for its next job by calling the
+    existing atomic claim - it does not get nudged for work it has not claimed. What was
+    missing was never permission; it was that nothing asked at the moment the lane went
+    free.
+
+    Returns {"trigger", "pane_id", "action", "reason", "task_id"} where action is
+    "claim" or "skip". Skip reasons are machine-readable and are the contract:
+
+        no_pane            nothing to decide about
+        unread_unknown     the mailbox could not be read; unknown is a skip
+        unread_mail        already fed; do not stack a second assignment
+        pending_delivery   a prompt is still waiting for the box to clear
+        no_assigned_work   clause 5: quiet lanes stay quiet, and this is recorded
+        cooldown           this pane was prompted < min_gap_s ago
+        task_cooldown      every task it holds was prompted < task_cooldown_s ago
+
+    CLAUSE 5 IS THE POINT OF `no_assigned_work`: reviewer/CoS/VP lanes with nothing
+    assigned must record explicit no-work rather than poll, or the fix becomes the
+    storm the CoS ruling was written to stop.
+    """
+    now = _now() if now is None else now
+    min_gap_s = TURN_END_MIN_GAP_S if min_gap_s is None else float(min_gap_s)
+    task_cooldown_s = (TURN_END_TASK_COOLDOWN_S if task_cooldown_s is None
+                       else float(task_cooldown_s))
+    plan = {"trigger": str(trigger or ""), "pane_id": str(pane_id or ""),
+            "action": "skip", "reason": None, "task_id": None}
+    if not pane_id:
+        plan["reason"] = "no_pane"
+        return plan
+    if unread is None:
+        plan["reason"] = "unread_unknown"
+        return plan
+    if unread:
+        plan["reason"] = "unread_mail"
+        return plan
+    if pending_delivery:
+        plan["reason"] = "pending_delivery"
+        return plan
+    candidates = assigned_open_tasks(tasks or (), pane_id)
+    if not candidates:
+        plan["reason"] = "no_assigned_work"
+        return plan
+    if last_nudge_at is not None and min_gap_s > 0 and now - float(last_nudge_at) < min_gap_s:
+        plan["reason"] = "cooldown"
+        return plan
+    nudges = task_nudges or {}
+    fresh = [t for t in candidates
+             if now - float(nudges.get(str(t.get("id")), 0) or 0) >= task_cooldown_s]
+    if not fresh:
+        plan["reason"] = "task_cooldown"
+        return plan
+    plan["action"] = "claim"
+    plan["task_id"] = str(fresh[0].get("id"))
+    return plan
+
+
+def assigned_open_tasks(tasks, pane_id):
+    """Open tasks ASSIGNED to `pane_id`, in board order, excluding blocked/gated ones.
+
+    This is the eligibility the owner's order needs and the CoS ruling withheld: it is
+    used ONLY at the moment a lane goes free, and the caller then takes the work through
+    the atomic claim (task_next), so a lane never receives a prompt for work it has not
+    claimed.
+    """
+    wanted = str(pane_id or "")
+    out = []
+    for task in tasks or ():
+        if str(task.get("status")) != "open":
+            continue
+        if task.get("blocked_by") or task.get("block_reason"):
+            continue
+        assignees = [str(a) for a in (task.get("assignees") or [])]
+        if wanted and wanted in assignees:
+            out.append(task)
+    out.sort(key=lambda t: (PRIORITY_ORDER.get(str(t.get("priority")), 9),
+                            float(t.get("created_at") or 0)))
+    return out
