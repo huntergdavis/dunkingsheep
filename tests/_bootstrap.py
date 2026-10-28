@@ -35,6 +35,13 @@ if not _OWN_ENV:
     os.environ["DUNKINGSHEEP_SOCKET"] = os.path.join(_TMP, "test.sock")
 
 # Tests must not shell out to `claude agents --json` (2.9 s per call).
+# A DAEMON THIS SUITE SPAWNS MUST DIE WITH THE RUN (t212): a killed, timed-out or crashed suite cannot
+# run its exit sweep, and the detached daemon then sits at ppid=1 forever - 121 of them put this host at
+# load1 65.7 on 2026-10-27. The client passes this to the daemon as DUNKINGSHEEP_DIE_WITH_PARENT.
+os.environ.setdefault("DUNKINGSHEEP_TEST_SPAWN", "1")
+# ...and it watches THIS process (the suite), not the short-lived CLI call that happens to spawn it.
+os.environ.setdefault("DUNKINGSHEEP_DIE_WITH_PARENT", str(os.getpid()))
+
 os.environ.setdefault("DUNKINGSHEEP_CLAUDE_STATUS", "0")
 os.environ.setdefault("DUNKINGSHEEP_MIN_POLL_S", "0")  # tests call the CLI repeatedly
 
