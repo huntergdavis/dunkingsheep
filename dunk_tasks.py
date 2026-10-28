@@ -307,6 +307,37 @@ class Tasks:
             "RETURNING value").fetchone()
         return f"t{row[0]}"
 
+    NEXT_JOB_EVENT = "next_job_handoff"
+
+    def record_next_job_handoff(self, task_id, *, pane_id, from_task, message_id=None,
+                                attempt=0, reason=None, now=None):
+        """Record that `pane_id` was handed `task_id` after completing `from_task` (t372).
+
+        This is the durable record clauses 1 and 4 are checked against, so it is written
+        with a SHAPE the acceptance instrument can validate from outside:
+
+            event  = 'next_job_handoff'   (NOT 'handoff' - that name already means a PR
+                                           handoff; 3 such rows exist from 2026-10-25)
+            meta   = {from_task, message_id, attempt, reason}
+
+        A record without from_task AND message_id does not count as a handoff, so a stray
+        `task note --event handoff "handed to reviewer"` cannot satisfy clause 4. The
+        event name is unique and the shape is required: one protects against accidents,
+        the other against a future lane deciding the name is convenient.
+        """
+        now = _now() if now is None else now
+        task = self.get(task_id)
+        meta = {"from_task": str(from_task) if from_task else None,
+                "message_id": str(message_id) if message_id else None,
+                "attempt": int(attempt or 0),
+                "reason": reason}
+        self._record(task_id, self.NEXT_JOB_EVENT, at=now, actor=str(pane_id or ""),
+                     scope=task.get("scope"), priority=task.get("priority"),
+                     status_from=None, status_to=task.get("status"), meta=meta)
+        return {"task_id": str(task_id), "pane_id": str(pane_id or ""),
+                "from_task": meta["from_task"], "message_id": meta["message_id"],
+                "attempt": meta["attempt"], "reason": reason, "at": now}
+
     def _record(self, task_id, event, at=None, actor=None, scope=None,
                 priority=None, status_from=None, status_to=None,
                 duration_ms=None, meta=None):
