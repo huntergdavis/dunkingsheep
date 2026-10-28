@@ -16,17 +16,28 @@ class PiTurnGenerationTests(unittest.TestCase):
         start = after.index("\t// Serialize hook commands")
         end = after.index('\n\tpi.on("agent_start"', start)
         function = after[start:end]
+        # This host's Node has no TypeScript stripping support. Erase only the
+        # two known annotations; assert their spelling so a changed patch cannot
+        # silently run a different approximation of the function.
+        annotations = {
+            "let activeTurnId: string | undefined;": "let activeTurnId;",
+            'function turn(kind: "start" | "end", cwd: string): Promise<void>':
+                "function turn(kind, cwd)",
+        }
+        for typed, plain in annotations.items():
+            self.assertEqual(1, function.count(typed))
+            function = function.replace(typed, plain)
         probe = """
 import assert from "node:assert/strict";
-function reporter(exec: any) {
+function reporter(exec) {
   const pi = {exec}, DUNK_BIN = "fake-dunk";
 FUNCTION
   return turn;
 }
-let calls: string[][] = [];
-let release: any;
+let calls = [];
+let release;
 const delayed = new Promise(resolve => { release = resolve; });
-const turn = reporter(async (_bin: string, args: string[]) => {
+const turn = reporter(async (_bin, args) => {
   calls.push(args);
   return args[0] === "--json" ? delayed : {code: 0, stdout: ""};
 });
@@ -45,8 +56,8 @@ for (const result of [
   {code: 0, stdout: "not json"},
   {code: 0, stdout: "{}"},
 ]) {
-  const seen: string[][] = [];
-  const failed = reporter(async (_bin: string, args: string[]) => {
+  const seen = [];
+  const failed = reporter(async (_bin, args) => {
     seen.push(args); return result;
   });
   await failed("start", "/tmp");
@@ -54,8 +65,8 @@ for (const result of [
   assert.equal(seen.length, 1, "failed/tokenless starts must not emit ends");
 }
 let generation = 0;
-const ordered: string[][] = [];
-const serial = reporter(async (_bin: string, args: string[]) => {
+const ordered = [];
+const serial = reporter(async (_bin, args) => {
   ordered.push(args);
   if (args[0] === "--json") return {code: 0, stdout: JSON.stringify({turn_id: String(++generation)})};
   return {code: 0, stdout: ""};
@@ -66,9 +77,9 @@ assert.deepEqual(ordered.map(args => args.at(-1)), ["start", "1", "start", "2"])
 console.log("PASS: delayed start, consumed token, three failure responses, ordered generations");
 """.replace("FUNCTION", function)
         with tempfile.TemporaryDirectory() as directory:
-            script = Path(directory) / "probe.mts"
+            script = Path(directory) / "probe.mjs"
             script.write_text(probe)
-            run = subprocess.run(["node", "--experimental-strip-types", str(script)],
+            run = subprocess.run(["node", str(script)],
                                  capture_output=True, text=True, timeout=20)
         self.assertEqual(0, run.returncode, run.stdout + run.stderr)
         self.assertIn("PASS:", run.stdout)
