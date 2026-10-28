@@ -1523,13 +1523,21 @@ def print_status(result):
                 "queued_messages", "herdr_available",
                 "herdr_hint", "state_file", "uptime_s", "self_pane_id", "message"):
         value = result.get(key)
-        if value in (None, ""):
+        if value in (None, "") and key != "code_stale":
             continue
         if key in ("code_mtime", "started_at"):
             value = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(value))} ({int(time.time() - value)}s ago)"
         if key == "code_stale":
-            value = ("YES - the code on disk is newer than this process; restart it"
-                     if value else "no")
+            if value is None:
+                errors = ", ".join(result.get("code_identity_errors") or [])
+                value = "UNKNOWN - source identity unavailable" + (f": {errors}" if errors else "")
+            elif value:
+                names = ", ".join(result.get("code_changed_modules") or [])
+                value = "YES - code on disk differs from this process; restart it"
+                if names:
+                    value += f" ({names})"
+            else:
+                value = "no"
         print(f"{key:<16} {value}")
 
 
