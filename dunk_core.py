@@ -65,7 +65,7 @@ from dunk_callers import process_alive
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
-VERSION = "2.70.59"
+VERSION = "2.70.68"
 
 def code_identity(path=None):
     """The code's own identity: a short hash of this file, and its mtime.
@@ -125,6 +125,10 @@ _TERM_ID_RE = re.compile(r"^term_[0-9A-Za-z]+$")
 # the ONLY unambiguous part, so it decides where the mail goes.
 _EMBEDDED_PANE_RE = re.compile(r"\(\s*([A-Za-z0-9_.-]+:p\d+|%\d+)\s*\)\s*$")
 IDLE_POLL_S = 5
+# A poll loop must never spin, even when a test sets the floor to 0 (t212): each poll forks tmux, and
+# through the guard shim that is two more processes. A leaked test daemon with a zero delay is a fork
+# storm - 218 guards were measured at load 78 on 2026-10-27.
+MIN_IDLE_POLL_S = 0.5
 # A restored dunk whose scheduled send is already in the past fires after this.
 RESTORE_GRACE_S = 5
 DEFAULT_TEXT = "continue"
@@ -4925,7 +4929,7 @@ class Flock:
                             if agent_status not in BUSY_STATUSES:
                                 break
                             dunker.status = f"Busy ({agent_status})"
-                            if stop_event.wait(IDLE_POLL_S):
+                            if stop_event.wait(max(IDLE_POLL_S, MIN_IDLE_POLL_S)):
                                 return
                     if not dunker.hold_while_typing or self._clear_to_send(
                             dunker.target_pane_id, dunker.last_sent_text,

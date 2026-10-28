@@ -369,9 +369,42 @@ class FlockClient:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         env = dict(os.environ)
         env["DUNKINGSHEEP_SOCKET"] = self.socket_path
-        # The daemon must not inherit the caller's pane identity.
+        # A TEST-SPAWNED DAEMON MUST NOT OUTLIVE ITS PARENT (t212). A suite run that is killed,
+        # times out or crashes cannot run its exit sweep, and the detached daemon then sits at ppid=1
+        # forever: 121 of them once put this host at load1 65. The suite marks its spawns with
+        # DUNKINGSHEEP_TEST_SPAWN=1 and the daemon then watches the spawning pid and exits when it
+        # goes away. A normal auto-start is unchanged - a lane's daemon is supposed to outlive the
+        # call that started it.
         env.pop("HERDR_PANE_ID", None)
+        if env.get("DUNKINGSHEEP_TEST_SPAWN") == "1":
+            # The SUITE's pid, not this CLI call's: a test invokes the CLI many times, and each call is
+            # a short-lived process. Tying the daemon to the caller would kill it between calls and
+            # every subsequent command would auto-start a fresh one (two test_cli tests failed exactly
+            # that way). The suite exports its own pid, and that is what the daemon watches.
+            env.setdefault("DUNKINGSHEEP_DIE_WITH_PARENT", str(os.getpid()))
         log_handle = open(LOG_FILE, "ab")
+        # A PROCESS-GROUP BOUND, not just a parent watch (reviewer, t212): a child the daemon spawned
+        # outlives a parent-watch, because it is reparented to init when the daemon dies. Two mechanisms,
+        # one for each way a run can end:
+        #   * PR_SET_PDEATHSIG on the daemon: the kernel kills it when the spawning process dies, even
+        #     by SIGKILL, which no userspace watch can survive;
+        #   * the daemon is a session leader (start_new_session=True) and kills its whole process group
+        #     on shutdown, so its children go with it.
+        # Both are limited to test spawns: a lane's auto-started daemon must outlive the call.
+        test_spawn = env.get("DUNKINGSHEEP_TEST_SPAWN") == "1"
+        preexec = None
+        if test_spawn:
+            def preexec():                      # runs in the child, before exec
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                    PR_SET_PDEATHSIG = 1
+                    # SIGTERM, not SIGKILL: the daemon must still be able to run its shutdown and kill
+                    # its process group. A SIGKILL from the kernel would leave its children orphaned,
+                    # which is precisely the leak this is meant to bound.
+                    libc.prctl(PR_SET_PDEATHSIG, 15)
+                except Exception:               # noqa: BLE001 - the group bound still applies
+                    pass
         try:
             subprocess.Popen(
                 [sys.executable, CLI_PATH, "serve"],
@@ -379,6 +412,7 @@ class FlockClient:
                 stdout=log_handle,
                 stderr=log_handle,
                 start_new_session=True,
+                preexec_fn=preexec,
                 close_fds=True,
                 cwd=HERE,
                 env=env,

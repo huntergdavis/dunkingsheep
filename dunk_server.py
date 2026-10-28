@@ -21,6 +21,7 @@ import signal
 import socket
 import struct
 import sys
+import time
 import threading
 
 from dunk_api import dispatch
@@ -218,6 +219,23 @@ def configure_logging(to_file=True, level=logging.INFO):
     )
 
 
+def kill_own_process_group(reason="shutdown"):
+    """SIGTERM the daemon's whole process group (t212).
+
+    A child outlives a parent watch: when the daemon dies its children are reparented to init and keep
+    polling - the guard shim forks twice per poll, and 218 of those were measured at load 78. For a
+    TEST spawn the daemon is a session leader, so signalling its group is the bound that holds. It is a
+    no-op for a lane's auto-started daemon, which must outlive the call that started it.
+    """
+    if os.environ.get("DUNKINGSHEEP_TEST_SPAWN") != "1":
+        return False
+    try:
+        os.killpg(os.getpgid(0), signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+
+
 def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
     """Blocking entry point used by `dunkingsheep serve`."""
     configure_logging(to_file=log_to_file)
@@ -266,12 +284,46 @@ def run_daemon(socket_path=SOCKET_PATH, state_file=None, log_to_file=True):
         log.error("%s", error)
         return 3
 
+    def _kill_group():
+        kill_own_process_group("daemon shutdown")
+
     def _on_signal(signum, _frame):
         log.info("received signal %s, shutting down", signum)
+        _kill_group()
         server.shutdown()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    # DIE WITH THE PARENT (t212): a test-spawned daemon watches the pid that spawned it and exits when
+    # that pid goes away. Without this a killed suite leaves detached daemons at ppid=1 that nothing
+    # sweeps - 121 of them were measured at load1 65.7 on 2026-10-27. Only set for test spawns, so a
+    # lane's auto-started daemon still outlives the call that started it.
+    # The client passes the spawning pid explicitly; a test that spawns `serve` directly gets the same
+    # guarantee from its own parent pid, because TEST_SPAWN is set for the whole run.
+    _parent = os.environ.get("DUNKINGSHEEP_DIE_WITH_PARENT", "").strip()
+    if not _parent and os.environ.get("DUNKINGSHEEP_TEST_SPAWN") == "1":
+        _parent = str(os.getppid())
+    if _parent.isdigit():
+        def _watch_parent(pid=int(_parent)):
+            while True:
+                time.sleep(2.0)
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    log.warning("parent pid %d is gone; a test-spawned daemon exits with it", pid)
+                    # Kill the group and exit HARD. Calling server.shutdown() from this thread
+                    # deadlocked the daemon (measured: the watchdog logged and the process was still
+                    # alive 12 s later), because shutdown() waits for serve_forever to return and
+                    # serve_forever is blocked in the main thread. A test daemon whose spawner is gone
+                    # has nothing left to flush: the group kill is the bound, exiting is the point.
+                    try:
+                        _kill_group()
+                    except Exception:      # noqa: BLE001 - the group kill is best-effort
+                        pass
+                    os._exit(0)
+        import threading
+        threading.Thread(target=_watch_parent, name="die-with-parent", daemon=True).start()
     server.serve_forever()
     return 0
 
