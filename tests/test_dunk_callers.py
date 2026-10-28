@@ -6,6 +6,7 @@ from dunk_callers import (
     agent_name,
     caller_alive,
     caller_from_peer,
+    caller_belongs_to_pane,
     process_alive,
     process_start,
 )
@@ -43,6 +44,15 @@ class SystemSenderHasNoPaneTests(unittest.TestCase):
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_pane_binding_requires_process_ancestry_and_current_start_time(self):
+        caller = {"pid": os.getpid(), "start": process_start(os.getpid())}
+        self.assertTrue(caller_belongs_to_pane(caller, os.getpid()))
+        self.assertTrue(caller_belongs_to_pane(caller, os.getppid()))
+        self.assertFalse(caller_belongs_to_pane(caller, 99_999_999))
+        self.assertFalse(caller_belongs_to_pane(dict(caller, start="wrong"), os.getpid()))
+        self.assertFalse(caller_belongs_to_pane(caller, None))
+        self.assertFalse(caller_belongs_to_pane(None, os.getpid()))
+
     def test_self_is_alive_with_its_own_start_time(self):
         start = process_start(os.getpid())
         self.assertIsNotNone(start)

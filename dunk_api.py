@@ -163,15 +163,18 @@ def h_status(flock, args, self_pane_id):
 
 
 def h_turn_start(flock, args, self_pane_id):
+    flock.require_turn_caller(args.get("pane"), self_pane_id)
     return flock.turn_start(args.get("pane"), ttl_s=args.get("ttl_s"),
                             source=args.get("source"),
                             self_pane_id=self_pane_id)
 
 
 def h_turn_end(flock, args, self_pane_id):
+    flock.require_turn_caller(args.get("pane"), self_pane_id)
     return flock.turn_end(args.get("pane"),
                           reason=args.get("reason") or "turn_end",
-                          self_pane_id=self_pane_id)
+                          self_pane_id=self_pane_id, turn_id=args.get("turn_id"),
+                          authenticated=True)
 
 
 def h_list_dunks(flock, args, self_pane_id):
@@ -1363,6 +1366,8 @@ COMMANDS = [
         h_turn_end,
         params={"pane": {"type": "string",
                          "description": "Pane id; defaults to the caller's."},
+                "turn_id": {"type": "string",
+                            "description": "Generation returned by turn_start; required to end it."},
                 "reason": {"type": "string",
                            "description": "Why the turn ended."}},
         mcp=False,

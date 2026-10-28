@@ -144,3 +144,31 @@ def caller_alive(caller):
     if not pid:
         return False
     return process_alive(pid, caller.get("start"))
+
+
+def caller_belongs_to_pane(caller, pane_pid):
+    """Bind a kernel-attributed caller to the backend's pane process ancestry.
+
+    A client-supplied pane label is not authentication. Both the stable caller's
+    PID/start time and the ancestry leading to the pane process must match.
+    Missing proc/backend information fails closed; no environment label is used.
+    """
+    if not caller or not caller.get("start") or not pane_pid:
+        return False
+    try:
+        pid, root = int(caller["pid"]), int(pane_pid)
+    except (KeyError, TypeError, ValueError):
+        return False
+    info = _stat(pid)
+    if not info or info["state"] in DEAD_STATES or str(info["start"]) != str(caller["start"]):
+        return False
+    seen = set()
+    for _ in range(64):
+        if not info or info["state"] in DEAD_STATES or pid <= 1 or pid in seen:
+            return False
+        if pid == root:
+            return True
+        seen.add(pid)
+        pid = info["ppid"]
+        info = _stat(pid)
+    return False
