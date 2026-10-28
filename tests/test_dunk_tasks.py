@@ -302,6 +302,36 @@ class FlockTaskTests(unittest.TestCase):
         with self.assertRaises(DunkError):
             self.flock.task_read(private["id"], self_pane_id="w9:p9")
 
+    def test_anonymous_caller_cannot_create_in_another_panes_private_queue(self):
+        # t278: a caller with no pane (human CLI, a unit) could silently create a
+        # task in another pane's PRIVATE queue; it showed in task list but no lane
+        # could read or complete it. Refuse, naming the workaround.
+        with self.assertRaises(DunkError) as caught:
+            self.flock.task_add("phantom", scope="w2:p2", self_pane_id=None)
+        message = str(caught.exception)
+        self.assertIn("--scope global", message)   # the workaround is named
+        # The refusal is not a silent private creation: nothing landed anywhere.
+        self.assertEqual([], self.flock.tasks.list(scope="w2:p2"))
+        self.assertEqual([], self.flock.tasks.list(scope=GLOBAL))
+
+    def test_anonymous_global_add_with_assign_is_unchanged(self):
+        # The legitimate path the guard must NOT break: a no-pane caller creating
+        # a GLOBAL task and assigning a lane (scope defaults to global).
+        task = self.flock.task_add("fleet work", assignees=["w2:p2"],
+                                   self_pane_id=None)
+        self.assertEqual(GLOBAL, task["scope"])
+        self.assertEqual(["w2:p2"], task["assignees"])
+        read = self.flock.task_read(task["id"], self_pane_id="w2:p2")
+        self.assertEqual("fleet work", read["title"])
+
+    def test_pane_caller_assigning_another_lane_on_global_is_unchanged(self):
+        # The VP-assigns workflow: a pane caller creates a global task and
+        # assigns another lane. Guard must not touch it.
+        task = self.flock.task_add("assigned work", assignees=["w9:p9"],
+                                   self_pane_id="w2:p1")
+        self.assertEqual(GLOBAL, task["scope"])
+        self.assertEqual(["w9:p9"], task["assignees"])
+
     def test_inbox_read_appends_global_and_pane_tasks(self):
         self.flock.inbox.send("Codex Site", "hello", sender="pm")
         self.flock.task_add("global work", self_pane_id="w2:p1")

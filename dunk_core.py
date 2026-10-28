@@ -2151,6 +2151,19 @@ class Flock:
                  assignees=None, parent_id=None, depends_on=None,
                  multi_assignee=False, self_pane_id=None):
         target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        # t278: a caller with NO pane (human CLI, a unit) could silently create a
+        # task in another pane's PRIVATE queue - the task showed in `task list`, but
+        # `task read`/`complete` from anywhere else answered "belongs to another
+        # pane's private queue". A pane caller is already refused by _task_scope
+        # (per-pane queues are private), so the hole is anonymous creation only.
+        # Refuse it, naming the workaround, instead of silently landing work where
+        # nobody can see who put it there.
+        if target != TASK_GLOBAL and not self_pane_id:
+            raise DunkError(
+                f"refusing to create a task in {target}'s private queue from a "
+                "caller with no pane id: per-pane queues belong to that pane. "
+                "Pass --scope global to create a fleet-visible task (add --assign "
+                "to assign a lane), or run the add from that pane itself.")
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
             priority=priority or "medium",
