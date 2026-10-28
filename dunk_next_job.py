@@ -88,6 +88,7 @@ class NextJobs:
     def deliver(self, h, restart=False):
         from dunk_core import Message, SUBMIT_ATTEMPTS
         from dunk_callers import process_start, process_alive
+        from dunk_inbox import InboxError
         f = self.flock
         with self._pane_lock(h["pane_id"]):
             h = next(x for x in f.tasks.next_job_handoffs(h["pane_id"])
@@ -102,7 +103,17 @@ class NextJobs:
                     owner = h.get("transport_owner") or {}
                     if owner.get("pid") and process_alive(owner["pid"], owner.get("start")):
                         return h  # recovery racing a live sender cannot steal its attempt
-                    receipt = f.inbox.status(h["message_id"])["notify"]
+                    try:
+                        receipt = f.inbox.status(h["message_id"])["notify"]
+                    except InboxError:
+                        # Reservation preceded inbox materialisation. There can
+                        # have been no typing, since transport requires that row.
+                        self.materialise(h)
+                        return f.tasks.update_next_job(h, state="pending",
+                                                       reason="interrupted_before_inbox")
+                    if receipt["attempt"] != h["attempt"]:
+                        return f.tasks.update_next_job(h, state="pending",
+                                                       reason="interrupted_before_transport")
                     if receipt["state"] == "sent" and receipt["attempt"] == h["attempt"]:
                         return f.tasks.update_next_job(h, state="sent", reason=None,
                                                        transport_id=receipt["transport_id"],

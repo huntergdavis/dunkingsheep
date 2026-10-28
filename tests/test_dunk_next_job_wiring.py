@@ -237,11 +237,25 @@ os._exit(0)
         self.complete()
         h = self.handoff()
         self.tasks.update_next_job(h, state='sending', attempt=1, attempt_at=1.)
+        self.f.inbox.record_notify(h['message_id'], 'queued', attempt=1,
+                                   transport_id=h['message_id'] + ':1')
         fresh = self.flock()
         fresh.next_jobs.recover()
         self.assertEqual('delivery_interrupted', self.handoff(fresh)['reason'])
         self.assertEqual([], self.herdr.sends)
         self.assertEqual('in_progress', fresh.tasks.get(self.b)['status'])
+
+    def test_crash_after_attempt_reservation_before_inbox_is_recoverable(self):
+        with self.assertLogs('dunkingsheep.next_job', level='ERROR'), \
+             mock.patch.object(self.f.next_jobs, 'materialise', side_effect=RuntimeError('crash boundary')):
+            self.complete()
+        self.tasks.update_next_job(self.handoff(), state='sending', attempt=1, attempt_at=1.)
+        fresh = self.flock()
+        fresh.next_jobs.recover()
+        self.assertEqual('interrupted_before_inbox', self.handoff(fresh)['reason'])
+        fresh.next_jobs.tick()
+        self.assertEqual('sent', self.handoff(fresh)['state'])
+        self.assertEqual(1, len(self.herdr.sends))
 
     def test_receipt_survives_crash_before_journal_update(self):
         self.complete()
