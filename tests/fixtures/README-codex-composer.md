@@ -17,3 +17,27 @@ requires a draft ABOVE a trailing empty prompt to survive (`test_a_draft_above_a
 tried. The discriminator that does separate the two cases in these captures is:
 a hint in the tail rows AND no prompt sigil BELOW the candidate line. That needs to
 be built against the full fixture matrix, not patched in one sitting.
+
+## Conservative footer classification (t341)
+
+Two blank rows between a prompt and footer cannot prove that the composer is
+empty. `box_text` now returns empty text with an `ambiguous composer/transcript:`
+detail for that geometry, unless an explicit placeholder has no other visible
+content before the footer. Empty text alone is not an emptiness assertion.
+Transcript fixtures remain excluded from draft text; ambiguous historical echo
+frames also remain unknown rather than being silently promoted to clear.
+
+Guarded sends, direct box checks and flushes refuse keys for this ambiguity;
+delivery reports unknown and not deliverable. This can hold an owned notice or
+a harmless echo until an unambiguous frame is available. It is a deliberate
+refusal, not automatic recovery, and does not broaden inbox-prefix ownership.
+Existing modal checks, prompt-region limits and contiguous/bordered draft rules
+remain in force. Placeholder text followed by a visible continuation, including
+a footer-shaped human line, is not proof of an empty composer.
+
+`test_codex_ambiguous_composer.py` supplies synthetic ellipsised/wrapped notice,
+human draft, mixed notice/draft, placeholder and transcript controls. It does
+not contain an original capture of the t339 incident: no original ANSI frame
+survives, and the operator's partial reconstruction cannot prove original
+geometry, safe key authorization or live recovery. All existing capture files
+in this directory are preserved unchanged.
