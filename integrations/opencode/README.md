@@ -17,7 +17,9 @@ pane root.
 | a second non-child root while a turn is active | refused as `ambiguous_session` |
 
 The plugin keeps the daemon token in memory.  There is no end without a
-successful start token.  A plugin process restart, a reconnect to a different
+successful start token.  A turn-end nudge's delivery receipt is the daemon
+message-store record plus `metrics` kind=`message.sent` for that pane, not an
+`inbox.db` `notify_state`/`read_at` (it is a pane send, not mailbox mail).  A plugin process restart, a reconnect to a different
 server, or a hard crash loses the token: the daemon TTL (default 1800 s) expires
 the turn.  That is the **stated** disconnect behaviour, not an inferred idle.
 A shared/detached OpenCode server is not in the pane's ancestry, so the daemon

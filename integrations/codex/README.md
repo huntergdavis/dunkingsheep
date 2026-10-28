@@ -70,6 +70,12 @@ For a fresh installation the two hook entries are:
 State and diagnostics live under `~/.local/state/dunkingsheep/` (override with
 `DUNKINGSHEEP_CODEX_STATE_DIR`).  Turn tokens and prompt text are not logged.
 
+**Delivery receipt:** a turn-end nudge is a pane send, not mailbox mail.  Its
+receipt is the daemon message-store record (status `sent`, `holds`) plus
+`metrics` kind=`message.sent` for that pane; it will never have an
+`inbox.db` `notify_state`/`read_at`, so a chain check that requires those will
+report a false "no receipt" for a delivery that happened.
+
 ## Isolated live acceptance (2026-10-28)
 
 A test pane launched with an isolated `CODEX_HOME`, `codex exec`, and
