@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.85"
+VERSION = "2.70.86"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -735,6 +735,7 @@ class Flock:
         # pane_id -> scope (global or that pane's private queue).
         self.task_waiters = {}
         self._task_stop = threading.Event()
+        self._next_job_wake = threading.Event()
         self._task_threads = []
         self.quarantined_mailboxes = self._quarantine_shared_mailboxes()
         if metrics is not None:
@@ -751,6 +752,8 @@ class Flock:
         self.metrics.prune()
         self.message_history = []
         self.next_message_id = 1
+        from dunk_next_job import NextJobs
+        self.next_jobs = NextJobs(self)
         if restore:
             self._restore()
         if self.persist_enabled:
@@ -2215,7 +2218,13 @@ class Flock:
     @_as_dunk_error
     def task_complete(self, task_id, by=None, self_pane_id=None):
         self._require_task_visible(self.tasks.get(task_id), self_pane_id)
-        return self.tasks.complete(task_id, by=by or self_pane_id)
+        # Automatic work belongs to the actual caller, never a caller-supplied
+        # completion label. Anonymous administrative completions do not feed lanes.
+        if not self_pane_id:
+            return self.tasks.complete(task_id, by=by)
+        plan = self.next_jobs.advance(self_pane_id, "completion", task_id)
+        self._next_job_wake.set()
+        return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
 
     @_as_dunk_error
     def task_block(self, task_id, reason=None, self_pane_id=None):
@@ -2261,7 +2270,7 @@ class Flock:
             raise DunkError("turn event caller is not authenticated to this pane")
 
     def turn_start(self, pane_id=None, ttl_s=None, source=None,
-                   self_pane_id=None):
+                   self_pane_id=None, handoff_id=None):
         """Declare a busy turn for `pane_id` (pi/claude hook or extension).
 
         The turn holds sends until turn_end, but carries a TTL so a crashed or
@@ -2271,6 +2280,8 @@ class Flock:
         pane_id = pane_id or self_pane_id
         if not pane_id:
             raise DunkError("turn start requires a pane")
+        if handoff_id is not None and not re.fullmatch(r"nj-[0-9a-f]{32}", handoff_id):
+            raise DunkError("invalid next-job handoff id")
         ttl = float(ttl_s or TURN_TTL_S)
         if ttl <= 0:
             raise DunkError("ttl_s must be positive")
@@ -2278,11 +2289,12 @@ class Flock:
         import secrets
         state = {"started_at": now, "expires_at": now + ttl, "ttl_s": ttl,
                  "turn_id": secrets.token_hex(16),
-                 "source": source, "caller": self.current_caller()}
+                 "source": source, "caller": self.current_caller(), "handoff_id": handoff_id}
         with self._lock:
             self.turns[pane_id] = state
         self.metrics.record("turn.start", pane_id=pane_id, source=source,
                             outcome="ok", at=now)
+        self.next_jobs.bind_turn(pane_id)
         return {"pane_id": pane_id, "started_at": now,
                 "expires_at": now + ttl, "ttl_s": ttl, "source": source,
                 "turn_id": state["turn_id"]}
@@ -2330,6 +2342,14 @@ class Flock:
         return result
 
     def _dispatch_on_turn_end(self, pane_id):
+        if TURN_END_DISPATCH:
+            plan = self.next_jobs.advance(pane_id, "turn.end")
+            self._next_job_wake.set()
+            handoffs = self.tasks.next_job_handoffs(pane_id)
+            if plan["action"] == "claim" or any(
+                    self.tasks.get(h["task_id"])["status"] not in ("done", "cancelled")
+                    for h in handoffs):
+                return dict(plan, delivered=False)
         # Check-and-send spans backend calls: do not hold the global lock, but
         # reserve this pane so concurrent end notifications cannot enqueue twice.
         with self._lock:
@@ -2857,8 +2877,17 @@ class Flock:
                             self.task_waiters.pop(pane_id, None)
 
     def _task_push_loop(self):
-        while not self._task_stop.wait(TASK_PUSH_S):
+        try:
+            self.next_jobs.recover()
+        except Exception:
+            log.exception("next-job recovery failed")
+        while not self._task_stop.is_set():
+            self._next_job_wake.wait(TASK_PUSH_S)
+            self._next_job_wake.clear()
+            if self._task_stop.is_set():
+                break
             try:
+                self.next_jobs.tick()
                 self._push_tasks()
             except Exception:
                 log.exception("task push failed")
@@ -4089,10 +4118,12 @@ class Flock:
         sent, ok, detail = self.send_guarded(
             message.pane_id, message.deliver,
             hold_while_typing=message.hold_while_typing,
-            allow_modal=(message.kind == "keys"))
+            allow_modal=(message.kind == "keys"),
+            preserve_draft=getattr(message, "preserve_draft", False))
         if not sent:
             with self._lock:
                 message.holds += 1
+                message.detail = detail
             self.metrics.record("message.held", pane_id=message.pane_id,
                                 mailbox=message.target_label, source=message.source,
                                 outcome="held", reason=self._last_block_reason.get(
@@ -5116,7 +5147,7 @@ class Flock:
         return {"pane_id": pane_id, "target_label": label, "flushed": True,
                 "before": before, "after": after, "by": self_pane_id, "reason": reason}
 
-    def _ensure_box_clear(self, pane_id, allow_modal=False):
+    def _ensure_box_clear(self, pane_id, allow_modal=False, preserve_draft=False):
         """Make the input box ready to type into. Our own text stranded by a
         failed submit is flushed with Enter; a human's draft is left alone; a
         declared active turn holds the send."""
@@ -5146,6 +5177,9 @@ class Flock:
                 return True
             self._last_block_reason[pane_id] = "stranded-will-not-submit"
             return False
+        if preserve_draft:
+            self._last_block_reason[pane_id] = "human_draft"
+            return False
         # The box holds text we did not type. PRESERVE it: submit it (so it reaches the
         # agent rather than being clobbered), and only then type ours. If it will not
         # submit, leave it exactly as it is and deliver on a later attempt - never
@@ -5165,7 +5199,7 @@ class Flock:
             return lock
 
     def send_guarded(self, pane_id, send, last_sent_text=None, awaiting_consumption=False,
-                     hold_while_typing=True, allow_modal=False):
+                     hold_while_typing=True, allow_modal=False, preserve_draft=False):
         """Run `send` (a callable that types into `pane_id`) with the send lock
         held, after one final look at the input box under that same lock.
 
@@ -5197,7 +5231,8 @@ class Flock:
                     return False, None, f"dead session ({marker})"
                 if self._session_process_gone(pane_id):
                     return False, None, "the lane's recorded process is gone"
-                if not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
+                if not self._ensure_box_clear(pane_id, allow_modal=allow_modal,
+                                             preserve_draft=preserve_draft):
                     why = self._last_block_reason.get(pane_id) or "draft"
                     return False, None, f"{BOX_HOLD} ({why})"
             try:
@@ -5539,6 +5574,7 @@ class Flock:
         """Halt every timer thread, keeping persisted running flags so a new
         Flock resumes them."""
         self._task_stop.set()
+        self._next_job_wake.set()
         if self.memory_ingestor is not None:
             self.memory_ingestor.stop()
         if self._owns_memory and self.memory is not None:

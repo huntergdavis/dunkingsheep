@@ -580,5 +580,20 @@ def assigned_open_tasks(tasks, pane_id):
         if wanted and wanted in assignees:
             out.append(task)
     out.sort(key=lambda t: (PRIORITY_ORDER.get(str(t.get("priority")), 9),
-                            float(t.get("created_at") or 0)))
+                            float(t.get("created_at") or 0), str(t.get("id"))))
     return out
+
+
+def delivery_retry_plan(*, attempt, last_at, now, max_attempts, min_gap_s=None):
+    """One bounded retry policy, with the dispatch rate floor and submit ceiling.
+
+    The caller supplies SUBMIT_ATTEMPTS; no second submit ladder lives here.
+    A crash after reserving an attempt consumes that attempt, never resets it.
+    """
+    gap = TURN_END_MIN_GAP_S if min_gap_s is None else float(min_gap_s)
+    if attempt >= max_attempts:
+        return {"action": "stop", "reason": "retry_exhausted"}
+    next_at = float(last_at or 0) + max(gap, 0) * (2 ** max(0, attempt - 1))
+    if attempt and now < next_at:
+        return {"action": "wait", "reason": "retry_backoff", "next_at": next_at}
+    return {"action": "attempt", "reason": None}

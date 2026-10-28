@@ -163,6 +163,10 @@ class Inbox:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
             if "digest_updated_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
+            for name, kind in (("notify_at", "REAL"), ("notify_transport_id", "TEXT"),
+                               ("notify_attempt", "INTEGER")):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE messages ADD COLUMN {name} {kind}")
             # Created after the migration: on an existing DB the column is new,
             # and a CREATE INDEX inside SCHEMA ran before ALTER TABLE.
             try:
@@ -198,6 +202,26 @@ class Inbox:
         return f"i{number}"
 
     # -- writing ------------------------------------------------------------
+
+    def ensure_next_job(self, message_id, mailbox, pane_id, body, subject):
+        """Materialise a task-store outbox intent once, including after a crash.
+
+        The id was committed with the lease. Never replace a receipt or change
+        the recipient of an existing message when replaying that intent.
+        """
+        if not str(message_id).startswith("nj-"):
+            raise InboxError("next-job message id must start with nj-")
+        with self._lock:
+            self.db.execute(
+                "INSERT OR IGNORE INTO messages "
+                "(id,mailbox,mailbox_label,pane_id,sender,subject,body,state,created_at) "
+                "VALUES (?,?,?,?,?,?,?,'queued',?)",
+                (message_id, mailbox, mailbox, pane_id, "next-job", subject, body, _now()))
+            self.db.commit()
+            result = self.status(message_id)
+            if result["pane_id"] != pane_id or result["mailbox"] != mailbox:
+                raise InboxError("next-job recipient changed")
+            return result
 
     def send(self, mailbox, body, subject=None, sender=None, mailbox_label=None,
              pane_id=None, attachments=()):
@@ -278,11 +302,13 @@ class Inbox:
             self.db.commit()
             return cursor.rowcount
 
-    def record_notify(self, message_id, state, reason=None):
+    def record_notify(self, message_id, state, reason=None, *, transport_id=None, attempt=None):
         with self._lock:
             self.db.execute(
-                "UPDATE messages SET notify_state = ?, notify_reason = ? WHERE id = ?",
-                (state, reason, message_id))
+                "UPDATE messages SET notify_state = ?, notify_reason = ?, notify_at = ?, "
+                "notify_transport_id = COALESCE(?, notify_transport_id), "
+                "notify_attempt = COALESCE(?, notify_attempt) WHERE id = ?",
+                (state, reason, _now(), transport_id, attempt, message_id))
             self.db.commit()
 
     # -- reading ------------------------------------------------------------
@@ -417,7 +443,9 @@ class Inbox:
             "attachments": int(blobs["n"] or 0),
             "attachment_bytes": int(blobs["bytes"] or 0),
             "reason": row["reason"],
-            "notify": {"state": row["notify_state"], "reason": row["notify_reason"]},
+            "notify": {"state": row["notify_state"], "reason": row["notify_reason"],
+                       "at": row["notify_at"], "transport_id": row["notify_transport_id"],
+                       "attempt": row["notify_attempt"]},
         }
 
     def stats(self):

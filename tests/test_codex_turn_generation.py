@@ -85,6 +85,18 @@ class CodexTurnGenerationTests(unittest.TestCase):
         self.assertEqual(1, len(self.calls))
         self.assertEqual(1, len(self.state_files()))
 
+    def test_only_initiating_prompt_handoff_is_echoed(self):
+        self.producer._run = self.fake_run()
+        event = self.event()
+        handoff = 'nj-' + 'a' * 32
+        event['prompt'] = '[inbox] TASK t2. Handoff ' + handoff + '.'
+        self.producer.start(event)
+        self.assertEqual(['--handoff-id', handoff], self.calls[0][-2:])
+        self.producer.end(self.event(action='end'))
+        self.producer.start(self.event(turn='turn-2'))
+        self.assertNotIn('--handoff-id', self.calls[-1])
+        self.assertEqual(1, len(self.state_files()))
+
     def test_failed_start_never_produces_an_end(self):
         self.producer._run = self.fake_run(result=(1, None, "refused"))
         self.producer.start(self.event())

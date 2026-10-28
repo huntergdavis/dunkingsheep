@@ -239,10 +239,16 @@ def start(event: dict | None) -> None:
                 and float(state.get("expires_at", 0)) > now):
             _log(f"start duplicate session={session[:12]} root={root['pid']}")
             return
-        code, result, stderr = _run([
+        args = [
             "--json", "turn", "start",
             "--source", "codex-hook", "--ttl-s", str(int(TTL_S)),
-        ], event["cwd"])
+        ]
+        # Echo only the id present in THIS initiating prompt, never a prior turn
+        # or a timestamp-nearby message. The prompt itself is never logged.
+        handoff = re.search(r"\bHandoff (nj-[0-9a-f]{32})\.", str(event.get("prompt") or ""))
+        if handoff:
+            args += ["--handoff-id", handoff.group(1)]
+        code, result, stderr = _run(args, event["cwd"])
         daemon_turn = result.get("turn_id") if isinstance(result, dict) else None
         if (code != 0 or not isinstance(daemon_turn, str) or not daemon_turn
                 or not isinstance(result.get("pane_id"), str)):

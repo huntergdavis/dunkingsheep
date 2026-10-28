@@ -311,17 +311,18 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertEqual([], self.flock.list())
         self.timer.assert_not_called()
 
-    def test_a_lane_holding_only_an_assigned_programme_task_is_not_prompted(self):
-        """CoS ruling: assigned-and-open umbrella work is not 'working on it now'."""
-        self.flock.task_add("PROGRAMME: the umbrella nobody claims", status="open",
-                            priority="urgent", assignees=[PANE])
+    def test_genuine_end_claims_assigned_work_under_owner_2271(self):
+        """t372 supersedes the old assigned-but-unclaimed restriction at turn end."""
+        added = self.flock.task_add("assigned next job", status="open",
+                                    priority="urgent", assignees=[PANE])
         with self.assertLogs("dunkingsheep", level="INFO") as captured:
             result = self.end_turn()
-        self.assertEqual(("skip", "no_open_work"),
+        self.assertEqual(("claim", None),
                          (result["dispatch"]["action"], result["dispatch"]["reason"]))
-        self.assertEqual([], self.herdr.sends,
-                         "an assigned-but-unclaimed programme task must earn no nudge")
-        self.assertIn("reason=no_open_work", "\n".join(captured.output))
+        self.assertEqual(added["id"], result["dispatch"]["task_id"])
+        self.assertEqual([PANE], self.tasks.get(added["id"])["claimed_by"])
+        self.assertEqual(1, len(self.tasks.next_job_handoffs(PANE)))
+        self.assertIn("action=claim", "\n".join(captured.output))
 
     def test_a_task_another_pane_has_claimed_is_not_mine_to_be_prompted_about(self):
         self.flock.task_add("their work", assignees=[PANE, "w1:p2"])

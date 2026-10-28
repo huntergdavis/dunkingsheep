@@ -79,6 +79,7 @@ def build_parser():
     q.add_argument("--pane", help="pane id (default: the caller's)")
     q.add_argument("--ttl-s", type=float)
     q.add_argument("--source")
+    q.add_argument("--handoff-id", help="next-job id from the initiating prompt")
     q = tsub.add_parser("end", help="end the busy turn and release the hold")
     q.add_argument("--pane", help="pane id (default: the caller's)")
     q.add_argument("--reason")
@@ -2301,7 +2302,7 @@ def run_client_command(client, args):
     if command == "turn":
         if args.turn_command == "start":
             return client.call("turn_start", pane=args.pane, ttl_s=args.ttl_s,
-                               source=args.source), \
+                               source=args.source, handoff_id=args.handoff_id), \
                 lambda r: print(f"turn start {r['pane_id']} ttl {r['ttl_s']}s")
         return client.call("turn_end", pane=args.pane,
                            reason=args.reason, turn_id=args.turn_id), print_turn_end

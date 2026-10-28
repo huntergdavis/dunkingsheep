@@ -126,3 +126,17 @@ test("session deletion ends the root with a stated reason", async () => {
   assert.equal(lines.length, 2);
   assert.match(lines[1], /^--json turn end --turn-id gen-1 --reason session_deleted$/);
 });
+
+test("only the initiating prompt carries the next-job handoff", async () => {
+  const { hooks, calls } = await setup();
+  const id = "nj-" + "a".repeat(32);
+  await hooks["chat.message"]({ sessionID: "ses_handoff" }, {
+    parts: [{type: "text", text: `[inbox] TASK t2. Handoff ${id}.`}],
+  });
+  assert.ok(calls()[0].endsWith(`--handoff-id ${id}`));
+  await idle(hooks, "ses_handoff");
+  await hooks["chat.message"]({ sessionID: "ses_handoff" }, {
+    parts: [{type: "text", text: "unrelated human prompt"}],
+  });
+  assert.ok(!calls().at(-1).includes("--handoff-id"));
+});

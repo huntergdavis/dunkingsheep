@@ -14,15 +14,15 @@ class PiTurnGenerationTests(unittest.TestCase):
         after = "".join(line[1:] for line in patch.splitlines(True)
                         if line.startswith((" ", "+")) and not line.startswith("+++"))
         start = after.index("\t// Serialize hook commands")
-        end = after.index('\n\tpi.on("agent_start"', start)
+        end = after.index('\n\tpi.on("before_agent_start"', start)
         function = after[start:end]
         # This host's Node has no TypeScript stripping support. Erase only the
         # two known annotations; assert their spelling so a changed patch cannot
         # silently run a different approximation of the function.
         annotations = {
             "let activeTurnId: string | undefined;": "let activeTurnId;",
-            'function turn(kind: "start" | "end", cwd: string): Promise<void>':
-                "function turn(kind, cwd)",
+            'function turn(kind: "start" | "end", cwd: string, prompt = ""): Promise<void>':
+                'function turn(kind, cwd, prompt = "")',
         }
         for typed, plain in annotations.items():
             self.assertEqual(1, function.count(typed))
@@ -50,6 +50,18 @@ await Promise.all([start, end]);
 assert.deepEqual(calls[1], ["turn", "end", "--turn-id", "generation-a"]);
 await turn("end", "/tmp");
 assert.equal(calls.length, 2, "a repeated end cannot reuse a consumed token");
+
+const withHandoff = [];
+const reporterWithHandoff = reporter(async (_bin, args) => {
+  withHandoff.push(args);
+  return {code: 0, stdout: '{"turn_id":"handoff-turn"}'};
+});
+const handoff = "nj-" + "a".repeat(32);
+await reporterWithHandoff("start", "/tmp", `[inbox] TASK t2. Handoff ${handoff}.`);
+assert.deepEqual(withHandoff[0].slice(-2), ["--handoff-id", handoff]);
+await reporterWithHandoff("end", "/tmp");
+await reporterWithHandoff("start", "/tmp", "unrelated human prompt");
+assert.ok(!withHandoff[2].includes("--handoff-id"));
 
 for (const result of [
   {code: 1, stdout: '{"turn_id":"invalid"}'},

@@ -166,7 +166,7 @@ def h_turn_start(flock, args, self_pane_id):
     flock.require_turn_caller(args.get("pane"), self_pane_id)
     return flock.turn_start(args.get("pane"), ttl_s=args.get("ttl_s"),
                             source=args.get("source"),
-                            self_pane_id=self_pane_id)
+                            self_pane_id=self_pane_id, handoff_id=args.get("handoff_id"))
 
 
 def h_turn_end(flock, args, self_pane_id):
@@ -1379,7 +1379,9 @@ COMMANDS = [
                 "ttl_s": {"type": "number",
                           "description": "Override the turn TTL in seconds."},
                 "source": {"type": "string",
-                           "description": "Hook/extension that declared it."}},
+                           "description": "Hook/extension that declared it."},
+                "handoff_id": {"type": "string",
+                               "description": "Next-job id from this turn's initiating prompt."}},
         mcp=False,
     ),
     Command(

@@ -88,12 +88,15 @@ function parseTurnID(stdout) {
   }
 }
 
-function startTurn(sessionID, cwd) {
+function startTurn(sessionID, cwd, prompt = "") {
   if (!sessionID || active.has(sessionID)) return;
-  const result = runCli([
+  const args = [
     "--json", "turn", "start", "--source", "opencode-plugin",
     "--ttl-s", String(Math.trunc(TTL_S)),
-  ], cwd);
+  ];
+  const handoff = prompt.match(/\bHandoff (nj-[0-9a-f]{32})\./);
+  if (handoff) args.push("--handoff-id", handoff[1]);
+  const result = runCli(args, cwd);
   const token = result.code === 0 ? parseTurnID(result.stdout) : null;
   if (!token) {
     log(`start failed session=${short(sessionID)} rc=${result.code} ` +
@@ -130,7 +133,7 @@ function endTurn(sessionID, reason) {
 
 export const DunkingsheepTurnPlugin = async () => ({
   // `chat.message` is the user's prompt entering this server: the start edge.
-  "chat.message": ({ sessionID }) => {
+  "chat.message": ({ sessionID }, output) => {
     if (!sessionID || childSessions.has(sessionID)) return;
     if (rootSessionID && rootSessionID !== sessionID) {
       if (active.size > 0) {
@@ -141,7 +144,9 @@ export const DunkingsheepTurnPlugin = async () => ({
       rootSessionID = sessionID;
     }
     rootSessionID ||= sessionID;
-    startTurn(sessionID, process.cwd());
+    const prompt = (output?.parts ?? []).filter(p => p.type === "text")
+      .map(p => p.text ?? "").join("\n");
+    startTurn(sessionID, process.cwd(), prompt);
   },
 
   event: ({ event }) => {
