@@ -2125,7 +2125,9 @@ def run_context_command(dunk_context, args):
         stores = dunk_context.select_stores(getattr(args, "path", None), which=which)
         if sub == "get":
             for name, target in stores.items():
-                entry = target.find(args.key)
+                # CHAIN HEAD, not "first match" (t121): after three supersedes, get() served an older
+                # body. resolve() follows superseded_by to the end.
+                entry = target.resolve(args.key)
                 if entry is not None:
                     target.log_access(entry["slug"])
                     return entry, lambda r: print(

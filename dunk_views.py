@@ -391,9 +391,7 @@ def project_summary(flock, project=None, path=None, now=None):
         stats = target.stats()
         for cls, count in stats["counts"].items():
             counts[cls] = counts.get(cls, 0) + count
-        for entry in target.entries():
-            if entry.get("error"):
-                continue
+        for entry in target.heads():      # heads only (t121): the page lists live articles
             item = {"store": name, "class": entry["class"], "slug": entry["slug"],
                     "subject": entry.get("subject"), "authority": entry.get("authority"),
                     "stated": entry.get("stated"),

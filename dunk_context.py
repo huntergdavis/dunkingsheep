@@ -80,7 +80,7 @@ def _parse_front(text):
 def _render(meta, body):
     lines = ["---"]
     for key in ("class", "subject", "type", "scope", "authority", "stated",
-                "source", "recheck_after", "supersedes", "superseded_by"):
+                "source", "recheck_after", "supersedes", "superseded_by", "retired"):
         value = meta.get(key)
         lines.append(f"{key}: {value if value is not None else 'null'}")
     lines.append("---")
@@ -118,9 +118,16 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     """
     stores = select_stores(project_path, which=which)
     truths, relevant = [], []
+    hidden = 0
     for name, store in stores.items():
+        # HEADS ONLY (t121). This is the path the CLI and the dashboard both take, so a filter in
+        # Store.digest() alone would have left the real digest unchanged - which is exactly what the
+        # first version of this fix did, and the test caught it.
         for entry in store.entries():
             if entry.get("error"):
+                continue
+            if not store.is_head(entry):
+                hidden += 1
                 continue
             if entry["class"] == "ground-truth":
                 truths.append((name, entry))
@@ -129,7 +136,7 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     included = [(name, e) for name, e in truths]
     lines = [f"## Ground truths ({len(truths)})"]
     lines += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for _n, e in truths] or ["- none"]
-    lines += ["", "## Relevant"]
+    lines += ["", "## Relevant" + (f" ({hidden} superseded/retired entries not shown)" if hidden else "")]
     used = len("\n".join(lines).encode("utf-8"))
     omitted = 0
     for name, entry in relevant:
@@ -214,10 +221,49 @@ class Store:
         return out
 
     def find(self, subject_or_slug):
+        """The entry with this exact slug, or the first with this subject (NOT chain-resolved).
+
+        Callers that want "the current article" must use resolve(): find() is exact on purpose, because
+        supersede() has to be able to name the entry it is replacing.
+        """
         for entry in self.entries():
-            if entry.get("slug") == subject_or_slug or entry.get("subject") == subject_or_slug:
+            if entry.get("slug") == subject_or_slug:
+                return entry
+        for entry in self.entries():
+            if entry.get("subject") == subject_or_slug:
                 return entry
         return None
+
+    @staticmethod
+    def is_head(entry):
+        """A LIVE article: not superseded and not retired.
+
+        "retired" used to be only a sentence appended to the body, which made it invisible to code, so
+        a retired article counted as live everywhere (t121). It is a front-matter field now.
+        """
+        return not entry.get("superseded_by") and not entry.get("retired")
+
+    def heads(self, cls=None):
+        return [e for e in self.entries()
+                if not e.get("error") and self.is_head(e) and (cls is None or e["class"] == cls)]
+
+    def resolve(self, subject_or_slug):
+        """The CHAIN HEAD for a subject or any slug in its chain.
+
+        get() used to return whichever entry matched first, so after three supersedes it served an
+        older body (t121). Following superseded_by to the end is the only answer that is not a guess.
+        """
+        entry = self.find(subject_or_slug)
+        if entry is None:
+            return None
+        seen = set()
+        while entry.get("superseded_by") and entry["superseded_by"] not in seen:
+            seen.add(entry["slug"])
+            nxt = self.find(entry["superseded_by"])
+            if nxt is None:
+                break
+            entry = nxt
+        return entry
 
     # -- writes -----------------------------------------------------------
     def add(self, body, *, cls, subject, type_, authority="agent", source="",
@@ -269,10 +315,11 @@ class Store:
                         supersedes=old["slug"])
 
     def retire(self, slug, reason=""):
-        entry = self.find(slug)
+        entry = self.resolve(slug) or self.find(slug)
         if entry is None:
             raise ContextError(f"entry {slug} not found")
         body = entry["body"] + f"\n\n**Retired {_today()}**: {reason}\n"
+        entry["retired"] = _today()          # machine-readable, so code stops counting it as live
         path = Path(entry["path"])
         path.write_text(_render(entry, body))
         return {"slug": entry["slug"], "retired": True, "reason": reason}
@@ -318,9 +365,7 @@ class Store:
             path.unlink()
         conn = sqlite3.connect(path)
         conn.execute("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, class UNINDEXED, scope UNINDEXED)")
-        for entry in self.entries():
-            if entry.get("error"):
-                continue
+        for entry in self.heads():       # heads only (t121): searching a superseded copy is noise
             if entry["class"] == "ground-truth" and entry["authority"] != "owner":
                 continue  # refused by the indexer, not downgraded
             conn.execute("INSERT INTO entries(slug, subject, body, class, scope) VALUES (?,?,?,?,?)",
@@ -328,7 +373,7 @@ class Store:
                           entry["class"], entry["scope"]))
         conn.commit()
         conn.close()
-        return {"indexed": sum(1 for e in self.entries() if not e.get("error")),
+        return {"indexed": len(self.heads()),
                 "path": str(path)}
 
     def search(self, query, *, cls=None, scope=None, limit=20):
@@ -376,7 +421,10 @@ class Store:
             return []
 
     def stats(self):
-        entries = [e for e in self.entries() if not e.get("error")]
+        all_entries = [e for e in self.entries() if not e.get("error")]
+        entries = [e for e in all_entries if self.is_head(e)]
+        superseded = sum(1 for e in all_entries if e.get("superseded_by"))
+        retired = sum(1 for e in all_entries if e.get("retired") and not e.get("superseded_by"))
         counts = {name: sum(1 for e in entries if e["class"] == name) for name in CLASSES}
         ages = {name: sorted((date.today() - date.fromisoformat(e["stated"])).days
                              for e in entries if e["class"] == name) for name in CLASSES}
@@ -391,6 +439,11 @@ class Store:
         seen = {r.get("slug") for r in reads if r["kind"] == "read"}
         delivered = {r.get("slug") for r in reads}
         return {"counts": counts,
+                # Counts are HEADS ONLY (t121); the two extra numbers keep the hidden rows visible,
+                # because a store that silently stops counting them cannot be audited.
+                "heads_total": len(entries),
+                "superseded_total": superseded,
+                "retired_total": retired,
                 "age_days": {name: {"median": pct(ages[name], 0.5), "p90": pct(ages[name], 0.9)}
                              for name in CLASSES},
                 "reads_7d": len(recent), "reads_total": len(reads),
@@ -424,9 +477,7 @@ class Store:
             if at and (slot[key] is None or at > slot[key]):
                 slot[key] = at
         rows = []
-        for entry in self.entries():
-            if entry.get("error"):
-                continue
+        for entry in self.heads():          # heads only (t121): a superseded copy is not a row
             slot = counters.get(entry["slug"], {})
             rows.append({"slug": entry["slug"], "class": entry["class"],
                          "subject": entry.get("subject"), "authority": entry.get("authority"),
@@ -439,7 +490,10 @@ class Store:
 
     # -- digest -----------------------------------------------------------
     def digest(self, *, max_bytes=DEFAULT_CAP, subject=None):
-        entries = [e for e in self.entries() if not e.get("error")]
+        # HEADS ONLY (t121): a digest that lists every superseded copy grows by one line per
+        # supersede, which is how one daily-updated article added seven entries.
+        entries = self.heads()
+        hidden = len([e for e in self.entries() if not e.get("error")]) - len(entries)
         truths = [e for e in entries if e["class"] == "ground-truth"]
         others = [e for e in entries if e["class"] != "ground-truth"
                   and (subject is None or e.get("subject") == subject)]
@@ -447,7 +501,7 @@ class Store:
         parts = [f"## Ground truths ({len(truths)})"]
         parts += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for e in truths] or ["- none"]
         parts.append("")
-        parts.append("## Relevant")
+        parts.append("## Relevant" + (f" ({hidden} superseded/retired entries not shown)" if hidden else ""))
         used = len("\n".join(parts).encode("utf-8"))
         omitted = 0
         for entry in others:
