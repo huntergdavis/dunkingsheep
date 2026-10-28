@@ -14,6 +14,10 @@ from dunk_dispatch import delivery_retry_plan
 log = logging.getLogger("dunkingsheep.next_job")
 
 
+class DispatchPaused(Exception):
+    """The operator withdrew dispatch permission; retain the durable intent."""
+
+
 class NextJobs:
     def __init__(self, flock):
         self.flock = flock
@@ -24,18 +28,37 @@ class NextJobs:
         with self._lock:
             return self._locks.setdefault(pane, threading.RLock())
 
+    def gate(self, pane):
+        """Use the existing dispatch kill switch and lane opt-in resolver."""
+        import dunk_core
+        import dunk_api
+        import dunk_panes
+        if not dunk_core.TURN_END_DISPATCH:
+            return "disabled"
+        try:
+            lanes = self.flock.resolve_lanes()
+            if pane not in dunk_api._dispatch_allowlist(self.flock, lanes=lanes):
+                return "not_allowed"
+            if not any(p["pane_id"] == pane for p in lanes) or dunk_panes.is_retired(pane):
+                return "unavailable_lane"
+        except Exception:
+            return "readiness_unknown"
+        return None
+
     def advance(self, pane, trigger, from_task=None, caller=None):
         f = self.flock
         with self._pane_lock(pane):
+            dispatch_reason = self.gate(pane)
             try:
-                unread = f.inbox_count(None, self_pane_id=pane).get("unread")
+                unread = (None if dispatch_reason else
+                          f.inbox_count(None, self_pane_id=pane).get("unread"))
             except Exception:
                 unread = None
             with f._lock:
                 pending = any(m.status == "queued" for m in f.outbox.get(pane, ()))
             plan = f.tasks.advance_next_job(
                 pane, trigger=trigger, from_task=from_task, caller=caller or f.current_caller(),
-                unread=unread, pending_delivery=pending)
+                unread=unread, pending_delivery=pending, dispatch_reason=dispatch_reason)
             f.metrics.record("next_job.decision", pane_id=pane, source=trigger,
                              outcome=plan["action"], reason=plan.get("reason"))
             log.info("next-job %s trigger=%s action=%s task=%s reason=%s", pane,
@@ -44,12 +67,17 @@ class NextJobs:
             if plan.get("handoff"):
                 try:
                     self.materialise(plan["handoff"])
+                except DispatchPaused as exc:
+                    f.tasks.update_next_job(plan["handoff"], reason=str(exc))
                 except Exception:
                     log.exception("next-job inbox materialisation deferred")
             return plan
 
     def materialise(self, h):
         f = self.flock
+        reason = self.gate(h["pane_id"])
+        if reason:
+            raise DispatchPaused(reason)
         mailbox, _, pane = f.resolve_mailbox(h["pane_id"], None, strict=True)
         if pane != h["pane_id"]:
             raise ValueError("next-job pane changed")
@@ -72,7 +100,8 @@ class NextJobs:
         latest = {r["actor"]: json.loads(r["meta"]) for r in rows if r["actor"]}
         for pane, plan in latest.items():
             # An explicit no-work is terminal. Restart is not a fleet backlog poll.
-            if plan.get("reason") in ("unread_unknown", "unread_mail", "pending_delivery"):
+            if plan.get("reason") in ("unread_unknown", "unread_mail", "pending_delivery",
+                                      "disabled", "not_allowed", "unavailable_lane", "readiness_unknown"):
                 self.advance(pane, "restart", plan.get("from_task"), caller=plan.get("caller"))
         self.tick(restart=True)
 
@@ -108,7 +137,6 @@ class NextJobs:
                     except InboxError:
                         # Reservation preceded inbox materialisation. There can
                         # have been no typing, since transport requires that row.
-                        self.materialise(h)
                         return f.tasks.update_next_job(h, state="pending",
                                                        reason="interrupted_before_inbox")
                     if receipt["attempt"] != h["attempt"]:
@@ -129,6 +157,12 @@ class NextJobs:
             if h["state"] == "sent":
                 self.bind_turn(h["pane_id"])
                 return h  # delivery confirmed; waiting for an actual producer turn
+            dispatch_reason = self.gate(h["pane_id"])
+            if dispatch_reason:
+                if h.get("reason") != dispatch_reason:
+                    f.inbox.record_notify(h["message_id"], "queued", dispatch_reason)
+                    return f.tasks.update_next_job(h, reason=dispatch_reason)
+                return h
             now = time.time()
             with f._lock:
                 turn = f.turns.get(h["pane_id"]) or {}
@@ -167,6 +201,9 @@ class NextJobs:
                 message.preserve_draft = True
                 f.inbox.record_notify(h["message_id"], "queued", transport_id=message.id,
                                       attempt=h["attempt"])
+                reason = self.gate(h["pane_id"])
+                if reason:
+                    raise DispatchPaused(reason)
                 sent = f._deliver(message)
                 if not sent:
                     state, reason = "pending", message.detail or "held"
@@ -183,6 +220,9 @@ class NextJobs:
                 if state == "sent":
                     self.bind_turn(h["pane_id"])
                 return result
+            except DispatchPaused as exc:
+                f.inbox.record_notify(h["message_id"], "queued", str(exc))
+                return f.tasks.update_next_job(h, state="pending", reason=str(exc))
             except Exception as exc:
                 # Before/during transport failure is deliberately conservative.
                 reason = f"delivery_error: {exc}"

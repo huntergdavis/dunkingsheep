@@ -630,7 +630,7 @@ class Tasks:
         return list(latest.values())
 
     def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
-                         unread=0, pending_delivery=False):
+                         unread=0, pending_delivery=False, dispatch_reason=None):
         """Complete A, choose/claim B and journal its inbox id in ONE transaction.
 
         Clauses 1/4: every trigger uses the same decision while holding SQLite's
@@ -683,7 +683,7 @@ class Tasks:
                 plan = next_job_plan(trigger=trigger, pane_id=pane_id, tasks=tasks,
                                      unread=unread, pending_delivery=(pending_delivery or
                                                                      bool(active) or held),
-                                     now=now)
+                                     now=now, dispatch_reason=dispatch_reason)
                 plan.update(from_task=from_task, completion_at=completion, caller=caller)
                 if plan["action"] == "claim":
                     chosen = next(t for t in tasks if t["id"] == plan["task_id"])

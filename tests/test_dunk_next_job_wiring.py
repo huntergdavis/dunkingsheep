@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import _bootstrap  # noqa: F401
 import dunk_core
+import dunk_api
 import dunk_dispatch
 from dunk_core import Flock
 from dunk_inbox import Inbox
@@ -34,6 +35,13 @@ class WiringTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='t372-private-')
         self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(os.environ, {'DUNKINGSHEEP_DISPATCH_LANES': PANE})
+        env.start()
+        self.addCleanup(env.stop)
+        path = mock.patch.object(dunk_api, 'DISPATCH_LANES_PATH',
+                                 os.path.join(self.tmp.name, 'dispatch-lanes.json'))
+        path.start()
+        self.addCleanup(path.stop)
         self.tasks_path = os.path.join(self.tmp.name, 'tasks.db')
         self.inbox_path = os.path.join(self.tmp.name, 'inbox.db')
         self.herdr = FakeHerdr()
@@ -177,6 +185,70 @@ os._exit(0)
         self.f.next_jobs.recover()
         self.assertEqual([], self.herdr.sends)
         self.assertEqual([], self.tasks.next_job_handoffs())
+
+    def test_dispatch_disabled_completes_a_but_never_claims_or_sends_b(self):
+        with mock.patch.object(dunk_core, 'TURN_END_DISPATCH', False):
+            result = self.complete()
+            self.f.next_jobs.recover()
+            self.f.next_jobs.tick()
+        self.assertEqual('done', result['status'])
+        self.assertEqual('disabled', result['next_job']['reason'])
+        self.assertEqual('open', self.tasks.get(self.b)['status'])
+        self.assertEqual([], self.tasks.leases_for(self.b))
+        self.assertEqual(0, self.f.inbox.db.execute('SELECT COUNT(*) FROM messages').fetchone()[0])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_unlisted_lane_is_not_claimed_on_completion_end_or_restart(self):
+        with mock.patch.object(dunk_api, '_dispatch_allowlist', return_value=set()) as allowed:
+            result = self.complete()
+            self.assertEqual('not_allowed', result['next_job']['reason'])
+            started = self.f.turn_start(PANE, source='pi-test')
+            ended = self.f.turn_end(PANE, turn_id=started['turn_id'], authenticated=True)
+            self.assertEqual('not_allowed', ended['dispatch']['reason'])
+            self.f.next_jobs.recover()
+            self.f.next_jobs.tick()
+            self.assertTrue(allowed.called)
+        self.assertEqual('open', self.tasks.get(self.b)['status'])
+        self.assertEqual([], self.tasks.leases_for(self.b))
+        self.assertEqual([], self.tasks.next_job_handoffs())
+        self.assertEqual([], self.herdr.sends)
+
+    def test_revoked_allowlist_pauses_existing_intent_without_spending_attempts(self):
+        self.complete()
+        with mock.patch.object(dunk_api, '_dispatch_allowlist', return_value=set()):
+            for _ in range(3):
+                self.f.next_jobs.tick()
+            self.f.next_jobs.recover()
+        self.assertEqual('not_allowed', self.handoff()['reason'])
+        self.assertEqual(0, self.handoff()['attempt'])
+        self.assertEqual([], self.herdr.sends)
+        self.f.next_jobs.tick()
+        self.assertEqual('sent', self.handoff()['state'])
+
+    def test_dispatch_disable_rechecked_after_claim_and_before_delivery(self):
+        self.complete()
+        with mock.patch.object(dunk_core, 'TURN_END_DISPATCH', False):
+            self.f.next_jobs.tick()
+        self.assertEqual('disabled', self.handoff()['reason'])
+        self.assertEqual(0, self.handoff()['attempt'])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_permission_revoked_at_last_delivery_check_never_types(self):
+        self.complete()
+        with mock.patch.object(self.f.next_jobs, 'gate', side_effect=[None, None, 'not_allowed']):
+            self.f.next_jobs.tick()
+        self.assertEqual('pending', self.handoff()['state'])
+        self.assertEqual('not_allowed', self.handoff()['reason'])
+        self.assertEqual([], self.herdr.sends)
+
+    def test_unlisted_lane_cannot_materialise_a_committed_intent(self):
+        self.tasks.advance_next_job(PANE, trigger='completion', from_task=self.a,
+                                    caller=CALLER, unread=0)
+        with mock.patch.object(dunk_api, '_dispatch_allowlist', return_value=set()):
+            self.f.next_jobs.recover()
+        self.assertEqual(0, self.f.inbox.db.execute('SELECT COUNT(*) FROM messages').fetchone()[0])
+        self.assertEqual(0, self.handoff()['attempt'])
+        self.assertEqual([], self.herdr.sends)
 
     def test_unknown_unread_is_not_permission(self):
         with mock.patch.object(self.f, 'inbox_count', side_effect=RuntimeError('db busy')):

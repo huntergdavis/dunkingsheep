@@ -2342,14 +2342,15 @@ class Flock:
         return result
 
     def _dispatch_on_turn_end(self, pane_id):
-        if TURN_END_DISPATCH:
-            plan = self.next_jobs.advance(pane_id, "turn.end")
-            self._next_job_wake.set()
-            handoffs = self.tasks.next_job_handoffs(pane_id)
-            if plan["action"] == "claim" or any(
-                    self.tasks.get(h["task_id"])["status"] not in ("done", "cancelled")
-                    for h in handoffs):
-                return dict(plan, delivered=False)
+        plan = self.next_jobs.advance(pane_id, "turn.end")
+        self._next_job_wake.set()
+        if plan.get("reason") in ("disabled", "not_allowed", "unavailable_lane", "readiness_unknown"):
+            return dict(plan, delivered=False)
+        handoffs = self.tasks.next_job_handoffs(pane_id)
+        if plan["action"] == "claim" or any(
+                self.tasks.get(h["task_id"])["status"] not in ("done", "cancelled")
+                for h in handoffs):
+            return dict(plan, delivered=False)
         # Check-and-send spans backend calls: do not hold the global lock, but
         # reserve this pane so concurrent end notifications cannot enqueue twice.
         with self._lock:
