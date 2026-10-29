@@ -490,25 +490,16 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         """A token existing is not the same as this pane being on its list: the
         credential names panes, so a view that only knows a token exists offers a
         button the daemon refuses (found reviewing the desk's can_type)."""
-        import json as _json
-        import dunk_desk
-        made = self.flock.create_workspace(label="guarded", cwd="/tmp",
-                                          mailbox="guarded lane")["pane_id"]
-        path = os.path.join(self.tmp.name, "desk.json")
-        with mock.patch.dict(os.environ, {"DUNKINGSHEEP_DESK_FILE": path}):
-            desk = dunk_desk.DeskCredential(path=path)
-            before = self.flock.delivery_capability("guarded lane")
-            self.assertFalse(before["desk_credential"])
-            self.assertFalse(before["desk_can_type"])
-            token = desk.issue([made])
-            after = self.flock.delivery_capability("guarded lane")
-            self.assertTrue(after["desk_credential"])
-            self.assertTrue(after["desk_can_type"], "this pane is on the list")
-            desk.issue(["%1"])
-            other = self.flock.delivery_capability("guarded lane")
-            self.assertTrue(other["desk_credential"])
-            self.assertFalse(other["desk_can_type"],
-                             "a token that does not cover this pane must not offer a button")
+        # The desk credential became the `web` service token (dunk_roles): a web
+        # token exists or it does not, and it covers every pane the owner may type into.
+        self.flock.create_workspace(label="guarded", cwd="/tmp", mailbox="guarded lane")
+        before = self.flock.delivery_capability("guarded lane")
+        self.assertFalse(before["desk_credential"])
+        self.assertFalse(before["desk_can_type"])
+        self.flock.roles.issue_token("web", label="desk")
+        after = self.flock.delivery_capability("guarded lane")
+        self.assertTrue(after["desk_credential"])
+        self.assertTrue(after["desk_can_type"])
 
     def test_two_live_panes_declaring_one_name_are_refused_not_split(self):
         """A restore that duplicates a lane must not split its mail silently."""
@@ -1047,8 +1038,10 @@ class SurfaceParityTests(unittest.TestCase):
             "cancel_message": "cancel-message", "list_panes": "panes",
             "read_pane": "read", "list_workspaces": "workspaces",
             "create_workspace": "new-workspace", "create_tab": "new-tab",
-            "lanes": "lane", "lane_set": "lane",
-            "delivery_capability": "capability", "desk_token": "desk-token",
+            "lanes": "lane", "lane_set": "lane", "lane_register": "lane",
+            "lane_unregister": "lane", "whoami": "whoami",
+            "token_issue": "token", "token_revoke": "token",
+            "delivery_capability": "capability",
             "owner_poll": "poll", "allocation": "allocation",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",

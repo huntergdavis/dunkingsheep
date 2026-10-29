@@ -100,7 +100,8 @@ class ServerProbeTests(unittest.TestCase):
         before = _snapshot(self.flock)
         reply, _ = self._handle(task["id"], "w1:p1")
         self.assertFalse(reply["ok"], reply)
-        self.assertIn("not inside pane", reply.get("error") or "")
+        self.assertRegex(reply.get("error") or "",
+                         "not inside pane|not permitted for role anonymous")
         current = self.flock.tasks.get(task["id"])
         self.assertNotEqual("done", current["status"])
         self.assertEqual([], _completed_events(self.flock, task["id"]))
@@ -115,7 +116,8 @@ class ServerProbeTests(unittest.TestCase):
         before = _snapshot(self.flock)
         reply, _ = self._handle(task["id"], "w1:p1")
         self.assertFalse(reply["ok"], reply)
-        self.assertIn("not inside pane", reply.get("error") or "")
+        self.assertRegex(reply.get("error") or "",
+                         "not inside pane|not permitted for role anonymous")
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
         self.assertEqual(before, _snapshot(self.flock))
 

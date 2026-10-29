@@ -82,12 +82,12 @@ class SuperuserStoreTests(unittest.TestCase):
         self.assertFalse(store.empty())
         self.assertEqual(0o600, os.stat(self.path).st_mode & 0o777)
 
-    def test_add_remove_and_name_matching(self):
+    def test_add_and_remove_panes(self):
+        # The legacy store still parses; the daemon reads only its pane entries
+        # (dunk_roles: a label is one `tmux select-pane -T` away for any lane).
         store = Superusers(path=self.path)
         store.add(VP_PANE)
         self.assertTrue(store.is_superuser(VP_PANE))
-        self.assertTrue(store.is_superuser("w1:p9", {"tab_label": "VP of agentry"}))
-        self.assertFalse(store.is_superuser("w1:p9", {"tab_label": "writer"}))
         self.assertTrue(store.remove(VP_PANE))
         self.assertFalse(store.is_superuser(VP_PANE))
 
@@ -109,6 +109,7 @@ class SuperuserGatingTests(unittest.TestCase):
         self.superusers = Superusers(
             path=os.path.join(self.tmp.name, "superusers.json"))
         self.superusers.add(SUPERVISOR)
+        self.superusers.add(VP_PANE)     # by pane: labels no longer grant anything
         self.flock = Flock(
             herdr=self.herdr,
             state_file=os.path.join(self.tmp.name, "dunks.json"),
@@ -153,13 +154,15 @@ class SuperuserGatingTests(unittest.TestCase):
         self.assertEqual(9, len(closed["closed_panes"]))
         self.assertIsNone(self.herdr.get_pane(VP_PANE))
 
-    def test_superuser_by_name_survives_a_pane_id_change(self):
-        # The VP pane is on the allowlist by its tab label, not its id.
-        self.assertTrue(self.flock.is_superuser(VP_PANE))
-        self.flock.require_superuser(VP_PANE, "close")  # does not raise
-        status = self.call("superuser_status", {}, VP_PANE)
-        self.assertTrue(status["superuser"])
-        self.assertIn("VP of agentry", status["names"])
+    def test_a_label_no_longer_grants_the_role(self):
+        # w9:p1 sits in the tab labelled "VP of agentry"; under roles the label
+        # is worth nothing - only a registration bound to the pane counts.
+        self.assertFalse(self.flock.is_superuser("w9:p1"))
+        with self.assertRaisesRegex(DunkError, "requires a superuser"):
+            self.flock.require_superuser("w9:p1", "close")
+        status = self.call("superuser_status", {}, "w9:p1")
+        self.assertFalse(status["superuser"])
+        self.assertNotEqual("owner", status["role"])
 
     # -- the other destructive surfaces ------------------------------------
 
@@ -170,20 +173,21 @@ class SuperuserGatingTests(unittest.TestCase):
             ("start_agent", {"name": "helper", "command": "codex"}),
             ("herdr", {"command": "tab list"}),
         ):
-            with self.assertRaisesRegex(DunkError, "requires a superuser"):
+            with self.assertRaisesRegex(DunkError, "requires a superuser|not permitted for role"):
                 self.call(name, args, OUTSIDER)
 
     def test_non_superuser_may_only_send_to_itself(self):
-        with self.assertRaisesRegex(DunkError, "requires a superuser"):
+        self.flock.roles.register(OUTSIDER, "worker", provider="codex")
+        with self.assertRaisesRegex(DunkError, "may only type into its own pane|requires"):
             self.call("send_text", {"target": VP_PANE, "text": "hi"}, OUTSIDER)
         result = self.call("send_text", {"target": "self", "text": "hi"}, OUTSIDER)
         self.assertEqual(OUTSIDER, result["pane_id"])
 
     def test_superuser_add_and_remove_are_gated(self):
-        with self.assertRaisesRegex(DunkError, "requires a superuser"):
+        with self.assertRaisesRegex(DunkError, "requires a superuser|not permitted for role"):
             self.call("superuser_add", {"entry": "w3:p3"}, OUTSIDER)
         added = self.call("superuser_add", {"entry": "w3:p3"}, SUPERVISOR)
-        self.assertIn("w3:p3", added["panes"])
+        self.assertIn("w3:p3", added["lanes"])
         removed = self.call("superuser_remove", {"entry": "w3:p3"}, SUPERVISOR)
         self.assertTrue(removed["removed"])
 
@@ -202,14 +206,14 @@ class SuperuserGatingTests(unittest.TestCase):
             superusers=empty,
         )
         try:
-            with self.assertRaisesRegex(DunkError, "allowlist is empty"):
+            with self.assertRaisesRegex(DunkError, "no owner is registered"):
                 dunk_api.dispatch(flock, "close", {"kind": "pane", "target": VP_PANE},
                                   self_pane_id=OUTSIDER)
             result = dunk_api.dispatch(flock, "superuser_recover",
                                        {"name": "VP of agentry"}, self_pane_id=VP_PANE)
             self.assertTrue(result["recovered"])
-            self.assertIn(VP_PANE, result["panes"])
-            with self.assertRaisesRegex(DunkError, "requires an existing superuser"):
+            self.assertIn(VP_PANE, result["lanes"])
+            with self.assertRaisesRegex(DunkError, "requires the owner role"):
                 dunk_api.dispatch(flock, "superuser_recover", {}, self_pane_id=OUTSIDER)
         finally:
             flock.close()

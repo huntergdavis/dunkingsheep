@@ -83,9 +83,16 @@ def locked_allowlist(path):
 
 
 def _parse_allowlist(data):
-    """(panes, names) sets from decoded JSON; shared by load and locked reads."""
+    """(panes, names) sets from decoded JSON; shared by load and locked reads.
+
+    A roles file (dunk_roles: {"lanes": {pane: {"role": ...}}}) is accepted
+    too: its owner lanes are the panes, and it never yields names."""
     if not isinstance(data, dict):
         raise SuperuserError("allowlist must contain a JSON object")
+    if isinstance(data.get("lanes"), dict) and "panes" not in data:
+        owners = {str(pane).strip() for pane, entry in data["lanes"].items()
+                  if isinstance(entry, dict) and entry.get("role") == "owner"}
+        return (owners, set())
     panes = list(data.get("panes") or ())
     names = list(data.get("names") or ())
     for entry in data.get("superusers") or ():

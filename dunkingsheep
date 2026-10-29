@@ -186,7 +186,7 @@ def build_parser():
                    help="block up to S seconds for delivery before returning (default 10)")
     p.add_argument("--ignore-typing", action="store_true",
                    help="send even while someone is typing (default: queue it)")
-    p.add_argument("--desk-token", help="narrow desk credential (send to a listed pane only)")
+    p.add_argument("--desk-token", help=argparse.SUPPRESS)
 
     p.add_argument("--no-enter", action="store_true",
                    help="leave the text in the box without pressing Enter")
@@ -199,7 +199,7 @@ def build_parser():
                    help="block up to S seconds for delivery before returning (default 10)")
     p.add_argument("--ignore-typing", action="store_true",
                    help="press them even while someone is typing (default: queue)")
-    p.add_argument("--desk-token", help="narrow desk credential (listed panes only)")
+    p.add_argument("--desk-token", help=argparse.SUPPRESS)
 
     p = sub.add_parser("install", help="put `dunkingsheep` on PATH as a plain command",
                        description="Install a launcher so agents can run `dunkingsheep "
@@ -467,6 +467,18 @@ def build_parser():
     q.add_argument("--bucket", choices=["hour", "day"], default="hour")
     tsub.add_parser("reap", help="requeue expired/dead leases now")
 
+    # -- roles ----------------------------------------------------------------
+    sub.add_parser("whoami", help="this caller's role and how it was bound")
+    p = sub.add_parser("token", help="service tokens for pane-less processes (web desk, timers)")
+    toksub = p.add_subparsers(dest="token_command", metavar="<subcommand>", parser_class=json_parser_class)
+    toksub.required = True
+    q = toksub.add_parser("issue", help="mint a token (owner only; printed once)")
+    q.add_argument("--role", required=True, choices=["web", "system", "owner"])
+    q.add_argument("--label")
+    q = toksub.add_parser("revoke", help="revoke every token with this label")
+    q.add_argument("label")
+    toksub.add_parser("list", help="labels and roles of issued tokens")
+
     # -- superusers -----------------------------------------------------------
     superuser = sub.add_parser(
         "superuser",
@@ -480,8 +492,8 @@ def build_parser():
     q.add_argument("entry", help="pane id (w9:p8) or name (VP of agentry)")
     q = ssub.add_parser("remove", help="remove a pane id or name")
     q.add_argument("entry")
-    q = ssub.add_parser("recover", help="re-assert this pane and the configured VP name")
-    q.add_argument("--name", help="name to re-assert (default: VP of agentry)")
+    q = ssub.add_parser("recover", help="bootstrap: register this pane as the first owner")
+    q.add_argument("--name", help=argparse.SUPPRESS)
 
     # -- memory ---------------------------------------------------------------
     memory = sub.add_parser(
@@ -615,8 +627,6 @@ def build_parser():
     p = sub.add_parser("api", help="read-only HTTP surface for the Command Center (roster, message state, project summary)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8792)
-    p = sub.add_parser("desk-token", help="issue the narrow desk credential (send only, listed panes)")
-    p.add_argument("--panes", required=True, help="comma-separated pane ids, e.g. %%1,%%2,%%4")
     p = sub.add_parser("capability", aliases=["capabilities"],
                        help="how a target can receive: push queue (pi) or immediate guarded send",
                        epilog="example: dunkingsheep capability '%9'")
@@ -626,6 +636,14 @@ def build_parser():
                        epilog="examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'")
     lsub = p.add_subparsers(dest="lane_command", metavar="<action>", parser_class=json_parser_class)
     lsub.add_parser("list", help="every lane row: pane, name, declared?, alive?")
+    q = lsub.add_parser("register", help="bind a role to a pane's root process (owner only; the first owner may self-register)")
+    q.add_argument("--role", required=True, choices=["owner", "desk", "planner", "worker", "reviewer"])
+    q.add_argument("--pane", help="pane id (default: this pane)")
+    q.add_argument("--provider", help="claude, codex, pi, opencode-go (reviewers must be claude/codex)")
+    q.add_argument("--model")
+    q.add_argument("--label")
+    q = lsub.add_parser("unregister", help="remove a pane's role binding (owner only)")
+    q.add_argument("pane")
     q = lsub.add_parser("set", help="declare who a pane IS (superuser); overrides any title")
     q.add_argument("pane")
     q.add_argument("mailbox")
@@ -711,6 +729,13 @@ def build_parser():
     p.add_argument("--split", choices=["right", "down"], help="with --tab: split its pane")
     p.add_argument("--cwd")
     p.add_argument("--focus", action="store_true")
+    p.add_argument("--role", choices=["owner", "desk", "planner", "worker", "reviewer"])
+    p.add_argument("--provider")
+    p.add_argument("--model")
+    p.add_argument("--role", choices=["owner", "desk", "planner", "worker", "reviewer"],
+                   help="bind this role to the new pane from the launch record")
+    p.add_argument("--provider", help="claude, codex, pi, opencode-go (reviewers must be claude/codex)")
+    p.add_argument("--model")
     p.add_argument("argv", nargs="+", metavar="COMMAND", help="the agent command line")
     p = sub.add_parser("respawn-pane", aliases=["respawn"],
                        help="guardedly replace an existing managed pane's process in place")
@@ -1226,14 +1251,30 @@ def print_recover(result):
         print(f"  warning {warning.get('kind')}: {warning.get('detail')}")
 
 
+def print_whoami(result):
+    print(f"pane {result.get('pane_id') or '-'}  role {result.get('role')}"
+          + ("  (service token)" if result.get("via_token") else ""))
+    if result.get("binding_note"):
+        print(f"  binding: {result['binding_note']}")
+    reg = result.get("registered")
+    if reg:
+        print(f"  registered: {reg.get('role')} pid {reg.get('pane_pid')} "
+              f"provider {reg.get('provider') or '-'} by {reg.get('by') or '-'}")
+
+
 def print_superuser(result):
-    print(f"allowlist {result.get('path')}")
-    print(f"  superuser: {'yes' if result.get('superuser') else 'no'}"
-          f" (pane {result.get('pane_id') or '-'})")
-    print("  panes: " + (", ".join(result.get("panes") or []) or "(none)"))
-    print("  names: " + (", ".join(result.get("names") or []) or "(none)"))
-    if result.get("empty"):
-        print("  empty: destructive operations are refused until a superuser is added")
+    print(f"roles {result.get('path')}")
+    print(f"  owner: {'yes' if result.get('superuser') else 'no'}"
+          f" (pane {result.get('pane_id') or '-'}, role {result.get('role')})")
+    lanes = result.get("lanes") or {}
+    for pane, entry in sorted(lanes.items()):
+        print(f"  {pane:8} {entry.get('role'):9} pid {entry.get('pane_pid') or '-'} "
+              f"{entry.get('provider') or ''} {entry.get('label') or ''}".rstrip())
+    if not lanes:
+        print("  (no lanes registered; `lane register --role owner` bootstraps)")
+    tokens = result.get("tokens") or []
+    if tokens:
+        print("  tokens: " + ", ".join(f"{t['label']}={t['role']}" for t in tokens))
     if "added" in result:
         print(f"  added: {result['added']}")
     if "removed" in result:
@@ -1716,7 +1757,7 @@ def _still_working_message(command, seconds):
 _MUTATING_COMMANDS = (
     "send", "send-keys", "fire", "flush", "clear-box", "start", "stop", "toggle",
     "stop-all", "add", "update", "set", "remove", "rm", "delete", "cancel",
-    "cancel-message", "inbox", "task", "superuser", "desk-token", "lane", "lanes",
+    "cancel-message", "inbox", "task", "superuser", "whoami", "token", "lane", "lanes",
     "new-workspace", "workspace", "new-tab", "tab", "split", "start-agent", "agent",
     "respawn-pane", "respawn", "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
     "recover", "shutdown", "watchdog", "watchdog-deadman", "memory", "context",
@@ -2694,13 +2735,30 @@ def run_client_command(client, args):
     if command == "api":
         import dunk_http
         return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
-    if command == "desk-token":
-        return client.call("desk_token", panes=args.panes), \
-            lambda r: print(r["token"])
+    if command == "whoami":
+        return client.call("whoami"), print_whoami
+    if command == "token":
+        sub = args.token_command
+        if sub == "issue":
+            return client.call("token_issue", role=args.role, label=args.label), \
+                lambda r: print(r["token"])
+        if sub == "revoke":
+            return client.call("token_revoke", label=args.label), \
+                lambda r: print(f"revoked {r['revoked']} token(s) labelled {r['label']}")
+        if sub == "list":
+            return client.call("superuser_status"), \
+                lambda r: print("\n".join(f"{t['label']:24} {t['role']}" for t in r.get("tokens") or []) or "no tokens")
     if command in ("capability", "capabilities"):
         return client.call("delivery_capability", target=args.target), print_capability
     if command in ("lane", "lanes"):
         action = args.lane_command or "list"
+        if action == "register":
+            return client.call("lane_register", pane=args.pane, role=args.role,
+                               provider=args.provider, model=args.model, label=args.label), \
+                lambda r: print(f"registered {r['pane_id']} as {r['role']} (pid {r.get('pane_pid')})")
+        if action == "unregister":
+            return client.call("lane_unregister", pane=args.pane), \
+                lambda r: print(f"unregistered {r['pane_id']}: {bool(r.get('removed'))}")
         if action == "set":
             return client.call("lane_set", pane=args.pane,
                                mailbox=args.mailbox), print_lane
@@ -2743,7 +2801,8 @@ def run_client_command(client, args):
     if command in ("new-workspace", "workspace"):
         return client.call("create_workspace", label=args.label, cwd=args.cwd,
                            command=args.run, focus=args.focus,
-                           mailbox=args.mailbox), print_created
+                           mailbox=args.mailbox, role=args.role, provider=args.provider,
+                           model=args.model), print_created
     if command in ("new-tab", "tab"):
         return client.call("create_tab", workspace=args.workspace, label=args.label,
                            cwd=args.cwd, command=args.run, focus=args.focus), print_created
@@ -2754,7 +2813,8 @@ def run_client_command(client, args):
     if command in ("start-agent", "agent"):
         return client.call("start_agent", name=args.name, command=shlex.join(args.argv),
                            workspace=args.workspace, tab=args.tab, split=args.split,
-                           cwd=args.cwd, focus=args.focus), \
+                           cwd=args.cwd, focus=args.focus, role=args.role,
+                           provider=args.provider, model=args.model), \
             lambda r: print(f"started agent {r['name']} in {r['pane_id']}: {shlex.join(r['argv'])}")
     if command in ("respawn-pane", "respawn"):
         argv, rollback = _respawn_argv(args)

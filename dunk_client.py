@@ -253,6 +253,22 @@ class FlockClient:
         self.timeout = timeout
         self._next_id = 1
 
+    @staticmethod
+    def service_token():
+        """A service token for a pane-less process (web desk, timers), from
+        DUNKINGSHEEP_SERVICE_TOKEN or the 0600 file DUNKINGSHEEP_SERVICE_TOKEN_FILE."""
+        token = (os.environ.get("DUNKINGSHEEP_SERVICE_TOKEN") or "").strip()
+        if token:
+            return token
+        path = (os.environ.get("DUNKINGSHEEP_SERVICE_TOKEN_FILE") or "").strip()
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    return handle.read().strip() or None
+            except OSError:
+                return None
+        return None
+
     # -- transport ------------------------------------------------------------
 
     def call(self, cmd, **args):
@@ -267,6 +283,9 @@ class FlockClient:
             "args": {key: value for key, value in args.items() if value is not ...},
             "self_pane_id": pane_id,
         }
+        token = self.service_token()
+        if token:
+            request["service_token"] = token
         self._next_id += 1
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
