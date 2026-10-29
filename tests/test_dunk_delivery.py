@@ -390,12 +390,9 @@ class HarnessQueueCapabilityTests(unittest.TestCase):
                              "agent": harness, "label": harness}]
         return self.flock._pane_harness("w1:p1")
 
-    def test_codex_holds_because_it_would_lose_the_text(self):
+    def test_codex_native_queue_is_not_held_while_working(self):
         self.assertEqual("codex", self.pane("codex"))
-        blocker = self.flock.send_blocker("w1:p1")
-        self.assertIsNotNone(blocker)
-        self.assertIn("does not queue", blocker[1])
-        self.assertIn("lost", blocker[1])
+        self.assertIsNone(self.flock.send_blocker("w1:p1"))
 
     def test_claude_and_pi_are_not_held_while_working(self):
         for harness in ("claude", "pi"):

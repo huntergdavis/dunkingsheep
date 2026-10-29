@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.100"
+VERSION = "2.70.101"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -348,14 +348,9 @@ DEAD_SESSION_MARKERS = (
 #   claude -> yes: the composer shows "ctrl+x ctrl+s to send now" and the message is
 #             processed after the current turn (proven 2026-10-24, not interleaved).
 #   pi     -> yes: "Alt+Up to edit all queued messages", processed after the turn.
-#   codex  -> NO: text typed into the composer during a turn is NOT retained. Measured
-#             on wR:p6 during a 54-minute turn: four notices reported sent, the
-#             composer sat at its placeholder, and the scrollback contained exactly one
-#             composer line - i.e. accepted and lost, which is worse than held.
-# The policy is "a busy agent is not a hold" - but only where the harness actually
-# queues. For a harness that does not, holding is the lesser evil, and the reason says
-# so. Anything unknown is treated as not-queueing (conservative).
-HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}
+#   codex  -> yes, via Tab while working (Enter is not its queue action).
+# The old negative measurement used Enter and incorrectly became a busy hold.
+HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True, "codex": True}
 
 # A pane can be alive, have unread mail, and still be unreachable: its input box
 # holds something that was never submitted, so every later send is held as "a
@@ -776,6 +771,7 @@ class Flock:
         # One entry per pane, updated on every decided delivery, retired on consumption,
         # cancellation or a newer intent for the same pane, and persisted with the state.
         self.stuck_candidates = {}
+        self.federated_input = os.environ.get("DUNKINGSHEEP_FEDERATED_INPUT") == "1"
         self.stuck_config = dunk_stuck.Config.from_mapping(
             self._stuck_config_source(stuck_config))
         # A CONFIG THAT WAS DECLARED WINS OVER THE ONE IN THE STATE FILE, otherwise the
@@ -1238,6 +1234,7 @@ class Flock:
         available = self.herdr.is_available() if check_herdr else None
         return {
             "version": VERSION,
+            "federated_input": self.federated_input,
             **code_status(),
             "started_at": self.started_at,
             "pid": os.getpid(),
@@ -1269,6 +1266,7 @@ class Flock:
             message = self.last_message
         return {
             "version": VERSION,
+            "federated_input": self.federated_input,
             **code_status(),
             "started_at": self.started_at,
             "pid": os.getpid(),
@@ -5568,6 +5566,133 @@ class Flock:
 
     STUCK_OBSERVE_TICK_S = 5.0
 
+    def _federated_composer(self, screen):
+        """Authorized live input under the explicit all-input-via-DS policy.
+
+        This is NOT an ownership/equality assertion. In federated mode the owner
+        authorizes preserving and submitting the existing composer, even when
+        scrolled. Strict mode and explicit preserve_draft sends retain their gates.
+        """
+        if not self.federated_input or not screen or _modal_open(screen):
+            return None
+        rows = screen.splitlines()
+        nonblank = [i for i, row in enumerate(rows) if _strip_ansi(row).strip()]
+        if not nonblank:
+            return None
+        def native_status(row):
+            # Installed native Codex appends its session title after cwd.
+            plain = _strip_ansi(row).strip()
+            return _native_status(" · ".join(plain.split(" · ")[:2]))
+        end = nonblank[-1]
+        if (_native_hints(rows[end]) or _native_warning(rows[end])) and len(nonblank) > 1:
+            end = nonblank[-2]
+        if not native_status(rows[end]):
+            return None
+        sigils = [(i, _styled_sigil_state(row)) for i, row in enumerate(rows[:end])
+                  if _prompt_body(row) is not None and not _native_banner(row)]
+        if (not sigils or sigils[-1][1] != "bold"
+                or any(state != "dim" for _, state in sigils[:-1])):
+            return None
+        start = sigils[-1][0]
+        parts = [_prompt_body(rows[start]) or ""]
+        parts.extend(_strip_ansi(row).strip() for row in rows[start + 1:end])
+        text = " ".join(part for part in parts if part)
+        return "" if _is_placeholder(text) else text
+
+    def _federated_recovery_step(self, now=None):
+        """Deterministic preserve-submit, using the existing durable attempt ledger.
+
+        Only native styled composers on the SAME recorded process qualify. A
+        changed screen resets the timer; cancellation/no-enter intent forbids action.
+        No text is replayed. The single key and its budget are guarded and durable.
+        """
+        now = time.time() if now is None else float(now)
+        if not self.stuck_config.enabled:
+            return 0
+        acted = 0
+        with self._lock:
+            candidates = dict(self.stuck_candidates)
+        for pane_id, entry in candidates.items():
+            with self._lock:
+                if self.outbox.get(pane_id):
+                    continue  # serialized send worker preserves this composer itself
+            if (not entry.get("press_enter") or entry.get("kind") != "text"
+                    or entry.get("status") not in ("sent", "failed")
+                    or not entry.get("generation")):
+                continue
+            screen = self.read_screen(pane_id)
+            content = self._federated_composer(screen)
+            generation = self._pane_generation(pane_id)
+            busy = bool(screen and _status_marker(screen, WORKING_MARKERS,
+                        lines=40, placeholder_safe=True, dim_ok=True))
+            status = "ready" if (content is not None and not busy
+                        and generation == entry["generation"]
+                        and not self._dead_session(pane_id)) else "unknown"
+            identity = "federated:" + str(entry["message_id"])
+            observation = dunk_stuck.Observation(
+                pane_id=pane_id, message_id=identity, text=content or "",
+                status=status, owned=content is not None, generation=generation)
+            decision = self.stuck.decide(observation, self.stuck_config, now=now)
+            if decision.action != "recover":
+                continue
+            # Tracker spends the attempt BEFORE the key; never refund on failure.
+            if not self._save():
+                continue
+            with self._lock_for(pane_id), self._typing(pane_id):
+                current = self.read_screen(pane_id)
+                live = self.stuck_candidates.get(pane_id) or {}
+                if (live != entry or self._pane_generation(pane_id) != generation
+                        or self._federated_composer(current) != content
+                        or not content or self._dead_session(pane_id)
+                        or _status_marker(current, WORKING_MARKERS, lines=40,
+                                          placeholder_safe=True, dim_ok=True)):
+                    continue
+                ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            if not ok:
+                log.warning("federated recovery %s: key refused: %s", pane_id, detail)
+                continue
+            time.sleep(SUBMIT_POLL_S[0])
+            after = self._federated_composer(self.read_screen(pane_id))
+            verified = after == "" and self._pane_generation(pane_id) == generation
+            self.metrics.record("stuck.recover", pane_id=pane_id,
+                                source="federated_watchdog",
+                                outcome="consumed" if verified else "unverified",
+                                reason="authorized preserve-submit; no text replayed")
+            log.warning("federated recovery %s: one Enter, %s", pane_id,
+                        "composer cleared" if verified else "receipt unverified")
+            acted += 1
+        self._save()
+        return acted
+    def _dialog_observer_step(self, now=None):
+        """Scan live agent dialogs every 30s even without queued mail. No keys."""
+        now = time.time() if now is None else now
+        if now < getattr(self, "_dialog_scan_at", 0):
+            return
+        self._dialog_scan_at = now + 30
+        observations = getattr(self, "_dialog_observations", {})
+        current = {}
+        try:
+            panes = self.herdr.list_panes()
+        except Exception:
+            log.exception("dialog observer could not list panes")
+            return
+        for pane in panes:
+            pane_id = pane.get("pane_id")
+            if not pane_id or not pane.get("agent"):
+                continue
+            screen = self.read_screen(pane_id)
+            if screen is None or not _modal_open(screen):
+                continue
+            signature = ("modal", _collapse(_strip_ansi(screen))[-4000:])
+            generation = self._pane_generation(pane_id)
+            previous = observations.get(pane_id)
+            since = (previous[2] if previous and previous[:2] == (generation, signature)
+                     else now)
+            current[pane_id] = (generation, signature, since)
+            self._note_stale_panel(pane_id, signature, since)
+        # Absent/nonmodal/replaced panes start a fresh stability interval.
+        self._dialog_observations = current
+
     def _stuck_observer_step(self, now=None):
         """ONE periodic scan for a stalled delivery nobody else is watching (t377).
 
@@ -5590,6 +5715,12 @@ class Flock:
             turn all stop it - the state machine in `dunk_stuck` owns those decisions, so
             this scan cannot invent a second policy.
         """
+        federated_acted = 0
+        if self.federated_input:
+            try:
+                federated_acted = self._federated_recovery_step(now)
+            except Exception:
+                log.exception("federated recovery scan failed; retrying next tick")
         try:
             with self._lock:
                 candidates = dict(self.stuck_candidates)
@@ -5597,8 +5728,10 @@ class Flock:
                 queued_panes = {pane for pane, queue in self.outbox.items()
                                 if any(m.status == "queued" for m in queue)}
                 history = {message.pane_id: message for message in self.message_history}
-            acted = 0
+            acted = federated_acted
             for pane_id, entry in candidates.items():
+                if self._federated_composer(self.read_screen(pane_id)) is not None:
+                    continue  # the explicit policy has one observer for this pane
                 if not entry.get("eligible"):
                     continue                            # a tombstone: newer intent wins
                 current_generation = self._pane_generation(pane_id)
@@ -5686,8 +5819,13 @@ class Flock:
         while not self._task_stop.wait(self.STUCK_OBSERVE_TICK_S):
             if self.closed:
                 return
+            # Dialog reporting is independent of automatic key recovery.
+            try:
+                self._dialog_observer_step()
+            except Exception:
+                log.exception("dialog observer step crashed; will retry")
             if not self.stuck_config.enabled:
-                continue                                # disabled: no observation at all
+                continue                                # key recovery disabled
             self._stuck_observer_step()
 
     def _outbox_worker(self, pane_id):
@@ -6060,14 +6198,15 @@ class Flock:
             # keys/Enter are how a panel is dismissed - holding them behind it is how
             # a queued Escape waited for ever.
             return None
-        if detail.startswith(AMBIGUOUS_COMPOSER):
+        if (detail.startswith(AMBIGUOUS_COMPOSER)
+                and self._federated_composer(screen) is None):
             return ("unknown", detail)
         # NO 'A HUMAN IS TYPING' HOLD. Every message the owner sends goes through this
         # daemon (web, phone, Telegram) - none of those paths type into a pane - so a
         # non-empty box is not evidence of a person. Foreign text is PRESERVED at send
         # time (submitted first, or left untouched), never a reason to stop the queue.
         # A harness that does not queue what we type while it works would LOSE the
-        # message (codex: measured). Hold for that tool only, and say why.
+        # message. Only unknown harnesses retain that capability hold.
         harness = self._pane_harness(pane_id)
         if not HARNESS_QUEUES_WHILE_BUSY.get(harness, False):
             # A working indicator sits a few lines above the composer (codex prints
@@ -6125,6 +6264,11 @@ class Flock:
             # A panel or dialog is open, so our text left the box and opened
             # it. Pressing Enter again would act on the panel instead.
             return False
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            # A nonempty live composer is pending even when scrolled; never call
+            # a clipped prefix/suffix an empty box or a successful submission.
+            return bool(federated)
         shown = _typed_text(screen)
         if not shown:            # empty box, or no box at all
             # "EMPTY" IS NOT ALWAYS PROOF. When the reader decided the last prompt
@@ -6171,6 +6315,31 @@ class Flock:
         screen = self.read_screen(pane_id, lines=40, ansi=False)
         return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
+    def _send_submit_key(self, pane_id, fallback="Enter", busy_hint=False):
+        """Submit using the harness's current queue action, under the caller's lock.
+
+        Codex Tab queues during a turn; Claude and pi queue with Enter. Re-read
+        on every attempt because the turn or a dialog can change between retries.
+        A learned Tab must never leak into a later idle send or another harness.
+        """
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return False, "submission unconfirmed: pane unreadable before key", None
+        if _modal_open(screen):
+            return False, "submission held: a dialog opened before the key", None
+        key = fallback if fallback in ("Enter", "C-m") else "Enter"
+        if self._pane_harness(pane_id) == "codex":
+            working = (busy_hint or self._read_status(pane_id) in
+                       ("working", "busy", "running", "processing")
+                       or _status_marker(screen, WORKING_MARKERS,
+                                         lines=CONSUMPTION_READ_LINES,
+                                         placeholder_safe=True, dim_ok=True)
+                       or "tab to queue message" in _strip_ansi(screen).lower())
+            if working:
+                key = "Tab"
+        ok, detail = self.herdr.send_keys(pane_id, key)
+        return ok, detail, key
+
     def _flush_once(self, pane_id, text):
         """One Enter, one short check. Used INSIDE the typing lock, so it must be short.
 
@@ -6179,13 +6348,14 @@ class Flock:
         which is the stall class the lock exists to prevent. If one press does not clear
         the box, the send is deferred and the outbox worker tries again.
         """
-        ok, detail = self.herdr.send_keys(pane_id, "Enter")
+        ok, detail, _key = self._send_submit_key(pane_id)
         if not ok:
             return False
         time.sleep(SUBMIT_POLL_S[0])
         return self._box_holds(pane_id, text) is False
 
-    def _press_until_submitted(self, pane_id, text, first_pressed=False):
+    def _press_until_submitted(self, pane_id, text, first_pressed=False, busy_hint=False,
+                               baseline=None):
         """Press Enter (each press under the typing mutex) until `text` leaves the box.
 
         Press Enter until `text` has left the input box. Returns
@@ -6200,7 +6370,7 @@ class Flock:
         # working before we sent is running SOMEONE's turn - possibly an earlier
         # message's - so its current "working" proves nothing about ours. Baseline
         # first; only a transition to working during the ladder may confirm.
-        pre_status = self._read_status(pane_id)
+        pre_status = baseline[0] if baseline is not None else self._read_status(pane_id)
         key = "Enter"          # what the press inside the mutex used, if any
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
@@ -6218,7 +6388,7 @@ class Flock:
                        or ("C-m" if attempt > SUBMIT_KEY_AFTER
                            and attempt % 2 == 1 else "Enter"))
                 with self._typing(pane_id):      # one keystroke burst per attempt
-                    ok, detail = self.herdr.send_keys(pane_id, key)
+                    ok, detail, key = self._send_submit_key(pane_id, key, busy_hint=busy_hint)
                 if not ok:
                     return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
@@ -6238,7 +6408,7 @@ class Flock:
                         # Only repeated readable checks prove submission. A
                         # missing input box during redraw proves nothing.
                         if attempt > 1:
-                            self._submit_key[pane_id] = key
+                            self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                             log.info("%s: submitted after %d presses (%s)",
                                      pane_id, attempt, key)
                         self.metrics.record("submit.attempt", pane_id=pane_id,
@@ -6255,7 +6425,7 @@ class Flock:
                         # own echo in the transcript.
                         if self._turn_started(pane_id, pre_status):
                             if attempt > 1:
-                                self._submit_key[pane_id] = key
+                                self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                             self.metrics.record("submit.attempt", pane_id=pane_id,
                                                 outcome="ok-turn", attempts=attempt,
                                                 bytes=len((text or "").encode("utf-8")))
@@ -6266,7 +6436,7 @@ class Flock:
                 # other witness, and it is the one that survives an ambiguous box read.
                 if self._turn_started(pane_id, pre_status):
                     if attempt > 1:
-                        self._submit_key[pane_id] = key
+                        self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                     self.metrics.record("submit.attempt", pane_id=pane_id,
                                         outcome="ok-turn", attempts=attempt,
                                         bytes=len((text or "").encode("utf-8")))
@@ -6481,6 +6651,9 @@ class Flock:
 
     def _recovery_box_text(self, pane_id, screen):
         """Unknown geometry is never evidence that the prompt was consumed."""
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            return federated
         # The legacy reader sees only the first line and ignores sigils more
         # than 14 rows from the bottom. A proven complete composer must remain
         # observable even when it is long, with or without blank footer gaps.
@@ -6552,13 +6725,24 @@ class Flock:
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
                 return False, f"{BOX_HOLD} ({why})"
+            # A long paste can scroll the active-turn indicator offscreen. Capture
+            # it before typing; Codex Tab also submits ordinary text if that turn
+            # finishes before the key, so this hint cannot interrupt the new state.
+            pre_status = self._read_status(pane_id)
+            before_paste = self.read_screen(pane_id) or ""
+            busy_hint = (self._pane_harness(pane_id) == "codex" and (
+                pre_status in ("working", "busy", "running", "processing")
+                or _status_marker(before_paste, WORKING_MARKERS,
+                                  lines=CONSUMPTION_READ_LINES,
+                                  placeholder_safe=True, dim_ok=True)
+                or "tab to queue message" in _strip_ansi(before_paste).lower()))
             ok, detail = self.herdr.send_text(pane_id, text)
             if not ok:
                 return False, detail
             self._remember_typed(pane_id, text)
             if not press_enter:
                 return True, "sent"
-            ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            ok, detail, _key = self._send_submit_key(pane_id, busy_hint=busy_hint)
             if not ok:
                 return False, detail
         if guarded:
@@ -6574,7 +6758,6 @@ class Flock:
             # re-attempts.
             # t363: baseline before any press, so "working" can only confirm a
             # transition - a lane already working is running an earlier turn.
-            pre_status = self._read_status(pane_id)
             for attempt in range(GUARDED_PRESS_ATTEMPTS):
                 time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
                 held = self._box_holds(pane_id, text)
@@ -6601,9 +6784,9 @@ class Flock:
                     return True, "sent (confirmed by the turn it started)"
                 key = self._submit_key.get(pane_id) or ("Enter" if attempt == 0 else "C-m")
                 with self._typing(pane_id):
-                    ok, _detail = self.herdr.send_keys(pane_id, key)
+                    ok, _detail, key = self._send_submit_key(pane_id, key, busy_hint=busy_hint)
                 if not ok:
-                    continue
+                    return False, _detail
             # The failure must be VISIBLE from the sender's side (VP i25123/i25315): a
             # recurrence then shows up in the journal as this line, not as an idle lane
             # somebody infers hours later.
@@ -6616,7 +6799,8 @@ class Flock:
                                "before this send; status alone cannot confirm a new "
                                "message - check the pane")
             return False, "text did not submit; it is still in the pane's input box"
-        return self._press_until_submitted(pane_id, text, first_pressed=True)
+        return self._press_until_submitted(pane_id, text, first_pressed=True,
+                                           busy_hint=busy_hint, baseline=(pre_status,))
 
     def flush_box(self, target, self_pane_id=None):
         """Submit whatever is sitting unsent in a pane's input box.
@@ -6655,7 +6839,7 @@ class Flock:
         if screen is None:
             return ("gone", "")
         if _modal_open(screen):
-            return ("modal", _collapse(_strip_ansi(screen))[-120:])
+            return ("modal", _collapse(_strip_ansi(screen))[-4000:])
         text = self._recovery_box_text(pane_id, screen)
         return ("gone", "") if text is None else ("box", text)
 
@@ -6672,12 +6856,29 @@ class Flock:
         kind, _text = signature
         if kind != "modal" or time.time() - since < MODAL_WAIT_S:
             return False
+        # Notification is independent of log suppression: failed transports retry,
+        # and durable sink receipts suppress duplicates across daemon restarts.
+        try:
+            import dunk_dialog_alerts
+            import dunk_pm
+            outcomes = dunk_dialog_alerts.notify(
+                pane_id, self._pane_generation(pane_id), _text,
+                owner_sink=dunk_dialog_alerts.post_owner,
+                vp_sink=lambda body: self.inbox_send(
+                    os.environ.get("DUNKINGSHEEP_VP_PANE", dunk_pm.DEFAULT_VP_PANE),
+                    body, subject="Dialog blocks queued delivery", system_sender="watchdog"))
+            for sink, ok, error in outcomes:
+                if not ok:
+                    log.warning("dialog alert %s -> %s failed (%s); will retry",
+                                pane_id, sink, error)
+        except Exception:
+            log.exception("could not notify blocked dialog on %s", pane_id)
         if not self._warned_modal.get(pane_id):
             self._warned_modal[pane_id] = True
             self.metrics.record("panel.blocking", pane_id=pane_id, outcome="held",
                                 reason="dialog",
                                 duration_ms=int((time.time() - since) * 1000))
-            log.warning("%s: a dialog has been open for %ds with a send waiting. "
+            log.warning("%s: a dialog has been open for %ds and blocks message delivery. "
                         "It is waiting for a person to answer it; nothing will be "
                         "typed or pressed there until it is.",
                         pane_id, int(time.time() - since))
@@ -6823,6 +7024,17 @@ class Flock:
             # a panel is dismissed, so they go through.
             self._last_block_reason[pane_id] = "dialog"
             return allow_modal
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            if not federated:
+                return True
+            if preserve_draft:
+                self._last_block_reason[pane_id] = "human_draft"
+                return False
+            self._last_block_reason[pane_id] = "federated-pending-input"
+            # Preserve the actual buffer, including hidden scrolled lines. Never
+            # replace it with reconstructed text or append the next message to it.
+            return self._flush_once(pane_id, federated)
         _text, detail = box_text(screen)
         if detail.startswith(AMBIGUOUS_COMPOSER):
             # t130 (Owner2277): the geometry rule cannot tell pending input from

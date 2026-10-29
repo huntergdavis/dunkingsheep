@@ -741,17 +741,9 @@ class WorkingLaneAcceptsMailTests(unittest.TestCase):
         self.assertNotIn(reason, ("blocked", "dead"),
                          "the classification is information about the pane, not a refusal")
 
-    def test_the_remaining_working_hold_names_the_harness_not_the_status(self):
-        # codex loses notices typed during a turn (measured 2026-10-24: four accepted,
-        # none processed). That hold is preserved - but it is a harness fact, and the
-        # reason must say so rather than reporting the status 'working'.
+    def test_codex_native_queue_removes_the_old_working_hold(self):
         self.busy_pane("codex")
-        blocker = self.flock.send_blocker("w2:p1")
-        self.assertIsNotNone(blocker, "a harness that loses text must still be held")
-        state, reason = blocker
-        self.assertEqual("blocked", state)
-        self.assertIn("does not queue", reason)
-        self.assertNotEqual("working", reason)
+        self.assertIsNone(self.flock.send_blocker("w2:p1"))
 
     def test_a_human_draft_in_a_working_lane_is_still_held(self):
         # t271 removes the STATUS from the hold reasons and nothing else: a person
