@@ -42,7 +42,10 @@ only to that reviewed per-lane hook file.
 - any queued outbox message for the pane;
 - delivery state other than `ready`, or foreign text in the composer;
 - no rollback argv (explicit or saved launch argv);
-- backend without guarded respawn support.
+- backend without guarded respawn support;
+- the replacement wrapper is alive but the intended agent is absent: the
+  `_verify_agent_started` screen check and a descendant-process check must both
+  find the harness, not just the wrapper pid.
 
 These are checked before a process is touched. Task/mail stores are not written.
 
@@ -67,5 +70,7 @@ preserved), wrong pid/start, missing idle confirmation, active turn, unread,
 outbox, live lease, non-ready delivery, unsupported backend, failed start with
 rollback, dead replacement with rollback, stale-pid second attempt, pane
 replaced between core check and backend mutation, explicit shared CODEX_HOME,
-backend refusal keeping the old launch record, and backend argv
-quoting/unmanaged refusal. No live pane is used.
+backend refusal keeping the old launch record, a live wrapper with a failed
+child (`command not found`/`[agent exited rc=127]`) rolling back, a live wrapper
+with no intended child rolling back, and backend argv quoting/unmanaged
+refusal. No live pane is used.

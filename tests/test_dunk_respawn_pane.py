@@ -29,6 +29,8 @@ class RespawnPaneTests(unittest.TestCase):
             "state": "ready", "reason": None, "foreign_text": False}
         self.flock.inbox_count = lambda *_a, **_k: {"unread": 0}
         self.flock.tasks.leases_for_pane = lambda _pane: []
+        self.flock.AGENT_VERIFY_S = 0.1
+        self.flock._agent_evidence = lambda *_a: ["codex"]
         self.flock.turns = {}
         self.flock.outbox = {}
         self.old_argv = ["codex", "-C", "/tmp", "-s", "danger-full-access",
@@ -42,6 +44,7 @@ class RespawnPaneTests(unittest.TestCase):
             "command": "old command", "cwd": "/tmp"}
         self.calls = []
         self.fail_after_kill = False
+        self.fail_child = False
         self.new_pid = os.getpid() + 1000
 
         def respawn(pane_id, argv, expected_pid=None, expected_start=None):
@@ -57,6 +60,14 @@ class RespawnPaneTests(unittest.TestCase):
                 for pane in self.herdr.panes:
                     if pane["pane_id"] == pane_id:
                         pane["pane_pid"] = self.new_pid
+                if self.fail_child:
+                    self.herdr.screens[pane_id] = ("command not found\n[agent exited rc=127]\n"
+                                                   "hunter$ ")
+            else:
+                for pane in self.herdr.panes:
+                    if pane["pane_id"] == pane_id:
+                        pane["pane_pid"] = self.new_pid
+                self.herdr.screens[pane_id] = "\u276f \n Ask Codex to do anything\n"
             return True, {"pane_id": pane_id, "pane_pid": self.new_pid,
                           "old_pid": expected_pid}
 
@@ -155,6 +166,22 @@ class RespawnPaneTests(unittest.TestCase):
         self.assertEqual(self.old_argv, self.flock.launches[self.pane_id]["argv"],
                          "failed launch must not replace the old launch record")
 
+    def test_live_wrapper_with_failed_child_rolls_back(self):
+        self.fail_child = True
+        with self.assertRaisesRegex(DunkError, "rolled back"):
+            self._respawn()
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(self.rollback, self.calls[1]["argv"])
+        self.assertEqual(self.old_argv, self.flock.launches[self.pane_id]["argv"],
+                         "failed child must not write a launch record")
+
+    def test_live_wrapper_without_agent_child_rolls_back(self):
+        self.flock._agent_evidence = lambda *_a: []
+        with self.assertRaisesRegex(DunkError, "live wrapper|no codex child|rollback not verified"):
+            self._respawn()
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(self.old_argv, self.flock.launches[self.pane_id]["argv"])
+
     def test_second_respawn_with_stale_pid_refuses(self):
         self._respawn()
         with self.assertRaisesRegex(DunkError, "expected"):
@@ -162,7 +189,7 @@ class RespawnPaneTests(unittest.TestCase):
         self.assertEqual(1, len(self.calls), "stale pid must not trigger a second mutation")
 
     def test_dead_replacement_rolls_back(self):
-        with patch("dunk_callers.process_alive", return_value=False):
+        with patch("dunk_callers.process_alive", side_effect=[False, True]):
             with self.assertRaisesRegex(DunkError, "rolled back"):
                 self.flock.respawn_pane(
                     self.pane_id, self.new_argv, rollback_argv=self.rollback,
