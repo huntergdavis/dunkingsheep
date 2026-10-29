@@ -1,6 +1,6 @@
 # Dunking Sheep 2.70.95 guide
 
-Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
+Dunking Sheep sends text (followed by Enter) into terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
 agents message each other, and to let an agent schedule future nudges to
 itself. Everything below is the same whether you drive it from the keyboard,
@@ -10,14 +10,16 @@ the command line, a unix socket, or the Model Context Protocol (MCP).
 
 - dunk / dunker: one schedule. Fields: id (d1, d2, ...), name, target pane,
   text, interval_minutes, running, only_when, max_sends, send_count, status.
-- target: a herdr pane. Give a pane id (w8:p3), the word self (the pane the
-  caller runs in, from $HERDR_PANE_ID), a terminal id, or a unique
+- target: a terminal pane. Give a pane id (%N under tmux, w8:p3 on the herdr
+  rollback backend), the word self (the pane the caller runs in, from
+  $TMUX_PANE, or $HERDR_PANE_ID on the rollback), a terminal id, or a unique
   case-insensitive substring of a tab label, workspace label, agent name or
   directory. An exact tab/workspace/agent label wins over a substring; among
   several substring matches a lone agent pane wins; anything still ambiguous
   is rejected with the candidates listed.
-- send: the daemon runs `herdr pane send-text` then `herdr pane send-keys
-  Enter` (chunked for long texts). Nothing touches the OS keyboard.
+- send: the daemon types the text into the pane, then submits with Enter
+  (chunked for long texts; on the herdr rollback backend this is `herdr pane
+  send-text` + `herdr pane send-keys`). Nothing touches the OS keyboard.
 - daemon: `dunkingsheep serve`, auto-started by any client. Listens on a unix
   socket at ~/.config/dunkingsheep/dunkingsheep.sock ($DUNKINGSHEEP_SOCKET).
   Logs to ~/.config/dunkingsheep/daemon.log.
@@ -40,7 +42,7 @@ dunk {id}" tells the receiving agent exactly which dunk to delete.
 
 ## Orchestration options
 
-- only_when = idle: hold each send until herdr reports the target agent as
+- only_when = idle: hold each send until the backend reports the target agent as
   idle (not working or blocked); re-checked every 5 seconds. Panes without a
   detected agent count as idle. A new schedule aimed at a pane that has an
   agent gets this gate by default, because typing into an agent mid-turn
@@ -103,7 +105,7 @@ dunkingsheep guard [status|install|check|uninstall]
 dunkingsheep read <target> [-l N]      last N lines of a pane
 dunkingsheep workspaces | new-workspace | new-tab | split | start-agent
 dunkingsheep rename|focus|close workspace|tab|pane <target> [label]
-dunkingsheep herdr <herdr args...>     any herdr subcommand;  herdr-help [group]
+dunkingsheep herdr <herdr args...>     herdr rollback passthrough (refused under tmux)
 dunkingsheep status | shutdown [--stop-all] | serve | tui | mcp
 dunkingsheep commands [--json]         the full command registry
 Add --json to any command for machine-readable output.
@@ -127,7 +129,7 @@ printf '%s\n' '{"id":1,"cmd":"help"}' | nc -U ~/.config/dunkingsheep/dunkingshee
 ```
 
 `self_pane_id` is optional; it is what target "self" resolves to. Clients
-normally pass their own $HERDR_PANE_ID.
+normally pass their own $TMUX_PANE ($HERDR_PANE_ID on the herdr rollback).
 
 ## Surface 3: MCP server (Claude Code, Codex, Gemini CLI, Cursor, ...)
 
@@ -156,28 +158,30 @@ command = "python3"
 args = ["/path/to/dunkingsheep", "mcp"]
 ```
 
-The harness spawns the MCP server inside the agent's own herdr pane, so the
-server inherits HERDR_PANE_ID and target "self" means the agent itself. If a
-harness scrubs the environment, pass `--self-pane <pane_id>` after `mcp` or
-set HERDR_PANE_ID in the server's env block.
+The harness spawns the MCP server inside the agent's own terminal pane, so
+the server inherits TMUX_PANE (HERDR_PANE_ID on the herdr rollback) and
+target "self" means the agent itself. If a harness scrubs the environment,
+pass `--self-pane <pane_id>` after `mcp` or set TMUX_PANE (or HERDR_PANE_ID
+on the rollback) in the server's env block.
 
 Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,
 update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,
 send_text, send_keys, flush_box, list_messages, get_message, cancel_message,
 inbox_send, inbox_count, inbox_list, inbox_read, inbox_status, inbox_ack,
 inbox_cancel, inbox_delete, inbox_stats, inbox_fetch,
-and for herdr
+and for terminal
 control list_workspaces, create_workspace,
 create_tab, split_pane, start_agent, rename, focus, close, herdr,
 herdr_help. Call `help` first if unsure; `initialize` also returns these
 instructions. Errors come back as tool results with isError=true and a
 plain-English message (never as protocol errors), so the agent can recover.
 
-## Building the herd: herdr control from the same surfaces
+## Building the herd: terminal control from the same surfaces
 
-Every surface can also shape herdr itself, so an admin agent can spin up
+Every surface can also shape the terminal backend itself (tmux by default;
+herdr on the rollback backend), so an admin agent can spin up
 workspaces, tabs and agents and then dunk on them. Targets for workspaces
-and tabs follow the pane rules: id (w9, w9:t2), exact label, unique label
+and tabs follow the pane rules: id, exact label, unique label
 substring, or 'self' (the caller's own). Everything is created in the
 background unless focus=true.
 
@@ -189,28 +193,30 @@ background unless focus=true.
 - split_pane(target, direction, cwd, command): a new shell pane right of or
   below any pane.
 - start_agent(name, command, workspace|tab, split, cwd): launch an agent
-  process registered with herdr under `name` (herdr agent start), so herdr
-  lists it and tracks its status by that name. Returns its pane id and, where
-  the platform names processes, the agent's confirmed child pid. Fail closed:
-  a launch whose command never becomes a process (missing binary, instant
-  exit, vanished pane, or a pid seen but gone at the deadline) is refused
-  with the evidence, never reported started. Process evidence is kernel
-  comm/state/start watched across the whole window, never a first-frame
-  sighting or an argv basename.
-  With `workspace`, herdr picks the tab; create_tab first and pass `tab`
-  to control the tab's name.
+  process under `name` (on the herdr rollback: registered with `herdr agent
+  start`, so herdr lists it and tracks its status by that name). Returns its
+  pane id and, where the platform names processes, the agent's confirmed
+  child pid. Fail closed: a launch whose command never becomes a process
+  (missing binary, instant exit, vanished pane, or a pid seen but gone at
+  the deadline) is refused with the evidence, never reported started.
+  Process evidence is kernel comm/state/start watched across the whole
+  window, never a first-frame sighting or an argv basename.
+  With `workspace`, the backend picks the tab; create_tab first and pass
+  `tab` to control the tab's name.
 - rename(kind, target, label) / focus(kind, target) / close(kind, target)
   for kind = workspace | tab | pane. close kills what runs inside, stops any
   dunks aimed there, and refuses the caller's own pane, tab or workspace.
-- herdr(command): run any herdr subcommand ('pane zoom w9:p2 --on',
-  'notification show Done', 'wait agent-status w9:p2 --status idle
-  --timeout 60000', 'api schema --json'); returns its parsed JSON, or the
-  usage text for a bare group. 'self' in the arguments becomes the caller's
-  pane id (tab/workspace id in tab/workspace commands). herdr wants ids,
-  not labels, here. Refused: server stop, update, channel set,
-  session/agent attach.
-- herdr_help(topic): herdr's own usage, overall or for one group, to
-  discover the above. The `help` command also returns it as `herdr_help`.
+- herdr(command): run any herdr subcommand on the rollback backend
+  ('pane zoom w9:p2 --on', 'notification show Done', 'wait agent-status
+  w9:p2 --status idle --timeout 60000', 'api schema --json'); returns its
+  parsed JSON, or the usage text for a bare group. Refused under the tmux
+  backend: use the dedicated workspace/tab/pane commands instead. 'self'
+  in the arguments becomes the caller's pane id (tab/workspace id in
+  tab/workspace commands). herdr wants ids, not labels, here. Refused:
+  server stop, update, channel set, session/agent attach.
+- herdr_help(topic): the rollback backend's own usage, overall or for
+  one group, to discover the above. The `help` command also returns it
+  as `herdr_help`. Refused under the tmux backend.
 
 ```
 dunkingsheep workspaces                       # what exists
@@ -220,8 +226,8 @@ dunkingsheep start-agent reviewer -w Site -- claude --model opus
 dunkingsheep split Site --down -r 'npm test -- --watch'
 dunkingsheep rename tab writer 'Site writer'   |  focus tab 'Site writer'
 dunkingsheep close tab 'Site writer'          # kills it, stops its dunks
-dunkingsheep herdr pane zoom self --on        # anything herdr can do
-dunkingsheep herdr-help pane                  # herdr's own usage
+dunkingsheep herdr pane zoom self --on        # anything the rollback backend can do
+dunkingsheep herdr-help pane                  # the rollback backend's own usage
 ```
 
 ## Recipe: an admin agent spins up a team and dunks on it
@@ -281,9 +287,10 @@ Queued messages live in the daemon's memory, not on disk, so a daemon
 restart drops anything still waiting.
 
 send_keys(target, keys) presses keys the same guarded way. Use it rather
-than the herdr passthrough: a bare Enter sent while someone is mid-sentence
-submits their half-written message. For that reason the `herdr` tool
-refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.
+than a raw backend passthrough: a bare Enter sent while someone is
+mid-sentence submits their half-written message. For that reason typing
+through the `herdr` tool is refused (`pane run`, `pane send-text`,
+`pane send-keys`, `agent send`): use send_text/send_keys instead.
 
 ## Getting the message actually submitted
 
@@ -314,7 +321,8 @@ reported as failed rather than sent, and shows up in last_error and in
 `messages`. And text stranded in a box by an earlier failure is recognised
 as ours: the next send submits it first rather than appending to it or
 waiting behind it for ever. For text the daemon did not type (an agent
-using the herdr CLI, or someone who walked away mid-sentence), which would
+using the backend CLI directly, or someone who walked away mid-sentence),
+which would
 otherwise block that pane's queue indefinitely, `flush_box(target)` /
 `dunkingsheep flush <target>` submits it explicitly.
 
@@ -428,8 +436,9 @@ dunkingsheep install     # put the CLI on PATH as a plain command
 dunkingsheep mcp-setup claude --apply   # register the MCP server
 ```
 
-`install` matters more than it looks. herdr starts agents by exec'ing them
-from its server process, so they inherit that environment: ~/.local/bin is
+`install` matters more than it looks. Agents are started by the terminal
+backend (tmux new-window/split; `herdr agent start` on the rollback), so
+they inherit that environment: ~/.local/bin is
 on their PATH but this project is not. Without the launcher an agent has to
 invoke the CLI by its path inside a workspace, which a sandboxed agent
 should refuse and does - Claude's auto mode reads it as running external
@@ -493,8 +502,8 @@ rules:  global completion (any assignee completes it for all);
 `task_next` is the atomic pull: it selects, assigns you, sets in_progress
 and records a lease in one SQLite transaction. `task_heartbeat` extends the
 lease; `task_complete` completes it for everyone. `task_follow` is the
-push: the daemon then hands you the next task when herdr reports your
-pane idle, so you do not poll. An empty task_next subscribes you
+push: the daemon then hands you the next task when the backend reports
+your pane idle, so you do not poll. An empty task_next subscribes you
 automatically. `inbox_read` returns your global tasks and your own pane's
 tasks after the messages.
 
@@ -542,7 +551,7 @@ task_metrics(window_s=3600, scope="global", bucket="hour")
 
 Per-pane privacy is enforced by the daemon: an agent may add, list, read
 or claim only its own pane's tasks (plus global tasks). A caller with no
-pane, such as the human CLI outside herdr, may inspect any pane. Each
+pane, such as the human CLI outside tmux, may inspect any pane. Each
 claim stores the pane id plus the stable agent process pid and kernel
 start time; the reaper checks /proc liveness, so a crashed agent's task
 returns to the queue even if its shell pane remains. A vanished pane is
@@ -575,25 +584,26 @@ p50/p95/p99, DB bytes and queue depth. The legacy index is retired:
 only recall path (the legacy index is retired; see
 docs/MEMORY_MIGRATION.md).
 
-## Terminal backends: herdr and tmux
+## Terminal backends: tmux (default) and herdr (rollback)
 
 Everything above the adapter asks for placements, panes, screen text and
 sends; the backend owns the tool's grammar. DUNKINGSHEEP_TERMINAL_BACKEND
-selects herdr (default) or tmux. herdr 0.9.5 starts an agent only in an
+selects tmux (the default) or herdr (the documented rollback: set it to
+`herdr` only to return to the old backend; the owner has not closed the
+rollback window). The tmux backend creates a window/split running the
+command; on the herdr rollback, herdr 0.9.5 starts an agent only in an
 existing shell pane, so start-agent creates/locates the pane first and
-then calls `agent start NAME --kind KIND --pane ID`; the tmux backend
-creates a window/split running the command. In tmux a session is a
-workspace, a window is a tab, and panes keep tmux's %N ids (also exported
-as TMUX_PANE). Tmux has no agent-status API, so that capability is
-honestly 'unknown' there.
+then calls `agent start NAME --kind KIND --pane ID`. In tmux a session is
+a workspace, a window is a tab, and panes keep tmux's %N ids (also
+exported as TMUX_PANE). Tmux has no agent-status API, so that capability
+is honestly 'unknown' there.
 
 The tmux backend refuses to close a pane/window/session Dunking Sheep did
 not create. `dunkingsheep guard install-tmux` installs a tmux wrapper that
 is put first on PATH only for agent panes the backend starts (never the
 user's shell): kill-pane/kill-window/kill-session go through the daemon's
 superuser/self policy, kill-server and `-a` are refused, and raw
-send-keys/layout mutation is refused with a pointer at the daemon. herdr
-stays the default until this guard is demonstrated on live lanes; see
+send-keys/layout mutation is refused with a pointer at the daemon. See
 docs/TERMINAL_ADAPTER.md.
 
 ## Sidebar poll (dunk-poll)
@@ -602,9 +612,10 @@ docs/TERMINAL_ADAPTER.md.
 inbox count + unread messages + dunks (optionally panes/tasks). It
 replaces three full CLI startups per sidebar poll (the owner's CPU note)
 and never asks the terminal for `pane current`; identity comes from
-HERDR_PANE_ID/TMUX_PANE. `dunkingsheep poll` is the same batch for a
-human, and `dunkingsheep install` writes ~/.local/bin/dunk-poll. The
-status half skips the terminal probe unless --check-herdr is given.
+TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is
+the same batch for a human, and `dunkingsheep install` writes
+`~/.local/bin/dunk-poll`. The status half skips the terminal probe
+unless --check-herdr is given.
 
 ## Real provider usage
 
@@ -621,15 +632,15 @@ so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine
 interface; the VP ops dashboard stores age-labelled provider_usage
 snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).
 
-## Recovery after a herdr upgrade
+## Recovery after a terminal upgrade
 
-An upgrade can restore every pane as a bare shell and lose the agent roster. `dunkingsheep doctor` is the read-only check: herdr version, pane detection, `read --source visible`, the guard, and any dunk whose target_agent or target_cwd no longer matches its pane. `dunkingsheep recover` prints a dry-run plan from dunks.json, launches.json and the memory index: `pi --session ...`, `codex resume ...`, `claude --resume ...`. `--record` snapshots live sessions first; `--apply` types a launch only into a pane that is still a bare shell, never over a live agent. A missing session is reported, never invented.
+An upgrade can restore every pane as a bare shell and lose the agent roster. `dunkingsheep doctor` is the read-only check: backend version (herdr on the rollback), pane detection, `read --source visible`, the guard, and any dunk whose target_agent or target_cwd no longer matches its pane. `dunkingsheep recover` prints a dry-run plan from dunks.json, launches.json and the memory index: `pi --session ...`, `codex resume ...`, `claude --resume ...`. `--record` snapshots live sessions first; `--apply` types a launch only into a pane that is still a bare shell, never over a live agent. A missing session is reported, never invented.
 
 ## Superusers and destructive operations
 
 Only panes and names on the superuser allowlist may close a pane, tab or
 workspace, stop the daemon, manage dunks, spawn agents, or use the raw
-herdr passthrough. Everyone else communicates through the inbox and task
+herdr passthrough (rollback backend only). Everyone else communicates through the inbox and task
 queue, and may type only into their own pane. This is the response to the
 2026-10-18 incident, where a free model's cleanup closed the VP's tab and
 took nine panes with it.
@@ -738,12 +749,14 @@ dunkingsheep watchdog-deadman --cadence-minutes 10 --cooldown-minutes 60 --to "v
   expected directory; otherwise it is config_bad (status file, exit 2, no row).
 - Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.
 
-## The herdr guard: agents that shell out
+## The terminal guards: agents that shell out
 
-An agent with a shell can call the herdr CLI directly, and `herdr pane run
-<pane> "..."` types straight into a terminal with no idea anyone is writing
-there. Nothing inside this daemon can see that. `dunkingsheep guard install`
-puts a small `herdr` wrapper first on PATH which forwards exactly the four
+An agent with a shell can call the terminal CLI directly, and a raw send
+types straight into a terminal with no idea anyone is writing there.
+Nothing inside this daemon can see that. On the live tmux backend the
+`tmux` wrapper (`dunkingsheep guard install-tmux`) routes closes through
+the daemon and refuses raw typing/layout; on the herdr rollback the
+`herdr` wrapper (`dunkingsheep guard install`) forwards exactly the four
 typing subcommands to the daemon and execs the real herdr for everything
 else, so agents get the same protection without changing how they work.
 
@@ -754,8 +767,9 @@ dunkingsheep guard check       # prove a typing command is intercepted
 dunkingsheep guard uninstall   # remove both
 ```
 
-Installing does two things. It puts the wrapper first on PATH for new
-shells, and it takes herdr's own place: the real binary is renamed to
+On the herdr rollback, installing does two things. It puts the wrapper
+first on PATH for new shells, and it takes herdr's own place: the real
+binary is renamed to
 `herdr-real` beside it. That second part matters, because herdr starts
 agents by exec'ing them from its server process, so they inherit the
 server's environment and never read a shell profile. Shadowing the binary
@@ -790,10 +804,10 @@ schedules (add_dunk with their pane as target).
 
 ## Troubleshooting
 
-- "herdr server not running": start herdr (`herdr status server`).
-- "no herdr pane matches": run `dunkingsheep panes` and use the pane id.
-- "target 'self' needs HERDR_PANE_ID": the caller is not inside a herdr
-  pane; pass a pane id or `--self-pane w8:p3`.
+- "herdr server not running": the rollback backend is down; start herdr (`herdr status server`), or stay on the tmux default.
+- "no pane matches": run `dunkingsheep panes` and use the pane id.
+- "target 'self' needs TMUX_PANE": the caller is not inside a pane
+  Pass a pane id or `--self-pane <pane-id>`.
 - Daemon problems: ~/.config/dunkingsheep/daemon.log; `dunkingsheep shutdown`
   then any command restarts it with the saved dunks.
 - Send failed: the pane was closed. Re-target with `update <id> -T ...`.

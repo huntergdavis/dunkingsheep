@@ -14,7 +14,7 @@ Keep it accurate: this is what an agent reads to teach itself the tool.
 from dunk_core import VERSION
 
 SHORT = """\
-Dunking Sheep types text (plus Enter) into herdr terminal panes on a schedule.
+Dunking Sheep types text (plus Enter) into terminal panes on a schedule.
 Each schedule is a "dunk": a target pane, a text, an interval, and a running
 flag. Dunks live in a background daemon, so the TUI, this CLI, the unix
 socket and the MCP server all see and control the same dunks.
@@ -54,7 +54,7 @@ def guide(markdown=False):
         out.append(text if text.endswith("\n\n") else text + "\n")
 
     w(h(1, f"Dunking Sheep {VERSION} guide"))
-    w("Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a\n"
+    w("Dunking Sheep sends text (followed by Enter) into terminal panes on a\n"
       "schedule. It exists to keep AI coding agents moving (\"continue\"), to let\n"
       "agents message each other, and to let an agent schedule future nudges to\n"
       "itself. Everything below is the same whether you drive it from the keyboard,\n"
@@ -63,14 +63,16 @@ def guide(markdown=False):
     w(h(2, "Concepts"))
     w("- dunk / dunker: one schedule. Fields: id (d1, d2, ...), name, target pane,\n"
       "  text, interval_minutes, running, only_when, max_sends, send_count, status.\n"
-      "- target: a herdr pane. Give a pane id (w8:p3), the word self (the pane the\n"
-      "  caller runs in, from $HERDR_PANE_ID), a terminal id, or a unique\n"
+      "- target: a terminal pane. Give a pane id (%N under tmux, w8:p3 on the herdr\n"
+      "  rollback backend), the word self (the pane the caller runs in, from\n"
+      "  $TMUX_PANE, or $HERDR_PANE_ID on the rollback), a terminal id, or a unique\n"
       "  case-insensitive substring of a tab label, workspace label, agent name or\n"
       "  directory. An exact tab/workspace/agent label wins over a substring; among\n"
       "  several substring matches a lone agent pane wins; anything still ambiguous\n"
       "  is rejected with the candidates listed.\n"
-      "- send: the daemon runs `herdr pane send-text` then `herdr pane send-keys\n"
-      "  Enter` (chunked for long texts). Nothing touches the OS keyboard.\n"
+      "- send: the daemon types the text into the pane, then submits with Enter\n"
+      "  (chunked for long texts; on the herdr rollback backend this is `herdr pane\n"
+      "  send-text` + `herdr pane send-keys`). Nothing touches the OS keyboard.\n"
       "- daemon: `dunkingsheep serve`, auto-started by any client. Listens on a unix\n"
       "  socket at ~/.config/dunkingsheep/dunkingsheep.sock ($DUNKINGSHEEP_SOCKET).\n"
       "  Logs to ~/.config/dunkingsheep/daemon.log.\n"
@@ -87,7 +89,7 @@ def guide(markdown=False):
       "dunk {id}\" tells the receiving agent exactly which dunk to delete.\n")
 
     w(h(2, "Orchestration options"))
-    w("- only_when = idle: hold each send until herdr reports the target agent as\n"
+    w("- only_when = idle: hold each send until the backend reports the target agent as\n"
       "  idle (not working or blocked); re-checked every 5 seconds. Panes without a\n"
       "  detected agent count as idle. A new schedule aimed at a pane that has an\n"
       "  agent gets this gate by default, because typing into an agent mid-turn\n"
@@ -148,7 +150,7 @@ def guide(markdown=False):
            "dunkingsheep read <target> [-l N]      last N lines of a pane\n"
            "dunkingsheep workspaces | new-workspace | new-tab | split | start-agent\n"
            "dunkingsheep rename|focus|close workspace|tab|pane <target> [label]\n"
-           "dunkingsheep herdr <herdr args...>     any herdr subcommand;  herdr-help [group]\n"
+           "dunkingsheep herdr <herdr args...>     herdr rollback passthrough (refused under tmux)\n"
            "dunkingsheep status | shutdown [--stop-all] | serve | tui | mcp\n"
            "dunkingsheep commands [--json]         the full command registry\n"
            "Add --json to any command for machine-readable output."))
@@ -166,7 +168,7 @@ def guide(markdown=False):
            "# discover everything, including JSON schemas:\n"
            "printf '%s\\n' '{\"id\":1,\"cmd\":\"help\"}' | nc -U ~/.config/dunkingsheep/dunkingsheep.sock"))
     w("`self_pane_id` is optional; it is what target \"self\" resolves to. Clients\n"
-      "normally pass their own $HERDR_PANE_ID.\n")
+      "normally pass their own $TMUX_PANE ($HERDR_PANE_ID on the herdr rollback).\n")
 
     w(h(2, "Surface 3: MCP server (Claude Code, Codex, Gemini CLI, Cursor, ...)"))
     w("`dunkingsheep mcp` is a Model Context Protocol server over stdio (newline-\n"
@@ -189,26 +191,28 @@ def guide(markdown=False):
            "[mcp_servers.dunkingsheep]\n"
            'command = "python3"\n'
            'args = ["/path/to/dunkingsheep", "mcp"]'))
-    w("The harness spawns the MCP server inside the agent's own herdr pane, so the\n"
-      "server inherits HERDR_PANE_ID and target \"self\" means the agent itself. If a\n"
-      "harness scrubs the environment, pass `--self-pane <pane_id>` after `mcp` or\n"
-      "set HERDR_PANE_ID in the server's env block.\n")
+    w("The harness spawns the MCP server inside the agent's own terminal pane, so\n"
+      "the server inherits TMUX_PANE (HERDR_PANE_ID on the herdr rollback) and\n"
+      "target \"self\" means the agent itself. If a harness scrubs the environment,\n"
+      "pass `--self-pane <pane_id>` after `mcp` or set TMUX_PANE (or HERDR_PANE_ID\n"
+      "on the rollback) in the server's env block.\n")
     w("Tools: help, status, list_panes, read_pane, list_dunks, get_dunk, add_dunk,\n"
       "update_dunk, remove_dunk, start_dunk, stop_dunk, stop_all, fire_dunk,\n"
       "send_text, send_keys, flush_box, list_messages, get_message, cancel_message,\n"
       "inbox_send, inbox_count, inbox_list, inbox_read, inbox_status, inbox_ack,\n"
       "inbox_cancel, inbox_delete, inbox_stats, inbox_fetch,\n"
-      "and for herdr\n"
+      "and for terminal\n"
       "control list_workspaces, create_workspace,\n"
       "create_tab, split_pane, start_agent, rename, focus, close, herdr,\n"
       "herdr_help. Call `help` first if unsure; `initialize` also returns these\n"
       "instructions. Errors come back as tool results with isError=true and a\n"
       "plain-English message (never as protocol errors), so the agent can recover.\n")
 
-    w(h(2, "Building the herd: herdr control from the same surfaces"))
-    w("Every surface can also shape herdr itself, so an admin agent can spin up\n"
+    w(h(2, "Building the herd: terminal control from the same surfaces"))
+    w("Every surface can also shape the terminal backend itself (tmux by default;\n"
+      "herdr on the rollback backend), so an admin agent can spin up\n"
       "workspaces, tabs and agents and then dunk on them. Targets for workspaces\n"
-      "and tabs follow the pane rules: id (w9, w9:t2), exact label, unique label\n"
+      "and tabs follow the pane rules: id, exact label, unique label\n"
       "substring, or 'self' (the caller's own). Everything is created in the\n"
       "background unless focus=true.\n")
     w("- list_workspaces: workspaces with their tabs; `self` marks the caller's.\n"
@@ -219,28 +223,30 @@ def guide(markdown=False):
       "- split_pane(target, direction, cwd, command): a new shell pane right of or\n"
       "  below any pane.\n"
       "- start_agent(name, command, workspace|tab, split, cwd): launch an agent\n"
-      "  process registered with herdr under `name` (herdr agent start), so herdr\n"
-      "  lists it and tracks its status by that name. Returns its pane id and, where\n"
-      "  the platform names processes, the agent's confirmed child pid. Fail closed:\n"
-      "  a launch whose command never becomes a process (missing binary, instant\n"
-      "  exit, vanished pane, or a pid seen but gone at the deadline) is refused\n"
-      "  with the evidence, never reported started. Process evidence is kernel\n"
-      "  comm/state/start watched across the whole window, never a first-frame\n"
-      "  sighting or an argv basename.\n"
-      "  With `workspace`, herdr picks the tab; create_tab first and pass `tab`\n"
-      "  to control the tab's name.\n"
+"  process under `name` (on the herdr rollback: registered with `herdr agent\n"
+"  start`, so herdr lists it and tracks its status by that name). Returns its\n"
+"  pane id and, where the platform names processes, the agent's confirmed\n"
+"  child pid. Fail closed: a launch whose command never becomes a process\n"
+"  (missing binary, instant exit, vanished pane, or a pid seen but gone at\n"
+"  the deadline) is refused with the evidence, never reported started.\n"
+"  Process evidence is kernel comm/state/start watched across the whole\n"
+"  window, never a first-frame sighting or an argv basename.\n"
+"  With `workspace`, the backend picks the tab; create_tab first and pass\n"
+"  `tab` to control the tab's name.\n"
       "- rename(kind, target, label) / focus(kind, target) / close(kind, target)\n"
       "  for kind = workspace | tab | pane. close kills what runs inside, stops any\n"
       "  dunks aimed there, and refuses the caller's own pane, tab or workspace.\n"
-      "- herdr(command): run any herdr subcommand ('pane zoom w9:p2 --on',\n"
-      "  'notification show Done', 'wait agent-status w9:p2 --status idle\n"
-      "  --timeout 60000', 'api schema --json'); returns its parsed JSON, or the\n"
-      "  usage text for a bare group. 'self' in the arguments becomes the caller's\n"
-      "  pane id (tab/workspace id in tab/workspace commands). herdr wants ids,\n"
-      "  not labels, here. Refused: server stop, update, channel set,\n"
-      "  session/agent attach.\n"
-      "- herdr_help(topic): herdr's own usage, overall or for one group, to\n"
-      "  discover the above. The `help` command also returns it as `herdr_help`.\n")
+      "- herdr(command): run any herdr subcommand on the rollback backend\n"
+      "  ('pane zoom w9:p2 --on', 'notification show Done', 'wait agent-status\n"
+      "  w9:p2 --status idle --timeout 60000', 'api schema --json'); returns its\n"
+      "  parsed JSON, or the usage text for a bare group. Refused under the tmux\n"
+      "  backend: use the dedicated workspace/tab/pane commands instead. 'self'\n"
+      "  in the arguments becomes the caller's pane id (tab/workspace id in\n"
+      "  tab/workspace commands). herdr wants ids, not labels, here. Refused:\n"
+      "  server stop, update, channel set, session/agent attach.\n"
+      "- herdr_help(topic): the rollback backend's own usage, overall or for\n"
+      "  one group, to discover the above. The `help` command also returns it\n"
+      "  as `herdr_help`. Refused under the tmux backend.\n")
     w(code("dunkingsheep workspaces                       # what exists\n"
            "dunkingsheep new-workspace -l Site --cwd ~/site -r claude\n"
            "dunkingsheep new-tab -w Site -l writer -r 'codex --model gpt-5'\n"
@@ -248,8 +254,8 @@ def guide(markdown=False):
            "dunkingsheep split Site --down -r 'npm test -- --watch'\n"
            "dunkingsheep rename tab writer 'Site writer'   |  focus tab 'Site writer'\n"
            "dunkingsheep close tab 'Site writer'          # kills it, stops its dunks\n"
-           "dunkingsheep herdr pane zoom self --on        # anything herdr can do\n"
-           "dunkingsheep herdr-help pane                  # herdr's own usage"))
+           "dunkingsheep herdr pane zoom self --on        # anything the rollback backend can do\n"
+           "dunkingsheep herdr-help pane                  # the rollback backend's own usage"))
     w(h(2, "Recipe: an admin agent spins up a team and dunks on it"))
     w(code("create_workspace(label=\"Site\", cwd=\"~/site\")\n"
            "start_agent(name=\"builder\", command=\"claude\", workspace=\"Site\")\n"
@@ -292,9 +298,10 @@ def guide(markdown=False):
     w("Queued messages live in the daemon's memory, not on disk, so a daemon\n"
       "restart drops anything still waiting.\n")
     w("send_keys(target, keys) presses keys the same guarded way. Use it rather\n"
-      "than the herdr passthrough: a bare Enter sent while someone is mid-sentence\n"
-      "submits their half-written message. For that reason the `herdr` tool\n"
-      "refuses `pane run`, `pane send-text`, `pane send-keys` and `agent send`.\n")
+      "than a raw backend passthrough: a bare Enter sent while someone is\n"
+      "mid-sentence submits their half-written message. For that reason typing\n"
+      "through the `herdr` tool is refused (`pane run`, `pane send-text`,\n"
+      "`pane send-keys`, `agent send`): use send_text/send_keys instead.\n")
     w(h(2, "Getting the message actually submitted"))
     w("Pressing Enter once does not reliably submit. Measured on live panes:\n"
       "Claude Code submits on the first Enter whatever the size, but Codex needs\n"
@@ -319,7 +326,8 @@ def guide(markdown=False):
       "`messages`. And text stranded in a box by an earlier failure is recognised\n"
       "as ours: the next send submits it first rather than appending to it or\n"
       "waiting behind it for ever. For text the daemon did not type (an agent\n"
-      "using the herdr CLI, or someone who walked away mid-sentence), which would\n"
+      "using the backend CLI directly, or someone who walked away mid-sentence),\n"
+      "which would\n"
       "otherwise block that pane's queue indefinitely, `flush_box(target)` /\n"
       "`dunkingsheep flush <target>` submits it explicitly.\n")
 
@@ -414,8 +422,9 @@ def guide(markdown=False):
     w("Two things make the inbox reachable from an agent's session.\n")
     w(code("dunkingsheep install     # put the CLI on PATH as a plain command\n"
            "dunkingsheep mcp-setup claude --apply   # register the MCP server"))
-    w("`install` matters more than it looks. herdr starts agents by exec'ing them\n"
-      "from its server process, so they inherit that environment: ~/.local/bin is\n"
+    w("`install` matters more than it looks. Agents are started by the terminal\n"
+      "backend (tmux new-window/split; `herdr agent start` on the rollback), so\n"
+      "they inherit that environment: ~/.local/bin is\n"
       "on their PATH but this project is not. Without the launcher an agent has to\n"
       "invoke the CLI by its path inside a workspace, which a sandboxed agent\n"
       "should refuse and does - Claude's auto mode reads it as running external\n"
@@ -465,8 +474,8 @@ def guide(markdown=False):
     w("`task_next` is the atomic pull: it selects, assigns you, sets in_progress\n"
       "and records a lease in one SQLite transaction. `task_heartbeat` extends the\n"
       "lease; `task_complete` completes it for everyone. `task_follow` is the\n"
-      "push: the daemon then hands you the next task when herdr reports your\n"
-      "pane idle, so you do not poll. An empty task_next subscribes you\n"
+      "push: the daemon then hands you the next task when the backend reports\n"
+      "your pane idle, so you do not poll. An empty task_next subscribes you\n"
       "automatically. `inbox_read` returns your global tasks and your own pane's\n"
       "tasks after the messages.\n")
     w(code("dunkingsheep task add \"Ship the parser\" -p high --body \"...\"\n"
@@ -506,7 +515,7 @@ def guide(markdown=False):
            "task_metrics(window_s=3600, scope=\"global\", bucket=\"hour\")"))
     w("Per-pane privacy is enforced by the daemon: an agent may add, list, read\n"
       "or claim only its own pane's tasks (plus global tasks). A caller with no\n"
-      "pane, such as the human CLI outside herdr, may inspect any pane. Each\n"
+      "pane, such as the human CLI outside tmux, may inspect any pane. Each\n"
       "claim stores the pane id plus the stable agent process pid and kernel\n"
       "start time; the reaper checks /proc liveness, so a crashed agent's task\n"
       "returns to the queue even if its shell pane remains. A vanished pane is\n"
@@ -533,32 +542,34 @@ def guide(markdown=False):
       "only recall path (the legacy index is retired; see\n"
       "docs/MEMORY_MIGRATION.md).\n")
 
-    w(h(2, "Terminal backends: herdr and tmux"))
+    w(h(2, "Terminal backends: tmux (default) and herdr (rollback)"))
     w("Everything above the adapter asks for placements, panes, screen text and\n"
       "sends; the backend owns the tool's grammar. DUNKINGSHEEP_TERMINAL_BACKEND\n"
-      "selects herdr (default) or tmux. herdr 0.9.5 starts an agent only in an\n"
+      "selects tmux (the default) or herdr (the documented rollback: set it to\n"
+      "`herdr` only to return to the old backend; the owner has not closed the\n"
+      "rollback window). The tmux backend creates a window/split running the\n"
+      "command; on the herdr rollback, herdr 0.9.5 starts an agent only in an\n"
       "existing shell pane, so start-agent creates/locates the pane first and\n"
-      "then calls `agent start NAME --kind KIND --pane ID`; the tmux backend\n"
-      "creates a window/split running the command. In tmux a session is a\n"
-      "workspace, a window is a tab, and panes keep tmux's %N ids (also exported\n"
-      "as TMUX_PANE). Tmux has no agent-status API, so that capability is\n"
-      "honestly 'unknown' there.\n")
+      "then calls `agent start NAME --kind KIND --pane ID`. In tmux a session is\n"
+      "a workspace, a window is a tab, and panes keep tmux's %N ids (also\n"
+      "exported as TMUX_PANE). Tmux has no agent-status API, so that capability\n"
+      "is honestly 'unknown' there.\n")
     w("The tmux backend refuses to close a pane/window/session Dunking Sheep did\n"
       "not create. `dunkingsheep guard install-tmux` installs a tmux wrapper that\n"
       "is put first on PATH only for agent panes the backend starts (never the\n"
       "user's shell): kill-pane/kill-window/kill-session go through the daemon's\n"
       "superuser/self policy, kill-server and `-a` are refused, and raw\n"
-      "send-keys/layout mutation is refused with a pointer at the daemon. herdr\n"
-      "stays the default until this guard is demonstrated on live lanes; see\n"
+      "send-keys/layout mutation is refused with a pointer at the daemon. See\n"
       "docs/TERMINAL_ADAPTER.md.\n")
     w(h(2, "Sidebar poll (dunk-poll)"))
     w("`dunk-poll` is a stdlib-only client: one socket request returns status +\n"
       "inbox count + unread messages + dunks (optionally panes/tasks). It\n"
       "replaces three full CLI startups per sidebar poll (the owner's CPU note)\n"
       "and never asks the terminal for `pane current`; identity comes from\n"
-      "HERDR_PANE_ID/TMUX_PANE. `dunkingsheep poll` is the same batch for a\n"
-      "human, and `dunkingsheep install` writes ~/.local/bin/dunk-poll. The\n"
-      "status half skips the terminal probe unless --check-herdr is given.\n")
+      "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\n"
+      "the same batch for a human, and `dunkingsheep install` writes\n"
+      "`~/.local/bin/dunk-poll`. The status half skips the terminal probe\n"
+      "unless --check-herdr is given.\n")
     w(h(2, "Real provider usage"))
     w("`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json\n"
       "(sample: packaging/usage.example.json), which maps each provider to a\n"
@@ -572,9 +583,10 @@ def guide(markdown=False):
       "so the plan is UNKNOWN. `dunkingsheep --json usage` is the machine\n"
       "interface; the VP ops dashboard stores age-labelled provider_usage\n"
       "snapshots (VP_PROVIDER_USAGE=0 disables the external read, as tests do).\n")
-    w(h(2, "Recovery after a herdr upgrade"))
+    w(h(2, "Recovery after a terminal upgrade"))
     w("An upgrade can restore every pane as a bare shell and lose the agent roster. "
-      "`dunkingsheep doctor` is the read-only check: herdr version, pane detection, "
+      "`dunkingsheep doctor` is the read-only check: backend version (herdr on the "
+      "rollback), pane detection, "
       "`read --source visible`, the guard, and any dunk whose target_agent or "
       "target_cwd no longer matches its pane. `dunkingsheep recover` prints a "
       "dry-run plan from dunks.json, launches.json and the memory index: "
@@ -585,7 +597,7 @@ def guide(markdown=False):
     w(h(2, "Superusers and destructive operations"))
     w("Only panes and names on the superuser allowlist may close a pane, tab or\n"
       "workspace, stop the daemon, manage dunks, spawn agents, or use the raw\n"
-      "herdr passthrough. Everyone else communicates through the inbox and task\n"
+      "herdr passthrough (rollback backend only). Everyone else communicates through the inbox and task\n"
       "queue, and may type only into their own pane. This is the response to the\n"
       "2026-10-18 incident, where a free model's cleanup closed the VP's tab and\n"
       "took nine panes with it.\n")
@@ -673,19 +685,22 @@ def guide(markdown=False):
       "  expected directory; otherwise it is config_bad (status file, exit 2, no row).\n"
       "- Full design: docs/WATCHDOG.md; policy: docs/WATCHDOG_ESCALATION_SPEC.md.\n")
 
-    w(h(2, "The herdr guard: agents that shell out"))
-    w("An agent with a shell can call the herdr CLI directly, and `herdr pane run\n"
-      "<pane> \"...\"` types straight into a terminal with no idea anyone is writing\n"
-      "there. Nothing inside this daemon can see that. `dunkingsheep guard install`\n"
-      "puts a small `herdr` wrapper first on PATH which forwards exactly the four\n"
+    w(h(2, "The terminal guards: agents that shell out"))
+    w("An agent with a shell can call the terminal CLI directly, and a raw send\n"
+      "types straight into a terminal with no idea anyone is writing there.\n"
+      "Nothing inside this daemon can see that. On the live tmux backend the\n"
+      "`tmux` wrapper (`dunkingsheep guard install-tmux`) routes closes through\n"
+      "the daemon and refuses raw typing/layout; on the herdr rollback the\n"
+      "`herdr` wrapper (`dunkingsheep guard install`) forwards exactly the four\n"
       "typing subcommands to the daemon and execs the real herdr for everything\n"
       "else, so agents get the same protection without changing how they work.\n")
     w(code("dunkingsheep guard status      # installed? active in this shell?\n"
            "dunkingsheep guard install     # wrapper + a PATH line in ~/.bashrc\n"
            "dunkingsheep guard check       # prove a typing command is intercepted\n"
            "dunkingsheep guard uninstall   # remove both"))
-    w("Installing does two things. It puts the wrapper first on PATH for new\n"
-      "shells, and it takes herdr's own place: the real binary is renamed to\n"
+    w("On the herdr rollback, installing does two things. It puts the wrapper\n"
+      "first on PATH for new shells, and it takes herdr's own place: the real\n"
+      "binary is renamed to\n"
       "`herdr-real` beside it. That second part matters, because herdr starts\n"
       "agents by exec'ing them from its server process, so they inherit the\n"
       "server's environment and never read a shell profile. Shadowing the binary\n"
@@ -712,10 +727,10 @@ def guide(markdown=False):
       "schedules (add_dunk with their pane as target).\n")
 
     w(h(2, "Troubleshooting"))
-    w("- \"herdr server not running\": start herdr (`herdr status server`).\n"
-      "- \"no herdr pane matches\": run `dunkingsheep panes` and use the pane id.\n"
-      "- \"target 'self' needs HERDR_PANE_ID\": the caller is not inside a herdr\n"
-      "  pane; pass a pane id or `--self-pane w8:p3`.\n"
+    w("- \"herdr server not running\": the rollback backend is down; start herdr (`herdr status server`), or stay on the tmux default.\n"
+      "- \"no pane matches\": run `dunkingsheep panes` and use the pane id.\n"
+      "- \"target 'self' needs TMUX_PANE\": the caller is not inside a pane\n"
+      "  Pass a pane id or `--self-pane <pane-id>`.\n"
       "- Daemon problems: ~/.config/dunkingsheep/daemon.log; `dunkingsheep shutdown`\n"
       "  then any command restarts it with the saved dunks.\n"
       "- Send failed: the pane was closed. Re-target with `update <id> -T ...`.\n")

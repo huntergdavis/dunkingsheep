@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Dunking Sheep TUI - terminal interface for automated text sending, for herdr.
+Dunking Sheep TUI - terminal interface for automated text sending.
 
-This is a herdr-native sibling of Dunking Bird. Each "dunker" targets a herdr
-pane and sends text through the herdr socket API. Run it in a herdr tab and
+This is a terminal-native sibling of Dunking Bird. Each "dunker" targets a terminal
+pane and sends text through the backend's pane API (tmux by default; herdr on
+the rollback backend). Run it in a tab and
 point dunkers at your agent panes to keep them engaged with prompts like
 "continue" or "keep going".
 
@@ -48,7 +49,7 @@ class LocalFlock:
 
     def __init__(self):
         self.flock = Flock(persist=False, restore=False)
-        self.self_pane_id = os.environ.get("HERDR_PANE_ID")
+        self.self_pane_id = os.environ.get("TMUX_PANE") or os.environ.get("HERDR_PANE_ID")
 
     def call(self, cmd, **args):
         return dispatch(self.flock, cmd, args, self_pane_id=self.self_pane_id)
@@ -366,7 +367,7 @@ class DunkingSheepTui:
             self.flash("Max sends must be a whole number")
 
     def pick_target(self):
-        """Choose a herdr pane to target (replaces window capture)."""
+        """Choose a terminal pane to target (replaces window capture)."""
         dunk = self.current()
         if dunk is None:
             return self.current_id()
@@ -374,7 +375,7 @@ class DunkingSheepTui:
         panes = result.get("panes", []) if result else []
         if not panes:
             status = self.rpc("status")
-            self.flash((status or {}).get("herdr_hint") or "No herdr panes")
+            self.flash((status or {}).get("herdr_hint") or "No panes (is the backend reachable?)")
             return
         chosen = self.target_modal(panes)
         if chosen is not None:
@@ -436,7 +437,7 @@ class DunkingSheepTui:
     TARGET_INDENT = 4
 
     def target_modal(self, panes):
-        """Full-screen picker of herdr panes, grouped by workspace with the tab
+        """Full-screen picker of terminal panes, grouped by workspace with the tab
         rows indented beneath each workspace name. Returns a pane dict or None."""
         # Land the selection on the first agent pane for convenience.
         sel = 0

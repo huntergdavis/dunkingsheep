@@ -27,7 +27,7 @@ from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 DEFAULT_SEND_WAIT_S = 3.0
 
 TARGET_DOC = (
-    "Which herdr pane. Accepts a pane id like 'w8:p3', the word 'self' for "
+    "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for "
     "the pane this agent is running in, a terminal id, or a unique "
     "case-insensitive substring of a tab label, workspace label, agent name "
     "or directory (an exact label wins over a substring). Use list_panes to "
@@ -1155,7 +1155,7 @@ ONLY_WHEN_PARAM = {
     "type": "string",
     "enum": ["idle", "any"],
     "description": (
-        "'idle' holds each send until herdr reports the target agent as idle "
+        "'idle' holds each send until the backend reports the target agent as idle "
         "(not working/blocked). 'any' (the default) sends on schedule."
     ),
 }
@@ -1191,7 +1191,7 @@ MESSAGE_IDS_PARAM = {"type": "string",
                      "description": "One inbox message id, or several comma separated."}
 MESSAGE_ID_PARAM = {"type": "string", "description": "Message id, e.g. 'm3' (see list_messages)."}
 LABEL_PARAM = {"type": "string", "description": "Name to give it (how you will target it later)."}
-CWD_PARAM = {"type": "string", "description": "Working directory for the new shell (default: herdr's)."}
+CWD_PARAM = {"type": "string", "description": "Working directory for the new shell (default: the backend's)."}
 RUN_COMMAND_PARAM = {
     "type": "string",
     "description": ("Optional command line to type + Enter into the new pane once it "
@@ -1380,7 +1380,7 @@ COMMANDS = [
     ),
     Command(
         "status",
-        "Daemon health: version, dunk counts, and whether herdr is reachable.",
+        "Daemon health: version, dunk counts, and whether the terminal backend is reachable.",
         h_status,
         params={"check_herdr": {"type": "boolean",
                                 "description": "Probe the terminal backend (slow; default off)."},
@@ -1461,7 +1461,7 @@ COMMANDS = [
     ),
     Command(
         "add_dunk",
-        "Create a dunk: periodically type `text` + Enter into a herdr pane. "
+        "Create a dunk: periodically type `text` + Enter into a terminal pane. "
         "Starts immediately unless start=false. Target 'self' dunks the pane "
         "this agent runs in (meta-dunking). Returns the new dunk including its id.",
         h_add_dunk,
@@ -1582,7 +1582,7 @@ COMMANDS = [
         "send_keys",
         "Press named keys in a pane (e.g. 'Enter', 'Escape', 'ctrl+c'), queued "
         "behind a human who is typing just like send_text. Use this rather than "
-        "the herdr passthrough: a bare Enter sent while someone is mid-sentence "
+        "a raw backend passthrough instead: a bare Enter sent while someone is mid-sentence "
         "submits their half-written message. An Enter that is meant to submit "
         "text waiting in the box is confirmed and repeated until it does.",
         h_send_keys,
@@ -1604,7 +1604,7 @@ COMMANDS = [
         "flush_box",
         "Submit whatever is sitting unsent in a pane's input box. Use it when "
         "messages to a pane stay queued: something left text in the box (an "
-        "agent typing through the herdr CLI, or a person who walked away "
+        "agent typing through the backend CLI directly, or a person who walked away "
         "mid-sentence), and every message queues behind it. Returns the text "
         "it submitted.",
         h_flush_box,
@@ -2085,7 +2085,7 @@ COMMANDS = [
     ),
     Command(
         "doctor",
-        "Read-only post-upgrade doctor: herdr version, pane detection, "
+        "Read-only post-upgrade doctor: backend version, pane detection, "
         "read --source visible, guard status, and dunk target metadata that no "
         "longer matches the pane. Flags stale target_agent/target_cwd.",
         h_doctor,
@@ -2120,7 +2120,7 @@ COMMANDS = [
     ),
     Command(
         "list_panes",
-        "List herdr panes (targets) grouped by workspace and tab, with the "
+        "List terminal panes (targets) grouped by workspace and tab, with the "
         "agent in each pane and its status. `is_self` marks the caller's pane.",
         h_list_panes,
     ),
@@ -2153,14 +2153,14 @@ COMMANDS = [
                            "description": "pane id (%9) or pinned lane name"}}),
     Command(
         "list_workspaces",
-        "List herdr workspaces with their tabs (ids, labels, agent status). "
+        "List workspaces with their tabs (ids, labels, agent status). "
         "`self` is the caller's own workspace/tab. Use it to pick where to "
         "create tabs or start agents.",
         h_list_workspaces,
     ),
     Command(
         "create_workspace",
-        "Create a new herdr workspace (a named space with its first tab and a "
+        "Create a new workspace (a named space with its first tab and a "
         "shell pane). Optionally run a command in that pane, e.g. 'claude' to "
         "start an agent there. Returns the new workspace, tab and pane ids; the "
         "pane id is a dunk target.",
@@ -2208,17 +2208,18 @@ COMMANDS = [
     ),
     Command(
         "start_agent",
-        "Launch an agent process in a new pane and register it with herdr under "
-        "`name` (herdr then tracks it by that name and status). `command` is the "
+        "Launch an agent process in a new pane and register it by name "
+        "(on the herdr rollback: `herdr agent start` tracks it by that name and status). "
+        "`command` is the "
         "full command line, e.g. 'claude' or 'codex --model gpt-5'. Place it in "
-        "`tab` (splitting when `split` is given) or in `workspace` (herdr picks "
+        "`tab` (splitting when `split` is given) or in `workspace` (the backend picks "
         "the tab; use create_tab + tab for a tab of your own naming); omit both "
         "to place it in the dedicated sandbox workspace, never the caller's tab. "
         "Superusers only. Returns the agent's pane id, ready to dunk on.",
         h_start_agent,
         params={
             "name": {"type": "string",
-                     "description": "Agent name as herdr will show it, e.g. 'writer'."},
+                     "description": "Agent name as the backend will show it, e.g. 'writer'."},
             "command": {"type": "string",
                         "description": "Command line to run, shell-split, e.g. 'claude --model opus'."},
             "workspace": WORKSPACE_PARAM,
@@ -2265,7 +2266,7 @@ COMMANDS = [
     ),
     Command(
         "focus",
-        "Bring a workspace, tab or pane to the front of the human's herdr "
+        "Bring a workspace, tab or pane to the front of the human's terminal "
         "session (to draw their attention to it).",
         h_focus,
         params={"kind": KIND_PARAM, "target": KIND_TARGET_PARAM},
@@ -2284,15 +2285,17 @@ COMMANDS = [
     ),
     Command(
         "herdr",
-        "Run any herdr CLI subcommand and get its JSON result: the escape hatch "
+        "Run any herdr CLI subcommand (rollback backend only; refused under tmux) "
+        "and get its JSON result: the escape hatch "
         "for everything herdr can do that has no dedicated tool here (`agent "
         "list`, `pane zoom w9:p2 --on`, `notification show 'Done'`, `wait "
         "agent-status w9:p2 --status idle --timeout 60000`, `api schema --json` "
         "to discover all of it). Pass the subcommand line without the leading "
         "'herdr'; the word `self` becomes the caller's pane id (its tab or "
-        "workspace id in `tab ...` / `workspace ...` commands). herdr takes ids "
-        "here, not labels: list_workspaces / list_panes give them. Commands that "
-        "would stop, update or attach herdr itself are refused.",
+        "workspace id in `tab ...` / `workspace ...` commands). On the rollback, "
+        "herdr takes ids here, not labels: list_workspaces / list_panes give "
+        "them. Commands that would stop, update or attach herdr itself are "
+        "refused.",
         h_herdr,
         params={"command": {"type": "string",
                             "description": "herdr subcommand line, e.g. 'tab focus w9:t2'."}},
@@ -2300,13 +2303,13 @@ COMMANDS = [
     ),
     Command(
         "herdr_help",
-        "herdr's own usage text, for discovering what the `herdr` tool can run: "
+        "The rollback backend's own usage text, for discovering what the `herdr` tool can run on the rollback: "
         "no topic lists the command groups; a topic such as 'pane', 'tab', "
         "'workspace', 'agent', 'wait' or 'notification' lists that group's "
         "subcommands and flags.",
         h_herdr_help,
         params={"topic": {"type": "string",
-                          "description": "A herdr command group, e.g. 'pane'. Omit for the overview."}},
+                          "description": "A rollback-backend (herdr) command group, e.g. 'pane'. Omit for the overview."}},
     ),
     Command(
         "shutdown",
@@ -2462,7 +2465,7 @@ MCP_GROUPS = (
      (("digest", "pm_digest"), ("routing", "pm_routing"))),
     ("system",
      "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), "
-     "herdr (any herdr subcommand except the typing ones), herdr_help, recover, doctor.",
+     "herdr (rollback-backend passthrough), herdr_help (rollback), recover, doctor.",
      (("help", "help"), ("herdr", "herdr"), ("herdr_help", "herdr_help"),
       ("recover", "recover"), ("doctor", "doctor"))),
 )

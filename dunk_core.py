@@ -5,18 +5,18 @@ Dunking Sheep core: the flock of dunkers and their timers.
 This module is the single mechanism behind every control surface. The TUI's
 keyboard, the unix-socket API, the command-line tool and the MCP server all
 end up calling methods on `Flock`. Nothing in here knows about curses, sockets
-or JSON-RPC; it only knows dunkers, herdr panes and time.
+or JSON-RPC; it only knows dunkers, terminal panes and time.
 
-A *dunker* (or *dunk*) is: a target herdr pane, a text, an interval, and a
+A *dunker* (or *dunk*) is: a target terminal pane, a text, an interval, and a
 running flag. While running, a per-dunker thread counts down and delivers the
-text (plus Enter) to the pane through `HerdrClient`, then starts over.
+text (plus Enter) to the pane through the terminal backend, then starts over.
 
 Orchestration extras on top of the classic Dunking Bird model:
 
 - text templates: `{id}`, `{name}`, `{count}`, `{target}`, `{interval}`,
   `{time}` and `{date}` expand at send time (other braces are left alone),
   so a dunk can tell the agent it lands on which dunk to remove.
-- `only_when="idle"`: defer a send while herdr reports the target agent as
+- `only_when="idle"`: defer a send while the backend reports the target agent as
   working or blocked; re-check every few seconds.
 - `max_sends=N`: remove the dunk automatically after its N-th send.
 - `skip_if_unconsumed=True`: backpressure. A scheduled send becomes a no-op
@@ -35,7 +35,7 @@ Orchestration extras on top of the classic Dunking Bird model:
   message. A send that never leaves the box is reported as failed, not sent.
 - persistence: the flock is saved to a JSON file on every structural change
   and restored (running dunks included) when a new flock is created.
-- herdr layout control: `list_workspaces`, `create_workspace`, `create_tab`,
+- terminal layout control: `list_workspaces`, `create_workspace`, `create_tab`,
   `split_pane`, `start_agent`, `rename`, `focus`, `close`, plus the
   `herdr_command` passthrough for anything else the herdr CLI can do. An admin
   agent builds its team here, then dunks on it.
@@ -581,7 +581,7 @@ class Dunker:
         return tab
 
     def set_target(self, pane):
-        """Point at a herdr pane dict (as returned by HerdrClient.list_panes_grouped)."""
+        """Point at a terminal pane dict (as returned by the backend's list_panes_grouped)."""
         self.target_pane_id = pane.get("pane_id")
         self.target_agent = pane.get("agent")
         self.target_cwd = pane.get("cwd")
@@ -2278,7 +2278,7 @@ class Flock:
 
         Global is fleet-wide. A pane id is private to that pane; an agent may
         only name its own pane (or 'self'). A caller with no pane, such as the
-        human's CLI outside herdr, may name any pane for inspection.
+        human's CLI outside tmux, may name any pane for inspection.
         """
         if scope is None or str(scope).strip() in ("", "all"):
             return default
@@ -2875,7 +2875,7 @@ class Flock:
         Complements the delivery `metrics` endpoint. Current state, throughput
         buckets and latencies all come from SQL; no model is involved. An
         agent can see global plus its own pane; a caller with no pane (the
-        human/CTO CLI outside herdr) can see all scopes.
+        human/CTO CLI outside tmux) can see all scopes.
         """
         value = "" if scope is None else str(scope).strip()
         if value in ("", "all"):
@@ -3251,7 +3251,7 @@ class Flock:
     # Workspaces, tabs and panes can be created, renamed, focused and closed
     # through the same surfaces that schedule dunks, so an admin agent can
     # spin up a team (a workspace per project, a tab per agent) and then dunk
-    # on it. Everything here is a thin, resolved call into HerdrClient.
+    # on it. Everything here is a thin, resolved call into the terminal backend.
 
     LAYOUT_KINDS = ("workspace", "tab", "pane")
 
@@ -3271,10 +3271,10 @@ class Flock:
 
     def _self_pane(self, self_pane_id):
         if not self_pane_id:
-            raise DunkError("'self' needs HERDR_PANE_ID (run from inside a herdr pane)")
+            raise DunkError("'self' needs TMUX_PANE (or HERDR_PANE_ID on the herdr rollback; run from inside a pane)")
         pane = self.herdr.get_pane(self_pane_id)
         if pane is None:
-            raise DunkError(f"own pane {self_pane_id} not found in herdr")
+            raise DunkError(f"own pane {self_pane_id} not found on the current backend")
         return pane
 
     @staticmethod
@@ -3300,7 +3300,7 @@ class Flock:
         if partial:
             raise DunkError(f"{kind} {spec!r} is ambiguous: "
                             + ", ".join(f"{i[id_key]} ({i.get(label_key)})" for i in partial))
-        raise DunkError(f"no herdr {kind} matches {spec!r}")
+        raise DunkError(f"no {kind} matches {spec!r} on the current backend")
 
     def resolve_workspace(self, spec, self_pane_id=None):
         """Workspace dict from an id ('w9'), a label, a unique label substring
@@ -3397,7 +3397,7 @@ class Flock:
 
         Bootstrap (empty allowlist) is allowed; after that only an existing
         superuser can recover. This is the setup/takeover step: the VP pane
-        gets its current HERDR_PANE_ID and name written into the allowlist.
+        gets its current TMUX_PANE (or HERDR_PANE_ID on the rollback) and name written into the allowlist.
         """
         if not self_pane_id:
             raise DunkError("superuser recover requires a known caller pane")
@@ -3457,7 +3457,7 @@ class Flock:
 
     def _after_create(self, ok, result, command, what):
         if not ok:
-            raise DunkError(f"herdr could not create the {what}: {result}")
+            raise DunkError(f"the terminal backend could not create the {what}: {result}")
         pane = result.get("root_pane") or result.get("pane") or result.get("agent") or {}
         out = {
             "workspace": result.get("workspace"),
@@ -3541,10 +3541,10 @@ class Flock:
 
     def start_agent(self, name, command, workspace=None, tab=None, split=None, cwd=None,
                     focus=False, self_pane_id=None):
-        """Launch `command` in a new pane registered with herdr as agent `name`
-        (`herdr agent start`). Placement: inside `tab` (splitting it when
+        """Launch `command` in a new pane registered by name as agent `name`
+        (on the herdr rollback: `herdr agent start`). Placement: inside `tab` (splitting it when
         `split` is right/down), else in `workspace` (id, label or 'self';
-        herdr picks the tab), else in the dedicated sandbox workspace."""
+        the backend picks the tab), else in the dedicated sandbox workspace."""
         name = str(name or "").strip()
         if not name:
             raise DunkError("agent name is required")
@@ -3563,7 +3563,7 @@ class Flock:
         ok, result = self.herdr.start_agent(name, argv, workspace_id=workspace_id,
                                             tab_id=tab_id, split=split, cwd=cwd, focus=focus)
         if not ok:
-            raise DunkError(f"herdr could not start agent {name!r}: {result}")
+            raise DunkError(f"the terminal backend could not start agent {name!r}: {result}")
         agent = result.get("agent") or {}
         # VERIFY BEFORE CLAIMING "STARTED" (t215): eight opencode panes were reported started
         # and had actually died with 'opencode: not found' (rc=127) because the pane's PATH
@@ -4218,7 +4218,7 @@ class Flock:
         kind, target_id, _item = self._resolve_kind(kind, target, self_pane_id)
         ok, result = self.herdr.rename(kind, target_id, label)
         if not ok:
-            raise DunkError(f"herdr could not rename {kind} {target_id}: {result}")
+            raise DunkError(f"the terminal backend could not rename {kind} {target_id}: {result}")
         log.info("renamed %s %s -> %r", kind, target_id, label)
         return {"kind": kind, "id": target_id, "label": label,
                 kind: (result or {}).get(kind)}
@@ -4227,7 +4227,7 @@ class Flock:
         kind, target_id, _item = self._resolve_kind(kind, target, self_pane_id)
         ok, result = self.herdr.focus(kind, target_id)
         if not ok:
-            raise DunkError(f"herdr could not focus {kind} {target_id}: {result}")
+            raise DunkError(f"the terminal backend could not focus {kind} {target_id}: {result}")
         return {"kind": kind, "id": target_id, "focused": True}
 
     def close_target(self, kind, target, self_pane_id=None, force=False):
@@ -4249,7 +4249,7 @@ class Flock:
                             "pane": "pane_id"}[kind]) == target_id]
         ok, result = self.herdr.close(kind, target_id)
         if not ok:
-            raise DunkError(f"herdr could not close {kind} {target_id}: {result}")
+            raise DunkError(f"the terminal backend could not close {kind} {target_id}: {result}")
         stopped = []
         with self._lock:
             for dunker in self.dunkers:
@@ -4385,7 +4385,7 @@ class Flock:
         if spec.lower() in ("self", "me", "here"):
             if not self_pane_id:
                 raise DunkError(
-                    "target 'self' needs HERDR_PANE_ID (run from inside a herdr pane)"
+                    "target 'self' needs TMUX_PANE (or HERDR_PANE_ID on the herdr rollback; run from inside a pane)"
                 )
             spec = self_pane_id
         panes = self.herdr.list_panes_grouped()
@@ -4418,7 +4418,7 @@ class Flock:
         if len(matches) == 1:
             return matches[0]
         if not matches:
-            raise DunkError(f"no herdr pane matches {spec!r}")
+            raise DunkError(f"no pane matches {spec!r} on the current backend")
         # Prefer a single agent pane among several matches (a tab label often
         # matches both the agent pane and a shell beside it).
         agents = [p for p in matches if p.get("agent")]
