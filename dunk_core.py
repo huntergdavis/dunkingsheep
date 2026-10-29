@@ -3639,7 +3639,8 @@ class Flock:
                             self._verify_agent_started(
                                 old_agent or sorted(rollback_names)[0], pane_id)
                             if rollback_names and not self._agent_evidence(
-                                    int(rollback_pid), rollback_names):
+                                    int(rollback_pid), rollback_names,
+                                    process_start(int(rollback_pid))):
                                 raise DunkError("rollback has a live wrapper but no intended "
                                                 "agent child process")
                             rolled = True
@@ -3688,7 +3689,7 @@ class Flock:
                 self._verify_agent_started(old_agent or sorted(names)[0], pane_id)
             except DunkError as error:
                 fail(str(error), new_pid)
-            if not self._agent_evidence(new_pid, names):
+            if not self._agent_evidence(new_pid, names, process_start(new_pid)):
                 fail(f"respawn-pane: pane {pane_id} has a live wrapper but no "
                      f"{'/'.join(sorted(names))} child process", new_pid)
         self._record_launch(
@@ -3720,27 +3721,46 @@ class Flock:
         "cannot execute",
     )
 
-    def _agent_evidence(self, root_pid, names):
-        """Descendant pids whose executable/cmdline basename is an expected agent.
+    def _agent_evidence(self, root_pid, names, since_start=None):
+        """Descendant pids that are a RUNNING process of an expected agent.
 
         The respawn wrapper is a shell that stays alive even when the intended
-        agent exited.  A live wrapper alone is not startup evidence.  This walks
-        /proc below the wrapper and returns the matching child pids.
+        agent exited.  A live wrapper is not startup evidence, and neither is a
+        dead/stopped child, a child from the previous agent, or a wrapper script
+        whose argv mentions the agent name.  The walk therefore requires:
+        - an expected kernel `comm` (the executable name, not an argv basename);
+        - a non-dead state (DEAD_STATES, plus stopped/traced T);
+        - when `since_start` is known, a start time no older than THIS wrapper.
+        A pid that vanishes mid-walk is simply not evidence.
         """
         wanted = {str(name).lower() for name in (names or ()) if name}
         if not root_pid or not wanted:
             return []
         try:
-            from dunk_callers import _stat
+            from dunk_callers import _stat, DEAD_STATES
         except Exception:                           # noqa: BLE001 - no evidence
             return []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return []
         procs = {}
-        for entry in os.listdir("/proc"):
+        for entry in entries:
             if not entry.isdigit():
                 continue
             info = _stat(int(entry))
-            if info:
-                procs[int(entry)] = info
+            if not info:
+                continue
+            state = str(info.get("state") or "")
+            if state in DEAD_STATES or state in ("T", "t"):
+                continue
+            if since_start is not None:
+                try:
+                    if int(info.get("start") or 0) < int(since_start):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            procs[int(entry)] = info
         children = {}
         for pid, info in procs.items():
             children.setdefault(info["ppid"], []).append(pid)
@@ -3757,15 +3777,6 @@ class Flock:
             if not info:
                 continue
             if os.path.basename(str(info.get("comm") or "")).lower() in wanted:
-                found.append(pid)
-                continue
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as handle:
-                    parts = [part.decode("utf-8", "replace")
-                             for part in handle.read().split(b"\0") if part]
-            except OSError:
-                parts = []
-            if any(os.path.basename(part).lower() in wanted for part in parts):
                 found.append(pid)
         return found
 

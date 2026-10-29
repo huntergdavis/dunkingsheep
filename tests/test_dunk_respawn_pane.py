@@ -199,6 +199,53 @@ class RespawnPaneTests(unittest.TestCase):
         self.assertEqual(self.rollback, self.calls[1]["argv"])
 
 
+class AgentEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def test_zombie_child_is_not_running_agent_evidence(self):
+        rows = {123: {"pid": 123, "ppid": 1, "comm": "sh", "state": "S"},
+                456: {"pid": 456, "ppid": 123, "comm": "codex", "state": "Z"}}
+        with patch("os.listdir", return_value=["123", "456"]), \
+             patch("dunk_callers._stat", side_effect=rows.get):
+            self.assertEqual([], self.flock._agent_evidence(123, {"codex"}))
+
+    def test_stopped_child_is_not_evidence(self):
+        rows = {123: {"pid": 123, "ppid": 1, "comm": "sh", "state": "S", "start": "1"},
+                456: {"pid": 456, "ppid": 123, "comm": "codex", "state": "T", "start": "200"}}
+        with patch("os.listdir", return_value=["123", "456"]), \
+             patch("dunk_callers._stat", side_effect=rows.get):
+            self.assertEqual([], self.flock._agent_evidence(123, {"codex"}))
+
+    def test_leftover_child_started_before_respawn_is_not_evidence(self):
+        rows = {123: {"pid": 123, "ppid": 1, "comm": "sh", "state": "S", "start": "100"},
+                456: {"pid": 456, "ppid": 123, "comm": "codex", "state": "S", "start": "50"}}
+        with patch("os.listdir", return_value=["123", "456"]), \
+             patch("dunk_callers._stat", side_effect=rows.get):
+            self.assertEqual([], self.flock._agent_evidence(123, {"codex"}, "100"))
+
+    def test_live_child_started_after_respawn_is_evidence(self):
+        rows = {123: {"pid": 123, "ppid": 1, "comm": "sh", "state": "S", "start": "100"},
+                456: {"pid": 456, "ppid": 123, "comm": "codex", "state": "S", "start": "100"}}
+        with patch("os.listdir", return_value=["123", "456"]), \
+             patch("dunk_callers._stat", side_effect=rows.get):
+            self.assertEqual([456], self.flock._agent_evidence(123, {"codex"}, "100"))
+
+    def test_proc_walk_race_is_not_evidence(self):
+        with patch("os.listdir", side_effect=OSError("vanished")):
+            self.assertEqual([], self.flock._agent_evidence(123, {"codex"}, "100"))
+
+    def test_live_child_is_production_helper_evidence(self):
+        rows = {123: {"pid": 123, "ppid": 1, "comm": "sh", "state": "S"},
+                456: {"pid": 456, "ppid": 123, "comm": "codex", "state": "S"}}
+        with patch("os.listdir", return_value=["123", "456"]), \
+             patch("dunk_callers._stat", side_effect=rows.get):
+            self.assertEqual([456], self.flock._agent_evidence(123, {"codex"}))
+
+
 class TmuxRespawnGuardTests(unittest.TestCase):
     def setUp(self):
         import tempfile

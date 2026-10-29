@@ -45,7 +45,12 @@ only to that reviewed per-lane hook file.
 - backend without guarded respawn support;
 - the replacement wrapper is alive but the intended agent is absent: the
   `_verify_agent_started` screen check and a descendant-process check must both
-  find the harness, not just the wrapper pid.
+  find the harness, not just the wrapper pid.  The descendant walk requires a
+  non-dead state (`DEAD_STATES`, plus stopped/traced `T`), a start time no older
+  than the new wrapper (so a leftover child from the previous agent is not
+  evidence), and an expected kernel `comm` (not an argv basename, so a wrapper
+  script named `codex` is not evidence).  A pid that vanishes mid-walk is
+  simply no evidence.
 
 These are checked before a process is touched. Task/mail stores are not written.
 
@@ -72,5 +77,7 @@ rollback, dead replacement with rollback, stale-pid second attempt, pane
 replaced between core check and backend mutation, explicit shared CODEX_HOME,
 backend refusal keeping the old launch record, a live wrapper with a failed
 child (`command not found`/`[agent exited rc=127]`) rolling back, a live wrapper
-with no intended child rolling back, and backend argv quoting/unmanaged
-refusal. No live pane is used.
+with no intended child rolling back, direct helper controls for a zombie child,
+stopped child, pre-respawn leftover child, live post-respawn child and a
+vanishing-proc race, and backend argv quoting/unmanaged refusal. No live pane is
+used.
