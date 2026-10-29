@@ -238,6 +238,15 @@
       "class": "ops",
       "cooldown_minutes": 720,
       "must_hold_runs": 1
+    },
+    "delivery.ambiguous_queued": {
+      "enabled": true,
+      "severity": "warning",
+      "class": "ops",
+      "cooldown_minutes": 240,
+      "must_hold_runs": 1,
+      "min_holds": 10,
+      "min_age_minutes": 20
     }
   }
 }
