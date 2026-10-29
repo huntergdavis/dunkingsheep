@@ -46,7 +46,7 @@ class NextJobs:
         return None
 
     def advance(self, pane, trigger, from_task=None, caller=None,
-                completer_is_operator=False):
+                operator_proof=None):
         f = self.flock
         with self._pane_lock(pane):
             dispatch_reason = self.gate(pane)
@@ -60,7 +60,7 @@ class NextJobs:
             plan = f.tasks.advance_next_job(
                 pane, trigger=trigger, from_task=from_task, caller=caller or f.current_caller(),
                 unread=unread, pending_delivery=pending, dispatch_reason=dispatch_reason,
-                completer_is_operator=completer_is_operator)
+                operator_proof=operator_proof)
             f.metrics.record("next_job.decision", pane_id=pane, source=trigger,
                              outcome=plan["action"], reason=plan.get("reason"))
             log.info("next-job %s trigger=%s action=%s task=%s reason=%s", pane,

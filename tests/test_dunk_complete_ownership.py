@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -183,6 +184,31 @@ class CompleteOwnershipTests(unittest.TestCase):
             self.flock.task_complete(task["id"], self_pane_id=OWNER)
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
 
+    def test_pidless_pane_claim_is_refused(self):
+        """t427 residual: a pane record with no pid cannot bind the peer, so
+        the label alone must not authorize - even for a legitimate-shaped call."""
+        task = self.flock.task_add("bound work", self_pane_id="w2:p1")
+        self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
+        # w2:p1 exists in the fake backend with no pane_pid key.
+        self.flock.set_caller(self._caller_for(os.getpid()))
+        self.addCleanup(self.flock.clear_caller)
+        with self.assertRaisesRegex(DunkError, "no process id"):
+            self.flock.task_complete(task["id"], self_pane_id="w2:p1")
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_backend_error_is_refused(self):
+        """t427 residual: a backend lookup failure cannot authenticate the
+        label either; availability never grants."""
+        task = self.flock.task_add("bound work", self_pane_id="w1:p1")
+        self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
+        self.flock.set_caller(self._caller_for(os.getpid()))
+        self.addCleanup(self.flock.clear_caller)
+        with mock.patch.object(self.flock.herdr, "get_pane",
+                               side_effect=OSError("backend down")):
+            with self.assertRaisesRegex(DunkError, "cannot be verified"):
+                self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
     def test_peer_gone_is_refused(self):
         """Hit-and-run shaped: the peer reaped before the check leaves no
         ancestry to verify, so the label cannot authorize. Legitimate clients
@@ -219,7 +245,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "not owned"):
             self.flock.tasks.advance_next_job(
                 OWNER, trigger="completion", from_task=task["id"],
-                completer_is_operator=False)
+                operator_proof=None)
         current = self.flock.tasks.get(task["id"])
         self.assertNotEqual("done", current["status"])
         self.assertEqual([], self._completed_events(task["id"]))
@@ -230,18 +256,56 @@ class CompleteOwnershipTests(unittest.TestCase):
     def test_operator_survives_reassignment(self):
         """Operator privilege is role-based: it does not evaporate when the
         row's assignees change under it."""
+        self.superusers.add(OPERATOR)
         task = self._owned_task()
         self.flock.tasks.assign(task["id"], [FOREIGN], mode="set")
         plan = self.flock.tasks.advance_next_job(
             OPERATOR, trigger="completion", from_task=task["id"],
-            completer_is_operator=True)
+            operator_proof={"superusers": self.superusers,
+                            "pane_id": OPERATOR, "pane_info": {}})
         self.assertEqual("done", plan["task"]["status"])
+
+    def test_revoked_operator_is_refused_in_transaction(self):
+        """P2 privilege shape (reviewer probe): the operator is removed from
+        the allowlist after the wrapper guard passed; the transaction re-reads
+        the file and refuses."""
+        self.superusers.add(OPERATOR)
+        task = self._owned_task()
+        proof = {"superusers": self.superusers,
+                 "pane_id": OPERATOR, "pane_info": {}}
+        self.superusers.remove(OPERATOR)
+        from dunk_tasks import TaskError
+        with self.assertRaisesRegex(TaskError, "not owned"):
+            self.flock.tasks.advance_next_job(
+                OPERATOR, trigger="completion", from_task=task["id"],
+                operator_proof=proof)
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+        self.assertEqual([], self._completed_events(task["id"]))
+
+    def test_revoked_operator_is_refused_through_wrapper(self):
+        """Same revocation through the public wrapper: the interleave removes
+        the allowlist entry between the guard and the transaction."""
+        self.superusers.add("w1:p1")
+        task = self.flock.task_add("other work", self_pane_id="w2:p1")
+        self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
+        original = self.flock.tasks.advance_next_job
+
+        def interleave(*args, **kwargs):
+            self.superusers.remove("w1:p1")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.flock.tasks, "advance_next_job",
+                          side_effect=interleave):
+            with self.assertRaises(DunkError):
+                self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+        self.assertEqual([], self._completed_events(task["id"]))
 
     def test_transaction_accepts_unchanged_ownership(self):
         task = self._owned_task()
         plan = self.flock.tasks.advance_next_job(
             OWNER, trigger="completion", from_task=task["id"],
-            completer_is_operator=False)
+            operator_proof=None)
         self.assertEqual("done", plan["task"]["status"])
 
 

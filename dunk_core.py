@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.97"
+VERSION = "2.70.98"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2421,30 +2421,37 @@ class Flock:
     @_as_dunk_error
     def task_complete(self, task_id, by=None, self_pane_id=None):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
-        # Operator privilege is role-based: read once here (it needs herdr I/O,
-        # which must not run inside the completion transaction) and pass the bit
-        # in for the in-transaction recheck. Privilege-revocation races between
-        # this read and the transaction stay out of scope, as reviewed.
-        operator = bool(self_pane_id and self.is_superuser(self_pane_id))
+        # Operator evidence resolved once here (pane_info needs herdr I/O, which
+        # must not run inside the completion transaction); the transaction
+        # re-reads the allowlist file itself, so a revocation between here and
+        # the UPDATE is caught there. Same three lines as is_superuser, kept
+        # inline so the pane_info travels with the proof.
+        self.superusers.refresh()
+        pane_info = self._pane_info(self_pane_id)
+        operator = bool(self_pane_id
+                        and self.superusers.is_superuser(self_pane_id, pane_info))
         self._authorize_task_complete(task, self_pane_id, operator=operator)
         # Automatic work belongs to the actual caller, never a caller-supplied
         # completion label (`by` is attribution only): past the guard a requesting
         # pane is always present, so completion always flows through the next-job
         # trigger with the pane recorded as the completer.
-        plan = self.next_jobs.advance(self_pane_id, "completion", task_id,
-                                       completer_is_operator=operator)
+        plan = self.next_jobs.advance(
+            self_pane_id, "completion", task_id,
+            operator_proof={"superusers": self.superusers,
+                            "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
         return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
 
     # Where a pane claim cannot be kernel-checked, label policy still decides:
-    # no peer at all (in-process trusted local code and tests), no /proc
-    # (non-Linux), a backend lookup failure, or a pane record with no pid
-    # (backend gap - availability; the 2026-10-24 pane_pid outage must not freeze
-    # completions). Everything else refuses unless the walk positively finds the
-    # claimed pane: a live legitimate client waits for its response, so an
-    # unresolvable peer is hit-and-run shaped (send, exit, let the label pass),
-    # not a race to accommodate. A pane no backend can see, named by a live peer,
-    # is spoof-shaped: no live lane hides from its own backend.
+    # no peer at all (in-process trusted local code and tests) or no /proc
+    # (non-Linux). Every other shape with a live peer refuses unless the walk
+    # positively finds the claimed pane: a backend lookup failure, an
+    # unresolvable pane, a pid-less pane record, or a failed walk are all
+    # refused - availability or backend failure cannot authenticate a supplied
+    # owner/operator label, and a live legitimate client waits for its response
+    # (hit-and-run shaped peers are refused, not accommodated). Operators act
+    # through allowlisted panes like everyone else; during a pane-identity
+    # outage completions pause fleet-wide until the backend is fixed, by design.
 
     def _require_completion_binding(self, self_pane_id):
         """Refuse a pane claim the kernel evidence does not support (t423 P1).
@@ -2466,8 +2473,14 @@ class Flock:
             return
         try:
             pane = self.herdr.get_pane(self_pane_id)
-        except Exception:                           # noqa: BLE001 - availability:
-            return                                  # a dead backend must not break
+        except Exception as error:                      # noqa: BLE001
+            log.warning("task completion refused reason=backend_error pane=%r "
+                        "caller_pid=%r error=%r", self_pane_id,
+                        caller.get("pid"), error)
+            raise DunkError(
+                f"pane {self_pane_id} cannot be verified (backend lookup failed); "
+                "a completion naming an unverifiable pane is refused. Retry when "
+                "the backend answers.") from None
         if pane is None:                            # owners completing through it
             log.warning("task completion refused reason=unknown_pane pane=%r "
                         "caller_pid=%r", self_pane_id, caller.get("pid"))
@@ -2477,7 +2490,12 @@ class Flock:
                 "lane pane, or have a superuser (CoS/VP operator) reassign it first.")
         pane_pid = pane.get("pane_pid")
         if pane_pid is None:
-            return
+            log.warning("task completion refused reason=pane_pid_missing pane=%r "
+                        "caller_pid=%r", self_pane_id, caller.get("pid"))
+            raise DunkError(
+                f"pane {self_pane_id} reports no process id, so the calling process "
+                "cannot be bound to it; the completion is refused rather than taken "
+                "on the label alone. Retry when the backend reports pane processes.")
         from dunk_callers import caller_pane_auth_failure
         reason = caller_pane_auth_failure(caller, pane_pid)
         if reason is not None:

@@ -632,7 +632,7 @@ class Tasks:
 
     def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
                          unread=0, pending_delivery=False, dispatch_reason=None,
-                         completer_is_operator=False):
+                         operator_proof=None):
         """Complete A, choose/claim B and journal its inbox id in ONE transaction.
 
         Clauses 1/4: every trigger uses the same decision while holding SQLite's
@@ -656,14 +656,28 @@ class Tasks:
                     # P2 (t423 REVISE): ownership is rechecked on the freshly-read
                     # row INSIDE this transaction, not just by the caller before it:
                     # a reassignment landing between the wrapper guard and this UPDATE
-                    # must not complete as the removed owner. No socket or terminal
-                    # I/O here, so operator privilege arrives as a precomputed flag
-                    # (privilege-revocation races stay out of scope, as reviewed).
+                    # must not complete as the removed owner. Operator privilege is
+                    # revalidated here too, on a fresh allowlist read (local file
+                    # only - no socket/terminal I/O in this transaction): a
+                    # revocation landing in the same window must not complete on a
+                    # stale flag. pane_info travels in with the proof because
+                    # resolving it needs herdr I/O, which stays outside.
                     owners = set(_decode(row["assignees"]))
                     owners.update(lease["pane_id"]
                                   for lease in self.leases_for(from_task, now)
                                   if lease.get("pane_id"))
-                    if pane_id not in owners and not completer_is_operator:
+                    proof = operator_proof or {}
+                    fresh_operator = False
+                    allowlist = proof.get("superusers")
+                    if (allowlist is not None and proof.get("pane_id")
+                            and proof.get("pane_id") == pane_id):
+                        try:
+                            allowlist.refresh()
+                            fresh_operator = bool(allowlist.is_superuser(
+                                pane_id, proof.get("pane_info")))
+                        except Exception:             # noqa: BLE001 - a corrupt
+                            fresh_operator = False    # allowlist grants nothing
+                    if pane_id not in owners and not fresh_operator:
                         raise TaskError(
                             f"task {from_task} is not owned by {pane_id} (owners: "
                             f"{', '.join(sorted(owners)) or 'no one recorded'}); "
