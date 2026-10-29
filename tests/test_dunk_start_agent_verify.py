@@ -8,13 +8,16 @@ claimed, and a missing command is a refusal with the captured line.
 
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
 from dunk_core import DunkError, Flock  # noqa: E402
+from dunk_terminal import TmuxBackend  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
@@ -150,6 +153,61 @@ class StartAgentVerifyTests(unittest.TestCase):
         result = self._start("✻ Welcome to Claude Code\n❯ \n", proc=None)
         self.assertEqual("probe", result["name"])
         self.assertIsNone(result["child_pid"])
+
+
+@unittest.skipUnless(os.path.isdir("/proc"), "needs a process table")
+class TmuxBackendContractTests(unittest.TestCase):
+    """P1 follow-up (t418): the DEFAULT backend must check processes.
+
+    The actual TmuxBackend class with only terminal IO mocked - no server, no
+    pane creation, real /proc reads. Before the wiring, hasattr failed and a
+    clean screen silently passed screen-only on the backend production runs.
+    """
+
+    DEAD_PID = 4194304  # above any real pid: dead by construction
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.backend = TmuxBackend(
+            tmux_bin="/bin/false",
+            registry_path=os.path.join(self.tmp.name, "tmux-panes.json"))
+        self.flock = Flock(herdr=self.backend, persist=False, restore=False)
+        self.flock.AGENT_VERIFY_S = 0.3
+        self.screen = "$ \n"
+        self.pane_pid = self.DEAD_PID
+        patcher = mock.patch.object(self.backend, "_tmux",
+                                    side_effect=self._fake_tmux)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.flock.close()
+
+    def _pane_line(self):
+        fields = ["%9", "$1", "@1", "/tmp", "bash", "shell", "1",
+                  "s", "w", "0", "0", str(self.pane_pid), "80", "24"]
+        return TmuxBackend.PANE_SEP.join(fields)
+
+    def _fake_tmux(self, *args, timeout=None):
+        if not args:
+            return 1, "", ""
+        if args[0] == "list-panes":
+            return 0, self._pane_line() + "\n", ""
+        if args[0] == "capture-pane":
+            return 0, self.screen, ""
+        return 1, "", ""
+
+    def test_default_backend_refuses_clean_screen_with_no_process(self):
+        with self.assertRaisesRegex(DunkError, "never became a process"):
+            self.flock._verify_agent_started("probe", "%9", "claude")
+
+    def test_default_backend_confirms_a_live_kernel_match(self):
+        with open("/proc/self/comm", encoding="utf-8") as handle:
+            kind = handle.read().strip()
+        self.pane_pid = os.getpid()
+        pid = self.flock._verify_agent_started("probe", "%9", kind)
+        self.assertEqual(os.getpid(), pid)
 
 
 if __name__ == "__main__":

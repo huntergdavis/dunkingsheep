@@ -1,4 +1,4 @@
-# Dunking Sheep 2.70.94 guide
+# Dunking Sheep 2.70.95 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -196,8 +196,9 @@ background unless focus=true.
   exit, vanished pane, or a pid seen but gone at the deadline) is refused
   with the evidence, never reported started. Process evidence is kernel
   comm/state/start watched across the whole window, never a first-frame
-  sighting or an argv basename. With `workspace`, herdr picks the tab;
-  create_tab first and pass `tab` to control the tab's name.
+  sighting or an argv basename.
+  With `workspace`, herdr picks the tab; create_tab first and pass `tab`
+  to control the tab's name.
 - rename(kind, target, label) / focus(kind, target) / close(kind, target)
   for kind = workspace | tab | pane. close kills what runs inside, stops any
   dunks aimed there, and refuses the caller's own pane, tab or workspace.
