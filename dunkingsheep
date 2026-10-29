@@ -1723,6 +1723,15 @@ _READ_ONLY_SUBCOMMANDS = {
 
 def _is_mutating(words):
     """True when this invocation can change state, and so invalidates cached reads."""
+    # Global options precede the command. Their separate values are not command
+    # names: filtering only '-' words left '%35' at the front of
+    # '--self-pane %35 inbox read', so the completed drain never invalidated a
+    # cached inbox count. Equals forms and boolean globals consume one word.
+    words = list(words)
+    while words and words[0].startswith("-"):
+        option = words.pop(0)
+        if option in ("--self-pane", "--socket") and words:
+            words.pop(0)
     words = [word for word in words if not word.startswith("-")]
     if not words:
         return False
