@@ -88,9 +88,13 @@ EOF
     echo "DRY-RUN: write $DROPIN with ExecStart=/usr/bin/python3 $dest/dunkingsheep serve"
   fi
   # The launcher must follow the daemon so CLI and daemon share one tree.
+  # The drop-in above is already written: if anything below fails, the override
+  # points at a tree the daemon is not running. Say so and name the remedy.
+  trap 'echo "activate FAILED after writing $DROPIN; run: $0 rollback --apply" >&2' EXIT
   run python3 "$dest/dunkingsheep" --no-start-daemon install
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
+  trap - EXIT
   echo "activated $SHA; now run: $0 verify"
 }
 
@@ -133,6 +137,8 @@ case "$cmd" in
     echo "2. activate: $0 activate --sha $SHA --apply    (restart, operator-scheduled)"
     echo "3. verify:   $0 verify"
     echo "4. rollback: $0 rollback --apply               (-> $PREVIOUS_DEFAULT)"
+    echo "   If activate fails at any step, run rollback immediately: the drop-in is"
+    echo "   written before the restart and would otherwise outlive a failed restart."
     echo "Allocation stays OFF until an operator registers a worker (docs/ALLOCATION.md)."
     echo "Legacy CoS native recovery stays OFF until DUNKINGSHEEP_RECOVERY_BINDINGS is"
     echo "independently verified and set in a drop-in (docs/DELIVERY.md, t508)."

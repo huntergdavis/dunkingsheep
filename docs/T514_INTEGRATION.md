@@ -119,6 +119,14 @@ left byte-identical to PR112.
   pid/start/cwd/home/session.
 - Nothing in either path consults a model.
 
+**Release note (reviewer t525, point 3).** `NextJobs.gate` now admits a pane
+that is either on the dispatch allowlist **or** has an enabled row in
+`allocation_workers`. This is the one new path around the allowlist. The row
+can only be written through `allocation register`, which requires the caller
+to be the authenticated turn caller of its own pane **and** a superuser, so a
+worker cannot enrol itself; an operator does. The `TURN_END_DISPATCH` kill
+switch still gates both paths.
+
 ## Staged rollout and rollback
 
 `tools/t514_rollout.sh` is dry-run by default and prints every command; only
@@ -135,7 +143,11 @@ pinned in a drop-in.
    and stuck-config environment in `30-reviewed-release.conf` is untouched),
    reinstall the launcher from the new tree, `daemon-reload`, restart. The
    restart interrupts queued deliveries for a few seconds; the operator picks
-   the moment (no human-active pane mid-turn, no lane restart).
+   the moment (no human-active pane mid-turn, no lane restart). **If activate
+   fails at any step, run `rollback --apply` at once**: the override drop-in is
+   written before the launcher install and the restart, so a failed restart
+   would otherwise leave the override in place with the old daemon running
+   (reviewer t525, point 11).
 3. **Verify** (`verify`): service active, launcher path, `status` shows
    2.70.103, `guard check`, `allocation status --json` shows an empty registry
    (allocator off), daemon log tail.
