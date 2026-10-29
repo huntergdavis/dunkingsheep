@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.95"
+VERSION = "2.70.96"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2420,14 +2420,57 @@ class Flock:
 
     @_as_dunk_error
     def task_complete(self, task_id, by=None, self_pane_id=None):
-        self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        self._authorize_task_complete(task, self_pane_id)
         # Automatic work belongs to the actual caller, never a caller-supplied
-        # completion label. Anonymous administrative completions do not feed lanes.
-        if not self_pane_id:
-            return self.tasks.complete(task_id, by=by)
+        # completion label (`by` is attribution only): past the guard a requesting
+        # pane is always present, so completion always flows through the next-job
+        # trigger with the pane recorded as the completer.
         plan = self.next_jobs.advance(self_pane_id, "completion", task_id)
         self._next_job_wake.set()
         return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+
+    def _authorize_task_complete(self, task, self_pane_id):
+        """Refuse foreign completion BEFORE any mutation, event or handoff (t423).
+
+        Measured incident: a worker completed another lane's owned task, which
+        also fired an automatic next-job claim. task_complete used to check only
+        visibility, so any pane (or none) could complete anything.
+
+        The rule is narrow and deterministic, on the identity the system already
+        routes (self_pane_id - the same key leases, claims and handoffs use) plus
+        the existing CoS/VP superuser policy:
+        - the requesting pane owns the task (assignee or live lease-holder), or
+        - the requesting pane is a superuser (CoS/VP operator path), or
+        - nothing completes: unattributed callers complete nothing, because
+          unowned means leader-owned - there is no ownerless completion.
+        Attribution (`by`, labels) never authorizes: only the requesting pane's
+        ownership or allowlist membership does. A self_pane_id forged as another
+        pane is indistinguishable at this layer by design - the same trust model
+        claims and leases already use - so that systemic shape stays out of scope
+        rather than inventing a bypass; kernel-binding every completion would
+        refuse legitimate human-operator and coordinator calls made outside the
+        agent process tree.
+        """
+        owners = set(task.get("assignees") or []) | set(task.get("claimed_by") or [])
+        if self_pane_id and self_pane_id in owners:
+            return
+        if self_pane_id and self.is_superuser(self_pane_id):
+            return
+        if not self_pane_id:
+            log.warning("task completion refused reason=anonymous task=%r",
+                        task.get("id"))
+            raise DunkError(
+                f"task {task.get('id')} cannot be completed without a pane identity, "
+                "so ownership cannot be checked. Pass --self-pane <pane> from the lane "
+                "that owns it, or have a superuser (CoS/VP operator) complete it.")
+        log.warning("task completion refused reason=foreign_owner task=%r pane=%r "
+                    "owners=%r", task.get("id"), self_pane_id, sorted(owners))
+        raise DunkError(
+            f"task {task.get('id')} is owned by"
+            f" {', '.join(sorted(owners)) or 'no one recorded'}; {self_pane_id} may not "
+            "complete it. Complete your own tasks, or have a superuser (CoS/VP "
+            "operator) complete it.")
 
     @_as_dunk_error
     def task_block(self, task_id, reason=None, self_pane_id=None):
