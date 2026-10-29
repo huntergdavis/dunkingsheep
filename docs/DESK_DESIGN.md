@@ -74,6 +74,10 @@ Two regions on phone (stacked), two columns on tablet and up.
   guess: *sent -> seen by desk (t+2 s) -> answered (t+14 s)*. If no desk reply
   within 60 s, the bubble shows "desk slow" and the watchdog gets the event.
 - Replies that filed a task show the task id as a chip that opens the task.
+- Each bubble carries a small transport mark (web / Telegram). Replies go back
+  only on the transport the question used; Telegram never receives web
+  traffic, reports or digests, only answers to Telegram questions and the
+  three page classes.
 - The composer is the existing rich-text one (TipTap) with attachments. Enter
   sends; Shift-Enter newlines. The same composer is the message dock (Ctrl+/)
   on every other view, so the owner can ask from anywhere without losing the

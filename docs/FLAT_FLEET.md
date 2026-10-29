@@ -231,7 +231,16 @@ second inbox with its own schema. It becomes mailbox `owner` in `inbox.db`:
 an owner message is a row; a reply is an `ack` linked by `reply_to`; Telegram
 and the web are two transports for one mailbox. Owner-reply latency is then the
 same metric as lane-read latency and the watchdog alarms on it with no special
-code. The ~2,400 historical owner rows are migrated so the latency baseline
+code.
+
+**Reply on the transport the question arrived on (owner, 2026-10-29).** Each
+owner message records its `transport` (`telegram` | `web`); a desk reply is
+delivered only on that transport. Telegram carries answers to Telegram
+questions and nothing else: no web-conversation echoes, no reports, no
+watchdog digests. Pages (security / outage / money, max 3 per hour, per
+`WATCHDOG_ESCALATION_SPEC.md`) remain the one exception. The web conversation
+shows everything, including Telegram exchanges, so the web is the complete
+record and Telegram is the quiet one. The ~2,400 historical owner rows are migrated so the latency baseline
 survives.
 
 ### 7.3 Reporter (replaces the VP)
