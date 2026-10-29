@@ -210,6 +210,67 @@ class PiTierTests(unittest.TestCase):
         self.assertEqual("unknown", fb.tier_state(credit, "pi"))
 
 
+class ReserveAndWindowPolicyTests(unittest.TestCase):
+    """VP i33250: owner above-5 reserve, and the all-reported-window contract."""
+
+    def _codex_at(self, percent):
+        return [reading("claude", 0.0), reading("codex", percent)]
+
+    def test_a_one_percent_target_is_not_a_landing_place(self):
+        # CoS reproduced 1% weekly codex being chosen. It has credit, so it is
+        # not exhausted - and it is still not a target.
+        decision = fb.plan_swap(pane("claude"),
+                                fb.credit_state(self._codex_at(1.0)))
+        self.assertEqual("skip", decision["action"])
+        self.assertEqual("targets_below_reserve", decision["reason"])
+
+    def test_exactly_five_percent_is_refused_and_above_it_is_allowed(self):
+        at_five = fb.plan_swap(pane("claude"),
+                               fb.credit_state(self._codex_at(5.0)))
+        self.assertEqual("targets_below_reserve", at_five["reason"])
+        above = fb.plan_swap(pane("claude"),
+                             fb.credit_state(self._codex_at(5.1)))
+        self.assertEqual("swap", above["action"])
+        self.assertEqual("codex", above["to"])
+
+    def test_current_exhaustion_and_target_reserve_are_different_questions(self):
+        # A current tier at 1% has credit: nothing has failed, so the pane is
+        # NOT swapped off it. Same number, opposite decision, because the
+        # question is different.
+        decision = fb.plan_swap(pane("claude"),
+                                fb.credit_state([reading("claude", 1.0),
+                                                 reading("codex", 90.0)]))
+        self.assertEqual("skip", decision["action"])
+        self.assertEqual("current_has_credit", decision["reason"])
+
+    def test_an_exhausted_extra_reported_window_fails_closed(self):
+        # CoS reproduced: five_hour 0 with weekly 99 read as "available".
+        windows = [{"name": "weekly", "percent_remaining": 99.0},
+                   {"name": "five_hour", "percent_remaining": 0.0}]
+        state = fb.credit_state([{"provider": "codex", "status": "ok",
+                                  "windows": windows}])
+        self.assertEqual("exhausted", state["codex"])
+
+    def test_an_unknown_extra_reported_window_fails_closed(self):
+        windows = [{"name": "weekly", "percent_remaining": 99.0},
+                   {"name": "five_hour", "percent_remaining": float("nan")}]
+        state = fb.credit_state([{"provider": "codex", "status": "ok",
+                                  "windows": windows}])
+        self.assertEqual("unknown", state["codex"])
+
+    def test_a_healthy_extra_window_does_not_break_availability(self):
+        windows = [{"name": "weekly", "percent_remaining": 99.0},
+                   {"name": "five_hour", "percent_remaining": 80.0}]
+        state = fb.credit_state([{"provider": "codex", "status": "ok",
+                                  "windows": windows}])
+        self.assertEqual("available", state["codex"])
+
+    def test_record_line_reports_headroom_not_just_availability(self):
+        decision = fb.plan_swap(pane("claude"),
+                                fb.credit_state(self._codex_at(42.0)))
+        self.assertIn("codex 42.0% left, above 5 reserve", decision["record"])
+
+
 class ReproducibilityTests(unittest.TestCase):
     def test_same_numbers_same_target_twice(self):
         credit = fb.credit_state(CLAUDE_CODEX_SPENT)

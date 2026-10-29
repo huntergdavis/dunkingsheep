@@ -38,15 +38,15 @@ REQUIRED_WINDOWS = {
     "opencode-go": ("five_hour", "weekly", "monthly"),
 }
 
-# Free rows have no quota provider of their own. They are usable only when a
-# snapshot positively says so (a "free" provider reading with credit); the
-# planner never assumes free capacity, because "everything is spent, so move it
-# to free" is exactly the unsafe swap the owner forbade.
+# Free rows are usable only when a snapshot positively says so (a "free"
+# provider reading with credit). The planner never assumes free capacity,
+# because "everything is spent, so move it to free" is exactly the unsafe swap
+# the owner forbade and CoS reproduced.
 FREE_PROVIDER = "free"
 
-# Which usage provider each tier's credit is read from. "free" rows have no
-# provider reading of their own: they are the fallback of last resort and are
-# treated as always available, which is exactly why they are last.
+# Which usage provider each tier's credit is read from. "free" reads a "free"
+# provider row: it is NOT assumed available. Assuming it was the bug CoS caught
+# (an all-spent snapshot moved panes onto a resource nobody had measured).
 TIER_PROVIDER = {
     "claude": ("claude",),
     "codex": ("codex",),
@@ -90,6 +90,17 @@ HARNESS_WIRING = {
 # tenth of a percent is indistinguishable from empty.
 SPENT_PERCENT = 0.1
 
+# A TARGET tier must have more than this much credit left in every window
+# (owner rule, VP i33250: "above 5 reserve"). This is deliberately a different
+# number from SPENT_PERCENT and must not be conflated with it:
+#   - SPENT_PERCENT decides whether the pane's CURRENT tier is exhausted, which
+#     is about what has already happened;
+#   - RESERVE_PERCENT decides whether a TARGET is worth moving to, which is
+#     about not landing a lane on a subscription that is about to run dry.
+# A tier at 1% weekly is therefore not "exhausted" (nothing has failed yet) and
+# is also not a legal target.
+RESERVE_PERCENT = 5.0
+
 
 
 class FallbackError(ValueError):
@@ -105,6 +116,7 @@ def credit_state(readings):
     must never read as "plenty of numbers".
     """
     state = {}
+    headroom = {}
     for reading in readings or []:
         provider = str(reading.get("provider") or "").strip()
         if not provider:
@@ -133,8 +145,10 @@ def credit_state(readings):
             continue
         numbers = []
         for name, value in by_name.items():
-            if required is not None and name not in required:
-                continue
+            # ALL-REPORTED-WINDOW CONTRACT (VP i33250): every window the
+            # provider reports is evaluated, not only the required ones. An
+            # extra window that is empty means the subscription is empty, so
+            # skipping it because it was not on our list would be a lie.
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 numbers = None
                 break
@@ -146,20 +160,45 @@ def credit_state(readings):
             state[provider] = "unknown"
             continue
         state[provider] = "exhausted" if min(numbers) <= SPENT_PERCENT else "available"
+        headroom[provider] = min(numbers)
+    state["headroom"] = headroom
     return state
+
+
+def tier_headroom(credit, tier):
+    """Lowest remaining percentage across the providers a tier reads, or None."""
+    providers = TIER_PROVIDER.get(tier, ())
+    values = [credit.get("headroom", {}).get(name) for name in providers]
+    values = [v for v in values if v is not None]
+    return min(values) if values else None
+
+
+def tier_credit(credit, tier):
+    """The lowest remaining percentage reported for a tier, or None.
+
+    None means "no numbers", which is never treated as headroom.
+    """
+    providers = TIER_PROVIDER.get(tier, ())
+    if not providers:
+        return None
+    return credit.get("headroom", {}).get(tier)
 
 
 def tier_state(credit, tier):
     """Availability of one tier, from the reduced credit state.
 
-    A tier may read from more than one provider (pi: opencode-go rows plus the
-    local pi estimate). It is available if ANY of them has credit, exhausted
-    only if ALL are exhausted, and unknown otherwise - so one silent provider
-    never turns into a swap on its own.
+    A tier reads from the providers in TIER_PROVIDER. Today every tier reads
+    exactly one (the adapter is primary-only); the list form is kept so a tier
+    that later reads several rows can be expressed as data, and the rule for
+    that case is already fixed: available if ANY has credit, exhausted only if
+    ALL are exhausted, unknown otherwise.
     """
     providers = TIER_PROVIDER.get(tier, ())
     if not providers:
-        return "available"          # free rows: last resort, no provider
+        # No provider mapped: nothing measured, so nothing available. (No tier
+        # is in this state today; the branch exists so an unconfigured tier can
+        # never be treated as free capacity.)
+        return "unknown"
     states = [credit.get(name, "unknown") for name in providers]
     if "available" in states:
         return "available"
@@ -246,25 +285,41 @@ def plan_swap(pane, credit, allowed_panes=None):
         state = tier_state(credit, tier)
         # "free" is a tier like any other here: its state comes from the
         # snapshot, so an unproven free row is "unknown" and is never chosen.
-        if state == "available":
-            return {
-                "action": "swap",
-                "pane_id": pane_id,
-                "from": current,
-                "to": tier,
-                "harness": pane.get("harness"),
-                "wiring": HARNESS_WIRING.get(tier, HARNESS_WIRING["pi"]),
-                "record": (f"pane {pane_id}: {current} -> {tier} because "
-                           f"{_provider_label(current)} credit "
-                           f"{_credit_label(credit, current)}"
-                           f" ({tier} available)"),
-            }
+        if state != "available":
+            continue
+        left = tier_headroom(credit, tier)
+        if left is not None and left <= RESERVE_PERCENT:
+            # Above-5 reserve: a tier that still has credit but is nearly dry
+            # is not a landing place. It is not "exhausted" either - those are
+            # different questions and this is the second one.
+            continue
+        return {
+            "action": "swap",
+            "pane_id": pane_id,
+            "from": current,
+            "to": tier,
+            "harness": pane.get("harness"),
+            "wiring": HARNESS_WIRING.get(tier, HARNESS_WIRING["pi"]),
+            "record": (f"pane {pane_id}: {current} -> {tier} because "
+                       f"{_provider_label(current)} credit "
+                       f"{_credit_label(credit, current)}"
+                       f" ({tier} {left}% left, above {RESERVE_PERCENT:g} reserve)"),
+        }
 
     # Every later tier is exhausted or unknown. Leave the pane alone and say
     # exactly why, which is the owner's "nothing is swapped and the report says
     # so" case.
-    remaining = {tier: tier_state(credit, tier) for tier in TIER_ORDER[start + 1:]}
-    return _reason_for_skip("no_tier_has_credit", pane_id=pane_id,
+    remaining = {}
+    for tier in TIER_ORDER[start + 1:]:
+        state = tier_state(credit, tier)
+        left = tier_headroom(credit, tier)
+        remaining[tier] = state if left is None else f"{state} ({left}% left)"
+    reason = "no_tier_has_credit"
+    if any(str(v).startswith("available") for v in remaining.values()):
+        # A later tier has credit but not enough of it: that is a reserve
+        # refusal, not an exhaustion one, and the operator action differs.
+        reason = "targets_below_reserve"
+    return _reason_for_skip(reason, pane_id=pane_id,
                             current=current, tiers=remaining)
 
 
