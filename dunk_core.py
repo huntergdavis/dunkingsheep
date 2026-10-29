@@ -776,6 +776,7 @@ class Flock:
         # One entry per pane, updated on every decided delivery, retired on consumption,
         # cancellation or a newer intent for the same pane, and persisted with the state.
         self.stuck_candidates = {}
+        self.federated_input = os.environ.get("DUNKINGSHEEP_FEDERATED_INPUT") == "1"
         self.stuck_config = dunk_stuck.Config.from_mapping(
             self._stuck_config_source(stuck_config))
         # A CONFIG THAT WAS DECLARED WINS OVER THE ONE IN THE STATE FILE, otherwise the
@@ -1238,6 +1239,7 @@ class Flock:
         available = self.herdr.is_available() if check_herdr else None
         return {
             "version": VERSION,
+            "federated_input": self.federated_input,
             **code_status(),
             "started_at": self.started_at,
             "pid": os.getpid(),
@@ -1269,6 +1271,7 @@ class Flock:
             message = self.last_message
         return {
             "version": VERSION,
+            "federated_input": self.federated_input,
             **code_status(),
             "started_at": self.started_at,
             "pid": os.getpid(),
@@ -5568,6 +5571,104 @@ class Flock:
 
     STUCK_OBSERVE_TICK_S = 5.0
 
+    def _federated_composer(self, screen):
+        """Authorized live input under the explicit all-input-via-DS policy.
+
+        This is NOT an ownership/equality assertion. In federated mode the owner
+        authorizes preserving and submitting the existing composer, even when
+        scrolled. Strict mode and explicit preserve_draft sends retain their gates.
+        """
+        if not self.federated_input or not screen or _modal_open(screen):
+            return None
+        rows = screen.splitlines()
+        nonblank = [i for i, row in enumerate(rows) if _strip_ansi(row).strip()]
+        if not nonblank:
+            return None
+        def native_status(row):
+            # Installed native Codex appends its session title after cwd.
+            plain = _strip_ansi(row).strip()
+            return _native_status(" · ".join(plain.split(" · ")[:2]))
+        end = nonblank[-1]
+        if (_native_hints(rows[end]) or _native_warning(rows[end])) and len(nonblank) > 1:
+            end = nonblank[-2]
+        if not native_status(rows[end]):
+            return None
+        sigils = [(i, _styled_sigil_state(row)) for i, row in enumerate(rows[:end])
+                  if _prompt_body(row) is not None and not _native_banner(row)]
+        if (not sigils or sigils[-1][1] != "bold"
+                or any(state != "dim" for _, state in sigils[:-1])):
+            return None
+        start = sigils[-1][0]
+        parts = [_prompt_body(rows[start]) or ""]
+        parts.extend(_strip_ansi(row).strip() for row in rows[start + 1:end])
+        text = " ".join(part for part in parts if part)
+        return "" if _is_placeholder(text) else text
+
+    def _federated_recovery_step(self, now=None):
+        """Deterministic preserve-submit, using the existing durable attempt ledger.
+
+        Only native styled composers on the SAME recorded process qualify. A
+        changed screen resets the timer; cancellation/no-enter intent forbids action.
+        No text is replayed. The single key and its budget are guarded and durable.
+        """
+        now = time.time() if now is None else float(now)
+        if not self.stuck_config.enabled:
+            return 0
+        acted = 0
+        with self._lock:
+            candidates = dict(self.stuck_candidates)
+        for pane_id, entry in candidates.items():
+            with self._lock:
+                if self.outbox.get(pane_id):
+                    continue  # serialized send worker preserves this composer itself
+            if (not entry.get("press_enter") or entry.get("kind") != "text"
+                    or entry.get("status") not in ("sent", "failed")
+                    or not entry.get("generation")):
+                continue
+            screen = self.read_screen(pane_id)
+            content = self._federated_composer(screen)
+            generation = self._pane_generation(pane_id)
+            busy = bool(screen and _status_marker(screen, WORKING_MARKERS,
+                        lines=40, placeholder_safe=True, dim_ok=True))
+            status = "ready" if (content is not None and not busy
+                        and generation == entry["generation"]
+                        and not self._dead_session(pane_id)) else "unknown"
+            identity = "federated:" + str(entry["message_id"])
+            observation = dunk_stuck.Observation(
+                pane_id=pane_id, message_id=identity, text=content or "",
+                status=status, owned=content is not None, generation=generation)
+            decision = self.stuck.decide(observation, self.stuck_config, now=now)
+            if decision.action != "recover":
+                continue
+            # Tracker spends the attempt BEFORE the key; never refund on failure.
+            if not self._save():
+                continue
+            with self._lock_for(pane_id), self._typing(pane_id):
+                current = self.read_screen(pane_id)
+                live = self.stuck_candidates.get(pane_id) or {}
+                if (live != entry or self._pane_generation(pane_id) != generation
+                        or self._federated_composer(current) != content
+                        or not content or self._dead_session(pane_id)
+                        or _status_marker(current, WORKING_MARKERS, lines=40,
+                                          placeholder_safe=True, dim_ok=True)):
+                    continue
+                ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            if not ok:
+                log.warning("federated recovery %s: key refused: %s", pane_id, detail)
+                continue
+            time.sleep(SUBMIT_POLL_S[0])
+            after = self._federated_composer(self.read_screen(pane_id))
+            verified = after == "" and self._pane_generation(pane_id) == generation
+            self.metrics.record("stuck.recover", pane_id=pane_id,
+                                source="federated_watchdog",
+                                outcome="consumed" if verified else "unverified",
+                                reason="authorized preserve-submit; no text replayed")
+            log.warning("federated recovery %s: one Enter, %s", pane_id,
+                        "composer cleared" if verified else "receipt unverified")
+            acted += 1
+        self._save()
+        return acted
+
     def _stuck_observer_step(self, now=None):
         """ONE periodic scan for a stalled delivery nobody else is watching (t377).
 
@@ -5590,6 +5691,12 @@ class Flock:
             turn all stop it - the state machine in `dunk_stuck` owns those decisions, so
             this scan cannot invent a second policy.
         """
+        federated_acted = 0
+        if self.federated_input:
+            try:
+                federated_acted = self._federated_recovery_step(now)
+            except Exception:
+                log.exception("federated recovery scan failed; retrying next tick")
         try:
             with self._lock:
                 candidates = dict(self.stuck_candidates)
@@ -5597,8 +5704,10 @@ class Flock:
                 queued_panes = {pane for pane, queue in self.outbox.items()
                                 if any(m.status == "queued" for m in queue)}
                 history = {message.pane_id: message for message in self.message_history}
-            acted = 0
+            acted = federated_acted
             for pane_id, entry in candidates.items():
+                if self._federated_composer(self.read_screen(pane_id)) is not None:
+                    continue  # the explicit policy has one observer for this pane
                 if not entry.get("eligible"):
                     continue                            # a tombstone: newer intent wins
                 current_generation = self._pane_generation(pane_id)
@@ -6060,7 +6169,8 @@ class Flock:
             # keys/Enter are how a panel is dismissed - holding them behind it is how
             # a queued Escape waited for ever.
             return None
-        if detail.startswith(AMBIGUOUS_COMPOSER):
+        if (detail.startswith(AMBIGUOUS_COMPOSER)
+                and self._federated_composer(screen) is None):
             return ("unknown", detail)
         # NO 'A HUMAN IS TYPING' HOLD. Every message the owner sends goes through this
         # daemon (web, phone, Telegram) - none of those paths type into a pane - so a
@@ -6125,6 +6235,11 @@ class Flock:
             # A panel or dialog is open, so our text left the box and opened
             # it. Pressing Enter again would act on the panel instead.
             return False
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            # A nonempty live composer is pending even when scrolled; never call
+            # a clipped prefix/suffix an empty box or a successful submission.
+            return bool(federated)
         shown = _typed_text(screen)
         if not shown:            # empty box, or no box at all
             # "EMPTY" IS NOT ALWAYS PROOF. When the reader decided the last prompt
@@ -6481,6 +6596,9 @@ class Flock:
 
     def _recovery_box_text(self, pane_id, screen):
         """Unknown geometry is never evidence that the prompt was consumed."""
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            return federated
         # The legacy reader sees only the first line and ignores sigils more
         # than 14 rows from the bottom. A proven complete composer must remain
         # observable even when it is long, with or without blank footer gaps.
@@ -6823,6 +6941,17 @@ class Flock:
             # a panel is dismissed, so they go through.
             self._last_block_reason[pane_id] = "dialog"
             return allow_modal
+        federated = self._federated_composer(screen)
+        if federated is not None:
+            if not federated:
+                return True
+            if preserve_draft:
+                self._last_block_reason[pane_id] = "human_draft"
+                return False
+            self._last_block_reason[pane_id] = "federated-pending-input"
+            # Preserve the actual buffer, including hidden scrolled lines. Never
+            # replace it with reconstructed text or append the next message to it.
+            return self._flush_once(pane_id, federated)
         _text, detail = box_text(screen)
         if detail.startswith(AMBIGUOUS_COMPOSER):
             # t130 (Owner2277): the geometry rule cannot tell pending input from
