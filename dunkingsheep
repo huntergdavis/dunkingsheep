@@ -297,17 +297,25 @@ def build_parser():
     q.add_argument("--recheck-after")
     q.add_argument("--supersedes")
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
     q = csub.add_parser("promote", help="owner-only: promote an entry to ground truth")
     q.add_argument("slug")
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
     q = csub.add_parser("supersede", help="replace an entry, keeping both linked")
     q.add_argument("slug")
     q.add_argument("file", nargs="?", default="-")
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
     q = csub.add_parser("retire", help="append a retirement note (history kept)")
     q.add_argument("slug")
     q.add_argument("--reason", default="")
     q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
+    q = csub.add_parser("ledger", help="what the daemon wrote: adopt (owner bootstrap) or status")
+    q.add_argument("action", choices=["adopt", "status"])
+    q.add_argument("--global", dest="global_store", action="store_true")
+    q.add_argument("--path")
     q = csub.add_parser("get", help="show an entry by subject or slug")
     q.add_argument("key")
     q.add_argument("--global", dest="global_store", action="store_true")
@@ -1286,6 +1294,55 @@ def print_recover(result):
         print(f"  warning {warning.get('kind')}: {warning.get('detail')}")
 
 
+def _context_body(args):
+    if getattr(args, "text", None):
+        return args.text
+    if getattr(args, "file", "-") == "-":
+        return sys.stdin.read()
+    try:
+        return open(args.file).read()
+    except FileNotFoundError:
+        raise Refused(f"no such file: {args.file!r} - the body comes from --text, stdin or a file")
+
+
+def _context_via_daemon(args):
+    """context add/promote/supersede/retire over the socket, role-gated there."""
+    from dunk_client import FlockClient, DaemonUnavailable
+    project_path = None if getattr(args, "global_store", False) else \
+        os.path.abspath(getattr(args, "path", None) or ".dunkingsheep")
+    sub = args.context_command
+    try:
+        client = FlockClient(socket_path=args.socket, self_pane_id=args.self_pane)
+        if sub == "add":
+            result = client.call("context_add", body=_context_body(args), cls=args.cls,
+                                 subject=args.subject, type=args.type_,
+                                 authority=args.authority, source=args.source,
+                                 stated=args.stated, recheck_after=args.recheck_after,
+                                 supersedes=args.supersedes,
+                                 global_store=bool(args.global_store), project_path=project_path)
+            print(f"added {result['class']}/{result['slug']}")
+        elif sub == "promote":
+            result = client.call("context_promote", slug=args.slug,
+                                 global_store=bool(args.global_store), project_path=project_path)
+            print(f"promoted {result['slug']}")
+        elif sub == "supersede":
+            result = client.call("context_supersede", slug=args.slug, body=_context_body(args),
+                                 global_store=bool(args.global_store), project_path=project_path)
+            print(f"superseded by {result['slug']}")
+        else:
+            result = client.call("context_retire", slug=args.slug, reason=args.reason,
+                                 global_store=bool(args.global_store), project_path=project_path)
+            print(f"retired {result['slug']}")
+        return 0
+    except (DunkError, Refused) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 2
+    except (DaemonUnavailable, OSError) as error:
+        print(f"daemon unavailable ({error}); the owner may write locally with --local",
+              file=sys.stderr)
+        return 1
+
+
 def _git_credential(client, operation):
     """git credential protocol on stdin/stdout: only `get` for https github.com,
     and only when this lane's role implies an App; otherwise print nothing so git
@@ -1889,6 +1946,9 @@ def _be_nice():
 
 # Read only local files; never open a socket.
 LOCAL_ONLY_COMMANDS = ("context", "github")
+# Context WRITES go through the daemon (docs/FLAT_FLEET.md 8); reads stay local
+# so the digest never waits on a socket. --local is the owner's bootstrap path.
+CONTEXT_DAEMON_WRITES = ("add", "promote", "supersede", "retire")
 
 # A synchronous send waits for delivery, and delivery reads panes several times.
 # Under load (27 live lanes at 2.7/cpu) those reads are slow: 15 s was not enough
@@ -2315,6 +2375,9 @@ def main(argv=None):
     # gets no standing rules exactly when the daemon is down.
     if command == "github":
         return _github_local(args)
+    if command == "context" and args.context_command in CONTEXT_DAEMON_WRITES \
+            and not getattr(args, "local", False):
+        return _context_via_daemon(args)
     if command in LOCAL_ONLY_COMMANDS:
         result, printer = run_client_command(None, args)
         if args.json:
@@ -2385,6 +2448,25 @@ def run_context_command(dunk_context, args):
                                global_store=bool(getattr(args, "global_store", False)))
     if sub == "init":
         return {"root": str(store.ensure())}, lambda r: print(f"store at {r['root']}")
+    if sub == "ledger":
+        ledger = dunk_context.Ledger()
+        if args.action == "adopt":
+            if os.environ.get("DUNKINGSHEEP_SUPERUSER") != "1":
+                raise SystemExit("refused: `context ledger adopt` is the owner's bootstrap; "
+                                 "run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal")
+            adopted = store.adopt(ledger=ledger, by="adopt")
+            return {"adopted": adopted, "ledger": str(ledger.path)}, \
+                lambda r: print(f"adopted {len(r['adopted'])} entries into {r['ledger']}")
+        rows = []
+        for entry in store.live_entries():
+            rows.append({"slug": entry["slug"], "class": entry["class"],
+                         "state": ledger.status(store.root, entry["slug"],
+                                                open(entry["path"]).read())})
+        return {"entries": rows, "count": ledger.count()}, \
+            lambda r: [print(f"{e['state']:11} {e['class']:13} {e['slug']}") for e in r["entries"]] and None
+    if sub in CONTEXT_DAEMON_WRITES:
+        # --local: the owner's bootstrap path writes files directly AND records them.
+        store.ledger = dunk_context.Ledger()
     if sub == "add":
         if getattr(args, "text", None):
             body = args.text

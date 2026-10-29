@@ -1162,6 +1162,32 @@ def h_whoami(flock, args, self_pane_id):
     return flock.whoami(self_pane_id)
 
 
+def h_context_add(flock, args, self_pane_id):
+    return flock.context_add(
+        args["body"], args["cls"], args["subject"], type_=args.get("type") or "reference",
+        authority=args.get("authority") or "agent", source=args.get("source") or "",
+        stated=args.get("stated"), recheck_after=args.get("recheck_after"),
+        supersedes=args.get("supersedes"), global_store=_bool(args.get("global_store"), True),
+        project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_promote(flock, args, self_pane_id):
+    return flock.context_promote(args["slug"], global_store=_bool(args.get("global_store"), True),
+                                 project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_supersede(flock, args, self_pane_id):
+    return flock.context_supersede(args["slug"], args["body"],
+                                   global_store=_bool(args.get("global_store"), True),
+                                   project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_retire(flock, args, self_pane_id):
+    return flock.context_retire(args["slug"], reason=args.get("reason") or "",
+                                global_store=_bool(args.get("global_store"), True),
+                                project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
 def h_gh_token(flock, args, self_pane_id):
     return flock.gh_token(kind=args.get("kind"), self_pane_id=self_pane_id)
 
@@ -2424,6 +2450,40 @@ COMMANDS = [
         "Live review tasks with PR, head, author lane, reviewer and age.",
         lambda flock, args, pane: h_review(flock, dict(args, action="list"), pane)),
     Command(
+        "context_add",
+        "Write a context entry through the daemon. Facts from any lane under its own "
+        "authority; ground truths, rules/principles and authority=owner need the owner.",
+        h_context_add,
+        params={"body": {"type": "string"}, "cls": {"type": "string",
+                "enum": ["ground-truth", "fact", "provisional", "history"]},
+                "subject": {"type": "string"}, "type": {"type": "string"},
+                "authority": {"type": "string", "enum": ["owner", "measured", "agent"]},
+                "source": {"type": "string"}, "stated": {"type": "string"},
+                "recheck_after": {"type": "string"}, "supersedes": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("body", "cls", "subject")),
+    Command(
+        "context_promote",
+        "Owner only: promote an entry to a ground truth (linked by supersession).",
+        h_context_promote,
+        params={"slug": {"type": "string"}, "global_store": {"type": "boolean"},
+                "project_path": {"type": "string"}},
+        required=("slug",)),
+    Command(
+        "context_supersede",
+        "Replace an entry, keeping both linked. Rules only by the owner.",
+        h_context_supersede,
+        params={"slug": {"type": "string"}, "body": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("slug", "body")),
+    Command(
+        "context_retire",
+        "Owner only: retire an entry with a reason (history kept).",
+        h_context_retire,
+        params={"slug": {"type": "string"}, "reason": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("slug",)),
+    Command(
         "whoami",
         "This caller's role (owner/system/web/desk/planner/worker/reviewer/"
         "anonymous), how it was bound, and what the kernel saw.",
@@ -2552,7 +2612,9 @@ MCP_GROUPS = (
       ("retired", "retire_pane"),
       ("lanes", "lanes"), ("lane_set", "lane_set"),
       ("review_sync", "review_sync"), ("review_list", "review_list"),
-      ("gh_token", "gh_token"))),
+      ("gh_token", "gh_token"), ("context_add", "context_add"),
+      ("context_promote", "context_promote"), ("context_supersede", "context_supersede"),
+      ("context_retire", "context_retire"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
@@ -2677,7 +2739,7 @@ SUPERUSER_ONLY = {
     "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
     "lane_set", "lane_register", "lane_unregister", "token_issue", "token_revoke",
-    "review_sync",
+    "review_sync", "context_promote", "context_retire",
     "memory_backfill",
 }
 

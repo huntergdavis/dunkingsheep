@@ -86,6 +86,7 @@ _WORKER = READ_ONLY | frozenset({
     "inbox_list", "inbox_delete", "inbox_cancel", "inbox_recover",
     "send_text", "send_keys", "flush_box",   # own pane only (require_send_self)
     "turn_start", "turn_end", "read_pane", "state_capture", "gh_token",
+    "context_add", "context_supersede",     # facts under the lane's own authority
 })
 
 ALLOW = {
@@ -96,7 +97,7 @@ ALLOW = {
         "inbox_fetch", "respawn_pane", "send_keys", "flush_box", "read_pane",
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
-        "gh_token", "review_sync",
+        "gh_token", "review_sync", "context_add",
     }),
     # The owner's transport (the web desk): everything but the
     # fleet-destructive verbs, which stay on a human in a terminal.

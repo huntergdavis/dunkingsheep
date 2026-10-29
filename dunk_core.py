@@ -3899,6 +3899,84 @@ class Flock:
             log.warning("review verdict side effects failed for %s: %s", task.get("id"), error)
             return {"errors": [str(error)]}
 
+    # -- context store writes (docs/FLAT_FLEET.md 8) --------------------------
+
+    def _context_store(self, global_store=True, project_path=None):
+        import dunk_context
+        ledger = getattr(self, "_context_ledger", None)
+        if ledger is None:
+            ledger = self._context_ledger = dunk_context.Ledger()
+        if global_store or not project_path:
+            return dunk_context.Store(global_store=True, ledger=ledger)
+        return dunk_context.Store(project_path, ledger=ledger)
+
+    def context_add(self, body, cls, subject, type_="reference", authority="agent",
+                    source="", stated=None, recheck_after=None, supersedes=None,
+                    global_store=True, project_path=None, self_pane_id=None):
+        """Write an entry through the daemon. Rules come only from the owner:
+        class ground-truth, an owner-only type, or authority owner needs the
+        owner role; every other role writes facts under its own authority."""
+        import dunk_context
+        role = self.caller_role(self_pane_id)
+        wants_rule = (cls == "ground-truth" or type_ in dunk_context.OWNER_ONLY_TYPES
+                      or authority == "owner")
+        if wants_rule and role != "owner":
+            raise DunkError(
+                f"only the owner writes rules (class {cls}, type {type_}, authority "
+                f"{authority}); role {role} records a fact with --authority agent or "
+                "measured and the owner promotes it")
+        if role not in ("owner", "system") and authority == "measured" and not source:
+            raise DunkError("a measured fact needs --source (the command or file it came from)")
+        store = self._context_store(global_store, project_path)
+        try:
+            return store.add(body, cls=cls, subject=subject, type_=type_, authority=authority,
+                             source=source, stated=stated, recheck_after=recheck_after,
+                             supersedes=supersedes, by=self_pane_id or role)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_promote(self, slug, global_store=True, project_path=None, self_pane_id=None):
+        import dunk_context
+        self.require_superuser(self_pane_id, "context promote")
+        store = self._context_store(global_store, project_path)
+        entry = store.find(slug)
+        if entry is None:
+            raise DunkError(f"no entry {slug!r}")
+        try:
+            return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
+                             type_=(entry.get("type") if entry.get("type") in
+                                    dunk_context.OWNER_ONLY_TYPES + ("decision",) else "principle"),
+                             authority="owner", source=entry.get("source") or "",
+                             recheck_after=entry.get("recheck_after") or "90d",
+                             supersedes=entry["slug"], by=self_pane_id)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_supersede(self, slug, body, global_store=True, project_path=None,
+                          self_pane_id=None):
+        import dunk_context
+        store = self._context_store(global_store, project_path)
+        old = store.resolve(slug)
+        if old is None:
+            raise DunkError(f"no live entry {slug!r}")
+        role = self.caller_role(self_pane_id)
+        if (old["class"] == "ground-truth" or old.get("authority") == "owner") and role != "owner":
+            raise DunkError("only the owner supersedes a rule")
+        try:
+            return store.supersede(slug, body, by=self_pane_id or role)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_retire(self, slug, reason="", global_store=True, project_path=None,
+                       self_pane_id=None):
+        import dunk_context
+        self.require_superuser(self_pane_id, "context retire")
+        store = self._context_store(global_store, project_path)
+        try:
+            return store.retire(slug, reason, by=self_pane_id)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
     def superuser_status(self, self_pane_id=None):
         return {"superuser": self.is_superuser(self_pane_id),
                 "pane_id": self_pane_id, "role": self.caller_role(self_pane_id),
