@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.88"
+VERSION = "2.70.89"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -6569,6 +6569,51 @@ def _prompt_body(row):
     return body
 
 
+# t377 native-footer correction: the REAL native Codex frame (captured in
+# chief-of-staff/rollout/t377/native-canary/readiness-frame.txt) differs from the
+# frames the matcher was built on in exactly two ways, and each is recognised here by
+# its PRODUCT SHAPE - never by "any row that starts with >" or "drop the last lines".
+#
+#   0  '  >_ OpenAI Codex (v0.165.0)'                     <- product banner, not a prompt
+#  19  '› Ask Codex to do anything'                        <- the composer
+#  21  '  GPT-6-Astra high · ~/workspace/...'              <- native status row
+#  22  '  ? for shortcuts            ⚠ 1 warning · f2 ...' <- native hint row
+#
+# Anything that does not match these exact shapes keeps the old behaviour: a second
+# sigil row is still ambiguous (fail closed), and a human line holding a middle dot is
+# still part of the composer, not a footer.
+NATIVE_BANNER_RE = re.compile(r"^>_\s+OpenAI Codex(?:\s+\(v[0-9][0-9.]*\))?$")
+NATIVE_STATUS_RE = re.compile(r"^\S[\w .+/-]{0,40}\s\u00b7\s(?:~|/)\S*$")
+NATIVE_HINTS_RE = re.compile(r"^(?:\? for shortcuts|\u2190 for agents)\b")
+
+
+def _native_banner(row):
+    return bool(NATIVE_BANNER_RE.match(_strip_ansi(row).strip()))
+
+
+def _native_status(row):
+    return bool(NATIVE_STATUS_RE.match(_strip_ansi(row).strip()))
+
+
+def _native_hints(row):
+    return bool(NATIVE_HINTS_RE.match(_strip_ansi(row).strip()))
+
+
+def _native_footer_start(raw, nonblank):
+    """The index of the native two-row footer's first row, or None.
+
+    Both rows must match their product shape AND be the last two non-blank rows. A
+    single status row, a status row without the hint row, or a hint row without the
+    status row is NOT a native footer and falls back to the conservative rule.
+    """
+    if len(nonblank) < 2:
+        return None
+    first, second = nonblank[-2], nonblank[-1]
+    if _native_status(raw[first]) and _native_hints(raw[second]):
+        return first
+    return None
+
+
 def _composer_region_text(screen):
     """The live composer's visible content, or "" when it cannot be delimited
     (FAIL CLOSED - CoS i31543/i31555: never submit on an undelimited frame).
@@ -6595,12 +6640,17 @@ def _composer_region_text(screen):
                 if _strip_ansi(row).strip()]
     if not nonblank:
         return ""
-    last_row = nonblank[-1]
-    last_plain = _strip_ansi(raw[last_row])
-    if " \u00b7 " not in last_plain or _prompt_body(raw[last_row]) is not None:
-        return ""          # the last visible row is not a status footer
+    end = _native_footer_start(raw, nonblank)
+    if end is None:
+        end = nonblank[-1]
+        last_plain = _strip_ansi(raw[end])
+        if " \u00b7 " not in last_plain or _prompt_body(raw[end]) is not None:
+            return ""      # the last visible row is not a status footer
+    # The native product banner is not a prompt. Every OTHER sigil-shaped row still
+    # counts, so a transcript echo or a human continuation with a sigil stays ambiguous.
     sigils = [index for index, row in enumerate(raw)
-              if _prompt_body(row) is not None and index < last_row]
+              if _prompt_body(row) is not None and index < end
+              and not _native_banner(row)]
     if len(sigils) != 1:
         return ""          # zero or several sigil candidates: fail closed
     composer = sigils[0]
@@ -6608,7 +6658,7 @@ def _composer_region_text(screen):
     body = _prompt_body(raw[composer])
     if body:
         parts.append(body)
-    for row in raw[composer + 1:last_row]:
+    for row in raw[composer + 1:end]:
         text = _strip_ansi(row).strip()
         if text:
             parts.append(text)
