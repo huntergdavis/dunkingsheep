@@ -327,7 +327,9 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertIn("action=claim", "\n".join(captured.output))
 
     def test_a_task_another_pane_has_claimed_is_not_mine_to_be_prompted_about(self):
-        self.flock.task_add("their work", assignees=[PANE, "w1:p2"], self_pane_id=PANE)
+        # Assigning another lane is the owner's act (FLAT_FLEET.md 5); the
+        # task is filed without a pane (trusted in-process caller).
+        self.flock.task_add("their work", assignees=[PANE, "w1:p2"])
         self.flock.tasks.claim_next(scope="global", pane_id="w1:p2")
         result = self.end_turn()
         self.assertEqual(("skip", "no_open_work"),

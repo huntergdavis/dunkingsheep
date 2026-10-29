@@ -28,6 +28,8 @@ def open_fds():
 class OwnerPushHandleTests(unittest.TestCase):
     def setUp(self):
         self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False)
+        # The owner channel is pushed by the owner's pane (FLAT_FLEET.md 4.3).
+        self.flock.roles.register("%4", "owner", by="test")
 
     def tearDown(self):
         self.flock.close()

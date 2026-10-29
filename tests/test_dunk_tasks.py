@@ -15,6 +15,7 @@ import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 import dunk_tasks  # noqa: E402
+from dunk_roles import Roles  # noqa: E402
 from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
@@ -534,6 +535,8 @@ class FlockTaskTests(unittest.TestCase):
             inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
                         blob_dir=os.path.join(self.tmp.name, "blobs")),
             tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")),
         )
 
     def tearDown(self):
@@ -834,7 +837,9 @@ class TaskAddOwnershipTests(unittest.TestCase):
             persist=False, restore=False,
             inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
                         blob_dir=os.path.join(self.tmp.name, "blobs")),
-            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")))
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")))
         self._leader = os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
 
     def tearDown(self):
