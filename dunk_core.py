@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.92"
+VERSION = "2.70.93"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -286,6 +286,19 @@ REMEMBERED_SENDS = 4
 # `Flock._unwedge`), so this only bounds how long we wait on ourselves, and a
 # notification an agent is waiting for should not take longer than this.
 STALE_BOX_S = 30.0
+
+# t269 (owner #1708 / CoS i29001/i29004): a refused delivery used to be re-attempted every
+# MESSAGE_RECHECK_S for ever, so an unreachable or permanently blocked target produced one
+# message.held row every 5 s (CoS measured 121,892 rows on 46 panes). Delivery now backs
+# off exponentially per message and, after HOLD_ATTEMPT_LIMIT refusals, reaches a terminal
+# 'undeliverable' state that stops creating rows and is visible to the sender.
+# The FIRST retry keeps the old cadence (MESSAGE_RECHECK_S) so a transient hold - a draft
+# that clears, a dialog someone answers - is not made slower than it was; the interval then
+# doubles, and the attempt count is capped, so an unreachable target stops for good after
+# roughly half an hour (5,10,20,40,80,160,300,300,300,300 s).
+HOLD_BACKOFF_BASE_S = 5
+HOLD_BACKOFF_CAP_S = 300
+HOLD_ATTEMPT_LIMIT = 10
 # Phrases an agent only shows while a full-screen panel or dialog is open
 # (/usage, settings, a confirmation). Such a screen is not an input box: its
 # selected row is drawn with the same prompt sigil, which made the daemon read
@@ -622,6 +635,15 @@ class Message:
         self.notify_for = []          # inbox message ids whose notice this is
         self.detail = None
         self.holds = 0
+        # t269: when the next attempt is allowed (None = now) and whether this message has
+        # reached the terminal state. Both are persisted, so a restart cannot reset the
+        # budget and restart the storm.
+        self.next_attempt_at = None
+        # The box state at the last refusal. Backoff exists to stop hammering an UNCHANGED
+        # unaccepting target; if the box changes (a draft cleared, a dialog was answered)
+        # the next attempt is allowed immediately, so a transient hold stays as fast as it
+        # was before t269 and only a genuinely stuck target is slowed down.
+        self.hold_signature = None
         self.created_at = time.time()
         self.finished_at = None
         self.done = threading.Event()
@@ -926,6 +948,10 @@ class Flock:
                      "hold_while_typing": message.hold_while_typing,
                      "is_notice": message.is_notice,
                      "notify_for": list(message.notify_for),
+                     "holds": message.holds,
+                     "next_attempt_at": message.next_attempt_at,
+                     "hold_signature": (list(message.hold_signature)
+                                        if message.hold_signature else None),
                      "created_at": message.created_at}
                     for queue in self.outbox.values() for message in queue
                     if message.status == "queued"],
@@ -984,7 +1010,8 @@ class Flock:
         # file. Anything already in message_history has had its outcome decided; restoring it
         # would type it again. The file is a snapshot, the history is the verdict.
         already_decided = {m.id for m in self.message_history
-                           if getattr(m, "status", None) in ("sent", "failed", "cancelled")}
+                           if getattr(m, "status", None) in ("sent", "failed", "cancelled",
+                                                             "undeliverable")}
         # THE PERSISTED VERDICTS (t249): message_history is empty in a fresh process, so this is
         # what actually protects a restart. The inbox record is consulted too - the notice path
         # writes its outcome there, so a row whose inbox notices were all delivered is decided
@@ -1002,7 +1029,7 @@ class Flock:
             if not entry:
                 return None
             status = entry.get("status") if isinstance(entry, dict) else entry
-            if status not in ("sent", "failed", "cancelled"):
+            if status not in ("sent", "failed", "cancelled", "undeliverable"):
                 return None
             stamped = entry.get("created_at") if isinstance(entry, dict) else None
             row_stamp = row.get("created_at")
@@ -1102,6 +1129,13 @@ class Flock:
                 message.is_notice = bool(row.get("is_notice"))
                 message.notify_for = list(row.get("notify_for") or [])
                 message.created_at = float(row.get("created_at") or time.time())
+                message.holds = int(row.get("holds") or 0)
+                message.next_attempt_at = (float(row["next_attempt_at"])
+                                           if row.get("next_attempt_at") else None)
+                stored_signature = row.get("hold_signature")
+                message.hold_signature = (tuple(stored_signature)
+                                          if isinstance(stored_signature, list)
+                                          else stored_signature)
                 self._enqueue(message)
                 restored.append(message)
             except Exception as error:      # noqa: BLE001 - one bad row must not lose the rest
@@ -4257,12 +4291,25 @@ class Flock:
             self.next_message_id += 1
         return message
 
-    def _deliver(self, message):
+    def _deliver(self, message, now=None):
         """Send one message, re-checking the box under the send lock. Returns
         False when a draft appeared at the last moment and the message must
-        stay queued."""
+        stay queued.
+
+        `now` exists so the WORKER's step can be driven on an injected clock: the backoff
+        deadline must come from the same clock the caller is using, or a fake-clock test
+        schedules a real-time deadline (CoS i31970). Production passes nothing.
+        """
+        now = time.time() if now is None else float(now)
         with self._lock:
             if message.status == "cancelled":
+                return True
+            if message.status != "queued":
+                # IDEMPOTENCE (VP review): a decided message - sent, failed or the t269
+                # terminal `undeliverable` - must never be delivered again. Re-entering
+                # `_deliver` used to emit a second terminal metric on an undeliverable
+                # message, and, once the box cleared, to send an exhausted message and
+                # flip it to `sent`, which would be a phantom recovery.
                 return True
             if getattr(message, "attempt_generation", None) is None:
                 # BEFORE the guarded call: the identity of the attempt, not of its
@@ -4275,13 +4322,70 @@ class Flock:
             preserve_draft=getattr(message, "preserve_draft", False),
             permission=getattr(message, "permission", None))
         if not sent:
+            reason = self._last_block_reason.get(message.pane_id)
             with self._lock:
                 message.holds += 1
-                message.detail = detail
+                attempts = min(message.holds, HOLD_ATTEMPT_LIMIT)
+                terminal = message.holds >= HOLD_ATTEMPT_LIMIT
+                if terminal:
+                    message.status = "undeliverable"
+                    message.detail = (
+                        f"undeliverable after {attempts} refused attempts "
+                        f"(last reason: {reason or 'unknown'}); not retried again")
+                    message.finished_at = time.time()
+                else:
+                    delay = _hold_backoff_s(attempts)
+                    message.next_attempt_at = now + delay
+                    try:
+                        message.hold_signature = self._box_signature(message.pane_id)
+                    except Exception:               # noqa: BLE001 - the budget still applies
+                        message.hold_signature = None
+                    # KEEP THE REFUSAL VERBATIM (VP review): `send_guarded` already says why
+                    # - "disabled", a BOX_HOLD, a dead session - and the next-job journal
+                    # reports `message.detail` as the reason. Replacing it with our own
+                    # "held (unknown)" lost the only useful word. The retry schedule goes
+                    # in its own field so neither has to be inferred from the other.
+                    message.detail = detail or reason or "held"
+                    message.retry_detail = (f"attempt {attempts} of {HOLD_ATTEMPT_LIMIT}, "
+                                            f"next attempt in {delay:.0f}s")
             self.metrics.record("message.held", pane_id=message.pane_id,
                                 mailbox=message.target_label, source=message.source,
-                                outcome="held", reason=self._last_block_reason.get(
-                                    message.pane_id))
+                                outcome="held", reason=reason, attempts=attempts)
+            if not terminal:
+                # DURABLE BUDGET (t269): the attempt count and the scheduled next attempt
+                # must be on disk, or a restart resets the budget and the storm starts
+                # over - which is precisely how a deploy used to undo this kind of fix.
+                self._save()
+            if terminal:
+                # ONE terminal row, then silence: this is what makes the growth rate of
+                # message.held on an undeliverable target go to zero instead of one row
+                # every MESSAGE_RECHECK_S.
+                self.metrics.record("message.undeliverable", pane_id=message.pane_id,
+                                    mailbox=message.target_label, source=message.source,
+                                    outcome="undeliverable", reason=reason,
+                                    attempts=attempts)
+                log.error("message %s -> %s is UNDELIVERABLE after %d refused attempts "
+                          "(last reason: %s); giving up so it stops generating holds",
+                          message.id, message.pane_id, attempts, reason or "unknown")
+                with self._lock:
+                    queue = self.outbox.get(message.pane_id) or []
+                    if message in queue:
+                        queue.remove(message)
+                # THE TERMINAL BRANCH RETURNS, so it must run the same end-of-life
+                # bookkeeping the decided path does (CoS i31970): a waiter blocked on
+                # message.done was left unset for ever, and the inbox notice stayed
+                # "queued" so a caller polling it saw a delivery that could never happen.
+                # One truthful failure receipt, then the waiters are released.
+                # REMEMBER BEFORE SAVE (VP i32107): `_remember` is what writes the decided
+                # verdict, so saving first persisted a file with no terminal tombstone and
+                # a replayed stale queued row was re-enqueued on the next restore.
+                with self._lock:
+                    self._remember(message)
+                self._save()
+                self._record_delivery_outcome(message, ok=False,
+                                              detail=message.detail or "undeliverable",
+                                              outcome="undeliverable",
+                                              metric=None)
             return False
         with self._lock:
             message.status = "sent" if ok else "failed"
@@ -4296,14 +4400,29 @@ class Flock:
         # second time under their old id, which is exactly what _restore_outbox's docstring
         # forbids. Measured 2026-10-26: m6361 had been delivered and was still in the file.
         self._save()
-        self.metrics.record(
-            "message.sent" if ok else "message.failed",
-            pane_id=message.pane_id, mailbox=message.target_label,
-            source=message.source, outcome="ok" if ok else "failed",
-            reason=None if ok else "unconfirmed",
-            duration_ms=int((message.finished_at - message.created_at) * 1000),
-            attempts=message.holds or None,
-            bytes=len((message.text or "").encode("utf-8")))
+        self._record_delivery_outcome(message, ok=ok, detail=detail,
+                                      outcome="ok" if ok else "failed")
+        return True
+
+    def _record_delivery_outcome(self, message, *, ok, detail, outcome,
+                                 metric="message.sent"):
+        """The ONE end-of-life path for a decided message (sent, failed or undeliverable).
+
+        Delivery bookkeeping used to live inline in the success branch only, so a terminal
+        refusal (t269) returned before it: `message.done` was never set (a waiter hangs for
+        ever) and the inbox notice kept saying "queued" (a poller sees a delivery that can
+        never arrive). One function, one behaviour, whichever way the message ended.
+        """
+        if metric:
+            self.metrics.record(
+                metric if ok else "message.failed",
+                pane_id=message.pane_id, mailbox=message.target_label,
+                source=message.source, outcome=outcome,
+                reason=None if ok else (detail or "unconfirmed"),
+                duration_ms=int(((message.finished_at or time.time())
+                                 - message.created_at) * 1000),
+                attempts=message.holds or None,
+                bytes=len((message.text or "").encode("utf-8")))
         for inbox_id in list(message.notify_for):
             # The inbox record said "queued" when the notice was created; say
             # what actually happened, so a status query is not stale. After
@@ -4315,9 +4434,8 @@ class Flock:
             except Exception:  # noqa: BLE001 - bookkeeping only
                 pass
         log.info("message %s -> %s (%s): %s", message.id, message.pane_id, message.source,
-                 "sent" if ok else f"FAILED {detail}")
+                 "sent" if ok else f"{outcome.upper()} {detail}")
         message.done.set()
-        return True
 
     def _note_stuck_candidate(self, message):
         """Keep the pane's LATEST delivery intent for the stuck observer (t377).
@@ -4824,51 +4942,24 @@ class Flock:
             self._stuck_observer_step()
 
     def _outbox_worker(self, pane_id):
-        """Deliver a pane's queued messages in order, each only once the box
-        has been clear for TYPING_SETTLE_S; while someone types, wait and
-        re-check every MESSAGE_RECHECK_S. A box that never clears at all is
-        unwedged rather than waited on for ever."""
+        """Deliver a pane's queued messages in order, one deterministic step at a time.
+
+        The loop is now split from the step so the step can be driven on a fake clock in
+        tests - CoS i31970 asked for real-worker controls, not direct `_deliver` calls, and
+        the changed-box behaviour in particular only exists in the worker.
+        """
         held_since = None
         seen, seen_since = None, time.time()
         try:
             while not self.closed:
-                with self._lock:
-                    queue = self.outbox.get(pane_id) or []
-                    queue[:] = [m for m in queue if m.status == "queued"]
-                    message = queue[0] if queue else None
-                    if message is None:
-                        self.outbox.pop(pane_id, None)
-                        return
-                # A message sent with the hold bypassed must not be gated here
-                # either: `--ignore-typing` means this send does not ask the pane.
-                if not message.hold_while_typing or self._clear_to_send(pane_id):
-                    if held_since is not None:
-                        log.info("message %s -> %s: box clear after %ds, delivering",
-                                 message.id, pane_id, int(time.time() - held_since))
-                        held_since = None
-                    if self._deliver(message):
-                        with self._lock:
-                            if message in queue:
-                                queue.remove(message)
-                        seen, seen_since = None, time.time()
-                        continue
-                    # Refused under the lock. This used to loop straight back,
-                    # and when the two checks disagreed - the box holding our
-                    # own text that would not submit, which `_clear_to_send`
-                    # forgives and `_ensure_box_clear` does not - the worker
-                    # span for 27 minutes without delivering or ever reaching
-                    # the recovery below. Fall through to it instead.
+                outcome = self._outbox_step(pane_id)
+                if outcome == "empty":
+                    return
+                if outcome == "delivered":
+                    held_since, seen, seen_since = None, None, time.time()
+                    continue
+                if outcome in ("held", "due"):
                     held_since = held_since or time.time()
-                elif held_since is None:
-                    held_since = time.time()
-                    with self._lock:
-                        message.holds += 1
-                        self.last_message = (f"Holding message for {message.target_label}: "
-                                             f"the box would not clear")
-                    log.info("message %s -> %s: holding, the box would not clear",
-                             message.id, pane_id)
-                # Watch what is in the box. While it changes someone is
-                # writing and we wait; while it does not, we are wedged.
                 signature = self._box_signature(pane_id)
                 if signature != seen:
                     seen, seen_since = signature, time.time()
@@ -4885,6 +4976,98 @@ class Flock:
             with self._lock:
                 if self.outbox_threads.get(pane_id) is threading.current_thread():
                     self.outbox_threads.pop(pane_id, None)
+
+    def _outbox_step(self, pane_id, now=None):
+        """ONE iteration of the outbox worker. Returns empty|delivered|held|due|stopped.
+
+        Everything the worker decides lives here, so a test can drive it with an injected
+        clock and assert on the SAME code that runs in production.
+        """
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            queue = self.outbox.get(pane_id) or []
+            queue[:] = [m for m in queue if m.status == "queued"]
+            message = queue[0] if queue else None
+            if message is None:
+                self.outbox.pop(pane_id, None)
+                return "empty"
+        # t269: respect this message's backoff, unless the box changed since the refusal.
+        due = getattr(message, "next_attempt_at", None)
+        if due is not None:
+            try:
+                signature_now = self._box_signature(pane_id)
+            except Exception:                       # noqa: BLE001
+                signature_now = None
+            if signature_now != getattr(message, "hold_signature", None):
+                message.next_attempt_at = None      # transient: try now
+                message.hold_signature = None
+                due = None
+        if due is not None and now < due:
+            return "due"
+        # A message sent with the hold bypassed must not be gated here either:
+        # `--ignore-typing` means this send does not ask the pane.
+        clear = message.hold_while_typing is False or self._clear_to_send(pane_id)
+        if clear:
+            if self._deliver(message, now=now):
+                with self._lock:
+                    if message in queue:
+                        queue.remove(message)
+                return "delivered"
+            return "held"
+        # NOT CLEAR TO SEND: this path never enters `_deliver`, so it needs its own
+        # accounting or a permanently dead pane holds a message for ever with no bound and
+        # no receipt (CoS i31970). It is bounded the same way: a metric row per scheduled
+        # attempt, a backoff, and a TERMINAL outcome only for a blocker that cannot clear
+        # by itself (a dead session). A dialog or a person typing is NOT terminal - those
+        # can end, and dropping mail because a human is mid-sentence is worse.
+        blocker = self.send_blocker(pane_id) or ("unknown", "unknown")
+        kind, reason = blocker[0], blocker[1]
+        with self._lock:
+            message.holds += 1
+            # The recorded attempt number is the number of rows this message produced,
+            # capped at the limit: the deferred path and a delivery refusal can both touch
+            # this message in one iteration, and a log line saying "11 of 10" is the kind of
+            # sloppy label that makes a reviewer distrust the rest of the numbers.
+            attempts = min(message.holds, HOLD_ATTEMPT_LIMIT)
+            permanent = kind == "dead"
+            terminal = permanent and attempts >= HOLD_ATTEMPT_LIMIT
+            if terminal:
+                message.status = "undeliverable"
+                message.detail = (f"undeliverable after {attempts} deferred attempts "
+                                  f"({reason}); the target cannot accept")
+                message.finished_at = now
+                delay = None
+            else:
+                delay = _hold_backoff_s(attempts)
+                message.next_attempt_at = now + delay
+                try:
+                    message.hold_signature = self._box_signature(pane_id)
+                except Exception:                   # noqa: BLE001
+                    message.hold_signature = None
+                message.detail = (f"deferred ({reason}); attempt {attempts} of "
+                                  f"{HOLD_ATTEMPT_LIMIT}, next attempt in {delay:.0f}s")
+        self.metrics.record("message.held", pane_id=pane_id,
+                            mailbox=message.target_label, source=message.source,
+                            outcome="held", reason=reason, attempts=attempts)
+        if terminal:
+            self.metrics.record("message.undeliverable", pane_id=pane_id,
+                                mailbox=message.target_label, source=message.source,
+                                outcome="undeliverable", reason=reason, attempts=attempts)
+            log.error("message %s -> %s is UNDELIVERABLE after %d deferred attempts (%s); "
+                      "the target cannot accept, so it stops being retried",
+                      message.id, pane_id, attempts, reason)
+            with self._lock:
+                if message in queue:
+                    queue.remove(message)
+            with self._lock:
+                self._remember(message)      # verdict first: it is what the save persists
+            self._save()
+            self._record_delivery_outcome(message, ok=False,
+                                          detail=message.detail or "undeliverable",
+                                          outcome="undeliverable", metric=None)
+            return "held"
+        self._save()
+        return "held"
 
     def list_messages(self, why_blocked=True):
         """Queued messages (oldest first) and the recent delivered/failed ones.
@@ -6283,6 +6466,17 @@ def _intent_order(entry):
     # creation order. Comparing the string form made "m10" older than "m9"
     # (CoS i31802 #3), which let an older failure win a same-timestamp tie.
     return (created, int(digits) if digits else -1, message_id)
+
+
+def _hold_backoff_s(attempts):
+    """Exponential backoff for a refused delivery: base doubling, capped.
+
+    t269: the point is not the exact curve but that the interval GROWS and the count is
+    BOUNDED, so an unreachable target cannot produce a hold row every 5 s for ever.
+    """
+    base = max(1, int(HOLD_BACKOFF_BASE_S))
+    cap = max(base, int(HOLD_BACKOFF_CAP_S))
+    return float(min(cap, base * (2 ** max(0, int(attempts) - 1))))
 
 
 def _looks_like_usage(text):
