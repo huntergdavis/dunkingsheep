@@ -5663,6 +5663,35 @@ class Flock:
             acted += 1
         self._save()
         return acted
+    def _dialog_observer_step(self, now=None):
+        """Scan live agent dialogs every 30s even without queued mail. No keys."""
+        now = time.time() if now is None else now
+        if now < getattr(self, "_dialog_scan_at", 0):
+            return
+        self._dialog_scan_at = now + 30
+        observations = getattr(self, "_dialog_observations", {})
+        current = {}
+        try:
+            panes = self.herdr.list_panes()
+        except Exception:
+            log.exception("dialog observer could not list panes")
+            return
+        for pane in panes:
+            pane_id = pane.get("pane_id")
+            if not pane_id or not pane.get("agent"):
+                continue
+            screen = self.read_screen(pane_id)
+            if screen is None or not _modal_open(screen):
+                continue
+            signature = ("modal", _collapse(_strip_ansi(screen))[-4000:])
+            generation = self._pane_generation(pane_id)
+            previous = observations.get(pane_id)
+            since = (previous[2] if previous and previous[:2] == (generation, signature)
+                     else now)
+            current[pane_id] = (generation, signature, since)
+            self._note_stale_panel(pane_id, signature, since)
+        # Absent/nonmodal/replaced panes start a fresh stability interval.
+        self._dialog_observations = current
 
     def _stuck_observer_step(self, now=None):
         """ONE periodic scan for a stalled delivery nobody else is watching (t377).
@@ -5692,6 +5721,7 @@ class Flock:
                 federated_acted = self._federated_recovery_step(now)
             except Exception:
                 log.exception("federated recovery scan failed; retrying next tick")
+        self._dialog_observer_step(now=now)
         try:
             with self._lock:
                 candidates = dict(self.stuck_candidates)

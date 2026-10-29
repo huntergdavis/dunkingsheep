@@ -63,3 +63,25 @@ class DialogAlertTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class DialogScanTests(unittest.TestCase):
+    def test_no_pending_message_required_and_closed_dialog_resets_interval(self):
+        import dunk_core
+        flock = Mock()
+        flock._dialog_scan_at = 0
+        flock._dialog_observations = {}
+        flock.herdr.list_panes.return_value = [{'pane_id': '%2', 'agent': 'codex'}]
+        flock.read_screen.return_value = 'approval dialog'
+        flock._pane_generation.return_value = 'pid:1:start:2'
+        with patch.object(dunk_core, '_modal_open', return_value=True):
+            dunk_core.Flock._dialog_observer_step(flock, now=100)
+            dunk_core.Flock._dialog_observer_step(flock, now=110)
+            dunk_core.Flock._dialog_observer_step(flock, now=130)
+        self.assertEqual(flock.herdr.list_panes.call_count, 2)
+        self.assertEqual(flock._note_stale_panel.call_args.args[2], 100)
+        with patch.object(dunk_core, '_modal_open', return_value=False):
+            dunk_core.Flock._dialog_observer_step(flock, now=160)
+        with patch.object(dunk_core, '_modal_open', return_value=True):
+            dunk_core.Flock._dialog_observer_step(flock, now=190)
+        self.assertEqual(flock._note_stale_panel.call_args.args[2], 190)
+        flock.herdr.send_keys.assert_not_called()

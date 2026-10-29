@@ -41,7 +41,7 @@ def notify(pane_id, generation, signature, *, owner_sink, vp_sink, path=None, no
                        "dialog-alerts.db")
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     identity = hashlib.sha256(f"{pane_id}\0{generation}\0{signature}".encode()).hexdigest()
-    body = (f"Dunking Sheep: a dialog in {pane_id} is blocking queued messages. "
+    body = (f"Dunking Sheep: a dialog in {pane_id} needs attention and prevents message delivery. "
             "Open that terminal to inspect the question. The VP may handle routine "
             "questions within existing authority; approvals needing the owner remain "
             "for the owner. No answer or key has been sent automatically.\n\n"
