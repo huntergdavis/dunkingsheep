@@ -177,7 +177,10 @@ class FlockServer:
                 result = dispatch(self.flock, name, args,
                                   self_pane_id=self_pane_id)
             except DunkError as error:
-                return {"id": req_id, "ok": False, "error": str(error)}, False
+                reply = {"id": req_id, "ok": False, "error": str(error)}
+                if getattr(error, "retryable", False):
+                    reply["retryable"] = True
+                return reply, False
             except Exception as error:  # noqa: BLE001
                 if (isinstance(error, sqlite3.OperationalError)
                         and (getattr(error, "sqlite_errorcode", 0) & 255)
