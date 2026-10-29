@@ -1,5 +1,6 @@
 """Context store invariants: truths, refusals, supersession, disposable index."""
 
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -265,3 +266,130 @@ class ContextCliTests(unittest.TestCase):
         store.retire(head["slug"], "withdrawn")
         result = self.run_cli("context", "get", first["slug"])
         self.assertNotIn("newest-body", result.stdout)
+
+    def test_context_search_survives_a_stale_cache(self):
+        """The user-visible path from t123: the CLI must print rows, not
+        'index search failed: no such column: ...'."""
+        store = Store(Path(self.tmp.name) / ".dunkingsheep")
+        store.add("the wiki artefact pattern is a durable design rule", cls="fact",
+                  subject="wiki-artefact-pattern", type_="reference", authority="measured")
+        store.index()
+        path = store.index_path()
+        path.unlink()
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body)")
+        conn.execute("INSERT INTO entries VALUES ('drifted','drifted','body')")
+        conn.commit()
+        conn.close()
+        found = self.run_cli("context", "search", "artefact")
+        self.assertEqual(0, found.returncode, found.stderr)
+        self.assertNotIn("no such column", found.stderr + found.stdout)
+        self.assertIn("wiki-artefact-pattern", found.stdout)
+
+
+class ContextIndexDriftTests(unittest.TestCase):
+    """t123: search must never fail because of the CACHE.
+
+    2026-10-25, pi-review-1: 'context search --global' raised
+    'index search failed: no such column: model' while 'context get' worked.
+    get reads the files; search reads the disposable index, and search() used
+    to trust any existing .index.db. The column the incident names appears
+    nowhere in this codebase, so these tests pin the failure FAMILY: a drifted,
+    foreign or damaged cache is rebuilt from the files, and a compatible cache
+    is left alone.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = Store(Path(self.tmp.name) / ".dunkingsheep")
+        self.entry = self.store.add("the wiki artefact pattern is a durable design rule",
+                                    cls="fact", subject="wiki-artefact-pattern",
+                                    type_="reference", authority="measured")
+        self.path = self.store.index_path()
+
+    def plant(self, schema, insert=None):
+        if self.path.exists():
+            self.path.unlink()
+        conn = sqlite3.connect(self.path)
+        conn.execute(schema)
+        if insert:
+            conn.execute(insert)
+        conn.commit()
+        conn.close()
+
+    def test_a_cache_from_an_older_schema_is_rebuilt_not_reported(self):
+        self.store.index()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body)",
+                   "INSERT INTO entries VALUES ('old','old','old')")
+        found = self.store.search("artefact")
+        self.assertEqual([self.entry["slug"]], [r["slug"] for r in found])
+        self.assertTrue(self.store.index_compatible(self.path), "the cache must be healed")
+
+    def test_a_cache_carrying_a_model_column_does_not_break_search(self):
+        """The incident's shape: the cache has a column the code never reads and
+        lacks one it does."""
+        self.store.index()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, class, model)",
+                   "INSERT INTO entries VALUES ('m','m','m','fact','none')")
+        found = self.store.search("artefact")
+        self.assertEqual([self.entry["slug"]], [r["slug"] for r in found])
+
+    def test_an_ordinary_table_with_the_same_columns_is_rebuilt(self):
+        """The CoS review's counterexample (2026-10-28): the right five columns,
+        but an ordinary table - it cannot answer MATCH/rank, so a column check
+        alone would have shipped a search that still fails."""
+        self.store.index()
+        self.plant("CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT, "
+                   "class TEXT, scope TEXT)",
+                   "INSERT INTO entries VALUES ('plain','plain','plain','fact','global')")
+        found = self.store.search("artefact")
+        self.assertEqual([self.entry["slug"]], [r["slug"] for r in found])
+        self.assertTrue(self.store.index_compatible(self.path), "the cache must be healed")
+
+    def test_an_ordinary_table_with_fewer_columns_is_rebuilt(self):
+        self.store.index()
+        self.plant("CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT)",
+                   "INSERT INTO entries VALUES ('plain','plain','plain')")
+        self.assertEqual([self.entry["slug"]],
+                         [r["slug"] for r in self.store.search("artefact")])
+
+    def test_an_fts_cache_with_the_wrong_engine_is_rebuilt(self):
+        """FTS4 has no rank column: the shape probe, not the header string, is
+        what catches an engine that reads but cannot order."""
+        self.store.index()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts4(slug, subject, body, class, scope)",
+                   "INSERT INTO entries VALUES ('old','old','old','fact','global')")
+        self.assertEqual([self.entry["slug"]],
+                         [r["slug"] for r in self.store.search("artefact")])
+
+    def test_an_empty_fts_cache_is_still_compatible(self):
+        """Zero rows is a valid cache, not drift: a store with nothing in it must
+        not rebuild on every search."""
+        self.store.index()
+        self.path.unlink()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, "
+                   "class UNINDEXED, scope UNINDEXED)", None)
+        self.assertTrue(self.store.index_compatible(self.path))
+        self.assertEqual([], self.store.search("artefact"))
+
+    def test_an_unreadable_cache_is_rebuilt(self):
+        self.store.index()
+        self.path.write_bytes(b"")
+        self.assertEqual([self.entry["slug"]],
+                         [r["slug"] for r in self.store.search("artefact")])
+
+    def test_a_compatible_cache_is_left_alone(self):
+        """A schema check must not become a rebuild on every search: the cache
+        exists to keep search cheap."""
+        self.store.index()
+        before = (self.path.stat().st_ino, self.path.stat().st_mtime_ns)
+        for _ in range(3):
+            self.store.search("artefact")
+        after = (self.path.stat().st_ino, self.path.stat().st_mtime_ns)
+        self.assertEqual(before, after)
+
+    def test_the_expected_columns_are_declared_once(self):
+        """One declaration: the code that reads the cache names what it reads."""
+        self.assertEqual(("slug", "subject", "body", "class", "scope"),
+                         Store.INDEX_COLUMNS)
