@@ -1,15 +1,16 @@
 """t496: one capture, one /proc walk.
 
-Measured on the deployed revision 895c05a (31 lanes, 60 panes): a capture took
-7.98s in-process, of which 5.30s was `_proc_children` - called 62 times, twice
-per lane - because `session_of()` and the env lookup both accept a prebuilt
-pid->children map and neither was given one.
+Measured on the deployed revision 895c05a (31 lanes, 60 panes): `_proc_children`
+was called 62 times per capture - twice per lane - because `session_of()` and the
+env lookup both accept a prebuilt pid->children map and neither was given one. In
+sampled in-process runs that scan was the largest single cost (5.3s of 8.0s on one
+sample, 4.2s of 6.2s on another).
 
-Through the daemon on a busy fleet that pushed the client's 15s budget over the
-edge ("error: no answer after 15s from the daemon", exit 3) while the daemon had
-used only ~1.1s of CPU: it was polling /proc, not waiting on a lock. Cheap calls
-made during a capture also degraded from ~0.3s to 2.9-3.4s, which is head-of-line
-blocking behind that scan, not a second defect.
+Scope of that evidence, stated because reviewer t500 was right to draw it: these
+are in-process samples with a fresh Flock and a temporary store. They establish
+the scan reduction; they do NOT establish that the scan was the sole cause of the
+observed "no answer after 15s" failure, nor that no daemon-wide lock was contended
+during it.
 
 These tests pin the call COUNT rather than the wall clock, so they are
 deterministic on any machine: a regression that reintroduces a per-lane walk
@@ -96,7 +97,13 @@ class OneProcWalkPerCapture(unittest.TestCase):
             self.assertIn(key, row)
         self.assertEqual("%7", row["pane_id"])
 
-    def test_a_pane_without_a_pid_still_needs_no_walk(self):
+    def test_a_pane_without_a_pid_still_costs_exactly_one_walk(self):
+        """The map is built eagerly, so a capture with no pid still scans once.
+
+        That is a deliberate tradeoff (reviewer t500): one scan for the whole
+        capture is cheaper than a per-lane decision about whether to scan, and
+        it keeps the map identity shared by both consumers.
+        """
         lanes = [lane("%8", None)]
         walks, result = self._capture_counting_proc_walks(lanes)
         self.assertEqual(1, walks)

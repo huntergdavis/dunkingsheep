@@ -388,11 +388,16 @@ def capture(flock, *, source="periodic", now=None, store=None):
     #
     # session_of() and the env lookup below both accept a prebuilt
     # pid -> children map, but neither was given one, so every lane rebuilt the
-    # whole map twice: 62 full /proc scans for 31 lanes, 5.3s of a measured
-    # 8.0s capture. On a 60-pane fleet through the daemon that pushed a
-    # 15s client timeout over the edge ("no answer after 15s", exit 3), while
-    # the daemon itself had burned only ~1.1s of CPU - it was polling /proc,
-    # not stuck on a lock.
+    # whole map twice: 62 full /proc scans for 31 lanes. In sampled in-process
+    # runs the scan was the largest single cost (5.3s of a 8.0s capture on one
+    # sample; 4.2s of 6.2s on another), which is why this is the first thing to
+    # remove.
+    #
+    # What the samples do NOT establish: that this was the sole cause of the
+    # observed "no answer after 15s" failure, or that no daemon-wide lock was
+    # contended during it. Those runs used a fresh Flock and a temporary store,
+    # so they cannot speak for the live daemon's mutex. Reviewer t500 accepted
+    # the scan reduction and explicitly did not accept the broader causal claim.
     kids = _proc_children()
     rows = []
     for lane in flock.resolve_lanes():
