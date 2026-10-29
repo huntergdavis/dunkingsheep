@@ -195,6 +195,23 @@ def _proc_start_ticks(pid):
         return None
 
 
+def _read_bound(pid, starts, reader):
+    """Read process metadata only when the identity holds BEFORE and AFTER.
+
+    t500 addendum [P2]: a precheck alone leaves a check-to-read race - the pid can
+    be recycled inside the read, and the value that comes back then belongs to a
+    different process. Validating after the read as well closes that window; a
+    changed or unreadable identity returns (None, False) and the caller must not
+    use the value.
+    """
+    if not _still_the_same_process(pid, starts):
+        return None, False
+    value = reader(pid)
+    if not _still_the_same_process(pid, starts):
+        return None, False
+    return value, True
+
+
 def _still_the_same_process(pid, starts):
     """Is `pid` still the process the snapshot saw? Unknown is NOT the same.
 
@@ -202,8 +219,15 @@ def _still_the_same_process(pid, starts):
     answer False: this is the check that stops a recycled pid from donating a
     foreign session, model or effort to a pane.
     """
+    if starts is None:
+        # The caller omitted snapshot evidence entirely (legacy callers that hold
+        # a map but no snapshot). capture ALWAYS passes one.
+        return True
     if not starts:
-        return True                            # caller has no snapshot to check
+        # t500 addendum [P2]: a SUPPLIED but EMPTY snapshot is not "no evidence" -
+        # it is evidence that /proc was unreadable or racing. Treating it as a
+        # bypass is how an unverified root argv became a session with no reason.
+        return False
     expected = starts.get(int(pid))
     if expected is None:
         return False
@@ -350,7 +374,10 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
             # argv belongs to somebody else. Never adopt it.
             replaced = True
             continue
-        argv = _cmdline(candidate)
+        argv, held = _read_bound(candidate, starts, _cmdline)
+        if not held:
+            replaced = True
+            continue
         if not argv:
             continue
         head = os.path.basename(argv[0])
@@ -385,11 +412,19 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
     # claim: the environment can be INHERITED from a pane created before this one (on
     # 2026-10-24 the tmux global env carried the VP's session, and a lane that inherited it
     # looked correct because the workspace matched while the conversation did not).
+    if not _still_the_same_process(agent_pids[0][0], starts):
+        return None, ("the agent process behind this pane was replaced while its session was "
+                      "being read, so no process-derived session can be attributed to it")
     started = _proc_start(agent_pids[0][0])
     active, candidates = _active_session_file(cwd, started)
     slug = _cwd_slug(cwd)
     for candidate, _argv in agent_pids:
-        env = _env_of(candidate)
+        env, held = _read_bound(candidate, starts, _env_of)
+        if not held:
+            # t500 addendum: the process behind this cached pid is no longer the
+            # one we validated, so its environment cannot name this pane's session.
+            replaced = True
+            continue
         sess_id = env.get("PI_SESSION_ID")
         sess_file = env.get("PI_SESSION_FILE") or ""
         if not sess_id and sess_file:
@@ -413,7 +448,10 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
                                        f"flagging the environment claim as inherited/stale")
             return sess_id, None
     for candidate, _argv in agent_pids:
-        path = _open_session_file(candidate)
+        path, held = _read_bound(candidate, starts, _open_session_file)
+        if not held:
+            replaced = True
+            continue
         if path:
             return _session_id_from_path(path), None
     if active:
@@ -425,6 +463,12 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
         return active_id, (f"no session in argv, environment or open files; recording the only "
                            f"session file written in this workspace since the pane started "
                            f"({active_id[:8]})")
+    if replaced:
+        # A read was refused because the process behind the pid changed. Say so,
+        # rather than reporting "no session flag", which would be true and
+        # misleading: the flag may exist, in somebody else's process.
+        return None, ("a process under this pane was replaced while its session was being read "
+                      "(pid reuse), so no process-derived session can be attributed to it")
     if recorded:
         return recorded, ("no session in the agent's argv and none open; keeping the recorded "
                           "launch session")
@@ -485,12 +529,12 @@ def capture(flock, *, source="periodic", now=None, store=None):
         env = {}
         if lane.get("pane_pid"):
             for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"], kids):
-                if not _still_the_same_process(candidate, starts):
-                    # t505: a recycled pid would hand this pane another lane's
-                    # environment (session, model, effort). Skip it and keep
-                    # looking; the pane itself is always the snapshot's own pid.
+                found, held = _read_bound(candidate, starts, _env_of)
+                if not held:
+                    # t505/t500: a recycled pid would hand this pane another lane's
+                    # environment (session, model, effort). Validated before AND
+                    # after the read, so the check-to-read race is closed.
                     continue
-                found = _env_of(candidate)
                 if found.get("PI_SESSION_ID") or found.get("PI_MODEL"):
                     env = found
                     break

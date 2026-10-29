@@ -106,13 +106,14 @@ class StalePidBindingTests(unittest.TestCase):
     def test_unknown_identity_is_not_the_same_process(self):
         """A pid absent from the snapshot, or with a different start, is NOT it.
 
-        `starts` of None/{} is the documented legacy path (a caller that holds a
-        map but no snapshot); capture always supplies a real snapshot, so the
-        check is live on the path that matters.
+        `starts=None` is the documented legacy path (a caller that holds a map but
+        no snapshot). A SUPPLIED but EMPTY snapshot is different: it means /proc
+        was unreadable or racing, so it must fail closed too (t500 addendum P2).
         """
         self.assertFalse(dunk_state._still_the_same_process(4242, {4242: 7}))
         self.assertFalse(dunk_state._still_the_same_process(4242, {9999: 1}))
-        self.assertTrue(dunk_state._still_the_same_process(4242, {}))
+        self.assertFalse(dunk_state._still_the_same_process(4242, {}))
+        self.assertTrue(dunk_state._still_the_same_process(4242, None))
 
     def test_capture_never_reads_env_of_a_recycled_pid(self):
         """End to end: the foreign environment must not reach the row."""
@@ -151,6 +152,176 @@ class StalePidBindingTests(unittest.TestCase):
         self.assertEqual(0, read["env"], "read the environment of a recycled pid")
         row = self.store.latest(limit=1)[0]
         self.assertNotEqual("foreign", row.get("session_id"))
+
+
+class CheckToReadRaceTests(unittest.TestCase):
+    """t500 addendum [P2]: a precheck alone leaves a check-to-read race.
+
+    The pid can be recycled INSIDE the read, so the value that comes back belongs
+    to a different process. Validating after the read as well is what closes it.
+    """
+
+    def test_a_recycle_inside_the_read_is_rejected(self):
+        starts = {1201: 3}
+        calls = {"n": 0}
+
+        def fake_ticks(pid):
+            calls["n"] += 1
+            # first check: same process; second (post-read): recycled
+            return 3 if calls["n"] == 1 else 999
+
+        with mock.patch.object(dunk_state, "_proc_start_ticks", fake_ticks):
+            value, held = dunk_state._read_bound(1201, starts,
+                                                 lambda pid: {"PI_SESSION_ID": "foreign"})
+        self.assertFalse(held)
+        self.assertIsNone(value, "used metadata read across a recycled pid")
+
+    def test_a_stable_process_is_read(self):
+        with mock.patch.object(dunk_state, "_proc_start_ticks", lambda pid: 3):
+            value, held = dunk_state._read_bound(1201, {1201: 3},
+                                                 lambda pid: {"PI_SESSION_ID": "ours"})
+        self.assertTrue(held)
+        self.assertEqual({"PI_SESSION_ID": "ours"}, value)
+
+    def test_empty_snapshot_does_not_authorize_a_read(self):
+        value, held = dunk_state._read_bound(1201, {},
+                                             lambda pid: {"PI_SESSION_ID": "unverified"})
+        self.assertFalse(held)
+        self.assertIsNone(value)
+
+    def test_session_of_refuses_when_the_pid_is_recycled_during_the_env_read(self):
+        kids = {1001: [1101]}
+        starts = {1001: 1, 1101: 2}
+
+        def fake_cmdline(pid):
+            return ["pi"] if int(pid) == 1101 else []
+
+        def fake_env(pid):
+            return {"PI_SESSION_ID": "foreign-session"}
+
+        # the argv read is stable, the env read is not
+        ticks = {1101: [2, 2, 999, 999, 999, 999]}
+
+        def fake_ticks(pid):
+            seq = ticks.get(int(pid))
+            if not seq:
+                return starts.get(int(pid))
+            return seq.pop(0) if seq else 999
+
+        with mock.patch.object(dunk_state, "_cmdline", fake_cmdline), \
+                mock.patch.object(dunk_state, "_env_of", fake_env), \
+                mock.patch.object(dunk_state, "_proc_start_ticks", fake_ticks), \
+                mock.patch.object(dunk_state, "_active_session_file",
+                                  lambda cwd, started: (None, 0)):
+            session, reason = dunk_state.session_of(1001, kids=kids, starts=starts,
+                                                    cwd="/tmp/ws")
+        self.assertIsNone(session, "persisted a session read across a recycled pid")
+        self.assertTrue("pid reuse" in reason or "replaced" in reason, reason)
+
+
+def _seq_ticks(values, stable=2):
+    """Return a _proc_start_ticks stand-in that walks `values` then stays stable."""
+    remaining = list(values)
+
+    def ticks(pid):
+        return remaining.pop(0) if remaining else stable
+    return ticks
+
+
+def _ticks_then_recycled(good_calls, good=2, recycled=999):
+    """Identity holds for the first `good_calls` checks, then the pid is reused.
+
+    Counting calls rather than listing values keeps the control readable when
+    the number of checks before a given read changes.
+    """
+    seen = {"n": 0}
+
+    def ticks(pid):
+        seen["n"] += 1
+        return good if seen["n"] <= good_calls else recycled
+    return ticks
+
+
+class LaterReadBindingTests(unittest.TestCase):
+    """Each later read has its own binding, not just the argv read.
+
+    Every case is built so that the NEXT source would answer if the guard were
+    missing: the environment, then the open session file, then the
+    start-dependent fallback. That is what makes each control discriminating -
+    a refusal for the wrong reason would still pass a test that only asked for
+    "None".
+    """
+
+    KIDS = {1001: [1101]}
+    STARTS = {1001: 1, 1101: 2}
+
+    def _session(self, ticks, *, argv=None, env=None, open_path=None, active=None):
+        with mock.patch.object(dunk_state, "_cmdline",
+                               lambda pid: argv if argv is not None else ["pi"]), \
+                mock.patch.object(dunk_state, "_env_of",
+                                  lambda pid: env if env is not None else {}), \
+                mock.patch.object(dunk_state, "_open_session_file",
+                                  lambda pid: open_path), \
+                mock.patch.object(dunk_state, "_active_session_file",
+                                  lambda cwd, started: (active, 1 if active else 0)), \
+                mock.patch.object(dunk_state, "_proc_start_ticks",
+                                  ticks if callable(ticks) else _seq_ticks(ticks)):
+            return dunk_state.session_of(1001, kids=self.KIDS, starts=self.STARTS,
+                                         cwd="/tmp/ws")
+
+    def test_no_recycle_point_adopts_the_foreign_environment(self):
+        """Order-independent: whatever read the recycle lands in, refuse.
+
+        The reviewer's three shapes (recycle during the env read, during the
+        open-file read, before the fallback) are all instances of one rule, so
+        the control sweeps every recycle point rather than pinning call numbers
+        that change whenever a read is added.
+        """
+        # 1..6 is inside the reads; a recycle AFTER every check of the read that
+        # produced a value is legitimately invisible to it, so the sweep stops
+        # where the checks end rather than asserting an impossible guarantee.
+        for good_calls in range(1, 7):
+            with self.subTest(good_calls=good_calls):
+                session, _reason = self._session(
+                    _ticks_then_recycled(good_calls),
+                    env={"PI_SESSION_ID": "foreign-session"},
+                    open_path="/x/ours-aaaa.jsonl")
+                self.assertNotEqual("foreign-session", session,
+                                    "adopted a foreign environment at recycle point %d"
+                                    % good_calls)
+
+    def test_no_recycle_point_adopts_a_foreign_open_session_file(self):
+        for good_calls in range(1, 7):
+            with self.subTest(good_calls=good_calls):
+                session, _reason = self._session(
+                    _ticks_then_recycled(good_calls),
+                    env={}, open_path="/x/foreign-bbbb.jsonl")
+                self.assertNotEqual("foreign-bbbb", session,
+                                    "adopted a foreign open file at recycle point %d"
+                                    % good_calls)
+
+    def test_no_recycle_point_uses_the_start_dependent_fallback(self):
+        for good_calls in range(1, 5):
+            with self.subTest(good_calls=good_calls):
+                session, _reason = self._session(
+                    _ticks_then_recycled(good_calls), env={}, open_path=None,
+                    active="/x/active-cccc.jsonl")
+                self.assertNotEqual("active-cccc", session,
+                                    "used the fallback at recycle point %d" % good_calls)
+
+    def test_a_stable_process_reaches_each_source(self):
+        """Control half: with no recycle, every source still answers."""
+        self.assertEqual("foreign-session", self._session(
+            [2] * 8, env={"PI_SESSION_ID": "foreign-session"},
+            open_path="/x/ours-aaaa.jsonl")[0])
+        self.assertIsNotNone(self._session(
+            [2] * 8, env={}, open_path="/x/ours-aaaa.jsonl")[0])
+        self.assertEqual("foreign-bbbb", self._session(
+            [2] * 8, env={}, open_path="/x/foreign-bbbb.jsonl")[0])
+        self.assertEqual("active-cccc", self._session(
+            [2] * 8, env={}, open_path=None, active="/x/active-cccc.jsonl")[0])
+        self.assertEqual("argv-dddd", self._session(
+            [2] * 8, argv=["pi", "--session", "argv-dddd"], env={}, open_path=None)[0])
 
 
 class OneProcWalkPerCapture(unittest.TestCase):
