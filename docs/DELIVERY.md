@@ -275,3 +275,65 @@ Older installed releases did not record scheduled candidates. An upgrade cannot
 retroactively prove the generation or intent of those existing prompts; they
 remain held for operator recovery. Do not fabricate candidates from a schedule's
 current text or press keys merely because a prompt looks familiar.
+
+### Native evidence for ambiguous owned prompts (t508)
+
+The daemon can additionally recover the captured CoS frame with a transcript
+prompt above a complete pending prompt and blank rows before the footer. This
+path calls `dunk_recovery.plan_recovery`; it does not relax the ordinary composer
+parser. Every preceding visible row must be accounted for in the bound native
+transcript, and the complete trailing region must equal the durable attempt.
+Native session metadata, cwd and turn lifecycle must authenticate successfully;
+the prompt must be absent from that session and no turn or dialog may be active.
+Unknown native evidence refuses. This additional reader currently supports Codex;
+other harnesses retain their existing strict composer recovery.
+
+An exact resume ID and the running process's `CODEX_HOME`, or a hook record naming
+the same PID/start/pane/cwd, bind the session. Bare legacy launches can opt in via
+`DUNKINGSHEEP_RECOVERY_BINDINGS`, a path to an operator-maintained JSON file:
+
+```json
+{
+  "%2": {
+    "pid": 12345, "start": "1234567", "cwd": "/workspace/project",
+    "codex_home": "/home/operator/.codex",
+    "session_id": "independently-verified-native-session-id"
+  }
+}
+```
+
+The operator must independently verify this mapping before rollout. Recovery
+never creates it. PID/start/cwd mismatches, conflicting resume/home metadata,
+missing state rows, malformed rollouts and unfinished turns refuse. A shared
+logs database, a matching cwd, or a newest rollout is insufficient to bind a
+process. If a shell owns the pane PID, automatic recovery also requires a native
+binding captured at the original typing boundary; a replaced child is refused.
+Missing attempt generations and native binding/read failures emit a named
+diagnostic once per attempt, and a newer intent logs which candidate it superseded.
+
+Actual typing receipts are saved before the initial Enter. Native recovery uses
+the same locks and persisted attempt ledger as the existing observer, with a
+maximum of **one** extra Enter per message ID/creation time/generation, even when
+the legacy budget is larger. The final boundary rechecks identity, ownership,
+generation, native quiescence and transcript stability. A failed reservation
+write means no key. Restart cannot refund the budget.
+Typing captures only session identity; it does not scan native history while
+holding the typing lock. Authenticated quiet transcript reads are cached by
+PID/start/session/path/cwd and exact file signature, revalidated before use.
+
+For this native recovery path, scheduled attempts must still belong to a running
+schedule with the same template and target, and be no older than
+`threshold_s + 2 * observation_interval_s` (160 seconds with defaults).
+Expired or edited reminders remain refused; the schedule is not stopped or
+replayed. A held expired prompt still needs separately guarded operator cleanup;
+this change does not clear text automatically or claim universal recovery.
+
+The original failed outcome remains in `decided`. A successful independent
+composer/turn observation adds `recovery_outcome` to the candidate and repairs
+associated inbox notification receipts. Failed receipt writes retry after restart
+without another submission. Composer consumption is transport evidence; real
+native next-turn receipt and controlled canary acceptance remain separate rollout
+checks. t130's historical `m9973` trace proves failed delivery without a later
+recovery line, but does not establish whether its candidate was registered or
+superseded; the source regression covers terminal failure through the real
+observer without claiming that historical cause.
