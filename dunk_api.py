@@ -566,6 +566,8 @@ def h_dispatch(flock, args, self_pane_id):
     """
     import dunk_dispatch
     action = args.get("action") or "status"
+    if action in ("add", "remove", "tick") and flock.caller_role(self_pane_id) not in ("owner", "system"):
+        raise DunkError(f"dispatch {action} requires the owner or system role; status and list are open")
     queue = dunk_dispatch.Queue()
     if action == "add":
         return queue.add(args["brief"], task_id=args.get("task_id"), lane=args.get("lane"))
@@ -828,7 +830,7 @@ def h_task_read(flock, args, self_pane_id):
 def h_task_update(flock, args, self_pane_id):
     role = flock.caller_role(self_pane_id)
     if role not in ("owner", "system", "web"):
-        touched = [key for key in ("status", "assignees", "multi_assignee") if key in args]
+        touched = [key for key in ("status", "assignees", "multi_assignee", "block_reason") if key in args]
         if touched:
             raise DunkError(
                 f"task update cannot change {', '.join(touched)} for role {role}: status "
@@ -2758,7 +2760,7 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
-    "lane_set", "lane_register", "lane_unregister", "token_issue", "token_revoke",
+    "lane_set", "lane_unregister", "token_issue", "token_revoke",
     "review_sync", "context_promote", "context_retire", "poolrad_sync",
     "memory_backfill",
 }

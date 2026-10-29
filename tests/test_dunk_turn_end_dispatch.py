@@ -281,8 +281,9 @@ class TurnEndChainTests(unittest.TestCase):
         self.assertEqual("not_allowed", result["dispatch"]["reason"])
 
     def test_completed_dependency_is_not_lost_from_open_task_view(self):
-        parent = self.flock.task_add("finished prerequisite", status="done",
-                                     self_pane_id=PANE)
+        # A lane files open work only; a finished prerequisite is filed by the
+        # trusted in-process caller (no pane) for the fixture.
+        parent = self.flock.task_add("finished prerequisite", status="done")
         added = self.flock.task_add("ready dependent", depends_on=[parent["id"]],
                                     self_pane_id=PANE)
         claimed = self.flock.tasks.claim_next(scope="global", pane_id=PANE)

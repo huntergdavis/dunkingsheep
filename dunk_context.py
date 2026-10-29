@@ -61,13 +61,17 @@ class Ledger:
     """
 
     def __init__(self, path=None):
+        import threading
         self.path = Path(path or os.environ.get("DUNKINGSHEEP_CONTEXT_LEDGER") or LEDGER_PATH)
         self._db = None
+        self._lock = threading.RLock()
 
     def _connect(self):
         if self._db is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._db = sqlite3.connect(str(self.path), timeout=5)
+            # The daemon serves one thread per connection; one sqlite handle
+            # under the lock is simpler than a per-thread pool for a few rows.
+            self._db = sqlite3.connect(str(self.path), timeout=5, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS entries (store TEXT NOT NULL, slug TEXT NOT NULL, "
@@ -86,25 +90,28 @@ class Ledger:
             self._db = None
 
     def record(self, store_root_path, slug, text, cls=None, authority=None, by=None):
-        db = self._connect()
-        db.execute("INSERT OR REPLACE INTO entries (store, slug, sha256, cls, authority, "
-                   "written_at, by) VALUES (?,?,?,?,?,?,?)",
-                   (str(store_root_path), slug, _sha(text), cls, authority, time.time(), by))
-        db.commit()
+        with self._lock:
+            db = self._connect()
+            db.execute("INSERT OR REPLACE INTO entries (store, slug, sha256, cls, authority, "
+                       "written_at, by) VALUES (?,?,?,?,?,?,?)",
+                       (str(store_root_path), slug, _sha(text), cls, authority, time.time(), by))
+            db.commit()
 
     def status(self, store_root_path, slug, text):
         """'recorded' | 'modified' | 'unrecorded' | 'bootstrap' (no rows at all)."""
-        db = self._connect()
-        if not db.execute("SELECT 1 FROM entries LIMIT 1").fetchone():
-            return "bootstrap"
-        row = db.execute("SELECT sha256 FROM entries WHERE store = ? AND slug = ?",
-                         (str(store_root_path), slug)).fetchone()
+        with self._lock:
+            db = self._connect()
+            if not db.execute("SELECT 1 FROM entries LIMIT 1").fetchone():
+                return "bootstrap"
+            row = db.execute("SELECT sha256 FROM entries WHERE store = ? AND slug = ?",
+                             (str(store_root_path), slug)).fetchone()
         if row is None:
             return "unrecorded"
         return "recorded" if row["sha256"] == _sha(text) else "modified"
 
     def count(self):
-        return self._connect().execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        with self._lock:
+            return self._connect().execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
 def store_root(path=None, *, global_store=False):

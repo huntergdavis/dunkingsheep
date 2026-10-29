@@ -39,19 +39,19 @@ def attribute_author(pr, lanes, mints):
         if label and (branch.startswith(label + "/") or branch.startswith(label + "-")):
             return pane_id
     created = _iso(pr.get("created_at"))
-    best = None
-    for pane_id, at in (mints or {}).items():
-        if created and at <= created and created - at < 2 * 3600:
-            if best is None or at > best[1]:
-                best = (pane_id, at)
-    return best[0] if best else None
+    recent = [(pane_id, at) for pane_id, at in (mints or {}).items()
+              if created and at <= created and created - at < 2 * 3600]
+    # One lane minted in the window: that lane. Several: say unknown rather
+    # than guess, because a wrong author lets the real one review its own PR.
+    return recent[0][0] if len(recent) == 1 else None
 
 
 def _iso(value):
     if not value:
         return None
     try:
-        return time.mktime(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        import calendar
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return None
 
@@ -105,12 +105,14 @@ class Sync:
         mints = getattr(self.flock, "_gh_token_mints", {}) or {}
         live = self._live_reviews()
         seen = set()
+        listed = set()       # repos GitHub answered for; only their closed PRs are cancelled
         for repo in self.github.repos_config():
             try:
                 pulls = self.github.open_pulls(repo, token)
             except dunk_github.GitHubError as error:
                 report["errors"].append(f"{repo}: {error}")
                 continue
+            listed.add(repo)
             report["repos"].append({"repo": repo, "open": len(pulls)})
             for pr in pulls:
                 if pr["draft"] or not pr["head"]:
@@ -152,7 +154,7 @@ class Sync:
                              f"review task {task['id']} open", pr["url"], report)
         # PRs that closed or merged: their live review task is moot.
         for key, task in live.items():
-            if key not in seen and key[0] in self.github.repos_config() and not dry_run:
+            if key not in seen and key[0] in listed and not dry_run:
                 self.flock.tasks.cancel(task["id"], reason="PR closed or merged on GitHub")
                 report["cancelled"].append(task["id"])
         return report

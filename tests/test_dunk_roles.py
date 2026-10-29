@@ -71,8 +71,13 @@ class RegistryTests(unittest.TestCase):
         self.roles.register(WORKER, "worker", pane_pid=4100, start="100")
         self.assertEqual("worker", self.roles.role_of(WORKER, {"pane_pid": 4100}))
         self.assertEqual("anonymous", self.roles.role_of(WORKER, {"pane_pid": 9999}))
-        # A backend that reports no pid cannot contradict the registration.
-        self.assertEqual("worker", self.roles.role_of(WORKER, {}))
+        # A registration that recorded a pid is unverifiable without a live
+        # record (the pane is gone, or a backend reports no pid): default role.
+        self.assertEqual("anonymous", self.roles.role_of(WORKER, {}))
+        self.assertEqual("anonymous", self.roles.role_of(WORKER, None))
+        # A registration without a pid (a fake backend) still holds.
+        self.roles.register(DESK, "desk")
+        self.assertEqual("desk", self.roles.role_of(DESK, None))
 
     def test_file_is_private_and_reread_when_changed(self):
         self.roles.register(OWNER, "owner")
@@ -198,7 +203,7 @@ class DispatchGateTests(unittest.TestCase):
     def test_only_the_owner_issues_tokens_and_registers_lanes(self):
         with self.assertRaisesRegex(DunkError, "requires a superuser"):
             self.call("token_issue", {"role": "web"}, pane=WORKER)
-        with self.assertRaisesRegex(DunkError, "requires a superuser"):
+        with self.assertRaisesRegex(DunkError, "requires the owner role"):
             self.call("lane_register", {"pane": OTHER, "role": "owner"}, pane=WORKER)
 
     def test_superuser_add_refuses_names(self):

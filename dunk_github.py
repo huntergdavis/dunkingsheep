@@ -147,7 +147,8 @@ class Tokens:
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = str(self.path) + ".tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump({"tokens": self._cache}, handle, indent=1)
         os.replace(temporary, self.path)
         try:
@@ -179,7 +180,8 @@ class Tokens:
             expires = data.get("expires_at")
             # GitHub returns ISO-8601 Z; keep a float for comparisons.
             try:
-                expires_at = time.mktime(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+                import calendar
+                expires_at = calendar.timegm(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ"))
             except (TypeError, ValueError):
                 expires_at = now + 3600
             entry = {"token": data["token"], "expires_at": expires_at,
@@ -224,8 +226,13 @@ def kind_for_role(role, requested=None):
 # -- pull requests ------------------------------------------------------------
 
 def open_pulls(repo, token):
-    _status, pulls = _request("GET", f"{API}/repos/{repo}/pulls?state=open&per_page=100",
-                              token=token)
+    pulls = []
+    for page in range(1, 11):          # 1,000 open PRs is more than any repo here has
+        _status, batch = _request(
+            "GET", f"{API}/repos/{repo}/pulls?state=open&per_page=100&page={page}", token=token)
+        pulls.extend(batch or [])
+        if not batch or len(batch) < 100:
+            break
     out = []
     for pr in pulls or []:
         out.append({

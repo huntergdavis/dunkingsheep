@@ -121,7 +121,7 @@ def code_status():
 
 
 from dunk_inbox import Inbox, InboxError
-from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
+from dunk_tasks import validate_verdict, Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 import dunk_stuck
 
 # The declared leader pane: who owns a task when the creator has no pane at all
@@ -2426,6 +2426,8 @@ class Flock:
             raise DunkError(f"role {role} files kind=work only")
         if kind == "review" and role not in ("owner", "system", "web"):
             raise DunkError("review tasks are filed by the review timer (system) or the owner")
+        if role in ("desk", "planner", "worker", "reviewer") and status not in (None, "", "open"):
+            raise DunkError(f"role {role} files open tasks; status moves through next/complete/block")
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
             priority=priority or "low",
@@ -2487,10 +2489,9 @@ class Flock:
             if verdict is None:
                 raise DunkError("completing a review needs --verdict accept|needs-fix")
             try:
-                verdict = self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
+                verdict = validate_verdict(verdict)
             except TaskError as error:
                 raise DunkError(str(error)) from None
-            github = self._after_review_verdict(dict(task), verdict, by=self_pane_id or by)
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
@@ -2501,6 +2502,13 @@ class Flock:
         pane_info = self._pane_info(self_pane_id)
         operator = bool(self_pane_id and self.caller_role(self_pane_id) in ("owner", "system"))
         self._authorize_task_complete(task, self_pane_id, operator=operator)
+        if task.get("kind") == "review":
+            # Authorized: record the verdict now, inside the lane's lease; the
+            # GitHub side effects wait until the completion has committed.
+            try:
+                self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
+            except TaskError as error:
+                raise DunkError(str(error)) from None
         # Automatic work belongs to the actual caller, never a caller-supplied
         # completion label (`by` is attribution only): past the guard a requesting
         # pane is always present, so completion always flows through the next-job
@@ -2514,7 +2522,8 @@ class Flock:
         self._next_job_wake.set()
         result = dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
         if task.get("kind") == "review":
-            result["github"] = github
+            result["github"] = self._after_review_verdict(dict(task), verdict,
+                                                          by=self_pane_id or by)
         return result
 
     # Transport provenance decides what an unverifiable claim means (t423 P1).
@@ -3780,6 +3789,8 @@ class Flock:
         if target == "self":
             target = self_pane_id
         mine = self.caller_role(self_pane_id)
+        if mine == "system" and role == "owner":
+            raise DunkError("the system token cannot create owners; only the owner's pane does")
         if mine not in ("owner", "system"):
             bootstrap = (role == "owner" and not self.roles.has_owner()
                          and target == self_pane_id and self_pane_id)
@@ -3936,6 +3947,14 @@ class Flock:
         if role not in ("owner", "system") and authority == "measured" and not source:
             raise DunkError("a measured fact needs --source (the command or file it came from)")
         store = self._context_store(global_store, project_path)
+        if supersedes and role != "owner":
+            try:
+                old = store.resolve(supersedes)
+            except dunk_context.ContextError as error:
+                raise DunkError(str(error)) from None
+            if old is not None and (old["class"] == "ground-truth"
+                                    or old.get("authority") == "owner"):
+                raise DunkError("only the owner supersedes a rule")
         try:
             return store.add(body, cls=cls, subject=subject, type_=type_, authority=authority,
                              source=source, stated=stated, recheck_after=recheck_after,

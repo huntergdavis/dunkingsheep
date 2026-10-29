@@ -306,9 +306,16 @@ class Roles:
         entry = self.lanes.get(str(pane_id))
         if not entry:
             return self.default
-        live_pid = (pane_info or {}).get("pane_pid")
         want_pid = entry.get("pane_pid")
-        if want_pid is not None and live_pid not in (None, "", "None"):
+        if want_pid is not None:
+            # The registration recorded a root pid: the pane must still exist
+            # and carry it. A gone pane, or a reused id with a new root, gets the
+            # default role until the owner re-registers it.
+            live_pid = (pane_info or {}).get("pane_pid")
+            if live_pid in (None, "", "None"):
+                log.warning("role binding unverifiable pane=%s registered_pid=%s (pane gone?)",
+                            pane_id, want_pid)
+                return self.default
             try:
                 if int(live_pid) != int(want_pid):
                     log.warning("role binding stale pane=%s registered_pid=%s live_pid=%s",

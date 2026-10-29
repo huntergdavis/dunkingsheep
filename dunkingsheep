@@ -2492,8 +2492,10 @@ def run_context_command(dunk_context, args):
         return {"entries": rows, "count": ledger.count()}, \
             lambda r: [print(f"{e['state']:11} {e['class']:13} {e['slug']}") for e in r["entries"]] and None
     if sub in CONTEXT_DAEMON_WRITES:
-        # --local: the owner's bootstrap path writes files directly AND records them.
-        store.ledger = dunk_context.Ledger()
+        # --local writes the file only. It is NOT recorded in the ledger, so a
+        # ground truth written this way is not injected until the owner runs
+        # `context ledger adopt`: the daemon is the only path that records.
+        store.ledger = None
     if sub == "add":
         if getattr(args, "text", None):
             body = args.text
