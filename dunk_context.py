@@ -354,25 +354,46 @@ class Store:
     # The columns search() reads. v2.35.0: files are truth, the FTS index is a
     # disposable cache - so a cache carrying anything else is disposable too.
     INDEX_COLUMNS = ("slug", "subject", "body", "class", "scope")
+    # Bounded: an FTS5 table is created by exactly this header. There is no
+    # schema parsing beyond it - a cache is not a document to interpret.
+    _FTS5_HEADER = re.compile(
+        r'^\s*CREATE\s+VIRTUAL\s+TABLE\s+["\[]?entries["\]]?\s+USING\s+fts5\s*\(', re.I)
+    # The one query shape search() uses: named columns, MATCH, rank. Probing it
+    # is how a cache proves it can ANSWER. Column names alone do not: an
+    # ordinary table with the same five columns passes a column check and then
+    # dies on MATCH ("no such column: entries", CoS review 2026-10-28).
+    # The term is a bare word on purpose: FTS5 parses the MATCH operand as a
+    # query, and a hyphen in it reads as an operator ("no such column: probe").
+    _PROBE = "SELECT slug FROM entries WHERE entries MATCH ? ORDER BY rank LIMIT 1"
+    _PROBE_TERM = "probe"
 
     def index_compatible(self, path):
-        """True when the cached index has exactly the columns this code reads.
+        """True only when the cached index is an FTS5 table that can answer the
+        search query this code runs.
 
-        Search must never fail because of the CACHE: on 2026-10-25 pi-review-1
-        got 'index search failed: no such column: model' from an index whose
-        columns did not match the query. Drift is ordinary - an older release,
-        another lane's build, a half-written file - and the answer is always a
-        rebuild from the files, never an error the operator has to decode.
+        Three bounded controls - the fts5 creation header, the exact column
+        tuple, one probe of the MATCH/rank shape - and any doubt rebuilds:
+        v2.35.0 already says files are truth and the index is disposable, so a
+        cache another schema built is disposable too. Drift is ordinary (an
+        older release, another lane's build, a half-written file) and the
+        answer is always a rebuild, never an error the operator must decode.
         """
         try:
             conn = sqlite_connect(path, readonly=True)
             try:
-                rows = conn.execute("PRAGMA table_info(entries)").fetchall()
+                row = conn.execute("SELECT sql FROM sqlite_master "
+                                   "WHERE type = 'table' AND name = 'entries'").fetchone()
+                if not row or not row[0] or not self._FTS5_HEADER.match(row[0]):
+                    return False
+                columns = conn.execute("PRAGMA table_info(entries)").fetchall()
+                if tuple(column[1] for column in columns) != self.INDEX_COLUMNS:
+                    return False
+                conn.execute(self._PROBE, (self._PROBE_TERM,)).fetchall()
             finally:
                 conn.close()
         except sqlite3.Error:
-            return False  # unreadable or corrupt cache: rebuild
-        return tuple(row[1] for row in rows) == self.INDEX_COLUMNS
+            return False  # unreadable, corrupt, or unable to answer: rebuild
+        return True
 
     def index(self):
         self.ensure()

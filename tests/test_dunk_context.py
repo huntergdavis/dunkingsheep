@@ -335,12 +335,43 @@ class ContextIndexDriftTests(unittest.TestCase):
         found = self.store.search("artefact")
         self.assertEqual([self.entry["slug"]], [r["slug"] for r in found])
 
-    def test_a_plain_table_named_entries_is_rebuilt(self):
+    def test_an_ordinary_table_with_the_same_columns_is_rebuilt(self):
+        """The CoS review's counterexample (2026-10-28): the right five columns,
+        but an ordinary table - it cannot answer MATCH/rank, so a column check
+        alone would have shipped a search that still fails."""
+        self.store.index()
+        self.plant("CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT, "
+                   "class TEXT, scope TEXT)",
+                   "INSERT INTO entries VALUES ('plain','plain','plain','fact','global')")
+        found = self.store.search("artefact")
+        self.assertEqual([self.entry["slug"]], [r["slug"] for r in found])
+        self.assertTrue(self.store.index_compatible(self.path), "the cache must be healed")
+
+    def test_an_ordinary_table_with_fewer_columns_is_rebuilt(self):
         self.store.index()
         self.plant("CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT)",
                    "INSERT INTO entries VALUES ('plain','plain','plain')")
         self.assertEqual([self.entry["slug"]],
                          [r["slug"] for r in self.store.search("artefact")])
+
+    def test_an_fts_cache_with_the_wrong_engine_is_rebuilt(self):
+        """FTS4 has no rank column: the shape probe, not the header string, is
+        what catches an engine that reads but cannot order."""
+        self.store.index()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts4(slug, subject, body, class, scope)",
+                   "INSERT INTO entries VALUES ('old','old','old','fact','global')")
+        self.assertEqual([self.entry["slug"]],
+                         [r["slug"] for r in self.store.search("artefact")])
+
+    def test_an_empty_fts_cache_is_still_compatible(self):
+        """Zero rows is a valid cache, not drift: a store with nothing in it must
+        not rebuild on every search."""
+        self.store.index()
+        self.path.unlink()
+        self.plant("CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, "
+                   "class UNINDEXED, scope UNINDEXED)", None)
+        self.assertTrue(self.store.index_compatible(self.path))
+        self.assertEqual([], self.store.search("artefact"))
 
     def test_an_unreadable_cache_is_rebuilt(self):
         self.store.index()
