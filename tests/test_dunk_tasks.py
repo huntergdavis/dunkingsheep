@@ -37,6 +37,17 @@ class TaskStoreTests(unittest.TestCase):
         order = [task["id"] for task in self.store.list(scope=GLOBAL)]
         self.assertEqual([urgent["id"], high["id"], medium["id"], low["id"]], order)
 
+    def test_default_low_oldest_first_and_explicit_priority_preserved(self):
+        older = self.store.add(GLOBAL, "older", assignees=['w1:p1'])
+        newer = self.store.add(GLOBAL, "newer", assignees=['w1:p1'])
+        explicit = self.store.add(GLOBAL, "explicit medium", priority="medium", assignees=['w1:p1'])
+        self.assertEqual('low', older['priority'])
+        self.assertEqual('low', newer['priority'])
+        self.assertEqual('medium', explicit['priority'])
+        self.assertEqual([explicit['id'], older['id'], newer['id']],
+                         [t['id'] for t in self.store.list(scope=GLOBAL)])
+        self.assertEqual(explicit['id'], self.store.claim_next('mine', 'w1:p1')['task']['id'])
+
     def test_dependencies_gate_next_until_done(self):
         first = self.store.add(GLOBAL, "first", priority="low")
         second = self.store.add(GLOBAL, "second", priority="urgent",
@@ -606,6 +617,12 @@ class FlockTaskTests(unittest.TestCase):
         done = self.flock.task_complete(task["id"], self_pane_id="w2:p1")
         self.assertEqual("done", done["status"])
         self.assertEqual("w2:p1", done["completed_by"])
+
+    def test_api_task_default_low_and_explicit_high(self):
+        plain = self.flock.task_add('default', self_pane_id='w2:p1')
+        high = self.flock.task_add('manual', priority='high', self_pane_id='w2:p1')
+        self.assertEqual('low', plain['priority'])
+        self.assertEqual('high', high['priority'])
 
     def test_per_pane_privacy_is_enforced(self):
         with self.assertRaises(DunkError):

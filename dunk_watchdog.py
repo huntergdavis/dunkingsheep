@@ -186,6 +186,10 @@ RULE_COMMON = {
 }
 
 RULE_PARAMS = {
+    "fleet.assignment_starvation": {
+        "quiet_minutes": POSITIVE, "min_empty_workers": POSITIVE_INT,
+        "worker_panes": _str_list, "superuser_panes": _str_list,
+    },
     "task.blocked_stale": {"threshold_minutes": POSITIVE},
     "task.lease_stale": {"never_renewed_minutes": POSITIVE, "lookback_minutes": POSITIVE,
                          "fresh_minutes": POSITIVE},
@@ -246,7 +250,7 @@ TOP = {
     "heartbeat_path": _str,
     "state_retention_days": POSITIVE,
     "stores": {"config_dir": _str},
-    "panes": {"source": _enum("herdr", "none"), "pane_id_pattern": _regex},
+    "panes": {"source": _enum("herdr", "daemon", "none"), "pane_id_pattern": _regex},
     "escalation": {
         "vp": {"mailbox": _str, "min_severity": _enum(*SEVERITIES)},
         "owner": {"enabled": _bool, "channel": _enum("desk-brief"),
@@ -303,7 +307,7 @@ RULE_DEFAULTS = {"severity": "warning", "class": "ops", "cooldown_minutes": 240,
 # Rules added AFTER a config was written. Only these are filled in when absent; every
 # older rule stays REQUIRED, so a config that accidentally loses one still fails loudly
 # (test_dunk_watchdog.ConfigTests.test_named_errors depends on that, and rightly so).
-RULE_ADDITIONS = ("delivery.ambiguous_queued",)
+RULE_ADDITIONS = ("delivery.ambiguous_queued", "fleet.assignment_starvation")
 
 
 def migrate_config(config):
@@ -317,7 +321,8 @@ def migrate_config(config):
             continue
         block = dict(RULE_DEFAULTS)
         for key in RULE_PARAMS[rule_id]:
-            block[key] = _RULE_EXAMPLE_DEFAULTS.get((rule_id, key), 1)
+            value = _RULE_EXAMPLE_DEFAULTS.get((rule_id, key), 1)
+            block[key] = list(value) if isinstance(value, list) else value
         rules[rule_id] = block
         added.append(rule_id)
     return added
@@ -326,6 +331,10 @@ def migrate_config(config):
 # Shipped defaults for the rules that can be added to an existing config. Only the ones
 # whose presence is a judgement need an entry; everything else defaults to 1.
 _RULE_EXAMPLE_DEFAULTS = {
+    ("fleet.assignment_starvation", "quiet_minutes"): 10,
+    ("fleet.assignment_starvation", "min_empty_workers"): 2,
+    ("fleet.assignment_starvation", "worker_panes"): ["configure-worker-pane"],
+    ("fleet.assignment_starvation", "superuser_panes"): ["configure-superuser-pane"],
     ("delivery.ambiguous_queued", "min_holds"): HOLD_ATTEMPT_LIMIT_DEFAULT,
     ("delivery.ambiguous_queued", "min_age_minutes"): 20,
 }
@@ -437,6 +446,27 @@ class Inputs:
         finally:
             conn.close()
 
+    def starvation_snapshot(self, since):
+        """Current global backlog and bounded progress; do not load event history."""
+        conn = _ro(self.path("tasks.db"))
+        conn.row_factory = sqlite3.Row
+        try:
+            tasks = [dict(r) for r in conn.execute(
+                "SELECT id,scope,status,assignees,created_at,block_reason FROM tasks "
+                "WHERE status IN ('open','in_progress','blocked') "
+                "AND created_at<=? ORDER BY id", (self.now,))]
+            leases = [dict(r) for r in conn.execute(
+                "SELECT pane_id FROM task_leases WHERE claimed_at<=? AND expires_at>?",
+                (self.now, self.now))]
+            progress = [dict(r) for r in conn.execute(
+                "SELECT actor,event FROM task_events WHERE at>=? AND at<=? "
+                "AND event IN ('claimed','completed') ORDER BY at,id", (since, self.now))]
+        finally:
+            conn.close()
+        for task in tasks:
+            task["assignees"] = json.loads(task["assignees"] or "[]")
+        return tasks, leases, progress
+
     def metrics(self, sql, params=()):
         conn = _ro(self.path("metrics.db"))
         try:
@@ -458,6 +488,12 @@ class Inputs:
         def load():
             if self._panes_provider is not None:
                 panes = self._panes_provider()
+            elif self.config["panes"]["source"] == "daemon":
+                from dunk_client import FlockClient
+                result = FlockClient(self_pane_id=None, timeout=5.0).call("list_panes")
+                if not isinstance(result, dict) or not isinstance(result.get("panes"), list):
+                    raise ValueError("daemon pane inventory is unavailable")
+                panes = result["panes"]
             else:
                 from herdr_client import HerdrClient
                 panes = HerdrClient().list_panes()
@@ -884,6 +920,54 @@ def rule_lane_idle_holding_task(inputs, rule):
                                    f"{rule['quiet_minutes']}min quiet", f"{status}, no activity", "current",
                                    {"task": task_id, "pane": pane, "agent_status": status}))
     return out
+
+
+def rule_fleet_assignment_starvation(inputs, rule):
+    """Empty ready queues are a supply problem, even while reviewers are busy.
+
+    Only explicitly configured, present worker panes count. Unknown activity
+    is reported separately, never called idle or eligible capacity. Blocked
+    work is evidence for an operator decision, never permission to bypass it.
+    """
+    since = inputs.now - rule["quiet_minutes"] * 60
+    tasks, leases, progress = inputs.starvation_snapshot(since)
+    backlog = [t for t in tasks if t["scope"] == "global" and t["status"] in ("open", "blocked")
+               and t["created_at"] <= since]
+    if not backlog:
+        return []
+    busy = {r["pane_id"] for r in leases}
+    busy.update(r["actor"] for r in progress)
+    busy.update(pane for pane, in inputs.metrics(
+        "SELECT DISTINCT pane_id FROM events WHERE kind IN ('turn.start','turn.end') "
+        "AND at>=? AND at<=?", (since, inputs.now)))
+    assigned = {pane for t in tasks if t["status"] in ("open", "in_progress")
+                for pane in t["assignees"]}
+    panes = inputs.panes()
+    empty = sorted(p for p in set(rule["worker_panes"]) - set(rule["superuser_panes"])
+                   if p in panes and panes[p] in ("idle", "done", "unknown")
+                   and p not in busy and p not in assigned)
+    idle = [p for p in empty if panes[p] in ("idle", "done")]
+    unknown = [p for p in empty if panes[p] == "unknown"]
+    if len(empty) < rule["min_empty_workers"]:
+        return []
+    blocked = [t["id"] for t in backlog if t["status"] == "blocked"]
+    unstarted = [t["id"] for t in backlog if t["status"] == "open"]
+    return [finding("fleet.assignment_starvation", rule, "fleet",
+                    f"{len(empty)} worker queues empty while backlog waits "
+                    f"({len(idle)} confirmed idle, {len(unknown)} activity unknown); "
+                    "superusers: verify unknown activity, rank and assign runnable work "
+                    "or resolve named gates; preserve owner holds",
+                    f"{rule['min_empty_workers']} empty queues quiet {rule['quiet_minutes']}min",
+                    f"{len(idle)} idle; {len(unknown)} unknown; "
+                    f"{len(unstarted)} open; {len(blocked)} blocked",
+                    f"last {rule['quiet_minutes']}min",
+                    {"idle_workers": idle, "activity_unknown_workers": unknown,
+                     "open_tasks": unstarted[:20],
+                     "blocked_tasks": blocked[:20], "backlog_count": len(backlog),
+                     "claims_in_window": sum(r["event"] == "claimed" for r in progress),
+                     "done_records_in_window": sum(r["event"] == "completed" for r in progress),
+                     "limits": "Open does not prove runnable; done events may include review/bookkeeping. "
+                               "This calls for allocation decisions, not automatic reassignment."})]
 
 
 def _heavy_jobs(inputs):
@@ -1336,6 +1420,7 @@ def rule_health_failed(inputs, rule):
 
 
 RULES = {
+    "fleet.assignment_starvation": rule_fleet_assignment_starvation,
     "task.blocked_stale": rule_task_blocked_stale,
     "task.lease_stale": rule_task_lease_stale,
     "dunk.skip_loop": rule_dunk_skip_loop,
@@ -1362,7 +1447,8 @@ assert set(RULES) == set(RULE_PARAMS), "every configurable rule needs exactly on
 # Spec section 1: the only rules that may carry an owner class. Adding one is a
 # VP-approved edit to the spec, then to this tuple.
 OWNER_ELIGIBLE_RULES = ("host.disk_full", "security.secret_text", "money.spend_projection")
-PANE_RULES = ("inbox.unread_dead", "lane.working_without_task", "lane.idle_holding_task")
+PANE_RULES = ("inbox.unread_dead", "lane.working_without_task", "lane.idle_holding_task",
+              "fleet.assignment_starvation")
 # Rules whose inputs are append-only history, so they can be re-evaluated at a
 # past `now`. Every other rule reads a current snapshot and is not replayable.
 REPLAYABLE_RULES = ("dunk.skip_loop", "inbox.ambiguous_sender")
@@ -1499,6 +1585,9 @@ def plan(config, findings, state, streaks, now, owner_blocked=None):
         # VP
         if not is_self and SEVERITY_RANK[item["severity"]] < SEVERITY_RANK[vp_rule["min_severity"]]:
             decision["vp"] = "below-min-severity"
+        elif (item["rule"] == "fleet.assignment_starvation" and
+              decision["streak"] < config["rules"][item["rule"]]["must_hold_runs"]):
+            decision["vp"] = "hold"
         elif _cooling(config, state, item, now):
             decision["vp"] = "dedupe"
         elif vp_count >= config["max_alerts_per_run"]:
@@ -1588,6 +1677,39 @@ def inbox_sender(to, subject, body):
     from dunk_client import FlockClient
     FlockClient(self_pane_id=None).call("inbox_send", to=to, subject=subject, body=body,
                                         system_sender=SYSTEM_SENDER)
+
+
+def send_starvation_group(config, state, item, now, send):
+    """Validated superuser destinations; remember each accepted send separately.
+
+    A successful inbox submission is not a read/turn receipt. Failed recipients
+    retry on the next run without re-prompting successful recipients.
+    """
+    rule = config["rules"][item["rule"]]
+    path = os.path.join(_expand(config["stores"]["config_dir"]), "superusers.json")
+    data = _load_json(path)
+    protected = data.get("panes")
+    if not isinstance(protected, list) or not all(isinstance(p, str) for p in protected):
+        raise ValueError("superusers.json panes must be a list of pane ids")
+    recipients = sorted(set(rule["superuser_panes"]))
+    if not set(recipients).issubset(set(protected)):
+        raise ValueError("configured starvation recipients are not all current superusers")
+    key = dedupe_key(item)
+    accepted = state.setdefault("superuser_deliveries", {}).setdefault(key, {})
+    errors = []
+    for pane in recipients:
+        if pane in accepted and now - accepted[pane] < rule["cooldown_minutes"] * 60:
+            continue
+        try:
+            send(pane, "watchdog: idle capacity needs backlog allocation",
+                 digest("SUPERUSER allocation action", [line("NOTIFY SUPERUSERS", item, "no")]))
+        except Exception as error:
+            errors.append(f"{pane}: {type(error).__name__}: {error}")
+        else:
+            accepted[pane] = now
+            save_state(_expand(config["state_path"]), state)
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 
 class DeskBriefChannel:
@@ -1688,6 +1810,27 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
         report["lines"] = render_lines(config, decisions, skipped, recovered, mode)
         return report
 
+    # This operational rule targets the configured superuser group, not the
+    # owner's phone or every worker. Keep ordinary watchdog routing unchanged.
+    current = {dedupe_key(item) for item in result["findings"]}
+    for key in list(state.get("superuser_deliveries", {})):
+        if key not in current:
+            del state["superuser_deliveries"][key]
+    group_lines = []
+    group_send = [d for d in vp_send if d["finding"]["rule"] == "fleet.assignment_starvation"]
+    vp_send = [d for d in vp_send if d not in group_send]
+    for decision in group_send:
+        item = decision["finding"]
+        try:
+            send_starvation_group(config, state, item, now, send or inbox_sender)
+        except Exception as error:
+            problems.append(f"superuser allocation alert: {type(error).__name__}: {error}")
+            decision["vp"] = "transport-error"
+        else:
+            report["sent"].append("superusers")
+            group_lines.append(line("NOTIFY SUPERUSERS", item, "no"))
+            state["alerts"].setdefault(dedupe_key(item), {})["last_alerted"] = now
+
     # Owner first, so a transport failure can ride the VP digest as a self error.
     page_lines = []
     for decision in owner_send:
@@ -1721,7 +1864,7 @@ def run(config, now, dry_run_flag=False, send=None, owner_channel=None, panes_pr
         vp_lines.append(f"{suppressed} further finding(s) suppressed by max_alerts_per_run; "
                         "run `dunkingsheep watchdog --dry-run` to see all.")
     vp_lines += [f"RESOLVED VP dedupe={key}" for key in recovered["vp"]]
-    report["lines"] = vp_lines
+    report["lines"] = group_lines + vp_lines
     if vp_lines:
         try:
             (send or inbox_sender)(config["escalation"]["vp"]["mailbox"],

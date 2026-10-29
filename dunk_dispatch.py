@@ -360,7 +360,7 @@ def turn_end_text(task):
     task_id = str(task.get("id"))
     title = " ".join(str(task.get("title") or "").split())
     status = str(task.get("status") or "open")
-    priority = str(task.get("priority") or "medium")
+    priority = str(task.get("priority") or "low")
     return "\n".join([
         f"[turn-end {task_id}] {title}",
         f"trigger: turn.end - you ended your turn still holding this task "

@@ -363,7 +363,7 @@ def build_parser():
     q.add_argument("--scope", help="'global' (default), 'self' or a pane id")
     q.add_argument("--body", "-b", default="")
     q.add_argument("--status", choices=list(TASK_STATUSES), default="open")
-    q.add_argument("--priority", "-p", choices=list(TASK_PRIORITIES), default="medium")
+    q.add_argument("--priority", "-p", choices=list(TASK_PRIORITIES), default="low")
     q.add_argument("--assign", "-a", action="append", metavar="PANE",
                    help="assignee pane id/agent name (repeatable; 'self' = caller)")
     q.add_argument("--depends-on", "-d", action="append", metavar="ID",

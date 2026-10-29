@@ -247,6 +247,21 @@
       "must_hold_runs": 1,
       "min_holds": 10,
       "min_age_minutes": 20
+    },
+    "fleet.assignment_starvation": {
+      "enabled": false,
+      "severity": "warning",
+      "class": "ops",
+      "cooldown_minutes": 60,
+      "must_hold_runs": 2,
+      "quiet_minutes": 10,
+      "min_empty_workers": 2,
+      "worker_panes": [
+        "configure-worker-pane"
+      ],
+      "superuser_panes": [
+        "configure-superuser-pane"
+      ]
     }
   }
 }

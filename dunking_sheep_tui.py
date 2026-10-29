@@ -254,7 +254,7 @@ class DunkingSheepTui:
             task = self.current_task()
             if task:
                 order = ["low", "medium", "high", "urgent"]
-                current = task.get("priority") or "medium"
+                current = task.get("priority") or "low"
                 priority = order[(order.index(current) + 1) % len(order)]
                 self.rpc("task_update", id=task["id"], priority=priority)
         elif key == ord("d"):
