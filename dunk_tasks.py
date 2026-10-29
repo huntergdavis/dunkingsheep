@@ -315,6 +315,15 @@ class Tasks:
 
     NEXT_JOB_EVENT = "next_job_handoff"
 
+    # t461: the ONLY handoff state that stops blocking. A cancelled intent is a
+    # message the daemon will never type (dunk_core treats "cancelled" as a real
+    # terminal message status), so it cannot be "a prompt still waiting for the
+    # box to clear". Every other state - pending, sending, sent, started,
+    # failed, uncertain, or a state this code does not know - keeps blocking,
+    # because an unrecognised state might still become a typed prompt and the
+    # cost of guessing wrong is a second nudge in a working pane.
+    NON_BLOCKING_HANDOFF_STATES = frozenset({"cancelled"})
+
     def record_next_job_handoff(self, task_id, *, pane_id, from_task, message_id=None,
                                 attempt=0, reason=None, now=None, details=None):
         """Record that `pane_id` was handed `task_id` after completing `from_task` (t372).
@@ -635,6 +644,28 @@ class Tasks:
                                               pane_id=row["actor"], at=row["at"])
         return list(latest.values())
 
+    def active_handoffs(self, pane_id, owned_task_ids):
+        """Handoffs that still count as "a prompt is on its way" for this pane.
+
+        t461: a CANCELLED historical intent is excluded. Before this, any
+        historical handoff naming a still-owned open task kept
+        `pending_delivery` true forever, so the pane never advanced to its next
+        eligible job even with no lease, no outbox row and no held work - a
+        terminal intent vetoing live work.
+
+        Everything else still blocks (fail closed on unknown states).
+        """
+        owned = set(owned_task_ids or ())
+        active = []
+        for handoff in self.next_job_handoffs(pane_id):
+            if handoff["task_id"] not in owned:
+                continue
+            state = str(handoff.get("state") or "").strip().lower()
+            if state in self.NON_BLOCKING_HANDOFF_STATES:
+                continue
+            active.append(handoff)
+        return active
+
     def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
                          unread=0, pending_delivery=False, dispatch_reason=None,
                          operator_proof=None):
@@ -712,7 +743,7 @@ class Tasks:
                     (GLOBAL, pane_id)).fetchall()
                 tasks = [self._decorate(r, pane_id) for r in rows]
                 owned = {t["id"] for t in tasks if pane_id in t["assignees"]}
-                active = [h for h in self.next_job_handoffs(pane_id) if h["task_id"] in owned]
+                active = self.active_handoffs(pane_id, owned)
                 held = any(t["status"] == "in_progress" and pane_id in t["claimed_by"]
                            for t in tasks)
                 plan = next_job_plan(trigger=trigger, pane_id=pane_id, tasks=tasks,
