@@ -344,80 +344,10 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, metrics["current"]["by_status"]["blocked"])
         self.assertGreaterEqual(metrics["coverage"]["events_total"], 5)
 
-    def test_leader_held_counts_leader_assigned_tasks_with_the_unowned(self):
-        # The standing rule makes unowned global tasks leader-owned; a task
-        # explicitly assigned to the leader pane is theirs as well (t407 F1).
-        real_now = dunk_tasks._now
-        state = {"calls": 0}
-        def fake_now():
-            state["calls"] += 1
-            return 1000.0 if state["calls"] == 1 else 2000.0
-        dunk_tasks._now = fake_now
-        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
-        try:
-            old = self.store.add(GLOBAL, "carried")
-            assigned = self.store.add(GLOBAL, "explicit", assignees=["%15"])
-            self.store.add(GLOBAL, "worker task", assignees=["w1:p1"])
-            dunk_tasks._now = real_now
-            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
-        finally:
-            del os.environ["DUNKINGSHEEP_VP_PANE"]
-        held = metrics["current"]["leader_held"]
-        self.assertEqual(2, held["count"])
-        self.assertEqual(1000.0, held["oldest_created_at"])
-        self.assertEqual(4000.0, held["oldest_age_s"])
-        self.assertEqual("%15", held["leader_pane"])
-
-    def test_leader_held_counts_one_explicit_leader_task_alone(self):
-        # A DB holding only one global active task assigned to the leader
-        # pane reports leader_held count 1 - not zero with None ages.
-        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
-        try:
-            self.store.add(GLOBAL, "explicit", assignees=["%15"])
-            self.store.add(GLOBAL, "other", assignees=["w1:p1"])
-            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
-        finally:
-            del os.environ["DUNKINGSHEEP_VP_PANE"]
-        held = metrics["current"]["leader_held"]
-        self.assertEqual(1, held["count"])
-        self.assertIsNotNone(held["oldest_age_s"])
-
-    def test_cli_prints_leader_held_zero_unavailable_and_unknown_age(self):
-        # t407 F2: a known zero, an unavailable payload and a positive count
-        # with unknown age must look different on the wire.
-        import io
-        from contextlib import redirect_stdout
-        import types
-        src = open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                "dunkingsheep")).read()
-        mod = types.ModuleType("dunky")
-        mod.__file__ = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                    "dunkingsheep")
-        exec(compile(src.split("if __name__")[0], "dunkingsheep", "exec"), mod.__dict__)
-        def render(current):
-            buffer = io.StringIO()
-            with redirect_stdout(buffer):
-                mod.print_task_metrics({"current": current, "throughput": {}})
-            for line in buffer.getvalue().splitlines():
-                if line.startswith("leader-held"):
-                    return line
-            return ""
-        self.assertEqual("leader-held tasks: 0",
-                         render({"leader_held": {"count": 0, "oldest_created_at": None,
-                                                 "oldest_age_s": None}}))
-        self.assertEqual("leader-held tasks: unavailable (payload predates the metric)",
-                         render({}))
-        self.assertEqual("leader-held tasks: 4 (oldest unknown)",
-                         render({"leader_held": {"count": 4, "oldest_created_at": None,
-                                                 "oldest_age_s": None}}))
-        self.assertEqual("leader-held tasks: 3 (oldest 1.4h)",
-                         render({"leader_held": {"count": 3, "oldest_age_s": 4900.0}}))
-        self.assertEqual("leader-held tasks: 3 (oldest 3.0d)",
-                         render({"leader_held": {"count": 3, "oldest_age_s": 259200.0}}))
-
-    def test_leader_held_counts_unowned_global_actives_with_deterministic_age(self):
-        # Owner #1708: unowned means leader-owned. Only active global tasks with
-        # no assignees count; assigned, pane-scoped and done tasks do not.
+    def test_leader_held_is_the_needs_owner_queue(self):
+        # FLAT_FLEET.md 5: no leader. `leader_held` keeps its name for the board
+        # and now counts the questions lanes asked the owner (blocked with a
+        # 'needs-owner:' reason), nothing else: unassigned work is the queue's.
         real_now = dunk_tasks._now
         state = {"calls": 0}
         def fake_now():
@@ -425,11 +355,12 @@ class TaskStoreTests(unittest.TestCase):
             return 1000.0 if state["calls"] == 1 else 2000.0
         dunk_tasks._now = fake_now
         try:
-            old = self.store.add(GLOBAL, "carried")
+            asked = self.store.add(GLOBAL, "which port?")
+            self.store.block(asked["id"], reason="needs-owner: which port do we target?")
+            self.store.add(GLOBAL, "unassigned work")
             self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
-            self.store.add("w9:lane", "private")
-            done = self.store.add(GLOBAL, "finished")
-            self.store.complete(done["id"], by="w1:p1")
+            other = self.store.add(GLOBAL, "blocked on a dependency")
+            self.store.block(other["id"], reason="waiting on PR 12")
         finally:
             dunk_tasks._now = real_now
         metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
@@ -437,9 +368,10 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, held["count"])
         self.assertEqual(1000.0, held["oldest_created_at"])
         self.assertEqual(4000.0, held["oldest_age_s"])
-        self.assertEqual(old["id"], self.store.get(old["id"])["id"])
+        self.assertIsNone(held["leader_pane"])
 
-    def test_leader_held_empty_when_everything_is_owned(self):
+    def test_leader_held_empty_when_nobody_asked_the_owner(self):
+        self.store.add(GLOBAL, "unassigned")
         self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
         metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
         held = metrics["current"]["leader_held"]

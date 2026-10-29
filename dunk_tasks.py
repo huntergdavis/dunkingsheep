@@ -1523,8 +1523,6 @@ class Tasks:
         since = (until - float(window_s)) if since is None else float(since)
         bucket_s = 86400 if str(bucket).lower() == "day" else 3600
 
-        # Same VP-pane resolution the rest of the product uses (dunk_core).
-        leader_pane = os.environ.get("DUNKINGSHEEP_VP_PANE", _default_vp_pane)
         tasks = [self._decorate(row) for row in
                  self.db.execute("SELECT * FROM tasks").fetchall()]
         if scopes is not None:
@@ -1540,11 +1538,11 @@ class Tasks:
             by_priority[task["priority"]] = by_priority.get(task["priority"], 0) + 1
             by_scope["global" if task["is_global"] else "pane"] += 1
             if task["status"] in ("open", "in_progress", "blocked"):
-                if (not task["assignees"] and task["is_global"]) \
-                        or leader_pane in task["assignees"]:
-                    # owner #1708: unowned means leader-owned, so an active global
-                    # task with no assignee is work the leader is carrying. A task
-                    # explicitly assigned to the leader pane is theirs as well.
+                if task["status"] == "blocked" and str(task.get("block_reason") or
+                                                     "").startswith("needs-owner:"):
+                    # FLAT_FLEET.md 5: the only work a person is holding is a
+                    # question a lane asked the owner. (The key keeps its old
+                    # name, `leader_held`, for the board; the leader is the owner.)
                     leader_held.append(task)
                 for assignee in task["assignees"]:
                     by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
@@ -1625,7 +1623,7 @@ class Tasks:
                     "definition": ("global tasks with no assignee (owner #1708: "
                                    "unowned means leader-owned), plus tasks "
                                    "explicitly assigned to the leader pane"),
-                    "leader_pane": leader_pane or None,
+                    "leader_pane": None,     # there is no leader; these are needs-owner questions
                 },
             },
             "throughput": {
