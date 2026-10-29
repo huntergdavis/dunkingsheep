@@ -149,6 +149,91 @@ def _proc_children():
     return kids
 
 
+def _proc_snapshot():
+    """One /proc pass: (pid -> [children], pid -> process start time).
+
+    t505 [P2]: a bare pid is not an identity. The pid can exit and be reused by
+    an unrelated process between the scan and the metadata read, and with a
+    capture-wide map that window now includes lane resolution. Recording the
+    start time in the SAME pass gives a cheap binding: pid plus start is the
+    pair that survives reuse, so a cached descendant whose start has changed is
+    refused instead of being asked for its argv and environment.
+    """
+    kids, starts = {}, {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return kids, starts
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as handle:
+                raw = handle.read().decode("utf-8", "replace")
+            fields = raw.rsplit(")", 1)[1].split()
+            ppid = int(fields[1])
+            start = int(fields[19])            # field 22 of stat
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(entry))
+        starts[int(entry)] = start
+    return kids, starts
+
+
+def _proc_start_ticks(pid):
+    """Raw start-time ticks of a pid (field 22 of stat), or None.
+
+    Deliberately NOT named _proc_start: that function already exists below and
+    returns a WALL-CLOCK start used to pick a session file. Two meanings of
+    "start" in one module is how a silent mismatch gets introduced.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            raw = handle.read().decode("utf-8", "replace")
+        return int(raw.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def _read_bound(pid, starts, reader):
+    """Read process metadata only when the identity holds BEFORE and AFTER.
+
+    t500 addendum [P2]: a precheck alone leaves a check-to-read race - the pid can
+    be recycled inside the read, and the value that comes back then belongs to a
+    different process. Validating after the read as well closes that window; a
+    changed or unreadable identity returns (None, False) and the caller must not
+    use the value.
+    """
+    if not _still_the_same_process(pid, starts):
+        return None, False
+    value = reader(pid)
+    if not _still_the_same_process(pid, starts):
+        return None, False
+    return value, True
+
+
+def _still_the_same_process(pid, starts):
+    """Is `pid` still the process the snapshot saw? Unknown is NOT the same.
+
+    A missing snapshot entry, an unreadable stat and a changed start time all
+    answer False: this is the check that stops a recycled pid from donating a
+    foreign session, model or effort to a pane.
+    """
+    if starts is None:
+        # The caller omitted snapshot evidence entirely (legacy callers that hold
+        # a map but no snapshot). capture ALWAYS passes one.
+        return True
+    if not starts:
+        # t500 addendum [P2]: a SUPPLIED but EMPTY snapshot is not "no evidence" -
+        # it is evidence that /proc was unreadable or racing. Treating it as a
+        # bypass is how an unverified root argv became a session with no reason.
+        return False
+    expected = starts.get(int(pid))
+    if expected is None:
+        return False
+    return _proc_start_ticks(pid) == expected
+
+
 def _descendants(pid, kids=None):
     kids = kids if kids is not None else _proc_children()
     out, queue = [], [int(pid)]
@@ -263,7 +348,7 @@ def _cwd_slug(cwd):
     return "--" + str(cwd).strip("/").replace("/", "-") + "--"
 
 
-def session_of(pane_pid, launch=None, kids=None, cwd=None):
+def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
     """(session_id, reason) for a live pane, read from its agent PROCESS.
 
     Why not launches.json alone: the flip left launch rows that carry another lane's
@@ -282,14 +367,27 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
         return recorded, "the pane pid is not a number, so its session cannot be read"
     pids = [pid] + _descendants(pid, kids)
     agent_pids = []
+    replaced = False
     for candidate in pids:
-        argv = _cmdline(candidate)
+        if not _still_the_same_process(candidate, starts):
+            # t505: the pid in the snapshot is no longer that process, so its
+            # argv belongs to somebody else. Never adopt it.
+            replaced = True
+            continue
+        argv, held = _read_bound(candidate, starts, _cmdline)
+        if not held:
+            replaced = True
+            continue
         if not argv:
             continue
         head = os.path.basename(argv[0])
         if head in _AGENT_EXES or any(os.path.basename(tok) in _AGENT_EXES for tok in argv[:3]):
             agent_pids.append((candidate, argv))
     if not agent_pids:
+        if replaced:
+            return None, ("a descendant pid from the capture snapshot no longer belongs to "
+                          "that process (pid reuse), so its argv cannot name this pane's "
+                          "session")
         return None, "no agent process under this pane (it is a shell), so there is no session"
     for candidate, argv in agent_pids:
         value = _flag(argv, _SESSION_FLAGS)
@@ -314,11 +412,35 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
     # claim: the environment can be INHERITED from a pane created before this one (on
     # 2026-10-24 the tmux global env carried the VP's session, and a lane that inherited it
     # looked correct because the workspace matched while the conversation did not).
-    started = _proc_start(agent_pids[0][0])
-    active, candidates = _active_session_file(cwd, started)
+    # The start-dependent derivation is a READ too, and it is the one that can
+    # leak worst: `started` decides which session files count as "written since
+    # this pane started", so a foreign start time hands us a foreign cutoff and
+    # the fallback then explains a foreign file as this pane's. Bind it the same
+    # way as every other read, and if the identity moves, derive NOTHING -
+    # `active` stays None so no cached fallback can be returned later.
+    agent_pid = agent_pids[0][0]
+    if not _still_the_same_process(agent_pid, starts):
+        return None, ("the agent process behind this pane was replaced while its session was "
+                      "being read, so no process-derived session can be attributed to it")
+    started, held = _read_bound(agent_pid, starts, _proc_start)
+    active, candidates = None, 0
+    if held:
+        derived, held = _read_bound(agent_pid, starts,
+                                    lambda pid: _active_session_file(cwd, started))
+        if held:
+            active, candidates = derived
+        else:
+            replaced = True
+    else:
+        replaced = True
     slug = _cwd_slug(cwd)
     for candidate, _argv in agent_pids:
-        env = _env_of(candidate)
+        env, held = _read_bound(candidate, starts, _env_of)
+        if not held:
+            # t500 addendum: the process behind this cached pid is no longer the
+            # one we validated, so its environment cannot name this pane's session.
+            replaced = True
+            continue
         sess_id = env.get("PI_SESSION_ID")
         sess_file = env.get("PI_SESSION_FILE") or ""
         if not sess_id and sess_file:
@@ -342,9 +464,21 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
                                        f"flagging the environment claim as inherited/stale")
             return sess_id, None
     for candidate, _argv in agent_pids:
-        path = _open_session_file(candidate)
+        path, held = _read_bound(candidate, starts, _open_session_file)
+        if not held:
+            replaced = True
+            continue
         if path:
             return _session_id_from_path(path), None
+    if replaced:
+        # A read was refused because the process behind the pid changed, so NO
+        # process-derived answer is admissible - not even the start-dependent
+        # fallback, whose cutoff came from that same process. This refusal has to
+        # come BEFORE the `active` returns (reviewer t500 addendum, third shape):
+        # otherwise a changed start-time read supplies a foreign file that gets
+        # explained as "the only session file written since the pane started".
+        return None, ("a process under this pane was replaced while its session was being read "
+                      "(pid reuse), so no process-derived session can be attributed to it")
     if active:
         active_id = _session_id_from_path(active)
         if candidates > 1:
@@ -398,7 +532,7 @@ def capture(flock, *, source="periodic", now=None, store=None):
     # contended during it. Those runs used a fresh Flock and a temporary store,
     # so they cannot speak for the live daemon's mutex. Reviewer t500 accepted
     # the scan reduction and explicitly did not accept the broader causal claim.
-    kids = _proc_children()
+    kids, starts = _proc_snapshot()
     rows = []
     for lane in flock.resolve_lanes():
         if not lane.get("agent"):
@@ -409,11 +543,17 @@ def capture(flock, *, source="periodic", now=None, store=None):
         thinking = _flag(argv, _THINKING_FLAGS)
         session, session_reason = session_of(lane.get("pane_pid"),
                                              {"session": launch.get("session") or launch.get("session_id")},
-                                             kids=kids, cwd=lane.get("cwd"))
+                                             kids=kids, cwd=lane.get("cwd"),
+                                             starts=starts)
         env = {}
         if lane.get("pane_pid"):
             for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"], kids):
-                found = _env_of(candidate)
+                found, held = _read_bound(candidate, starts, _env_of)
+                if not held:
+                    # t505/t500: a recycled pid would hand this pane another lane's
+                    # environment (session, model, effort). Validated before AND
+                    # after the read, so the check-to-read race is closed.
+                    continue
                 if found.get("PI_SESSION_ID") or found.get("PI_MODEL"):
                     env = found
                     break

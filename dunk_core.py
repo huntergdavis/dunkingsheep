@@ -42,6 +42,7 @@ Orchestration extras on top of the classic Dunking Bird model:
 """
 
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import json
@@ -54,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.102"
+VERSION = "2.70.103"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -706,6 +707,7 @@ class Flock:
         self.persist_enabled = persist
         self._load_launches()
         self._lock = threading.RLock()
+        self._attempt_ctx = threading.local()
         # Per-request caller identity (pane id + stable agent pid/start). The
         # server sets it from SO_PEERCRED; direct callers leave it empty.
         self._caller_state = threading.local()
@@ -816,6 +818,8 @@ class Flock:
         self.next_message_id = 1
         from dunk_next_job import NextJobs
         self.next_jobs = NextJobs(self)
+        from dunk_allocator import Allocator
+        self.allocator = Allocator(self)
         if restore:
             self._restore()
         if self.persist_enabled:
@@ -3345,6 +3349,10 @@ class Flock:
             if self._task_stop.is_set():
                 break
             try:
+                try:
+                    self.allocator.tick()
+                except Exception:
+                    log.exception("allocator pass failed; existing delivery continues")
                 self.next_jobs.tick()
                 self._push_tasks()
             except Exception:
@@ -4975,12 +4983,13 @@ class Flock:
                 # BEFORE the guarded call: the identity of the attempt, not of its
                 # aftermath. A pane swapped after this point cannot rewrite it.
                 message.attempt_generation = self._pane_generation(message.pane_id)
-        sent, ok, detail = self.send_guarded(
-            message.pane_id, message.deliver,
-            hold_while_typing=message.hold_while_typing,
-            allow_modal=(message.kind == "keys"),
-            preserve_draft=getattr(message, "preserve_draft", False),
-            permission=getattr(message, "permission", None))
+        with self._attempt_context(message):
+            sent, ok, detail = self.send_guarded(
+                message.pane_id, message.deliver,
+                hold_while_typing=message.hold_while_typing,
+                allow_modal=(message.kind == "keys"),
+                preserve_draft=getattr(message, "preserve_draft", False),
+                permission=getattr(message, "permission", None))
         if not sent:
             reason = self._last_block_reason.get(message.pane_id)
             with self._lock:
@@ -5112,17 +5121,21 @@ class Flock:
             return
         attempt_generation = getattr(message, "attempt_generation", None)
         scheduled = bool(getattr(message, "scheduled", False))
-        eligible = ((getattr(message, "status", None) == "failed"
+        eligible = ((getattr(message, "status", None) in ("failed", "typed")
                      or (scheduled and getattr(message, "status", None) == "sent"))
                     and bool(getattr(message, "press_enter", True))
                     and getattr(message, "kind", "text") == "text"
                     and bool(attempt_generation))     # unknown attempt identity: fail closed
-        entry = {"message_id": message.id,
+        entry = {"message_id": message.id, "pane_id": pane_id,
                  "created_at": getattr(message, "created_at", 0),
                  "press_enter": bool(getattr(message, "press_enter", True)),
                  "status": getattr(message, "status", None),
                  "kind": getattr(message, "kind", "text"),
                  "scheduled": scheduled,
+                 "source": getattr(message, "source", None),
+                 "notify_for": list(getattr(message, "notify_for", [])),
+                 "schedule_template": getattr(message, "schedule_template", None),
+                 "typed_at": getattr(message, "typed_at", None),
                  # The exact delivery-owned content, so ownership can be proven after a
                  # restart (message_history and sent_text_by_pane do not survive one).
                  "text": getattr(message, "text", "") or "",
@@ -5136,6 +5149,16 @@ class Flock:
                  "eligible": eligible, "superseded_by": message.id}
         with self._lock:
             existing = self.stuck_candidates.get(pane_id)
+            if existing and (existing.get("message_id"), existing.get("created_at")) == (
+                    message.id, message.created_at):
+                # Preserve a recovery receipt if the original send finishes late.
+                for field in ("recovery_outcome", "recovery_detail", "recovered_at",
+                              "receipts_reconciled", "native_binding", "native_refusal",
+                              "unobservable_logged", "native_recovery"):
+                    if field in existing:
+                        entry[field] = existing[field]
+                if existing.get("recovery_outcome") == "consumed":
+                    entry.update(eligible=False, status="consumed")
             if existing and _intent_order(existing) > _intent_order(entry):
                 # A decision for a NEWER message is already recorded. Its intent stands
                 # even though it is ineligible: a late, older FAILED decision must not
@@ -5153,7 +5176,164 @@ class Flock:
                     t for t in transcript if t))[-REMEMBERED_SENDS:]
             # Always keep the latest intent as a TOMBSTONE when ineligible, so ordering
             # does not depend on the entry staying eligible.
+            if existing and existing.get("eligible") and (
+                    existing.get("message_id"), existing.get("created_at")) != (
+                    entry["message_id"], entry["created_at"]):
+                log.info("%s: stuck candidate superseded: message=%s created_at=%s by=%s created_at=%s",
+                         pane_id, existing.get("message_id"), existing.get("created_at"),
+                         entry["message_id"], entry["created_at"])
             self.stuck_candidates[pane_id] = entry
+            if (entry["status"] in ("typed", "failed") and entry["press_enter"]
+                    and entry["kind"] == "text" and not attempt_generation
+                    and not entry.get("unobservable_logged")):
+                entry["unobservable_logged"] = True
+                log.warning("%s: recovery not observable: message=%s created_at=%s "
+                            "attempt generation unknown", pane_id, message.id, entry["created_at"])
+
+    @contextlib.contextmanager
+    def _attempt_context(self, message):
+        previous = getattr(self._attempt_ctx, "message", None)
+        self._attempt_ctx.message = message
+        try:
+            yield
+        finally:
+            self._attempt_ctx.message = previous
+
+    def _persist_typed_attempt(self, pane_id, text, press_enter):
+        """Save the actual typing receipt before Enter, including across a crash.
+
+        A failed write refuses the submit. A crash before this save leaves no
+        authority to recover; it never turns a queued intent into proof of typing.
+        """
+        message = getattr(self._attempt_ctx, "message", None)
+        if message is None or message.pane_id != pane_id or message.text != text:
+            return True  # direct low-level caller has no durable attempt authority
+        status = message.status
+        message.press_enter = press_enter
+        message.typed_at = time.time()
+        message.status = "typed"
+        try:
+            self._note_stuck_candidate(message)
+            try:
+                from dunk_recovery_native import resolve_prompt_session
+                pid, start, session_id, _path, _cwd = resolve_prompt_session(
+                    self.herdr, self.herdr.get_pane(pane_id) or {})
+                with self._lock:
+                    entry = self.stuck_candidates.get(pane_id) or {}
+                    if (entry.get("message_id"), entry.get("created_at")) == (
+                            message.id, message.created_at):
+                        entry["native_binding"] = [pid, start, session_id]
+            except Exception:
+                pass  # no native proof: retain only the existing strict recovery path
+            return self._save()
+        finally:
+            message.status = status
+
+    def _owned_recovery_evidence(self, pane_id, screen):
+        """t508: extra authority for an otherwise undelimitable Codex frame.
+
+        Only the trailing complete region can be the pending prompt. An exact
+        durable attempt plus kernel-bound native absence must agree. This does
+        not change the ordinary composer parser or authorise an ordinary flush.
+        """
+        if not screen or _modal_open(screen) or self.turn_active(pane_id):
+            return None
+        with self._lock:
+            entry = dict(self.stuck_candidates.get(pane_id) or {})
+        if (not entry.get("eligible") or not entry.get("press_enter")
+                or entry.get("kind") != "text"
+                or entry.get("status") not in ("failed", "sent", "typed")
+                or ("typed_at" in entry and not entry["typed_at"])
+                or entry.get("generation") != self._pane_generation(pane_id)):
+            return None
+        try:
+            pane = self.herdr.get_pane(pane_id) or {}
+            if pane.get("agent") not in (None, "", "codex"):
+                return None
+            status = self._read_status(pane_id)
+            if status not in (None, "unknown", "idle", "ready") or self._session_process_gone(pane_id):
+                return None
+            state, _reason = classify_delivery(screen, "idle", typed="")
+            if state != "ready":
+                return None
+            region = _trailing_prompt_region(screen)
+            if not region or dunk_stuck.collapse(region) != dunk_stuck.collapse(entry["text"]):
+                return None
+            from dunk_recovery_native import read_prompt_session
+            from dunk_recovery import plan_recovery
+            native = read_prompt_session(self.herdr, pane)
+            if not _native_prefix_accounted(screen, native.text):
+                return None
+            binding = [native.pid, native.start, native.snapshot.session_id]
+            if not entry.get("native_binding") and native.pid != (pane.get("pane_pid") or pane.get("pid")):
+                # The durable generation identifies the pane process. If a shell
+                # owns that PID, a child can be replaced without changing it;
+                # only a binding captured during the actual typing closes that gap.
+                return None
+            if entry.get("native_binding") and entry["native_binding"] != binding:
+                return None
+            plan = plan_recovery(
+                attempt={"attempt_id": entry["message_id"], "text": entry["text"],
+                         "state": "typed" if entry["status"] == "typed" else "unconfirmed",
+                         "generation": entry["generation"]},
+                frame={"prompt_text": region, "ambiguous": True, "dialog_open": False},
+                pane={"pane_id": pane_id, "generation": self._pane_generation(pane_id),
+                      "turn_state": "idle"}, native_session_text=native.text)
+            if plan["action"] != "submit_once":
+                return None
+            with self._lock:
+                live = self.stuck_candidates.get(pane_id) or {}
+                if (live.get("message_id"), live.get("created_at")) != (
+                        entry["message_id"], entry.get("created_at")) or not live.get("eligible"):
+                    return None
+                live["native_binding"] = binding
+                live["native_recovery"] = True
+            return {"text": region, "native": native, "entry": entry}
+        except Exception as error:  # unknown evidence is a refusal, never native absence
+            from dunk_native_session import NativeSessionRefusal
+            reason = str(error) if isinstance(error, NativeSessionRefusal) else type(error).__name__
+            with self._lock:
+                live = self.stuck_candidates.get(pane_id) or {}
+                if ((live.get("message_id"), live.get("created_at")) == (
+                        entry.get("message_id"), entry.get("created_at"))
+                        and not live.get("native_refusal")):
+                    live["native_refusal"] = reason
+                    log.warning("%s: recovery not observable: message=%s created_at=%s native=%s",
+                                pane_id, entry.get("message_id"), entry.get("created_at"), reason)
+            return None
+
+    def _reconcile_stuck(self, pane_id, message_id, outcome, detail, created_at=None):
+        """Keep the original failure visible alongside its later recovery receipt."""
+        with self._lock:
+            entry = self.stuck_candidates.get(pane_id) or {}
+            if entry.get("message_id") != message_id:
+                return
+            if created_at is not None and entry.get("created_at") != created_at:
+                return
+            entry["recovery_outcome"] = outcome
+            entry["recovery_detail"] = detail
+            entry["recovered_at"] = time.time()
+            if outcome == "consumed":
+                entry.update(eligible=False, status="consumed")
+            elif outcome == "exhausted":
+                entry.update(eligible=False)
+        saved = self._save()
+        if outcome == "consumed" and saved:
+            self._publish_stuck_receipt(pane_id, entry)
+
+    def _publish_stuck_receipt(self, pane_id, entry):
+        """Idempotent receipt repair, retried after restart without another key."""
+        try:
+            for inbox_id in entry.get("notify_for") or []:
+                self.inbox.record_notify(inbox_id, "sent", "recovered: " + entry["recovery_detail"])
+            with self._lock:
+                live = self.stuck_candidates.get(pane_id) or {}
+                if (live.get("message_id"), live.get("created_at")) == (
+                        entry.get("message_id"), entry.get("created_at")):
+                    live["receipts_reconciled"] = True
+            self._save()
+        except Exception:
+            log.exception("%s: recovered prompt receipt could not be reconciled", pane_id)
 
     def _remember(self, message):
         self._note_stuck_candidate(message)
@@ -5242,8 +5422,23 @@ class Flock:
             self.stuck.forget(pane_id)
             log.info("%s: no pane generation evidence; not recovering anything", pane_id)
             return False
+        native_owned = self._owned_recovery_evidence(pane_id, self.read_screen(pane_id))
+        with self._lock:
+            authority = dict(self.stuck_candidates.get(pane_id) or {})
+        if authority.get("native_recovery") and not native_owned:
+            self.stuck.forget(pane_id)
+            return False  # never downgrade a native-bound attempt to legacy authority
+        budget_id = (f"{identity}@{authority.get('created_at')}"
+                     if authority.get("typed_at") or authority.get("native_recovery") else identity)
+        if native_owned:
+            # Migrating an old candidate to native proof must not refund a key
+            # already spent through the legacy observer for this same intent.
+            fingerprint = dunk_stuck.fingerprint(content or "")
+            old_spent = self.stuck.reserved(pane_id, identity, generation, fingerprint)
+            key = self.stuck.ledger_key(pane_id, budget_id, generation, fingerprint)
+            self.stuck.spent[key] = max(self.stuck.spent.get(key, 0), old_spent)
         observation = dunk_stuck.Observation(
-            pane_id=pane_id, message_id=identity, text=content or "",
+            pane_id=pane_id, message_id=budget_id, text=content or "",
             status=self._stuck_status(pane_id),
             owned=self._stuck_text_is_ours(pane_id, getattr(head, "text", None), content),
             generation=generation, dialog=False,
@@ -5253,7 +5448,12 @@ class Flock:
             # The clock starts when the text was first SEEN stranded, not when this
             # tick happened to run, so a 5 s worker and a 120 s bound still mean 120 s.
             self.stuck.decide(observation, self.stuck_config, now=min(since, now))
-        decision = self.stuck.decide(observation, self.stuck_config, now=now)
+        config = self.stuck_config
+        if native_owned:
+            # PR109 permits one recovery; the legacy actor's larger configured
+            # budget must not silently widen this new authority.
+            config = dataclasses.replace(config, max_attempts=1)
+        decision = self.stuck.decide(observation, config, now=now)
         if first_observation and pane_id in self.stuck.records:
             # THE CLOCK START, ON THE RECORD (t377 follow-up, CoS i31729). A recovery
             # needs an independently observable T0; the reset and key lines are not it,
@@ -5268,6 +5468,9 @@ class Flock:
                      record.get("fingerprint"), float(record.get("first_seen") or 0.0),
                      now, self.stuck_config.threshold_s)
         if decision.action != "recover":
+            if decision.action == "terminal":
+                self._reconcile_stuck(pane_id, identity, "exhausted", decision.reason,
+                                      getattr(head, "created_at", None))
             if decision.action == "reset" and decision.reason not in (
                     "the composer is empty", "no tracked message for this pane"):
                 log.info("%s: stuck recovery reset: %s", pane_id, decision.reason)
@@ -5292,12 +5495,13 @@ class Flock:
             return False
         log.warning("%s: our own text sat unsubmitted for %ds (attempt %d of %d); "
                     "one guarded key: %r", pane_id, int(decision.stale_for),
-                    decision.attempts, self.stuck_config.max_attempts,
+                    decision.attempts, config.max_attempts,
                     (content or "")[:80])
         pressed, detail = self._press_stuck_enter(
             pane_id, expected_fingerprint=dunk_stuck.fingerprint(content or ""),
             generation=generation, message_id=identity, tracked_text=tracked,
-            message=head, require_intent=require_intent)
+            message=head, require_intent=require_intent,
+            expected_created_at=getattr(head, "created_at", None))
         if not pressed:
             log.warning("%s: no key pressed (%s)", pane_id, detail)
             self.metrics.record("stuck.recover", pane_id=pane_id, source="stuck_watchdog",
@@ -5319,16 +5523,19 @@ class Flock:
                             attempts=decision.attempts)
         if outcome == "consumed":
             self.stuck.forget(pane_id)
+            self._reconcile_stuck(pane_id, identity, outcome, why, getattr(head, "created_at", None))
             log.warning("%s: stuck message recovered (attempt %d): %s",
                         pane_id, decision.attempts, why)
         else:
+            self._reconcile_stuck(pane_id, identity, outcome, why, getattr(head, "created_at", None))
             log.warning("%s: stuck attempt %d did not consume the text (%s): %s",
                         pane_id, decision.attempts, outcome, why)
         self._save()
         return outcome == "consumed"
 
     def _press_stuck_enter(self, pane_id, expected_fingerprint, generation, message_id,
-                           tracked_text, message=None, require_intent=False):
+                           tracked_text, message=None, require_intent=False,
+                           expected_created_at=None):
         """Exactly ONE Enter, under the shared locks, re-validated immediately before.
 
         The observation and this press are separated by time; a person can type in
@@ -5354,12 +5561,14 @@ class Flock:
                     live = dict(self.stuck_candidates.get(pane_id) or {})
                 if live.get("message_id") != message_id:
                     return False, "a newer delivery intent superseded this stalled message"
+                if expected_created_at is not None and live.get("created_at") != expected_created_at:
+                    return False, "the durable delivery attempt identity changed"
                 if not live.get("press_enter", True):
                     return False, "the tracked delivery was an explicit no-enter send"
                 if live.get("generation") != self._pane_generation(pane_id):
                     return False, "the pane generation changed since the decision"
                 if (live.get("eligible") is not True
-                        or live.get("status") not in ("failed", "sent")
+                        or live.get("status") not in ("failed", "sent", "typed")
                         or not self._sent_schedule_pending(pane_id, live, screen)):
                     # The authority can be REVOKED between the decision and the press
                     # (CoS i31802 #2): a cancellation or a newer outcome that arrived
@@ -5383,7 +5592,12 @@ class Flock:
             if rows and not any(m.status == "queued" for m in rows):
                 return False, "the message is no longer queued"
             # STATUS at the final boundary, not just when the clock started.
-            status = self._stuck_status(pane_id)
+            native_owned = self._owned_recovery_evidence(pane_id, screen)
+            with self._lock:
+                native_required = (self.stuck_candidates.get(pane_id) or {}).get("native_recovery")
+            if native_required and not native_owned:
+                return False, "the native evidence is no longer valid"
+            status = "ready" if native_owned else self._stuck_status(pane_id)
             if status != "ready":
                 return False, f"the target is {status} at press time"
             if _modal_open(screen):
@@ -5398,11 +5612,18 @@ class Flock:
             matcher = getattr(self, "composer_region_is_owned", None)
             if matcher is not None:
                 try:
-                    if not matcher(pane_id, screen):
+                    if not matcher(pane_id, screen) and not native_owned:
                         return False, "t130's matcher says the composer is not ours"
                 except Exception:               # noqa: BLE001 - fail closed
                     return False, "t130's matcher failed; not pressing"
             try:
+                if native_owned:
+                    entry = native_owned["entry"]
+                    if entry["message_id"] != message_id:
+                        return False, "the native evidence belongs to a different attempt"
+                    if entry.get("scheduled") and not self._scheduled_recovery_current(entry):
+                        return False, "the scheduled instruction is stale or superseded"
+                    native_owned["native"].assert_unchanged()
                 result = self.herdr.send_keys(pane_id, ["Enter"])
             except Exception as error:          # noqa: BLE001 - report, never crash
                 return False, f"the key could not be sent: {error}"
@@ -5469,12 +5690,31 @@ class Flock:
             return False
         if screen is None:
             screen = self.read_screen(pane_id)
+        evidence = self._owned_recovery_evidence(pane_id, screen)
+        if evidence:
+            return self._scheduled_recovery_current(entry)
         boundary, region = _styled_composer_boundary(screen)
         if (boundary != "delimited" or not region
                 or _collapse(region) != _collapse(entry.get("text") or "")):
             return False
         accounted, _unaccounted = self._dim_bodies_accounted(pane_id, screen)
         return accounted and self.composer_region_is_owned(pane_id, screen)
+
+    def _scheduled_recovery_current(self, entry):
+        """Do not replay expired reminders or instructions replaced by an edit.
+
+        Keep the schedule running: this retires only an old attempt. The next
+        timer send still uses the current instruction and normal backpressure.
+        """
+        age = time.time() - float(entry.get("created_at") or 0)
+        deadline = self.stuck_config.threshold_s + 2 * self.stuck_config.observation_interval_s
+        if age < 0 or age > deadline:
+            return False
+        with self._lock:
+            dunker = next((d for d in self.dunkers if d.id == entry.get("source")), None)
+        return bool(dunker and dunker.running
+                    and dunker.target_pane_id == entry.get("pane_id", dunker.target_pane_id)
+                    and entry.get("schedule_template") == dunker.text)
 
     @staticmethod
     def _text_identity(content):
@@ -5512,7 +5752,7 @@ class Flock:
                 screen = self.read_screen(pane_id)
                 if screen is None:
                     return False                 # unreadable is not "ours"
-                if not matcher(pane_id, screen):
+                if not matcher(pane_id, screen) and not self._owned_recovery_evidence(pane_id, screen):
                     return False
             except Exception:                   # noqa: BLE001 - a matcher error fails closed
                 return False
@@ -5538,6 +5778,8 @@ class Flock:
                             and self.composer_region_is_owned(pane_id, screen)):
                         resolved, _reason = classify_delivery(screen, status, typed="")
                         return resolved
+                    if self._owned_recovery_evidence(pane_id, screen):
+                        return "ready"
                 return "unknown"
             return name or "unknown"
         except Exception:                       # noqa: BLE001 - never crash a worker
@@ -5622,6 +5864,14 @@ class Flock:
                 continue
             screen = self.read_screen(pane_id)
             content = self._federated_composer(screen)
+            if content is None:
+                # NOT A FEDERATED FRAME (t514 integration). The legacy loop below
+                # owns this pane: it skips exactly the panes this parser DOES
+                # recognise, so the two observers partition the fleet. Calling
+                # decide() here with empty text would pop the shared per-pane
+                # record every tick and the legacy/native clock (PR112's captured
+                # CoS frame among them) would never reach its threshold.
+                continue
             generation = self._pane_generation(pane_id)
             busy = bool(screen and _status_marker(screen, WORKING_MARKERS,
                         lines=40, placeholder_safe=True, dim_ok=True))
@@ -5733,6 +5983,9 @@ class Flock:
                 if self._federated_composer(self.read_screen(pane_id)) is not None:
                     continue  # the explicit policy has one observer for this pane
                 if not entry.get("eligible"):
+                    if (entry.get("recovery_outcome") == "consumed"
+                            and not entry.get("receipts_reconciled")):
+                        self._publish_stuck_receipt(pane_id, entry)
                     continue                            # a tombstone: newer intent wins
                 current_generation = self._pane_generation(pane_id)
                 saved_generation = entry.get("generation")
@@ -6044,9 +6297,11 @@ class Flock:
         attempt = self._new_message(dunker.target_pane_id, dunker.target_label(),
                                     text, dunker.id, lambda: (False, "record only"))
         attempt.scheduled = True
+        attempt.schedule_template = dunker.text
         attempt.attempt_generation = self._pane_generation(dunker.target_pane_id)
         try:
-            ok, message = self.submit_text(dunker.target_pane_id, text)
+            with self._attempt_context(attempt):
+                ok, message = self.submit_text(dunker.target_pane_id, text)
         except Exception as error:
             ok, message = False, str(error)
         attempt.status = "sent" if ok else "failed"
@@ -6668,6 +6923,9 @@ class Flock:
         owned, region = self._composer_ownership(pane_id, screen)
         if owned:
             return region
+        evidence = self._owned_recovery_evidence(pane_id, screen)
+        if evidence:
+            return evidence["text"]
         _text, detail = box_text(screen)
         if detail.startswith(AMBIGUOUS_COMPOSER):
             return None
@@ -6744,10 +7002,20 @@ class Flock:
                                   lines=CONSUMPTION_READ_LINES,
                                   placeholder_safe=True, dim_ok=True)
                 or "tab to queue message" in _strip_ansi(before_paste).lower()))
+            # t508 (PR112): bind the durable attempt's generation BEFORE typing, in
+            # the same mutex hold as the PR113 busy-hint capture above. Both are
+            # pre-typing observations; neither may read the aftermath of the send.
+            attempt = getattr(self._attempt_ctx, "message", None)
+            if attempt is not None and attempt.attempt_generation is None:
+                # A transient metadata miss before waiting for the guard can
+                # recover here, still BEFORE typing; never adopt the aftermath.
+                attempt.attempt_generation = self._pane_generation(pane_id)
             ok, detail = self.herdr.send_text(pane_id, text)
             if not ok:
                 return False, detail
             self._remember_typed(pane_id, text)
+            if not self._persist_typed_attempt(pane_id, text, press_enter):
+                return False, "typed but not submitted: durable attempt receipt failed"
             if not press_enter:
                 return True, "sent"
             ok, detail, _key = self._send_submit_key(pane_id, busy_hint=busy_hint)
@@ -8036,6 +8304,62 @@ def _styled_composer_boundary(screen):
         if text:
             parts.append(text)
     return "delimited", " ".join(parts)
+
+
+def _trailing_prompt_region(screen):
+    """Complete trailing region for the native-bound recovery path only.
+
+    The ordinary parser still refuses multiple sigils. Here earlier rows must
+    additionally be accounted by the exact native transcript before any use.
+    """
+    rows = (screen or "").splitlines()
+    nonblank = [i for i, row in enumerate(rows) if _strip_ansi(row).strip()]
+    if not nonblank:
+        return ""
+    end = _native_footer_start(rows, nonblank)
+    if end is None:
+        end = nonblank[-1]
+        if " · " not in _strip_ansi(rows[end]) or _prompt_body(rows[end]) is not None:
+            return ""
+    sigils = [i for i in range(end) if _prompt_body(rows[i]) is not None
+              and not _native_banner(rows[i])]
+    if not sigils:
+        return ""
+    return " ".join([_prompt_body(rows[sigils[-1]]) or ""] +
+                    [_strip_ansi(row).strip() for row in rows[sigils[-1] + 1:end]])
+
+
+def _native_prefix_accounted(screen, native_text):
+    """An earlier prompt or human continuation cannot disappear at extraction."""
+    rows = (screen or "").splitlines()
+    sigils = [i for i, row in enumerate(rows) if _prompt_body(row) is not None
+              and not _native_banner(row)]
+    if not sigils:
+        return False
+    transcript = dunk_stuck.collapse(native_text)
+    cursor = 0
+    worked_rows = 0
+    for row in rows[:sigils[-1]]:
+        text = _strip_ansi(row).strip()
+        if not text:
+            continue
+        if re.fullmatch(r"Worked for (?:\d+[hms] ?)+ • \d{1,2}:\d{2} [AP]M", text):
+            worked_rows += 1
+            if worked_rows > 1:
+                return False
+            continue
+        if _prompt_body(row) is not None:
+            text = (_prompt_body(row) or "").removesuffix("…").strip()
+        elif text.startswith("• "):
+            text = text[2:]
+        if not text:
+            return False
+        text = dunk_stuck.collapse(text)
+        position = transcript.find(text, cursor)
+        if position < 0:
+            return False
+        cursor = position + len(text)
+    return True
 
 
 def _composer_region_text(screen):

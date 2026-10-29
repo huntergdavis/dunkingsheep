@@ -46,6 +46,7 @@ one line. That was proven by adding one.
 | `kill_decision` | a real TERM of a process we started, and a protected pid refused | `test_a_real_kill_of_a_process_we_started` | tested |
 | `write_heartbeat` | the watchdog itself being dead, detected without it | `test_the_deadman_has_exactly_one_recipient` | tested |
 | `rule_resource_would_kill` | a lane tripping a policy while doing asked-for work | `test_a_would_kill_names_the_lane_and_the_task_it_was_doing` | tested |
+| `plan_recovery` | our own typed prompt stranded in an ambiguous Codex frame, absent from the native session | `test_a_positive_plan_names_its_attempt_and_generation` | tested |
 
 ## Why each of these is the only case
 
