@@ -1264,6 +1264,20 @@ def print_task_metrics(result):
     if assignees:
         print("open by assignee: "
               + ", ".join(f"{row['assignee']}={row['count']}" for row in assignees))
+    leader_held = current.get("leader_held")
+    if leader_held is None:
+        # An older daemon payload without the field: the number is unknown,
+        # which must not be confused with a measured zero.
+        print("leader-held tasks: unavailable (payload predates the metric)")
+    elif isinstance(leader_held, dict) and isinstance(leader_held.get("count"), int):
+        age = leader_held.get("oldest_age_s")
+        if leader_held["count"] == 0:
+            print("leader-held tasks: 0")
+        else:
+            age_text = (f" (oldest {age / 86400:.1f}d)" if age is not None and age >= 86400
+                        else f" (oldest {age / 3600:.1f}h)" if age is not None
+                        else " (oldest unknown)")
+            print(f"leader-held tasks: {leader_held['count']}{age_text}")
 
 
 def print_inbox_read(r):
