@@ -3,8 +3,9 @@
 Measured on the deployed revision 895c05a (31 lanes, 60 panes): `_proc_children`
 was called 62 times per capture - twice per lane - because `session_of()` and the
 env lookup both accept a prebuilt pid->children map and neither was given one. In
-sampled in-process runs that scan was the largest single cost (5.3s of 8.0s on one
-sample, 4.2s of 6.2s on another).
+sampled in-process runs that scan was the largest single cost (5.30s of an 8.0s
+capture on one sample, 4.55s of a 6.21s capture on another - separate runs, not a
+range).
 
 Scope of that evidence, stated because reviewer t500 was right to draw it: these
 are in-process samples with a fresh Flock and a temporary store. They establish
@@ -100,9 +101,10 @@ class OneProcWalkPerCapture(unittest.TestCase):
     def test_a_pane_without_a_pid_still_costs_exactly_one_walk(self):
         """The map is built eagerly, so a capture with no pid still scans once.
 
-        That is a deliberate tradeoff (reviewer t500): one scan for the whole
-        capture is cheaper than a per-lane decision about whether to scan, and
-        it keeps the map identity shared by both consumers.
+        That is a deliberate tradeoff (reviewer t500): one scan keeps the map
+        identity shared by both consumers, at the cost of a scan even when no
+        lane has a pid. It is not an empirical claim that this beats every lazy
+        implementation - only that it is the tradeoff this fix chose.
         """
         lanes = [lane("%8", None)]
         walks, result = self._capture_counting_proc_walks(lanes)

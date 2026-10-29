@@ -389,9 +389,9 @@ def capture(flock, *, source="periodic", now=None, store=None):
     # session_of() and the env lookup below both accept a prebuilt
     # pid -> children map, but neither was given one, so every lane rebuilt the
     # whole map twice: 62 full /proc scans for 31 lanes. In sampled in-process
-    # runs the scan was the largest single cost (5.3s of a 8.0s capture on one
-    # sample; 4.2s of 6.2s on another), which is why this is the first thing to
-    # remove.
+    # runs the scan was the largest single cost (5.30s of an 8.0s capture on one
+    # sample; 4.55s of a 6.21s capture on another), which is why this is the
+    # first thing to remove. Those two numbers are separate runs, not a range.
     #
     # What the samples do NOT establish: that this was the sole cause of the
     # observed "no answer after 15s" failure, or that no daemon-wide lock was
