@@ -53,6 +53,9 @@ Not a job any more: managing managers. There is no "ask the VP", no relay.
 Top bar, one line: wordmark, four tabs, theme picker, the message dock button
 (Ctrl+/). No eyebrow/subtitle band under it (owner #1803, #1808). The old
 `/dash/cos` and `/dash/vp` redirect to `/dash/desk` for a month, then 404.
+The live ttyd terminal (today `vp-terminal-webui`) stays as the "open full
+terminal" link on the Terminals view; its session check moves into the web
+process.
 
 ## 4. Views
 
@@ -140,8 +143,9 @@ character editor. The "Direct line to the VP" box becomes the message dock
   working accent, dead red).
 - **Message bubble**: owner / desk / report (reports are a distinct style so a
   machine-made digest is never mistaken for the desk agent's words).
-- Tokens live in `ui/src/themes/<name>.json` as today; the structural CSS in
-  `dash.css` references only tokens. The contrast gate runs in CI for every
+- Tokens live in `ui/src/themes/<name>.json`; today each theme also ships a
+  `<name>.css`, so "structural CSS references only tokens" is new work: the
+  per-theme CSS files are folded into token sets and deleted. The contrast gate runs in CI for every
   theme on every PR that touches `ui/`.
 
 ## 6. Data contract (web -> daemon, socket only)
@@ -158,7 +162,11 @@ character editor. The "Direct line to the VP" box becomes the message dock
 | Budget | `usage project` | 60 s |
 | Reports | `report list --limit 5` | 60 s |
 | Terminal screen | `pane read` | 3 s |
-| Send | `send` (owner role) | - |
+| Send | `send` (web role, as the owner) | - |
+| Decision answer | `task unblock --note` (web role) | - |
+
+The web process binds role `web` with its service token (FLAT_FLEET 4.3); it
+is the owner's transport, so these calls are the owner's.
 
 Where a command does not exist yet, it is added to the daemon (`FLAT_FLEET.md`
 section 9.2, rule 1). The web process holds no state but sessions and the
@@ -167,7 +175,8 @@ viewport report.
 ## 7. Acceptance
 
 - At 390 px and 1440 px, every view's first viewport answers its one question
-  with no horizontal scroll (capture pair, as `capture_dashboard_pair.py` does).
+  with no horizontal scroll (the 390/1440 capture pair from
+  `tools/capture_served.py`, kept in `ui/tools/`).
 - Decisions I need renders above everything on Desk and Operations.
 - Every number on Operations has a source and timestamp in its tooltip.
 - Owner message -> desk reply shows the three receipt states from daemon data.
