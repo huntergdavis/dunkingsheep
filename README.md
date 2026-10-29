@@ -337,3 +337,25 @@ Python 3.8+ and herdr 0.7.4+ with a running server (`herdr` on `PATH` or at
   <img src="dunkingsheep.png" alt="A sheep slam-dunking a keyboard through a basketball hoop" width="70%"><br>
   <sub><em>required AI slop</em></sub>
 </p>
+
+### Federated native input recovery
+
+`DUNKINGSHEEP_FEDERATED_INPUT=1` enables the owner-authorized policy that all
+terminal composer input arrives through Dunking Sheep. Status exposes the active
+policy. In this mode a recognized native Codex composer is preserved and submitted
+before the next message, including scrolled input; its visible suffix is not
+misrepresented as proof of full-text equality. Explicit `preserve_draft` callers
+retain draft protection. Without the flag the existing strict ownership rules apply.
+
+The deterministic observer uses the recorded pane process generation and latest
+submit intent, a stable visible-composer fingerprint, and the persisted recovery
+attempt budget. It presses a submit key without replaying text. Dialogs, changed
+processes, cancellation and no-enter intents prevent recovery. Normal queued
+delivery and the observer do not recover the same pane concurrently.
+
+Busy Codex submission uses native Tab queueing with bounded retries; Claude and pi
+use Enter. Prolonged dialogs are scanned independently every 30 seconds and alert
+the owner through the CoS web brief channel and the VP through inbox. They are
+never answered automatically. Notification failures retry; successful identical
+alerts have a 30-minute cooldown. The VP handles only decisions within existing
+authority.
