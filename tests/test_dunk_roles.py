@@ -101,6 +101,14 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(self.roles.may_review("w3:p1"))
         self.assertTrue(self.roles.may_review("w3:p2"))
 
+    def test_may_review_trusts_the_resolved_role_of_a_pid_bound_pane(self):
+        # Regression 2026-10-29: a reviewer registered with its root pid was
+        # re-resolved WITHOUT the live pane record inside may_review and fell
+        # to the default role, so every verdict was refused.
+        self.roles.register("w3:p3", "reviewer", provider="claude", pane_pid=4321)
+        self.assertFalse(self.roles.may_review("w3:p3"))            # no live record here
+        self.assertTrue(self.roles.may_review("w3:p3", role="reviewer"))
+
     def test_allowlist_shape(self):
         self.assertTrue(dunk_roles.allowed("owner", "shutdown"))
         self.assertFalse(dunk_roles.allowed("web", "shutdown"))

@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.71.0"
+VERSION = "2.71.1"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2479,7 +2479,7 @@ class Flock:
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         if task.get("kind") == "review":
             role = self.caller_role(self_pane_id)
-            if role == "reviewer" and not self.roles.may_review(self_pane_id):
+            if role == "reviewer" and not self.roles.may_review(self_pane_id, role=role):
                 raise DunkError(f"{self_pane_id} may not review (provider not on the "
                                 "reviewer list)")
             if role not in ("reviewer", "owner"):
@@ -3028,8 +3028,8 @@ class Flock:
         that hold a lease.
         """
         caller = self.current_caller()
-        if self_pane_id and self.caller_role(self_pane_id) == "reviewer" \
-                and not self.roles.may_review(self_pane_id):
+        role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+        if role == "reviewer" and not self.roles.may_review(self_pane_id, role=role):
             raise DunkError(
                 f"{self_pane_id} is a reviewer lane on a provider that may not review "
                 f"({self.roles.provider_of(self_pane_id) or 'unknown'}; allowed: "
