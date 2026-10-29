@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.94"
+VERSION = "2.70.95"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -133,7 +133,7 @@ from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
 from dunk_terminal import get_backend
-from dunk_callers import process_alive
+from dunk_callers import DEAD_STATES, process_alive, process_start
 import dunk_activity
 from dunk_claude import ClaudeStatus
 
@@ -3569,8 +3569,18 @@ class Flock:
         # and had actually died with 'opencode: not found' (rc=127) because the pane's PATH
         # lacked /snap/bin. "The pane exists" is not "the agent runs": read what the pane says
         # before reporting success, and refuse with the captured line if it says the command
-        # never started.
-        self._verify_agent_started(name, agent.get("pane_id"))
+        # never started. Where the platform names processes the pane's process table is
+        # watched too (criterion (a)): kernel comm/state/start evidence, observed across the
+        # whole window and revalidated at the deadline - never an early return on first
+        # sight (t215 REVISE P1). A match returns the confirmed child pid in the report.
+        #
+        # Deliberately NOT resolving argv[0] via the caller's PATH (shutil.which): the pane
+        # inherits the tmux server's environment, not the caller's, so caller-side resolution
+        # can pin the wrong binary or refuse a launch the pane would have run. The launched
+        # argv stays exactly as typed (and recorded); a missing binary is refused by the
+        # screen/process checks below instead.
+        kind = os.path.basename(argv[0])
+        child_pid = self._verify_agent_started(name, agent.get("pane_id"), kind)
         session = agent.get("agent_session") or {}
         self._record_launch(
             agent.get("pane_id"), agent=name, argv=list(argv),
@@ -3581,7 +3591,7 @@ class Flock:
             self.last_message = f"Started agent {name}"
         log.info("started agent %s -> %s: %s", name, agent.get("pane_id"), argv)
         return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
-                "argv": result.get("argv") or argv}
+                "argv": result.get("argv") or argv, "child_pid": child_pid}
 
     def respawn_pane(self, pane_id, argv, rollback_argv=None, expected_pid=None,
                      expected_start=None, confirm_idle=False, reason=None,
@@ -3873,29 +3883,53 @@ class Flock:
                 found.append(pid)
         return found
 
-    def _verify_agent_started(self, name, pane_id):
+    def _verify_agent_started(self, name, pane_id, kind=None):
         """Refuse to report 'started' for a pane whose command never ran.
 
-        Fail closed: if the pane's first lines name a missing command, or the pane is already
-        gone, raise with that line as the evidence. A start line that reports success for a dead
-        agent is worse than a refusal, because nobody looks again.
+        Fail closed: if the pane's first lines name a missing command, the pane exits at
+        once, the pane is already gone, or - where `kind` is given and the platform names
+        processes - no `kind` process with kernel evidence survives the observation window,
+        raise with that evidence. A start line that reports success for a dead agent is worse
+        than a refusal, because nobody looks again.
+
+        Where processes are watched the whole window is observed and the evidence is
+        revalidated at the deadline: a pid seen on the first frame is observation, not proof
+        (t215 REVISE P1 - a blank first frame with a live pid followed by an rc=127 exit line
+        is a refusal, not a start). Returns the confirmed agent pid, or None on the
+        screen-only path.
+
+        Returns None without watching processes when `kind` is None (the respawn path does
+        its own _agent_evidence separately) or when no process table is available.
 
         KNOWN LIMITS, named rather than implied:
-        - a bare shell prompt that simply sits idle looks like a working agent's idle UI and
+        - where no process table is available (non-Linux) or the pane reports no pid,
+          verification is screen-only and a bare shell prompt that simply sits idle still
           passes; nothing on the screen distinguishes "agent at rest" from "shell at rest".
         - a refusal leaves the pane up (pane-safety: this code never closes a pane). The refusal
           names its id so a superuser can close it.
         """
         if not pane_id:
             raise DunkError(f"agent {name!r} was launched without a pane id")
+        # The process check needs an adapter that lists the pane's processes; doubles that
+        # predate it stay on the screen-only path.
+        watch_procs = kind is not None and hasattr(self.herdr, "agent_child_pids")
         deadline = time.time() + self.AGENT_VERIFY_S
         captured = ""
+        pane_pid = None
+        since_start = None
+        seen = []
         while time.time() < deadline:
             pane = self.herdr.get_pane(pane_id)
             if pane is None:
                 raise DunkError(
                     f"agent {name!r} did not stay up: pane {pane_id} is already gone"
                     + (f"; captured: {captured.strip()[:200]!r}" if captured.strip() else ""))
+            if pane_pid is None:
+                pane_pid = (pane or {}).get("pane_pid")
+                if pane_pid is not None:
+                    # Generation binding: a leftover pid from an earlier generation must
+                    # not count. Unreadable (a fixture pid, a race) skips the clause.
+                    since_start = process_start(pane_pid)
             captured = self.herdr.read_pane(pane_id, lines=20) or ""
             lowered = captured.lower()
             for marker in self.AGENT_FAILURE_MARKERS:
@@ -3907,12 +3941,80 @@ class Flock:
                         "The pane is up but the command never ran - check the PATH the pane "
                         "inherits.")
             # An agent that is drawing its own UI has started; a bare shell that has printed
-            # nothing yet is neither. Keep waiting for the rest of the window.
+            # nothing yet is neither. Keep waiting for the rest of the window: a process
+            # sighting below is recorded, never returned early.
             if "[agent exited rc=" in lowered:
                 line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
                 raise DunkError(
                     f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
+            if watch_procs:
+                entries = (self.herdr.agent_child_pids(pane_pid)
+                           if pane_pid is not None else None)
+                if entries is None:
+                    # No table on this platform (or no pid on the pane): screen-only
+                    # from here on, with the idle-shell limit above.
+                    watch_procs = False
+                else:
+                    # Latched, never returned early: a sighting is observation.
+                    matched = self._match_agent_process(entries, kind, since_start)
+                    if matched:
+                        seen = matched
             time.sleep(0.1)
+        if not watch_procs:
+            return None
+        # P1: revalidate at the deadline. A transient first-frame pid - seen, then gone -
+        # is evidence of a failed start, not a completed one.
+        entries = (self.herdr.agent_child_pids(pane_pid)
+                   if pane_pid is not None else None)
+        confirmed = (self._match_agent_process(entries, kind, since_start)
+                     if entries is not None else [])
+        if confirmed:
+            return confirmed[0]
+        if seen:
+            raise DunkError(
+                f"agent {name!r} started to appear in pane {pane_id} (pid {seen[0]}) but "
+                "the process is gone at the end of the observation window - the command "
+                "did not stay up."
+                + (f" Captured: {captured.strip()[:200]!r}" if captured.strip() else ""))
+        raise DunkError(
+            f"agent {name!r} never became a process in pane {pane_id}: no {kind!r} "
+            f"process under pid {pane_pid}. The pane is up but the command never ran - "
+            "check the PATH the pane inherits."
+            + (f" Captured: {captured.strip()[:200]!r}" if captured.strip() else ""))
+
+    @staticmethod
+    def _match_agent_process(entries, kind, since_start=None):
+        """Pids with kernel evidence of running `kind`.
+
+        t215 REVISE (reviewer P2): an argv basename is not identity - /bin/sleep launched
+        with argv0=claude must not match. Rules shared with the accepted t398
+        _agent_evidence: the kernel `comm` (executable name) must name the agent; the state
+        must be neither dead (DEAD_STATES) nor stopped/traced (T/t); when both start times
+        are known the process must be no older than the pane (a leftover pid from an earlier
+        generation is not evidence). Measured live: pi sets its process title (comm=pi with
+        exe=node), codex runs as comm=codex - comm matching holds for the real fleet.
+        """
+        want = str(kind or "").lower()
+        if not want:
+            return []
+        found = []
+        for ent in entries or []:
+            ent = ent or {}
+            if os.path.basename(str(ent.get("comm") or "")).lower() != want:
+                continue
+            state = str(ent.get("state") or "")
+            if state in DEAD_STATES or state in ("T", "t"):
+                continue
+            if since_start is not None and ent.get("start") is not None:
+                try:
+                    if int(ent["start"]) < int(since_start):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            pid = ent.get("pid")
+            if pid is not None:
+                found.append(pid)
+        return found
 
     # -- post-upgrade recovery ------------------------------------------------
 

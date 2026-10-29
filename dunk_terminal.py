@@ -393,6 +393,16 @@ class TmuxBackend(TerminalBackend):
                 return pane
         return None
 
+    def agent_child_pids(self, pane_pid):
+        """Kernel process entries for the agent behind `pane_pid` (t215).
+
+        The same shared observer HerdrClient uses (dunk_callers.pane_agent_pids):
+        tmux reports pane_pid for every pane, so startup verification checks
+        processes on the default backend instead of silently falling back to
+        screen-only. None where the platform offers no process table."""
+        from dunk_callers import pane_agent_pids
+        return pane_agent_pids(pane_pid)
+
     def list_tabs(self):
         code, out, err = self._tmux("list-windows", "-a", "-F", self.TAB_FORMAT)
         if code != 0:
