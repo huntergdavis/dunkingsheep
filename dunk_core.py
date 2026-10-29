@@ -434,6 +434,12 @@ class DunkError(ValueError):
     """A caller mistake (bad id, bad interval, ambiguous target). Safe to show."""
 
 
+class RetryableDunkError(DunkError):
+    """Safe to show, and the caller may retry the request (busy store, not refusal)."""
+
+    retryable = True
+
+
 class AmbiguousTarget(DunkError):
     """A target matched more than one pane. Distinct from "no such pane",
     because a mailbox may be a name with no pane behind it, but it must never
@@ -3925,11 +3931,15 @@ class Flock:
         argv_is_codex = any(os.path.basename(str(part)).lower() == "codex"
                             for part in argv)
         if pane_agent == "codex" or argv_is_codex:
-            from dunk_native_session import (NativeSessionRefusal,
+            from dunk_native_session import (NativeSessionBusy,
+                                             NativeSessionRefusal,
                                              check_native_session_quiescence)
             try:
                 native_snapshot = check_native_session_quiescence(
                     argv, pane.get("cwd"))
+            except NativeSessionBusy as error:
+                raise RetryableDunkError(
+                    f"respawn-pane refused: {error}") from None
             except NativeSessionRefusal as error:
                 raise DunkError(f"respawn-pane refused: {error}") from None
 
@@ -4001,6 +4011,9 @@ class Flock:
             # precondition, not atomic coordination with the native session.
             try:
                 native_snapshot.assert_unchanged()
+            except NativeSessionBusy as error:
+                raise RetryableDunkError(
+                    f"respawn-pane refused: {error}") from None
             except NativeSessionRefusal as error:
                 raise DunkError(f"respawn-pane refused: {error}") from None
 

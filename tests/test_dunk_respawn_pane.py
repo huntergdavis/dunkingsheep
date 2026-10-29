@@ -355,3 +355,72 @@ class TmuxRespawnGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NativeBusySocketBoundaryTests(unittest.TestCase):
+    """t142: a busy native state DB must serialize as retryable, never raw text.
+
+    Consumer boundary: reader -> Flock.respawn_pane -> API dispatch ->
+    FlockServer.handle_line. Private fixture only; the backend is a Mock
+    that must never be called (busy refuses before any mutation).
+    """
+    def setUp(self):
+        from unittest.mock import Mock
+        self.herdr = FakeHerdr()
+        self.pane_id = "w2:p1"
+        self.pane = next(p for p in self.herdr.panes
+                         if p["pane_id"] == self.pane_id)
+        self.pane["agent"] = "codex"
+        self.pane["pane_pid"] = os.getpid()
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.flock.require_superuser = lambda *_a, **_k: None
+        self.flock.delivery_state = lambda _pane: {
+            "state": "ready", "reason": None, "foreign_text": False}
+        self.flock.inbox_count = lambda *_a, **_k: {"unread": 0}
+        self.flock.tasks.leases_for_pane = lambda _pane: []
+        self.flock.turns = {}
+        self.flock.outbox = {}
+        self.backend = Mock(name="herdr.respawn_pane")
+        self.herdr.respawn_pane = self.backend
+        self.codex_tmp = tempfile.TemporaryDirectory(
+            prefix="t142-native-boundary-")
+        self.addCleanup(self.codex_tmp.cleanup)
+        self.codex_home = os.path.join(self.codex_tmp.name, "codex-home")
+        os.makedirs(self.codex_home)
+        db_path = os.path.join(self.codex_home, "state_5.sqlite")
+        setup = sqlite3.connect(db_path)
+        setup.execute("create table threads "
+                      "(id text primary key, rollout_path text, cwd text)")
+        setup.execute("insert into threads values (?,?,?)",
+                      ("session-old", os.path.join(self.codex_home, "rollout.jsonl"),
+                       "/tmp"))
+        setup.commit()
+        setup.close()
+        self.writer = sqlite3.connect(db_path, timeout=30)
+        self.writer.execute("BEGIN EXCLUSIVE")
+        self.writer.execute("UPDATE threads SET cwd='/tmp' "
+                            "WHERE id='session-old'")
+        self.addCleanup(self.writer.close)
+        self.addCleanup(self.writer.rollback)
+        self.addCleanup(self.flock.close)
+        self.start = process_start(os.getpid())
+        self.argv = ["codex", f"CODEX_HOME={self.codex_home}",
+                     "resume", "session-old"]
+
+    def test_busy_native_db_replies_retryable_without_raw_lock_text(self):
+        from dunk_server import FlockServer
+        server = object.__new__(FlockServer)
+        server.flock = self.flock
+        line = json.dumps({"id": 7, "cmd": "respawn_pane", "args": {
+            "pane": self.pane_id, "expected_pid": os.getpid(),
+            "expected_start": self.start, "argv": self.argv,
+            "rollback_argv": self.argv, "confirm_idle": True}})
+        reply, stop = server.handle_line(line)
+        self.assertFalse(stop)
+        self.assertFalse(reply["ok"])
+        self.assertTrue(reply.get("retryable"),
+                        f"busy must serialize retryable: {reply}")
+        self.assertNotIn("database is locked", reply["error"])
+        self.assertIn("retry the request", reply["error"])
+        self.assertEqual([], self.backend.call_args_list,
+                         "busy refuses before any backend mutation")
