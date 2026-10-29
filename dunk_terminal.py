@@ -658,6 +658,12 @@ class TmuxBackend(TerminalBackend):
             if str(process_start(current_pid)) != str(expected_start):
                 return False, (f"refusing: pane {pane_id} process changed between check "
                                "and mutation")
+        # RESIDUAL LIMIT, deliberately next to the re-check: tmux has no atomic
+        # compare-and-kill.  This read closes the window up to the last read; a
+        # pane replacement after it and before the respawn is still possible.
+        # Do not treat the check as atomic or delete it as redundant - closing
+        # that window would require a backend primitive that compares the pid
+        # and replaces the process in one operation.
         code, out, err = self._tmux("respawn-pane", "-k", "-t", pane_id, command)
         if code != 0:
             return False, (err.strip() or out.strip() or "tmux respawn-pane failed")
