@@ -91,7 +91,8 @@ TASK_SCOPE_ADD_PARAM = {
 TASK_SCOPE_NEXT_PARAM = {
     "type": "string",
     "description": "'global' (default), 'self' (own pane queue), 'auto' (pane "
-                   "then global), or a pane id.",
+                   "then global), 'mine' (only tasks naming you as assignee, global "
+                   "or own pane), or a pane id.",
 }
 TASK_TITLE_PARAM = {"type": "string", "description": "Short task title."}
 TASK_BODY_PARAM = {
@@ -1929,7 +1930,11 @@ COMMANDS = [
         "ATOMIC CLAIM: take the highest-priority unblocked task the caller may "
         "work on, assign it to the caller and set it in_progress in one SQLite "
         "transaction. scope=global (default), self (own pane), auto (pane then "
-        "global), or a pane id. Returns {task, lease_seconds, expires_at}; when "
+        "global), mine (only tasks naming the caller as assignee, global or own "
+        "pane), or a pane id. Scope selects the queue, never the owner: a pane "
+        "id as the positional reads that pane's private queue and cannot take "
+        "another lane's assigned global work; use scope=mine for own assigned "
+        "work. Returns {task, lease_seconds, expires_at}; when "
         "the queue is empty the caller is auto-subscribed for a push. A pane "
         "already holding in-progress work is refused "
         "({task:null, refused:{reason:'busy',task_ids:[...]}}) unless "

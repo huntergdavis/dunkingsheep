@@ -979,7 +979,19 @@ class Tasks:
         refusal returns ``refused`` with a reason and is logged, so "nothing to
         do" and "you were refused" never look alike.
         """
-        target = validate_scope(scope)
+        mine_only = str(scope or "").strip() == "mine"
+        if mine_only:
+            # t425: explicit own-assigned-work selection. Scope picks the
+            # queue; ownership (assignees) is a separate axis, so a pane id
+            # as the positional is never reinterpreted as "my work" here.
+            # "mine" claims only tasks that name this pane in assignees,
+            # from the global queue and the pane's own queue. Unowned leader
+            # backlog and other lanes' tasks are never candidates.
+            if not pane_id:
+                raise TaskError("scope 'mine' requires a known caller pane")
+            target = "mine"
+        else:
+            target = validate_scope(scope)
         if not pane_id:
             raise TaskError("claiming a task requires a caller pane id")
         lease_s = float(lease_seconds or DEFAULT_LEASE_S)
@@ -995,12 +1007,22 @@ class Tasks:
                 self.db.commit()
             self.db.execute("BEGIN IMMEDIATE")
             try:
-                rows = self.db.execute(
-                    "SELECT * FROM tasks WHERE scope = ? AND "
-                    "status IN ('open', 'in_progress') ORDER BY created_at, id",
-                    (target,),
-                ).fetchall()
-                candidates = [self._decorate(row) for row in rows]
+                if mine_only:
+                    rows = self.db.execute(
+                        "SELECT * FROM tasks WHERE scope IN (?, ?) AND "
+                        "status IN ('open', 'in_progress') "
+                        "ORDER BY created_at, id",
+                        (GLOBAL, pane_id),
+                    ).fetchall()
+                    candidates = [self._decorate(row) for row in rows
+                                  if pane_id in _decode(row["assignees"])]
+                else:
+                    rows = self.db.execute(
+                        "SELECT * FROM tasks WHERE scope = ? AND "
+                        "status IN ('open', 'in_progress') ORDER BY created_at, id",
+                        (target,),
+                    ).fetchall()
+                    candidates = [self._decorate(row) for row in rows]
                 candidates.sort(key=self._order_key)
 
                 now = _now()
