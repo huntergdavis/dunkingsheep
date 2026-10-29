@@ -1,0 +1,213 @@
+--- a/dunkingsheep.ts
++++ b/dunkingsheep.ts
+@@ -85,6 +85,10 @@
+ 		interval: number | null;
+ 		running: boolean;
+ 	}[];
++	stale?: boolean;
++	stale_reason?: string;
++	last_good_at?: number;
++	source?: string;
+ }
+ 
+ /**
+@@ -127,7 +131,6 @@
+ 	let pending: Promise<string | undefined> | undefined;
+ 	let injected = false;
+ 	let timer: ReturnType<typeof setInterval> | undefined;
+-	let inFlight = false;
+ 
+ 	async function run(args: string[], cwd: string): Promise<any | undefined> {
+ 		try {
+@@ -168,43 +171,146 @@
+ 		};
+ 	}
+ 
+-	async function poll(
+-		cwd: string,
+-		withPanes = false,
+-	): Promise<{ snapshot?: DunkSnapshot; panes?: any } | undefined> {
+-		if (inFlight) return undefined;
+-		inFlight = true;
+-		try {
+-			// One tiny stdlib client -> one daemon batch. The old path started
+-			// the full CLI three times per poll, which was the CPU the owner
+-			// flagged. The CLI remains only as a fallback before dunk-poll is
+-			// installed.
++	// --- t399 poll-backoff:start ---
++	// One poller per extension instance. The helper (dunk-poll) is the hot path;
++	// the full CLI is used ONLY when the helper is demonstrably missing. A
++	// timeout, EAGAIN, refused socket or unavailable daemon backs off instead of
++	// fanning out three more CLI processes per pi lane (the t399 overload).
++	function makePoller({ exec, pollBin, runCli, buildSnapshot, emit, now, baseMs, maxMs }) {
++		let inFlight = false;
++		let backoffMs = 0;
++		let nextAttemptAt = 0;
++		let lastGoodAt = 0;
++		let lastSnapshot;
++		let lastReason;
++		const maxBackoff = maxMs || 5 * 60_000;
++		const baseBackoff = baseMs || 20_000;
++
++		function missing(result, error) {
++			const text = `${error?.message ?? ""} ${result?.stderr ?? ""}`;
++			return result?.code === 127 || /ENOENT|not found|no such file/i.test(text);
++		}
++
++		function transient(result, error) {
++			const text = `${error?.message ?? ""} ${result?.stderr ?? ""}`;
++			return result?.code === 124 || /timeout|timed out|ETIMEDOUT|EAGAIN|ECONNREFUSED|temporarily unavailable|daemon unavailable/i.test(text);
++		}
++
++		function stale(reason) {
++			if (!lastSnapshot) return undefined;
++			return {
++				...lastSnapshot,
++				stale: true,
++				stale_reason: reason,
++				last_good_at: lastGoodAt,
++			};
++		}
++
++		function fail(reason) {
++			lastReason = reason;
++			backoffMs = backoffMs ? Math.min(maxBackoff, backoffMs * 2) : baseBackoff;
++			nextAttemptAt = now() + backoffMs;
++			const snapshot = stale(reason);
++			if (snapshot) emit(snapshot);
++			return snapshot ? { snapshot } : undefined;
++		}
++
++		async function fallback(cwd, withPanes) {
++			// Compatibility only: the helper is provably absent. This is the old
++			// three-CLI shape, bounded by the same inFlight/backoff gate.
++			try {
++				const [status, count, list] = await Promise.all([
++					runCli(["status"], cwd),
++					runCli(["inbox", "count"], cwd),
++					runCli(["list"], cwd),
++				]);
++				const snapshot = buildSnapshot(status, count, list);
++				if (!snapshot) return fail("CLI fallback returned no snapshot");
++				lastSnapshot = { ...snapshot, source: "cli-fallback" };
++				lastGoodAt = now();
++				// A permanently missing helper must not turn into three CLI
++				// processes every interval: keep backing off, but still show
++				// the last CLI snapshot (not a fake healthy one).
++				lastReason = "helper missing; CLI fallback";
++				backoffMs = backoffMs ? Math.min(maxBackoff, backoffMs * 2) : baseBackoff;
++				nextAttemptAt = now() + backoffMs;
++				emit(lastSnapshot);
++				const panes = withPanes ? await runCli(["panes"], cwd) : undefined;
++				return { snapshot: lastSnapshot, panes };
++			} catch (error) {
++				return fail(`CLI fallback failed: ${error?.message ?? error}`);
++			}
++		}
++
++		async function poll(cwd, withPanes = false) {
++			if (inFlight) return undefined;
++			const at = now();
++			if (at < nextAttemptAt) {
++				const snapshot = stale(lastReason || "backing off");
++				return snapshot ? { snapshot } : undefined;
++			}
++			inFlight = true;
+ 			try {
+-				const result = await pi.exec(POLL_BIN, withPanes ? ["--panes"] : [], {
+-					cwd,
+-					timeout: 10_000,
+-				});
+-				if (result.code === 0) {
+-					const data = JSON.parse(result.stdout);
++				let result;
++				try {
++					result = await exec(pollBin, withPanes ? ["--panes"] : [], {
++						cwd,
++						timeout: 10_000,
++					});
++				} catch (error) {
++					if (missing(undefined, error)) return await fallback(cwd, withPanes);
++					return fail(`poll helper failed: ${error?.message ?? error}`);
++				}
++				if (result?.code === 0) {
++					let data;
++					try {
++						data = JSON.parse(result.stdout);
++					} catch {
++						return fail("poll returned invalid JSON");
++					}
+ 					const snapshot = buildSnapshot(data.status, data.inbox_count, data.dunks);
+-					if (snapshot) pi.events.emit(SNAPSHOT_CHANNEL, snapshot);
+-					return { snapshot, panes: data.panes };
++					if (!snapshot) return fail("poll returned no snapshot");
++					lastSnapshot = { ...snapshot, source: "dunk-poll" };
++					lastGoodAt = now();
++					backoffMs = 0;
++					nextAttemptAt = 0;
++					lastReason = undefined;
++					emit(lastSnapshot);
++					return { snapshot: lastSnapshot, panes: data.panes };
+ 				}
+-			} catch {
+-				// fall through to the CLI
++				if (missing(result)) return await fallback(cwd, withPanes);
++				if (transient(result)) {
++					return fail(`poll helper unavailable: ${result?.stderr || result?.code}`);
++				}
++				return fail(`poll helper exited ${result?.code}`);
++			} finally {
++				inFlight = false;
+ 			}
+-			const [status, count, list] = await Promise.all([
+-				run(["status"], cwd),
+-				run(["inbox", "count"], cwd),
+-				run(["list"], cwd),
+-			]);
+-			const snapshot = buildSnapshot(status, count, list);
+-			if (snapshot) pi.events.emit(SNAPSHOT_CHANNEL, snapshot);
+-			const panes = withPanes ? await run(["panes"], cwd) : undefined;
+-			return { snapshot, panes };
+-		} finally {
+-			inFlight = false;
+ 		}
++
++		return {
++			poll,
++			state: () => ({ inFlight, backoffMs, nextAttemptAt, lastGoodAt, lastReason, hasSnapshot: Boolean(lastSnapshot) }),
++		};
++	}
++
++	function staleLine(snapshot) {
++		const at = snapshot.last_good_at ? new Date(snapshot.last_good_at).toLocaleTimeString() : "never";
++		return `Inbox: STALE — ${snapshot.unread} unread of ${snapshot.total} at last good ${at}; ${snapshot.stale_reason || "poll unavailable"}`;
++	}
++	// --- t399 poll-backoff:end ---
++	const poller = makePoller({
++		exec: (bin, args, options) => pi.exec(bin, args, options),
++		pollBin: POLL_BIN,
++		runCli: (args, cwd) => run(args, cwd),
++		buildSnapshot,
++		emit: (snapshot) => pi.events.emit(SNAPSHOT_CHANNEL, snapshot),
++		now: () => Date.now(),
++		baseMs: POLL_MS,
++	});
++
++	async function poll(cwd, withPanes = false) {
++		return poller.poll(cwd, withPanes);
+ 	}
+ 
+ 	function buildContext(snapshot: DunkSnapshot, panes: any): string {
+@@ -213,7 +319,11 @@
+ 
+ 		lines.push(`Dunking Sheep — self pane ${self}, mailbox "${snapshot.mailbox ?? "?"}"`);
+ 		lines.push("");
+-		lines.push(`Inbox: ${snapshot.unread} unread of ${snapshot.total}`);
++		if (snapshot.stale) {
++			lines.push(staleLine(snapshot));
++		} else {
++			lines.push(`Inbox: ${snapshot.unread} unread of ${snapshot.total}`);
++		}
+ 		for (const message of snapshot.recent.slice(0, 5)) {
+ 			lines.push(
+ 				`  #${message.id} from ${message.sender}: ${message.subject}${message.waiting ? ` (waiting ${message.waiting})` : ""}`,
