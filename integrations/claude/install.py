@@ -52,7 +52,24 @@ def _entry(event: str, action: str, home: Path) -> dict:
     }]}
 
 
-def _already_wired(document: dict) -> bool:
+def _expected_command(event: str, action: str, home: Path) -> str:
+    # The exact command this installer writes.  Matching is by equality, not
+    # substring: a different absolute path (or a legacy hook that merely
+    # mentions the wrapper name) must NOT count as wired, or --check would
+    # bless a hook that runs someone else's producer.
+    return f"bash '{home / WRAPPER}' {action}"
+
+
+def _entry_commands(entry: dict) -> list:
+    if not isinstance(entry, dict):
+        return []
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return []
+    return [hook.get("command") for hook in hooks if isinstance(hook, dict)]
+
+
+def _already_wired(document: dict, home: Path) -> bool:
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
         return False
@@ -60,12 +77,9 @@ def _already_wired(document: dict) -> bool:
         entries = hooks.get(event)
         if not isinstance(entries, list):
             return False
-        commands = " ".join(
-            str(hook.get("command", ""))
-            for entry in entries if isinstance(entry, dict)
-            for hook in (entry.get("hooks") or []) if isinstance(hook, dict)
-        )
-        if WRAPPER not in commands or f" {action}" not in commands:
+        want = _expected_command(event, action, home)
+        if not any(cmd == want
+                   for entry in entries for cmd in _entry_commands(entry)):
             return False
     return True
 
@@ -111,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             document = json.loads(settings_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             error = str(exc)
-    wired = bool(document and _already_wired(document))
+    wired = bool(document and _already_wired(document, home))
     if args.check:
         print(json.dumps({
             "home": str(home),
@@ -138,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"hooks not merged")
             return 0
         document = {}
-    if _already_wired(document):
+    if _already_wired(document, home):
         print("turn hooks already wired; left unchanged")
         return 0
     backup = home / f"settings.json.bak-{int(time.time())}"

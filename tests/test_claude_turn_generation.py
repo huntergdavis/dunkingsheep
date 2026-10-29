@@ -11,6 +11,7 @@ import os
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -212,8 +213,9 @@ class ClaudeTurnGenerationTests(unittest.TestCase):
 
     def doc_shaped_subagent_stop(self, session="sess-1"):
         # Shape per the official hooks reference: a SubagentStop carries
-        # session identity AND stop_hook_active, so neither field alone can
-        # distinguish it from a Stop.  Only the hook event name can.
+        # session identity AND stop_hook_active (plus agent identity), so
+        # neither the key nor the payload shape can distinguish it from a
+        # Stop.  Only the hook event name can.
         return {
             "hook_event_name": "SubagentStop",
             "session_id": session,
@@ -221,6 +223,8 @@ class ClaudeTurnGenerationTests(unittest.TestCase):
             "cwd": str(ROOT),
             "permission_mode": "default",
             "stop_hook_active": True,
+            "agent_id": "subagent",
+            "agent_type": "Explore",
         }
 
     def test_start_requires_user_prompt_submit_name(self):
@@ -249,6 +253,44 @@ class ClaudeTurnGenerationTests(unittest.TestCase):
         self.assertEqual(1, len(self.state_files()))
         self.producer.end(self.stop_event())
         self.assertEqual(2, len(self.calls))
+
+    def test_old_end_never_consumes_successor(self):
+        """t439 follow-up: an end that first observed an older generation must
+        not consume a newer one published before its decision lock runs.
+        Mirrors the independent probe: swap the token right after the first
+        lock exit and assert the replacement survives with no end RPC."""
+        self.producer._run = self.fake_run()
+        old = {
+            "session_id": "sess-1", "cwd": str(ROOT),
+            "daemon_turn_id": "old-token", "started_at": 1000.0,
+            "root_pid": 250, "root_start": "b",
+            "expires_at": time.time() + 300,
+        }
+        path = Path(self.tmp.name) / "state" / "sess-1.json"
+        self.producer._write_state(path, old)
+        real_lock = self.producer._Lock
+        prod = self.producer
+        count = [0]
+
+        class Interleave(real_lock):
+            def __exit__(self, *args):
+                try:
+                    return super().__exit__(*args)
+                finally:
+                    count[0] += 1
+                    if count[0] == 1:
+                        prod._write_state(path, dict(old, daemon_turn_id="new-token"))
+
+        self.producer._Lock = Interleave
+        try:
+            self.producer.end(self.stop_event())
+        finally:
+            self.producer._Lock = real_lock
+        ends = [c for c in self.calls if c[1:3] == ["turn", "end"]]
+        self.assertEqual([], ends, "successor token must not be spent")
+        current = json.loads(path.read_text())
+        self.assertEqual("new-token", current["daemon_turn_id"],
+                         "replacement state preserved")
 
     def test_concurrent_ends_send_exactly_one_rpc(self):
         self.producer._run = self.fake_run()

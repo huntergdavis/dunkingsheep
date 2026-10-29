@@ -112,6 +112,24 @@ class ClaudeInstallerTests(unittest.TestCase):
                             "SubagentStop must never map to end")
             self.assertEqual(1, len(list(Path(home).glob("settings.json.bak-*"))))
 
+    def test_wrong_absolute_path_does_not_count_as_wired(self):
+        with tempfile.TemporaryDirectory() as home:
+            settings_path = Path(home) / "settings.json"
+            settings_path.write_text(json.dumps({"hooks": {
+                "Stop": [{"hooks": [{"type": "command",
+                                        "command": "bash '/elsewhere/dunkingsheep-turn.sh' end"}]}]}}))
+            check = run(CLAUDE_INSTALL, "--home", home, "--check")
+            self.assertNotEqual(0, check.returncode,
+                                "a different absolute path must not pass --check")
+            result = run(CLAUDE_INSTALL, "--home", home)
+            self.assertEqual(0, result.returncode, result.stderr)
+            hooks = json.loads(settings_path.read_text())["hooks"]
+            commands = [hook["command"]
+                        for entry in hooks["Stop"]
+                        for hook in entry["hooks"]]
+            self.assertIn("bash '%s' end" % (Path(home) / "dunkingsheep-turn.sh"),
+                          commands)
+
 
 if __name__ == "__main__":
     unittest.main()

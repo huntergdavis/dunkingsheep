@@ -36,6 +36,10 @@ UserPromptSubmit cannot arrive before the prior turn's Stop chain completes.
 Concurrent duplicate Stop callbacks are serialized by the state lock with
 consume-before-RPC: exactly one wins and only the winner performs the end
 RPC (proven by a deterministic barrier test with two racing ends).  The
+first observation binds what an end may consume: an end that never saw
+any generation skips, and an end that saw generation G refuses a changed
+state without consuming the successor (proven by an interleave test that
+swaps the token mid-callback).  The
 duplicate keeps the existing token (starting again would orphan the daemon
 turn to its TTL). A replaced pane
 root starts fresh (logged); a stale/expired token is refused and cleaned up;

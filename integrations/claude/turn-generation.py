@@ -24,12 +24,14 @@ Claude's hook payloads - Claude exposes no turn id):
   * an end is NEVER sent without a start token (no unbound/guessed turn);
   * a Claude turn is matched by session id plus the starter's pid/start, so a
     replayed, stale, replaced-root or expired Stop cannot end the next turn;
-  * a Stop-shaped event is required to end: the payload must carry the
-    `stop_hook_active` key Claude sends on Stop.  A SubagentStop-shaped event
-    (no such key) is refused even if it ever reaches `end`, so a subagent
-    finishing can never close the parent turn.  The installer additionally
-    wires SubagentStop to the `noop` action, so the barrier is doubled:
-    wiring first, payload shape second;
+  * a Stop-shaped event is required to end: the hook event name must be
+    exactly "Stop" (UserPromptSubmit opens, nothing else may).  The payload
+    must also carry the `stop_hook_active` key Claude sends on Stop.  Per the
+    official hooks reference, SubagentStop carries that key too, so the shape
+    alone is NOT the barrier: exact event identity is.  A SubagentStop-shaped
+    event (or a miswired SubagentStop reaching `end`) is refused.  The
+    installer additionally wires SubagentStop to the `noop` action, so the
+    barrier is doubled: wiring first, event identity second;
   * the token is bound to the Claude process that started it; a replaced pane
     root makes the end refuse instead of falling back to a label;
   * a duplicate UserPromptSubmit for a live session keeps the existing token
@@ -340,10 +342,20 @@ def end(event: dict | None) -> None:
         return
     path, lock_path = _paths(session)
     deadline = time.time() + END_WAIT_S
+    # The FIRST observation binds what this callback may consume.  The wait
+    # loop releases the lock between polls, so a concurrent start can publish
+    # a newer generation before the decision lock runs: an end that never
+    # observed any generation has no token of its own, and an end that
+    # observed generation G must never consume a successor.
+    seen = None
     while True:
         with _Lock(lock_path):
-            if _read_state(path) is not None:
-                break
+            observed = _read_state(path)
+            if observed is not None and seen is None:
+                seen = (observed.get("daemon_turn_id"),
+                        observed.get("started_at"))
+        if observed is not None:
+            break
         if time.time() >= deadline:
             break
         # A fast settled turn can beat its own start hook; wait briefly for a
@@ -355,8 +367,11 @@ def end(event: dict | None) -> None:
     # where the dead generation is still consumed so it can never fire later.
     with _Lock(lock_path):
         state = _read_state(path)
-        if state is None:
+        if state is None or seen is None:
             outcome = ("skipped", "no_start_token", None)
+        elif ((state.get("daemon_turn_id"), state.get("started_at"))
+                != seen):
+            outcome = ("refused", "changed_state", None)
         elif state.get("session_id") != session:
             outcome = ("refused", "session_mismatch", None)
         elif (state.get("root_pid") != root["pid"]
