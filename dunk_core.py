@@ -6822,6 +6822,23 @@ class Flock:
         kind, _text = signature
         if kind != "modal" or time.time() - since < MODAL_WAIT_S:
             return False
+        # Notification is independent of log suppression: failed transports retry,
+        # and durable sink receipts suppress duplicates across daemon restarts.
+        try:
+            import dunk_dialog_alerts
+            import dunk_pm
+            outcomes = dunk_dialog_alerts.notify(
+                pane_id, self._pane_generation(pane_id), _text,
+                owner_sink=dunk_dialog_alerts.post_owner,
+                vp_sink=lambda body: self.inbox_send(
+                    os.environ.get("DUNKINGSHEEP_VP_PANE", dunk_pm.DEFAULT_VP_PANE),
+                    body, subject="Dialog blocks queued delivery", system_sender="watchdog"))
+            for sink, ok, error in outcomes:
+                if not ok:
+                    log.warning("dialog alert %s -> %s failed (%s); will retry",
+                                pane_id, sink, error)
+        except Exception:
+            log.exception("could not notify blocked dialog on %s", pane_id)
         if not self._warned_modal.get(pane_id):
             self._warned_modal[pane_id] = True
             self.metrics.record("panel.blocking", pane_id=pane_id, outcome="held",
