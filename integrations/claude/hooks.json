@@ -1,0 +1,38 @@
+{
+  "_comment": "Fragment merged into ~/.claude/settings.json by integrations/claude/install.py. UserPromptSubmit opens a daemon turn and captures its token; Stop closes it with that token; SubagentStop is wired to noop so a finishing subagent can never close the parent turn. Keep the command strings identical to the trusted entries when replacing an existing script.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/dunkingsheep-turn.sh\" start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/dunkingsheep-turn.sh\" end",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/dunkingsheep-turn.sh\" noop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
