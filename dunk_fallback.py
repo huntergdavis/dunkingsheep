@@ -22,10 +22,27 @@ coordinated authorisation.
 
 from __future__ import annotations
 
+import math
+
 # The owner's tier order. A pane walks FORWARD through this list only: a lane on
 # codex may fall back to pi or free, never back to claude, so a swap cannot
 # oscillate between two subscriptions that both have credit.
 TIER_ORDER = ("claude", "codex", "pi", "free")
+
+# Every quota window a provider is REQUIRED to report. A reading that omits one
+# is not partially good news: the missing window could be the empty one, so the
+# whole provider is "unknown". (CoS review i33219 finding 3.)
+REQUIRED_WINDOWS = {
+    "claude": ("five_hour", "weekly_all"),
+    "codex": ("weekly",),
+    "opencode-go": ("five_hour", "weekly", "monthly"),
+}
+
+# Free rows have no quota provider of their own. They are usable only when a
+# snapshot positively says so (a "free" provider reading with credit); the
+# planner never assumes free capacity, because "everything is spent, so move it
+# to free" is exactly the unsafe swap the owner forbade.
+FREE_PROVIDER = "free"
 
 # Which usage provider each tier's credit is read from. "free" rows have no
 # provider reading of their own: they are the fallback of last resort and are
@@ -39,7 +56,7 @@ TIER_PROVIDER = {
     # its credit is read from THAT provider only. The local pi estimate is a
     # cost summary; folding it in would make "exhausted" unreachable.
     "pi": ("opencode-go",),
-    "free": (),
+    "free": (FREE_PROVIDER,),
 }
 
 # Per-harness relaunch facts from the owner's spec. Kept as data so the planner
@@ -47,8 +64,12 @@ TIER_PROVIDER = {
 HARNESS_WIRING = {
     "codex": {
         "args": ["-s", "danger-full-access", "-a", "never"],
-        "emits_turn_events": False,
-        "note": "codex cannot emit turn events (t310/t264)",
+        # t310/t264 recorded that codex could not emit turn events; the paired
+        # native producers accepted since then supersede that, so a relauncher
+        # must not skip wiring codex's producer.
+        "emits_turn_events": True,
+        "note": "codex needs -s danger-full-access -a never; paired native "
+                "turn producers now exist",
     },
     "pi": {
         "args": [],
@@ -58,7 +79,9 @@ HARNESS_WIRING = {
     "claude": {
         "args": [],
         "emits_turn_events": True,
-        "note": "claude is out of weekly quota until 2026-10-29T08:59:59Z",
+        # No static reset date: claude's quota comes from the credit snapshot
+        # (five_hour / weekly_all), so a hardcoded date can only go stale.
+        "note": "claude quota is read from the credit snapshot",
     },
 }
 
@@ -66,6 +89,7 @@ HARNESS_WIRING = {
 # 0.0001% as "credit"; the board reports one decimal, so anything below one
 # tenth of a percent is indistinguishable from empty.
 SPENT_PERCENT = 0.1
+
 
 
 class FallbackError(ValueError):
@@ -89,12 +113,36 @@ def credit_state(readings):
             state[provider] = "unknown"
             continue
         windows = reading.get("windows") or []
-        remaining = [w.get("percent_remaining") for w in windows]
-        numbers = [float(v) for v in remaining if v is not None]
-        if not numbers:
+        by_name = {}
+        for window in windows:
+            name = str(window.get("name") or "").strip()
+            value = window.get("percent_remaining")
+            if name:
+                by_name[name] = value
+        if not by_name:
             # pi reports a local session estimate, not plan quota. Its
             # availability cannot be decided from this reading, so it is
             # unknown rather than assumed good.
+            state[provider] = "unknown"
+            continue
+        required = REQUIRED_WINDOWS.get(provider)
+        if required is not None and any(name not in by_name for name in required):
+            # One missing window is not "the others look fine": the absent one
+            # could be the empty one.
+            state[provider] = "unknown"
+            continue
+        numbers = []
+        for name, value in by_name.items():
+            if required is not None and name not in required:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                numbers = None
+                break
+            if not math.isfinite(float(value)):
+                numbers = None
+                break
+            numbers.append(float(value))
+        if not numbers:
             state[provider] = "unknown"
             continue
         state[provider] = "exhausted" if min(numbers) <= SPENT_PERCENT else "available"
@@ -182,13 +230,22 @@ def plan_swap(pane, credit, allowed_panes=None):
         # Free rows are the end of the line: there is no cheaper tier behind
         # them, so "credit exhausted everywhere" reports this, not a swap.
         return _reason_for_skip("on_last_tier", pane_id=pane_id, current=current)
-    if tier_state(credit, current) == "available":
+    current_state = tier_state(credit, current)
+    if current_state == "available":
         return _reason_for_skip("current_has_credit", pane_id=pane_id,
+                                current=current)
+    if current_state != "exhausted":
+        # Unknown is not exhausted. Swapping on an unproven exhaustion would
+        # move a working lane off a subscription that may still have credit,
+        # which is the unsafe fallback this planner exists to prevent.
+        return _reason_for_skip("current_credit_unknown", pane_id=pane_id,
                                 current=current)
 
     start = TIER_ORDER.index(current)
     for tier in TIER_ORDER[start + 1:]:
         state = tier_state(credit, tier)
+        # "free" is a tier like any other here: its state comes from the
+        # snapshot, so an unproven free row is "unknown" and is never chosen.
         if state == "available":
             return {
                 "action": "swap",

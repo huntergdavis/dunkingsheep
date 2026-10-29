@@ -14,10 +14,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dunk_fallback as fb  # noqa: E402
 
 
+WINDOWS = {
+    "claude": ("five_hour", "weekly_all"),
+    "codex": ("weekly",),
+    "opencode-go": ("five_hour", "weekly", "monthly"),
+    "free": ("monthly",),
+}
+
+
 def reading(provider, percent, status="ok"):
-    """One provider reading shaped like `dunkingsheep usage --json`."""
+    """One provider reading shaped like `dunkingsheep usage --json`.
+
+    Every required window for the provider is present, so a test that wants a
+    MISSING window has to build the dict itself (see WindowValidationTests).
+    """
+    names = WINDOWS.get(provider, ("weekly",))
     windows = [] if percent is None else [
-        {"name": "weekly", "percent_remaining": percent}]
+        {"name": name, "percent_remaining": percent} for name in names]
     return {"provider": provider, "status": status, "windows": windows}
 
 
@@ -57,6 +70,37 @@ class CreditStateTests(unittest.TestCase):
         self.assertEqual("exhausted", state["codex"])
 
 
+class WindowValidationTests(unittest.TestCase):
+    """CoS review i33219 finding 3: a missing window or a NaN is not credit."""
+
+    def test_missing_required_window_is_unknown(self):
+        reading_partial = {"provider": "codex", "status": "ok", "windows": []}
+        self.assertEqual("unknown", fb.credit_state([reading_partial])["codex"])
+
+    def test_missing_one_of_several_required_windows_is_unknown(self):
+        reading_partial = {"provider": "claude", "status": "ok",
+                           "windows": [{"name": "five_hour",
+                                        "percent_remaining": 100.0}]}
+        self.assertEqual("unknown", fb.credit_state([reading_partial])["claude"])
+
+    def test_nan_window_is_unknown(self):
+        reading_nan = {"provider": "codex", "status": "ok",
+                       "windows": [{"name": "weekly",
+                                    "percent_remaining": float("nan")}]}
+        self.assertEqual("unknown", fb.credit_state([reading_nan])["codex"])
+
+    def test_non_numeric_window_is_unknown(self):
+        reading_bad = {"provider": "codex", "status": "ok",
+                       "windows": [{"name": "weekly",
+                                    "percent_remaining": "lots"}]}
+        self.assertEqual("unknown", fb.credit_state([reading_bad])["codex"])
+
+    def test_free_capacity_is_never_assumed(self):
+        self.assertEqual("unknown", fb.tier_state({}, "free"))
+        self.assertEqual("available",
+                         fb.tier_state({"free": "available"}, "free"))
+
+
 class TransitionTableTests(unittest.TestCase):
     """The owner's acceptance table: every tier transition, plus refusals."""
 
@@ -68,21 +112,24 @@ class TransitionTableTests(unittest.TestCase):
          pane("claude"), CLAUDE_SPENT, "swap", "codex"),
         ("claude+codex spent -> pi",
          pane("claude"), CLAUDE_CODEX_SPENT, "swap", "pi"),
-        ("claude+codex+pi spent -> free rows",
-         pane("claude"), ALL_SPENT, "swap", "free"),
+        ("claude+codex+pi spent, no free capacity -> NOTHING is swapped",
+         pane("claude"), ALL_SPENT, "skip", "no_tier_has_credit"),
+        ("claude+codex+pi spent WITH a funded free row -> free",
+         pane("claude"), ALL_SPENT + [reading("free", 100.0)], "swap", "free"),
         ("codex spent -> pi",
          pane("codex"), [reading("claude", 100.0), reading("codex", 0.0),
                          reading("opencode-go", 80.0)], "swap", "pi"),
-        ("codex spent, pi unknown -> free (unknown is not credit)",
+        ("codex spent, pi unknown, no free capacity -> NOTHING is swapped",
          pane("codex"), [reading("claude", 100.0), reading("codex", 0.0),
                          reading("opencode-go", None, status="error")],
-         "swap", "free"),
-        ("pi spent -> free",
+         "skip", "no_tier_has_credit"),
+        ("pi spent, no free capacity -> NOTHING is swapped",
          pane("pi"), [reading("claude", 100.0), reading("codex", 100.0),
-                      reading("opencode-go", 0.0)], "swap", "free"),
+                      reading("opencode-go", 0.0)], "skip", "no_tier_has_credit"),
         ("pi never falls BACK to claude or codex",
          pane("pi"), [reading("claude", 100.0), reading("codex", 100.0),
-                      reading("opencode-go", 0.0)], "swap", "free"),
+                      reading("opencode-go", 0.0),
+                      reading("free", 100.0)], "swap", "free"),
         ("free is the last tier: nothing after it",
          pane("free"), ALL_SPENT, "skip", "on_last_tier"),
         ("mid-turn is never swapped",
@@ -107,28 +154,39 @@ class TransitionTableTests(unittest.TestCase):
                     self.assertEqual(expected, decision["reason"], decision)
 
     def test_exhausted_everywhere_swaps_nothing_and_says_so(self):
-        # The owner's third acceptance case, stated as a whole-run property.
+        """The owner's third acceptance case: credit exhausted everywhere.
+
+        Nothing moves - not to another provider and NOT to free, because free
+        capacity is not assumed. Every refusal is named.
+        """
         panes = [pane("claude", pane_id="%1"), pane("codex", pane_id="%2"),
-                 pane("pi", pane_id="%3")]
+                 pane("pi", pane_id="%3"), pane("free", pane_id="%4")]
         plan = fb.plan_all(panes, fb.credit_state(ALL_SPENT))
-        # claude and codex still have "free" behind them; pi too. Free is a real
-        # tier, so these DO swap. The nothing-to-do case is a fleet already on
-        # free.
-        self.assertEqual(3, len(plan["swapped"]))
-        free_fleet = [pane("free", pane_id="%1"), pane("free", pane_id="%2")]
-        plan = fb.plan_all(free_fleet, fb.credit_state(ALL_SPENT))
         self.assertEqual([], plan["swapped"])
-        self.assertEqual("0 swap(s), 2 skip(s)", plan["summary"])
-        for decision in plan["decisions"]:
-            self.assertEqual("on_last_tier", decision["reason"])
+        self.assertEqual("0 swap(s), 4 skip(s)", plan["summary"])
+        reasons = {d["pane_id"]: d["reason"] for d in plan["decisions"]}
+        self.assertEqual({"no_tier_has_credit", "on_last_tier"},
+                         {reasons["%1"], reasons["%2"], reasons["%3"]} |
+                         {reasons["%4"]})
+        self.assertEqual("on_last_tier", reasons["%4"])
+
+    def test_all_unknown_swaps_nothing(self):
+        unknown = [reading("claude", None, status="error"),
+                   reading("codex", None, status="error"),
+                   reading("opencode-go", None, status="error")]
+        plan = fb.plan_all([pane("codex", pane_id="%1")],
+                           fb.credit_state(unknown))
+        self.assertEqual([], plan["swapped"])
+        self.assertEqual("current_credit_unknown",
+                         plan["decisions"][0]["reason"])
 
     def test_all_unknown_credit_never_swaps_to_a_provider(self):
         unknown = [reading("claude", None, status="error"),
                    reading("codex", None, status="error"),
                    reading("opencode-go", None, status="error")]
         decision = fb.plan_swap(pane("codex"), fb.credit_state(unknown))
-        self.assertEqual("swap", decision["action"])
-        self.assertEqual("free", decision["to"])
+        self.assertEqual("skip", decision["action"])
+        self.assertEqual("current_credit_unknown", decision["reason"])
 
 
 class PiTierTests(unittest.TestCase):
@@ -180,7 +238,13 @@ class WiringTests(unittest.TestCase):
         self.assertEqual("codex", decision["to"])
         self.assertEqual(["-s", "danger-full-access", "-a", "never"],
                          decision["wiring"]["args"])
-        self.assertFalse(decision["wiring"]["emits_turn_events"])
+        # i33219 finding 4: paired native producers now exist, so a relauncher
+        # must wire codex's turn producer rather than skip it.
+        self.assertTrue(decision["wiring"]["emits_turn_events"])
+
+    def test_no_static_reset_date_is_asserted(self):
+        for tier, wiring in fb.HARNESS_WIRING.items():
+            self.assertNotIn("2026-", wiring["note"], tier)
 
     def test_pi_swap_reports_a_turn_producer(self):
         decision = fb.plan_swap(pane("codex"), fb.credit_state(CLAUDE_CODEX_SPENT))
