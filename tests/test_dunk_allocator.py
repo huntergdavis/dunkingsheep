@@ -67,6 +67,14 @@ class AllocationTests(unittest.TestCase):
         self.tasks.complete(manual["id"], "%worker")
         self.assertEqual(blocked["id"], self.a.allocate({"%worker": {}})[0]["task_id"])
 
+    def test_private_ready_queue_blocks_capacity_but_dependency_wait_does_not(self):
+        t = self.task(); self.offer(t); self.worker("%1")
+        private = self.tasks.add("%1", "private owned", body="private", assignees=["%1"])
+        self.assertEqual([], self.a.allocate({"%1": {}}))
+        dependency = self.task("dependency")
+        self.tasks.update(private["id"], depends_on=[dependency["id"]])
+        self.assertEqual(t["id"], self.a.allocate({"%1": {}})[0]["task_id"])
+
     def test_reassignment_and_block_reason_invalidate_offer(self):
         t = self.task(); self.offer(t); self.worker("%1")
         self.tasks.assign(t["id"], ["%other"], mode="set")

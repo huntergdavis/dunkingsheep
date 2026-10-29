@@ -182,7 +182,10 @@ class AllocationStore:
                 now, results = time.time(), []
                 workers = [dict(r) for r in t.db.execute(
                     "SELECT * FROM allocation_workers WHERE enabled=1 ORDER BY last_assigned,pane_id")]
-                tasks = t.list(include_done=False)
+                # Include private queues for capacity only; they are never offers
+                # and their contents are not exposed by allocation status.
+                tasks = [t._decorate(r) for r in t.db.execute(
+                    "SELECT * FROM tasks WHERE status NOT IN ('done','cancelled')").fetchall()]
                 offers = {r["task_id"]: dict(r) for r in t.db.execute(
                     "SELECT * FROM allocation_offers WHERE state='ready'")}
                 candidates = sorted((x for x in tasks if x["id"] in offers), key=t._order_key)
@@ -204,7 +207,8 @@ class AllocationStore:
                         if t._busy_task_ids(pane, now):
                             continue
                         owned = [x for x in tasks if pane in x["assignees"] and x["id"] not in offers
-                                 and x["status"] in ("open", "in_progress")]
+                                 and (x["status"] == "in_progress" or
+                                      (x["status"] == "open" and not x["blocked_by"] and not x["block_reason"]))]
                         if owned or t.active_handoffs(pane, {x["id"] for x in tasks}):
                             continue
                         # An offered item is released by its current owners for allocation.
