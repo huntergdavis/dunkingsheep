@@ -333,6 +333,12 @@ class AccountingPureTests(unittest.TestCase):
         self.assertTrue(out.endswith("\n"))
         self.assertEqual("id,evidence_doc", out.splitlines()[0])
 
+    def test_a_crlf_ledger_keeps_its_line_endings(self):
+        ledger = "id,evidence_doc\r\nOVL_0001_0001,docs/re/A.md\r\n"
+        out = dunk_review.with_row(ledger, "OVL_007F_0F7E", "docs/re/C.md")
+        self.assertNotIn("\n", out.replace("\r\n", ""))
+        self.assertEqual(3, out.count("\r\n"))
+
     def test_choose_row_refuses_a_verdict_naming_two_ids(self):
         row, reason = dunk_review.choose_row(
             [("verdict notes", "Accept OVL_007F_0F7E and OVL_007F_0A01")],

@@ -109,14 +109,21 @@ def ledger_rows(text):
 
 
 def with_row(text, ident, doc):
-    """The ledger with one row inserted in sorted position, header and line endings kept."""
-    lines = (text or "").splitlines()
+    """The ledger with one row inserted in sorted position.
+
+    Line endings are kept as they are: a CRLF ledger written back as LF would turn a
+    one-line credit into a 290-line diff, which is exactly the kind of noise that
+    hides a real change in review.
+    """
+    text = text or ""
+    lines = text.splitlines()
     if not lines:
         raise ValueError("the ledger is empty: no header line to keep")
+    sep = "\r\n" if "\r\n" in text else "\n"
     header, body = lines[0], lines[1:]
     keys = [line.split(",", 1)[0] for line in body]
     body.insert(bisect.bisect_left(keys, ident), f"{ident},{doc}")
-    return "\n".join([header] + body) + ("\n" if (text or "").endswith("\n") else "")
+    return sep.join([header] + body) + (sep if text.endswith(("\n", "\r")) else "")
 
 
 def choose_row(sources, added_docs, ledger_text):
@@ -138,7 +145,7 @@ def choose_row(sources, added_docs, ledger_text):
                           f"({', '.join(ids)}); one ledger row is one id")
     if ident is None:
         return None, ("no row id (OVL_xxxx_yyyy / RES_xxxx_yyyy) is named in the verdict "
-                      "notes, the PR title or the PR body")
+                      "notes, the review task title or the PR body")
     existing = dict(ledger_rows(ledger_text))
     if ident in existing:
         return None, f"{ident} is already credited as {existing[ident]}"
@@ -381,7 +388,7 @@ class Sync:
             detail = {}
         row, reason = choose_row(
             [("verdict notes", self._verdict_text(task)),
-             ("PR title", task.get("title") or ""),
+             ("review task title", task.get("title") or ""),
              ("PR body", detail.get("body") or "")],
             added, ledger_text)
         if row is None:

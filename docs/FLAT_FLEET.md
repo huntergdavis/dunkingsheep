@@ -321,8 +321,9 @@ three repos are personal. The row therefore travels as its own small PR:
 1. **Derive the row, or refuse.** Inputs are the verdict (the reviewer's
    `task note` lines) and the accepted PR (the files it adds). A row is one id
    and one evidence document. The id is the first source that names *exactly
-   one* `OVL_<unit>_<offset>` / `RES_<unit>_<offset>` (verdict notes, then PR
-   title, then PR body); the document is the added `docs/re/*.md` whose name
+   one* `OVL_<unit>_<offset>` / `RES_<unit>_<offset>` (verdict notes, then the
+   review task title, which carries the PR title, then the PR body); the document
+   is the added `docs/re/*.md` whose name
    carries that unit and offset, the poolrad convention
    (`tools/overlay/check_body_doc_pairing.py`: `U7F_STATE_FLAGS_0F7E.md` <-
    `OVL_007F_0F7E`). Two ids, no matching document, two matching documents, or
