@@ -129,6 +129,19 @@ class ServerProbeTests(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual("done", self.flock.tasks.get(task["id"])["status"])
 
+    def test_server_credential_failure_is_refused(self):
+        """t429 boundary: the socket peer's credentials failed (getsockopt
+        fault shape), so no caller exists - but this is a TRANSPORT request,
+        not trusted in-process use. An owner label on it must not complete."""
+        task = self.flock.task_add("bound work", self_pane_id="w1:p1")
+        self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
+        self._set_pane_pid("w1:p1", os.getpid())
+        before = _snapshot(self.flock)
+        reply, _ = self._handle(task["id"], "w1:p1", peer=None)
+        self.assertFalse(reply["ok"], reply)
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+        self.assertEqual(before, _snapshot(self.flock))
+
     def test_wrapper_interleave_reassignment_is_refused(self):
         """Reviewer interleave through the PUBLIC wrapper: the guard passes for
         the owner, the task is reassigned before the store transaction, and the

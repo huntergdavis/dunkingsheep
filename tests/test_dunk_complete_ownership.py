@@ -135,13 +135,22 @@ class CompleteOwnershipTests(unittest.TestCase):
         return {"pane_id": None, "pid": pid, "start": process_start(pid),
                 "name": "test", "source": "test"}
 
+    def _socket_caller_for(self, pid):
+        """A caller as the socket server delivers it: kernel caller plus the
+        transport-provenance flag handle_line sets. Tests that omit the flag
+        model trusted in-process use (label policy); tests that set it model
+        socket transport (binding enforced)."""
+        self.flock.set_caller(self._caller_for(pid))
+        self.flock.set_socket_peer(True)
+        self.addCleanup(self.flock.clear_caller)
+        self.addCleanup(self.flock.clear_socket_peer)
+
     def test_bound_owner_completion_passes(self):
         """A kernel-bound owner is unaffected by the binding check."""
         task = self.flock.task_add("bound work", self_pane_id="w1:p1")
         self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
         self._set_pane_pid("w1:p1", os.getpid())
-        self.flock.set_caller(self._caller_for(os.getpid()))
-        self.addCleanup(self.flock.clear_caller)
+        self._socket_caller_for(os.getpid())
         done = self.flock.task_complete(task["id"], self_pane_id="w1:p1")
         self.assertEqual("done", done["status"])
 
@@ -151,8 +160,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("bound work", self_pane_id="w1:p1")
         self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
         self._set_pane_pid("w1:p1", os.getpid())
-        self.flock.set_caller(self._caller_for(os.getppid()))
-        self.addCleanup(self.flock.clear_caller)
+        self._socket_caller_for(os.getppid())
         with self.assertRaisesRegex(DunkError, "not inside pane"):
             self.flock.task_complete(task["id"], self_pane_id="w1:p1")
         current = self.flock.tasks.get(task["id"])
@@ -166,8 +174,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("other work", self_pane_id="w2:p1")
         self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
         self._set_pane_pid("w1:p1", os.getpid())
-        self.flock.set_caller(self._caller_for(os.getppid()))
-        self.addCleanup(self.flock.clear_caller)
+        self._socket_caller_for(os.getppid())
         with self.assertRaisesRegex(DunkError, "not inside pane"):
             self.flock.task_complete(task["id"], self_pane_id="w1:p1")
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
@@ -178,8 +185,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         fallback for this shape; in-process callers without a peer still use
         label policy, as the w9:p7 tests pin.)"""
         task = self._owned_task()  # w9:p7 has no fake pane: unresolvable
-        self.flock.set_caller(self._caller_for(os.getpid()))
-        self.addCleanup(self.flock.clear_caller)
+        self._socket_caller_for(os.getpid())
         with self.assertRaisesRegex(DunkError, "not visible"):
             self.flock.task_complete(task["id"], self_pane_id=OWNER)
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
@@ -190,8 +196,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("bound work", self_pane_id="w2:p1")
         self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
         # w2:p1 exists in the fake backend with no pane_pid key.
-        self.flock.set_caller(self._caller_for(os.getpid()))
-        self.addCleanup(self.flock.clear_caller)
+        self._socket_caller_for(os.getpid())
         with self.assertRaisesRegex(DunkError, "no process id"):
             self.flock.task_complete(task["id"], self_pane_id="w2:p1")
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
@@ -202,7 +207,9 @@ class CompleteOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("bound work", self_pane_id="w1:p1")
         self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
         self.flock.set_caller(self._caller_for(os.getpid()))
+        self.flock.set_socket_peer(True)
         self.addCleanup(self.flock.clear_caller)
+        self.addCleanup(self.flock.clear_socket_peer)
         with mock.patch.object(self.flock.herdr, "get_pane",
                                side_effect=OSError("backend down")):
             with self.assertRaisesRegex(DunkError, "cannot be verified"):
@@ -218,7 +225,9 @@ class CompleteOwnershipTests(unittest.TestCase):
         self._set_pane_pid("w1:p1", os.getpid())
         self.flock.set_caller({"pane_id": None, "pid": None, "start": None,
                                "name": None, "source": "none"})
+        self.flock.set_socket_peer(True)
         self.addCleanup(self.flock.clear_caller)
+        self.addCleanup(self.flock.clear_socket_peer)
         with self.assertRaisesRegex(DunkError, "not inside pane"):
             self.flock.task_complete(task["id"], self_pane_id="w1:p1")
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
@@ -253,6 +262,10 @@ class CompleteOwnershipTests(unittest.TestCase):
             [], [h for h in self.flock.tasks.next_job_handoffs(OWNER)
                  if h.get("from_task") == task["id"]])
 
+    def _proof_for(self, pane_id, pane_info=None):
+        return {"allowlist_path": self.superusers.path,
+                "pane_id": pane_id, "pane_info": pane_info or {}}
+
     def test_operator_survives_reassignment(self):
         """Operator privilege is role-based: it does not evaporate when the
         row's assignees change under it."""
@@ -261,8 +274,7 @@ class CompleteOwnershipTests(unittest.TestCase):
         self.flock.tasks.assign(task["id"], [FOREIGN], mode="set")
         plan = self.flock.tasks.advance_next_job(
             OPERATOR, trigger="completion", from_task=task["id"],
-            operator_proof={"superusers": self.superusers,
-                            "pane_id": OPERATOR, "pane_info": {}})
+            operator_proof=self._proof_for(OPERATOR))
         self.assertEqual("done", plan["task"]["status"])
 
     def test_revoked_operator_is_refused_in_transaction(self):
@@ -271,9 +283,11 @@ class CompleteOwnershipTests(unittest.TestCase):
         the file and refuses."""
         self.superusers.add(OPERATOR)
         task = self._owned_task()
-        proof = {"superusers": self.superusers,
-                 "pane_id": OPERATOR, "pane_info": {}}
-        self.superusers.remove(OPERATOR)
+        proof = self._proof_for(OPERATOR)
+        other = Superusers(
+            path=os.path.join(self.tmp.name, "superusers.json"))
+        self.assertIn(OPERATOR, other.entries())
+        other.remove(OPERATOR)
         from dunk_tasks import TaskError
         with self.assertRaisesRegex(TaskError, "not owned"):
             self.flock.tasks.advance_next_job(
@@ -291,7 +305,9 @@ class CompleteOwnershipTests(unittest.TestCase):
         original = self.flock.tasks.advance_next_job
 
         def interleave(*args, **kwargs):
-            self.superusers.remove("w1:p1")
+            other = Superusers(
+                path=os.path.join(self.tmp.name, "superusers.json"))
+            other.remove("w1:p1")
             return original(*args, **kwargs)
 
         with mock.patch.object(self.flock.tasks, "advance_next_job",

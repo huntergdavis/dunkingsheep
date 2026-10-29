@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.98"
+VERSION = "2.70.99"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2423,9 +2423,9 @@ class Flock:
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
         # must not run inside the completion transaction); the transaction
-        # re-reads the allowlist file itself, so a revocation between here and
-        # the UPDATE is caught there. Same three lines as is_superuser, kept
-        # inline so the pane_info travels with the proof.
+        # re-reads the allowlist file itself under lock, so a revocation between
+        # here and the UPDATE is caught there. Same three lines as is_superuser,
+        # kept inline so the pane_info travels with the proof.
         self.superusers.refresh()
         pane_info = self._pane_info(self_pane_id)
         operator = bool(self_pane_id
@@ -2437,21 +2437,21 @@ class Flock:
         # trigger with the pane recorded as the completer.
         plan = self.next_jobs.advance(
             self_pane_id, "completion", task_id,
-            operator_proof={"superusers": self.superusers,
+            operator_proof={"allowlist_path": self.superusers.path,
                             "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
         return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
 
-    # Where a pane claim cannot be kernel-checked, label policy still decides:
-    # no peer at all (in-process trusted local code and tests) or no /proc
-    # (non-Linux). Every other shape with a live peer refuses unless the walk
-    # positively finds the claimed pane: a backend lookup failure, an
-    # unresolvable pane, a pid-less pane record, or a failed walk are all
-    # refused - availability or backend failure cannot authenticate a supplied
-    # owner/operator label, and a live legitimate client waits for its response
-    # (hit-and-run shaped peers are refused, not accommodated). Operators act
-    # through allowlisted panes like everyone else; during a pane-identity
-    # outage completions pause fleet-wide until the backend is fixed, by design.
+    # Transport provenance decides what an unverifiable claim means (t423 P1).
+    # The server marks every socket request (see set_socket_peer): a request
+    # that arrived over the socket is NEVER trusted on its labels alone, so any
+    # shape the kernel cannot check refuses - credential failure, missing /proc,
+    # backend failure, unresolvable pane, pid-less pane, failed walk. Label
+    # policy survives ONLY with no peer at all (in-process trusted local code
+    # and tests) or no /proc outside a socket request (non-Linux diagnostics).
+    # Operators act through allowlisted panes like everyone else; during a
+    # pane-identity outage completions pause fleet-wide until the backend is
+    # fixed, by design.
 
     def _require_completion_binding(self, self_pane_id):
         """Refuse a pane claim the kernel evidence does not support (t423 P1).
@@ -2460,20 +2460,37 @@ class Flock:
         used to authorize the client-supplied pane label without consulting it:
         a foreign peer naming the owner (or an allowlisted operator) completed
         the task - including hit-and-run, where the peer exits right after
-        sending so no ancestry exists to check. Where the binding is checkable
-        (peer + pane pid) any failure refuses; the inconclusive shapes above
-        fall back to label policy. Inconclusive never silently passes a
-        privilege: it only preserves in-process/test/diagnostic use, which has
-        no peer to bind.
+        sending so no ancestry exists to check.
         """
+        socket_request = getattr(self._caller_state, "socket_peer_ok", None)
+        # None: in-process trusted local code and tests. True/False: socket
+        # transport (peer credentials ok/failed). Only the completion binding
+        # reads this flag.
         caller = self.current_caller()
+        if socket_request is False:
+            log.warning("task completion refused reason=unverified_peer pane=%r",
+                        self_pane_id)
+            raise DunkError(
+                f"pane {self_pane_id} cannot be verified (socket peer credentials "
+                "unavailable); a completion on an unauthenticated transport is "
+                "refused. Retry when credentials resolve, or complete from a live "
+                "lane pane.")
         if not caller:
             return
         if not os.path.isdir("/proc"):
+            if socket_request:
+                log.warning("task completion refused reason=no_proc_table pane=%r",
+                            self_pane_id)
+                raise DunkError(
+                    f"pane {self_pane_id} cannot be verified (no process table on "
+                    "this transport); a completion without kernel evidence is "
+                    "refused.")
             return
         try:
             pane = self.herdr.get_pane(self_pane_id)
         except Exception as error:                      # noqa: BLE001
+            if not socket_request:
+                return
             log.warning("task completion refused reason=backend_error pane=%r "
                         "caller_pid=%r error=%r", self_pane_id,
                         caller.get("pid"), error)
@@ -2481,7 +2498,9 @@ class Flock:
                 f"pane {self_pane_id} cannot be verified (backend lookup failed); "
                 "a completion naming an unverifiable pane is refused. Retry when "
                 "the backend answers.") from None
-        if pane is None:                            # owners completing through it
+        if pane is None:
+            if not socket_request:
+                return
             log.warning("task completion refused reason=unknown_pane pane=%r "
                         "caller_pid=%r", self_pane_id, caller.get("pid"))
             raise DunkError(
@@ -2490,6 +2509,8 @@ class Flock:
                 "lane pane, or have a superuser (CoS/VP operator) reassign it first.")
         pane_pid = pane.get("pane_pid")
         if pane_pid is None:
+            if not socket_request:
+                return
             log.warning("task completion refused reason=pane_pid_missing pane=%r "
                         "caller_pid=%r", self_pane_id, caller.get("pid"))
             raise DunkError(
@@ -2877,6 +2898,18 @@ class Flock:
 
     def clear_caller(self):
         self._caller_state.value = None
+
+    def set_socket_peer(self, ok):
+        """Record whether this request arrived over the socket with verifiable
+        peer credentials (t423). True: SO_PEERCRED yielded a peer. False: a socket
+        request whose credentials failed - fail closed, never trusted. Absent
+        (never set): in-process trusted local code and tests. Only the task
+        completion binding reads this; leases, handoffs and turn records keep
+        using current_caller() unchanged."""
+        self._caller_state.socket_peer_ok = None if ok is None else bool(ok)
+
+    def clear_socket_peer(self):
+        self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
     def task_next(self, scope=None, lease_seconds=None, self_pane_id=None,

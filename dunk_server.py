@@ -172,6 +172,10 @@ class FlockServer:
             return {"id": req_id, "ok": False, "error": "args must be an object"}, False
         caller = caller_from_peer(peer_pid, self_pane_id) if peer_pid else None
         self.flock.set_caller(caller)
+        # Transport provenance for completion authorization (t423): a socket
+        # request whose peer credentials failed must not degrade into the
+        # absent-caller state that trusted in-process code uses.
+        self.flock.set_socket_peer(peer_pid is not None)
         try:
             try:
                 result = dispatch(self.flock, name, args,
@@ -189,6 +193,7 @@ class FlockServer:
                         "error": f"internal error: {error}"}, False
         finally:
             self.flock.clear_caller()
+            self.flock.clear_socket_peer()
         return {"id": req_id, "ok": True, "result": result}, name == "shutdown"
 
 

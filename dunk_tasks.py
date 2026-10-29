@@ -33,6 +33,10 @@ import re
 import sqlite3
 from dunk_pm import DEFAULT_VP_PANE as _default_vp_pane
 from dunk_sqlite import connect as sqlite_connect
+# t423: in-transaction privilege revalidation must share the locked-read
+# protocol and matching semantics with the allowlist store (single source of
+# truth); dunk_superusers imports only stdlib, so this edge is acyclic.
+from dunk_superusers import match_allowlist, read_panes_locked
 
 log = logging.getLogger("dunkingsheep.tasks")
 import threading
@@ -657,24 +661,23 @@ class Tasks:
                     # row INSIDE this transaction, not just by the caller before it:
                     # a reassignment landing between the wrapper guard and this UPDATE
                     # must not complete as the removed owner. Operator privilege is
-                    # revalidated here too, on a fresh allowlist read (local file
-                    # only - no socket/terminal I/O in this transaction): a
-                    # revocation landing in the same window must not complete on a
-                    # stale flag. pane_info travels in with the proof because
-                    # resolving it needs herdr I/O, which stays outside.
+                    # revalidated here too, on a fresh allowlist read serialized
+                    # against save() replacement (local file lock only - no
+                    # socket/terminal I/O in this transaction): a revocation landing
+                    # in the same window must not complete on a stale read.
                     owners = set(_decode(row["assignees"]))
                     owners.update(lease["pane_id"]
                                   for lease in self.leases_for(from_task, now)
                                   if lease.get("pane_id"))
                     proof = operator_proof or {}
                     fresh_operator = False
-                    allowlist = proof.get("superusers")
-                    if (allowlist is not None and proof.get("pane_id")
+                    allowlist_path = proof.get("allowlist_path")
+                    if (allowlist_path and proof.get("pane_id")
                             and proof.get("pane_id") == pane_id):
                         try:
-                            allowlist.refresh()
-                            fresh_operator = bool(allowlist.is_superuser(
-                                pane_id, proof.get("pane_info")))
+                            panes, names = read_panes_locked(allowlist_path)
+                            fresh_operator = match_allowlist(
+                                panes, names, pane_id, proof.get("pane_info"))
                         except Exception:             # noqa: BLE001 - a corrupt
                             fresh_operator = False    # allowlist grants nothing
                     if pane_id not in owners and not fresh_operator:
