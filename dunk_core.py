@@ -3558,6 +3558,22 @@ class Flock:
         if not hasattr(self.herdr, "respawn_pane"):
             raise DunkError("respawn-pane: the active backend does not support guarded respawn")
 
+        # No shared Codex home on a Codex lane: the producer hook must be the
+        # reviewed per-lane hook file, not ~/.codex/hooks.json or its helper.
+        # We refuse an EXPLICIT shared CODEX_HOME; the operator supplies the
+        # per-lane path (see docs/RESPAWN_PANE.md).
+        if str(pane.get("agent") or "").lower() == "codex":
+            shared = os.path.realpath(os.path.expanduser("~/.codex"))
+            for values in (argv, rollback_argv or []):
+                for part in values:
+                    text = str(part)
+                    if not text.startswith("CODEX_HOME="):
+                        continue
+                    home = text.split("=", 1)[1]
+                    if os.path.realpath(os.path.expanduser(home)) == shared:
+                        raise DunkError("respawn-pane refused: use an isolated per-lane "
+                                        "CODEX_HOME, not the shared ~/.codex home")
+
         with self._lock:
             turn = self.turns.get(pane_id)
             if turn and not turn.get("ended_at"):

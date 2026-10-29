@@ -31,6 +31,10 @@ only to that reviewed per-lane hook file.
 - no superuser allowlist entry / wrong operator;
 - pane not visible or not created by Dunking Sheep;
 - `--expected-pid`/`--expected-start` mismatch (including a replaced/reused pid);
+- a FINAL identity re-check inside the backend immediately before the kill/spawn
+  catches a pane replaced between the core checks and the mutation;
+- an explicit shared `CODEX_HOME=~/.codex` on a Codex lane is refused; use the
+  isolated per-lane home;
 - missing `--confirm-idle`;
 - active declared turn;
 - live task lease for the pane;
@@ -46,6 +50,8 @@ These are checked before a process is touched. Task/mail stores are not written.
 
 On success the old launch record is preserved under `previous`, the new argv is
 recorded with `source="respawn_pane"`, and one `pane.respawn` metric is written.
+The launch record is written only AFTER the replacement exists and is verified
+live; a backend refusal before mutation leaves the old launch record untouched.
 The replacement pid is verified live before success is returned.
 
 If the backend fails after the old process is gone, or the replacement is not a
@@ -59,5 +65,7 @@ error says so; no success is claimed.
 `python3 -m unittest tests.test_dunk_respawn_pane` covers success (old launch
 preserved), wrong pid/start, missing idle confirmation, active turn, unread,
 outbox, live lease, non-ready delivery, unsupported backend, failed start with
-rollback, dead replacement with rollback, stale-pid second attempt, and
-backend argv quoting/unmanaged refusal. No live pane is used.
+rollback, dead replacement with rollback, stale-pid second attempt, pane
+replaced between core check and backend mutation, explicit shared CODEX_HOME,
+backend refusal keeping the old launch record, and backend argv
+quoting/unmanaged refusal. No live pane is used.

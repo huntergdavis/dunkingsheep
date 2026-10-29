@@ -124,6 +124,22 @@ class RespawnPaneTests(unittest.TestCase):
             self._respawn()
         self.assertEqual([], self.calls)
 
+    def test_shared_codex_home_is_refused(self):
+        shared = os.path.expanduser("~/.codex")
+        argv = ["env", f"CODEX_HOME={shared}", "codex", "--no-daemon"]
+        with self.assertRaisesRegex(DunkError, "isolated per-lane"):
+            self._respawn(argv=argv)
+        self.assertEqual([], self.calls)
+
+    def test_backend_refusal_keeps_the_old_launch_record(self):
+        def refuse(pane_id, argv, expected_pid=None, expected_start=None):
+            self.calls.append({"pane_id": pane_id, "argv": list(argv)})
+            return False, "refused before mutation"
+        self.herdr.respawn_pane = refuse
+        with self.assertRaisesRegex(DunkError, "refused before mutation"):
+            self._respawn()
+        self.assertEqual(self.old_argv, self.flock.launches[self.pane_id]["argv"])
+
     def test_backend_without_respawn_refuses(self):
         del self.herdr.respawn_pane
         with self.assertRaisesRegex(DunkError, "does not support"):
@@ -186,6 +202,25 @@ class TmuxRespawnGuardTests(unittest.TestCase):
         self.assertIn("sh -c", command)
         self.assertIn("touch /tmp/pwned", command)
         self.assertNotIn("; touch /tmp/pwned", command.replace("'" + "; touch /tmp/pwned" + "'", ""))
+
+    def test_pane_replaced_between_core_check_and_backend_mutation_refuses(self):
+        state = {"pid": 200}
+        calls = []
+
+        def tmux(*args, **_kw):
+            calls.append(args)
+            return 0, "", ""
+
+        self.backend._tmux = tmux
+        self.backend._managed = lambda *_a: True
+        pids = iter([200, 201])
+        self.backend.get_pane = lambda _pane: {"pane_id": "w1:p1",
+                                               "pane_pid": next(pids)}
+        ok, message = self.backend.respawn_pane(
+            "w1:p1", ["codex", "--no-daemon"], expected_pid=200)
+        self.assertFalse(ok)
+        self.assertIn("replaced between check", message)
+        self.assertEqual([], calls, "no kill/spawn after the pane pid changed")
 
     def test_unmanaged_or_wrong_pid_refuses(self):
         self.backend.get_pane = lambda _pane: {"pane_id": "w1:p1",

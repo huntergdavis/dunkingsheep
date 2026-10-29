@@ -640,6 +640,24 @@ class TmuxBackend(TerminalBackend):
                 return False, (f"refusing: pane {pane_id} process start is "
                                f"{actual_start!r}, expected {expected_start!r}")
         command = self._agent_launch(shlex.join([str(part) for part in argv]))
+        # FINAL identity re-check immediately before the kill/spawn.  The caller
+        # has already checked its snapshot; this closes the window in which the
+        # pane could have been replaced while idle/mail/queue checks ran.
+        current = self.get_pane(pane_id)
+        if not current or current.get("pane_pid") is None:
+            return False, f"pane {pane_id} disappeared before respawn"
+        try:
+            current_pid = int(current.get("pane_pid"))
+        except (TypeError, ValueError):
+            return False, f"pane {pane_id} lost its pane pid before respawn"
+        if current_pid != old_pid_int:
+            return False, (f"refusing: pane {pane_id} was replaced between check and "
+                           f"mutation (pid {old_pid_int} -> {current_pid})")
+        if expected_start is not None:
+            from dunk_callers import process_start
+            if str(process_start(current_pid)) != str(expected_start):
+                return False, (f"refusing: pane {pane_id} process changed between check "
+                               "and mutation")
         code, out, err = self._tmux("respawn-pane", "-k", "-t", pane_id, command)
         if code != 0:
             return False, (err.strip() or out.strip() or "tmux respawn-pane failed")
