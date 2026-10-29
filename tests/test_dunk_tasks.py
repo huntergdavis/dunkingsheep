@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import logging
 import threading
 import unittest
 
@@ -229,6 +230,31 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(["w1:p1"], stolen["refused"]["owned_by"])
         back = self.store.claim_next(GLOBAL, "w1:p1")
         self.assertEqual(task["id"], back["task"]["id"], "the owner could not reclaim")
+
+    def test_reap_advisory_names_the_sole_owner_when_that_owner_is_gone(self):
+        """The advisory must fire for the common case: the owner IS the pane
+        whose lease ended, and it is not in the live pane list. Filtering the
+        expiring claimant out of the owner set hides exactly that case (t145
+        review i32091)."""
+        task = self.store.add(GLOBAL, "dead owner work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        with self.assertLogs("dunkingsheep.tasks", level="INFO") as logs:
+            self.store.reap(alive_source="live", alive_panes={"w2:p2"})
+        self.assertTrue(any("reopened while owned" in line and "w1:p1" in line
+                            for line in logs.output),
+                        f"no advisory for a sole dead owner: {logs.output}")
+        self.assertEqual(["w1:p1"], self.store.get(task["id"])["assignees"])
+
+    def test_reap_advisory_is_silent_when_the_owner_is_alive(self):
+        self.store.add(GLOBAL, "live owner work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        logging.getLogger("dunkingsheep.tasks").setLevel(logging.INFO)
+        with self.assertNoLogs("dunkingsheep.tasks", level="INFO"):
+            self.store.reap(alive_source="live", alive_panes={"w1:p1"})
 
     def test_release_keeps_the_durable_assignee_and_blocks_other_lanes(self):
         task = self.store.add(GLOBAL, "owned work", assignees=["w1:p1"])

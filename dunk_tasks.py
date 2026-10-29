@@ -1200,8 +1200,10 @@ class Tasks:
                             "pane_id": lease["pane_id"],
                             "reason": reason,
                         })
-                        owners = [name for name in _decode(row["assignees"])
-                                  if name != lease["pane_id"]]
+                        # The claimant is an owner too (claim appends it), and
+                        # it is the common case: its lease ended and its pane is
+                        # gone. Filtering it out hid exactly that (t145/i32091).
+                        owners = _decode(row["assignees"])
                         if (alive_panes is not None and owners
                                 and not any(owner in alive_panes for owner in owners)):
                             # Advisory only: ownership is durable, so a dead
