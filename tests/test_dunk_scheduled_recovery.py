@@ -246,6 +246,30 @@ class ScheduledRecoveryTests(unittest.TestCase):
         self.assertEqual(1, self.tick(1120))
         self.assertEqual(1, len(self.backend.keys))
 
+    def test_long_false_sent_composer_stays_observable(self):
+        text = '\n'.join('scheduled line ' + str(i) for i in range(18))
+        self.dunk.text = text
+        frame = '\x1b[1m›\x1b[0m ' + text + '\n  GPT-6-Astra high · ~/workspace · task\n'
+        original = self.backend.send_text
+        def send(pane, body):
+            result = original(pane, body)
+            self.backend.screens[pane] = frame
+            return result
+        self.backend.send_text = send
+        self.backend.enters_needed[PANE] = 999
+        with mock.patch.object(dunk_core, 'SUBMIT_GAPS', [0]), \
+                mock.patch.object(dunk_core, 'SUBMIT_POLL_S', [0]), \
+                mock.patch.object(dunk_core, 'SUBMIT_VERIFY_GAPS', [0, 0]):
+            self.flock._do_send(self.dunk)
+        before = len(self.backend.keys)
+        self.assertEqual('sent', self.flock.stuck_candidates[PANE]['status'])
+        self.assertEqual(dunk_core._collapse(text), dunk_core._collapse(self.flock._box_text(PANE)))
+        self.tick(1000)
+        self.tick(1120)
+        self.tick(1300)
+        self.assertEqual(before + 1, len(self.backend.keys))
+        self.assertFalse(any(e.get('outcome') == 'consumed' for e in self.metrics.events))
+
     def test_reported_sent_dim_transcript_is_not_submitted_again(self):
         self.reported_sent_schedule(sigil='\x1b[1;2m›\x1b[0m')
         for at in (1000, 1120, 1300):

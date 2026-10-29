@@ -5636,10 +5636,15 @@ class Flock:
 
     def _recovery_box_text(self, pane_id, screen):
         """Unknown geometry is never evidence that the prompt was consumed."""
+        # The legacy reader sees only the first line and ignores sigils more
+        # than 14 rows from the bottom. A proven complete composer must remain
+        # observable even when it is long, with or without blank footer gaps.
+        owned, region = self._composer_ownership(pane_id, screen)
+        if owned:
+            return region
         _text, detail = box_text(screen)
         if detail.startswith(AMBIGUOUS_COMPOSER):
-            owned, region = self._composer_ownership(pane_id, screen)
-            return region if owned else None
+            return None
         return _typed_text(screen)
 
     def press_keys(self, pane_id, keys):

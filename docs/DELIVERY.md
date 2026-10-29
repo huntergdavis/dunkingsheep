@@ -266,6 +266,11 @@ refuses some genuine historical transcript frames, including the old %33
 capture: styling cannot prove the provenance of the omitted rows. Such frames
 still need guarded operator recovery; the watchdog is not universal recovery.
 
+Recovery reads a proven complete composer before consulting the legacy
+first-line/14-row reader. Long prompts therefore remain observable and keep
+the same one-attempt budget; an unchanged prompt after the retry is reported
+as unconsumed, not successful recovery.
+
 Older installed releases did not record scheduled candidates. An upgrade cannot
 retroactively prove the generation or intent of those existing prompts; they
 remain held for operator recovery. Do not fabricate candidates from a schedule's
