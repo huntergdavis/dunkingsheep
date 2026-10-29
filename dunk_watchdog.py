@@ -169,6 +169,14 @@ def _regex(value):
     return None
 
 
+# t409 (VP i32480, OPTION 1 ALERT-ONLY). A queued delivery can be refused indefinitely
+# because the reader cannot delimit the target's composer ("ambiguous composer/transcript:
+# prompt row N is separated from footer row M by K blank rows"). The message is RETAINED -
+# nothing becomes terminal, nothing is retried, cleared, re-targeted or dropped - but the
+# condition was invisible, so it is surfaced here. The marker is dunk_core.AMBIGUOUS_COMPOSER
+# and tests/test_watchdog_ambiguous_queued.py asserts the two strings still agree.
+AMBIGUOUS_READER_MARKER = "ambiguous composer/transcript"
+
 RULE_COMMON = {
     "enabled": _bool,
     "severity": _enum(*SEVERITIES),
@@ -185,6 +193,10 @@ RULE_PARAMS = {
                        # A streak that stopped N minutes ago is history, not a condition.
                        "fresh_minutes": POSITIVE_INT},
     "dunk.overdue": {"missed_intervals": POSITIVE},
+    # t409: how old and how often refused before this is worth saying. Both are read from
+    # the t269 budget that already exists (HOLD_ATTEMPT_LIMIT attempts over the backoff),
+    # not new policy.
+    "delivery.ambiguous_queued": {"min_holds": POSITIVE_INT, "min_age_minutes": POSITIVE},
     # Above the 24h auto-archive: a page must mean "the archive did not catch
     # this", not "the archive is about to catch this".
     "inbox.undeliverable": {"min_messages": POSITIVE_INT, "min_age_hours": POSITIVE},
@@ -275,8 +287,53 @@ def _validate(spec, value, prefix):
                 raise ConfigError(f"{prefix}{key}", problem)
 
 
+# t409: a rule added to the schema would otherwise make every EXISTING config fail with
+# "missing", which is a migration that silently disables the fleet's watchdog. Instead an
+# absent rule is filled in DISABLED with the shipped defaults, so an old config keeps
+# behaving exactly as it did (preserve deployed policy) and enabling the new rule is an
+# explicit edit. `migrated` records what happened so a caller can log it.
+# The t269 budget, mirrored so the watchdog can default the new rule without importing
+# dunk_core (the two are separate deployments and a test asserts they agree).
+HOLD_ATTEMPT_LIMIT_DEFAULT = 10
+
+RULE_DEFAULTS = {"severity": "warning", "class": "ops", "cooldown_minutes": 240,
+                 "must_hold_runs": 1, "enabled": False}
+
+
+# Rules added AFTER a config was written. Only these are filled in when absent; every
+# older rule stays REQUIRED, so a config that accidentally loses one still fails loudly
+# (test_dunk_watchdog.ConfigTests.test_named_errors depends on that, and rightly so).
+RULE_ADDITIONS = ("delivery.ambiguous_queued",)
+
+
+def migrate_config(config):
+    """Fill in rules a config predates (DISABLED). Returns the list of added rule ids."""
+    rules = config.get("rules")
+    if not isinstance(rules, dict):
+        return []
+    added = []
+    for rule_id in RULE_ADDITIONS:
+        if rule_id in rules:
+            continue
+        block = dict(RULE_DEFAULTS)
+        for key in RULE_PARAMS[rule_id]:
+            block[key] = _RULE_EXAMPLE_DEFAULTS.get((rule_id, key), 1)
+        rules[rule_id] = block
+        added.append(rule_id)
+    return added
+
+
+# Shipped defaults for the rules that can be added to an existing config. Only the ones
+# whose presence is a judgement need an entry; everything else defaults to 1.
+_RULE_EXAMPLE_DEFAULTS = {
+    ("delivery.ambiguous_queued", "min_holds"): HOLD_ATTEMPT_LIMIT_DEFAULT,
+    ("delivery.ambiguous_queued", "min_age_minutes"): 20,
+}
+
+
 def validate_config(config):
     """Raise ConfigError naming the first bad key; return the config unchanged."""
+    migrate_config(config)
     _validate(TOP, config, "")
     stuck = config.get("stuck_recovery") or {}
     if stuck.get("enabled") and stuck["observation_interval_s"] > stuck["threshold_s"]:
@@ -858,6 +915,95 @@ def _heavy_jobs(inputs):
     return count
 
 
+_AMBIGUOUS_SHAPE_RE = re.compile(
+    r"^ambiguous composer/transcript: prompt row (\d+) is separated from footer row "
+    r"(\d+) by (\d+) blank rows")
+
+
+def _ambiguous_shape(reason):
+    """The integers in the documented sentence, or {} when the text is not that sentence.
+
+    Deliberately narrow: if the reason does not match the anchored pattern exactly, no
+    structural field is reported at all - an unrecognised suffix is never echoed back.
+    """
+    match = _AMBIGUOUS_SHAPE_RE.match(reason or "")
+    if not match:
+        return {}
+    return {"prompt_row": int(match.group(1)), "footer_row": int(match.group(2)),
+            "blank_rows": int(match.group(3))}
+
+
+def rule_delivery_ambiguous_queued(inputs, rule):
+    """t409 OPTION 1: a message held on an AMBIGUOUS composer, said out loud, never acted on.
+
+    The reader refuses a frame it cannot delimit ("prompt row N is separated from footer row
+    M by K blank rows"), and the message stays queued. VP i32480 rejected terminalising that
+    class - an unchanged frame is not proof of a dead agent, permanent failure or human intent,
+    and a 'gone' signature is missing telemetry rather than stability. So this rule REPORTS:
+
+      * message id, pane, queue age, refused-attempt count and the structural reason;
+      * never the message body, its mailbox, a transcript or any payload;
+      * no claim that the recipient is dead - the wording says the composer could not be read.
+
+    Read-only by construction: it reads the state file and metrics.db and returns findings.
+    It presses nothing, retries nothing, clears nothing, re-targets nothing and never drops a
+    message. The t269 backoff/terminal policy is untouched.
+    """
+    state = _load_json(inputs.path("dunks.json"))
+    out = []
+    for row in state.get("outbox") or []:
+        holds = int(row.get("holds") or 0)
+        if holds < rule["min_holds"]:
+            continue
+        created = float(row.get("created_at") or inputs.now)
+        age_s = max(0.0, inputs.now - created)
+        if age_s < rule["min_age_minutes"] * 60:
+            continue
+        pane = str(row.get("pane_id") or "")
+        message_id = str(row.get("id") or "")
+        if not pane or not message_id:
+            continue
+        # The recorded reason is the only field that says WHY; the signature does not
+        # (a 'gone' signature is missing telemetry). Read the newest refusal for this pane
+        # that happened inside this message's lifetime.
+        try:
+            # BOTH bounds (VP i32622): without `at <= now` a FUTURE-dated row would speak
+            # for the present - a stale ambiguous row could override a current turn-wait
+            # and raise a false "current" alert.
+            rows = inputs.metrics(
+                "SELECT reason, at FROM events WHERE kind='message.held' AND pane_id=? "
+                "AND at>=? AND at<=? ORDER BY at DESC LIMIT 1",
+                (pane, created - 5, inputs.now))
+        except Exception:                        # noqa: BLE001 - no store, no finding
+            rows = []
+        reason = str((rows[0][0] if rows else "") or "")
+        observed_at = float(rows[0][1]) if rows and rows[0][1] else None
+        if not reason.startswith(AMBIGUOUS_READER_MARKER):
+            continue                         # a different shape: turn-wait, box hold, dead
+        # STRUCTURE ONLY (VP i32622): the reason field can carry an arbitrary suffix, so it
+        # is never copied into the finding. What travels is the fixed class name plus
+        # integers parsed from the documented sentence, and nothing else.
+        shape = _ambiguous_shape(reason)
+        next_attempt = row.get("next_attempt_at")
+        out.append(finding(
+            "delivery.ambiguous_queued", rule, message_id,
+            f"message {message_id} has been queued {_minutes(age_s)} min on {pane} with "
+            f"{holds} refused attempts: the reader could not delimit that composer "
+            f"(message retained, not terminal, recipient not assumed dead)",
+            f"{rule['min_holds']} refused attempts and "
+            f"{rule['min_age_minutes']} min queued",
+            f"{holds} attempts, {_minutes(age_s)} queued",
+            "queue age and refused attempts",
+            {"message": message_id, "pane": pane, "age_minutes": _minutes(age_s),
+             "holds": holds, "reason_class": "ambiguous_reader",
+             "shape": shape,
+             "last_refusal_age_s": (round(max(0.0, inputs.now - observed_at))
+                                    if observed_at else None),
+             "next_attempt_in_s": (round(max(0.0, float(next_attempt) - inputs.now))
+                                   if next_attempt else None)}))
+    return out
+
+
 def rule_host_load(inputs, rule):
     """A band fitted to our own recorded work (2026-10-22), not to a guess.
 
@@ -1194,6 +1340,7 @@ RULES = {
     "task.lease_stale": rule_task_lease_stale,
     "dunk.skip_loop": rule_dunk_skip_loop,
     "dunk.overdue": rule_dunk_overdue,
+    "delivery.ambiguous_queued": rule_delivery_ambiguous_queued,
     "inbox.undeliverable": rule_inbox_undeliverable,
     "inbox.unread_live": rule_inbox_unread_live,
     "inbox.unread_dead": rule_inbox_unread_dead,
