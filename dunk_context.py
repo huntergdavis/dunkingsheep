@@ -351,6 +351,29 @@ class Store:
     def index_path(self):
         return self.root / ".index.db"
 
+    # The columns search() reads. v2.35.0: files are truth, the FTS index is a
+    # disposable cache - so a cache carrying anything else is disposable too.
+    INDEX_COLUMNS = ("slug", "subject", "body", "class", "scope")
+
+    def index_compatible(self, path):
+        """True when the cached index has exactly the columns this code reads.
+
+        Search must never fail because of the CACHE: on 2026-10-25 pi-review-1
+        got 'index search failed: no such column: model' from an index whose
+        columns did not match the query. Drift is ordinary - an older release,
+        another lane's build, a half-written file - and the answer is always a
+        rebuild from the files, never an error the operator has to decode.
+        """
+        try:
+            conn = sqlite_connect(path, readonly=True)
+            try:
+                rows = conn.execute("PRAGMA table_info(entries)").fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False  # unreadable or corrupt cache: rebuild
+        return tuple(row[1] for row in rows) == self.INDEX_COLUMNS
+
     def index(self):
         self.ensure()
         path = self.index_path()
@@ -373,7 +396,7 @@ class Store:
 
     def search(self, query, *, cls=None, scope=None, limit=20):
         path = self.index_path()
-        if not path.exists():
+        if not path.exists() or not self.index_compatible(path):
             self.index()
         conn = sqlite_connect(path, readonly=True)
         sql = "SELECT slug, subject, class, scope FROM entries WHERE entries MATCH ?"
