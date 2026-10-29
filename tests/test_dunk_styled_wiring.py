@@ -1,15 +1,7 @@
-"""t130: the style-state boundary is WIRED into delivery with dim-body
-provenance accounting - the control that closes the forged-human-content gap.
+"""Styled ownership requires full excluded-span provenance.
 
-The %33 wedge frame (real captured styled frame) now flows: plain boundary
-fails closed (2 sigil rows) -> styled boundary delimits (exactly one bold-
-non-dim composer, dim echoes excluded) -> EVERY excluded dim body must match
-a message the daemon demonstrably sent (sent history or outbox) -> region
-through UNCHANGED strict ownership equality -> flush.
-
-Controls: an unaccounted dim body (human text in a transcript-styled row)
-refuses the frame; accounting via outbox rows works like sent-history
-accounting; the genuine-shell and named-agent paths are unchanged.
+The historical %33 capture contains truncated echo and unaccounted transcript
+output. It now fails closed. Exact, fully accounted echo controls still pass.
 """
 
 import os
@@ -65,11 +57,16 @@ FRAME_33 = "\n".join([
 ]) + "\n"
 
 
+EXACT_FRAME = (E + "1;2m›\x1b[0m [inbox] new message for codex-design from %19. "
+               "Read it with: dunkingsheep inbox read\n\n" +
+               FRAME_33[FRAME_33.index(E + "1m›"):])
+
+
 class StyledWiringTests(unittest.TestCase):
     def setUp(self):
         self.herdr = FakeHerdr()
         self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
-        self.herdr.set_screen("w2:p1", FRAME_33)
+        self.herdr.set_screen("w2:p1", EXACT_FRAME)
         self.gaps = mock.patch.object(dunk_core, "SUBMIT_GAPS", (0.0, 0.0, 0.0, 0.0))
         self.verify = mock.patch.object(dunk_core, "SUBMIT_VERIFY_GAPS", (0.0, 0.0))
         self.poll = mock.patch.object(dunk_core, "SUBMIT_POLL_S", (0.0,))
@@ -89,11 +86,11 @@ class StyledWiringTests(unittest.TestCase):
             "[inbox] new message for codex-design from %19. Read it with: dunkingsheep inbox read",
             D71_TEXT,
         ]
-        owned, region = self.flock._composer_ownership("w2:p1", FRAME_33)
+        owned, region = self.flock._composer_ownership("w2:p1", EXACT_FRAME)
         self.assertTrue(owned, f"region={region[:120]!r}")
         self.assertTrue(region.startswith("Design/web check-in d71:"), region[:120])
         # And the guard flushes it:
-        self.herdr.set_screen("w2:p1", FRAME_33)
+        self.herdr.set_screen("w2:p1", EXACT_FRAME)
         self.flock.sent_text_by_pane["w2:p1"] = [
             "[inbox] new message for codex-design from %19. Read it with: dunkingsheep inbox read",
             D71_TEXT,
@@ -108,7 +105,7 @@ class StyledWiringTests(unittest.TestCase):
         NOTHING the daemon sent is human content in a transcript-styled row -
         the frame REFUSES rather than silently excluding the text."""
         self.flock.sent_text_by_pane["w2:p1"] = [D71_TEXT]  # echo body NOT in history
-        owned, region = self.flock._composer_ownership("w2:p1", FRAME_33)
+        owned, region = self.flock._composer_ownership("w2:p1", EXACT_FRAME)
         self.assertFalse(owned)
         self.assertEqual("", region)
         ok = self.flock._ensure_box_clear("w2:p1")
@@ -127,9 +124,19 @@ class StyledWiringTests(unittest.TestCase):
                                 "send_text", lambda: None)
         msg.status = "queued"
         self.flock.outbox["w2:p1"] = [msg]
-        owned, region = self.flock._composer_ownership("w2:p1", FRAME_33)
+        owned, region = self.flock._composer_ownership("w2:p1", EXACT_FRAME)
         self.assertTrue(owned, f"outbox-provenanced dim body must account: {region[:80]!r}")
         self.assertTrue(region.startswith("Design/web check-in d71:"), region[:80])
+
+    def test_historical_truncated_echo_with_unknown_output_refuses(self):
+        self.flock.sent_text_by_pane["w2:p1"] = [
+            "[inbox] new message for codex-design from %19. Read it with: dunkingsheep inbox read",
+            D71_TEXT,
+        ]
+        self.assertFalse(self.flock.composer_region_is_owned("w2:p1", FRAME_33))
+        self.herdr.set_screen("w2:p1", FRAME_33)
+        self.assertFalse(self.flock._ensure_box_clear("w2:p1"))
+        self.assertEqual([], self.herdr.keys)
 
     def test_plain_frames_unaffected(self):
         """The wiring must not change the plain-path behaviour: single-sigil
