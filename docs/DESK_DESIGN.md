@@ -81,6 +81,10 @@ Two regions on phone (stacked), two columns on tablet and up.
   only on the transport the question used; Telegram never receives web
   traffic, reports or digests, only answers to Telegram questions and the
   three page classes.
+- Recorded owner preferences, all acceptance items: no auto-scroll while the
+  owner is reading up (#1182, #1699); a floating "new content" arrow instead
+  (#45); scrollbars always visible and draggable (#941, #943); short bubbles
+  hug their text (#1876).
 - The composer is the existing rich-text one (TipTap) with attachments. Enter
   sends; Shift-Enter newlines. The same composer is the message dock (Ctrl+/)
   on every other view, so the owner can ask from anywhere without losing the
@@ -181,4 +185,6 @@ viewport report.
 - Every number on Operations has a source and timestamp in its tooltip.
 - Owner message -> desk reply shows the three receipt states from daemon data.
 - All 12 themes pass the contrast gate.
+- No auto-scroll while reading up; new-content arrow; visible draggable
+  scrollbars; short bubbles hug text (section 4.1).
 - `grep -r "subprocess\|sqlite3" web/` returns only the session store.

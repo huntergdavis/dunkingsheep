@@ -96,22 +96,47 @@ events. Any lane can claim `%15`.
 - In `dunk_api.dispatch()`: resolve the caller's pane from the peer pid's
   ancestry. If the claimed id disagrees, the bound id wins and the mismatch is
   recorded in `metrics.db` (`identity.mismatch`).
-- A caller with no TTY (systemd units) is role `system`. A caller with a TTY
-  that resolves to no pane is role `anonymous` (read-only), not refused.
+- **No pane means `anonymous`, always.** A caller whose ancestry reaches no
+  registered pane (a systemd unit, a `setsid` orphan, a Bash subprocess of a
+  lane that reparented to pid 1) is read-only unless it presents a service
+  token (4.2). "No TTY -> system" would be a privilege grant any lane can
+  reach with `setsid -f`; it is not in this design.
 - `--self-pane` becomes an *assertion* that must match, never a source.
+- A demotion on a write (bound pane missing, `caller_start_mismatch` after a
+  tmux or daemon restart) is recorded as `identity.mismatch` in `metrics.db`
+  and surfaced in the owner's delivery receipt as "desk unauthenticated", so
+  a quietly-demoted desk never fails silently.
 
-### 4.2 Roles file
+### 4.2 Role registry
 
-`~/.config/dunkingsheep/roles.json`, same shape as `superusers.json`:
+Roles are **never matched by label**: a pane's tab title, window name or
+label is set by whatever runs in it (`tmux select-pane -T owner` is one
+command away for any lane), which is exactly how `superusers.json`'s `names`
+list works today. And tmux `%N` ids are reused after a server restart, so a
+bare pane id is not stable either.
+
+A role is bound to the pane's root process, `(pane_id, pane_pid, start)`,
+recorded by the launcher at the moment the lane is started and re-verified on
+every call by `caller_pane_auth_failure`. `~/.config/dunkingsheep/roles.json`:
 
 ```json
-{"panes": {"%95": "owner", "%96": "desk"},
- "names": {"owner": "owner", "desk": "desk", "pi-worker-*": "worker", "pi-review-*": "reviewer"},
- "default": "worker"}
+{"lanes": {"%96": {"role": "desk", "pane_pid": 41200, "start": "17932...", "provider": "pi", "model": "deepseek-v4.1-flash"},
+           "%97": {"role": "reviewer", "pane_pid": 41388, "start": "...", "provider": "claude", "model": "fable-5.1"}},
+ "reviewer_providers": ["claude", "codex"],
+ "default": "anonymous"}
 ```
 
-Name patterns match pane label, tab label or workspace label, case-insensitive,
-`fnmatch`. `superusers.json` is retired; `owner` is the superuser role.
+`dunkingsheep lane register --role <r>` (owner/system only; `start_agent`
+and `respawn_pane` call it) writes the entry from the daemon's own launch
+record, never from the client's claim. A pane whose pid/start no longer match
+is `anonymous` until re-registered. `superusers.json` is retired; `owner` is
+the superuser role, bound the same way to the owner's pane **and** reachable
+by an `owner-token` file (same mechanism as the service tokens) so the owner
+is never locked out of a terminal that is not a tmux pane (#2087-#2093).
+
+`reviewer_providers` is enforced in `task next` for `kind=review`: a free
+model cannot review (ground truth `free-models-worker-tier`), and the check
+reads the launch record, not the lane's self-description.
 
 ### 4.3 Allowlist (enforced in `dunk_api.dispatch`, next to `SUPERUSER_ONLY`)
 
@@ -119,7 +144,8 @@ Name patterns match pane label, tab label or workspace label, case-insensitive,
 | --- | --- | --- |
 | `owner` | everything | - |
 | `system` | timers and bridges: `task add/assign/cancel`, `inbox send --system-sender`, `respawn_pane`, `send_keys` under the stuck/watchdog guards, `report`, `owner_*` | interactive typing |
-| `desk` | `task add` (unassigned only) / `list` / `read` / `update` / `note` / `metrics`, `inbox read` (own mailbox), `owner_take`, `owner_reply`, `context digest` / `search`, `metrics summary`, `pane read`, `views *`, `memory recall/search` | `send_text`, `send_keys`, `inbox send`, `task next/claim/complete/heartbeat/release`, every dunk verb, `respawn`, `start_agent`, `context add`, `gh_token` |
+| `desk` | `task add` (unassigned, `kind=work` only) / `list` / `read` / `note` / `metrics`, `inbox read` (own mailbox), `owner_take`, `owner_reply`, `context digest` / `search`, `metrics summary`, `status`, `usage`, `report list/run`, `review list`, `poolrad progress`, `pane read`, `views *`, `memory recall/search` | `send_text`, `send_keys`, `inbox send`, `task next/claim/complete/heartbeat/release/update/assign`, every dunk verb, `respawn`, `start_agent`, `context add`, `gh_token` |
+| `planner` | `task add --kind work` (unassigned only), `task list/read/note`, `views *`, `memory recall`, `context digest` | everything else: no mail, no typing, no claiming, no status changes |
 | `worker` | `task next/heartbeat/complete/note/block/release/follow`, `inbox read/send`, `context add --class fact`, `memory *`, `pane send self`, `gh_token author` | `task add` with other assignees, `task complete` on a task it does not lease, anything superuser, `gh_token reviewer` |
 | `reviewer` | as worker, except `task next` yields only `kind=review` with `author != self`, and `gh_token reviewer` not `author` | pushing code: the reviewer App has `contents: read` |
 | `web` | the owner's transport: everything `owner` may call except the fleet-destructive verbs (`close`, `shutdown`, `respawn_pane`, `start_agent`, every dunk verb, `superuser *`, `gh_token`). Bound by a service token, not a pane (below). | the excluded verbs |
@@ -135,9 +161,38 @@ role; a no-TTY request without one is `anonymous`. The old desk credential
 mechanism for one verb pair, and its name collides with the desk role.
 
 Also closed: `inbox read --mailbox X` for another mailbox (`_mailbox_or_self`),
-`task complete` by a non-lease-holder, ungated `owner_push`.
+`task complete` by a non-lease-holder, ungated `owner_push`, and three
+indirect routes the first draft missed: `task update` drops `status` and
+`assignees` for every role but `owner`/`system`; `task assign` is
+`owner`/`system` only; `inbox send --system-sender` requires the system
+token. The review verdict (`accept` / `needs-fix`) is not a free-text note:
+it is written by the daemon at `task complete` from the bound pane that holds
+the lease, and only when that pane's role is `reviewer` and its registered
+provider is in `reviewer_providers`.
+
+**Result caps for `desk`** (the latency mechanism, not a hope): every read the
+desk makes is clamped daemon-side to 4 KB and `limit <= 5` (`memory recall`
+is unclamped today and costs ~1 s per call; a task body can be 25 KB). The
+60-second "desk slow" receipt in `DESK_DESIGN.md` 4.1 is the enforcement the
+owner sees.
 `dunk_mcp.list_tools` filters by role so the desk never sees a typing tool; the
 dispatch check is what enforces it.
+
+### 4.4 What this does and does not enforce
+
+Every lane runs as the Unix user `hunter`, as does the daemon, and so does the
+owner's own `gh` login (`~/.config/gh/hosts.yml`, `repo` + `workflow` scope)
+and ssh key. A lane can read the App private keys, the service tokens and the
+owner's credentials; a lane that deliberately does so can approve as the
+owner, push as the owner, or mint the reviewer token itself. **This design
+enforces its invariants against confusion, generalisation and bugs: the
+failure modes actually observed this month. It does not enforce them against
+a lane that sets out to bypass them.** The uplift that would is a second Unix
+user for the daemon and its secrets (socket group-writable, `/proc` reads
+still work, tmux socket shared by group) and the owner's personal
+credentials leaving the fleet host; it is deferred because it entangles tmux
+and every worktree, and it is recorded here so nobody mistakes a guardrail
+for a wall.
 
 ## 5. Tasks
 
@@ -150,6 +205,9 @@ dispatch check is what enforces it.
   backlog is a strict ranking with no "unset" state.
 - `Tasks._record` gains an `on_event` list; the daemon reacts to `created` /
   `completed` without polling.
+- A unique index on `(kind, repo, pr, head)` makes duplicate review tasks
+  impossible at the store (the CoS filed twelve identical ones for PR #117
+  in its last two minutes; a check in the timer is not a constraint).
 - The only way a lane asks the owner anything is
   `task block --reason "needs-owner: <question>"`. The reporter and the desk
   surface those as "Decisions I need"; the owner's answer unblocks with the
@@ -167,7 +225,7 @@ identity owned by that login, not an account. Two apps:
 | App | Used by | Permissions |
 | --- | --- | --- |
 | `dunkingsheep-author` | worker lanes | contents: write, pull_requests: write, workflows: write, metadata: read |
-| `dunkingsheep-reviewer` | reviewer lanes and the review timer | contents: read, pull_requests: write, **commit statuses: write**, metadata: read |
+| `dunkingsheep-reviewer` | reviewer lanes and the review timer | contents: write (accounting commits only, see 6.4), pull_requests: write, **commit statuses: write**, metadata: read |
 
 The reviewer App posts the `dunkingsheep/review` commit status, which needs
 `statuses: write`; branch protection pins that required check to this App so
@@ -201,9 +259,15 @@ records that trade; the fallback is for an outage, not a design choice.
 
 ### 6.2 Branch protection
 
-On `dunkingsheep` and `poolrad-decomp` (`vp-of-agentry` is archived): require
-one approving review, dismiss stale approvals on push, require the
-`dunkingsheep/review` status, auto-merge enabled, no bypass for anyone. GitHub
+On `dunkingsheep`: one approving review. On `poolrad-decomp`: **two**, as
+its process requires today ("both reviewers reproduce every claim from the
+media", `VP_HANDOFF.md`). Both: dismiss stale approvals on push, require the
+`dunkingsheep/review` status pinned to the reviewer App, auto-merge enabled,
+no direct pushes to `main`, bypass only for the reviewer App and only for
+the accounting commit (6.4). Lane worktrees use **https** remotes so the
+credential helper runs; with today's ssh remotes every push is the owner's
+key and the author token is dead code. The step 9 check asserts the PR author
+is `dunkingsheep-author[bot]`. GitHub
 itself refuses an app approving its own PR, so author != reviewer is enforced
 by GitHub, not by a prompt. `no-self-merge` and `no-self-credit` stop being
 rules and become refused API calls.
@@ -225,7 +289,35 @@ instead of 5) runs
    With `needs-fix`, it posts failure and files a `kind=work` follow-up for the
    author lane.
 
-Reviewer lanes `task follow`; the daemon pushes review tasks to idle reviewers.
+Reviewer lanes `task follow`; the daemon pushes review tasks to idle
+reviewers. The review task body carries what a real poolrad review needs:
+ledger hashes, checkpoint pins, scope and the author worktree path, not only
+CI state and a diff stat.
+
+### 6.4 Acceptance is a commit
+
+In poolrad-decomp acceptance *is* a reviewer commit on `main` that updates
+the credited/replaced ledger ("Accept OVL_007F_063A (967 B): 289 strict /
+334 identities"). No approver may push code, so `review-sync` makes that
+commit deterministically from the verdict's numbers, as the reviewer App,
+under its bypass. It is the only write the reviewer App ever makes and it
+touches only the ledger files.
+
+### 6.5 Filling the backlog
+
+The VP and CoS wrote 198 of the last three days' tasks, including every
+claimable Poolrad body with its base commit, slot and method pointer. Two
+replacements, and the second is an LLM, which this document says plainly:
+
+- `dunkingsheep poolrad backlog-sync` (timer, deterministic): turns the next
+  N unstarted rows of the repo's strict-candidate and function-census queues
+  into `kind=work` tasks with the verified base commit and slot.
+- One `planner` lane (role in 4.3: may only write `kind=work` task bodies)
+  with the standing task "decompose the umbrella into claimable bodies".
+
+The rebase loop (six open PRs regenerating the same census CSV, each merge
+reopening the others' review) is a poolrad repo problem the review timer
+would make quadratic: the census moves to a post-merge CI job in step 10.
 
 ## 7. The front desk and the reporter
 
@@ -254,7 +346,8 @@ and the web are two transports for one mailbox. Owner-reply latency is then the
 same metric as lane-read latency and the watchdog alarms on it with no special
 code.
 
-**Reply on the transport the question arrived on (owner, 2026-10-29).** Each
+**Reply on the transport the question arrived on (owner, 2026-10-29, chat;
+supersedes the hourly-screenshot asks #627/#676).** Each
 owner message records its `transport` (`telegram` | `web`); a desk reply is
 delivered only on that transport. Telegram carries answers to Telegram
 questions and nothing else: no web-conversation echoes, no reports, no
@@ -278,9 +371,14 @@ latency baseline survives; attachments move to the inbox blob store.
 working/idle/dead, `needs-owner` list, budget projection, watchdog digest, PRs
 awaiting review and their age, Poolrad credited/replaced counts. A timer runs it
 every 4 hours; the desk may run it on demand. It posts to the `owner` mailbox
-on the `report` transport, so Telegram keeps working. Optionally the text is
-piped through a one-shot `claude -p "ELI5 bullets"`: a process that exits, not
-a pane with an inbox, opinions and rule-writing power.
+on the `report` transport, which the web shows and Telegram does not (7.2).
+The ELI5 pass the owner has asked for repeatedly (#1083, #1770, #2271) is
+mandatory, by a one-shot `claude -p` run with **no tools and no MCP**
+(`--tools "" --strict-mcp-config --mcp-config '{}'`): a process that exits,
+not a pane with an inbox, opinions and rule-writing power. The deterministic
+block is posted verbatim above the prose, and the daemon rejects prose that
+names a task id or a status absent from its input, so a summariser cannot
+round "merged" up to "done".
 
 Three separate mechanisms address the VP mailbox today and each gets its own
 edit: `host_watch.py` (literal `"π - vp-of-agentry"` via subprocess),
@@ -301,18 +399,19 @@ boundary either. The honest design is three layers:
 - **Writes go through the daemon.** `context_add / promote / retire /
   supersede` become daemon commands; the CLI calls them over the socket; the
   role check lives in `dispatch()` like every other write.
-- **The daemon stamps what it writes.** Each entry it creates carries an
-  HMAC over (slug, class, authority, body) keyed by a daemon secret in
-  `~/.config/dunkingsheep/context-key` (0600). The digest injects a ground
-  truth only when its stamp verifies and `authority: owner`; `context check`
-  reports every unstamped or mis-authored entry as a violation with its path.
+- **The store is a SQLite table the daemon alone opens.** Markdown under
+  `context/` becomes an export the daemon writes, never a source it reads;
+  the digest is built from the table. `context check` diffs the export
+  against the table and names any file a lane dropped in by hand. (A first
+  draft used an HMAC stamp; a key readable by the same uid proves nothing,
+  so it is gone.)
 - **Rules of the road.** `context add` refuses `--class ground-truth`,
   `type: rule`, and `authority: owner` unless the bound role is `owner`.
   `TYPES` is validated. `context promote` checks the bound role, not
   `DUNKINGSHEEP_SUPERUSER=1`.
 
-A lane that bypasses the daemon can still drop a file; it will not be injected,
-and `check` names it. That is the strongest guarantee a same-uid fleet allows,
+A lane that bypasses the daemon can still drop a file; it is never read, and
+`check` names it. That is the strongest guarantee a same-uid fleet allows,
 and the ADR says so rather than claiming more.
 - Every ground truth carries `recheck_after`; the digest marks it STALE like a
   fact. Rules are scoped ("until t130 is live" is the right shape).
@@ -375,7 +474,16 @@ dunkingsheep/                 one repo, one package, one reviewed release
    `CoverageEconomics`, `LineTrend`, `QuotaCard`, `Search`,
    `ForceSendDialog`). **Keep:** Play, character editor, themes as a system,
    host_watch, budget projection.
-7. `vp-of-agentry` is archived on GitHub after cutover, not deleted.
+7. `vp-of-agentry` is archived on GitHub one week after cutover, not deleted.
+9. **Consumers of what is removed, each needing its own edit:**
+   `dunk_views.py` opens `vp-of-agentry/data/messages.sqlite3` from inside
+   the daemon; `dunk_watchdog.py` and `dunk_telegram_routing.py` read
+   `telegram-routing.json` / `channels.json` for page confirmation;
+   `tests/test_dunk_watchdog.py`, `tests/test_cli.py`,
+   `tests/test_dunk_tasks.py` assert on them; `DUNKINGSHEEP_VP_PANE` is in the
+   daemon's systemd drop-in and read by `dunk_superusers.py`;
+   `vp-ops-metrics` feeds the budget projection the plan keeps;
+   `desk_token` remains in `dunk_api.py`.
 8. **Environment that must carry into `dunkingsheep-web.service`:**
    `VP_DOSBOX_X` (the pinned DOSBox-X build), `POOLRAD_EDITOR_TOOL`, the
    terminal URL. `dunkingsheep release install <sha>` is new work: today a
@@ -385,25 +493,37 @@ dunkingsheep/                 one repo, one package, one reviewed release
 
 ## 10. Rollout (serial, each step verifiable, all in worktrees)
 
-| Step | Work | Verified by |
-| --- | --- | --- |
-| 0 | This document and `docs/DESK_DESIGN.md` merged | PR reviewed by a non-author |
-| 1 | Task up everything in the queue with bodies | `task list` shows bodies and dependencies |
-| 2 | Drain and stop: every lane `task note` + `release` (2-minute drain), then stop; delete all dunks; retire panes | `dunk-poll`: 0 running dunks, 0 agent panes but owner + desk |
-| 3 | Identity binding + roles allowlist | a lane calling `--self-pane %15` is bound to its own pane; a `desk` pane calling `send_text` is refused (tests) |
-| 4 | Task `kind`/`author`, claimable-by-role, `on_event`, default `low` | migration test; `task next` as reviewer never returns own-author work |
-| 5 | GitHub Apps wired: `gh_token`, credential helper, branch protection, review timer | unit tests; the live PR check runs in step 9 |
-| 6 | Repo merge: `web/`, `ui/`, `play/`, `bridges/`; owner mailbox migration; `report`; web speaks socket-only | `dunkingsheep-web.service` serves `/dash/desk`; `grep -r "subprocess\|sqlite3" web/` returns only the session store |
-| 7 | Context governance; retire the four rules; fix the two broken ground truths | `context check` clean; `context add --class ground-truth` refused for a worker |
-| 8 | Cutover: stop and disable every `vp-*` unit (`vp-of-agentry`, `vp-telegram`, `vp-terminal-gateway`, `vp-herdr-webui`, `vp-herdr-webui-proxy`, `vp-ops-metrics`, `vp-ops-snapshot`, `vp-host-watch`, `vp-free-catalog`); rename `vp-terminal-webui` (ttyd) to `dunkingsheep-terminal` so the live terminal survives, with its session check folded into `dunkingsheep-web`; start `dunkingsheep-web`, `dunkingsheep-telegram`, the review and report timers; launch the desk pane; archive the repo | Telegram round-trip through the desk |
-| 9 | Launch 1 reviewer + 1 worker lane on `task follow`; run the step 5 and step 8 checks that need live lanes (PR -> review task -> approval -> auto-merge; owner p50) | all step 5/8 checks green |
-| 10 | Scale: 2 reviewer lanes, N worker lanes; point them at the poolrad-decomp backlog | dispatched_1h > 0; review queue age < 30 min; owner p50 < 20 s over a day |
+Ordering principle after the red-team pass: **Poolrad value first, the repo
+merge last.** The merge is the largest step and the only one with no Poolrad
+value; everything the fleet needs to burn through the backlog lands before it.
+
+| Step | Work | Verified by | Revert |
+| --- | --- | --- | --- |
+| 0 | This document and `docs/DESK_DESIGN.md` merged | reviewed by a non-author | - |
+| 1 | Task up everything in the queue with bodies | `task list` shows bodies and dependencies | - |
+| 2 | Drain and stop: every lane `task note` + `release` (2-minute drain), then stop; delete all dunks; retire panes. **Keep:** the owner pane; one reviewer lane (so steps 3-7 are reviewed by a non-author); a desk pane launched now on today's reply path (`vpctl brief`), so the owner is answered throughout. Stop `vp-telegram` so it cannot ghost-reply; Telegram queues updates by offset. | `dunk-poll`: 0 running dunks; panes = owner + reviewer + desk | `systemctl --user start vp-telegram` |
+| 3 | Identity binding + role registry + allowlist + service/owner tokens | tests: `--self-pane %15` is bound to the caller's pane; `desk` calling `send_text` refused; a `setsid` orphan is anonymous; label rename grants nothing | drop-in restore to release `182e6029` |
+| 4 | Task `kind`/`author`/`repo`/`pr`/`head`, unique review index, claimable-by-role, verdict-at-complete, `on_event`, default `low`, result caps; the desk's reads (`status`, `usage`, `report`, `review list`, `poolrad progress`) | migration test on a copy of `tasks.db`; `task next` as reviewer never returns own-author work | `tasks.db` copied before migration; copy restored |
+| 5 | GitHub Apps wired: `gh_token`, credential helper, `gh` wrapper, https remotes, branch protection (1 / 2 approvals), review timer, accounting commit | unit tests; the live PR check runs in step 7 | branch protection removed by the owner's login |
+| 6 | Context governance in SQLite; retire the four rules; fix the two broken ground truths | `context check` clean; a worker's `context add --class ground-truth` refused | markdown export is the old format |
+| 7 | Launch the desk on the new path, `backlog-sync`, 1 reviewer + 1 worker on `task follow`; live checks: PR from a worker -> review task < 2 min -> approval by the reviewer App -> auto-merge; author approval refused; PR author is the App | all checks green | lanes stopped; nothing else changes |
+| 8 | Scale: 2 reviewer lanes (Claude/Codex), N worker lanes (producer models named: Claude Fable, medium), `planner` lane; point at the poolrad-decomp backlog | dispatched_1h > 0; review queue oldest age < 30 min; owner p50 < 20 s over a day | - |
+| 9 | Repo merge: `web/`, `ui/`, `play/`, `bridges/`; owner mailbox migration (by copy); socket-only web; README rewrite | `dunkingsheep-web.service` serves `/dash/desk` from a release dir; `grep -r "subprocess\|sqlite3" web/` returns only the session store; DESK_DESIGN section 7 | old units re-enabled |
+| 10 | Cutover: write `~/.config/dunkingsheep/rollback/flat-fleet-undo.sh` first; stop and **disable, never delete** every `vp-*` unit and drop-in; copy, never move, `vp-of-agentry/data/`; start `dunkingsheep-web`, `dunkingsheep-telegram`, timers; census-in-CI for poolrad | Telegram round trip through the desk on the `telegram` transport only; undo script tested on a dry run | `flat-fleet-undo.sh` (< 10 min; stops `dunkingsheep-telegram` before starting `vp-telegram`: one poller per bot) |
+
+During steps 2-9 the owner's experience, in plain words: nobody answers on
+Telegram until step 10; the desk pane answers on the web from step 2; the
+dashboard stays up with numbers that stop moving; the owner pane posts one
+line to the web desk every two hours; if none appears for four hours the
+rebuild is stuck and `systemctl --user start vp-of-agentry vp-telegram`
+brings the old desk back.
 
 Acceptance, measured not claimed: owner p50 < 20 s / p90 < 60 s over a full
 day; manager-to-manager mail = 0 (there are no managers); `needs-owner` is the
 only blocked-on-a-person state; 100% of merged PRs have a review task and a
 non-author approval; 0 agent-authored `ground-truth` / `rule` entries after
-the cutover.
+the cutover; Poolrad bodies merged per day >= the pre-rebuild Claude-lane
+rate (about six).
 
 ## 11. What this does not solve
 
@@ -412,5 +532,8 @@ the cutover.
   watchdog's `lane.idle_holding_task` rule has to.
 - The desk will sometimes answer "I don't know; filed t600" where the CoS would
   have dug in. That is the trade, on purpose.
+- Throughput on free models does not go up: the bake-off verified 0 of 12
+  bodies. The relay removal helps the two or three Claude lanes that produce
+  bodies today; free lanes are docs and triage. Nothing here is a 30x.
 - A GitHub outage stalls merges. The daemon's review status is the only gate
   that can be relaxed, and only by the owner editing branch protection.
