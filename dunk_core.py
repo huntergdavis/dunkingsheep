@@ -6441,6 +6441,19 @@ class Flock:
         shown = _typed_text(screen)
         if shown is None or not shown:
             return True
+        # t405: a later inbox nudge must not turn an incomplete /model tail
+        # into user input. A possible tail is grounds to HOLD, never proof of
+        # ownership or permission to submit. Keep it for operator inspection.
+        with self._lock:
+            candidates = list(self.sent_text_by_pane.get(pane_id, ()))
+            candidates += [m.text for m in self.outbox.get(pane_id, ())
+                           if m.status == "queued" and m.text]
+        shown_c = _collapse(shown)
+        if any(_collapse(text).startswith("/model ")
+               and _collapse(text) != shown_c and _collapse(text).endswith(shown_c)
+               for text in candidates):
+            self._last_block_reason[pane_id] = "partial-model-command"
+            return False
         if self._looks_like_ours(pane_id, shown):
             self._last_block_reason[pane_id] = "stranded"
             log.info("%s: our previous send is stranded in the box; submitting it",
@@ -7181,6 +7194,12 @@ def _modal_open(screen):
     if not screen:
         return False
     lines = [line for line in _strip_ansi(screen).splitlines() if line.strip()]
+    # t405: native model/effort pickers advertise these exact control rows.
+    # Require the live bottom row, so an old footer echoed above the composer
+    # does not turn a normal input box into a modal.
+    if lines and _collapse(lines[-1]).lower() in (
+            "enter select · esc back", "enter default · s session · esc back"):
+        return True
     low = "\n".join(lines[-MODAL_TAIL_LINES:]).lower()
     return any(marker in low for marker in MODAL_MARKERS)
 
