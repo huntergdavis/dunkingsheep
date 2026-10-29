@@ -72,6 +72,7 @@ READ_ONLY = frozenset({
     "memory_context", "memory_stats", "memory_status", "owner_stats",
     "superuser_status", "pm_digest", "pm_routing", "list_messages",
     "get_message", "dispatch", "review_list", "poolrad_progress",
+    "owner_receipts",      # delivery receipts the web desk reconciles (read-only)
     # Bootstrap paths: the handlers gate these (first owner may self-register).
     "superuser_recover", "lane_register",
 })
