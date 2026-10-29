@@ -412,11 +412,27 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
     # claim: the environment can be INHERITED from a pane created before this one (on
     # 2026-10-24 the tmux global env carried the VP's session, and a lane that inherited it
     # looked correct because the workspace matched while the conversation did not).
-    if not _still_the_same_process(agent_pids[0][0], starts):
+    # The start-dependent derivation is a READ too, and it is the one that can
+    # leak worst: `started` decides which session files count as "written since
+    # this pane started", so a foreign start time hands us a foreign cutoff and
+    # the fallback then explains a foreign file as this pane's. Bind it the same
+    # way as every other read, and if the identity moves, derive NOTHING -
+    # `active` stays None so no cached fallback can be returned later.
+    agent_pid = agent_pids[0][0]
+    if not _still_the_same_process(agent_pid, starts):
         return None, ("the agent process behind this pane was replaced while its session was "
                       "being read, so no process-derived session can be attributed to it")
-    started = _proc_start(agent_pids[0][0])
-    active, candidates = _active_session_file(cwd, started)
+    started, held = _read_bound(agent_pid, starts, _proc_start)
+    active, candidates = None, 0
+    if held:
+        derived, held = _read_bound(agent_pid, starts,
+                                    lambda pid: _active_session_file(cwd, started))
+        if held:
+            active, candidates = derived
+        else:
+            replaced = True
+    else:
+        replaced = True
     slug = _cwd_slug(cwd)
     for candidate, _argv in agent_pids:
         env, held = _read_bound(candidate, starts, _env_of)
@@ -454,6 +470,15 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
             continue
         if path:
             return _session_id_from_path(path), None
+    if replaced:
+        # A read was refused because the process behind the pid changed, so NO
+        # process-derived answer is admissible - not even the start-dependent
+        # fallback, whose cutoff came from that same process. This refusal has to
+        # come BEFORE the `active` returns (reviewer t500 addendum, third shape):
+        # otherwise a changed start-time read supplies a foreign file that gets
+        # explained as "the only session file written since the pane started".
+        return None, ("a process under this pane was replaced while its session was being read "
+                      "(pid reuse), so no process-derived session can be attributed to it")
     if active:
         active_id = _session_id_from_path(active)
         if candidates > 1:
@@ -463,12 +488,6 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
         return active_id, (f"no session in argv, environment or open files; recording the only "
                            f"session file written in this workspace since the pane started "
                            f"({active_id[:8]})")
-    if replaced:
-        # A read was refused because the process behind the pid changed. Say so,
-        # rather than reporting "no session flag", which would be true and
-        # misleading: the flag may exist, in somebody else's process.
-        return None, ("a process under this pane was replaced while its session was being read "
-                      "(pid reuse), so no process-derived session can be attributed to it")
     if recorded:
         return recorded, ("no session in the agent's argv and none open; keeping the recorded "
                           "launch session")
