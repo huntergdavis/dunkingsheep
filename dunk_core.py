@@ -6874,7 +6874,7 @@ class Flock:
             self.metrics.record("panel.blocking", pane_id=pane_id, outcome="held",
                                 reason="dialog",
                                 duration_ms=int((time.time() - since) * 1000))
-            log.warning("%s: a dialog has been open for %ds with a send waiting. "
+            log.warning("%s: a dialog has been open for %ds and blocks message delivery. "
                         "It is waiting for a person to answer it; nothing will be "
                         "typed or pressed there until it is.",
                         pane_id, int(time.time() - since))
