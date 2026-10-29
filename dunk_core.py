@@ -820,6 +820,8 @@ class Flock:
         self.next_message_id = 1
         from dunk_next_job import NextJobs
         self.next_jobs = NextJobs(self)
+        from dunk_allocator import Allocator
+        self.allocator = Allocator(self)
         if restore:
             self._restore()
         if self.persist_enabled:
@@ -3347,6 +3349,10 @@ class Flock:
             if self._task_stop.is_set():
                 break
             try:
+                try:
+                    self.allocator.tick()
+                except Exception:
+                    log.exception("allocator pass failed; existing delivery continues")
                 self.next_jobs.tick()
                 self._push_tasks()
             except Exception:

@@ -19,7 +19,7 @@ import json
 import os
 import sys
 
-from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE
+from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE, _as_dunk_error
 from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
 # A direct send waits briefly for actual delivery before reporting back, so
@@ -107,7 +107,7 @@ TASK_STATUS_PARAM = {
 TASK_PRIORITY_PARAM = {
     "type": "string",
     "enum": list(TASK_PRIORITIES),
-    "description": "urgent, high, medium or low (default medium).",
+    "description": "urgent, high, medium or low (default low).",
 }
 TASK_ASSIGNEES_PARAM = {
     "type": "array",
@@ -789,6 +789,36 @@ def _task_values(value):
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+@_as_dunk_error
+def h_allocation(flock, args, self_pane_id):
+    action = args.get("action", "status")
+    store = flock.allocator.store
+    if action == "status":
+        return dict(store.status(), last_tick=flock.allocator.last_result)
+    if action in ("register", "offer"):
+        flock.require_superuser(self_pane_id, "allocation_" + action)
+    if action == "register":
+        pane = args.get("pane_id")
+        if not any(p["pane_id"] == pane for p in flock.resolve_lanes()):
+            raise DunkError("register requires an existing pane id")
+        result = store.register(pane, args.get("pools", []), args.get("roles", []),
+                                args.get("skills", []), self_pane_id,
+                                enabled=args.get("enabled", True))
+    elif action == "offer":
+        result = store.offer(args.get("task_id"), args.get("pool"),
+                             args.get("requires", []), self_pane_id)
+    elif action == "review":
+        task = flock.tasks.get(args.get("task_id"))
+        flock._authorize_task_complete(task, self_pane_id, operator=False)
+        result = store.review(task["id"], args.get("revision"), args.get("body"),
+                              args.get("pool"), args.get("requires", []), self_pane_id)
+    else:
+        raise DunkError("allocation action must be status, register, offer or review")
+    flock.allocator.last_tick = 0
+    flock._next_job_wake.set()
+    return result
 
 
 def h_task_add(flock, args, self_pane_id):
@@ -1793,6 +1823,18 @@ COMMANDS = [
                 "dest": {"type": "string",
                          "description": "Directory to write into (default: the daemon's cwd)."}},
         required=["attachment_id"],
+    ),
+    Command(
+        "allocation", "Deterministic registered-worker and independent-review allocation.",
+        h_allocation, mcp=False,
+        params={"action": {"type": "string"}, "pane_id": {"type": "string"},
+                "pools": {"type": "array", "items": {"type": "string"}},
+                "roles": {"type": "array", "items": {"type": "string"}},
+                "skills": {"type": "array", "items": {"type": "string"}},
+                "enabled": {"type": "boolean"}, "task_id": {"type": "string"},
+                "pool": {"type": "string"}, "revision": {"type": "string"},
+                "body": {"type": "string"},
+                "requires": {"type": "array", "items": {"type": "string"}}},
     ),
     # -- global and per-pane tasks ------------------------------------------
     Command(

@@ -391,6 +391,14 @@ class Tasks:
         task = dict(row)
         task["assignees"] = _decode(task.get("assignees"))
         task["depends_on"] = _decode(task.get("depends_on"))
+        try:
+            offer = self.db.execute("SELECT owners FROM allocation_offers WHERE task_id=? AND state='ready'",
+                                    (task["id"],)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            offer = None
+        task["allocation_waiting"] = bool(offer and sorted(task["assignees"]) == _decode(offer["owners"]))
         task["multi_assignee"] = bool(task.get("multi_assignee"))
         task["is_global"] = task["scope"] == GLOBAL
         leases = self.leases_for(task["id"])
@@ -1007,6 +1015,8 @@ class Tasks:
 
     def _claimable(self, task, pane_id):
         """Whether ``pane_id`` may take this task right now."""
+        if task.get("allocation_waiting"):
+            return False
         if pane_id and any(lease["pane_id"] == pane_id for lease in task["leases"]):
             return False  # already holds this one
         if task["leases"]:

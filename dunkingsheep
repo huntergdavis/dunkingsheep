@@ -69,6 +69,19 @@ def build_parser():
                                 parser_class=json_parser_class)
     sub.required = True
 
+    p = sub.add_parser("allocation", help="registered-worker automatic backlog/review allocation")
+    p.add_argument("action", choices=["status", "register", "offer", "review"])
+    p.add_argument("--pane-id")
+    p.add_argument("--pool")
+    p.add_argument("--pools", action="append")
+    p.add_argument("--roles", action="append", choices=["worker", "reviewer"])
+    p.add_argument("--skills", action="append")
+    p.add_argument("--requires", action="append")
+    p.add_argument("--task-id")
+    p.add_argument("--revision")
+    p.add_argument("--body")
+    p.add_argument("--disable", action="store_true")
+
     p = sub.add_parser("status", help="daemon health and counts")
     p.add_argument("--check-herdr", action="store_true",
                    help="probe the terminal backend (slow; default off)")
@@ -2557,6 +2570,13 @@ def run_client_command(client, args):
                                payload=raw, to=args.to), print_pm_digest
         if sub == "routing":
             return client.call("pm_routing"), print_pm_routing
+    if command == "allocation":
+        payload = {key: getattr(args, key) for key in
+                   ("action", "pane_id", "pool", "pools", "roles", "skills", "requires", "task_id", "revision", "body")
+                   if getattr(args, key) is not None}
+        if args.action == "register":
+            payload["enabled"] = not args.disable
+        return client.call("allocation", **payload), lambda r: print(__import__("json").dumps(r, indent=2))
     if command == "task":
         sub = args.task_command
         if sub == "add":
@@ -2715,7 +2735,7 @@ def run_client_command(client, args):
             lambda r: print(f"cancelled {r['message_id']} for {r['target_label']}")
     if command == "metrics":
         return client.call("metrics", window_s=args.window, since=args.since,
-                           until=args.until), lambda r: print(json.dumps(r, indent=2))
+                           until=args.until), lambda r: print(__import__("json").dumps(r, indent=2))
     if command == "panes":
         return client.call("list_panes"), print_panes
     if command in ("workspaces", "tabs"):
