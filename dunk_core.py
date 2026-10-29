@@ -5864,6 +5864,14 @@ class Flock:
                 continue
             screen = self.read_screen(pane_id)
             content = self._federated_composer(screen)
+            if content is None:
+                # NOT A FEDERATED FRAME (t514 integration). The legacy loop below
+                # owns this pane: it skips exactly the panes this parser DOES
+                # recognise, so the two observers partition the fleet. Calling
+                # decide() here with empty text would pop the shared per-pane
+                # record every tick and the legacy/native clock (PR112's captured
+                # CoS frame among them) would never reach its threshold.
+                continue
             generation = self._pane_generation(pane_id)
             busy = bool(screen and _status_marker(screen, WORKING_MARKERS,
                         lines=40, placeholder_safe=True, dim_ok=True))
