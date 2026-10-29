@@ -13,6 +13,9 @@ import json
 import os
 import re
 import time
+import math
+import fcntl
+from contextlib import contextmanager, ExitStack
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR", os.path.expanduser("~/.config/dunkingsheep"))
 PATH = os.path.join(CONFIG_DIR, "retired-panes.json")
@@ -34,7 +37,31 @@ def _load(path=PATH):
         return {}
 
 
+@contextmanager
+def identity_guard(paths, *, exclusive=False):
+    """Coordinate managed identity writers with a guarded archival transaction."""
+    with ExitStack() as stack:
+        for path in sorted(set(map(str, paths))):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            handle = stack.enter_context(open(path + ".lock", "a"))
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    fcntl.flock(handle, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("identity record is busy")
+                    time.sleep(.01)
+        yield
+
+
 def _write(data, path=PATH):
+    with identity_guard([path], exclusive=True):
+        _write_locked(data, path)
+
+
+def _write_locked(data, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -106,3 +133,69 @@ def mailbox_retired(mailbox, *, path=PATH):
             if box == text.strip() or box == plain:
                 return True
     return False
+
+
+_ARCHIVE_PANE = r"(?:[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+|%\d+)"
+_ARCHIVE_SUFFIX = re.compile(r"\s*\((" + _ARCHIVE_PANE + r")\)\s*$")
+
+
+def valid_retirements(records):
+    """A reasonless or undated record cannot withdraw identity protection."""
+    valid = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        pane, reason, at = (record.get(k) for k in ("pane_id", "reason", "retired_at"))
+        if (isinstance(pane, str) and pane.strip() and isinstance(reason, str) and reason.strip()
+                and isinstance(at, (int, float)) and not isinstance(at, bool)
+                and math.isfinite(at) and at > 0):
+            valid.append(record)
+    return valid
+
+
+def retirement_aliases(record):
+    aliases = [record["pane_id"]]
+    for field in ("labels", "mailboxes"):
+        values = record.get(field) or []
+        if isinstance(values, (list, tuple)):
+            aliases.extend(value for value in values if isinstance(value, str) and value.strip())
+    return aliases
+
+
+def retired_mailboxes(candidates, records, *, live_panes, protected=()):
+    """Exact database keys with positive retirement evidence, safe to age-archive.
+
+    Stricter than alert suppression: a contradictory pane suffix, a currently
+    live pane, a reused name or quarantined recipient must remain unresolved.
+    No age/name-prefix inference can establish retirement.
+    """
+    def plain(value):
+        return _ARCHIVE_SUFFIX.sub("", str(value or "").strip()).strip()
+
+    live = set(live_panes)
+    protected = {plain(value).casefold() for value in protected if value}
+    retired, names = set(), set()
+    for record in valid_retirements(records):
+        pane = record["pane_id"]
+        aliases = retirement_aliases(record)
+        if pane in live:
+            protected.update(plain(name).casefold() for name in aliases if name)
+            continue
+        retired.add(pane)
+        names.update(plain(name) for name in aliases if name)
+    selected = set()
+    for value in candidates:
+        text = str(value or "").strip()
+        name = plain(text)
+        if not text or text.startswith("unrouted:") or name.casefold() in protected:
+            continue
+        suffix = _ARCHIVE_SUFFIX.search(text)
+        if suffix:
+            eligible = suffix.group(1) in retired
+        elif re.fullmatch(_ARCHIVE_PANE, text):
+            eligible = text in retired
+        else:
+            eligible = text in names
+        if eligible:
+            selected.add(value)  # retain the exact stored key for the SQL update
+    return selected

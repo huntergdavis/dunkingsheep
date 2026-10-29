@@ -1665,12 +1665,16 @@ class Flock:
     def lane_registry_path(self):
         return os.path.join(CONFIG_DIR, "lanes.json")
 
-    def _lane_registry(self):
+    def _lane_registry(self, strict=False):
         try:
             with open(self.lane_registry_path(), encoding="utf-8") as handle:
                 data = json.load(handle)
+            if strict and not isinstance(data, dict):
+                raise ValueError("lane registry must be an object")
             return data if isinstance(data, dict) else {}
         except (OSError, ValueError):
+            if strict:
+                raise
             return {}
 
     # A NAME A TITLE MAY BECOME. Auto-declaration reads whatever a pane carries, and a
@@ -1912,14 +1916,16 @@ class Flock:
     def _write_lane_registry(self, data):
         """Atomic replace of the lane registry. One writer, one rename."""
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            temporary = self.lane_registry_path() + ".tmp"
-            with open(temporary, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.lane_registry_path())
-            return True
+            import dunk_panes
+            with dunk_panes.identity_guard([self.lane_registry_path()], exclusive=True):
+                os.makedirs(CONFIG_DIR, exist_ok=True)
+                temporary = self.lane_registry_path() + ".tmp"
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, self.lane_registry_path())
+                return True
         except OSError as error:
             log.warning("could not write the lane registry: %s", error)
             return False
@@ -3017,6 +3023,65 @@ class Flock:
         if changed:
             self._save()
 
+    def _archive_retired_inbox(self, pane_list):
+        """Revalidate retirement and bindings at mutation; uncertain identity stays queued."""
+        # This backend API also returns [] on errors. Absence is not fresh proof.
+        if not pane_list or any(not p.get("pane_id") for p in pane_list):
+            return 0
+        import dunk_panes
+        import math
+        from dunk_inbox import normalise_mailbox
+        live = {p["pane_id"] for p in pane_list}
+
+        def eligible_now():
+            records = dunk_panes.valid_retirements(dunk_panes.all_retired())
+            try:
+                registry = self._lane_registry(strict=True)
+            except (OSError, ValueError):
+                return set()
+            if any(self._row_identity(row)[0] is None for row in registry.values()):
+                return set()
+            protected = {p.get(field) for p in pane_list
+                         for field in ("pane_id", "label", "tab_label", "agent_name", "name")
+                         if p.get(field)}
+            effective = []
+            for record in records:
+                pane = record["pane_id"]
+                row = registry.get(pane)
+                if row is not None:
+                    name, declared = self._row_identity(row)
+                    at = row.get("declared_at") if isinstance(row, dict) else None
+                    aliases = {normalise_mailbox(n).casefold()
+                               for n in dunk_panes.retirement_aliases(record)}
+                    older_matching = (declared and name and normalise_mailbox(name).casefold() in aliases
+                                      and isinstance(at, (int, float)) and not isinstance(at, bool)
+                                      and math.isfinite(at) and 0 < at < record["retired_at"])
+                    if not older_matching:
+                        protected.update(dunk_panes.retirement_aliases(record))
+                        continue
+                effective.append(record)
+            retired_ids = {r["pane_id"] for r in effective}
+            for pane, row in registry.items():
+                if pane not in retired_ids or pane in live:
+                    protected.add(pane)
+                    name, _ = self._row_identity(row)
+                    if name:
+                        protected.add(name)
+            with self.inbox._lock:
+                bindings = self.inbox.db.execute(
+                    "SELECT DISTINCT mailbox, pane_id FROM messages WHERE pane_id IS NOT NULL").fetchall()
+            protected.update(row[0] for row in bindings
+                             if row[1] not in retired_ids or row[1] in live)
+            return dunk_panes.retired_mailboxes(
+                [row["mailbox"] for row in self.inbox.stats()], effective,
+                live_panes=live, protected=protected)
+
+        boxes = eligible_now()  # preview only; never authorizes the SQL mutation
+        return self.inbox.archive_retired(
+            boxes, authorize=eligible_now,
+            identity_guard=lambda: dunk_panes.identity_guard(
+                [dunk_panes.PATH, self.lane_registry_path()]))
+
     def _task_reaper_loop(self):
         while not self._task_stop.wait(TASK_REAP_S):
             try:
@@ -3041,10 +3106,13 @@ class Flock:
                     # A retired pane's mailbox is not undeliverable YET - it is
                     # retained and quiet. Same 24h age, same retention, no alerts.
                     try:
-                        import dunk_panes
-                        retired_boxes = {box for record in dunk_panes.all_retired()
-                                         for box in (record.get("mailboxes") or [])}
-                        archived += self.inbox.archive_retired(retired_boxes)
+                        retired_archived = self._archive_retired_inbox(pane_list)
+                        if retired_archived:
+                            self.metrics.record("inbox.archived", pane_id=None,
+                                                source="inbox", outcome="ok",
+                                                reason="retired_mailbox_24h")
+                            log.info("inbox: auto-archived %d retired-mailbox message(s) "
+                                     "older than 24h", retired_archived)
                     except Exception as error:      # noqa: BLE001 - never break the tick
                         log.warning("retired-mailbox archive failed: %s", error)
                     if archived:

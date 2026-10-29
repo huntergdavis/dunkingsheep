@@ -38,6 +38,7 @@ import sqlite3
 from dunk_sqlite import connect as sqlite_connect
 import threading
 import time
+from contextlib import nullcontext
 
 CONFIG_DIR = os.environ.get("DUNKINGSHEEP_DIR") or os.path.expanduser(
     "~/.config/dunkingsheep"
@@ -673,7 +674,8 @@ class Inbox:
             self.db.commit()
         return int(cursor.rowcount or 0)
 
-    def archive_retired(self, mailboxes, age_s=86400, now=None, reason=None):
+    def archive_retired(self, mailboxes, age_s=86400, now=None, reason=None,
+                        authorize=None, identity_guard=None):
         """Archive mail addressed to a RETIRED pane's mailbox, keeping every row.
 
         Retention is not 'keep alerting': a retired pane's mail is the record of what
@@ -684,16 +686,31 @@ class Inbox:
             return 0
         now = time.time() if now is None else float(now)
         cutoff = now - float(age_s)
-        marks = ",".join("?" for _ in mailboxes)
-        with self._lock:
-            cursor = self.db.execute(
+        with self._lock, (identity_guard() if identity_guard else nullcontext()):
+            owned_transaction = False
+            try:
+                if authorize is not None:
+                    if self.db.in_transaction:
+                        return 0  # never commit or discard somebody else's transaction
+                    self.db.execute("BEGIN IMMEDIATE")
+                    owned_transaction = True
+                    mailboxes = set(mailboxes) & set(authorize())
+                    if not mailboxes:
+                        self.db.rollback()
+                        return 0
+                marks = ",".join("?" for _ in mailboxes)
+                cursor = self.db.execute(
                 f"UPDATE messages SET state = 'archived', archived_at = ?, "
                 f"read_at = COALESCE(read_at, ?), "
                 f"reason = COALESCE(reason, ?) "
                 f"WHERE mailbox IN ({marks}) AND state IN ('queued','undeliverable') "
                 f"AND created_at < ? AND archived_at IS NULL",
-                (now, now, reason or "mailbox of a retired pane", *mailboxes, cutoff))
-            self.db.commit()
+                    (now, now, reason or "mailbox of a retired pane", *mailboxes, cutoff))
+                self.db.commit()
+            except Exception:
+                if owned_transaction:
+                    self.db.rollback()
+                raise
         return int(cursor.rowcount or 0)
 
     def _transition(self, message_ids, state, stamp, allowed, read_stamp=False,
