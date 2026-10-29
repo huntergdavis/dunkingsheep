@@ -27,3 +27,26 @@ Tests: `python3 -m unittest tests.test_pi_poll_backoff`. The test extracts the
 `makePoller` / `staleLine` functions from the patch and runs them against fake
 executors, covering success, timeout, daemon-unavailable/EAGAIN, missing helper,
 missing helper with fallback failure, one-inflight, backoff cap and stale UI.
+
+
+## Installation order and drift guard
+
+The producer handoff fix and the poll backoff are **separate patches against the
+installed extension**; applying the poll patch to an extension that predates the
+producer fix keeps the old producer and regresses handoff binding (t444:
+`turn.start source=null`, handoff stays `sent`). The current installed
+`b0e93ea` already has the poll patch but not the producer prompt binding, so
+apply **`t444-handoff-source.patch`** to that file (it is the exact delta from
+the current installed extension); for a pre-producer base apply
+`turn-generation.patch` first, then `poll-backoff.patch`. Verify all markers:
+
+```sh
+grep -q -- '--handoff-id' ~/.pi/agent/extensions/dunkingsheep.ts
+grep -q -- '--source", "pi-extension' ~/.pi/agent/extensions/dunkingsheep.ts
+grep -q -- 't399 poll-backoff:start' ~/.pi/agent/extensions/dunkingsheep.ts
+```
+
+Reload only at the safe boundary; never replace the extension under a live turn
+without the operator's guarded reload. The handoff binding is accepted only when
+the next-job receipt reaches `started` with the native `turn.start` carrying the
+same `handoff_id`; a `sent` receipt alone is not native-start proof.
