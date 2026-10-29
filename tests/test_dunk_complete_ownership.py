@@ -12,11 +12,13 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import _bootstrap  # noqa: F401,E402
+from dunk_callers import process_start  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 from dunk_superusers import Superusers  # noqa: E402
@@ -118,6 +120,129 @@ class CompleteOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "self-pane"):
             self.flock.task_complete(task["id"])
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    # -- P1: kernel binding of the pane claim -------------------------------
+
+    def _set_pane_pid(self, pane_id, pid):
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == pane_id:
+                pane["pane_pid"] = pid
+                return pane
+        raise AssertionError(f"no such fake pane {pane_id}")
+
+    def _caller_for(self, pid):
+        return {"pane_id": None, "pid": pid, "start": process_start(pid),
+                "name": "test", "source": "test"}
+
+    def test_bound_owner_completion_passes(self):
+        """A kernel-bound owner is unaffected by the binding check."""
+        task = self.flock.task_add("bound work", self_pane_id="w1:p1")
+        self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
+        self._set_pane_pid("w1:p1", os.getpid())
+        self.flock.set_caller(self._caller_for(os.getpid()))
+        self.addCleanup(self.flock.clear_caller)
+        done = self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertEqual("done", done["status"])
+
+    def test_spoofed_owner_label_is_refused(self):
+        """P1 probe 1: a foreign peer naming the OWNER still fails: the live
+        parent process is provably outside this process's ancestry."""
+        task = self.flock.task_add("bound work", self_pane_id="w1:p1")
+        self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
+        self._set_pane_pid("w1:p1", os.getpid())
+        self.flock.set_caller(self._caller_for(os.getppid()))
+        self.addCleanup(self.flock.clear_caller)
+        with self.assertRaisesRegex(DunkError, "not inside pane"):
+            self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        current = self.flock.tasks.get(task["id"])
+        self.assertNotEqual("done", current["status"])
+        self.assertEqual([], self._completed_events(task["id"]))
+
+    def test_spoofed_operator_label_is_refused(self):
+        """P1 probe 2: a foreign peer naming an ALLOWLISTED operator pane fails
+        the binding first - the allowlist is consulted only for bound panes."""
+        self.superusers.add("w1:p1")
+        task = self.flock.task_add("other work", self_pane_id="w2:p1")
+        self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
+        self._set_pane_pid("w1:p1", os.getpid())
+        self.flock.set_caller(self._caller_for(os.getppid()))
+        self.addCleanup(self.flock.clear_caller)
+        with self.assertRaisesRegex(DunkError, "not inside pane"):
+            self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_unresolvable_pane_claim_is_refused(self):
+        """A live peer naming a pane no backend can see is spoof-shaped: no
+        live lane hides from its own backend. (Replaces the old inconclusive
+        fallback for this shape; in-process callers without a peer still use
+        label policy, as the w9:p7 tests pin.)"""
+        task = self._owned_task()  # w9:p7 has no fake pane: unresolvable
+        self.flock.set_caller(self._caller_for(os.getpid()))
+        self.addCleanup(self.flock.clear_caller)
+        with self.assertRaisesRegex(DunkError, "not visible"):
+            self.flock.task_complete(task["id"], self_pane_id=OWNER)
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_peer_gone_is_refused(self):
+        """Hit-and-run shaped: the peer reaped before the check leaves no
+        ancestry to verify, so the label cannot authorize. Legitimate clients
+        wait for their response and stay resolvable."""
+        task = self.flock.task_add("bound work", self_pane_id="w1:p1")
+        self.flock.task_assign(task["id"], ["w1:p1"], self_pane_id="w1:p1")
+        self._set_pane_pid("w1:p1", os.getpid())
+        self.flock.set_caller({"pane_id": None, "pid": None, "start": None,
+                               "name": None, "source": "none"})
+        self.addCleanup(self.flock.clear_caller)
+        with self.assertRaisesRegex(DunkError, "not inside pane"):
+            self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_no_proc_table_falls_back_to_label_policy(self):
+        """Non-Linux keeps existing behavior: with no kernel evidence the
+        label policy still decides."""
+        task = self._owned_task()
+        self.flock.set_caller(self._caller_for(os.getpid()))
+        self.addCleanup(self.flock.clear_caller)
+        with mock.patch("os.path.isdir", return_value=False):
+            done = self.flock.task_complete(task["id"], self_pane_id=OWNER)
+        self.assertEqual("done", done["status"])
+
+    # -- P2: ownership rechecked inside the transaction ----------------------
+
+    def test_reassignment_before_transaction_is_refused(self):
+        """P2 interleaving, deterministic: the guard passed for OWNER while it
+        owned the task; the reassignment lands before the store transaction;
+        the transaction must refuse with no effects."""
+        task = self._owned_task()
+        self.flock.tasks.assign(task["id"], [FOREIGN], mode="set")
+        from dunk_tasks import TaskError
+        with self.assertRaisesRegex(TaskError, "not owned"):
+            self.flock.tasks.advance_next_job(
+                OWNER, trigger="completion", from_task=task["id"],
+                completer_is_operator=False)
+        current = self.flock.tasks.get(task["id"])
+        self.assertNotEqual("done", current["status"])
+        self.assertEqual([], self._completed_events(task["id"]))
+        self.assertEqual(
+            [], [h for h in self.flock.tasks.next_job_handoffs(OWNER)
+                 if h.get("from_task") == task["id"]])
+
+    def test_operator_survives_reassignment(self):
+        """Operator privilege is role-based: it does not evaporate when the
+        row's assignees change under it."""
+        task = self._owned_task()
+        self.flock.tasks.assign(task["id"], [FOREIGN], mode="set")
+        plan = self.flock.tasks.advance_next_job(
+            OPERATOR, trigger="completion", from_task=task["id"],
+            completer_is_operator=True)
+        self.assertEqual("done", plan["task"]["status"])
+
+    def test_transaction_accepts_unchanged_ownership(self):
+        task = self._owned_task()
+        plan = self.flock.tasks.advance_next_job(
+            OWNER, trigger="completion", from_task=task["id"],
+            completer_is_operator=False)
+        self.assertEqual("done", plan["task"]["status"])
 
 
 if __name__ == "__main__":

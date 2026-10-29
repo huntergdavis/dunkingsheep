@@ -631,7 +631,8 @@ class Tasks:
         return list(latest.values())
 
     def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
-                         unread=0, pending_delivery=False, dispatch_reason=None):
+                         unread=0, pending_delivery=False, dispatch_reason=None,
+                         completer_is_operator=False):
         """Complete A, choose/claim B and journal its inbox id in ONE transaction.
 
         Clauses 1/4: every trigger uses the same decision while holding SQLite's
@@ -652,6 +653,21 @@ class Tasks:
                         self.db.commit()
                         return {"action": "skip", "reason": "already_completed",
                                 "task": self.get(from_task)}
+                    # P2 (t423 REVISE): ownership is rechecked on the freshly-read
+                    # row INSIDE this transaction, not just by the caller before it:
+                    # a reassignment landing between the wrapper guard and this UPDATE
+                    # must not complete as the removed owner. No socket or terminal
+                    # I/O here, so operator privilege arrives as a precomputed flag
+                    # (privilege-revocation races stay out of scope, as reviewed).
+                    owners = set(_decode(row["assignees"]))
+                    owners.update(lease["pane_id"]
+                                  for lease in self.leases_for(from_task, now)
+                                  if lease.get("pane_id"))
+                    if pane_id not in owners and not completer_is_operator:
+                        raise TaskError(
+                            f"task {from_task} is not owned by {pane_id} (owners: "
+                            f"{', '.join(sorted(owners)) or 'no one recorded'}); "
+                            "completion refused with no effects")
                     self.db.execute(
                         "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
                         "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",

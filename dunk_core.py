@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.96"
+VERSION = "2.70.97"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2421,16 +2421,75 @@ class Flock:
     @_as_dunk_error
     def task_complete(self, task_id, by=None, self_pane_id=None):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
-        self._authorize_task_complete(task, self_pane_id)
+        # Operator privilege is role-based: read once here (it needs herdr I/O,
+        # which must not run inside the completion transaction) and pass the bit
+        # in for the in-transaction recheck. Privilege-revocation races between
+        # this read and the transaction stay out of scope, as reviewed.
+        operator = bool(self_pane_id and self.is_superuser(self_pane_id))
+        self._authorize_task_complete(task, self_pane_id, operator=operator)
         # Automatic work belongs to the actual caller, never a caller-supplied
         # completion label (`by` is attribution only): past the guard a requesting
         # pane is always present, so completion always flows through the next-job
         # trigger with the pane recorded as the completer.
-        plan = self.next_jobs.advance(self_pane_id, "completion", task_id)
+        plan = self.next_jobs.advance(self_pane_id, "completion", task_id,
+                                       completer_is_operator=operator)
         self._next_job_wake.set()
         return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
 
-    def _authorize_task_complete(self, task, self_pane_id):
+    # Where a pane claim cannot be kernel-checked, label policy still decides:
+    # no peer at all (in-process trusted local code and tests), no /proc
+    # (non-Linux), a backend lookup failure, or a pane record with no pid
+    # (backend gap - availability; the 2026-10-24 pane_pid outage must not freeze
+    # completions). Everything else refuses unless the walk positively finds the
+    # claimed pane: a live legitimate client waits for its response, so an
+    # unresolvable peer is hit-and-run shaped (send, exit, let the label pass),
+    # not a race to accommodate. A pane no backend can see, named by a live peer,
+    # is spoof-shaped: no live lane hides from its own backend.
+
+    def _require_completion_binding(self, self_pane_id):
+        """Refuse a pane claim the kernel evidence does not support (t423 P1).
+
+        The server records the socket peer's kernel caller, but task_complete
+        used to authorize the client-supplied pane label without consulting it:
+        a foreign peer naming the owner (or an allowlisted operator) completed
+        the task - including hit-and-run, where the peer exits right after
+        sending so no ancestry exists to check. Where the binding is checkable
+        (peer + pane pid) any failure refuses; the inconclusive shapes above
+        fall back to label policy. Inconclusive never silently passes a
+        privilege: it only preserves in-process/test/diagnostic use, which has
+        no peer to bind.
+        """
+        caller = self.current_caller()
+        if not caller:
+            return
+        if not os.path.isdir("/proc"):
+            return
+        try:
+            pane = self.herdr.get_pane(self_pane_id)
+        except Exception:                           # noqa: BLE001 - availability:
+            return                                  # a dead backend must not break
+        if pane is None:                            # owners completing through it
+            log.warning("task completion refused reason=unknown_pane pane=%r "
+                        "caller_pid=%r", self_pane_id, caller.get("pid"))
+            raise DunkError(
+                f"pane {self_pane_id} is not visible on this backend; a completion "
+                "naming an unresolvable pane is refused. Run the command from a live "
+                "lane pane, or have a superuser (CoS/VP operator) reassign it first.")
+        pane_pid = pane.get("pane_pid")
+        if pane_pid is None:
+            return
+        from dunk_callers import caller_pane_auth_failure
+        reason = caller_pane_auth_failure(caller, pane_pid)
+        if reason is not None:
+            log.warning("task completion refused reason=spoofed_pane pane=%r "
+                        "binding=%s caller_pid=%r caller_source=%r", self_pane_id,
+                        reason, caller.get("pid"), caller.get("source"))
+            raise DunkError(
+                f"the calling process is not inside pane {self_pane_id} (caller "
+                f"binding failed: {reason}); a pane label alone does not authorize "
+                "completion. Run the command from the lane that owns the task.")
+
+    def _authorize_task_complete(self, task, self_pane_id, operator=False):
         """Refuse foreign completion BEFORE any mutation, event or handoff (t423).
 
         Measured incident: a worker completed another lane's owned task, which
@@ -2440,23 +2499,20 @@ class Flock:
         The rule is narrow and deterministic, on the identity the system already
         routes (self_pane_id - the same key leases, claims and handoffs use) plus
         the existing CoS/VP superuser policy:
+        - the pane claim is kernel-bound where checkable (_require_completion_binding
+          refuses provably-spoofed labels first),
         - the requesting pane owns the task (assignee or live lease-holder), or
-        - the requesting pane is a superuser (CoS/VP operator path), or
+        - the requesting pane is a superuser (CoS/VP operator path, `operator`), or
         - nothing completes: unattributed callers complete nothing, because
           unowned means leader-owned - there is no ownerless completion.
-        Attribution (`by`, labels) never authorizes: only the requesting pane's
-        ownership or allowlist membership does. A self_pane_id forged as another
-        pane is indistinguishable at this layer by design - the same trust model
-        claims and leases already use - so that systemic shape stays out of scope
-        rather than inventing a bypass; kernel-binding every completion would
-        refuse legitimate human-operator and coordinator calls made outside the
-        agent process tree.
+        This fast-path check gives precise errors; the completion transaction in
+        advance_next_job rechecks ownership on the freshly-read row as the
+        authority (a reassignment between here and the transaction must not
+        complete as the removed owner). Attribution (`by`, labels) never
+        authorizes: only the requesting pane's ownership or allowlist membership
+        does.
         """
         owners = set(task.get("assignees") or []) | set(task.get("claimed_by") or [])
-        if self_pane_id and self_pane_id in owners:
-            return
-        if self_pane_id and self.is_superuser(self_pane_id):
-            return
         if not self_pane_id:
             log.warning("task completion refused reason=anonymous task=%r",
                         task.get("id"))
@@ -2464,6 +2520,11 @@ class Flock:
                 f"task {task.get('id')} cannot be completed without a pane identity, "
                 "so ownership cannot be checked. Pass --self-pane <pane> from the lane "
                 "that owns it, or have a superuser (CoS/VP operator) complete it.")
+        self._require_completion_binding(self_pane_id)
+        if self_pane_id in owners:
+            return
+        if operator:
+            return
         log.warning("task completion refused reason=foreign_owner task=%r pane=%r "
                     "owners=%r", task.get("id"), self_pane_id, sorted(owners))
         raise DunkError(
