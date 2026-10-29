@@ -74,6 +74,10 @@ READ_ONLY = frozenset({
     "superuser_status", "pm_digest", "pm_routing", "list_messages",
     "get_message", "dispatch", "review_list", "poolrad_progress",
     "owner_receipts",      # delivery receipts the web desk reconciles (read-only)
+    # Turn events are bound to the caller's own pane by the kernel check in
+    # require_turn_caller; an unregistered lane must still be able to report
+    # busy/idle, or the delivery gate goes blind (two lanes stalled 2026-10-29).
+    "turn_start", "turn_end",
     # Bootstrap paths: the handlers gate these (first owner may self-register).
     "superuser_recover", "lane_register",
 })
