@@ -106,3 +106,56 @@ def mailbox_retired(mailbox, *, path=PATH):
             if box == text.strip() or box == plain:
                 return True
     return False
+
+
+_ARCHIVE_PANE = r"(?:[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+|%\d+)"
+_ARCHIVE_SUFFIX = re.compile(r"\s*\((" + _ARCHIVE_PANE + r")\)\s*$")
+
+
+def retired_mailboxes(candidates, records, *, live_panes, protected=()):
+    """Exact database keys with positive retirement evidence, safe to age-archive.
+
+    Stricter than alert suppression: a contradictory pane suffix, a currently
+    live pane, a reused name or quarantined recipient must remain unresolved.
+    No age/name-prefix inference can establish retirement.
+    """
+    def plain(value):
+        return _ARCHIVE_SUFFIX.sub("", str(value or "").strip()).strip()
+
+    live = set(live_panes)
+    protected = {plain(value).casefold() for value in protected if value}
+    retired, names = set(), set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        pane = record.get("pane_id")
+        reason = record.get("reason")
+        if not isinstance(pane, str) or not pane.strip() or not isinstance(reason, str) or not reason.strip():
+            continue
+        aliases = [pane]
+        for field in ("labels", "mailboxes"):
+            values = record.get(field) or []
+            if isinstance(values, (list, tuple)):
+                aliases.extend(value for value in values
+                               if isinstance(value, str) and value.strip())
+        if pane in live:
+            protected.update(plain(name).casefold() for name in aliases if name)
+            continue
+        retired.add(pane)
+        names.update(plain(name) for name in aliases if name)
+    selected = set()
+    for value in candidates:
+        text = str(value or "").strip()
+        name = plain(text)
+        if not text or text.startswith("unrouted:") or name.casefold() in protected:
+            continue
+        suffix = _ARCHIVE_SUFFIX.search(text)
+        if suffix:
+            eligible = suffix.group(1) in retired
+        elif re.fullmatch(_ARCHIVE_PANE, text):
+            eligible = text in retired
+        else:
+            eligible = text in names
+        if eligible:
+            selected.add(value)  # retain the exact stored key for the SQL update
+    return selected

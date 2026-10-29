@@ -3017,6 +3017,34 @@ class Flock:
         if changed:
             self._save()
 
+    def _archive_retired_inbox(self, pane_list):
+        """Archive confirmed retired recipients; missing/active identity stays put."""
+        if pane_list is None or any(not p.get("pane_id") for p in pane_list):
+            return 0
+        import dunk_panes
+        records = dunk_panes.all_retired()
+        retired_ids = {r.get("pane_id") for r in records if isinstance(r, dict)}
+        live = {p["pane_id"] for p in pane_list}
+        protected = {p.get(field) for p in pane_list
+                     for field in ("pane_id", "label", "tab_label", "agent_name", "name")
+                     if p.get(field)}
+        # An unretired registered lane may be between restarts. Its name is not
+        # abandoned just because it is absent from this backend snapshot.
+        for pane, row in self._lane_registry().items():
+            if pane not in retired_ids or pane in live:
+                name, _ = self._row_identity(row)
+                if name:
+                    protected.add(name)
+        with self.inbox._lock:
+            bindings = self.inbox.db.execute(
+                "SELECT DISTINCT mailbox, pane_id FROM messages WHERE pane_id IS NOT NULL").fetchall()
+        protected.update(row[0] for row in bindings
+                         if row[1] not in retired_ids or row[1] in live)
+        boxes = dunk_panes.retired_mailboxes(
+            [row["mailbox"] for row in self.inbox.stats()], records,
+            live_panes=live, protected=protected)
+        return self.inbox.archive_retired(boxes)
+
     def _task_reaper_loop(self):
         while not self._task_stop.wait(TASK_REAP_S):
             try:
@@ -3041,10 +3069,13 @@ class Flock:
                     # A retired pane's mailbox is not undeliverable YET - it is
                     # retained and quiet. Same 24h age, same retention, no alerts.
                     try:
-                        import dunk_panes
-                        retired_boxes = {box for record in dunk_panes.all_retired()
-                                         for box in (record.get("mailboxes") or [])}
-                        archived += self.inbox.archive_retired(retired_boxes)
+                        retired_archived = self._archive_retired_inbox(pane_list)
+                        if retired_archived:
+                            self.metrics.record("inbox.archived", pane_id=None,
+                                                source="inbox", outcome="ok",
+                                                reason="retired_mailbox_24h")
+                            log.info("inbox: auto-archived %d retired-mailbox message(s) "
+                                     "older than 24h", retired_archived)
                     except Exception as error:      # noqa: BLE001 - never break the tick
                         log.warning("retired-mailbox archive failed: %s", error)
                     if archived:
