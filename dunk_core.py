@@ -6667,6 +6667,113 @@ def _native_footer_start(raw, nonblank):
         return None
     return first
 
+# t130/t394 style-state boundary (pi-worker-2): the style-state
+# classifier/below coexists with the native-footer correction above -
+# the native shapes cover the plain path; the style-state boundary
+# covers multi-sigil frames on the ANSI (styled) read path.
+
+def _styled_sigil_state(row):
+    """Classify a prompt-sigil row by the SGR state IN EFFECT AT THE SIGIL
+    POSITION (t130, %19 review i31909: deciding from the union of codes in the
+    row misclassifies nested styles in both directions - a dim sigil with a
+    bright body, and a live composer row carrying a single dim word).
+
+    Measured on the %33 styled capture: submitted-prompt echoes carry
+    `\x1b[1;2m` before the sigil (bold+DIM = transcript echo); the live
+    composer carries `\x1b[1m` (bold, no dim). Classification at the sigil:
+    bold without dim -> composer candidate; bold with dim -> transcript echo;
+    anything else (no bold, reset-only, colour-only, stripped, the colon SGR
+    form) -> UNKNOWN, which fails the frame closed.
+    """
+    dim = False
+    bold = False
+    pos = 0
+    for match in re.finditer(r"\x1b\[([0-9;]*)m", row):
+        if "\u203a" in row[pos:match.start()]:
+            break                      # sigil reached: current state is decisive
+        # SGR parameters apply LEFT TO RIGHT within one escape (%19 i31913):
+        # 1;0 is bold-then-reset (normal), 1;22 is bold-then-normal-intensity,
+        # 2;1 is dim-then-bold. Token presence cannot substitute for the
+        # effective state, so each code is applied in order, and 22 cancels
+        # BOTH bold and dim ("normal intensity"), not just one of them.
+        for c in match.group(1).split(";"):
+            if c == "0":
+                dim = bold = False
+            elif c == "22":
+                dim = bold = False
+            elif c == "2":
+                dim = True
+            elif c == "1":
+                bold = True
+            # unsupported codes (3 italics, 32 colour, ...) change nothing here:
+            # the effective state simply lacks bold, so the row stays unknown.
+        pos = match.end()
+    else:
+        # The sigil sits in the tail AFTER the last SGR prefix: the state the
+        # prefix left in effect IS the state at the sigil position.
+        if "\u203a" not in row[pos:]:
+            return "unknown"           # no sigil anywhere in the row
+    # Effective state at the sigil decides (%19 i31918 CORRECTED table):
+    # bold+dim = the MEASURED transcript signature (excluded, forged-content
+    # boundary still unresolved); bold WITHOUT dim = composer candidate;
+    # dim-ONLY = UNKNOWN/REFUSE (a styling fact is not transcript provenance);
+    # neither (reset/normal-intensity/italics/colour-only/stripped) = REFUSE.
+    if bold and dim:
+        return "dim"                   # measured transcript signature
+    if bold:
+        return "bold"                  # composer candidate
+    return "unknown"                   # dim-only, normal, neither: REFUSE
+
+
+def _styled_composer_boundary(screen):
+    """("delimited", region) or ("undelimitable", "") using CAPTURED STYLE
+    STATE, for the multi-sigil frames the plain boundary fails closed on.
+
+    Rules (VP i31906 required negatives):
+    - footer = the ONLY footer-shaped row (" · ", no sigil) AND the last
+      non-blank row; a second footer-lookalike (a human continuation holding a
+      middle dot, or content after the footer) refuses;
+    - sigil rows classified by _styled_sigil_state; exactly ONE composer
+      candidate (bold, non-dim), it must be the LAST sigil row, and every dim
+      sigil body must be ACCOUNTED (see _dim_body_accounted) - an unaccounted
+      dim body is human content that must not be silently excluded;
+    - region = composer body + non-blank rows below it, up to the footer.
+    """
+    if not screen:
+        return "undelimitable", ""
+    raw = screen.splitlines()
+    nonblank = [index for index, row in enumerate(raw)
+                if _strip_ansi(row).strip()]
+    if not nonblank:
+        return "undelimitable", ""
+    last_row = nonblank[-1]
+    last_plain = _strip_ansi(raw[last_row])
+    if MID not in last_plain or _prompt_body(raw[last_row]) is not None:
+        return "undelimitable", ""
+    footer_rows = [index for index in nonblank
+                   if MID in _strip_ansi(raw[index])
+                   and _prompt_body(raw[index]) is None]
+    if len(footer_rows) != 1:
+        return "undelimitable", ""
+    footer = footer_rows[0]
+    sigils = [(index, _styled_sigil_state(raw[index]))
+              for index in range(footer) if _prompt_body(raw[index]) is not None]
+    if not sigils:
+        return "undelimitable", ""
+    candidates = [index for index, state in sigils if state == "bold"]
+    if len(candidates) != 1 or candidates[0] != sigils[-1][0]:
+        return "undelimitable", ""
+    composer = candidates[0]
+    parts = []
+    body = _prompt_body(raw[composer])
+    if body:
+        parts.append(body)
+    for row in raw[composer + 1:footer]:
+        text = _strip_ansi(row).strip()
+        if text:
+            parts.append(text)
+    return "delimited", " ".join(parts)
+
 
 def _composer_region_text(screen):
     """The live composer's visible content, or "" when it cannot be delimited
