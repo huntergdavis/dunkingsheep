@@ -736,6 +736,10 @@ def h_inbox_ack(flock, args, self_pane_id):
     return flock.inbox_ack(_ids(args), mailbox=args.get("mailbox"), self_pane_id=self_pane_id)
 
 
+def h_inbox_recover(flock, args, self_pane_id):
+    return flock.inbox_recover(args.get("mailbox"), self_pane_id=self_pane_id)
+
+
 def h_inbox_cancel(flock, args, self_pane_id):
     return flock.inbox_cancel(_ids(args))
 
@@ -1700,7 +1704,8 @@ COMMANDS = [
         "inbox_read",
         "Read waiting messages in order, with their full bodies, and mark them "
         "read. This is the one an agent calls when it has mail. Use peek=true "
-        "to look without marking them read.",
+        "to look without marking them read. If the answer never arrives, "
+        "inbox_recover replays the batch instead of losing it.",
         h_inbox_read,
         params={"mailbox": MAILBOX_PARAM,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100,
@@ -1729,6 +1734,19 @@ COMMANDS = [
         params={"message_ids": MESSAGE_IDS_PARAM,
                 "mailbox": MAILBOX_PARAM},
         required=["message_ids"],
+    ),
+    Command(
+        "inbox_recover",
+        "Replay the latest delivered batch for a mailbox after a lost read "
+        "response: when an inbox_read answer never reached the client, the "
+        "batch is marked read but was displayed nowhere. Recover returns "
+        "those same messages so they can be displayed and then inbox_ack-ed. "
+        "The buffer holds one batch per mailbox and a full ack clears it; "
+        "acked mail never resurfaces. Visibility follows the read rule, not "
+        "the ack rule: like inbox read it is permissive, while ack stays "
+        "scoped to the caller's own mailbox.",
+        h_inbox_recover,
+        params={"mailbox": MAILBOX_PARAM},
     ),
     Command(
         "inbox_archive",
@@ -2346,10 +2364,12 @@ def mcp_commands():
 MCP_GROUPS = (
     ("inbox",
      "Agent-to-agent mailbox. action=send (preferred over typing), count, "
-     "list, read (also returns your tasks), status, ack, cancel, delete, "
-     "stats, fetch. No size limit; a send nudges the recipient with one line.",
+     "list, read (also returns your tasks), recover, status, ack, cancel, "
+     "delete, stats, fetch. No size limit; a send nudges the recipient with "
+     "one line.",
      (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
-      ("read", "inbox_read"), ("status", "inbox_status"), ("ack", "inbox_ack"),
+      ("read", "inbox_read"), ("recover", "inbox_recover"),
+      ("status", "inbox_status"), ("ack", "inbox_ack"),
       ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),
       ("stats", "inbox_stats"), ("fetch", "inbox_fetch"),
       ("archive", "inbox_archive"))),

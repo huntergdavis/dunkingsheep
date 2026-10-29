@@ -241,6 +241,8 @@ def build_parser():
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--limit", "-n", type=int, default=10)
     q.add_argument("--peek", action="store_true", help="do not mark them read")
+    q = isub.add_parser("recover", help="replay the latest delivered batch after a lost read response")
+    q.add_argument("mailbox", nargs="?", help="agent name, pane id or 'self' (default self)")
     q = isub.add_parser("archive", help="archive a mailbox in bulk (no deletion)")
     q.add_argument("mailbox")
     q.add_argument("--before", help="only messages created before this ISO date/time or epoch")
@@ -1294,6 +1296,14 @@ def _print_inbox_tasks(r):
     if nxt:
         print(f"next: {nxt['id']} [{nxt['priority']}] {nxt['title']}")
     print()
+
+
+def print_inbox_recover(r):
+    messages = r["messages"]
+    if messages:
+        print(f"mailbox {r['mailbox']}: recovered {len(messages)} delivered message(s) "
+              f"- display them, then inbox ack")
+    print_inbox_read(r)
 
 
 def print_inbox_status(r):
@@ -2465,6 +2475,8 @@ def run_client_command(client, args):
         if sub == "read":
             return client.call("inbox_read", mailbox=args.mailbox, limit=args.limit,
                                peek=args.peek), print_inbox_read
+        if sub == "recover":
+            return client.call("inbox_recover", mailbox=args.mailbox), print_inbox_recover
         if sub == "status":
             return client.call("inbox_status", message_id=args.message_id), print_inbox_status
         if sub in ("ack", "cancel", "delete"):

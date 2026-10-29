@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS attachments_by_message ON attachments (message_id);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS deliveries (
+    mailbox       TEXT PRIMARY KEY,
+    message_ids   TEXT NOT NULL,
+    delivered_at  REAL NOT NULL
+);
 """
 
 
@@ -402,6 +407,99 @@ class Inbox:
                 "WHERE id = ? AND state = 'queued'", [(now, i) for i in ids])
             self.db.commit()
             return self.db.total_changes - before
+
+    def record_delivery(self, mailbox, message_ids, now=None):
+        """Remember the latest delivered batch for a mailbox: the recovery buffer.
+
+        Bounded to ONE batch per mailbox: a newer read overwrites the receipt,
+        so the buffer never grows into a history. An empty batch records
+        nothing and leaves any existing receipt alone - an empty read delivered
+        nothing new, so there is nothing new to recover.
+        """
+        ids = [str(i) for i in (message_ids or []) if str(i).strip()]
+        if not ids:
+            return 0
+        now = _now() if now is None else now
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO deliveries (mailbox, message_ids, delivered_at) "
+                "VALUES (?,?,?) ON CONFLICT(mailbox) DO UPDATE SET "
+                "message_ids = excluded.message_ids, "
+                "delivered_at = excluded.delivered_at",
+                (mailbox, json.dumps(ids), now))
+            self.db.commit()
+            return len(ids)
+
+    def pending_delivery(self, mailbox):
+        """The receipt for a mailbox, or None when nothing is recoverable."""
+        with self._lock:
+            row = self.db.execute(
+                "SELECT mailbox, message_ids, delivered_at FROM deliveries "
+                "WHERE mailbox = ?", (mailbox,)).fetchone()
+        if row is None:
+            return None
+        return {"mailbox": row["mailbox"],
+                "message_ids": list(json.loads(row["message_ids"])),
+                "delivered_at": row["delivered_at"]}
+
+    def recover_delivery(self, mailbox):
+        """Replay the receipt batch for display, whatever its read state.
+
+        Only ids that still exist come back, in queue order; ids that vanished
+        (an explicit delete) shrink the receipt instead of haunting it. When
+        nothing survives, the receipt is dropped and the error says so: a
+        receipt that replays nothing forever is the unbounded loop this buffer
+        exists to avoid.
+        """
+        receipt = self.pending_delivery(mailbox)
+        if receipt is None:
+            # No receipt is the normal case (nothing delivered, or everything
+            # already acked): like an empty read, this answers empty rather
+            # than erroring, so polling callers and the smoke suite get a
+            # result, not a refusal.
+            return []
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE id IN (%s) ORDER BY created_at" %
+                ",".join("?" for _ in receipt["message_ids"]),
+                tuple(receipt["message_ids"])).fetchall()
+            survivors = [row["id"] for row in rows]
+            if set(survivors) != set(receipt["message_ids"]):
+                if survivors:
+                    self.db.execute(
+                        "UPDATE deliveries SET message_ids = ? WHERE mailbox = ?",
+                        (json.dumps(survivors), mailbox))
+                else:
+                    self.db.execute(
+                        "DELETE FROM deliveries WHERE mailbox = ?", (mailbox,))
+                self.db.commit()
+            messages = [self._full(row) for row in rows]
+        return messages
+
+    def note_acked(self, mailbox):
+        """Shrink the receipt to ids that are still not acked.
+
+        Called after an ack: a fully acked receipt is deleted, a partially
+        acked one keeps only the remainder. Returns the ids still pending.
+        """
+        receipt = self.pending_delivery(mailbox)
+        if receipt is None:
+            return []
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id, state FROM messages WHERE id IN (%s)" %
+                ",".join("?" for _ in receipt["message_ids"]),
+                tuple(receipt["message_ids"])).fetchall()
+            remaining = [row["id"] for row in rows if row["state"] != "acked"]
+            if remaining:
+                self.db.execute(
+                    "UPDATE deliveries SET message_ids = ? WHERE mailbox = ?",
+                    (json.dumps(remaining), mailbox))
+            else:
+                self.db.execute(
+                    "DELETE FROM deliveries WHERE mailbox = ?", (mailbox,))
+            self.db.commit()
+            return remaining
 
     def get(self, message_id, with_body=True):
         with self._lock:

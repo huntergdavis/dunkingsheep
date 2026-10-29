@@ -2190,6 +2190,12 @@ class Flock:
         if peek or not messages:
             return result
         marked = self.inbox.mark_read([message["message_id"] for message in messages])
+        # t128: the mark commits BEFORE the socket response reaches the client,
+        # so a response lost after this point used to silently consume the batch.
+        # The receipt bounds recovery to the latest delivered batch per mailbox:
+        # `inbox_recover` replays it for display, and `inbox_ack` consumes it.
+        self.inbox.record_delivery(
+            key, [message["message_id"] for message in messages])
         now = time.time()
         for message in messages:
             message["state"] = "read"
@@ -2201,6 +2207,21 @@ class Flock:
                 bytes=message.get("body_bytes"))
         result["marked_read"] = marked
         return result
+
+    @_as_dunk_error
+    def inbox_recover(self, mailbox=None, self_pane_id=None):
+        """Replay the latest delivered batch for display after a lost response.
+
+        t128 (ack-on-display): when an `inbox_read` response never reached the
+        client, the batch is marked read but was displayed nowhere. Recover
+        returns those same messages so the client can display them and then
+        `inbox_ack` them. The buffer holds one batch per mailbox: a newer read
+        overwrites it, and a full ack clears it. Acked mail never resurfaces -
+        recover replays the receipt, it does not resurrect consumed mail.
+        """
+        key = self._mailbox_or_self(mailbox, self_pane_id)
+        return {"mailbox": key,
+                "messages": self.inbox.recover_delivery(key)}
 
     @_as_dunk_error
     def inbox_status(self, message_id):
@@ -2221,6 +2242,10 @@ class Flock:
                 pass
         result = self.inbox.ack(message_ids, mailbox=key)
         result["acked_in"] = key
+        if key:
+            # t128: shrink the delivery receipt to what is still unacked, so a
+            # recovered batch stops replaying once it has been displayed+acked.
+            result["still_pending"] = self.inbox.note_acked(key)
         for message_id in result.get("changed", []):
             was = before.get(message_id) or {}
             started = was.get("read_at") or was.get("created_at")
