@@ -1,5 +1,6 @@
 """Allocator acceptance: durable exclusivity, contracts, ordering and recovery."""
 import os
+import json
 import sys
 import tempfile
 import threading
@@ -79,6 +80,27 @@ class AllocationTests(unittest.TestCase):
         t = self.task(); self.offer(t); self.worker("%1")
         self.tasks.assign(t["id"], ["%other"], mode="set")
         self.assertEqual([], self.a.allocate({"%1": {}}))
+
+    def test_invalidated_offer_is_manual_work_and_blocks_second_offer(self):
+        first = self.task(); self.offer(first); self.worker("%1")
+        self.tasks.assign(first["id"], ["%1"], mode="set")
+        second = self.task("second", "high"); self.offer(second)
+        self.assertFalse(self.tasks.get(first["id"])["allocation_waiting"])
+        self.assertEqual([], self.a.allocate({"%1": {}}))
+        self.assertEqual("open", self.tasks.get(second["id"])["status"])
+
+    def test_former_coauthor_stays_excluded_from_corrected_review(self):
+        source = self.task()
+        self.tasks.assign(source["id"], ["%coauthor"], mode="add")
+        self.worker("%r", "reviewer"); self.worker("%coauthor", "reviewer")
+        review = self.a.review(source["id"], "a"*40, "first", "code", [], "%leader")
+        self.a.allocate({"%r": {}})
+        self.tasks.complete(review["id"], "%r")
+        self.tasks.assign(source["id"], ["%leader"], mode="set")
+        self.a.review(source["id"], "b"*40, "second", "code", [], "%leader")
+        self.assertEqual([], self.a.allocate({"%coauthor": {}}))
+        self.assertEqual("%r", self.a.allocate({"%r": {}})[0]["pane_id"])
+        with self.assertRaises(TaskError): self.offer(review)
 
     def test_canonical_review_and_author_exclusion(self):
         source = self.task()
@@ -172,11 +194,63 @@ class AllocationTests(unittest.TestCase):
         from dunk_core import DunkError
         flock, runtime = self.runtime()
         flock.allocator = runtime
+        flock.require_turn_caller = Mock()
         flock.require_superuser = Mock(side_effect=DunkError("not operator"))
         for action in ("register", "offer"):
             with self.assertRaises(DunkError):
                 dunk_api.h_allocation(flock, {"action": action}, "%foreign")
         self.assertEqual([], self.a.status()["offers"])
+
+    def test_foreign_operator_peer_cannot_mutate_registry_or_offers(self):
+        import dunk_api
+        from dunk_core import DunkError
+        flock, runtime = self.runtime()
+        flock.allocator = runtime
+        flock.require_turn_caller = Mock(side_effect=DunkError("pane_not_in_ancestry"))
+        flock.require_superuser = Mock()
+        for action in ("register", "offer"):
+            with self.assertRaises(DunkError):
+                dunk_api.h_allocation(flock, {"action": action}, "%leader")
+        flock.require_superuser.assert_not_called()
+        self.assertEqual([], self.a.status()["offers"])
+
+    def test_real_server_binds_operator_peer_before_writes(self):
+        # Reuses reviewer30 i33922's independent synthetic kernel topology,
+        # exercising the real socket handler and policy (no permission mocks).
+        import test_dunk_complete_ownership as ownership
+        import dunk_callers
+        from dunk_server import FlockServer
+        table = {
+            1001: dict(pid=1001, comm="codex", state="S", ppid=1000, session=1000, start="7"),
+            1000: dict(pid=1000, comm="bash", state="S", ppid=1, session=1000, start="5"),
+            1: dict(pid=1, comm="init", state="S", ppid=0, session=1, start="1"),
+        }
+        for pane_pid, peer_pid, accepted in ((2000, 1001, False), (1000, None, False), (1000, 1001, True)):
+            fixture = ownership.CompleteOwnershipTests("test_owner_completion_passes")
+            fixture.setUp()
+            try:
+                flock = fixture.flock
+                fixture.superusers.add(ownership.OPERATOR)
+                source = flock.tasks.add("global", "operator source", body="concrete", assignees=[ownership.OPERATOR])
+                server = FlockServer(flock, socket_path=fixture.tmp.name+"/unused.sock")
+                request = {"id": "binding", "cmd": "allocation", "self_pane_id": ownership.OPERATOR}
+                with patch.object(dunk_callers, "_stat", side_effect=lambda p: table.get(int(p))), \
+                     patch.object(dunk_callers, "_cmdline", return_value=["codex"]), \
+                     patch.object(flock.herdr, "get_pane", return_value={"pane_id": ownership.OPERATOR, "pane_pid": pane_pid}), \
+                     patch.object(flock, "resolve_lanes", return_value=[{"pane_id": "w1:p1", "pane_pid": 3000}]):
+                    for args in (
+                        {"action": "register", "pane_id": "w1:p1", "pools": ["code"], "roles": ["worker"]},
+                        {"action": "offer", "task_id": source["id"], "pool": "code"},
+                    ):
+                        request["args"] = args
+                        result, _ = server.handle_line(json.dumps(request), peer_pid=peer_pid)
+                        self.assertEqual(accepted, result["ok"], result)
+                status = flock.allocator.store.status()
+                self.assertEqual(int(accepted), len(status["workers"]))
+                self.assertEqual(int(accepted), len(status["offers"]))
+            finally:
+                fixture.tearDown()
+                fixture.doCleanups()
 
     def test_api_review_requires_native_ownership(self):
         import dunk_api

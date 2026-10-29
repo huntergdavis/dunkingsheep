@@ -101,6 +101,8 @@ class AllocationStore:
         with t._lock:
             t.db.execute("BEGIN IMMEDIATE")
             try:
+                if t.db.execute("SELECT 1 FROM allocation_reviews WHERE task_id=?", (task_id,)).fetchone():
+                    raise TaskError("canonical review cannot be reoffered as worker work")
                 self._offer(t.get(task_id), pool, "worker", requires, [], actor)
                 t.db.commit()
             except Exception:
@@ -156,8 +158,12 @@ class AllocationStore:
                         details = dict(h, state="cancelled", reason="review_revision_superseded")
                         t.record_next_job_handoff(task_id, pane_id=h["pane_id"],
                                                  from_task=h.get("from_task"), details=details)
-                self._offer(t.get(task_id), pool, "reviewer", requires,
-                            source["assignees"] + [p for p in (source.get("created_by"), source.get("completed_by")) if p], author)
+                excluded = set(source["assignees"])
+                excluded.update(p for p in (source.get("created_by"), source.get("completed_by")) if p)
+                prior_offer = t.db.execute("SELECT excluded FROM allocation_offers WHERE task_id=?", (task_id,)).fetchone()
+                if prior_offer:
+                    excluded.update(json.loads(prior_offer["excluded"]))
+                self._offer(t.get(task_id), pool, "reviewer", requires, sorted(excluded), author)
                 t.db.execute("INSERT INTO allocation_reviews VALUES (?,?,?,?) "
                              "ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision",
                              (source_id, task_id, revision, author))
@@ -206,7 +212,7 @@ class AllocationStore:
                             continue
                         if t._busy_task_ids(pane, now):
                             continue
-                        owned = [x for x in tasks if pane in x["assignees"] and x["id"] not in offers
+                        owned = [x for x in tasks if pane in x["assignees"] and not x.get("allocation_waiting")
                                  and (x["status"] == "in_progress" or
                                       (x["status"] == "open" and not x["blocked_by"] and not x["block_reason"]))]
                         if owned or t.active_handoffs(pane, {x["id"] for x in tasks}):

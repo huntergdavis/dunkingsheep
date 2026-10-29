@@ -798,6 +798,9 @@ def h_allocation(flock, args, self_pane_id):
     if action == "status":
         return dict(store.status(), last_tick=flock.allocator.last_result)
     if action in ("register", "offer"):
+        # Operator labels are policy, not caller identity. Bind the socket peer
+        # to the actual requesting pane before granting allocation mutations.
+        flock.require_turn_caller(self_pane_id, self_pane_id)
         flock.require_superuser(self_pane_id, "allocation_" + action)
     if action == "register":
         pane = args.get("pane_id")
