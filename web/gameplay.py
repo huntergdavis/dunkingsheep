@@ -16,8 +16,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from server.emulator_build import describe_emulator, pinned_binary
-from server.state_archive import archive_status
+from web.emulator_build import describe_emulator, pinned_binary
+from web.state_archive import archive_status
 
 
 class GameError(Exception):

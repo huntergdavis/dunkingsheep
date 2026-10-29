@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from server.emulator_build import file_sha256
+from web.emulator_build import file_sha256
 
 
 def archive_status(manifest: Path) -> dict:
