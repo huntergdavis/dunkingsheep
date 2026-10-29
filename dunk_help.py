@@ -443,7 +443,10 @@ def guide(markdown=False):
            "        atomic claim under BEGIN IMMEDIATE (two agents never win the\n"
            "        same exclusive task); multi_assignee tasks accept several;\n"
            "        lease default 1800s; expired or dead-pane leases requeue;\n"
-           "        push to idle followers reuses the dunk idle gate + inbox nudge"))
+           "        push to idle followers reuses the dunk idle gate + inbox nudge;\n"
+           "        a pane already holding in-progress work is refused more work\n"
+           "        (refused.reason='busy') unless --allow-busy; every refusal is\n"
+           "        logged with its reason (empty/blocked/owned_elsewhere/leased)"))
     w("`task_next` is the atomic pull: it selects, assigns you, sets in_progress\n"
       "and records a lease in one SQLite transaction. `task_heartbeat` extends the\n"
       "lease; `task_complete` completes it for everyone. `task_follow` is the\n"
@@ -455,6 +458,7 @@ def guide(markdown=False):
            "dunkingsheep task add \"Write tests\" --depends-on t12\n"
            "dunkingsheep task next                 # atomic claim (global by default)\n"
            "dunkingsheep task next auto            # own pane queue, then global\n"
+           "dunkingsheep task next --allow-busy    # take a second task on purpose\n"
            "dunkingsheep task heartbeat t12        # extend the lease\n"
            "dunkingsheep task complete t12         # global completion\n"
            "dunkingsheep task follow               # receive pushed work when idle\n"

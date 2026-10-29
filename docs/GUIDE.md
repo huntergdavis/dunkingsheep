@@ -463,7 +463,10 @@ rules:  global completion (any assignee completes it for all);
         atomic claim under BEGIN IMMEDIATE (two agents never win the
         same exclusive task); multi_assignee tasks accept several;
         lease default 1800s; expired or dead-pane leases requeue;
-        push to idle followers reuses the dunk idle gate + inbox nudge
+        push to idle followers reuses the dunk idle gate + inbox nudge;
+        a pane already holding in-progress work is refused more work
+        (refused.reason='busy') unless --allow-busy; every refusal is
+        logged with its reason (empty/blocked/owned_elsewhere/leased)
 ```
 
 `task_next` is the atomic pull: it selects, assigns you, sets in_progress
@@ -479,6 +482,7 @@ dunkingsheep task add "Ship the parser" -p high --body "..."
 dunkingsheep task add "Write tests" --depends-on t12
 dunkingsheep task next                 # atomic claim (global by default)
 dunkingsheep task next auto            # own pane queue, then global
+dunkingsheep task next --allow-busy    # take a second task on purpose
 dunkingsheep task heartbeat t12        # extend the lease
 dunkingsheep task complete t12         # global completion
 dunkingsheep task follow               # receive pushed work when idle

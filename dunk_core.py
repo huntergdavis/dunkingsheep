@@ -2698,12 +2698,18 @@ class Flock:
         self._caller_state.value = None
 
     @_as_dunk_error
-    def task_next(self, scope=None, lease_seconds=None, self_pane_id=None):
+    def task_next(self, scope=None, lease_seconds=None, self_pane_id=None,
+                  allow_busy=False):
         """Atomically claim the next task; subscribe if the queue is empty.
 
         Auto-following on an empty queue is what makes the pull cheap: the
         daemon pushes the next task when this pane next goes idle instead of
-        the agent polling.
+        the agent polling. A pane already holding in-progress work is refused a
+        second task (``refused.reason == "busy"``) unless ``allow_busy`` is set;
+        parallel work is an explicit decision, not something a poll takes by
+        accident (t145). A refusal still subscribes the pane for a later push,
+        exactly like an empty queue, because the push gate already skips panes
+        that hold a lease.
         """
         caller = self.current_caller()
         value = "" if scope is None else str(scope).strip()
@@ -2721,7 +2727,8 @@ class Flock:
                 local = self.tasks.claim_next(scope=self_pane_id,
                                               pane_id=self_pane_id,
                                               lease_seconds=lease_seconds,
-                                              caller=caller)
+                                              caller=caller,
+                                              allow_busy=allow_busy)
                 if local.get("task"):
                     return local
         else:
@@ -2730,7 +2737,8 @@ class Flock:
 
         result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
                                        lease_seconds=lease_seconds,
-                                       caller=caller)
+                                       caller=caller,
+                                       allow_busy=allow_busy)
         if not result.get("task") and self_pane_id:
             with self._lock:
                 self.task_waiters[self_pane_id] = follow_scope

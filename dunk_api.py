@@ -862,7 +862,8 @@ def h_task_note(flock, args, self_pane_id):
 def h_task_next(flock, args, self_pane_id):
     return flock.task_next(scope=args.get("scope"),
                            lease_seconds=args.get("lease_seconds"),
-                           self_pane_id=self_pane_id)
+                           self_pane_id=self_pane_id,
+                           allow_busy=_bool(args.get("allow_busy"), False))
 
 
 def h_task_heartbeat(flock, args, self_pane_id):
@@ -1895,10 +1896,17 @@ COMMANDS = [
         "work on, assign it to the caller and set it in_progress in one SQLite "
         "transaction. scope=global (default), self (own pane), auto (pane then "
         "global), or a pane id. Returns {task, lease_seconds, expires_at}; when "
-        "the queue is empty the caller is auto-subscribed for a push.",
+        "the queue is empty the caller is auto-subscribed for a push. A pane "
+        "already holding in-progress work is refused "
+        "({task:null, refused:{reason:'busy',task_ids:[...]}}) unless "
+        "allow_busy=true; every refusal is logged and names its reason "
+        "(empty/blocked/owned_elsewhere/leased/not_claimable/busy).",
         h_task_next,
         params={"scope": TASK_SCOPE_NEXT_PARAM,
-                "lease_seconds": TASK_LEASE_PARAM},
+                "lease_seconds": TASK_LEASE_PARAM,
+                "allow_busy": {"type": "boolean",
+                               "description": "Take a second task while already "
+                                              "holding in-progress work."}},
     ),
     Command(
         "task_heartbeat",

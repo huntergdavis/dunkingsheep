@@ -425,6 +425,8 @@ def build_parser():
     q.add_argument("scope", nargs="?",
                    help="'global' (default), 'self', 'auto' or a pane id")
     q.add_argument("--lease", type=float, metavar="SECONDS")
+    q.add_argument("--allow-busy", action="store_true",
+                   help="take a second task while already holding in-progress work")
 
     q = tsub.add_parser("heartbeat", help="extend the lease on a claimed task")
     q.add_argument("id")
@@ -1029,7 +1031,23 @@ def print_task_list(result):
 def print_task_next(result):
     task = result.get("task")
     if not task:
-        print("no eligible task")
+        refused = result.get("refused") or {}
+        reason = refused.get("reason")
+        ids = refused.get("task_ids") or []
+        owners = refused.get("owned_by") or []
+        if reason == "busy":
+            held = ", ".join(ids) or "in-progress work"
+            print(f"refused (busy): this pane already holds {held}; "
+                  f"pass --allow-busy to take parallel work")
+        elif reason == "empty":
+            print("no eligible task: the queue is empty for this scope")
+        elif reason:
+            detail = f" ({', '.join(ids)})" if ids else ""
+            if owners:
+                detail += f" owned by {', '.join(owners)}"
+            print(f"no eligible task: refused ({reason}){detail}")
+        else:
+            print("no eligible task")
         if result.get("following"):
             print("following the queue: the daemon will push the next task "
                   "when this pane is idle")
@@ -2517,7 +2535,8 @@ def run_client_command(client, args):
                 lambda r: print(f"noted {r['noted']}: {r['event']}")
         if sub == "next":
             return client.call("task_next", scope=args.scope,
-                               lease_seconds=args.lease), print_task_next
+                               lease_seconds=args.lease,
+                               allow_busy=args.allow_busy), print_task_next
         if sub == "heartbeat":
             return client.call("task_heartbeat", id=args.id,
                                lease_seconds=args.lease), \

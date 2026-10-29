@@ -345,6 +345,33 @@ class CliEndToEndTests(unittest.TestCase):
         self.assertIn("help", names)
         self.assertIn("input_schema", registry[0])
 
+    def test_task_next_busy_refusal_and_the_executable_override(self):
+        """Executable level, as the CLI a lane actually runs: `--allow-busy`
+        must be parsed and forwarded (not just known to the handler), and a
+        refusal must say WHY instead of printing "no eligible task" (t145).
+        """
+        self.run_cli("status")  # auto-start the private daemon
+        first = self.run_json("task", "add", "alpha")
+        claimed = self.run_cli("task", "next")
+        self.assertIn(f"claimed {first['id']}", claimed.stdout)
+
+        second = self.run_json("task", "add", "beta")
+        refused = self.run_cli("task", "next")
+        self.assertNotIn("no eligible task", refused.stdout,
+                         "a refusal must not look like an empty queue")
+        self.assertIn("refused (busy)", refused.stdout)
+        self.assertIn("--allow-busy", refused.stdout)
+        self.assertIn(first["id"], refused.stdout)
+
+        payload = self.run_json("task", "next")
+        self.assertIsNone(payload["task"])
+        self.assertEqual("busy", payload["refused"]["reason"])
+        self.assertEqual([first["id"]], payload["refused"]["task_ids"])
+
+        allowed = self.run_cli("task", "next", "--allow-busy")
+        self.assertIn(f"claimed {second['id']}", allowed.stdout,
+                      "the executable did not forward --allow-busy")
+
     def test_self_discovery_surfaces(self):
         # No arguments prints help rather than an error.
         bare = self.run_cli()
