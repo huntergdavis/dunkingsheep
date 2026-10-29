@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.89"
+VERSION = "2.70.90"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -6585,6 +6585,11 @@ def _prompt_body(row):
 NATIVE_BANNER_RE = re.compile(r"^>_\s+OpenAI Codex(?:\s+\(v[0-9][0-9.]*\))?$")
 NATIVE_STATUS_RE = re.compile(r"^\S[\w .+/-]{0,40}\s\u00b7\s(?:~|/)\S*$")
 NATIVE_HINTS_RE = re.compile(r"^(?:\? for shortcuts|\u2190 for agents)\b")
+# After a message is TYPED the native UI drops the shortcut hint and leaves only the
+# right-aligned warning counter (CoS i31841, captured in the live canary):
+#   '                                                       ⚠ 1 warning · f2 to view'
+# Anchored and exact: the counter, singular or plural, then that literal suffix.
+NATIVE_WARNING_RE = re.compile(r"^\u26a0\s+\d+\s+warnings?\s+\u00b7\s+f2 to view$")
 
 
 def _native_banner(row):
@@ -6599,6 +6604,10 @@ def _native_hints(row):
     return bool(NATIVE_HINTS_RE.match(_strip_ansi(row).strip()))
 
 
+def _native_warning(row):
+    return bool(NATIVE_WARNING_RE.match(_strip_ansi(row).strip()))
+
+
 def _native_footer_start(raw, nonblank):
     """The index of the native two-row footer's first row, or None.
 
@@ -6609,9 +6618,16 @@ def _native_footer_start(raw, nonblank):
     if len(nonblank) < 2:
         return None
     first, second = nonblank[-2], nonblank[-1]
-    if _native_status(raw[first]) and _native_hints(raw[second]):
-        return first
-    return None
+    if not _native_status(raw[first]):
+        return None
+    if not (_native_hints(raw[second]) or _native_warning(raw[second])):
+        return None
+    # The native UI draws a BLANK row between the composer and this status row. A human
+    # continuation is contiguous, so a forged status+warning pair typed right under our
+    # text does not qualify and stays in the region (where ownership equality refuses it).
+    if first - 1 < 0 or _strip_ansi(raw[first - 1]).strip():
+        return None
+    return first
 
 
 def _composer_region_text(screen):
