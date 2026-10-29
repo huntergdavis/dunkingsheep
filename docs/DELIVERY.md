@@ -250,6 +250,13 @@ Busy turns, dialogs, human edits and unaccounted styled text still refuse keys.
 Same-generation provenance for previous submitted echoes is retained with the
 candidate so the styled matcher can work after restart without guessing history.
 
+Scheduled sends reported as successful are observed too: the incident's d55
+prompt was logged as sent while still pending. For this case, recovery additionally
+requires the measured bold, non-dim current-composer boundary, full text equality
+and provenance for every excluded dim echo. This extra proof is checked again
+under the typing lock. A dim transcript echo or unknown styling cannot authorize
+replay. Ordinary direct-message success and explicit no-enter remain ineligible.
+
 Older installed releases did not record scheduled candidates. An upgrade cannot
 retroactively prove the generation or intent of those existing prompts; they
 remain held for operator recovery. Do not fabricate candidates from a schedule's

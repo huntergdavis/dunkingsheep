@@ -211,6 +211,55 @@ class ScheduledRecoveryTests(unittest.TestCase):
         self.assertEqual([], self.backend.keys)
         self.assertIsNone(self.flock._box_text(PANE))
 
+    def reported_sent_schedule(self, sigil='\x1b[1m›\x1b[0m'):
+        def false_confirmation(pane, text):
+            self.flock._remember_typed(pane, text)
+            self.backend.screens[pane] = FRAME.replace('›', sigil)
+            self.backend.box[pane] = text
+            return True, 'sent'
+        with mock.patch.object(self.flock, 'submit_text', side_effect=false_confirmation):
+            self.flock._do_send(self.dunk)
+
+    def test_reported_sent_but_bright_pending_schedule_recovers(self):
+        # d55 was logged SENT; only watching failed outcomes misses the VP wedge.
+        self.reported_sent_schedule()
+        self.tick(1000)
+        self.tick(1100)
+        self.assertEqual([], self.backend.keys)
+        self.assertEqual(1, self.tick(1120))
+        self.assertEqual(1, len(self.backend.keys))
+
+    def test_reported_sent_dim_transcript_is_not_submitted_again(self):
+        self.reported_sent_schedule(sigil='\x1b[1;2m›\x1b[0m')
+        for at in (1000, 1120, 1300):
+            self.tick(at)
+        self.assertEqual([], self.backend.keys)
+
+    def test_reported_sent_unknown_style_is_not_submission_authority(self):
+        self.reported_sent_schedule(sigil='›')
+        for at in (1000, 1120, 1300):
+            self.tick(at)
+        self.assertEqual([], self.backend.keys)
+
+    def test_sent_schedule_style_change_before_press_refuses(self):
+        self.reported_sent_schedule()
+        self.tick(1000)
+        save = self.flock._save
+        def raced_save():
+            self.backend.screens[PANE] = FRAME.replace('›', '\x1b[1;2m›\x1b[0m')
+            return save()
+        with mock.patch.object(self.flock, '_save', side_effect=raced_save):
+            self.tick(1120)
+        self.assertEqual([], self.backend.keys)
+
+    def test_genuinely_consumed_schedule_retires_without_a_recovery(self):
+        self.reported_sent_schedule()
+        self.backend.screens[PANE] = '› Ask Codex to do anything\n\n  GPT-6-Astra high · ~/workspace · task\n'
+        self.backend.box[PANE] = ''
+        self.tick(1000)
+        self.tick(1120)
+        self.assertEqual([], self.backend.keys)
+
 
 if __name__ == '__main__':
     unittest.main()

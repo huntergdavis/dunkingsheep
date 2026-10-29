@@ -4325,13 +4325,17 @@ class Flock:
         Latest intent wins, whichever way it went: a newer SENT or CANCELLED message, or
         an explicit `send --no-enter`, supersedes an older failed candidate with the same
         text. Only a delivery that asked for Enter and was reported unconfirmed stays
-        eligible. Bounded to one entry per pane by construction.
+        eligible. Scheduled sends also retain observation after a reported success:
+        that case requires additional live-style proof, never a transcript echo.
+        Bounded to one entry per pane by construction.
         """
         pane_id = getattr(message, "pane_id", None)
         if not pane_id:
             return
         attempt_generation = getattr(message, "attempt_generation", None)
-        eligible = (getattr(message, "status", None) == "failed"
+        scheduled = bool(getattr(message, "scheduled", False))
+        eligible = ((getattr(message, "status", None) == "failed"
+                     or (scheduled and getattr(message, "status", None) == "sent"))
                     and bool(getattr(message, "press_enter", True))
                     and getattr(message, "kind", "text") == "text"
                     and bool(attempt_generation))     # unknown attempt identity: fail closed
@@ -4340,6 +4344,7 @@ class Flock:
                  "press_enter": bool(getattr(message, "press_enter", True)),
                  "status": getattr(message, "status", None),
                  "kind": getattr(message, "kind", "text"),
+                 "scheduled": scheduled,
                  # The exact delivery-owned content, so ownership can be proven after a
                  # restart (message_history and sent_text_by_pane do not survive one).
                  "text": getattr(message, "text", "") or "",
@@ -4448,6 +4453,9 @@ class Flock:
                     return False
             if head is not None and candidate.get("message_id") == head.id:
                 require_intent = True
+                if not self._sent_schedule_pending(pane_id, candidate):
+                    self.stuck.forget(pane_id)
+                    return False
         identity = (getattr(head, "id", None) or expect_message_id
                     or self._text_identity(content))
         generation = self._pane_generation(pane_id)
@@ -4572,7 +4580,9 @@ class Flock:
                     return False, "the tracked delivery was an explicit no-enter send"
                 if live.get("generation") != self._pane_generation(pane_id):
                     return False, "the pane generation changed since the decision"
-                if live.get("eligible") is not True or live.get("status") != "failed":
+                if (live.get("eligible") is not True
+                        or live.get("status") not in ("failed", "sent")
+                        or not self._sent_schedule_pending(pane_id, live, screen)):
                     # The authority can be REVOKED between the decision and the press
                     # (CoS i31802 #2): a cancellation or a newer outcome that arrived
                     # while the attempt was being reserved. Naming the id is not
@@ -4666,6 +4676,27 @@ class Flock:
         message.created_at = entry.get("created_at") or 0
         message.attempt_generation = entry["generation"]
         return message
+
+    def _sent_schedule_pending(self, pane_id, entry, screen=None):
+        """A reported SENT schedule needs extra proof before any recovery.
+
+        d55 falsely confirmed submission. Monitor its actual composer, but
+        never replay a transcript echo: require the measured bold/non-dim live
+        boundary plus the ordinary strict ownership/provenance checks. Repeat
+        this check under the typing lock immediately before the key.
+        """
+        if entry.get("status") != "sent":
+            return True
+        if not entry.get("scheduled"):
+            return False
+        if screen is None:
+            screen = self.read_screen(pane_id)
+        boundary, region = _styled_composer_boundary(screen)
+        if (boundary != "delimited" or not region
+                or _collapse(region) != _collapse(entry.get("text") or "")):
+            return False
+        accounted, _unaccounted = self._dim_bodies_accounted(pane_id, screen)
+        return accounted and self.composer_region_is_owned(pane_id, screen)
 
     @staticmethod
     def _text_identity(content):
@@ -4768,9 +4799,10 @@ class Flock:
         another message.
 
         Eligibility is deliberately narrow and truthful:
-          - a message we typed, that ASKED for Enter (`press_enter`), and whose submit
-            was reported FAILED - an explicit `send --no-enter` is an instruction, not a
-            stall, and is never recovered;
+          - a message we typed that ASKED for Enter (`press_enter`), whose submit
+            was reported FAILED, or a scheduled send with explicit styled proof
+            that its reported success left it pending. An explicit `send --no-enter`
+            is an instruction, not a stall, and is never recovered;
           - the pane has no queued message (so no outbox worker is already watching it:
             exactly one observer per pane);
           - the composer still holds that text, is readable, and the pane generation is
@@ -5020,6 +5052,7 @@ class Flock:
         # or a post-attempt pane identity is not proof of what we typed and where.
         attempt = self._new_message(dunker.target_pane_id, dunker.target_label(),
                                     text, dunker.id, lambda: (False, "record only"))
+        attempt.scheduled = True
         attempt.attempt_generation = self._pane_generation(dunker.target_pane_id)
         try:
             ok, message = self.submit_text(dunker.target_pane_id, text)
