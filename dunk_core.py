@@ -5460,9 +5460,26 @@ class Flock:
         zero keys. The sigil-free-transcript wedge positive is the one recovery
         case; sigil'd transcript echoes fail closed (DocumentedLimitTests)."""
         region = _composer_region_text(screen)
-        if not region:
-            return False, ""
-        return self._region_is_ours(pane_id, region), region
+        if region:
+            return self._region_is_ours(pane_id, region), region
+        # t130 (VP i31906 authorization): the plain boundary fails closed on
+        # multi-sigil frames (a transcript echo above the live composer). When
+        # the screen carries ANSI styling, the style-state boundary may delimit
+        # it: exactly one bold-non-dim composer sigil, and every excluded
+        # bold+dim (transcript-echo) sigil body must be ACCOUNTED - matching a
+        # message the daemon demonstrably sent for this pane (sent history or
+        # outbox). Provenance, not styling alone, closes the forged-human-
+        # content gap; an unaccounted dim body refuses the frame.
+        if ANSI_RE.search(screen):
+            styled_status, styled_region = _styled_composer_boundary(screen)
+            if styled_status != "delimited" or not styled_region:
+                return False, ""
+            accounted, _unaccounted = self._dim_bodies_accounted(pane_id, screen)
+            if not accounted:
+                return False, ""
+            if self._region_is_ours(pane_id, styled_region):
+                return True, styled_region
+        return False, ""
 
     def composer_region_is_owned(self, pane_id, screen):
         """PUBLIC (t377 seam, Owner2282): the exact-owned full-composer check.
@@ -5475,6 +5492,41 @@ class Flock:
         depends on this, not on the private helpers."""
         owned, _region = self._composer_ownership(pane_id, screen)
         return owned
+
+    def _dim_bodies_accounted(self, pane_id, screen):
+        """t130: provenance accounting for the style-state boundary. Every
+        bold+dim (transcript-echo) sigil body must match a message the daemon
+        demonstrably sent for this pane - sent history or outbox rows, either
+        direction of the prefix test (echoes wrap and truncate). An unaccounted
+        dim body is human content in a transcript-styled row: the frame is
+        REFUSED rather than the text silently excluded (VP i31906: no silent
+        text exclusion based only on dim)."""
+        bodies = []
+        for row in screen.splitlines():
+            body = _prompt_body(row)
+            if body is None:
+                continue
+            state = _styled_sigil_state(row)
+            if state == "dim" and body:
+                bodies.append(body)
+        if not bodies:
+            return True, []
+        with self._lock:
+            known = list(self.sent_text_by_pane.get(pane_id, []))
+            known += [m.text for m in self.outbox.get(pane_id) or [] if m.text]
+        unaccounted = []
+        for body in bodies:
+            b = _collapse(body)
+            # The capture truncates long prompts with an ellipsis: strip a
+            # trailing one before matching, so a truncated echo still matches
+            # the full sent text.
+            b = b.rstrip("\u2026").strip()
+            if not b:
+                continue
+            if not any(_collapse(t).startswith(b) or b.startswith(
+                    _collapse(t)[:CONSUMPTION_PREFIX_CHARS]) for t in known if t):
+                unaccounted.append(body)
+        return (not unaccounted), unaccounted
 
     def _box_text(self, pane_id):
         """Whatever is sitting in the pane's input box: '' when empty, None
@@ -6579,6 +6631,10 @@ BOX_REGION_ROWS = 14
 # Stable discriminator for callers: empty text with this detail is NOT empty-box
 # evidence and must never authorise a send/flush. Keep the public two-value API.
 AMBIGUOUS_COMPOSER = "ambiguous composer/transcript:"
+# The middle-dot separator that marks a status footer row (t130: defined here
+# because _styled_composer_boundary is the first caller on this path; the plain
+# _box_holds/box_text readers detect footers via box_text's own detail strings).
+MID = " \u00b7 "
 # Box borders and padding sit BEFORE the prompt sigil on a bordered composer, so a
 # raw first-character test missed '│ ❯ check your inbox' entirely - which is
 # exactly the row a stuck draft sits on.
@@ -6729,15 +6785,15 @@ def _styled_composer_boundary(screen):
     """("delimited", region) or ("undelimitable", "") using CAPTURED STYLE
     STATE, for the multi-sigil frames the plain boundary fails closed on.
 
-    Rules (VP i31906 required negatives):
-    - footer = the ONLY footer-shaped row (" · ", no sigil) AND the last
-      non-blank row; a second footer-lookalike (a human continuation holding a
-      middle dot, or content after the footer) refuses;
-    - sigil rows classified by _styled_sigil_state; exactly ONE composer
-      candidate (bold, non-dim), it must be the LAST sigil row, and every dim
-      sigil body must be ACCOUNTED (see _dim_body_accounted) - an unaccounted
-      dim body is human content that must not be silently excluded;
-    - region = composer body + non-blank rows below it, up to the footer.
+    Order of checks (t130):
+    1. the footer is the LAST non-blank row, footer-shaped (" · ", no sigil);
+    2. exactly ONE composer candidate (bold, non-dim) among the sigil rows
+       above the footer, and it is the LAST sigil row;
+    3. exactly ONE footer-shaped row between the composer and the end
+       (transcript middle-dot rows above the composer are content, not
+       footers - the %33 frame carries one);
+    4. region = composer body + non-blank rows below it, up to the footer;
+       ownership equality is applied by the caller.
     """
     if not screen:
         return "undelimitable", ""
@@ -6747,28 +6803,28 @@ def _styled_composer_boundary(screen):
     if not nonblank:
         return "undelimitable", ""
     last_row = nonblank[-1]
-    last_plain = _strip_ansi(raw[last_row])
-    if MID not in last_plain or _prompt_body(raw[last_row]) is not None:
+    if MID not in _strip_ansi(raw[last_row]) or _prompt_body(raw[last_row]) is not None:
         return "undelimitable", ""
-    footer_rows = [index for index in nonblank
-                   if MID in _strip_ansi(raw[index])
-                   and _prompt_body(raw[index]) is None]
-    if len(footer_rows) != 1:
-        return "undelimitable", ""
-    footer = footer_rows[0]
     sigils = [(index, _styled_sigil_state(raw[index]))
-              for index in range(footer) if _prompt_body(raw[index]) is not None]
+              for index in range(last_row) if _prompt_body(raw[index]) is not None]
     if not sigils:
         return "undelimitable", ""
     candidates = [index for index, state in sigils if state == "bold"]
     if len(candidates) != 1 or candidates[0] != sigils[-1][0]:
         return "undelimitable", ""
-    composer = candidates[0]
+    composer_row = candidates[0]
+    footer_rows = [index for index in nonblank
+                   if index > composer_row
+                   and MID in _strip_ansi(raw[index])
+                   and _prompt_body(raw[index]) is None]
+    if len(footer_rows) != 1:
+        return "undelimitable", ""
+    footer = footer_rows[0]
     parts = []
-    body = _prompt_body(raw[composer])
+    body = _prompt_body(raw[composer_row])
     if body:
         parts.append(body)
-    for row in raw[composer + 1:footer]:
+    for row in raw[composer_row + 1:footer]:
         text = _strip_ansi(row).strip()
         if text:
             parts.append(text)
