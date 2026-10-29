@@ -425,7 +425,10 @@ def guide(markdown=False):
       + code("dunkingsheep inbox recover") +
       " replays the latest delivered batch for display, and " +
       code("dunkingsheep inbox ack") + " then consumes it. The buffer holds one\n"
-      "batch per mailbox; a newer read overwrites it and a full ack clears it.\n")
+      "batch per mailbox; a newer read overwrites it and a full ack clears it.\n"
+      "Recover follows the read rule, not the ack rule: like inbox read it is\n"
+      "permissive (inspecting a stranded mailbox is how the backlog gets drained),\n"
+      "while ack stays scoped to the caller's own mailbox.\n")
     w("An agent whose MCP connection predates the inbox has a stale tool list and\n"
       "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
       "is why the launcher is the first thing to install.\n")

@@ -447,6 +447,9 @@ dunkingsheep inbox ack
 
  then consumes it. The buffer holds one
 batch per mailbox; a newer read overwrites it and a full ack clears it.
+Recover follows the read rule, not the ack rule: like inbox read it is
+permissive (inspecting a stranded mailbox is how the backlog gets drained),
+while ack stays scoped to the caller's own mailbox.
 
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which

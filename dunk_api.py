@@ -1723,7 +1723,9 @@ COMMANDS = [
         "batch is marked read but was displayed nowhere. Recover returns "
         "those same messages so they can be displayed and then inbox_ack-ed. "
         "The buffer holds one batch per mailbox and a full ack clears it; "
-        "acked mail never resurfaces.",
+        "acked mail never resurfaces. Visibility follows the read rule, not "
+        "the ack rule: like inbox read it is permissive, while ack stays "
+        "scoped to the caller's own mailbox.",
         h_inbox_recover,
         params={"mailbox": MAILBOX_PARAM},
     ),
