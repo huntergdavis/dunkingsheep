@@ -31,6 +31,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from dunk_sqlite import connect as sqlite_connect
+
 
 class NativeSessionRefusal(RuntimeError):
     """The native session cannot be proven quiescent; callers must refuse."""
@@ -38,6 +40,16 @@ class NativeSessionRefusal(RuntimeError):
 
 class NativeSessionChanged(NativeSessionRefusal):
     """The rollout changed after the quiescence snapshot was taken."""
+
+
+class NativeSessionBusy(NativeSessionRefusal):
+    """The private state DB is busy; the quiescence check can be retried.
+
+    Sanitized contract: a fixed message with no raw database text, marked
+    retryable so callers can distinguish a busy store from a refusal.
+    """
+
+    retryable = True
 
 
 @dataclass(frozen=True)
@@ -117,7 +129,7 @@ def _state_row(codex_home, session_id):
             f"native session guard cannot find private state DB {path}"
         )
     try:
-        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        connection = sqlite_connect(path, readonly=True)
         connection.row_factory = sqlite3.Row
         try:
             row = connection.execute(
@@ -126,8 +138,14 @@ def _state_row(codex_home, session_id):
         finally:
             connection.close()
     except sqlite3.Error as error:
+        if isinstance(error, sqlite3.OperationalError) and (
+            error.sqlite_errorcode in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+        ):
+            raise NativeSessionBusy(
+                "native session state DB busy; retry the request"
+            ) from None
         raise NativeSessionRefusal(
-            f"native session guard could not read private state DB: {error}"
+            "native session guard could not read private state DB"
         ) from None
     if row is None:
         raise NativeSessionRefusal(
