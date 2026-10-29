@@ -776,6 +776,894 @@ class FirstObservationEvidenceTests(unittest.TestCase):
                          f"one line per record, not per tick: {lines}")
 
 
+class StandaloneObserverTests(unittest.TestCase):
+    """CoS i31791: a LONE stalled delivery must be observed by a timer.
+
+    The two-send staging was disproved - the second send flushed the first in 1.81 s
+    through `_ensure_box_clear`, with zero recoveries. The real gap: `_outbox_worker`
+    returns when the queue is empty, so a message that was typed, reported
+    unconfirmed and left in the composer had no observer at all. These tests drive the
+    ACTUAL worker step (`_stuck_observer_step`, the body of the daemon thread), with a
+    fake clock - not `_unwedge` and not a second message.
+    """
+
+    THRESHOLD = 120.0
+    T0 = 500_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT              # typed by us, never submitted
+        self.flock._remember_typed(PANE, OUR_TEXT)
+        # A delivery that ASKED for Enter and was reported unconfirmed - the owner's case.
+        self.message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT,
+                                              "send_text", lambda: (True, "ok"))
+        self.message.status = "failed"
+        self.message.attempt_generation = self.flock._pane_generation(PANE)
+        self.message.detail = "typed, not submitted"
+        self.flock._remember(self.message)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def step(self, at):
+        # The worker's own step, with the clock injected (the daemon thread passes None).
+        import dunk_stuck
+        original = dunk_stuck.Tracker.decide
+        return self.flock._stuck_observer_step(now=at)
+
+    def test_a_lone_stalled_message_is_the_only_thing_needed(self):
+        self.assertEqual(0, self.flock._stuck_observer_step(now=self.T0),
+                         "first sighting: evidence and a clock, no action")
+        self.assertEqual([], self.presses())
+        self.assertIn(PANE, self.flock.stuck.records,
+                      "the standalone observer must start the clock on a lone message")
+
+    def test_nothing_happens_before_the_threshold(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        for at in (self.T0 + 1, self.T0 + 60, self.T0 + 119):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(), "no key before the threshold")
+
+    def test_exactly_one_action_at_the_threshold_and_no_second_message(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        before_ids = len(self.flock.message_history)
+        acted = self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+        self.assertEqual(1, acted, "the worker reports the action it took")
+        self.assertEqual(1, len(self.presses()), "exactly one key, and no other message")
+        self.assertEqual(before_ids, len(self.flock.message_history),
+                         "recovery must not create or send a second message")
+        outcomes = [e["outcome"] for e in self.metrics.events if e["event"] == "stuck.recover"]
+        self.assertEqual(["consumed"], outcomes)
+
+    def test_an_explicit_no_enter_send_is_never_recovered(self):
+        # `send --no-enter` is an instruction: re-register the intent as no-enter, the way
+        # the daemon does when that delivery is decided.
+        self.message.press_enter = False
+        self.flock.stuck_candidates.clear()
+        self.flock._remember(self.message)
+        for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + 10_000):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(),
+                         "an explicit --no-enter is not a stalled delivery")
+        self.assertNotIn(PANE, self.flock.stuck.records,
+                         "and it must not even start a clock")
+
+    def test_consumption_stops_the_observation(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        # The lane finally took it: the composer is empty on the SCREEN too, which is
+        # what the reader actually reads.
+        self.herdr.box[PANE] = ""
+        self.herdr.screens[PANE] = "│ ✻ idle\n❯\u00a0\n\x1b[2midle · pi\x1b[0m\n"
+        self.flock._stuck_observer_step(now=self.T0 + 5)
+        self.assertNotIn(PANE, self.flock.stuck.records, "consumed text is forgotten")
+        self.assertEqual([], self.presses())
+
+    def test_a_cancelled_message_is_not_observed(self):
+        self.message.status = "cancelled"
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses())
+        self.assertNotIn(PANE, self.flock.stuck.records)
+
+    def test_a_dead_pane_is_not_observed(self):
+        self.herdr.unreadable.add(PANE)             # the pane cannot be read at all
+        for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + 200):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(), "an unreadable pane is never pressed")
+
+    def test_a_pane_with_a_queued_message_is_left_to_its_outbox_worker(self):
+        follower = self.flock._new_message(PANE, "Claude Proj", "a later notice",
+                                          "send_text", lambda: (True, "ok"))
+        self.flock._enqueue(follower)               # a real queued row
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(),
+                         "exactly one observer: the outbox worker owns this pane")
+        self.assertNotIn(PANE, self.flock.stuck.records)
+
+    def test_the_ordinary_two_send_flush_stays_a_separate_control(self):
+        # Documented as the control CoS measured: a queued message behind our text is
+        # the outbox worker's job (it flushes), not the standalone observer's.
+        follower = self.flock._new_message(PANE, "Claude Proj", "second message",
+                                          "send_text", lambda: (True, "ok"))
+        self.flock._enqueue(follower)
+        self.assertEqual(0, self.flock._stuck_observer_step(now=self.T0),
+                         "the standalone observer declines a pane with a queue")
+
+
+class ObserverBoundaryTests(unittest.TestCase):
+    """CoS i31795: three boundary failures reproduced against the frozen observer head.
+
+    1. a newer SENT / no-enter delivery for the same pane must SUPERSEDE an older failed
+       candidate with the same composer text;
+    2. an unreadable observation must RESET the clock (fresh stable window afterwards);
+    3. the candidate must not live in the 50-row display history - ordinary traffic must
+       not drop the watchdog's own work.
+    """
+
+    THRESHOLD = 120.0
+    T0 = 700_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+        self.failed = self.deliver(OUR_TEXT, status="failed", press_enter=True)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def deliver(self, text, status="failed", press_enter=True, created_at=None):
+        message = self.flock._new_message(PANE, "Claude Proj", text, "send_text",
+                                         lambda: (True, "ok"))
+        message.status = status
+        message.press_enter = press_enter
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        if created_at is not None:
+            message.created_at = created_at
+        self.flock._remember(message)
+        return message
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_a_newer_no_enter_delivery_supersedes_an_older_failed_candidate(self):
+        self.flock._stuck_observer_step(now=self.T0)      # the failed candidate starts a clock
+        self.deliver(OUR_TEXT, status="sent", press_enter=False,
+                     created_at=self.failed.created_at + 1)
+        for at in (self.T0 + 60, self.T0 + self.THRESHOLD, self.T0 + 600):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(),
+                         "a newer explicit no-enter intent must not be overridden")
+
+    def test_a_newer_sent_delivery_also_supersedes(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        self.deliver(OUR_TEXT, status="sent", press_enter=True,
+                     created_at=self.failed.created_at + 1)
+        for at in (self.T0 + self.THRESHOLD, self.T0 + 600):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(), "the pane's latest intent is a clean send")
+
+    def test_an_unreadable_observation_resets_the_clock(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        self.herdr.unreadable.add(PANE)
+        self.flock._stuck_observer_step(now=self.T0 + 60)      # unknown -> reset
+        self.assertNotIn(PANE, self.flock.stuck.records, "unknown state must reset the clock")
+        self.herdr.unreadable.discard(PANE)
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)  # first sighting again
+        self.assertEqual([], self.presses(), "no press on the stale pre-unknown clock")
+        # A FRESH stable window is required before acting.
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD + self.THRESHOLD)
+        self.assertEqual(1, len(self.presses()), "one press after a fresh window, not before")
+
+    def test_display_history_traffic_does_not_drop_the_candidate(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        # 50 unrelated SENT rows: enough to push the failed message out of a 50-row
+        # display buffer (CoS reproduced exactly this).
+        for n in range(50):
+            other = self.flock._new_message("w1:p1", "shell", f"traffic {n}", "send_text",
+                                           lambda: (True, "ok"))
+            other.status = "sent"
+            self.flock._remember(other)
+        self.assertNotIn(self.failed, self.flock.message_history,
+                         "premise: the failed message left the display history")
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+        self.assertEqual(1, len(self.presses()),
+                         "the candidate is independent of the display buffer")
+
+    def test_the_candidate_survives_a_restart(self):
+        state = os.path.join(self.tmp.name, "dunks.json")
+        flo = dunk_core.Flock(
+            herdr=self.herdr, state_file=state, persist=True, restore=True,
+            inbox=self.inbox, tasks=Tasks(path=os.path.join(self.tmp.name, "t2.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        try:
+            flo.composer_region_is_owned = lambda pane_id, screen: True
+            flo._remember_typed(PANE, OUR_TEXT)
+            message = flo._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                      lambda: (True, "ok"))
+            message.status = "failed"
+            message.attempt_generation = flo._pane_generation(PANE)
+            flo._remember(message)
+            self.assertIn(PANE, flo.stuck_candidates)
+            flo._save()
+        finally:
+            flo.close()
+        again = dunk_core.Flock(
+            herdr=self.herdr, state_file=state, persist=True, restore=True,
+            inbox=self.inbox, tasks=Tasks(path=os.path.join(self.tmp.name, "t3.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        try:
+            self.assertIn(PANE, again.stuck_candidates,
+                          "the eligibility queue must survive a daemon restart")
+            self.assertEqual(OUR_TEXT, again.stuck_candidates[PANE].get("message_id") and OUR_TEXT)
+            self.assertTrue(again.stuck_candidates[PANE]["press_enter"])
+        finally:
+            again.close()
+
+    def test_consumption_retires_the_candidate_to_a_watermark(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        self.herdr.box[PANE] = ""
+        self.herdr.screens[PANE] = "│ ✻ idle\n❯\u00a0\n\x1b[2midle · pi\x1b[0m\n"
+        self.flock._stuck_observer_step(now=self.T0 + 5)
+        entry = self.flock.stuck_candidates.get(PANE) or {}
+        self.assertEqual("consumed", entry.get("status"), "consumption retires the work")
+        self.assertFalse(entry.get("eligible"))
+        self.assertNotIn(PANE, self.flock.stuck.records)
+
+
+class RestartRecoveryTests(unittest.TestCase):
+    """CoS i31799 #1: after a restart the candidate existed but ownership could not be
+    proven (no message_history, no sent_text_by_pane), so nothing ever pressed."""
+
+    THRESHOLD = 120.0
+    T0 = 900_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "dunks.json")
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        first = self.flock()
+        try:
+            first.composer_region_is_owned = lambda pane_id, screen: True
+            first._remember_typed(PANE, OUR_TEXT)
+            message = first._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                        lambda: (True, "ok"))
+            message.status = "failed"
+            message.attempt_generation = first._pane_generation(PANE)
+            first._remember(message)                 # records the candidate
+            first._save()
+        finally:
+            first.close()
+
+    def flock(self):
+        return dunk_core.Flock(
+            herdr=self.herdr, state_file=self.state, persist=True, restore=True,
+            inbox=self.inbox, tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+
+    def tearDown(self):
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_the_restarted_worker_actually_recovers(self):
+        fresh = self.flock()
+        try:
+            # NO STUB: this is the production authority path. The real matcher
+            # (`_region_is_ours`) reads sent_text_by_pane / the outbox, so the restart
+            # must REHYDRATE the persisted text for the press to be authorised at all.
+            self.assertIn(PANE, fresh.stuck_candidates, "the candidate persisted")
+            self.assertEqual([], fresh.sent_text_by_pane.get(PANE) or [],
+                             "premise: a restart remembers no sends by itself")
+            fresh._stuck_observer_step(now=self.T0)                 # binds + starts the window
+            self.assertEqual([], self.presses(), "the first step is only evidence")
+            # THE FIX UNDER TEST: once the candidate is generation-bound, the persisted
+            # exact text becomes ownership evidence, so the REAL matcher authorises.
+            self.assertIn(OUR_TEXT, fresh.sent_text_by_pane.get(PANE) or [],
+                          "the persisted text must be rehydrated once it is bound")
+            self.assertTrue(fresh.composer_region_is_owned(PANE, self.herdr.screens[PANE]),
+                            "the REAL matcher must authorise this composer after a restart")
+            fresh._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+            self.assertEqual(1, len(self.presses()),
+                             "the restarted worker must press, using the persisted text")
+            outcomes = [e["outcome"] for e in self.metrics.events
+                        if e["event"] == "stuck.recover"]
+            self.assertEqual(["consumed"], outcomes)
+        finally:
+            fresh.close()
+
+    def test_a_human_continuation_is_refused_after_a_restart_by_the_real_matcher(self):
+        # NO stub here: the real matcher reads the COMPLETE composer region, so a
+        # continuation line below our text makes the frame not-ours and nothing presses.
+        fresh = self.flock()
+        try:
+            self.herdr.screens[PANE] = (f"│ ✻ idle\n❯ {OUR_TEXT}\n"
+                                        "  and one more thing I was typing\n│ idle · pi\n")
+            self.assertFalse(fresh.composer_region_is_owned(
+                PANE, self.herdr.screens[PANE]), "premise: the real matcher refuses")
+            fresh._stuck_observer_step(now=self.T0)
+            fresh._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+            fresh._stuck_observer_step(now=self.T0 + self.THRESHOLD * 2)
+            self.assertEqual([], self.presses(),
+                             "the persisted text must not authorise a modified composer")
+        finally:
+            fresh.close()
+
+
+class IntentOrderingTests(unittest.TestCase):
+    """CoS i31799 #2: completion order is not decision order."""
+
+    THRESHOLD = 120.0
+    T0 = 950_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def decide(self, created_at, status, press_enter=True, text=OUR_TEXT):
+        message = self.flock._new_message(PANE, "Claude Proj", text, "send_text",
+                                         lambda: (True, "ok"))
+        message.status = status
+        message.press_enter = press_enter
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        message.created_at = created_at
+        self.flock._remember(message)
+        return message
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_a_late_older_failure_cannot_undo_a_newer_no_enter_intent(self):
+        # The NEWER decision (a no-enter send) is remembered FIRST; the older FAILED one
+        # completes and is remembered LATER.
+        self.decide(created_at=2_000.0, status="sent", press_enter=False)
+        self.decide(created_at=1_000.0, status="failed")
+        for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + 600):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(), "the newer intent must still stand")
+
+    def test_a_late_older_failure_cannot_undo_a_newer_clean_send(self):
+        self.decide(created_at=2_000.0, status="sent", press_enter=True)
+        self.decide(created_at=1_000.0, status="failed")
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses())
+
+    def test_a_late_older_failure_cannot_undo_a_newer_cancellation(self):
+        self.decide(created_at=2_000.0, status="cancelled")
+        self.decide(created_at=1_000.0, status="failed")
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses())
+
+    def test_the_ordinary_order_still_recovers(self):
+        self.decide(created_at=1_000.0, status="failed")
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual(1, len(self.presses()), "a plain old failure still gets its press")
+
+
+class RevokedAuthorityTests(unittest.TestCase):
+    """CoS i31802 #2: the registry must AUTHORISE the press, not just name the id."""
+
+    THRESHOLD = 120.0
+    T0 = 1_100_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+        self.message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                              lambda: (True, "ok"))
+        self.message.status = "failed"
+        self.message.attempt_generation = self.flock._pane_generation(PANE)
+        self.flock._remember(self.message)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_authority_revoked_after_the_decision_prevents_the_press(self):
+        original_save = self.flock._save
+
+        def revoke_then_save():
+            entry = dict(self.flock.stuck_candidates.get(PANE) or {})
+            entry.update({"eligible": False, "status": "cancelled"})
+            self.flock.stuck_candidates[PANE] = entry
+            return original_save()
+
+        self.flock._save = revoke_then_save
+        self.flock._stuck_observer_step(now=self.T0)
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+        self.assertEqual([], self.presses(),
+                         "naming the id is not authorising the press")
+
+    def test_authority_intact_still_presses(self):
+        self.flock._stuck_observer_step(now=self.T0)
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+        self.assertEqual(1, len(self.presses()))
+
+
+class SameTimestampOrderTests(unittest.TestCase):
+    """CoS i31802 #3: ties must follow the message SEQUENCE, not the string form."""
+
+    THRESHOLD = 120.0
+    T0 = 1_200_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def remember(self, message_id, status, press_enter=True, created_at=5_000.0):
+        message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                         lambda: (True, "ok"))
+        message.id = message_id                     # the id IS the creation sequence
+        message.status = status
+        message.press_enter = press_enter
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        message.created_at = created_at
+        self.flock._remember(message)
+        return message
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_same_timestamp_uses_message_sequence_not_lexical_order(self):
+        # m10 (newer, no-enter) is decided first; the older m9 FAILED arrives later.
+        self.remember("m10", status="sent", press_enter=False)
+        self.remember("m9", status="failed")
+        for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + 600):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(),
+                         "'m10' must outrank 'm9' by sequence, not by string order")
+
+    def test_consumption_keeps_the_watermark(self):
+        self.remember("m2", status="failed", created_at=1_000.0)
+        # Consumption retires the entry to a tombstone instead of discarding it.
+        self.herdr.box[PANE] = ""
+        self.herdr.screens[PANE] = "│ ✻ idle\n❯\u00a0\n\x1b[2midle · pi\x1b[0m\n"
+        self.flock._stuck_observer_step(now=self.T0)
+        entry = self.flock.stuck_candidates.get(PANE) or {}
+        self.assertEqual("consumed", entry.get("status"))
+        self.assertFalse(entry.get("eligible"))
+        # A late, older FAILED decision must not resurrect the work.
+        self.remember("m1", status="failed", created_at=900.0)
+        self.herdr.box[PANE] = OUR_TEXT
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        for at in (self.T0 + 10, self.T0 + self.THRESHOLD, self.T0 + 600):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses(), "the watermark must survive consumption")
+
+
+class RetirementRaceTests(unittest.TestCase):
+    """CoS i31804: retirement must not delete a NEWER candidate from a stale snapshot."""
+
+    THRESHOLD = 120.0
+    T0 = 1_300_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+        self.old = self.deliver("m1", OUR_TEXT, created_at=1_000.0)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def deliver(self, message_id, text, created_at):
+        message = self.flock._new_message(PANE, "Claude Proj", text, "send_text",
+                                         lambda: (True, "ok"))
+        message.id = message_id
+        message.status = "failed"
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        message.created_at = created_at
+        self.flock._remember(message)
+        return message
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def test_a_new_candidate_arriving_during_an_empty_read_survives(self):
+        # The observer reads the box, gets an EMPTY snapshot (stale), and while it reads
+        # a NEWER failed message m2 is remembered. The retirement path must retire only
+        # the entry it observed (m1), never m2.
+        original_box = self.flock._box_text
+
+        def empty_but_race(pane_id):
+            self.deliver("m2", "a newer stalled line", created_at=2_000.0)
+            return ""                      # the stale read
+
+        self.flock._box_text = empty_but_race
+        self.flock._stuck_observer_step(now=self.T0)
+        self.flock._box_text = original_box
+        entry = self.flock.stuck_candidates.get(PANE) or {}
+        self.assertEqual("m2", entry.get("message_id"),
+                         "the newer candidate must survive a stale empty read")
+        self.assertTrue(entry.get("eligible"), "and it stays eligible for its own clock")
+
+
+class GenerationBindingTests(unittest.TestCase):
+    """CoS i31806: a restored candidate must be bound to the pane generation it belongs
+    to. A replacement pane must RETIRE it, never inherit the old text as authority."""
+
+    THRESHOLD = 120.0
+    T0 = 1_500_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "dunks.json")
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        first = self.flock()
+        try:
+            first._remember_typed(PANE, OUR_TEXT)
+            message = first._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                        lambda: (True, "ok"))
+            message.status = "failed"
+            message.attempt_generation = first._pane_generation(PANE)
+            first._remember(message)                 # records the candidate + generation
+            first._save()
+            self.saved_generation = first.stuck_candidates[PANE]["generation"]
+            self.assertTrue(self.saved_generation, "the decision must persist a generation")
+        finally:
+            first.close()
+
+    def flock(self):
+        return dunk_core.Flock(
+            herdr=self.herdr, state_file=self.state, persist=True, restore=True,
+            inbox=self.inbox, tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+
+    def tearDown(self):
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def replace_pane_with_a_real_live_process(self):
+        """A DIFFERENT live child process at the same pane id (CoS's repro)."""
+        import subprocess, sys
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.terminate)
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = child.pid
+        return child.pid
+
+    def test_the_same_generation_still_recovers_with_the_real_matcher(self):
+        fresh = self.flock()
+        try:
+            self.assertEqual(self.saved_generation,
+                             fresh.stuck_candidates[PANE]["generation"])
+            # Ownership evidence is BOUND to the generation inside the observer step, so
+            # the matcher authorises after the first step, not before it.
+            fresh._stuck_observer_step(now=self.T0)
+            self.assertTrue(fresh.composer_region_is_owned(PANE, self.herdr.screens[PANE]),
+                            "bound ownership evidence must let the real matcher authorise")
+            fresh._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+            self.assertEqual(1, len(self.presses()),
+                             "a same-generation restart must still press, once")
+        finally:
+            fresh.close()
+
+    def test_a_replacement_generation_is_retired_not_adopted(self):
+        old_pid = os.getpid()
+        new_pid = self.replace_pane_with_a_real_live_process()
+        self.assertNotEqual(old_pid, new_pid)
+        fresh = self.flock()
+        try:
+            self.assertNotEqual(self.saved_generation,
+                                fresh._pane_generation(PANE),
+                                "premise: the generation really changed")
+            # The replacement pane really shows the same text - the VISUAL premise holds -
+            # and the seam still refuses, because no ownership evidence was ever bound to
+            # the new generation. That is the contract.
+            self.assertIn(OUR_TEXT, self.herdr.screens[PANE])
+            self.assertFalse(fresh.composer_region_is_owned(PANE, self.herdr.screens[PANE]),
+                             "the replacement generation must not inherit ownership")
+            for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + self.THRESHOLD * 2):
+                fresh._stuck_observer_step(now=at)
+            self.assertEqual([], self.presses(),
+                             "a replacement pane must never inherit the old authority")
+            entry = fresh.stuck_candidates.get(PANE) or {}
+            self.assertEqual("generation-changed", entry.get("status"),
+                             "the candidate is retired with a named reason, watermark kept")
+            self.assertFalse(entry.get("eligible"))
+        finally:
+            fresh.close()
+
+    def test_an_unbound_candidate_fails_closed(self):
+        # A state file from an older build (or a truncated entry) has no generation.
+        import json as _json
+        payload = _json.load(open(self.state))
+        payload["stuck_candidates"][PANE].pop("generation", None)
+        open(self.state, "w").write(_json.dumps(payload))
+        fresh = self.flock()
+        try:
+            for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + self.THRESHOLD * 2):
+                fresh._stuck_observer_step(now=at)
+            self.assertEqual([], self.presses(),
+                             "an unbound candidate must not act on a pane it cannot identify")
+        finally:
+            fresh.close()
+
+
+class AttemptGenerationTests(unittest.TestCase):
+    """CoS i31809: the candidate must carry the generation of the ATTEMPT, captured
+    before the text/keys, not a pane read taken after the outcome."""
+
+    THRESHOLD = 120.0
+    T0 = 1_700_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == PANE:
+                pane["pane_pid"] = os.getpid()
+        self.metrics = _RecordingMetrics()
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                           blob_dir=os.path.join(self.tmp.name, "blobs"))
+        self.flock = dunk_core.Flock(
+            herdr=self.herdr, persist=False, restore=False, inbox=self.inbox,
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            metrics=self.metrics,
+            stuck_config={"threshold_s": self.THRESHOLD, "max_attempts": 1,
+                          "cooldown_s": 60, "observation_interval_s": 5})
+        self.flock.composer_region_is_owned = lambda pane_id, screen: True
+        self.herdr.screens[PANE] = f"│ ✻ idle\n❯ {OUR_TEXT}\n│ idle · pi\n"
+        self.herdr.box[PANE] = OUR_TEXT
+        self.flock._remember_typed(PANE, OUR_TEXT)
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def presses(self):
+        return [k for pane, k in self.herdr.keys if pane == PANE]
+
+    def live_child(self):
+        import subprocess, sys
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.terminate)
+        return child.pid
+
+    def delivery_that_replaces_the_pane_mid_attempt(self):
+        """The real guarded path: type text, swap the pane BEFORE the outcome lands."""
+        original_send_text = self.herdr.send_text
+
+        def send_then_replace(pane_id, text):
+            result = original_send_text(pane_id, text)   # the text really goes in
+            for pane in self.herdr.panes:                # the pane is replaced now
+                if pane["pane_id"] == PANE:
+                    pane["pane_pid"] = self.live_child()
+            return result
+
+        self.herdr.send_text = send_then_replace
+        message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                         lambda: self.flock.submit_text(PANE, OUR_TEXT))
+        self.flock._deliver(message)          # the ACTUAL delivery path
+        self.herdr.send_text = original_send_text
+        return message
+
+    def failing_delivery_that_replaces_the_pane_mid_attempt(self):
+        """Same, but the submit does not take: the message ends FAILED and eligible.
+
+        The callable types the text for real and then reports the mixed outcome the
+        production path reports when the box keeps the text; the pane is replaced inside
+        the attempt, i.e. BEFORE `_deliver` decides the outcome.
+        """
+        def deliver_then_replace():
+            self.herdr.send_text(PANE, OUR_TEXT)       # the text really goes in
+            for pane in self.herdr.panes:
+                if pane["pane_id"] == PANE:
+                    pane["pane_pid"] = self.live_child()
+            return False, "typed, not submitted"       # the shape the real path reports
+
+        message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                         deliver_then_replace)
+        self.flock._deliver(message)
+        return message
+
+    def test_the_attempt_identity_is_captured_before_delivery_not_after(self):
+        before = self.flock._pane_generation(PANE)
+        message = self.delivery_that_replaces_the_pane_mid_attempt()
+        after = self.flock._pane_generation(PANE)
+        self.assertNotEqual(before, after, "premise: the pane really was replaced")
+        self.assertEqual(before, message.attempt_generation,
+                         "the attempt identity must be the pane the text went into")
+        self.assertEqual(before, self.flock.stuck_candidates[PANE]["generation"],
+                         "the registry must carry the ATTEMPT generation")
+
+    def test_a_pane_replaced_during_the_attempt_gets_no_watcher_key(self):
+        message = self.failing_delivery_that_replaces_the_pane_mid_attempt()
+        self.assertEqual("failed", message.status, "premise: the submit did not take")
+        # The DELIVERY's own keys are not the subject here; the watcher must add none.
+        baseline = len(self.presses())
+        for at in (self.T0, self.T0 + self.THRESHOLD, self.T0 + self.THRESHOLD * 2):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual(baseline, len(self.presses()),
+                         "a replacement pane must never inherit the old attempt's authority")
+        entry = self.flock.stuck_candidates.get(PANE) or {}
+        self.assertEqual("generation-changed", entry.get("status"))
+        self.assertFalse(entry.get("eligible"))
+
+    def test_an_unchanged_generation_still_presses_once(self):
+        message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                         lambda: (True, "ok"))
+        message.status = "failed"
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        message.attempt_generation = self.flock._pane_generation(PANE)
+        self.flock._remember(message)
+        self.flock._stuck_observer_step(now=self.T0)
+        self.flock._stuck_observer_step(now=self.T0 + self.THRESHOLD)
+        self.assertEqual(1, len(self.presses()))
+
+    def test_a_candidate_with_no_attempt_identity_is_never_eligible(self):
+        message = self.flock._new_message(PANE, "Claude Proj", OUR_TEXT, "send_text",
+                                         lambda: (True, "ok"))
+        message.status = "failed"                  # no attempt_generation recorded
+        self.flock._remember(message)
+        entry = self.flock.stuck_candidates.get(PANE) or {}
+        self.assertFalse(entry.get("eligible"),
+                         "unknown attempt identity must fail closed, not guess")
+        for at in (self.T0, self.T0 + self.THRESHOLD):
+            self.flock._stuck_observer_step(now=at)
+        self.assertEqual([], self.presses())
+
+
 def screen_lines(screen):
     """The composer text as the pane reader sees it (last prompt line content)."""
     return OUR_TEXT + " and one more thing I was typing"
