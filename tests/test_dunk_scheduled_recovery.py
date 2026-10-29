@@ -187,7 +187,7 @@ class ScheduledRecoveryTests(unittest.TestCase):
         self.flock._remember(previous)
         self.failed_schedule()
         self.backend.screens[PANE] = (
-            '\x1b[1;2m›\x1b[0m ' + echo + '\nPrevious response.\n\n'
+            '\x1b[1;2m›\x1b[0m ' + echo + '\n\n'
             '\x1b[1m›\x1b[0m ' + TEXT + '\n\n\n'
             '  GPT-6-Astra high · ~/workspace · task\n')
         self.flock.close()
@@ -219,6 +219,23 @@ class ScheduledRecoveryTests(unittest.TestCase):
             return True, 'sent'
         with mock.patch.object(self.flock, 'submit_text', side_effect=false_confirmation):
             self.flock._do_send(self.dunk)
+
+    def test_reviewed_echo_edits_cannot_authorize_recovery(self):
+        echo = 'Prior approved schedule: check your task and report the result.'
+        for body in (echo + ' HUMAN EDIT', echo + '\nhuman continuation',
+                     echo + '\n\nhuman continuation', echo[:5], echo[:5] + '…'):
+            with self.subTest(body=body):
+                self.flock.sent_text_by_pane[PANE] = [echo]
+                self.failed_schedule()
+                self.backend.screens[PANE] = (
+                    '\x1b[1;2m›\x1b[0m ' + body + '\n\n'
+                    '\x1b[1m›\x1b[0m ' + TEXT + '\n\n\n'
+                    '  GPT-6-Astra high · ~/workspace · task\n')
+                self.tick(1000)
+                self.tick(1120)
+                self.assertEqual([], self.backend.keys)
+                self.assertFalse(self.flock.composer_region_is_owned(
+                    PANE, self.backend.screens[PANE]))
 
     def test_reported_sent_but_bright_pending_schedule_recovers(self):
         # d55 was logged SENT; only watching failed outcomes misses the VP wedge.

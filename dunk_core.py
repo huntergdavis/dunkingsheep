@@ -5599,38 +5599,31 @@ class Flock:
         return owned
 
     def _dim_bodies_accounted(self, pane_id, screen):
-        """t130: provenance accounting for the style-state boundary. Every
-        bold+dim (transcript-echo) sigil body must match a message the daemon
-        demonstrably sent for this pane - sent history or outbox rows, either
-        direction of the prefix test (echoes wrap and truncate). An unaccounted
-        dim body is human content in a transcript-styled row: the frame is
-        REFUSED rather than the text silently excluded (VP i31906: no silent
-        text exclusion based only on dim)."""
+        """Account the COMPLETE excluded span, never only a sigil's first row.
+
+        A styled echo does not prove where its body ends. Include every row up
+        to the next sigil and require exact normalized equality with recorded
+        text. Unknown transcript output, truncation and additions fail closed;
+        renderer styling alone cannot establish their provenance.
+        """
+        if not screen:
+            return False, []
+        rows = screen.splitlines()
+        sigils = [i for i, row in enumerate(rows) if _prompt_body(row) is not None]
         bodies = []
-        for row in screen.splitlines():
-            body = _prompt_body(row)
-            if body is None:
+        for n, index in enumerate(sigils):
+            if _styled_sigil_state(rows[index]) != "dim":
                 continue
-            state = _styled_sigil_state(row)
-            if state == "dim" and body:
-                bodies.append(body)
-        if not bodies:
-            return True, []
+            end = sigils[n + 1] if n + 1 < len(sigils) else len(rows)
+            parts = [_prompt_body(rows[index]) or ""]
+            parts.extend(_strip_ansi(row).strip() for row in rows[index + 1:end])
+            bodies.append(" ".join(parts))
         with self._lock:
             known = list(self.sent_text_by_pane.get(pane_id, []))
             known += [m.text for m in self.outbox.get(pane_id) or [] if m.text]
-        unaccounted = []
-        for body in bodies:
-            b = _collapse(body)
-            # The capture truncates long prompts with an ellipsis: strip a
-            # trailing one before matching, so a truncated echo still matches
-            # the full sent text.
-            b = b.rstrip("\u2026").strip()
-            if not b:
-                continue
-            if not any(_collapse(t).startswith(b) or b.startswith(
-                    _collapse(t)[:CONSUMPTION_PREFIX_CHARS]) for t in known if t):
-                unaccounted.append(body)
+        exact = {_collapse(text) for text in known if text}
+        unaccounted = [body for body in bodies if not _collapse(body)
+                       or _collapse(body) not in exact]
         return (not unaccounted), unaccounted
 
     def _box_text(self, pane_id):

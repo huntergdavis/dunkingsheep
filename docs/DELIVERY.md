@@ -257,6 +257,15 @@ and provenance for every excluded dim echo. This extra proof is checked again
 under the typing lock. A dim transcript echo or unknown styling cannot authorize
 replay. Ordinary direct-message success and explicit no-enter remain ineligible.
 
+Independent review found that first-line/prefix accounting could hide a human
+suffix or continuation beside a known dim echo. Accounting now includes the
+entire excluded span through the next sigil and requires exact normalized
+equality with recorded text. Truncated echoes (including ellipses), short
+prefixes and unaccounted transcript output fail closed. This deliberately
+refuses some genuine historical transcript frames, including the old %33
+capture: styling cannot prove the provenance of the omitted rows. Such frames
+still need guarded operator recovery; the watchdog is not universal recovery.
+
 Older installed releases did not record scheduled candidates. An upgrade cannot
 retroactively prove the generation or intent of those existing prompts; they
 remain held for operator recovery. Do not fabricate candidates from a schedule's
