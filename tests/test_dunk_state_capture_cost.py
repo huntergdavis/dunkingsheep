@@ -53,6 +53,106 @@ def lane(pane_id, pid):
             "cwd": "/tmp", "project": "p", "harness": "pi"}
 
 
+class StalePidBindingTests(unittest.TestCase):
+    """t505 [P2]: a pid from the snapshot is not an identity.
+
+    The reviewer's reproducer, reduced: the snapshot records pane -> wrapper ->
+    agent, then the agent pid is recycled under an unrelated root. The cached
+    pid's CURRENT argv names a foreign session. Trusting it attributes another
+    lane's session, model and effort to this pane with every reason NULL.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = dunk_state.StateStore(
+            path=os.path.join(self.tmp.name, "state.db"))
+
+    def test_recycled_descendant_is_not_adopted(self):
+        kids = {1001: [1101], 1101: [1201], 9000: [1201]}
+        starts = {1001: 1, 1101: 2, 1201: 3}          # snapshot saw 1201 start=3
+
+        def fake_start(pid):
+            # 1201 was recycled: it now belongs to a process that started later
+            return 999 if int(pid) == 1201 else starts.get(int(pid))
+
+        def fake_cmdline(pid):
+            if int(pid) == 1201:
+                return ["pi", "--session", "foreign-session"]
+            return []
+
+        with mock.patch.object(dunk_state, "_proc_start_ticks", fake_start), \
+                mock.patch.object(dunk_state, "_cmdline", fake_cmdline):
+            session, reason = dunk_state.session_of(1001, kids=kids, starts=starts)
+        self.assertIsNone(session, "adopted a recycled pid's session")
+        self.assertIn("pid reuse", reason)
+
+    def test_a_live_descendant_is_still_adopted(self):
+        """The control: same shape, process NOT recycled, session is read."""
+        kids = {1001: [1101], 1101: [1201]}
+        starts = {1001: 1, 1101: 2, 1201: 3}
+
+        def fake_cmdline(pid):
+            if int(pid) == 1201:
+                return ["pi", "--session", "our-session"]
+            return []
+
+        with mock.patch.object(dunk_state, "_proc_start_ticks",
+                               lambda pid: starts.get(int(pid))), \
+                mock.patch.object(dunk_state, "_cmdline", fake_cmdline):
+            session, _reason = dunk_state.session_of(1001, kids=kids, starts=starts)
+        self.assertEqual("our-session", session)
+
+    def test_unknown_identity_is_not_the_same_process(self):
+        """A pid absent from the snapshot, or with a different start, is NOT it.
+
+        `starts` of None/{} is the documented legacy path (a caller that holds a
+        map but no snapshot); capture always supplies a real snapshot, so the
+        check is live on the path that matters.
+        """
+        self.assertFalse(dunk_state._still_the_same_process(4242, {4242: 7}))
+        self.assertFalse(dunk_state._still_the_same_process(4242, {9999: 1}))
+        self.assertTrue(dunk_state._still_the_same_process(4242, {}))
+
+    def test_capture_never_reads_env_of_a_recycled_pid(self):
+        """End to end: the foreign environment must not reach the row."""
+        lanes = [lane("%1", os.getpid())]
+        real_snapshot = dunk_state._proc_snapshot
+
+        def snapshot_with_recycled_child():
+            kids, starts = real_snapshot()
+            # pretend our own pid's child is a pid that has since been reused
+            kids.setdefault(os.getpid(), []).append(999999)
+            starts[999999] = 1                      # a start time it does not have
+            return kids, starts
+
+        read = {"env": 0}
+        real_env = dunk_state._env_of
+
+        def counting_env(pid):
+            # The pane's own wrapper carries no agent environment, so the loop
+            # must walk to the descendant - that is what makes this control
+            # discriminating: with the identity check removed, the recycled pid
+            # is read and its foreign session reaches the row.
+            if int(pid) == 999999:
+                read["env"] += 1
+                return {"PI_SESSION_ID": "foreign", "PI_MODEL": "foreign-model"}
+            return {}
+
+        with mock.patch.object(dunk_state, "_proc_snapshot",
+                               snapshot_with_recycled_child), \
+                mock.patch.object(dunk_state, "_env_of", counting_env), \
+                mock.patch.object(dunk_state.dunk_activity, "activity",
+                                  lambda *a, **k: {"state": None, "source": "t",
+                                                   "reason": "t"}):
+            result = dunk_state.capture(_FakeFlock(lanes), source="test",
+                                        store=self.store)
+        self.assertEqual(1, result["rows"])
+        self.assertEqual(0, read["env"], "read the environment of a recycled pid")
+        row = self.store.latest(limit=1)[0]
+        self.assertNotEqual("foreign", row.get("session_id"))
+
+
 class OneProcWalkPerCapture(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -62,13 +162,13 @@ class OneProcWalkPerCapture(unittest.TestCase):
 
     def _capture_counting_proc_walks(self, lanes):
         calls = {"n": 0}
-        real = dunk_state._proc_children
+        real = dunk_state._proc_snapshot
 
         def counting():
             calls["n"] += 1
             return real()
 
-        with mock.patch.object(dunk_state, "_proc_children", counting):
+        with mock.patch.object(dunk_state, "_proc_snapshot", counting):
             with mock.patch.object(dunk_state.dunk_activity, "activity",
                                    lambda *a, **k: {"state": None, "source": "test",
                                                     "reason": "test"}):
@@ -118,6 +218,15 @@ class OneProcWalkPerCapture(unittest.TestCase):
         with mock.patch.object(dunk_state, "_proc_children",
                                side_effect=AssertionError("walked /proc")):
             self.assertEqual([2, 3], dunk_state._descendants(1, kids))
+
+    def test_one_snapshot_feeds_both_maps(self):
+        kids, starts = dunk_state._proc_snapshot()
+        self.assertIsInstance(kids, dict)
+        self.assertIsInstance(starts, dict)
+        # the snapshot records start times for the same pids it lists as children
+        for children in kids.values():
+            for child in children:
+                self.assertIn(child, starts)
 
 
 if __name__ == "__main__":

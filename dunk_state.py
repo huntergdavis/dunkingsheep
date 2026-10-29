@@ -149,6 +149,67 @@ def _proc_children():
     return kids
 
 
+def _proc_snapshot():
+    """One /proc pass: (pid -> [children], pid -> process start time).
+
+    t505 [P2]: a bare pid is not an identity. The pid can exit and be reused by
+    an unrelated process between the scan and the metadata read, and with a
+    capture-wide map that window now includes lane resolution. Recording the
+    start time in the SAME pass gives a cheap binding: pid plus start is the
+    pair that survives reuse, so a cached descendant whose start has changed is
+    refused instead of being asked for its argv and environment.
+    """
+    kids, starts = {}, {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return kids, starts
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as handle:
+                raw = handle.read().decode("utf-8", "replace")
+            fields = raw.rsplit(")", 1)[1].split()
+            ppid = int(fields[1])
+            start = int(fields[19])            # field 22 of stat
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(entry))
+        starts[int(entry)] = start
+    return kids, starts
+
+
+def _proc_start_ticks(pid):
+    """Raw start-time ticks of a pid (field 22 of stat), or None.
+
+    Deliberately NOT named _proc_start: that function already exists below and
+    returns a WALL-CLOCK start used to pick a session file. Two meanings of
+    "start" in one module is how a silent mismatch gets introduced.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+            raw = handle.read().decode("utf-8", "replace")
+        return int(raw.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def _still_the_same_process(pid, starts):
+    """Is `pid` still the process the snapshot saw? Unknown is NOT the same.
+
+    A missing snapshot entry, an unreadable stat and a changed start time all
+    answer False: this is the check that stops a recycled pid from donating a
+    foreign session, model or effort to a pane.
+    """
+    if not starts:
+        return True                            # caller has no snapshot to check
+    expected = starts.get(int(pid))
+    if expected is None:
+        return False
+    return _proc_start_ticks(pid) == expected
+
+
 def _descendants(pid, kids=None):
     kids = kids if kids is not None else _proc_children()
     out, queue = [], [int(pid)]
@@ -263,7 +324,7 @@ def _cwd_slug(cwd):
     return "--" + str(cwd).strip("/").replace("/", "-") + "--"
 
 
-def session_of(pane_pid, launch=None, kids=None, cwd=None):
+def session_of(pane_pid, launch=None, kids=None, cwd=None, starts=None):
     """(session_id, reason) for a live pane, read from its agent PROCESS.
 
     Why not launches.json alone: the flip left launch rows that carry another lane's
@@ -282,7 +343,13 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
         return recorded, "the pane pid is not a number, so its session cannot be read"
     pids = [pid] + _descendants(pid, kids)
     agent_pids = []
+    replaced = False
     for candidate in pids:
+        if not _still_the_same_process(candidate, starts):
+            # t505: the pid in the snapshot is no longer that process, so its
+            # argv belongs to somebody else. Never adopt it.
+            replaced = True
+            continue
         argv = _cmdline(candidate)
         if not argv:
             continue
@@ -290,6 +357,10 @@ def session_of(pane_pid, launch=None, kids=None, cwd=None):
         if head in _AGENT_EXES or any(os.path.basename(tok) in _AGENT_EXES for tok in argv[:3]):
             agent_pids.append((candidate, argv))
     if not agent_pids:
+        if replaced:
+            return None, ("a descendant pid from the capture snapshot no longer belongs to "
+                          "that process (pid reuse), so its argv cannot name this pane's "
+                          "session")
         return None, "no agent process under this pane (it is a shell), so there is no session"
     for candidate, argv in agent_pids:
         value = _flag(argv, _SESSION_FLAGS)
@@ -398,7 +469,7 @@ def capture(flock, *, source="periodic", now=None, store=None):
     # contended during it. Those runs used a fresh Flock and a temporary store,
     # so they cannot speak for the live daemon's mutex. Reviewer t500 accepted
     # the scan reduction and explicitly did not accept the broader causal claim.
-    kids = _proc_children()
+    kids, starts = _proc_snapshot()
     rows = []
     for lane in flock.resolve_lanes():
         if not lane.get("agent"):
@@ -409,10 +480,16 @@ def capture(flock, *, source="periodic", now=None, store=None):
         thinking = _flag(argv, _THINKING_FLAGS)
         session, session_reason = session_of(lane.get("pane_pid"),
                                              {"session": launch.get("session") or launch.get("session_id")},
-                                             kids=kids, cwd=lane.get("cwd"))
+                                             kids=kids, cwd=lane.get("cwd"),
+                                             starts=starts)
         env = {}
         if lane.get("pane_pid"):
             for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"], kids):
+                if not _still_the_same_process(candidate, starts):
+                    # t505: a recycled pid would hand this pane another lane's
+                    # environment (session, model, effort). Skip it and keep
+                    # looking; the pane itself is always the snapshot's own pid.
+                    continue
                 found = _env_of(candidate)
                 if found.get("PI_SESSION_ID") or found.get("PI_MODEL"):
                     env = found
