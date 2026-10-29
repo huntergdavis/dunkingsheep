@@ -746,6 +746,10 @@ def build_parser():
                    help="the lane this new pane IS: recorded in the lane registry, "
                         "so mail for that lane reaches this pane after a backend change")
     placement(p)
+    p.add_argument("--role", choices=["owner", "desk", "planner", "worker", "reviewer"],
+                   help="bind this role to the new pane from the launch record")
+    p.add_argument("--provider")
+    p.add_argument("--model")
     p = sub.add_parser("new-tab", aliases=["tab"], help="create a named tab in a workspace",
                        epilog="example: dunkingsheep new-tab -w Site -l writer -r 'codex'")
     p.add_argument("--workspace", "-w", help="id, label, substring or 'self' (default: own workspace)")
@@ -763,9 +767,6 @@ def build_parser():
     p.add_argument("--split", choices=["right", "down"], help="with --tab: split its pane")
     p.add_argument("--cwd")
     p.add_argument("--focus", action="store_true")
-    p.add_argument("--role", choices=["owner", "desk", "planner", "worker", "reviewer"])
-    p.add_argument("--provider")
-    p.add_argument("--model")
     p.add_argument("--role", choices=["owner", "desk", "planner", "worker", "reviewer"],
                    help="bind this role to the new pane from the launch record")
     p.add_argument("--provider", help="claude, codex, pi, opencode-go (reviewers must be claude/codex)")

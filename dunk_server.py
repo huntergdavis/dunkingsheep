@@ -181,6 +181,11 @@ class FlockServer:
         if pane_pid in (None, "", "None"):
             state.identity_note = "pane has no root pid; claim stands"
             return claimed
+        if not os.path.isdir(f"/proc/{pane_pid}"):
+            # A pane whose root process is gone (or a backend that reports a
+            # pid the kernel does not know) cannot contradict the claim.
+            state.identity_note = f"pane root pid {pane_pid} not running; claim stands"
+            return claimed
         reason = caller_pane_auth_failure(caller, pane_pid)
         if reason is None:
             state.identity_bound = True

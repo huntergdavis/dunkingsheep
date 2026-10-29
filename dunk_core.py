@@ -2039,10 +2039,12 @@ class Flock:
         except Exception:                       # noqa: BLE001 - a fallback must not raise
             return False
 
-    def _mailbox_or_self(self, spec, self_pane_id, strict=False):
+    def _mailbox_or_self(self, spec, self_pane_id, strict=False, own_only=False):
         if spec:
             resolved = self.resolve_mailbox(spec, self_pane_id, strict=strict)[0]
-            if self_pane_id and self.caller_role(self_pane_id) not in ("owner", "web", "system"):
+            # Reading another lane's MAIL needs the owner role; counting it does not.
+            if own_only and self_pane_id and \
+                    self.caller_role(self_pane_id) not in ("owner", "web", "system"):
                 own = self._own_mailbox(self_pane_id)
                 if resolved != own:
                     raise DunkError(
@@ -2206,7 +2208,7 @@ class Flock:
 
     @_as_dunk_error
     def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):
-        key = self._mailbox_or_self(mailbox, self_pane_id)
+        key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         return {"mailbox": key,
                 "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
 
@@ -2226,7 +2228,7 @@ class Flock:
         A failure in 1 or 2 leaves the batch unread, which is the safe direction: the
         reader sees the same mail again rather than losing it.
         """
-        key = self._mailbox_or_self(mailbox, self_pane_id)
+        key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         messages = self.inbox.read(key, limit=limit, peek=True)
         result = {"mailbox": key, "messages": messages}
         if self_pane_id:
@@ -2279,7 +2281,8 @@ class Flock:
         """Ack only messages in the caller's own mailbox. Sender is irrelevant;
         an id from another mailbox is refused, never marked read there. The
         internal no-mailbox call (tests, in-process) keeps the old behaviour."""
-        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
+        key = (self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
+               if (mailbox or self_pane_id) else None)
         before = {}
         for message_id in ([message_ids] if isinstance(message_ids, str)
                            else list(message_ids)):
@@ -3719,7 +3722,12 @@ class Flock:
                 log.warning("service token refused (unknown token)")
         if role is None:
             if self_pane_id:
-                role = self.roles.role_of(self_pane_id, self._role_pane_info(self_pane_id))
+                # Only a registration that recorded a root pid needs the live pane
+                # record; an unregistered pane costs no terminal read at all.
+                entry = self.roles.entry(self_pane_id)
+                info = (self._role_pane_info(self_pane_id)
+                        if entry and entry.get("pane_pid") is not None else None)
+                role = self.roles.role_of(self_pane_id, info)
                 legacy = self._legacy_superusers
                 if (role == self.roles.default and legacy is not None
                         and self_pane_id in getattr(legacy, "panes", ())):

@@ -2690,9 +2690,12 @@ def dispatch(flock, name, args=None, self_pane_id=None):
     # Each dispatch starts from "no desk credential used", whatever the last
     # request on this thread did.
     role = flock.caller_role(self_pane_id)
-    if name in SUPERUSER_ONLY and role not in ("owner", "system", "web"):
-        flock.require_superuser(self_pane_id, name)   # names the bootstrap when no owner exists
-    if not dunk_roles.allowed(role, name):
+    if name in SUPERUSER_ONLY and role not in ("system", "web"):
+        # The owner gate (names the bootstrap when no owner exists). Passing it
+        # IS the permission for these verbs; token roles fall through to the
+        # per-role table, which denies the fleet-destructive ones to `web`.
+        flock.require_superuser(self_pane_id, name)
+    elif not dunk_roles.allowed(role, name):
         raise DunkError(
             f"{name} is not permitted for role {role}"
             + (f" (pane {self_pane_id})" if self_pane_id else " (no pane, no token)")
