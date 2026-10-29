@@ -61,6 +61,19 @@ class DialogAlertTests(unittest.TestCase):
                                     capture_output=True, timeout=15, check=True)
 
 class DialogScanTests(unittest.TestCase):
+    def test_scan_survives_failure_when_key_recovery_disabled(self):
+        import dunk_core
+        flock = Mock()
+        flock.closed = False
+        flock.STUCK_OBSERVE_TICK_S = 5
+        flock.stuck_config.enabled = False
+        flock._task_stop.wait.side_effect = [False, False, True]
+        flock._dialog_observer_step.side_effect = [RuntimeError('transient'), None]
+        with patch.object(dunk_core.log, 'exception'):
+            dunk_core.Flock._stuck_observer_loop(flock)
+        self.assertEqual(flock._dialog_observer_step.call_count, 2)
+        flock._stuck_observer_step.assert_not_called()
+
     def test_no_pending_message_required_and_closed_dialog_resets_interval(self):
         import dunk_core
         flock = Mock()
