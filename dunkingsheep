@@ -2058,6 +2058,8 @@ def main(argv=None):
         return 0
 
     _check_send_body(args)
+    if command in ("respawn-pane", "respawn"):
+        _respawn_argv(args)   # local argv refusal before the socket is opened
 
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
@@ -2258,6 +2260,28 @@ def _check_send_body(args):
     _refuse_shell_substitution(" ".join(getattr(args, "body", []) or []),
                                getattr(args, "subject", None),
                                literal=bool(getattr(args, "literal", False)))
+
+
+def _respawn_argv(args):
+    """Parse and validate respawn argv in one place.
+
+    Called both by the CLI dispatch and, before the socket is opened, by main().
+    Malformed JSON is a local argument error; it must not be reported as a
+    missing daemon, and a valid argv must still reach the normal daemon-absent
+    refusal. This preflight is why the CLI regression can use a nonexistent
+    socket and still exercise the dispatch parser.
+    """
+    try:
+        argv = json.loads(args.command_json)
+        rollback = json.loads(args.rollback_json) if args.rollback_json else None
+    except ValueError as error:
+        raise Refused(f"--command-json/--rollback-json must be JSON arrays: {error}")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        raise Refused("--command-json must be a non-empty JSON array of strings")
+    if rollback is not None and (not isinstance(rollback, list) or not rollback
+                                 or not all(isinstance(x, str) for x in rollback)):
+        raise Refused("--rollback-json must be a non-empty JSON array of strings")
+    return argv, rollback
 
 
 class Refused(SystemExit):
@@ -2470,7 +2494,7 @@ def run_client_command(client, args):
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
                     "caller_name": t.get("caller_name")} for t in tasks]
-        import dunk_load, json, os
+        import dunk_load, os
         policies = None
         policy_path = args.policies or os.path.expanduser("~/.config/dunkingsheep/load-policies.json")
         try:
@@ -2678,16 +2702,7 @@ def run_client_command(client, args):
                            cwd=args.cwd, focus=args.focus), \
             lambda r: print(f"started agent {r['name']} in {r['pane_id']}: {shlex.join(r['argv'])}")
     if command in ("respawn-pane", "respawn"):
-        try:
-            argv = json.loads(args.command_json)
-            rollback = json.loads(args.rollback_json) if args.rollback_json else None
-        except ValueError as error:
-            raise SystemExit(f"--command-json/--rollback-json must be JSON arrays: {error}")
-        if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
-            raise SystemExit("--command-json must be a non-empty JSON array of strings")
-        if rollback is not None and (not isinstance(rollback, list) or not rollback
-                                     or not all(isinstance(x, str) for x in rollback)):
-            raise SystemExit("--rollback-json must be a non-empty JSON array of strings")
+        argv, rollback = _respawn_argv(args)
         return client.call("respawn_pane", pane=args.pane, argv=argv,
                            rollback_argv=rollback, expected_pid=args.expected_pid,
                            expected_start=args.expected_start,
