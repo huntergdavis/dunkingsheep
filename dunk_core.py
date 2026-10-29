@@ -4358,6 +4358,16 @@ class Flock:
                 # even though it is ineligible: a late, older FAILED decision must not
                 # resurrect work the newer send/cancel/no-enter already superseded.
                 return
+            # A styled composer can include a dim echo of the preceding send.
+            # Preserve that bounded, same-generation provenance across restart;
+            # the styled matcher must never invent it from a live screen.
+            if (existing and attempt_generation
+                    and existing.get("generation") == attempt_generation):
+                transcript = list(existing.get("transcript_texts") or [])
+                if existing.get("status") == "sent" and existing.get("press_enter"):
+                    transcript.append(existing.get("text") or "")
+                entry["transcript_texts"] = list(dict.fromkeys(
+                    t for t in transcript if t))[-REMEMBERED_SENDS:]
             # Always keep the latest intent as a TOMBSTONE when ineligible, so ordering
             # does not depend on the entry staying eligible.
             self.stuck_candidates[pane_id] = entry
@@ -4426,6 +4436,18 @@ class Flock:
             return False
         self._stuck_last_check[pane_id] = now
         head = message if message is not None else self._stranded_message(pane_id, content)
+        # Queued followers and the standalone observer must spend the SAME
+        # durable attempt, with the same final intent/generation checks.
+        with self._lock:
+            candidate = self.stuck_candidates.get(pane_id) or {}
+            if (candidate.get("text") and dunk_stuck.collapse(candidate["text"])
+                    == dunk_stuck.collapse(content)):
+                if (not candidate.get("eligible") or head is None
+                        or candidate.get("message_id") != head.id):
+                    self.stuck.forget(pane_id)
+                    return False
+            if head is not None and candidate.get("message_id") == head.id:
+                require_intent = True
         identity = (getattr(head, "id", None) or expect_message_id
                     or self._text_identity(content))
         generation = self._pane_generation(pane_id)
@@ -4616,6 +4638,9 @@ class Flock:
         if not content:
             return None
         want = dunk_stuck.collapse(content)
+        candidate = self._stuck_candidate_message(pane_id)
+        if candidate and dunk_stuck.collapse(candidate.text) == want:
+            return candidate
         with self._lock:
             rows = [m for m in (self.outbox.get(pane_id) or []) if m.status == "queued"]
         for row in reversed(rows):                  # newest first: the last typed is the one in the box
@@ -4625,6 +4650,22 @@ class Flock:
             if row.text and dunk_stuck.collapse(row.text).startswith(want[:40]):
                 return row                            # a wrapped prefix of a long notice
         return None
+
+    def _stuck_candidate_message(self, pane_id):
+        """Reconstruct a bound failed delivery; never adopt the current pane."""
+        with self._lock:
+            entry = dict(self.stuck_candidates.get(pane_id) or {})
+        if (not entry.get("eligible") or not entry.get("generation")
+                or entry["generation"] != self._pane_generation(pane_id)):
+            return None
+        message = Message(entry["message_id"], pane_id,
+                          entry.get("label") or pane_id, entry.get("text") or "",
+                          "stuck_candidate", lambda: (False, "observation only"))
+        message.status = entry.get("status") or "failed"
+        message.press_enter = entry.get("press_enter", True)
+        message.created_at = entry.get("created_at") or 0
+        message.attempt_generation = entry["generation"]
+        return message
 
     @staticmethod
     def _text_identity(content):
@@ -4675,6 +4716,19 @@ class Flock:
             state = self.delivery_state(pane_id)
             name = str(state.get("state") or "")
             if not state.get("deliverable") and name == "unknown":
+                # Geometry alone is ambiguous, but the shared t130 matcher can
+                # prove the COMPLETE composer belongs to us. Resolve only that
+                # case, and only with affirmative idle evidence. Other unknown
+                # states remain unknown; normal delivery policy is unchanged.
+                if str(state.get("reason") or "").startswith(AMBIGUOUS_COMPOSER):
+                    screen = self.read_screen(pane_id)
+                    status = self._read_status(pane_id)
+                    if (screen is not None and status in ("idle", "ready")
+                            and not _modal_open(screen)
+                            and not self._session_process_gone(pane_id)
+                            and self.composer_region_is_owned(pane_id, screen)):
+                        resolved, _reason = classify_delivery(screen, status, typed="")
+                        return resolved
                 return "unknown"
             return name or "unknown"
         except Exception:                       # noqa: BLE001 - never crash a worker
@@ -4765,9 +4819,10 @@ class Flock:
                     # generation, is what the daemon typed.
                     with self._lock:
                         remembered = self.sent_text_by_pane.setdefault(pane_id, [])
-                        if text not in remembered:
-                            remembered.append(text)
-                            del remembered[:-REMEMBERED_SENDS]
+                        for owned_text in list(entry.get("transcript_texts") or []) + [text]:
+                            if owned_text and owned_text not in remembered:
+                                remembered.append(owned_text)
+                        del remembered[:-REMEMBERED_SENDS]
                 if pane_id in busy_panes or pane_id in queued_panes:
                     continue                            # exactly one observer per pane
                 message = history.get(pane_id)
@@ -4959,7 +5014,21 @@ class Flock:
         text = expand_template(dunker.text, dunker).strip()
         if not text:
             return True, "empty text, nothing sent"
-        ok, message = self.submit_text(dunker.target_pane_id, text)
+        # Timer sends bypass _deliver. Give each actual attempt the same durable
+        # intent record as direct messages, BEFORE another send can supersede it.
+        # The expanded text and pre-attempt generation are essential: a template
+        # or a post-attempt pane identity is not proof of what we typed and where.
+        attempt = self._new_message(dunker.target_pane_id, dunker.target_label(),
+                                    text, dunker.id, lambda: (False, "record only"))
+        attempt.attempt_generation = self._pane_generation(dunker.target_pane_id)
+        try:
+            ok, message = self.submit_text(dunker.target_pane_id, text)
+        except Exception as error:
+            ok, message = False, str(error)
+        attempt.status = "sent" if ok else "failed"
+        attempt.detail = message
+        attempt.finished_at = time.time()
+        self._note_stuck_candidate(attempt)
         with self._lock:
             if ok:
                 dunker.send_count += 1
@@ -4988,6 +5057,7 @@ class Flock:
                             bytes=len((text or "").encode("utf-8")))
         log.info("%s -> %s: %s (%s)", dunker.id, dunker.target_pane_id,
                  "sent" if ok else "FAILED", message)
+        self._save()
         return ok, message
 
     def _previous_send_consumed(self, dunker):
@@ -5459,6 +5529,8 @@ class Flock:
         text - makes the boundary undelimitable and the frame is refused with
         zero keys. The sigil-free-transcript wedge positive is the one recovery
         case; sigil'd transcript echoes fail closed (DocumentedLimitTests)."""
+        if not screen:
+            return False, ""
         region = _composer_region_text(screen)
         if region:
             return self._region_is_ours(pane_id, region), region
@@ -5534,6 +5606,14 @@ class Flock:
         screen = self.read_screen(pane_id)
         if screen is None:
             return None
+        return self._recovery_box_text(pane_id, screen)
+
+    def _recovery_box_text(self, pane_id, screen):
+        """Unknown geometry is never evidence that the prompt was consumed."""
+        _text, detail = box_text(screen)
+        if detail.startswith(AMBIGUOUS_COMPOSER):
+            owned, region = self._composer_ownership(pane_id, screen)
+            return region if owned else None
         return _typed_text(screen)
 
     def press_keys(self, pane_id, keys):
@@ -5700,7 +5780,8 @@ class Flock:
             return ("gone", "")
         if _modal_open(screen):
             return ("modal", _collapse(_strip_ansi(screen))[-120:])
-        return ("box", _typed_text(screen) or "")
+        text = self._recovery_box_text(pane_id, screen)
+        return ("gone", "") if text is None else ("box", text)
 
     def _note_stale_panel(self, pane_id, signature, since):
         """Say once that a dialog is holding up this pane. Never answer it.
