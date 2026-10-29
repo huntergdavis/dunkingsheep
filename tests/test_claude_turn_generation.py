@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -208,6 +209,74 @@ class ClaudeTurnGenerationTests(unittest.TestCase):
         self.producer._run = self.fake_run()
         self.producer.end(self.stop_event(session="never-started"))
         self.assertEqual([], self.calls)
+
+    def doc_shaped_subagent_stop(self, session="sess-1"):
+        # Shape per the official hooks reference: a SubagentStop carries
+        # session identity AND stop_hook_active, so neither field alone can
+        # distinguish it from a Stop.  Only the hook event name can.
+        return {
+            "hook_event_name": "SubagentStop",
+            "session_id": session,
+            "transcript_path": "/tmp/subagent-transcript",
+            "cwd": str(ROOT),
+            "permission_mode": "default",
+            "stop_hook_active": True,
+        }
+
+    def test_start_requires_user_prompt_submit_name(self):
+        self.producer._run = self.fake_run()
+        misrouted = self.stop_event()
+        misrouted["prompt"] = "a stop reaching start"
+        self.producer.start(misrouted)
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.state_files())
+
+    def test_end_requires_stop_name(self):
+        self.producer._run = self.fake_run()
+        self.producer.start(self.start_event())
+        self.producer.end(self.start_event())
+        self.assertEqual(1, len(self.calls), "a start is not an end")
+        self.assertEqual(1, len(self.state_files()))
+
+    def test_doc_shaped_subagent_stop_never_ends(self):
+        self.producer._run = self.fake_run()
+        self.producer.start(self.start_event())
+        self.producer.end(self.doc_shaped_subagent_stop())
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual(1, len(self.state_files()))
+        self.producer.noop(self.doc_shaped_subagent_stop())
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual(1, len(self.state_files()))
+        self.producer.end(self.stop_event())
+        self.assertEqual(2, len(self.calls))
+
+    def test_concurrent_ends_send_exactly_one_rpc(self):
+        self.producer._run = self.fake_run()
+        self.producer.start(self.start_event())
+        barrier = threading.Barrier(2)
+
+        def one_end():
+            barrier.wait()
+            self.producer.end(self.stop_event())
+
+        threads = [threading.Thread(target=one_end) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        ends = [call for call in self.calls if call[1:3] == ["turn", "end"]]
+        self.assertEqual(1, len(ends), "exactly one winner RPCs")
+        self.assertEqual([], self.state_files(), "winner consumes the token")
+
+    def test_state_dir_is_owner_only_even_if_precreated_wide(self):
+        from pathlib import Path as P
+        wide = P(self.tmp.name) / "state"
+        wide.mkdir(exist_ok=True)
+        os.chmod(wide, 0o755)
+        self.producer._run = self.fake_run()
+        self.producer.start(self.start_event())
+        self.assertEqual(0o700, stat.S_IMODE(wide.stat().st_mode))
+        self.assertEqual(1, len(self.state_files()))
 
     def test_main_dispatches_start_end_noop(self):
         seen = []

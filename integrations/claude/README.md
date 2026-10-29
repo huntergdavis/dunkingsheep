@@ -20,16 +20,24 @@ the starter's pid/start time.
 | Claude event     | action | effect                                              |
 |------------------|--------|-----------------------------------------------------|
 | UserPromptSubmit | start  | open turn, capture `--json` token to 0600 state     |
-| Stop             | end    | close with the token; Stop-shaped events only       |
+| Stop             | end    | close with the token; exact `hook_event_name` only  |
 | SubagentStop     | noop   | log and exit 0; never touches parent turn state     |
 
 Two independent barriers keep subagents from ending the parent turn: the
-installer wiring above, and `end()` refusing any event without Claude's
-`stop_hook_active` key (which SubagentStop-shaped events do not carry).
+installer wiring above, and `end()` requiring the exact hook event name
+`"Stop"` (per the official hooks reference, a SubagentStop payload carries
+`stop_hook_active` too, so shape alone cannot tell them apart).
 
-Claude exposes no turn id, so one session holds at most one open turn: a
-duplicate `UserPromptSubmit` for a live session keeps the existing token
-(starting again would orphan the daemon turn to its TTL). A replaced pane
+Claude exposes no per-turn event identity: there is no turn id in any hook
+payload.  Correlation is (session id, starter pid/start, at most one open
+turn) under one documented ordering assumption: Claude runs a single agent
+loop per session, and a Stop hook can veto the stop, so the next
+UserPromptSubmit cannot arrive before the prior turn's Stop chain completes.
+Concurrent duplicate Stop callbacks are serialized by the state lock with
+consume-before-RPC: exactly one wins and only the winner performs the end
+RPC (proven by a deterministic barrier test with two racing ends).  The
+duplicate keeps the existing token (starting again would orphan the daemon
+turn to its TTL). A replaced pane
 root starts fresh (logged); a stale/expired token is refused and cleaned up;
 an end with no start token is skipped, never invented.
 
@@ -50,6 +58,8 @@ Never point `--home` at a production `~/.claude` until this producer is
 independently accepted and its rollout is coordinated.
 
 State: `~/.local/state/dunkingsheep/claude-turns/` (`DUNKINGSHEEP_CLAUDE_STATE_DIR`
-overrides), directory `0700`, files `0600`, `fcntl`-locked. Logs carry no
+overrides), directory `0700` (chmodded back even if pre-created wider),
+files `0600` created before any secret bytes exist (`os.open`, never an
+umask-dependent open-then-chmod). Logs carry no
 tokens or prompt text. Every hook path exits 0: a nonzero UserPromptSubmit
 would block the agent's prompt.

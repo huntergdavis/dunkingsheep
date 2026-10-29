@@ -6,7 +6,16 @@ exposes that runs *inside* the agent's own process tree.  That matters: the
 daemon's turn RPC authenticates the caller by kernel PID/start-time ancestry
 under the backend's pane root (`Flock.require_turn_caller`), so a detached
 adapter that merely asserts a pane label, cwd or session id is refused by
-design.
+design.  Claude exposes no per-turn event identity: there is no turn id
+in any hook payload.  Correlation is (Claude session id, starter
+pid/start, at most one open turn) under one documented native ordering
+assumption: Claude runs a single agent loop per session, and a Stop hook
+can veto the stop, so the next UserPromptSubmit cannot be delivered before
+the prior turn's Stop hook chain has completed.  A delayed duplicate Stop
+therefore cannot race a newer generation open on the same (session, root);
+concurrent duplicate Stop callbacks for the SAME generation are serialized
+by the state lock with consume-before-RPC, so exactly one wins and replays
+find no state.  The daemon TTL remains the backstop.
 
 Contract (same shape as integrations/codex/turn-generation.py, adapted to
 Claude's hook payloads - Claude exposes no turn id):
@@ -35,8 +44,11 @@ If the terminal identity is unavailable, this producer emits no event.
 
 State files live under ~/.local/state/dunkingsheep/claude-turns/ (override with
 DUNKINGSHEEP_CLAUDE_STATE_DIR).  They contain a session id, the daemon's turn
-token and the starter's pid/start time.  Tokens and prompts are never written
-to the log.
+token and the starter's pid/start time.  The state directory is created mode
+0700 (and chmodded back to 0700 if it already existed with wider
+permissions); state files are created mode 0600 BEFORE any secret bytes are
+written (os.open, never an umask-dependent open-then-chmod).  Tokens and
+prompts are never written to the log.
 """
 from __future__ import annotations
 
@@ -149,7 +161,14 @@ class _Lock:
         self.handle = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The lock directory is created BEFORE the secrets directory, so it
+        # must already carry the restrictive mode: mkdir alone does not fix
+        # a directory that already exists with wider permissions.
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(self.path.parent, 0o700)
+        except OSError:
+            pass
         self.handle = open(self.path, "a+", encoding="utf-8")
         fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
         return self
@@ -178,10 +197,23 @@ def _read_state(path: Path) -> dict | None:
 
 def _write_state(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with open(temp, "w", encoding="utf-8") as handle:
-        json.dump(state, handle, sort_keys=True)
-    os.chmod(temp, 0o600)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    # The file is created mode 0600 BEFORE any secret bytes exist: os.open
+    # applies the mode at creation, so no umask-dependent window follows.
+    temp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, sort_keys=True)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
     os.replace(temp, path)
 
 
@@ -208,7 +240,7 @@ def _run(args: list[str], cwd: str | None, timeout: float = 10.0):
     return proc.returncode, parsed, (proc.stderr or "")[:300]
 
 
-def _valid_start_event(event: dict | None) -> str | None:
+def _valid_fields(event: dict | None) -> str | None:
     if not isinstance(event, dict):
         return "no hook input"
     session = event.get("session_id")
@@ -219,17 +251,25 @@ def _valid_start_event(event: dict | None) -> str | None:
     return None
 
 
+def _valid_start_event(event: dict | None) -> str | None:
+    if not isinstance(event, dict):
+        return "no hook input"
+    if event.get("hook_event_name") != "UserPromptSubmit":
+        return "not a UserPromptSubmit event"
+    return _valid_fields(event)
+
+
 def _valid_stop_event(event: dict | None) -> str | None:
-    error = _valid_start_event(event)
-    if error:
-        return error
-    # A Stop-shaped event carries the key Claude sends on Stop.  A
-    # SubagentStop-shaped event does not, so even a miswired SubagentStop can
-    # never close the parent turn here: the installer wiring (SubagentStop ->
-    # noop) is the first barrier, this check the second.
+    if not isinstance(event, dict):
+        return "no hook input"
+    # Exact event identity, not shape alone: per the official hooks reference
+    # SubagentStop carries stop_hook_active too, so the key cannot tell them
+    # apart.  Only a Stop event may end the turn.
+    if event.get("hook_event_name") != "Stop":
+        return "not a Stop event"
     if "stop_hook_active" not in event:
         return "not a Stop event (no stop_hook_active)"
-    return None
+    return _valid_fields(event)
 
 
 def start(event: dict | None) -> None:
@@ -300,53 +340,55 @@ def end(event: dict | None) -> None:
         return
     path, lock_path = _paths(session)
     deadline = time.time() + END_WAIT_S
-    state = None
     while True:
         with _Lock(lock_path):
-            state = _read_state(path)
-            if state is not None:
+            if _read_state(path) is not None:
                 break
         if time.time() >= deadline:
             break
         # A fast settled turn can beat its own start hook; wait briefly for a
         # start to publish its token.  Never invent one.
         time.sleep(0.05)
-    if state is None:
-        _log(f"end skipped reason=no_start_token session={session[:12]}")
-        return
-    if state.get("session_id") != session:
-        _log(f"end refused reason=session_mismatch session={session[:12]}")
-        return
-    if (state.get("root_pid") != root["pid"]
-            or str(state.get("root_start")) != root["start"]):
-        # A different Claude process now owns this pane.  The old token is not
-        # evidence about the new turn, and the old root must not be guessed at.
-        _log(f"end refused reason=replaced_root session={session[:12]} "
-             f"stored={state.get('root_pid')} current={root['pid']}")
-        return
-    now = time.time()
-    if float(state.get("expires_at", 0)) <= now:
-        with _Lock(lock_path):
-            if (_read_state(path) or {}).get("session_id") == session:
-                _remove_state(path)
-        _log(f"end refused reason=expired_turn session={session[:12]}")
-        return
-    daemon_turn = state.get("daemon_turn_id")
-    if not isinstance(daemon_turn, str) or not daemon_turn:
-        with _Lock(lock_path):
-            if (_read_state(path) or {}).get("session_id") == session:
-                _remove_state(path)
-        _log(f"end skipped reason=no_start_token session={session[:12]}")
-        return
-    # Consume the token before the RPC: a replay cannot send it twice, and a
-    # failed end leaves the daemon TTL as the backstop rather than an old token.
+    # Decide, validate and consume in ONE locked section: concurrent duplicate
+    # Stop callbacks are serialized here, so exactly one wins and only the
+    # winner performs the end RPC below - including on the expiry paths,
+    # where the dead generation is still consumed so it can never fire later.
     with _Lock(lock_path):
-        current = _read_state(path)
-        if current is not None and current.get("session_id") == session:
+        state = _read_state(path)
+        if state is None:
+            outcome = ("skipped", "no_start_token", None)
+        elif state.get("session_id") != session:
+            outcome = ("refused", "session_mismatch", None)
+        elif (state.get("root_pid") != root["pid"]
+                or str(state.get("root_start")) != root["start"]):
+            # A different Claude process now owns this pane.  The old token
+            # is not evidence about the new turn, and the old root must not
+            # be guessed at.
+            outcome = ("refused", "replaced_root", None)
+            _log(f"end refused reason=replaced_root session={session[:12]} "
+                 f"stored={state.get('root_pid')} current={root['pid']}")
+        elif float(state.get("expires_at", 0)) <= time.time():
             _remove_state(path)
+            outcome = ("refused", "expired_turn", None)
+        else:
+            daemon_turn = state.get("daemon_turn_id")
+            if not isinstance(daemon_turn, str) or not daemon_turn:
+                _remove_state(path)
+                outcome = ("skipped", "no_start_token", None)
+            else:
+                _remove_state(path)
+                outcome = ("send", None, {
+                    "daemon_turn_id": daemon_turn,
+                    "cwd": state.get("cwd"),
+                })
+    verdict, reason, winner = outcome
+    if verdict != "send":
+        _log(f"end {verdict} reason={reason} session={session[:12]}")
+        return
     code, result, stderr = _run([
-        "--json", "turn", "end", "--turn-id", daemon_turn, "--reason", "stop",
-    ], state.get("cwd"))
+        "--json", "turn", "end", "--turn-id", winner["daemon_turn_id"],
+        "--reason", "stop",
+    ], winner["cwd"])
     ended = bool(isinstance(result, dict) and result.get("ended"))
     dispatch = result.get("dispatch") if isinstance(result, dict) else None
     action = dispatch.get("action") if isinstance(dispatch, dict) else None
@@ -359,8 +401,9 @@ def noop(event: dict | None) -> None:
     """SubagentStop (and any future non-turn event) lands here, never in end.
 
     A subagent finishing must not close the parent turn.  The installer wires
-    SubagentStop to this action; end() additionally refuses events that are
-    not Stop-shaped, so the barrier holds even if the wiring is ever changed.
+    SubagentStop to this action; end() additionally requires the exact hook
+    event name "Stop", so the barrier holds even if the wiring is ever
+    changed.
     """
     session = event.get("session_id") if isinstance(event, dict) else None
     _log(f"noop action=SubagentStop ignored session={str(session)[:12]}")
