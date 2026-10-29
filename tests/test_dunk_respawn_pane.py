@@ -1,6 +1,9 @@
 """t398: guarded same-pane respawn. No live pane or raw tmux is used."""
+import json
 import os
+import sqlite3
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,7 +40,23 @@ class RespawnPaneTests(unittest.TestCase):
                          "-a", "never", "resume", "session-old"]
         self.rollback = ["codex", "-C", "/tmp", "-s", "danger-full-access",
                          "-a", "never", "resume", "session-old"]
-        self.new_argv = ["codex", "--no-daemon", "-C", "/tmp", "-s",
+        self.codex_tmp = tempfile.TemporaryDirectory(prefix="t416-codex-home-")
+        self.addCleanup(self.codex_tmp.cleanup)
+        self.codex_home = os.path.join(self.codex_tmp.name, "codex-home")
+        os.makedirs(self.codex_home)
+        self.rollout = os.path.join(self.codex_home, "rollout-session-old.jsonl")
+        with open(self.rollout, "w") as handle:
+            handle.write(json.dumps({"type": "session_meta", "payload": {
+                "session_id": "session-old", "id": "session-old",
+                "cwd": "/tmp"}}) + "\n")
+        state = sqlite3.connect(os.path.join(self.codex_home, "state_5.sqlite"))
+        state.execute("create table threads (id text primary key, rollout_path text, cwd text)")
+        state.execute("insert into threads values (?,?,?)",
+                      ("session-old", self.rollout, "/tmp"))
+        state.commit()
+        state.close()
+        self.new_argv = ["env", f"CODEX_HOME={self.codex_home}",
+                         "codex", "--no-daemon", "-C", "/tmp", "-s",
                          "danger-full-access", "-a", "never", "resume", "session-old"]
         self.flock.launches[self.pane_id] = {
             "agent": "codex", "argv": self.old_argv,
@@ -86,6 +105,18 @@ class RespawnPaneTests(unittest.TestCase):
         with patch("dunk_callers.process_alive", return_value=True):
             return self.flock.respawn_pane(**args)
 
+    def set_native_turns(self, *events):
+        with open(self.rollout, "w") as handle:
+            handle.write(json.dumps({"type": "session_meta", "payload": {
+                "session_id": "session-old", "id": "session-old",
+                "cwd": "/tmp"}}) + "\n")
+            for event, turn_id in events:
+                handle.write(json.dumps({
+                    "timestamp": "2026-10-29T06:06:32Z",
+                    "type": "event_msg",
+                    "payload": {"type": event, "turn_id": turn_id,
+                                "thread_id": "session-old"}}) + "\n")
+
     def test_success_preserves_old_launch_and_records_new_argv(self):
         result = self._respawn()
         self.assertEqual(os.getpid(), result["old_pid"])
@@ -95,6 +126,19 @@ class RespawnPaneTests(unittest.TestCase):
         self.assertEqual("respawn_pane", entry["source"])
         self.assertEqual(self.old_argv, entry["previous"]["argv"])
         self.assertEqual(self.new_argv, self.calls[0]["argv"])
+
+    def test_native_session_active_old_turn_refuses_before_mutation(self):
+        self.set_native_turns(("task_started", "turn-old"))
+        with self.assertRaisesRegex(DunkError, "unfinished turn.*turn-old"):
+            self._respawn()
+        self.assertEqual([], self.calls)
+
+    def test_native_session_completed_old_turn_allows(self):
+        self.set_native_turns(("task_started", "turn-old"),
+                              ("task_complete", "turn-old"))
+        result = self._respawn()
+        self.assertEqual(self.new_pid, result["pane_pid"])
+        self.assertEqual(1, len(self.calls))
 
     def test_requires_positive_idle_confirmation(self):
         with self.assertRaisesRegex(DunkError, "confirm-idle"):
