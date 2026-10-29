@@ -695,6 +695,20 @@ def build_parser():
     p.add_argument("--cwd")
     p.add_argument("--focus", action="store_true")
     p.add_argument("argv", nargs="+", metavar="COMMAND", help="the agent command line")
+    p = sub.add_parser("respawn-pane", aliases=["respawn"],
+                       help="guardedly replace an existing managed pane's process in place")
+    p.add_argument("pane")
+    p.add_argument("--expected-pid", type=int, required=True,
+                   help="exact live pane pid")
+    p.add_argument("--expected-start", required=True,
+                   help="exact /proc start time for --expected-pid")
+    p.add_argument("--confirm-idle", action="store_true",
+                   help="required; checked against turns/leases/mail/outbox/screen")
+    p.add_argument("--reason", help="why this pane is being replaced")
+    p.add_argument("--command-json", required=True,
+                   help="replacement argv as a JSON array of strings")
+    p.add_argument("--rollback-json",
+                   help="argv JSON to restore if the replacement fails")
     for name, help_text in (("rename", "rename a workspace, tab or pane"),
                             ("focus", "bring a workspace, tab or pane to the front"),
                             ("close", "close a workspace, tab or pane (kills what runs inside)")):
@@ -1649,7 +1663,7 @@ _MUTATING_COMMANDS = (
     "stop-all", "add", "update", "set", "remove", "rm", "delete", "cancel",
     "cancel-message", "inbox", "task", "superuser", "desk-token", "lane", "lanes",
     "new-workspace", "workspace", "new-tab", "tab", "split", "start-agent", "agent",
-    "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
+    "respawn-pane", "respawn", "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
     "recover", "shutdown", "watchdog", "watchdog-deadman", "memory", "context",
 )
 
@@ -2644,6 +2658,22 @@ def run_client_command(client, args):
                            workspace=args.workspace, tab=args.tab, split=args.split,
                            cwd=args.cwd, focus=args.focus), \
             lambda r: print(f"started agent {r['name']} in {r['pane_id']}: {shlex.join(r['argv'])}")
+    if command in ("respawn-pane", "respawn"):
+        try:
+            argv = json.loads(args.command_json)
+            rollback = json.loads(args.rollback_json) if args.rollback_json else None
+        except ValueError as error:
+            raise SystemExit(f"--command-json/--rollback-json must be JSON arrays: {error}")
+        if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+            raise SystemExit("--command-json must be a non-empty JSON array of strings")
+        if rollback is not None and (not isinstance(rollback, list) or not rollback
+                                     or not all(isinstance(x, str) for x in rollback)):
+            raise SystemExit("--rollback-json must be a non-empty JSON array of strings")
+        return client.call("respawn_pane", pane=args.pane, argv=argv,
+                           rollback_argv=rollback, expected_pid=args.expected_pid,
+                           expected_start=args.expected_start,
+                           confirm_idle=args.confirm_idle, reason=args.reason), \
+            lambda r: print(f"respawned pane {r['pane_id']} ({r['old_pid']} -> {r['pane_pid']}); reason={r.get('reason')}")
     if command == "rename":
         return client.call("rename", kind=args.kind, target=args.target, label=args.label), \
             lambda r: print(f"renamed {r['kind']} {r['id']} -> {r['label']!r}")

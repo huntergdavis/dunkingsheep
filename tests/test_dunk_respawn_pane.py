@@ -1,0 +1,204 @@
+"""t398: guarded same-pane respawn. No live pane or raw tmux is used."""
+import os
+import sys
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+import _bootstrap  # noqa: F401,E402
+from dunk_callers import process_start  # noqa: E402
+from dunk_core import DunkError, Flock  # noqa: E402
+from fakes import FakeHerdr  # noqa: E402
+from dunk_terminal import TmuxBackend  # noqa: E402
+
+
+class RespawnPaneTests(unittest.TestCase):
+    def setUp(self):
+        self.herdr = FakeHerdr()
+        self.pane_id = "w2:p1"
+        self.pane = next(p for p in self.herdr.panes if p["pane_id"] == self.pane_id)
+        self.pane["agent"] = "codex"
+        self.pane["pane_pid"] = os.getpid()
+        self.herdr.screens[self.pane_id] = "\u276f \n Ask Codex to do anything\n"
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False)
+        self.flock.require_superuser = lambda *_a, **_k: None
+        self.flock.delivery_state = lambda _pane: {
+            "state": "ready", "reason": None, "foreign_text": False}
+        self.flock.inbox_count = lambda *_a, **_k: {"unread": 0}
+        self.flock.tasks.leases_for_pane = lambda _pane: []
+        self.flock.turns = {}
+        self.flock.outbox = {}
+        self.old_argv = ["codex", "-C", "/tmp", "-s", "danger-full-access",
+                         "-a", "never", "resume", "session-old"]
+        self.rollback = ["codex", "-C", "/tmp", "-s", "danger-full-access",
+                         "-a", "never", "resume", "session-old"]
+        self.new_argv = ["codex", "--no-daemon", "-C", "/tmp", "-s",
+                         "danger-full-access", "-a", "never", "resume", "session-old"]
+        self.flock.launches[self.pane_id] = {
+            "agent": "codex", "argv": self.old_argv,
+            "command": "old command", "cwd": "/tmp"}
+        self.calls = []
+        self.fail_after_kill = False
+        self.new_pid = os.getpid() + 1000
+
+        def respawn(pane_id, argv, expected_pid=None, expected_start=None):
+            self.calls.append({"pane_id": pane_id, "argv": list(argv),
+                               "expected_pid": expected_pid,
+                               "expected_start": expected_start})
+            if len(self.calls) == 1 and self.fail_after_kill:
+                for pane in self.herdr.panes:
+                    if pane["pane_id"] == pane_id:
+                        pane["pane_pid"] = self.new_pid
+                return False, "simulated startup failure after kill"
+            if len(self.calls) == 1:
+                for pane in self.herdr.panes:
+                    if pane["pane_id"] == pane_id:
+                        pane["pane_pid"] = self.new_pid
+            return True, {"pane_id": pane_id, "pane_pid": self.new_pid,
+                          "old_pid": expected_pid}
+
+        self.herdr.respawn_pane = respawn
+        self.start = process_start(os.getpid())
+
+    def tearDown(self):
+        self.flock.close()
+
+    def _respawn(self, **kw):
+        args = dict(pane_id=self.pane_id, argv=self.new_argv,
+                    rollback_argv=self.rollback, expected_pid=os.getpid(),
+                    expected_start=self.start, confirm_idle=True,
+                    reason="t398 test", self_pane_id="%2")
+        args.update(kw)
+        with patch("dunk_callers.process_alive", return_value=True):
+            return self.flock.respawn_pane(**args)
+
+    def test_success_preserves_old_launch_and_records_new_argv(self):
+        result = self._respawn()
+        self.assertEqual(os.getpid(), result["old_pid"])
+        self.assertEqual(self.new_pid, result["pane_pid"])
+        entry = self.flock.launches[self.pane_id]
+        self.assertEqual(self.new_argv, entry["argv"])
+        self.assertEqual("respawn_pane", entry["source"])
+        self.assertEqual(self.old_argv, entry["previous"]["argv"])
+        self.assertEqual(self.new_argv, self.calls[0]["argv"])
+
+    def test_requires_positive_idle_confirmation(self):
+        with self.assertRaisesRegex(DunkError, "confirm-idle"):
+            self._respawn(confirm_idle=False)
+        self.assertEqual([], self.calls)
+
+    def test_wrong_pid_and_start_refuse_without_mutation(self):
+        with self.assertRaisesRegex(DunkError, "expected"):
+            self._respawn(expected_pid=os.getpid() + 1)
+        self.assertEqual([], self.calls)
+        with self.assertRaisesRegex(DunkError, "process start"):
+            self._respawn(expected_start="not-the-start")
+        self.assertEqual([], self.calls)
+
+    def test_active_turn_unread_outbox_lease_and_nonready_refuse(self):
+        cases = []
+        self.flock.turns[self.pane_id] = {"started_at": 1, "expires_at": 2,
+                                          "ended_at": None}
+        cases.append(self.flock.turns)
+        with self.assertRaisesRegex(DunkError, "active turn"):
+            self._respawn()
+        self.flock.turns = {}
+        self.flock.inbox_count = lambda *_a, **_k: {"unread": 2}
+        with self.assertRaisesRegex(DunkError, "unread"):
+            self._respawn()
+        self.flock.inbox_count = lambda *_a, **_k: {"unread": 0}
+        self.flock.outbox[self.pane_id] = [SimpleNamespace(status="queued")]
+        with self.assertRaisesRegex(DunkError, "outbox"):
+            self._respawn()
+        self.flock.outbox = {}
+        self.flock.tasks.leases_for_pane = lambda _pane: [{"task_id": "t1"}]
+        with self.assertRaisesRegex(DunkError, "live task lease"):
+            self._respawn()
+        self.flock.tasks.leases_for_pane = lambda _pane: []
+        self.flock.delivery_state = lambda _pane: {
+            "state": "unknown", "reason": "ambiguous", "foreign_text": False}
+        with self.assertRaisesRegex(DunkError, "confirmed idle"):
+            self._respawn()
+        self.assertEqual([], self.calls)
+
+    def test_backend_without_respawn_refuses(self):
+        del self.herdr.respawn_pane
+        with self.assertRaisesRegex(DunkError, "does not support"):
+            self._respawn()
+        self.assertEqual([], self.calls)
+
+    def test_failed_start_rolls_back_to_rollback_argv(self):
+        self.fail_after_kill = True
+        with self.assertRaisesRegex(DunkError, "rolled back"):
+            self._respawn()
+        self.assertEqual(2, len(self.calls), "one new command + one rollback")
+        self.assertEqual(self.rollback, self.calls[1]["argv"])
+        self.assertEqual(self.old_argv, self.flock.launches[self.pane_id]["argv"],
+                         "failed launch must not replace the old launch record")
+
+    def test_second_respawn_with_stale_pid_refuses(self):
+        self._respawn()
+        with self.assertRaisesRegex(DunkError, "expected"):
+            self._respawn(expected_pid=os.getpid())
+        self.assertEqual(1, len(self.calls), "stale pid must not trigger a second mutation")
+
+    def test_dead_replacement_rolls_back(self):
+        with patch("dunk_callers.process_alive", return_value=False):
+            with self.assertRaisesRegex(DunkError, "rolled back"):
+                self.flock.respawn_pane(
+                    self.pane_id, self.new_argv, rollback_argv=self.rollback,
+                    expected_pid=os.getpid(), expected_start=self.start,
+                    confirm_idle=True, reason="dead", self_pane_id="%2")
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(self.rollback, self.calls[1]["argv"])
+
+
+class TmuxRespawnGuardTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory(prefix="t398-tmux-")
+        self.addCleanup(self.tmp.cleanup)
+        self.backend = TmuxBackend(tmux_bin="/bin/true",
+                                   registry_path=f"{self.tmp.name}/panes.json")
+        self.backend._managed = lambda *_a: True
+        self.backend._tmux = lambda *_a, **_k: (0, "", "")
+
+    def test_argv_is_shell_quoted_and_pane_id_is_preserved(self):
+        state = {"pid": 200}
+        calls = []
+        def tmux(*args, **_kw):
+            calls.append(args)
+            state["pid"] = 201
+            return 0, "", ""
+        self.backend._tmux = tmux
+        self.backend.get_pane = lambda _pane: {"pane_id": "w1:p1",
+                                               "pane_pid": state["pid"]}
+        ok, result = self.backend.respawn_pane(
+            "w1:p1", ["codex", "; touch /tmp/pwned", "--no-daemon"],
+            expected_pid=200)
+        self.assertTrue(ok, result)
+        self.assertEqual("w1:p1", result["pane_id"])
+        self.assertEqual("w1:p1", result["pane_id"])
+        command = calls[0][-1]
+        self.assertIn("sh -c", command)
+        self.assertIn("touch /tmp/pwned", command)
+        self.assertNotIn("; touch /tmp/pwned", command.replace("'" + "; touch /tmp/pwned" + "'", ""))
+
+    def test_unmanaged_or_wrong_pid_refuses(self):
+        self.backend.get_pane = lambda _pane: {"pane_id": "w1:p1",
+                                               "pane_pid": 200}
+        self.backend._managed = lambda *_a: False
+        ok, message = self.backend.respawn_pane("w1:p1", ["codex"])
+        self.assertFalse(ok)
+        self.assertIn("did not create", message)
+        self.backend._managed = lambda *_a: True
+        ok, message = self.backend.respawn_pane("w1:p1", ["codex"], expected_pid=201)
+        self.assertFalse(ok)
+        self.assertIn("expected 201", message)
+
+
+if __name__ == "__main__":
+    unittest.main()

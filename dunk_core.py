@@ -3516,6 +3516,137 @@ class Flock:
         return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
                 "argv": result.get("argv") or argv}
 
+    def respawn_pane(self, pane_id, argv, rollback_argv=None, expected_pid=None,
+                     expected_start=None, confirm_idle=False, reason=None,
+                     self_pane_id=None):
+        """Replace a managed pane's process in place, session-preserving.
+
+        Operator-only.  The pane must be one Dunking Sheep created, the live
+        pane pid/start must match exactly, and --confirm-idle must be backed by
+        evidence rather than a missing telemetry signal: no active declared
+        turn, no live task lease, no unread mail, no queued outbox message, and
+        the delivery classifier must say ready (not working/unknown/foreign).
+        The new command is an argv list and is joined with shlex by the backend;
+        the old launch record is preserved under `previous` on success.  A
+        failed startup is rolled back to the caller's rollback argv (or the
+        saved old argv) and reported as a failure, never as success.
+        """
+        self.require_superuser(self_pane_id, "respawn-pane")
+        pane_id = str(pane_id or "").strip()
+        if not pane_id:
+            raise DunkError("respawn-pane requires a pane")
+        if not argv or not isinstance(argv, (list, tuple)):
+            raise DunkError("respawn-pane requires an argv list")
+        if not confirm_idle:
+            raise DunkError("respawn-pane requires --confirm-idle with positive evidence")
+        if expected_pid is None or expected_start is None:
+            raise DunkError("respawn-pane requires --expected-pid and --expected-start")
+        pane = self.herdr.get_pane(pane_id)
+        if pane is None:
+            raise DunkError(f"respawn-pane: pane {pane_id} is not visible")
+        try:
+            pane_pid = int(pane.get("pane_pid"))
+        except (TypeError, ValueError):
+            raise DunkError(f"respawn-pane: pane {pane_id} has no live pane pid") from None
+        if pane_pid != int(expected_pid):
+            raise DunkError(f"respawn-pane: pane {pane_id} pid is {pane_pid}, "
+                            f"expected {expected_pid}")
+        from dunk_callers import process_alive, process_start
+        if str(process_start(pane_pid)) != str(expected_start):
+            raise DunkError(f"respawn-pane: pane {pane_id} process start does not match "
+                            f"expected {expected_start}")
+        if not hasattr(self.herdr, "respawn_pane"):
+            raise DunkError("respawn-pane: the active backend does not support guarded respawn")
+
+        with self._lock:
+            turn = self.turns.get(pane_id)
+            if turn and not turn.get("ended_at"):
+                raise DunkError(f"respawn-pane refused: pane {pane_id} has an active turn")
+            queued = [m for m in self.outbox.get(pane_id, ()) if m.status == "queued"]
+            if queued:
+                raise DunkError(f"respawn-pane refused: pane {pane_id} has "
+                                f"{len(queued)} queued outbox message(s)")
+        leases = self.tasks.leases_for_pane(pane_id)
+        if leases:
+            raise DunkError(f"respawn-pane refused: pane {pane_id} has a live task lease "
+                            f"({', '.join(str(l.get('task_id')) for l in leases)})")
+        try:
+            unread = (self.inbox_count(None, self_pane_id=pane_id) or {}).get("unread")
+        except Exception as error:                  # noqa: BLE001 - unknown is a refusal
+            raise DunkError(f"respawn-pane refused: unread count failed: {error}") from None
+        if unread is None:
+            raise DunkError(f"respawn-pane refused: pane {pane_id} unread count is unknown")
+        if unread:
+            raise DunkError(f"respawn-pane refused: pane {pane_id} has {unread} unread message(s)")
+        delivery = self.delivery_state(pane_id)
+        if delivery.get("state") != "ready" or delivery.get("foreign_text"):
+            raise DunkError(f"respawn-pane refused: pane {pane_id} is not confirmed idle "
+                            f"(state={delivery.get('state')!r}, "
+                            f"reason={delivery.get('reason')!r})")
+
+        old = dict(self.launches.get(pane_id) or {})
+        rollback = list(rollback_argv or old.get("argv") or [])
+        if not rollback:
+            raise DunkError(f"respawn-pane refused: no rollback argv for pane {pane_id}")
+        reason = str(reason or "respawn_pane")
+
+        def fail(message, new_pid=None):
+            self.metrics.record("pane.respawn", pane_id=pane_id, source="respawn_pane",
+                                outcome="failed", reason=message)
+            rolled = None
+            if new_pid is not None and new_pid != pane_pid:
+                try:
+                    start = process_start(new_pid)
+                    ok, result = self.herdr.respawn_pane(
+                        pane_id, rollback, expected_pid=new_pid, expected_start=start)
+                    rolled = bool(ok)
+                    self.metrics.record("pane.respawn.rollback", pane_id=pane_id,
+                                        source="respawn_pane",
+                                        outcome="ok" if ok else "failed",
+                                        reason=None if ok else str(result))
+                    if ok:
+                        log.warning("respawn pane %s failed (%s); rolled back to saved argv",
+                                    pane_id, message)
+                    else:
+                        log.error("respawn pane %s failed (%s); rollback failed: %s",
+                                  pane_id, message, result)
+                except Exception as error:          # noqa: BLE001 - report, do not hide
+                    log.error("respawn pane %s rollback raised: %s", pane_id, error)
+            raise DunkError(message + (" (rolled back)" if rolled else ""))
+
+        try:
+            ok, result = self.herdr.respawn_pane(
+                pane_id, list(argv), expected_pid=pane_pid, expected_start=expected_start)
+        except Exception as error:                  # noqa: BLE001 - backend refusal
+            fail(f"respawn-pane backend failed: {error}")
+        if not ok:
+            current = self.herdr.get_pane(pane_id) or {}
+            try:
+                current_pid = int(current.get("pane_pid"))
+            except (TypeError, ValueError):
+                current_pid = None
+            fail(f"respawn-pane failed: {result}", current_pid)
+        new_pid = result.get("pane_pid")
+        try:
+            new_pid = int(new_pid)
+        except (TypeError, ValueError):
+            fail("respawn-pane returned no new pane pid")
+        if new_pid == pane_pid or not process_alive(new_pid):
+            fail("respawn-pane did not produce a live replacement process", new_pid)
+        self._record_launch(
+            pane_id, agent=old.get("agent") or pane.get("agent"),
+            argv=list(argv), command=shlex.join([str(part) for part in argv]),
+            cwd=old.get("cwd") or pane.get("cwd"), source="respawn_pane",
+            previous=old, reason=reason)
+        self.metrics.record("pane.respawn", pane_id=pane_id, source="respawn_pane",
+                            outcome="ok", reason=reason)
+        with self._lock:
+            self.last_message = f"Respawned pane {pane_id} ({pane_pid} -> {new_pid})"
+        log.info("respawned pane %s old_pid=%s new_pid=%s reason=%s",
+                 pane_id, pane_pid, new_pid, reason)
+        return {"pane_id": pane_id, "old_pid": pane_pid, "pane_pid": new_pid,
+                "argv": list(argv), "rollback_argv": rollback, "reason": reason}
+
     # How long a freshly started agent gets to show a failure, and the lines that mean it
     # never ran. A shell's "not found" arrives in milliseconds; a working agent prints its
     # banner in the same window.
