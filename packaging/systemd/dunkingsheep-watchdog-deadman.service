@@ -2,6 +2,9 @@
 Description=Dunking Sheep watchdog dead-man check (independent of the watchdog)
 
 [Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2);
+# without it they are anonymous and every write is refused.
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
 Type=oneshot
 # Reads only the heartbeat; never the watchdog config or rules. 3 x the
 # watchdog's 10-minute cadence; at most one VP alert per hour while stale.
@@ -10,4 +13,4 @@ Type=oneshot
 # records its own cadence in the heartbeat; the dead-man uses the larger of the
 # two, clamped to 6x this value, so a mismatch only makes it more tolerant.
 # Still keep --cadence-minutes in step with cadence_minutes in watchdog.json.
-ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon watchdog-deadman --cadence-minutes 10 --multiplier 3 --cooldown-minutes 60 --to "vp of agentry"
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon watchdog-deadman --cadence-minutes 10 --multiplier 3 --cooldown-minutes 60 --to owner
