@@ -27,12 +27,20 @@ def open_fds():
 
 class OwnerPushHandleTests(unittest.TestCase):
     def setUp(self):
-        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False)
+        import tempfile
+        from dunk_roles import Roles
+        self.tmp = tempfile.TemporaryDirectory()
+        # An isolated registry: registering into the suite's shared state dir
+        # would flip the default role for every test that runs after this one.
+        roles = Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                      tokens_path=os.path.join(self.tmp.name, "tokens.json"))
+        self.flock = Flock(herdr=FakeHerdr(), persist=False, restore=False, roles=roles)
         # The owner channel is pushed by the owner's pane (FLAT_FLEET.md 4.3).
         self.flock.roles.register("%4", "owner", by="test")
 
     def tearDown(self):
         self.flock.close()
+        self.tmp.cleanup()
 
     def test_fifty_pushes_and_takes_do_not_grow_the_descriptor_count(self):
         # Warm up first: the first call legitimately creates the shared connection.

@@ -496,6 +496,9 @@ class InboxThroughTheFlockTests(unittest.TestCase):
         before = self.flock.delivery_capability("guarded lane")
         self.assertFalse(before["desk_credential"])
         self.assertFalse(before["desk_can_type"])
+        from dunk_roles import Roles
+        self.flock.roles = Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                                 tokens_path=os.path.join(self.tmp.name, "tokens.json"))
         self.flock.roles.issue_token("web", label="desk")
         after = self.flock.delivery_capability("guarded lane")
         self.assertTrue(after["desk_credential"])
