@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sqlite3
+from dunk_pm import DEFAULT_VP_PANE as _default_vp_pane
 from dunk_sqlite import connect as sqlite_connect
 
 log = logging.getLogger("dunkingsheep.tasks")
@@ -1042,6 +1043,8 @@ class Tasks:
         since = (until - float(window_s)) if since is None else float(since)
         bucket_s = 86400 if str(bucket).lower() == "day" else 3600
 
+        # Same VP-pane resolution the rest of the product uses (dunk_core).
+        leader_pane = os.environ.get("DUNKINGSHEEP_VP_PANE", _default_vp_pane)
         tasks = [self._decorate(row) for row in
                  self.db.execute("SELECT * FROM tasks").fetchall()]
         if scopes is not None:
@@ -1057,9 +1060,11 @@ class Tasks:
             by_priority[task["priority"]] = by_priority.get(task["priority"], 0) + 1
             by_scope["global" if task["is_global"] else "pane"] += 1
             if task["status"] in ("open", "in_progress", "blocked"):
-                if not task["assignees"] and task["is_global"]:
+                if (not task["assignees"] and task["is_global"]) \
+                        or leader_pane in task["assignees"]:
                     # owner #1708: unowned means leader-owned, so an active global
-                    # task with no assignee is work the leader is carrying.
+                    # task with no assignee is work the leader is carrying. A task
+                    # explicitly assigned to the leader pane is theirs as well.
                     leader_held.append(task)
                 for assignee in task["assignees"]:
                     by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
@@ -1137,6 +1142,10 @@ class Tasks:
                     "oldest_age_s": (round(until - min(task["created_at"]
                                                        for task in leader_held), 1)
                                      if leader_held else None),
+                    "definition": ("global tasks with no assignee (owner #1708: "
+                                   "unowned means leader-owned), plus tasks "
+                                   "explicitly assigned to the leader pane"),
+                    "leader_pane": leader_pane or None,
                 },
             },
             "throughput": {
