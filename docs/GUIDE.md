@@ -436,6 +436,18 @@ read that fails no longer consumes the mail. A REPEATED batch after an error
 is the fix working, not a bug: the same messages are offered again until a
 read completes. `--peek` still marks nothing at all.
 
+If a read answer never arrives (the mark committed, then the response was
+lost), the batch is marked read but was displayed nowhere: ```
+dunkingsheep inbox recover
+```
+
+ replays the latest delivered batch for display, and ```
+dunkingsheep inbox ack
+```
+
+ then consumes it. The buffer holds one
+batch per mailbox; a newer read overwrites it and a full ack clears it.
+
 An agent whose MCP connection predates the inbox has a stale tool list and
 will not see inbox_read until it reconnects. The CLI works meanwhile, which
 is why the launcher is the first thing to install.

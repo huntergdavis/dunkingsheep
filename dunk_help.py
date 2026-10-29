@@ -420,6 +420,12 @@ def guide(markdown=False):
       "read that fails no longer consumes the mail. A REPEATED batch after an error\n"
       "is the fix working, not a bug: the same messages are offered again until a\n"
       "read completes. `--peek` still marks nothing at all.\n")
+    w("If a read answer never arrives (the mark committed, then the response was\n"
+      "lost), the batch is marked read but was displayed nowhere: "
+      + code("dunkingsheep inbox recover") +
+      " replays the latest delivered batch for display, and " +
+      code("dunkingsheep inbox ack") + " then consumes it. The buffer holds one\n"
+      "batch per mailbox; a newer read overwrites it and a full ack clears it.\n")
     w("An agent whose MCP connection predates the inbox has a stale tool list and\n"
       "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
       "is why the launcher is the first thing to install.\n")
