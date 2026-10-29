@@ -1,4 +1,4 @@
-# Dunking Sheep 2.70.91 guide
+# Dunking Sheep 2.70.92 guide
 
 Dunking Sheep sends text (followed by Enter) into herdr terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -491,6 +491,13 @@ task_next(scope="auto"); task_heartbeat(id="t12"); task_complete(id="t12")
 task_follow(); task_list(); task_assign(id="t12", assignees=["self"])
 ```
 
+`task add` without `--assign` creates the task OWNED by the creating pane,
+because a task with no owner is nobody's work and is counted against no
+one. `--assign <pane>` is delegation and is kept as written; moving it
+later is `task assign`, an explicit write. A caller with no pane at all
+(a systemd unit, a web/HTTP caller) needs a declared leader
+(`DUNKINGSHEEP_LEADER_PANE`) and is refused with that instruction rather
+than left ownerless.
 `task_metrics` is the read-only analytics endpoint for a status board or
 the CTO. It reports current queue depth and the status / priority / scope
 mix, per-assignee load, created/claimed/completed/cancelled/requeued

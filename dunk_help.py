@@ -465,6 +465,13 @@ def guide(markdown=False):
            "task_add(title=..., priority=\"urgent\", depends_on=[\"t3\"])\n"
            "task_next(scope=\"auto\"); task_heartbeat(id=\"t12\"); task_complete(id=\"t12\")\n"
            "task_follow(); task_list(); task_assign(id=\"t12\", assignees=[\"self\"])"))
+    w("`task add` without `--assign` creates the task OWNED by the creating pane,\n"
+      "because a task with no owner is nobody's work and is counted against no\n"
+      "one. `--assign <pane>` is delegation and is kept as written; moving it\n"
+      "later is `task assign`, an explicit write. A caller with no pane at all\n"
+      "(a systemd unit, a web/HTTP caller) needs a declared leader\n"
+      "(`DUNKINGSHEEP_LEADER_PANE`) and is refused with that instruction rather\n"
+      "than left ownerless.")
     w("`task_metrics` is the read-only analytics endpoint for a status board or\n"
       "the CTO. It reports current queue depth and the status / priority / scope\n"
       "mix, per-assignee load, created/claimed/completed/cancelled/requeued\n"

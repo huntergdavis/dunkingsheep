@@ -54,7 +54,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.91"
+VERSION = "2.70.92"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -122,6 +122,12 @@ def code_status():
 from dunk_inbox import Inbox, InboxError
 from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 import dunk_stuck
+
+# The declared leader pane: who owns a task when the creator has no pane at all
+# (a systemd unit, a web/HTTP caller, the watchdog). Same shape as
+# DUNKINGSHEEP_VP_NAME in dunk_superusers: a deployment fact named in the
+# environment, not inferred from a roster that may be stale.
+TASK_LEADER_ENV = "DUNKINGSHEEP_LEADER_PANE"
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
 from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
@@ -2249,6 +2255,30 @@ class Flock:
                 resolved.append(value)
         return resolved
 
+    def _default_task_owner(self, self_pane_id):
+        """Who owns a task created WITHOUT `--assign` (owner #1708, wiring b).
+
+        A task with no assignee is nobody's work: it sits in the list, is counted
+        against no one, and every lane can tell itself it is someone else's. So
+        creation is owned by construction - by the creating pane, or, when the
+        creator has no pane (a systemd unit, an HTTP caller with no terminal), by
+        the DECLARED leader pane. Delegation stays an explicit write: passing
+        `--assign` is unchanged, and `task assign` moves ownership afterwards.
+
+        When neither is known this REFUSES instead of writing an ownerless row.
+        The message names both ways out, because an unowned task is a silent
+        failure and a refusal is a loud one.
+        """
+        if self_pane_id:
+            return [self_pane_id]
+        leader = (os.environ.get(TASK_LEADER_ENV) or "").strip()
+        if leader:
+            return [leader]
+        raise DunkError(
+            "a task must have an owner: no creating pane and no declared leader "
+            f"(set {TASK_LEADER_ENV}). Pass --assign <pane>, or run the command from "
+            "the lane that should own it.")
+
     def _require_task_visible(self, task, self_pane_id):
         if not self_pane_id:
             return task
@@ -2276,10 +2306,18 @@ class Flock:
                 "caller with no pane id: per-pane queues belong to that pane. "
                 "Pass --scope global to create a fleet-visible task (add --assign "
                 "to assign a lane), or run the add from that pane itself.")
+        # OWNED BY CONSTRUCTION: `--assign` is delegation and wins; with no
+        # `--assign` the creating pane owns the work, so no task is ever
+        # ownerless (see _default_task_owner for the pane-less path). The t278
+        # refusal above comes first on purpose: a no-pane attempt at another
+        # pane's private queue is refused for its scope, not for its owner.
+        owners = self._task_assignees(assignees, self_pane_id)
+        if not owners:
+            owners = self._default_task_owner(self_pane_id)
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
             priority=priority or "medium",
-            assignees=self._task_assignees(assignees, self_pane_id),
+            assignees=owners,
             parent_id=parent_id, depends_on=depends_on,
             created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False))
 
