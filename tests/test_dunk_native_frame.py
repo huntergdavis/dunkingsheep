@@ -39,7 +39,9 @@ TEXT = "T377-CANARY one known-owned line"
 
 def with_composer(composer_rows):
     rows = NATIVE_FRAME.splitlines()
-    rows[4:6] = [composer_rows]          # replace the placeholder composer row
+    # Replace ONLY the composer row: the blank row the native UI draws between the
+    # composer and the status row is part of the captured geometry, not filler.
+    rows[4] = composer_rows
     return "\n".join(rows) + "\n"
 
 
