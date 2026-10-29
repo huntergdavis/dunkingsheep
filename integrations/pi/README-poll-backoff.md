@@ -9,8 +9,11 @@ The change:
 
 - `dunk-poll` remains the hot path.
 - The legacy three-CLI fallback (`status` + `inbox count` + `list`) runs **only**
-  when the helper is demonstrably missing (`ENOENT` / exit 127). It never runs on
-  timeout, `EAGAIN`, refused socket or daemon unavailability.
+  when the helper itself did not spawn (a thrown `ENOENT`), or exits 127 (the
+  established "helper absent" compatibility case). A **started** helper that
+  returns nonzero — for example `dunk-poll --socket <absent>` printing "daemon
+  socket not found" — is not a missing executable and never triggers the three
+  CLI reads. It goes to backoff and a stale/unknown state.
 - One poll is in flight; failures use bounded exponential backoff (base
   `POLL_MS`, capped at 5 minutes). The interval still calls the poller, but a
   poll inside the backoff window spawns nothing.

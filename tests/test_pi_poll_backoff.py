@@ -81,7 +81,28 @@ assert.equal(r, undefined, "no synthetic healthy snapshot");
 assert.deepEqual(h.cli(), []);
 assert.ok(h.state().backoffMs >= 1000);
 
-// missing helper is the ONLY fallback: three CLI reads, source cli-fallback
+// RED/GREEN real stderr control: a STARTED helper reporting that its daemon
+// socket is absent is NOT a missing executable; no CLI fallback.
+const socketErr = "dunk-poll: daemon socket not found at /tmp/cos-t399-absent-socket-2317; is the daemon running?";
+for (const code of [1, 2]) {
+  h = harness(async () => ({code, stderr: socketErr}),
+              async () => { throw new Error("CLI must not run on absent daemon socket"); });
+  r = await h.poller.poll("/tmp");
+  assert.equal(r, undefined, "no healthy snapshot for absent daemon socket");
+  assert.deepEqual(h.cli(), [], `code ${code} socket-ENOENT must not fan out`);
+  assert.ok(h.state().backoffMs >= 1000);
+}
+
+// GREEN control: a true spawn failure of the helper itself still uses the
+// compatibility fallback.
+h = harness(async () => {
+  const error = new Error("spawn dunk-poll ENOENT"); error.code = "ENOENT"; throw error;
+}, async (args) => ({ok:true,args}));
+r = await h.poller.poll("/tmp");
+assert.equal(r.snapshot.source, "cli-fallback");
+assert.equal(h.cli().length, 3);
+
+// missing-helper exit 127 is also a genuine helper-absent compatibility path.
 h = harness(async () => ({code:127,stderr:"dunk-poll: not found"}),
             async (args) => ({ok:true,args}));
 r = await h.poller.poll("/tmp");

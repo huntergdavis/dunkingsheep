@@ -19,7 +19,7 @@
  
  	async function run(args: string[], cwd: string): Promise<any | undefined> {
  		try {
-@@ -168,43 +171,146 @@
+@@ -168,43 +171,151 @@
  		};
  	}
  
@@ -49,9 +49,14 @@
 +		const maxBackoff = maxMs || 5 * 60_000;
 +		const baseBackoff = baseMs || 20_000;
 +
-+		function missing(result, error) {
-+			const text = `${error?.message ?? ""} ${result?.stderr ?? ""}`;
-+			return result?.code === 127 || /ENOENT|not found|no such file/i.test(text);
++		// A spawn failure means the helper binary itself did not start.  A
++		// nonzero RESULT means the helper started and answered (e.g. its daemon
++		// socket is absent); that is never a missing executable, even when the
++		// stderr contains ENOENT/not found.
++		function spawnMissing(error) {
++			const code = error?.code;
++			const text = String(error?.message ?? "");
++			return code === "ENOENT" || (/\bENOENT\b/.test(text) && /spawn|exec|command/i.test(text));
 +		}
 +
 +		function transient(result, error) {
@@ -127,7 +132,7 @@
 +						timeout: 10_000,
 +					});
 +				} catch (error) {
-+					if (missing(undefined, error)) return await fallback(cwd, withPanes);
++					if (spawnMissing(error)) return await fallback(cwd, withPanes);
 +					return fail(`poll helper failed: ${error?.message ?? error}`);
 +				}
 +				if (result?.code === 0) {
@@ -151,7 +156,7 @@
  				}
 -			} catch {
 -				// fall through to the CLI
-+				if (missing(result)) return await fallback(cwd, withPanes);
++				if (result?.code === 127) return await fallback(cwd, withPanes);
 +				if (transient(result)) {
 +					return fail(`poll helper unavailable: ${result?.stderr || result?.code}`);
 +				}
@@ -198,7 +203,7 @@
  	}
  
  	function buildContext(snapshot: DunkSnapshot, panes: any): string {
-@@ -213,7 +319,11 @@
+@@ -213,7 +324,11 @@
  
  		lines.push(`Dunking Sheep — self pane ${self}, mailbox "${snapshot.mailbox ?? "?"}"`);
  		lines.push("");
