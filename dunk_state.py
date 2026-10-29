@@ -384,6 +384,21 @@ def capture(flock, *, source="periodic", now=None, store=None):
             launches[pane_id] = dict(entry, pane_id=pane_id)
     except (OSError, ValueError):
         launches = {}
+    # t496: ONE /proc walk per capture, not two per lane.
+    #
+    # session_of() and the env lookup below both accept a prebuilt
+    # pid -> children map, but neither was given one, so every lane rebuilt the
+    # whole map twice: 62 full /proc scans for 31 lanes. In sampled in-process
+    # runs the scan was the largest single cost (5.30s of an 8.0s capture on one
+    # sample; 4.55s of a 6.21s capture on another), which is why this is the
+    # first thing to remove. Those two numbers are separate runs, not a range.
+    #
+    # What the samples do NOT establish: that this was the sole cause of the
+    # observed "no answer after 15s" failure, or that no daemon-wide lock was
+    # contended during it. Those runs used a fresh Flock and a temporary store,
+    # so they cannot speak for the live daemon's mutex. Reviewer t500 accepted
+    # the scan reduction and explicitly did not accept the broader causal claim.
+    kids = _proc_children()
     rows = []
     for lane in flock.resolve_lanes():
         if not lane.get("agent"):
@@ -394,10 +409,10 @@ def capture(flock, *, source="periodic", now=None, store=None):
         thinking = _flag(argv, _THINKING_FLAGS)
         session, session_reason = session_of(lane.get("pane_pid"),
                                              {"session": launch.get("session") or launch.get("session_id")},
-                                             cwd=lane.get("cwd"))
+                                             kids=kids, cwd=lane.get("cwd"))
         env = {}
         if lane.get("pane_pid"):
-            for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"]):
+            for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"], kids):
                 found = _env_of(candidate)
                 if found.get("PI_SESSION_ID") or found.get("PI_MODEL"):
                     env = found
