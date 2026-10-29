@@ -60,11 +60,34 @@ class FederatedTests(unittest.TestCase):
         self.assertEqual(0, self.flock._federated_recovery_step(12))
         self.assertFalse(self.herdr.keys)
     def test_no_enter_cancelled_or_replaced_never_press(self):
+        original = dict(self.flock.stuck_candidates[PANE])
         for changes in ({'press_enter':False}, {'status':'cancelled'}, {'generation':'other'}):
-            self.flock.stuck_candidates[PANE].update(changes)
-            self.flock._federated_recovery_step(10)
+            with self.subTest(changes=changes):
+                self.flock.stuck_candidates[PANE] = dict(original, **changes)
+                self.flock._federated_recovery_step(10)
+                self.flock._federated_recovery_step(12)
+                self.assertFalse(self.herdr.keys)
+    def test_changed_content_at_key_time_refuses(self):
+        self.flock._federated_recovery_step(10)
+        with mock.patch.object(self.flock, 'read_screen', side_effect=[FRAME, EMPTY]):
             self.flock._federated_recovery_step(12)
-            self.assertFalse(self.herdr.keys)
+        self.assertFalse(self.herdr.keys)
+    def test_changed_generation_at_key_time_refuses(self):
+        self.flock._federated_recovery_step(10)
+        with mock.patch.object(self.flock, '_pane_generation', side_effect=['g1', 'g2']):
+            self.flock._federated_recovery_step(12)
+        self.assertFalse(self.herdr.keys)
+    def test_new_dialog_at_key_time_refuses(self):
+        self.flock._federated_recovery_step(10)
+        with mock.patch.object(dunk_core, '_modal_open', side_effect=[False, True]):
+            self.flock._federated_recovery_step(12)
+        self.assertFalse(self.herdr.keys)
+    def test_budget_survives_tracker_restore(self):
+        self.flock._federated_recovery_step(10)
+        self.flock._federated_recovery_step(12)
+        self.flock.stuck = dunk_core.dunk_stuck.Tracker.from_state(self.flock.stuck.as_state())
+        self.flock._federated_recovery_step(15)
+        self.assertEqual(1, len(self.herdr.keys))
     def test_dialog_never_authorizes_keys(self):
         with mock.patch.object(dunk_core, '_modal_open', return_value=True):
             self.flock._federated_recovery_step(10)
