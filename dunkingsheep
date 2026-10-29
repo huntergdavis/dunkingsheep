@@ -477,6 +477,30 @@ def build_parser():
     q.add_argument("--bucket", choices=["hour", "day"], default="hour")
     tsub.add_parser("reap", help="requeue expired/dead leases now")
 
+    # -- GitHub Apps ----------------------------------------------------------
+    p = sub.add_parser("gh-token", help="print a one-hour App token for this lane's role (empty for the owner)")
+    p.add_argument("--kind", choices=["author", "reviewer"], help="owner/system only")
+    p.add_argument("--quiet", action="store_true", help="print nothing when no token applies")
+    p = sub.add_parser("git-credential", help="git credential helper: `git config --global credential.helper '!dunkingsheep git-credential'`")
+    p.add_argument("operation", nargs="?", default="get", choices=["get", "store", "erase"])
+    p = sub.add_parser("review", help="the review timer and its queue")
+    rsub = p.add_subparsers(dest="review_command", metavar="<subcommand>", parser_class=json_parser_class)
+    rsub.required = True
+    q = rsub.add_parser("sync", help="open PRs -> review tasks; statuses follow verdicts (system/owner)")
+    q.add_argument("--dry-run", action="store_true")
+    rsub.add_parser("list", help="live review tasks with PR, head, author, reviewer, age")
+    p = sub.add_parser("github", help="one-shot GitHub setup with the owner's own login")
+    gsub = p.add_subparsers(dest="github_command", metavar="<subcommand>", parser_class=json_parser_class)
+    gsub.required = True
+    q = gsub.add_parser("protect", help="branch protection on main: required review(s), the dunkingsheep/review check, auto-merge")
+    q.add_argument("repo", help="owner/name")
+    q.add_argument("--approvals", type=int, default=1)
+    q.add_argument("--bypass-reviewer-app", action="store_true",
+                   help="let the reviewer App push the accounting commit directly (poolrad, FLAT_FLEET.md 6.4)")
+    q.add_argument("--dry-run", action="store_true")
+    q = gsub.add_parser("wrappers", help="install the gh wrapper and git credential helper for lanes")
+    q.add_argument("--bin-dir", default="~/.config/dunkingsheep/bin")
+
     # -- roles ----------------------------------------------------------------
     sub.add_parser("whoami", help="this caller's role and how it was bound")
     p = sub.add_parser("token", help="service tokens for pane-less processes (web desk, timers)")
@@ -1261,6 +1285,133 @@ def print_recover(result):
         print(f"  warning {warning.get('kind')}: {warning.get('detail')}")
 
 
+def _git_credential(client, operation):
+    """git credential protocol on stdin/stdout: only `get` for https github.com,
+    and only when this lane's role implies an App; otherwise print nothing so git
+    falls through to the owner's own helpers."""
+    attrs = {}
+    for line in sys.stdin:
+        line = line.rstrip("\n")
+        if not line:
+            break
+        key, _sep, value = line.partition("=")
+        attrs[key] = value
+    if operation != "get":
+        return {}
+    if attrs.get("protocol") != "https" or attrs.get("host") != "github.com":
+        return {}
+    try:
+        result = client.call("gh_token")
+    except Exception:  # noqa: BLE001 - no daemon means no token, not a broken git
+        return {}
+    if not result.get("token"):
+        return {}
+    sys.stdout.write(f"username=x-access-token\npassword={result['token']}\n")
+    sys.stdout.flush()
+    return {}
+
+
+def _github_local(args):
+    """Owner's one-shot setup with their own `gh` login (never a lane path)."""
+    import dunk_github
+    import subprocess as _sp
+    if args.github_command == "wrappers":
+        result = dunk_github_wrappers_install(args.bin_dir)
+        for key, value in result.items():
+            print(f"{key:<20} {value}")
+        return 0
+    if args.github_command == "protect":
+        reviewer = dunk_github.load_app("reviewer")
+        payload = dunk_github.protection_payload(
+            args.approvals, reviewer["id"],
+            bypass_app_slug=reviewer["slug"] if args.bypass_reviewer_app else None)
+        if args.dry_run:
+            print(json.dumps(payload, indent=2))
+            return 0
+        proc = _sp.run(["gh", "api", "-X", "PUT",
+                        f"repos/{args.repo}/branches/main/protection", "--input", "-"],
+                       input=json.dumps(payload), capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(proc.stderr.strip() or proc.stdout.strip(), file=sys.stderr)
+            return proc.returncode
+        proc2 = _sp.run(["gh", "api", "-X", "PATCH", f"repos/{args.repo}", "--input", "-"],
+                        input=json.dumps({"allow_auto_merge": True,
+                                          "delete_branch_on_merge": True}),
+                        capture_output=True, text=True)
+        print(f"protected {args.repo}: {args.approvals} approval(s), "
+              f"{dunk_github.REVIEW_CONTEXT} required (app {reviewer['id']}), "
+              f"auto-merge {'on' if proc2.returncode == 0 else 'NOT enabled: ' + proc2.stderr.strip()}")
+        return 0
+    return 2
+
+
+GH_WRAPPER = """#!/bin/sh
+# dunkingsheep gh wrapper: lanes act as their GitHub App; the owner keeps their login.
+# Installed by `dunkingsheep github wrappers`; do not edit.
+tok=$(dunkingsheep --no-start-daemon gh-token --quiet 2>/dev/null)
+if [ -n "$tok" ]; then
+  GH_TOKEN="$tok" exec __REAL_GH__ "$@"
+fi
+exec __REAL_GH__ "$@"
+"""
+
+
+def dunk_github_wrappers_install(bin_dir):
+    import shutil
+    import stat
+    import subprocess as _sp
+    bin_dir = os.path.expanduser(bin_dir)
+    os.makedirs(bin_dir, exist_ok=True)
+    real = None
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(directory, "gh")
+        if (os.path.realpath(directory) != os.path.realpath(bin_dir)
+                and os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            with open(candidate, "rb") as handle:
+                if b"dunkingsheep gh wrapper" in handle.read(300):
+                    continue
+            real = candidate
+            break
+    if not real:
+        raise SystemExit("no real `gh` found on PATH to wrap")
+    target = os.path.join(bin_dir, "gh")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(GH_WRAPPER.replace("__REAL_GH__", real))
+    os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    helper = "!dunkingsheep git-credential"
+    _sp.run(["git", "config", "--global", "--replace-all",
+             "credential.https://github.com.helper", helper], check=False)
+    return {"gh_wrapper": target, "real_gh": real, "git_credential_helper": helper,
+            "note": "lanes use https remotes; the owner's own gh/ssh login is untouched "
+                    "(gh-token prints nothing for the owner role)"}
+
+
+def print_review_sync(result):
+    for repo in result.get("repos") or []:
+        print(f"{repo['repo']}: {repo['open']} open PR(s)")
+    for item in result.get("filed") or []:
+        print(f"  filed {item.get('task', '(dry)')} {item['repo']}#{item['pr']} @ {item['head'][:12]} author {item.get('author') or '?'}")
+    for task in result.get("cancelled") or []:
+        print(f"  cancelled {task}")
+    for status in result.get("statuses") or []:
+        print(f"  status {status['repo']}@{status['head']} {status['state']}")
+    for error in result.get("errors") or []:
+        print(f"  ! {error}")
+    if not any(result.get(k) for k in ("filed", "cancelled", "errors")):
+        print("  nothing to do")
+
+
+def print_review_list(result):
+    rows = result.get("reviews") or []
+    if not rows:
+        print("no live reviews")
+        return
+    for row in rows:
+        who = ",".join(row.get("reviewer") or []) or "-"
+        print(f"{row['task']:6} {row['status']:11} {row['repo']}#{row['pr']} @ {row['head']} "
+              f"author {row.get('author') or '?':8} reviewer {who:10} age {row['age_s'] // 60}m")
+
+
 def print_whoami(result):
     print(f"pane {result.get('pane_id') or '-'}  role {result.get('role')}"
           + ("  (service token)" if result.get("via_token") else ""))
@@ -1736,7 +1887,7 @@ def _be_nice():
 
 
 # Read only local files; never open a socket.
-LOCAL_ONLY_COMMANDS = ("context",)
+LOCAL_ONLY_COMMANDS = ("context", "github")
 
 # A synchronous send waits for delivery, and delivery reads panes several times.
 # Under load (27 live lanes at 2.7/cpu) those reads are slow: 15 s was not enough
@@ -2161,6 +2312,8 @@ def main(argv=None):
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
     # gets no standing rules exactly when the daemon is down.
+    if command == "github":
+        return _github_local(args)
     if command in LOCAL_ONLY_COMMANDS:
         result, printer = run_client_command(None, args)
         if args.json:
@@ -2749,6 +2902,20 @@ def run_client_command(client, args):
     if command == "api":
         import dunk_http
         return dunk_http.main(["--host", args.host, "--port", str(args.port)]), lambda r: None
+    if command == "gh-token":
+        result = client.call("gh_token", kind=args.kind)
+        def _print_token(r):
+            if r.get("token"):
+                print(r["token"])
+            elif not args.quiet:
+                print(f"no App token for role {r.get('role')}: {r.get('note')}", file=sys.stderr)
+        return result, _print_token
+    if command == "git-credential":
+        return _git_credential(client, args.operation), (lambda r: None)
+    if command == "review":
+        if args.review_command == "sync":
+            return client.call("review_sync", dry_run=args.dry_run), print_review_sync
+        return client.call("review_list"), print_review_list
     if command == "whoami":
         return client.call("whoami"), print_whoami
     if command == "token":

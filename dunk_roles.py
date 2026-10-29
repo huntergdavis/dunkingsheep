@@ -71,7 +71,7 @@ READ_ONLY = frozenset({
     "delivery_capability", "lanes", "memory_recall", "memory_search",
     "memory_context", "memory_stats", "memory_status", "owner_stats",
     "superuser_status", "pm_digest", "pm_routing", "list_messages",
-    "get_message", "dispatch",
+    "get_message", "dispatch", "review_list",
     # Bootstrap paths: the handlers gate these (first owner may self-register).
     "superuser_recover", "lane_register",
 })
@@ -96,7 +96,7 @@ ALLOW = {
         "inbox_fetch", "respawn_pane", "send_keys", "flush_box", "read_pane",
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
-        "gh_token",
+        "gh_token", "review_sync",
     }),
     # The owner's transport (the web desk): everything but the
     # fleet-destructive verbs, which stay on a human in a terminal.

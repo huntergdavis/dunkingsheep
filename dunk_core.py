@@ -2484,9 +2484,10 @@ class Flock:
             if verdict is None:
                 raise DunkError("completing a review needs --verdict accept|needs-fix")
             try:
-                self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
+                verdict = self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
             except TaskError as error:
                 raise DunkError(str(error)) from None
+            github = self._after_review_verdict(dict(task), verdict, by=self_pane_id or by)
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
@@ -2508,7 +2509,10 @@ class Flock:
                                                else self.roles.path),
                             "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
-        return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        result = dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        if task.get("kind") == "review":
+            result["github"] = github
+        return result
 
     # Transport provenance decides what an unverifiable claim means (t423 P1).
     # The server marks every socket request (see set_socket_peer): a request
@@ -3820,6 +3824,72 @@ class Flock:
     def token_revoke(self, label, self_pane_id=None):
         self.require_superuser(self_pane_id, "token revoke")
         return {"label": label, "revoked": self.roles.revoke_token(label)}
+
+    # -- GitHub Apps (docs/FLAT_FLEET.md 6) ---------------------------------
+
+    def _github_tokens(self):
+        tokens = getattr(self, "_github_token_cache", None)
+        if tokens is None:
+            import dunk_github
+            tokens = dunk_github.Tokens()
+            self._github_token_cache = tokens
+        return tokens
+
+    def gh_token(self, kind=None, self_pane_id=None):
+        """A short-lived installation token for the App this caller's role implies.
+
+        A worker gets the author App, a reviewer the reviewer App, the owner and
+        system whichever they ask for; everyone else gets `token: null` so the
+        gh wrapper leaves their own login alone.
+        """
+        import dunk_github
+        role = self.caller_role(self_pane_id)
+        try:
+            resolved = dunk_github.kind_for_role(role, kind)
+        except dunk_github.GitHubError as error:
+            raise DunkError(str(error)) from None
+        if resolved is None:
+            return {"token": None, "kind": None, "role": role,
+                    "note": "this role uses no App token (the owner keeps their own login)"}
+        try:
+            entry = self._github_tokens().get(resolved)
+        except dunk_github.GitHubError as error:
+            raise DunkError(str(error)) from None
+        if resolved == "author" and self_pane_id:
+            mints = getattr(self, "_gh_token_mints", None)
+            if mints is None:
+                mints = self._gh_token_mints = {}
+            mints[self_pane_id] = time.time()
+        return {"token": entry["token"], "kind": resolved, "role": role,
+                "slug": entry.get("slug"), "expires_at": entry.get("expires_at"),
+                "cached": entry.get("cached", False)}
+
+    def review_sync(self, dry_run=False, self_pane_id=None):
+        import dunk_review
+        return dunk_review.Sync(self, tokens=self._github_tokens()).run(dry_run=dry_run)
+
+    def review_list(self, self_pane_id=None):
+        tasks = self.tasks.list(scope=None, include_done=False, limit=500, kind="review")
+        now = time.time()
+        rows = []
+        for task in tasks:
+            rows.append({"task": task["id"], "status": task["status"], "repo": task.get("repo"),
+                         "pr": task.get("pr"), "head": (task.get("head") or "")[:12],
+                         "author": task.get("author"), "reviewer": task.get("claimed_by") or
+                         task.get("assignees") or [], "age_s": round(now - task["created_at"]),
+                         "verdict": task.get("verdict"), "title": task["title"]})
+        rows.sort(key=lambda r: -r["age_s"])
+        return {"reviews": rows, "count": len(rows),
+                "oldest_age_s": rows[0]["age_s"] if rows else None}
+
+    def _after_review_verdict(self, task, verdict, by=None):
+        try:
+            import dunk_review
+            return dunk_review.Sync(self, tokens=self._github_tokens()).on_verdict(
+                task, verdict, by=by)
+        except Exception as error:  # noqa: BLE001 - GitHub trouble never undoes a verdict
+            log.warning("review verdict side effects failed for %s: %s", task.get("id"), error)
+            return {"errors": [str(error)]}
 
     def superuser_status(self, self_pane_id=None):
         return {"superuser": self.is_superuser(self_pane_id),

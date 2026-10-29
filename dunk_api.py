@@ -1162,6 +1162,20 @@ def h_whoami(flock, args, self_pane_id):
     return flock.whoami(self_pane_id)
 
 
+def h_gh_token(flock, args, self_pane_id):
+    return flock.gh_token(kind=args.get("kind"), self_pane_id=self_pane_id)
+
+
+def h_review(flock, args, self_pane_id):
+    action = args.get("action") or "list"
+    if action == "sync":
+        return flock.review_sync(dry_run=_bool(args.get("dry_run"), False),
+                                 self_pane_id=self_pane_id)
+    if action == "list":
+        return flock.review_list(self_pane_id=self_pane_id)
+    raise DunkError(f"review: unknown action {action!r} (sync, list)")
+
+
 def h_lane_register(flock, args, self_pane_id):
     return flock.lane_register(pane=args.get("pane"), role=args.get("role"),
                                provider=args.get("provider"), model=args.get("model"),
@@ -2394,6 +2408,22 @@ COMMANDS = [
     ),
     # -- superuser allowlist -------------------------------------------------
     Command(
+        "gh_token",
+        "A one-hour GitHub App installation token for the App this caller's role "
+        "implies (worker: author; reviewer: reviewer; owner/system: --kind). Lanes "
+        "never see a key; the gh wrapper and git-credential call this.",
+        h_gh_token, params={"kind": {"type": "string", "enum": ["author", "reviewer"]}}),
+    Command(
+        "review_sync",
+        "The review timer: open PRs -> one live review task per head; statuses and "
+        "approvals follow verdicts. System/owner only. dry_run reports without writing.",
+        lambda flock, args, pane: h_review(flock, dict(args, action="sync"), pane),
+        params={"dry_run": {"type": "boolean"}}),
+    Command(
+        "review_list",
+        "Live review tasks with PR, head, author lane, reviewer and age.",
+        lambda flock, args, pane: h_review(flock, dict(args, action="list"), pane)),
+    Command(
         "whoami",
         "This caller's role (owner/system/web/desk/planner/worker/reviewer/"
         "anonymous), how it was bound, and what the kernel saw.",
@@ -2520,7 +2550,9 @@ MCP_GROUPS = (
      "this hour, and blocked lanes with reasons.",
      (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
       ("retired", "retire_pane"),
-      ("lanes", "lanes"), ("lane_set", "lane_set"))),
+      ("lanes", "lanes"), ("lane_set", "lane_set"),
+      ("review_sync", "review_sync"), ("review_list", "review_list"),
+      ("gh_token", "gh_token"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
@@ -2645,6 +2677,7 @@ SUPERUSER_ONLY = {
     "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
     "lane_set", "lane_register", "lane_unregister", "token_issue", "token_revoke",
+    "review_sync",
     "memory_backfill",
 }
 

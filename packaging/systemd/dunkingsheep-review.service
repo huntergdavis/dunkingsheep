@@ -1,0 +1,10 @@
+[Unit]
+Description=Dunking Sheep review timer: open PRs -> review tasks; statuses follow verdicts
+After=default.target dunkingsheep.service
+
+[Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2).
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon review sync
+TimeoutStartSec=120
