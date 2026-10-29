@@ -549,7 +549,8 @@ def guide(markdown=False):
       "and never asks the terminal for `pane current`; identity comes from\n"
       "TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is\n"
       "the same batch for a human, and `dunkingsheep install` writes\n"
-      "status half skips the terminal probe unless --check-herdr is given.\n")
+      "`~/.local/bin/dunk-poll`. The status half skips the terminal probe\n"
+      "unless --check-herdr is given.\n")
     w(h(2, "Real provider usage"))
     w("`dunkingsheep usage [provider]` reads ~/.config/dunkingsheep/usage.json\n"
       "(sample: packaging/usage.example.json), which maps each provider to a\n"

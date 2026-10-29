@@ -8,7 +8,7 @@ terminal tool implements them. The first backend was herdr; tmux is the
 second (owner decision 2026-10-18: "tmux is the way") and the default since
 t50 (2026-10-24). herdr stays selectable for the rollback window with
 
-    DUNKINGSHEEP_TERMINAL_BACKEND=tmux
+    DUNKINGSHEEP_TERMINAL_BACKEND=herdr
 
 Nothing about herdr is removed before that window closes.
 

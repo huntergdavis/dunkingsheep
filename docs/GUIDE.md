@@ -589,7 +589,8 @@ replaces three full CLI startups per sidebar poll (the owner's CPU note)
 and never asks the terminal for `pane current`; identity comes from
 TMUX_PANE (HERDR_PANE_ID on the herdr rollback). `dunkingsheep poll` is
 the same batch for a human, and `dunkingsheep install` writes
-status half skips the terminal probe unless --check-herdr is given.
+`~/.local/bin/dunk-poll`. The status half skips the terminal probe
+unless --check-herdr is given.
 
 ## Real provider usage
 
