@@ -5885,7 +5885,15 @@ class Flock:
                 signature_now = self._box_signature(pane_id)
             except Exception:                       # noqa: BLE001
                 signature_now = None
-            if signature_now != getattr(message, "hold_signature", None):
+            # A policy/parser upgrade can resolve a hold without changing the
+            # old ("box", "") signature. Native EMPTY is positive readiness;
+            # do not retain an obsolete busy/ambiguous deadline in that case.
+            # Pending text still backs off if its submission failed.
+            native_ready = (self.federated_input
+                            and self._federated_composer(self.read_screen(pane_id)) == ""
+                            and self.send_blocker(pane_id) is None)
+            if (signature_now != getattr(message, "hold_signature", None)
+                    or native_ready):
                 message.next_attempt_at = None      # transient: try now
                 message.hold_signature = None
                 due = None
