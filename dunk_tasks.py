@@ -315,13 +315,22 @@ class Tasks:
 
     NEXT_JOB_EVENT = "next_job_handoff"
 
-    # t461: the ONLY handoff state that stops blocking. A cancelled intent is a
-    # message the daemon will never type (dunk_core treats "cancelled" as a real
-    # terminal message status), so it cannot be "a prompt still waiting for the
-    # box to clear". Every other state - pending, sending, sent, started,
-    # failed, uncertain, or a state this code does not know - keeps blocking,
-    # because an unrecognised state might still become a typed prompt and the
-    # cost of guessing wrong is a second nudge in a working pane.
+    # t461: the ONLY handoff state that stops blocking, compared EXACTLY.
+    #
+    # Reviewer t462 [P2]: this used to normalize with strip().lower(), while the
+    # delivery worker (dunk_next_job.NextJobs.tick/deliver) skips only the exact
+    # string "cancelled". So a raw state of "CANCELLED" or " cancelled " was
+    # treated as terminal HERE and as EXECUTABLE there: the claim gate advanced
+    # to new work while the worker still typed the old prompt - two sends for
+    # one intent. The two readers must agree, and the cheap way to agree is to
+    # compare the same bytes. Normalizing in both places would be a contract
+    # spread across files; comparing exactly keeps it in one.
+    #
+    # Everything else blocks - pending, sending, sent, started, failed,
+    # uncertain, undeliverable, a case/whitespace variant of "cancelled", an
+    # empty state, and any state this code does not know - because an
+    # unrecognised state might still become a typed prompt and the cost of
+    # guessing wrong is a second nudge in a working pane.
     NON_BLOCKING_HANDOFF_STATES = frozenset({"cancelled"})
 
     def record_next_job_handoff(self, task_id, *, pane_id, from_task, message_id=None,
@@ -660,8 +669,9 @@ class Tasks:
         for handoff in self.next_job_handoffs(pane_id):
             if handoff["task_id"] not in owned:
                 continue
-            state = str(handoff.get("state") or "").strip().lower()
-            if state in self.NON_BLOCKING_HANDOFF_STATES:
+            # Exact comparison, deliberately: see NON_BLOCKING_HANDOFF_STATES.
+            state = handoff.get("state")
+            if isinstance(state, str) and state in self.NON_BLOCKING_HANDOFF_STATES:
                 continue
             active.append(handoff)
         return active

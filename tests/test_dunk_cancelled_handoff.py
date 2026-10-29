@@ -124,6 +124,54 @@ class CancelledHandoffTests(unittest.TestCase):
         plan = self._advance(finished)
         self.assertEqual("pending_delivery", plan["reason"])
 
+    def test_case_variant_of_cancelled_still_blocks(self):
+        """Reviewer t462 [P2]: the delivery worker (dunk_next_job.tick/deliver)
+        skips only the exact string 'cancelled'. A 'CANCELLED' state is
+        therefore still EXECUTABLE there, so the claim gate must not treat it
+        as terminal - that mismatch typed the old prompt AND claimed new work
+        (two sends for one intent)."""
+        finished = self._task("A finish me", "urgent")
+        self._task("B next job", "high")
+        old = self._task("H historical intent", "low")
+        self._handoff(old["id"], "CANCELLED")
+        plan = self._advance(finished)
+        self.assertEqual("skip", plan["action"], plan)
+        self.assertEqual("pending_delivery", plan["reason"])
+
+    def test_whitespace_padded_cancelled_still_blocks(self):
+        finished = self._task("A finish me", "urgent")
+        self._task("B next job", "high")
+        old = self._task("H historical intent", "low")
+        self._handoff(old["id"], " cancelled ")
+        plan = self._advance(finished)
+        self.assertEqual("pending_delivery", plan["reason"])
+
+    def test_mixed_case_cancelled_still_blocks(self):
+        finished = self._task("A finish me", "urgent")
+        self._task("B next job", "high")
+        old = self._task("H historical intent", "low")
+        self._handoff(old["id"], "Cancelled")
+        plan = self._advance(finished)
+        self.assertEqual("pending_delivery", plan["reason"])
+
+    def test_empty_state_still_blocks(self):
+        finished = self._task("A finish me", "urgent")
+        self._task("B next job", "high")
+        old = self._task("H historical intent", "low")
+        self._handoff(old["id"], "")
+        plan = self._advance(finished)
+        self.assertEqual("pending_delivery", plan["reason"])
+
+    def test_active_handoffs_matches_the_delivery_workers_skip_set(self):
+        """The claim gate and dunk_next_job must agree on what is terminal."""
+        import inspect
+        import dunk_next_job
+        source = inspect.getsource(dunk_next_job.NextJobs.tick)
+        # the worker skips exactly this tuple; our non-blocking set must be the
+        # subset of it that we are allowed to stop blocking on.
+        self.assertIn('("started", "undeliverable", "cancelled")', source)
+        self.assertEqual({"cancelled"}, set(self.store.NON_BLOCKING_HANDOFF_STATES))
+
     def test_unknown_state_blocks_because_it_is_not_proven_terminal(self):
         finished = self._task("A finish me", "urgent")
         self._task("B next job", "high")
