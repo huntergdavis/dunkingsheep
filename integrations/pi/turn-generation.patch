@@ -18,7 +18,7 @@
 +			try {
 +				if (kind === "start") {
 +					activeTurnId = undefined;
-+					const args = ["--json", "turn", "start"];
++					const args = ["--json", "turn", "start", "--source", "pi-extension"];
 +					const handoff = prompt.match(/\bHandoff (nj-[0-9a-f]{32})\./);
 +					if (handoff) args.push("--handoff-id", handoff[1]);
 +					const result = await pi.exec(DUNK_BIN, args, { cwd, timeout: 10_000 });

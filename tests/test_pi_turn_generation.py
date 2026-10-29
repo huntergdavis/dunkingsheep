@@ -7,6 +7,18 @@ import unittest
 
 
 class PiTurnGenerationTests(unittest.TestCase):
+    def test_t444_patch_adds_prompt_handoff_and_source_to_current_serialized_producer(self):
+        patch = (Path(__file__).resolve().parents[1] /
+                 "integrations/pi/t444-handoff-source.patch").read_text()
+        self.assertIn('--source", "pi-extension', patch)
+        self.assertIn('--handoff-id', patch)
+        self.assertIn('before_agent_start', patch)
+        self.assertIn('const handoff = prompt.match', patch)
+        self.assertIn('function turn(kind: "start" | "end", cwd: string, prompt = "")', patch)
+        self.assertNotIn('t399 poll-backoff', patch,
+                         "the installed poll patch is already present; do not duplicate it")
+
+
     @unittest.skipUnless(shutil.which("node"), "node required to exercise the pi producer patch")
     def test_patch_serializes_tokens_and_never_emits_unbound_ends(self):
         patch = (Path(__file__).resolve().parents[1] /
@@ -44,7 +56,7 @@ const turn = reporter(async (_bin, args) => {
 const start = turn("start", "/tmp");
 const end = turn("end", "/tmp");
 await Promise.resolve();
-assert.deepEqual(calls, [["--json", "turn", "start"]]);
+assert.deepEqual(calls, [["--json", "turn", "start", "--source", "pi-extension"]]);
 release({code: 0, stdout: JSON.stringify({turn_id: "generation-a"})});
 await Promise.all([start, end]);
 assert.deepEqual(calls[1], ["turn", "end", "--turn-id", "generation-a"]);
@@ -58,10 +70,13 @@ const reporterWithHandoff = reporter(async (_bin, args) => {
 });
 const handoff = "nj-" + "a".repeat(32);
 await reporterWithHandoff("start", "/tmp", `[inbox] TASK t2. Handoff ${handoff}.`);
+assert.deepEqual(withHandoff[0].slice(0, 5),
+                 ["--json", "turn", "start", "--source", "pi-extension"]);
 assert.deepEqual(withHandoff[0].slice(-2), ["--handoff-id", handoff]);
 await reporterWithHandoff("end", "/tmp");
 await reporterWithHandoff("start", "/tmp", "unrelated human prompt");
 assert.ok(!withHandoff[2].includes("--handoff-id"));
+assert.ok(withHandoff[2].includes("--source"));
 
 for (const result of [
   {code: 1, stdout: '{"turn_id":"invalid"}'},
@@ -85,7 +100,7 @@ const serial = reporter(async (_bin, args) => {
 });
 await Promise.all([serial("start", "/tmp"), serial("end", "/tmp"),
                    serial("start", "/tmp"), serial("end", "/tmp")]);
-assert.deepEqual(ordered.map(args => args.at(-1)), ["start", "1", "start", "2"]);
+assert.deepEqual(ordered.map(args => args.at(-1)), ["pi-extension", "1", "pi-extension", "2"]);
 console.log("PASS: delayed start, consumed token, three failure responses, ordered generations");
 """.replace("FUNCTION", function)
         with tempfile.TemporaryDirectory() as directory:
