@@ -166,10 +166,22 @@ def credit_state(readings):
 
 
 def tier_headroom(credit, tier):
-    """Lowest remaining percentage across the providers a tier reads, or None."""
+    """Lowest FINITE remaining percentage for a tier, or None.
+
+    None means "no usable number", which is not the same as "plenty": a
+    hand-built or partially-filled snapshot has no headroom for a tier, so the
+    tier cannot be a target.
+    """
     providers = TIER_PROVIDER.get(tier, ())
-    values = [credit.get("headroom", {}).get(name) for name in providers]
-    values = [v for v in values if v is not None]
+    headroom = credit.get("headroom") or {}
+    values = []
+    for name in providers:
+        value = headroom.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(float(value)):
+            continue
+        values.append(float(value))
     return min(values) if values else None
 
 
@@ -288,7 +300,12 @@ def plan_swap(pane, credit, allowed_panes=None):
         if state != "available":
             continue
         left = tier_headroom(credit, tier)
-        if left is not None and left <= RESERVE_PERCENT:
+        if left is None:
+            # No positive finite number for the target means the reserve is
+            # UNPROVEN, not satisfied. A snapshot without headroom data (or
+            # with NaN) must refuse rather than compatibility-pass.
+            continue
+        if left <= RESERVE_PERCENT:
             # Above-5 reserve: a tier that still has credit but is nearly dry
             # is not a landing place. It is not "exhausted" either - those are
             # different questions and this is the second one.
@@ -313,12 +330,17 @@ def plan_swap(pane, credit, allowed_panes=None):
     for tier in TIER_ORDER[start + 1:]:
         state = tier_state(credit, tier)
         left = tier_headroom(credit, tier)
-        remaining[tier] = state if left is None else f"{state} ({left}% left)"
+        remaining[tier] = (f"{state} (headroom unknown)"
+                           if left is None else f"{state} ({left}% left)")
     reason = "no_tier_has_credit"
     if any(str(v).startswith("available") for v in remaining.values()):
         # A later tier has credit but not enough of it: that is a reserve
         # refusal, not an exhaustion one, and the operator action differs.
         reason = "targets_below_reserve"
+    if any(str(v).startswith("available (headroom unknown")
+           for v in remaining.values()):
+        # Available but with no number behind it: the reserve is unproven.
+        reason = "target_headroom_unknown"
     return _reason_for_skip(reason, pane_id=pane_id,
                             current=current, tiers=remaining)
 

@@ -5,6 +5,7 @@ refusals. Each row states the credit snapshot, the pane state and the decision
 that must come back, so a reader can check the rule without reading the code.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -264,6 +265,29 @@ class ReserveAndWindowPolicyTests(unittest.TestCase):
         state = fb.credit_state([{"provider": "codex", "status": "ok",
                                   "windows": windows}])
         self.assertEqual("available", state["codex"])
+
+    def test_target_without_headroom_data_is_refused(self):
+        # A hand-built snapshot (no headroom key) must refuse: the reserve is
+        # unproven, not satisfied.
+        decision = fb.plan_swap(pane("claude"),
+                                {"claude": "exhausted", "codex": "available"})
+        self.assertEqual("skip", decision["action"])
+        self.assertEqual("target_headroom_unknown", decision["reason"])
+        self.assertNotIn("None", json.dumps(decision))
+
+    def test_target_with_nan_headroom_is_refused(self):
+        credit = {"claude": "exhausted", "codex": "available",
+                  "headroom": {"codex": float("nan")}}
+        decision = fb.plan_swap(pane("claude"), credit)
+        self.assertEqual("target_headroom_unknown", decision["reason"])
+
+    def test_target_with_headroom_present_swaps_and_never_renders_none(self):
+        credit = {"claude": "exhausted", "codex": "available",
+                  "headroom": {"codex": 30.0}}
+        decision = fb.plan_swap(pane("claude"), credit)
+        self.assertEqual("swap", decision["action"])
+        self.assertNotIn("None", decision["record"])
+        self.assertIn("30.0% left", decision["record"])
 
     def test_record_line_reports_headroom_not_just_availability(self):
         decision = fb.plan_swap(pane("claude"),
