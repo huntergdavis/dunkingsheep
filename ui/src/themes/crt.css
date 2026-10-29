@@ -1,0 +1,127 @@
+
+/* CRT: a steady phosphor display; no flashing, flicker or moving scanlines. */
+:root[data-theme="crt"] {
+  color-scheme: dark;
+  --bg: #07110b;
+  --surface: #0b1910;
+  --surface-raised: #11271a;
+  --ink: #c1f4c7;
+  --muted: #87b994;
+  --accent: #8fffab;
+  --accent-contrast: #07110b;
+  --border: #315c3d;
+  --border-strong: #5b8b68;
+  --icon-button-border: var(--border);
+  --icon-button-panel-border: var(--muted);
+  --success: #8fffab;
+  --warning: #eed28a;
+  --danger: #ffb3a3;
+  --purple: #b4d9a0;
+  --orange: #eed28a;
+  --teal: #9fe4c3;
+  --radius: 2px;
+  --font-body: var(--font-mono);
+  --font-display: var(--font-mono);
+  --font-dashboard: var(--font-mono);
+  --overlay: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.12) 0 1px, transparent 1px 4px);
+}
+
+/* Connect component shades to the theme roles without changing default values.
+ * The legacy palette remains available when the CRT selector is absent. */
+:root[data-theme="crt"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(0, 9, 3, 0.8);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+  /* Keep queue warnings and hover controls on the phosphor palette. */
+  --queue-help-ink: var(--warning);
+  --queue-help-border: var(--border-strong);
+  --queue-help-surface: var(--surface-raised);
+  --queue-help-ink-2: var(--warning);
+  --queue-help-surface-2: var(--surface-raised);
+  --queue-help-surface-3: var(--surface-raised);
+  --queue-help-border-2: var(--warning);
+  --queue-help-ink-3: var(--warning);
+}
+
+/* The overlay never receives input and does not create a scrolling surface.
+ * Native dialogs remain above it in the browser's top layer. */
+:root[data-theme="crt"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background-image: var(--overlay);
+}
+
+:root[data-theme="crt"] :is(h1, h2, .dash-nav-brand) {
+  font-family: var(--font-display);
+  text-shadow: 0 0 12px var(--border-strong);
+}
+
+@media print, (forced-colors: active) {
+  :root[data-theme="crt"] body::after { display: none; }
+  :root[data-theme="crt"] :is(h1, h2, .dash-nav-brand) { text-shadow: none; }
+}
+
+/* ChatScope declares its own font on both wrappers; keep message text CRT too. */
+:root[data-theme="crt"] :is(.cs-message, .cs-message__content) {
+  font-family: var(--font-body);
+}

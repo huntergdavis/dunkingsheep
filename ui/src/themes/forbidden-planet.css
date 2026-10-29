@@ -1,0 +1,148 @@
+/* Forbidden Planet: atomic-age cream and teal, soft rounded system faces. */
+:root[data-theme="forbidden-planet"] {
+  color-scheme: light;
+  --bg: #f3ead2;
+  --surface: #fbf6e6;
+  --surface-raised: #e6dabb;
+  --ink: #16302e;
+  --muted: #44605a;
+  --accent: #0d6b64;
+  --accent-contrast: #f8f2df;
+  --border: #5d6f5c;
+  --border-strong: #405c57;
+  --icon-button-border: var(--border-strong);
+  --icon-button-panel-border: var(--border-strong);
+  --icon-button-ink: var(--ink);
+  --success: #2f6b45;
+  --warning: #7a5200;
+  --danger: #a03a2f;
+  --purple: #5b4a76;
+  --orange: #8a4a1f;
+  --teal: #1f6b66;
+  --radius: 12px;
+  --font-body: 'Varela Round','Nunito','Trebuchet MS',system-ui,sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-display: 'Varela Round','Nunito','Trebuchet MS',system-ui,sans-serif;
+  --font-mono: ui-monospace,'SFMono-Regular','Courier New',monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* Forbidden Planet component aliases use the same cream and teal palette. */
+:root[data-theme="forbidden-planet"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --white: var(--surface);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(22, 48, 46, 0.34);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* Remap inherited light-on-light borders and dark-panel borders so the
+   control boundaries clear 3:1 on this theme's own surfaces. */
+:root[data-theme="forbidden-planet"] {
+  --topbar-surface: var(--surface);
+  --topbar-border: var(--border);
+  --activity-border: var(--border);
+  --activity-toggle-border: var(--border);
+  --composer-border: var(--border);
+  --jump-banner-border: var(--border);
+  --jump-latest-border: var(--border);
+  --login-card-border: var(--border);
+  --older-marker-border: var(--border);
+  --queue-help-border: var(--border);
+  --queue-help-border-2: var(--border);
+  --search-head-border-2: var(--border);
+  --search-more-border: var(--border);
+  --search-head-ink: var(--muted);
+  --status-badge-ink: #465f5a;
+  --status-badge-ink-3: #6d4d10;
+  --ops-reference-ink: var(--ink);
+  --game-chat-actions-ink: #f8f2df;
+  --sidebar-border: #b7c7bb;
+  --game-type-border: #b7c7bb;
+  --game-type-border-2: #b7c7bb;
+  --game-type-border-3: #b7c7bb;
+  --ops-panel-border: #b7c7bb;
+  --ops-executive-border: #b7c7bb;
+  --ops-executive-head-border: #b7c7bb;
+  --ops-kpis-border: #b7c7bb;
+  --ops-lab-panel-border: #b7c7bb;
+  --ops-metrics-border: #b7c7bb;
+  --ops-mission-head-border: #b7c7bb;
+  --ops-credit-chart-border: #b7c7bb;
+  --ops-source-border: #b7c7bb;
+  --ops-source-border-2: #b7c7bb;
+  --poolrad-stat-border: #b7c7bb;
+}
+
+/* interim effect consumers: t177 generalises into token hooks */
+:root[data-theme="forbidden-planet"] body::after {
+  content: none;
+  background-image: var(--overlay);
+  pointer-events: none;
+}
+:root[data-theme="forbidden-planet"] :is(h1, h2, .dash-nav-brand) {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+  text-shadow: none;
+}
+:root[data-theme="forbidden-planet"] :is(.cs-message, .cs-message__content) {
+  font-family: var(--font-body);
+}
+:root[data-theme="forbidden-planet"] :is(pre, code, kbd, samp) {
+  font-family: var(--font-mono);
+}
