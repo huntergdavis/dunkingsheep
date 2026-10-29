@@ -482,6 +482,7 @@ def guide(markdown=False):
            "dunkingsheep task add \"Write tests\" --depends-on t12\n"
            "dunkingsheep task next                 # atomic claim (global by default)\n"
            "dunkingsheep task next auto            # own pane queue, then global\n"
+           "dunkingsheep task next mine            # only work assigned to you (global or own pane)\n"
            "dunkingsheep task next --allow-busy    # take a second task on purpose\n"
            "dunkingsheep task heartbeat t12        # extend the lease\n"
            "dunkingsheep task complete t12         # global completion\n"
@@ -493,6 +494,14 @@ def guide(markdown=False):
            "task_add(title=..., priority=\"urgent\", depends_on=[\"t3\"])\n"
            "task_next(scope=\"auto\"); task_heartbeat(id=\"t12\"); task_complete(id=\"t12\")\n"
            "task_follow(); task_list(); task_assign(id=\"t12\", assignees=[\"self\"])"))
+    w("Scope selects the queue, never the owner: `task next <pane-id>` reads "
+      "that pane's private queue (a foreign pane's queue is refused by privacy), "
+      "so it cannot take another lane's assigned global work. To claim "
+      "only work assigned to you - global tasks naming you plus your own pane's "
+      "queue, excluding unowned leader backlog and other lanes' tasks - use "
+      "`task next mine` (or `task follow mine` for the same selection pushed "
+      "when idle). Ownership is the assignees list; an unowned task belongs to "
+      "the leader by default, never to whoever polls first.\n")
     w("`task add` without `--assign` creates the task OWNED by the creating pane,\n"
       "because a task with no owner is nobody's work and is counted against no\n"
       "one. `--assign <pane>` is delegation and is kept as written; moving it\n"

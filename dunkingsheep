@@ -425,7 +425,7 @@ def build_parser():
 
     q = tsub.add_parser("next", help="atomically claim the next task")
     q.add_argument("scope", nargs="?",
-                   help="'global' (default), 'self', 'auto' or a pane id")
+                   help="'global' (default), 'self', 'auto', 'mine' (only work assigned to you), or a pane id")
     q.add_argument("--lease", type=float, metavar="SECONDS")
     q.add_argument("--allow-busy", action="store_true",
                    help="take a second task while already holding in-progress work")

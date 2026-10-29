@@ -503,6 +503,82 @@ class TaskStoreTests(unittest.TestCase):
                          "a task still held by another lease is not a requeue")
 
 
+    def test_mine_claims_owned_global_and_skips_unowned_backlog(self):
+        """t425: 'mine' selects ownership, not scope. An older, higher-
+        priority unowned global backlog task must not shadow the caller's
+        own assigned global task."""
+        backlog = self.store.add(GLOBAL, "leader backlog", priority="urgent")
+        owned = self.store.add(GLOBAL, "my work", priority="medium",
+                               assignees=["w1:p1"])
+        claimed = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertEqual(owned["id"], claimed["task"]["id"])
+        self.assertEqual("in_progress", claimed["task"]["status"])
+        self.assertEqual("mine", claimed["scope"])
+        still = self.store.get(backlog["id"])
+        self.assertEqual("open", still["status"])
+        self.assertEqual([], still["assignees"])
+
+    def test_mine_claims_own_pane_assigned_task(self):
+        """t425: own-pane-scoped tasks naming the caller are eligible."""
+        local = self.store.add("w1:p1", "local work", assignees=["w1:p1"])
+        claimed = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertEqual(local["id"], claimed["task"]["id"])
+
+    def test_mine_excludes_other_workers_tasks(self):
+        """t425: another lane's assigned task is never a 'mine' candidate,
+        and the refusal is honest empty rather than a silent skip."""
+        other = self.store.add(GLOBAL, "their work", assignees=["w9:p9"])
+        refused = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertIsNone(refused["task"])
+        self.assertEqual("empty", refused["refused"]["reason"])
+        still = self.store.get(other["id"])
+        self.assertEqual("open", still["status"])
+        self.assertEqual(["w9:p9"], still["assignees"])
+
+    def test_mine_empty_when_no_owned_work(self):
+        """t425: no owned work is an honest empty, not an error."""
+        self.store.add(GLOBAL, "leader backlog")
+        refused = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertIsNone(refused["task"])
+        self.assertEqual("empty", refused["refused"]["reason"])
+        self.assertEqual([], refused["refused"]["task_ids"])
+
+    def test_mine_busy_refusal_preserved(self):
+        """t425: holding in-progress work refuses a second 'mine' claim
+        unless allow_busy is set, exactly like every other scope."""
+        first = self.store.add(GLOBAL, "first", assignees=["w1:p1"])
+        second = self.store.add(GLOBAL, "second", assignees=["w1:p1"])
+        claimed = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertEqual(first["id"], claimed["task"]["id"])
+        refused = self.store.claim_next("mine", "w1:p1", lease_seconds=300)
+        self.assertIsNone(refused["task"])
+        self.assertEqual("busy", refused["refused"]["reason"])
+        allowed = self.store.claim_next("mine", "w1:p1", lease_seconds=300,
+                                        allow_busy=True)
+        self.assertEqual(second["id"], allowed["task"]["id"])
+
+    def test_mine_requires_a_pane(self):
+        """t425: ownership is relative to a caller; anonymous 'mine'
+        is refused, not treated as global."""
+        with self.assertRaises(TaskError):
+            self.store.claim_next("mine", None, lease_seconds=300)
+
+    def test_pane_id_scope_does_not_take_anothers_assigned_global(self):
+        """t425 regression pin of the observed %36-vs-%34 friction: a pane
+        id as the positional reads that pane's private queue (scope), so it
+        never takes another lane's assigned GLOBAL work. That behaviour is
+        preserved; 'mine' is the explicit tool for assigned work."""
+        owned = self.store.add(GLOBAL, "their work", assignees=["%34"])
+        result = self.store.claim_next("%34", "%36", lease_seconds=300)
+        self.assertIsNone(result["task"])
+        self.assertEqual("empty", result["refused"]["reason"])
+        still = self.store.get(owned["id"])
+        self.assertEqual("open", still["status"])
+        self.assertEqual(["%34"], still["assignees"])
+        mine = self.store.claim_next("mine", "%34", lease_seconds=300)
+        self.assertEqual(owned["id"], mine["task"]["id"])
+
+
 class FlockTaskTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -698,6 +774,65 @@ class FlockTaskTests(unittest.TestCase):
                          "task_follow", "task_stats", "task_metrics"):
             self.assertIn(expected, names)
         self.assertNotIn("task_reap", names)  # admin-only, socket/CLI
+
+    def test_mine_end_to_end_claim_and_follow_subscription(self):
+        """t425: `task next mine` claims the caller's assigned global work
+        through the full Flock path and subscribes on empty, like others."""
+        task = self.flock.task_add("assigned work", priority="high",
+                                   assignees=["w2:p1"], self_pane_id="w2:p1")
+        claimed = self.flock.task_next(scope="mine", self_pane_id="w2:p1")
+        self.assertEqual(task["id"], claimed["task"]["id"])
+        self.assertEqual("in_progress", claimed["task"]["status"])
+        busy = self.flock.task_next(scope="mine", self_pane_id="w2:p1")
+        self.assertIsNone(busy["task"])
+        self.assertEqual("busy", busy["refused"]["reason"])
+        self.assertTrue(busy.get("following"))
+        self.assertEqual("mine", self.flock.task_waiters["w2:p1"])
+
+    def test_mine_empty_subscribes_mine_follow(self):
+        """t425: no owned work is an honest empty that still subscribes the
+        pane for a later push of assigned work (not the global backlog)."""
+        # Backlog owned by another lane (t110: creator-owned), not by us.
+        self.flock.task_add("leader backlog", assignees=["%99"],
+                            self_pane_id="%99")
+        empty = self.flock.task_next(scope="mine", self_pane_id="w2:p1")
+        self.assertIsNone(empty["task"])
+        self.assertEqual("empty", empty["refused"]["reason"])
+        self.assertTrue(empty.get("following"))
+        self.assertEqual("mine", self.flock.task_waiters["w2:p1"])
+
+    def test_follow_mine_scope_accepted(self):
+        """t425: `task follow mine` subscribes the pane for pushed assigned
+        work; the push loop claims through the same selection."""
+        result = self.flock.task_follow(scope="mine", self_pane_id="w2:p1")
+        self.assertTrue(result["following"])
+        self.assertEqual("mine", result["scope"])
+        task = self.flock.task_add("assigned work", priority="high",
+                                   assignees=["w2:p1"], self_pane_id="w2:p1")
+        self.flock._push_tasks()
+        claimed = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.assertEqual("in_progress", claimed["status"])
+        self.assertEqual(["w2:p1"], claimed["claimed_by"])
+
+    def test_mine_needs_a_calling_pane(self):
+        """t425: anonymous 'mine' is refused, not treated as global."""
+        with self.assertRaises(DunkError):
+            self.flock.task_next(scope="mine", self_pane_id=None)
+        with self.assertRaises(DunkError):
+            self.flock.task_follow(scope="mine", self_pane_id=None)
+
+    def test_task_next_pane_scope_still_reads_scope_not_owner(self):
+        """t425 cross-pane pin of the observed friction: from %36,
+        `task next %34` is refused by per-pane privacy (it names %34's
+        private queue), so it can never take %34's assigned global work.
+        Scope was not reinterpreted as ownership."""
+        task = self.flock.task_add("their work", assignees=["%34"],
+                                   self_pane_id="%34")
+        with self.assertRaises(DunkError) as caught:
+            self.flock.task_next(scope="%34", self_pane_id="%36")
+        self.assertIn("private", str(caught.exception))
+        still = self.flock.task_read(task["id"], self_pane_id="%34")
+        self.assertEqual("open", still["status"])
 
     def test_task_metrics_privacy_and_scope(self):
         self.flock.task_add("global", self_pane_id="w2:p1")

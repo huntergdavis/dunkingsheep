@@ -2790,6 +2790,17 @@ class Flock:
                                               allow_busy=allow_busy)
                 if local.get("task"):
                     return local
+        elif value == "mine":
+            # t425: explicit own-assigned-work selection. Scope picks the
+            # queue; a pane id as the positional is never reinterpreted as
+            # "my work" (see t145). "mine" claims only tasks naming this
+            # pane in assignees, from the global queue and the pane's own
+            # queue; unowned leader backlog and other lanes' tasks are
+            # excluded. Busy/lease/caller checks below are unchanged.
+            if not self_pane_id:
+                raise DunkError("scope 'mine' requires a known caller pane")
+            target = "mine"
+            follow_scope = "mine"
         else:
             target = self._task_scope(value, self_pane_id, default=TASK_GLOBAL)
             follow_scope = target
@@ -2809,7 +2820,12 @@ class Flock:
         """Ask the daemon to push the next task when this pane is idle."""
         if not self_pane_id:
             raise DunkError("task follow requires a known caller pane")
-        target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
+        if str(scope or "").strip() == "mine":
+            # t425: follow only own assigned work; the push loop claims via
+            # the same "mine" selection, so unowned backlog never arrives.
+            target = "mine"
+        else:
+            target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
         with self._lock:
             self.task_waiters[self_pane_id] = target
             followers = sorted(self.task_waiters)
