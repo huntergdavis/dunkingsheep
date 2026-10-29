@@ -920,8 +920,44 @@ class Tasks:
             return task["multi_assignee"] or assigned_to_me
         return False
 
+    def _busy_task_ids(self, pane_id, now):
+        """Ids of in-progress tasks this pane holds a live lease on."""
+        rows = self.db.execute(
+            "SELECT DISTINCT lease.task_id FROM task_leases AS lease "
+            "JOIN tasks AS task ON task.id = lease.task_id "
+            "WHERE lease.pane_id = ? AND lease.expires_at > ? "
+            "AND task.status = 'in_progress' ORDER BY lease.task_id",
+            (str(pane_id), now),
+        ).fetchall()
+        return [row["task_id"] for row in rows]
+
+    def _refusal(self, candidates, pane_id):
+        """Why nothing was claimable, as a reason plus the evidence for it."""
+        ids = [task["id"] for task in candidates]
+        if not candidates:
+            return {"reason": "empty", "task_ids": []}
+        blocked = [task["id"] for task in candidates if task["blocked_by"]]
+        if len(blocked) == len(candidates):
+            return {"reason": "blocked", "task_ids": blocked}
+        owned = [task for task in candidates if task["assignees"]
+                 and not task["multi_assignee"] and pane_id not in task["assignees"]]
+        if owned:
+            return {"reason": "owned_elsewhere",
+                    "task_ids": [task["id"] for task in owned],
+                    "owned_by": sorted({name for task in owned
+                                        for name in task["assignees"]})}
+        leased = [task["id"] for task in candidates if task["leases"]]
+        if leased:
+            return {"reason": "leased", "task_ids": leased}
+        return {"reason": "not_claimable", "task_ids": ids}
+
+    def _log_refusal(self, pane_id, target, refused):
+        log.info("task claim refused: pane=%s scope=%s reason=%s tasks=%s",
+                 pane_id, target, refused["reason"],
+                 ",".join(refused.get("task_ids") or []) or "-")
+
     def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None,
-                   caller=None):
+                   caller=None, allow_busy=False):
         """Atomically claim the next eligible task in ``scope``.
 
         The whole read-select-update runs under ``BEGIN IMMEDIATE``. SQLite
@@ -935,6 +971,12 @@ class Tasks:
         behind the request. The pane id stays the registry key; the pid/start
         is liveness, so a crashed agent's lease can be reclaimed while its
         shell pane still exists. The name is only a label.
+
+        A pane already holding in-progress work (a live lease) is REFUSED a
+        second task unless ``allow_busy`` is set: parallel work is an explicit
+        decision, not something a poll can take by accident (t145). Every
+        refusal returns ``refused`` with a reason and is logged, so "nothing to
+        do" and "you were refused" never look alike.
         """
         target = validate_scope(scope)
         if not pane_id:
@@ -960,6 +1002,16 @@ class Tasks:
                 candidates = [self._decorate(row) for row in rows]
                 candidates.sort(key=self._order_key)
 
+                now = _now()
+                if not allow_busy:
+                    busy = self._busy_task_ids(pane_id, now)
+                    if busy:
+                        self.db.commit()
+                        refused = {"reason": "busy", "task_ids": busy}
+                        self._log_refusal(pane_id, target, refused)
+                        return {"task": None, "scope": target,
+                                "pane_id": pane_id, "refused": refused}
+
                 chosen = None
                 for task in candidates:
                     if task["blocked_by"]:
@@ -970,10 +1022,12 @@ class Tasks:
                     break
 
                 if chosen is None:
+                    refused = self._refusal(candidates, pane_id)
                     self.db.commit()
-                    return {"task": None, "scope": target, "pane_id": pane_id}
+                    self._log_refusal(pane_id, target, refused)
+                    return {"task": None, "scope": target,
+                            "pane_id": pane_id, "refused": refused}
 
-                now = _now()
                 self._claim_locked(chosen, pane_id, lease_s, caller, now)
                 self.db.commit()
             except Exception:

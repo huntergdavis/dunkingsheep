@@ -101,7 +101,8 @@ class TaskStoreTests(unittest.TestCase):
             found = []
             barrier.wait()
             while True:
-                task = tasks.claim_next(GLOBAL, pane, lease_seconds=300)["task"]
+                task = tasks.claim_next(GLOBAL, pane, lease_seconds=300,
+                                        allow_busy=True)["task"]
                 if task is None:
                     break
                 found.append(task["id"])
@@ -134,6 +135,71 @@ class TaskStoreTests(unittest.TestCase):
                          [(item["task_id"], item["reason"]) for item in requeued])
         self.assertEqual("open", self.store.get(task["id"])["status"])
         self.assertEqual([], self.store.get(task["id"])["assignees"])
+
+    def test_busy_lane_is_refused_a_second_task(self):
+        """t145: a lane already holding in-progress work is not handed more.
+
+        The incident behind this task was a busy lane (codex-parity) being given
+        another lane's reaped task. A refusal must be a refusal, not a silent
+        empty result: the caller gets a reason and the second task stays open
+        and unassigned.
+        """
+        first = self.store.add(GLOBAL, "mine", priority="urgent",
+                               assignees=["w1:p1"])
+        second = self.store.add(GLOBAL, "second", priority="low")
+        claimed = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertEqual(first["id"], claimed["task"]["id"])
+        refused = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertIsNone(refused["task"])
+        self.assertEqual("busy", refused["refused"]["reason"])
+        self.assertEqual([first["id"]], refused["refused"]["task_ids"])
+        still = self.store.get(second["id"])
+        self.assertEqual("open", still["status"])
+        self.assertEqual([], still["assignees"])
+        self.assertEqual([], self.store.leases_for(second["id"]))
+
+    def test_busy_lane_may_take_parallel_work_only_with_the_explicit_flag(self):
+        first = self.store.add(GLOBAL, "first")
+        second = self.store.add(GLOBAL, "second", priority="urgent")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertIsNone(self.store.claim_next(GLOBAL, "w1:p1")["task"])
+        allowed = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                                        allow_busy=True)
+        self.assertEqual(first["id"], allowed["task"]["id"])
+        self.assertIsNone(allowed.get("refused"))
+        held = {lease["task_id"] for lease in self.store.leases_for_pane("w1:p1")}
+        self.assertEqual({first["id"], second["id"]}, held)
+
+    def test_refusal_reason_names_why_nothing_was_claimable(self):
+        self.assertEqual(
+            "empty",
+            self.store.claim_next(GLOBAL, "w1:p1")["refused"]["reason"])
+        task = self.store.add(GLOBAL, "owned", assignees=["w2:p2"])
+        refused = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual("owned_elsewhere", refused["refused"]["reason"])
+        self.assertEqual(["w2:p2"], refused["refused"]["owned_by"])
+        self.assertEqual(task["id"], refused["refused"]["task_ids"][0])
+        blocked = self.store.add(GLOBAL, "blocked", depends_on=[task["id"]])
+        refused = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual("owned_elsewhere", refused["refused"]["reason"],
+                         "an open task owned elsewhere still explains the refusal")
+        only_blocked = Tasks(os.path.join(self.tmp.name, "blocked.db"))
+        try:
+            gate = only_blocked.add(GLOBAL, "gate")
+            only_blocked.block(gate["id"], reason="paused")
+            waiting = only_blocked.add(GLOBAL, "waiting", depends_on=[gate["id"]])
+            refused = only_blocked.claim_next(GLOBAL, "w1:p1")
+            self.assertEqual("blocked", refused["refused"]["reason"])
+            self.assertEqual([waiting["id"]], refused["refused"]["task_ids"])
+        finally:
+            only_blocked.close()
+
+    def test_every_refusal_is_logged_with_the_pane_and_reason(self):
+        with self.assertLogs("dunkingsheep.tasks", level="INFO") as logs:
+            self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertIn("refused", logs.output[0])
+        self.assertIn("w1:p1", logs.output[0])
+        self.assertIn("empty", logs.output[0])
 
     def test_pane_gone_alone_does_not_requeue(self):
         task = self.store.add(GLOBAL, "work")
@@ -373,6 +439,23 @@ class FlockTaskTests(unittest.TestCase):
                          self.flock.task_read(task["id"], self_pane_id="%58")["status"])
         claimed = dunk_api.h_task_next(self.flock, {}, "%58")
         self.assertEqual(task["id"], claimed["task"]["id"])
+
+    def test_cli_handler_refuses_a_busy_pane_and_honours_allow_busy(self):
+        """The plumbing, not just the store: `task next` from a pane that holds
+        work is refused with a reason, keeps the documented auto-follow, and
+        `allow_busy` is what a lane must pass to take parallel work."""
+        first = self.flock.task_add("first", self_pane_id="w2:p1")
+        second = self.flock.task_add("second", self_pane_id="w2:p1")
+        claimed = dunk_api.h_task_next(self.flock, {}, "w2:p1")
+        self.assertEqual(first["id"], claimed["task"]["id"])
+        refused = dunk_api.h_task_next(self.flock, {}, "w2:p1")
+        self.assertIsNone(refused["task"])
+        self.assertEqual("busy", refused["refused"]["reason"])
+        self.assertEqual([first["id"]], refused["refused"]["task_ids"])
+        self.assertTrue(refused.get("following"),
+                        "an empty task_next still subscribes the pane for a push")
+        allowed = dunk_api.h_task_next(self.flock, {"allow_busy": True}, "w2:p1")
+        self.assertEqual(second["id"], allowed["task"]["id"])
 
     def test_an_unleased_task_assigned_to_another_pane_is_not_claimable(self):
         """t145 guard: after a lease is reaped the task has no lease row but
