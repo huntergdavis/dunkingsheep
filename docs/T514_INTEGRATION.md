@@ -62,7 +62,28 @@ before `send_text`.
 | focused: allocator, tasks, task_pool, next_job x3, recovery, recovery_wiring, state_capture_cost, federated_recovery, federated_backoff, busy_native_queue, dialog_alerts, delivery, delivery_backoff, stuck_recovery, scheduled_recovery, codex_ambiguous_composer, submit_honesty, guarded_nudge_submits, state_session, native_session, dispatch, cli | 435 tests, 3 failures, all in `test_cli` (see below) |
 | seam suites after the fix: integration_t514, federated_recovery, federated_backoff, recovery_wiring, stuck_recovery, scheduled_recovery, busy_native_queue, dialog_alerts | 164 tests OK |
 | red control: fix reverted, `test_dunk_integration_t514` | 1 failure (the plain-frame test), as intended |
-| full `python3 -m unittest discover -s tests` | see the task note for the final count |
+| full `python3 -m unittest discover -s tests` (924 s) | 1744 tests, 13 failures, 6 errors, 7 skipped; attribution below |
+
+Full-run attribution, verified by re-running the same 19 tests on unmodified
+`origin/main` 182e602 in a scratch worktree with the same environment:
+
+- 15 fail **identically on main**: 6 `test_dunk_http_resize.TmuxResize` errors
+  (IndexError, tmux environment), 3 `test_dunk_core` Flock/modal failures,
+  `test_command_smoke` (turn_start/turn_end auth), `test_dunk_identity` version
+  commit lookup, `test_dunk_watchdog` sampler (`llm` in dunk_panes), the MCP
+  grouped-home test (`owner_receipts`), the CLI parity test (`owner_receipts`,
+  `respawn_pane`) and the mechanism census (8 functions with no row, all main's).
+- 2 were **widened by the merged PRs and are fixed here** (commit after
+  554577e): the CLI parity spelling map lacked PR111's `allocation` command,
+  and the mechanism census lacked a row for PR112's `plan_recovery`. After the
+  fix both tests fail with exactly main's lists.
+- 2 **pass on re-run** in isolation on both trees (`test_cli` task-next busy
+  refusal, `test_dunk_identity_tty` systemd unit): load-sensitive under the
+  full run, pre-existing, reported.
+- `test_cli.test_full_lifecycle_through_the_cli` and `test_self_discovery_surfaces`
+  as described above (main defect; stale guide fixed).
+
+Nothing that passes on main fails on this tree.
 
 `test_cli` failures: `test_commands_listing_and_version` was the version bump
 landing mid-run (CLI subprocess read 2.70.103, test imported 2.70.102); it
