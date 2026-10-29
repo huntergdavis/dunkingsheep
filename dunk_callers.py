@@ -79,6 +79,52 @@ def _cmdline(pid):
         return []
 
 
+def pane_agent_pids(pane_pid):
+    """Kernel process entries for the pane process itself plus its direct children.
+
+    t215 REVISE: start-agent verifies the pane PROCESS, not just the pane. Each
+    entry is {"pid", "comm", "state", "start", "argv"}: kernel comm/state/start
+    plus the command line for context. Identity matching MUST use comm/state,
+    never an argv basename (a /bin/sleep launched with argv0=claude is not an
+    agent). Returns None when this platform offers no process table (no /proc)
+    or the pane reports no usable pid, so callers fall back to screen-only
+    verification instead of refusing blind. An empty list means the table worked
+    and nothing is there - evidence of a dead launch, not ignorance."""
+    try:
+        ppid = int(pane_pid)
+    except (TypeError, ValueError):
+        return None
+    if not os.path.isdir("/proc"):
+        return None
+
+    def entry(pid):
+        info = _stat(pid)
+        if not info:
+            return None
+        return {"pid": int(pid), "comm": info.get("comm") or "",
+                "state": info.get("state") or "", "start": info.get("start"),
+                "argv": _cmdline(pid)}
+
+    found = []
+    own = entry(ppid)
+    if own:
+        # The agent may have replaced the shell (same pid), not forked from it.
+        found.append(own)
+    try:
+        digits = os.listdir("/proc")
+    except OSError:
+        return None
+    for item in digits:
+        if not item.isdigit() or int(item) == ppid:
+            continue
+        info = _stat(int(item))
+        if info and info.get("ppid") == ppid:
+            got = entry(int(item))
+            if got:
+                found.append(got)
+    return found
+
+
 def agent_name(pid):
     """The agent executable this process is, if any."""
     info = _stat(pid)

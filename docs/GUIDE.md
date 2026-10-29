@@ -190,9 +190,14 @@ background unless focus=true.
   below any pane.
 - start_agent(name, command, workspace|tab, split, cwd): launch an agent
   process registered with herdr under `name` (herdr agent start), so herdr
-  lists it and tracks its status by that name. Returns its pane id. With
-  `workspace`, herdr picks the tab; create_tab first and pass `tab` to
-  control the tab's name.
+  lists it and tracks its status by that name. Returns its pane id and, where
+  the platform names processes, the agent's confirmed child pid. Fail closed:
+  a launch whose command never becomes a process (missing binary, instant
+  exit, vanished pane, or a pid seen but gone at the deadline) is refused
+  with the evidence, never reported started. Process evidence is kernel
+  comm/state/start watched across the whole window, never a first-frame
+  sighting or an argv basename. With `workspace`, herdr picks the tab;
+  create_tab first and pass `tab` to control the tab's name.
 - rename(kind, target, label) / focus(kind, target) / close(kind, target)
   for kind = workspace | tab | pane. close kills what runs inside, stops any
   dunks aimed there, and refuses the caller's own pane, tab or workspace.

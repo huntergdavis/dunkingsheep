@@ -1,6 +1,7 @@
 """Test doubles shared by the Dunking Sheep test suite."""
 
 import json
+import os
 import re
 import threading
 
@@ -66,6 +67,15 @@ class FakeHerdr:
         # A real pane prints its banner (or its failure) within milliseconds.
         self.screen_after_create = None
         self.vanish_panes = False
+        # t215 REVISE: kernel entries behind a fresh pane. None means this platform
+        # has no process table (screen-only verification, as before the process
+        # check existed). Otherwise a list of child dicts {argv, comm, state,
+        # start} (defaults: comm=basename(argv0), state=S, start=2000), or a list
+        # of such lists served one frame per agent_child_pids call, clamped to
+        # the last (a pid seen, then gone). [] means the launch left nothing
+        # but the shell behind - the fail-closed case.
+        self.proc_after_create = None
+        self._proc_calls = {}
         self.enter_presses = {}
         self.statuses = {}
         self.screens = {}
@@ -114,9 +124,39 @@ class FakeHerdr:
         pane = {"pane_id": f"{workspace_id}:p{self._counter}", "tab_id": tab_id,
                 "workspace_id": workspace_id, "cwd": cwd or "/home/x",
                 "agent_status": "unknown", "terminal_id": f"term_{self._counter}",
+                "pane_pid": 50000 + self._counter,
                 "terminal_title_stripped": "shell", "focused": False}
         self.panes.append(pane)
         return dict(pane)
+
+    def agent_child_pids(self, pane_pid):
+        """t215 REVISE: kernel entries for the fake's pane. None (the default)
+        means 'no /proc here', so verification stays screen-only exactly as
+        before the process check existed."""
+        if self.proc_after_create is None:
+            return None
+        try:
+            ppid = int(pane_pid)
+        except (TypeError, ValueError):
+            return None
+        frames = self.proc_after_create
+        if frames and isinstance(frames[0], list):
+            n = self._proc_calls.get(ppid, 0)
+            self._proc_calls[ppid] = n + 1
+            children = frames[min(n, len(frames) - 1)]
+        else:
+            children = frames
+        found = [{"pid": ppid, "comm": "bash", "state": "S", "start": 1000,
+                  "argv": ["bash"]}]
+        for index, child in enumerate(children or []):
+            argv = list((child or {}).get("argv") or [])
+            comm = (child or {}).get("comm",
+                                      os.path.basename(argv[0]) if argv else "")
+            found.append({"pid": ppid + 1 + index, "comm": comm,
+                          "state": (child or {}).get("state", "S"),
+                          "start": (child or {}).get("start", 2000),
+                          "argv": argv})
+        return found
 
     def create_workspace(self, label=None, cwd=None, focus=False, env=None):
         failed = self._fail()
@@ -298,6 +338,11 @@ class FakeHerdr:
         if pane_id in self.unreadable:
             return None
         screen = self.screens.get(pane_id)
+        if isinstance(screen, list):
+            # t215 REVISE: evolving frames, one per read, clamped to the last
+            # (a blank first frame followed by an exit line).
+            shown = sum(1 for pid, _ in self.reads if pid == pane_id)
+            screen = screen[min(shown - 1, len(screen) - 1)]
         if screen is None and ansi:
             # No screen pinned by the test: render the modelled input box, so
             # a send that has not been submitted is visibly still sitting there.
