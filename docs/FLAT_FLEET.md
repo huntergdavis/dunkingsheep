@@ -309,9 +309,40 @@ CI state and a diff stat.
 In poolrad-decomp acceptance *is* a reviewer commit on `main` that updates
 the credited/replaced ledger ("Accept OVL_007F_063A (967 B): 289 strict /
 334 identities"). No approver may push code, so `review-sync` makes that
-commit deterministically from the verdict's numbers, as the reviewer App,
-under its bypass. It is the only write the reviewer App ever makes and it
-touches only the ledger files.
+commit deterministically from the verdict and the accepted PR. It is the only
+write the reviewer App ever makes and it touches only the ledger file
+(`docs/re/strict_full_c_addresses.csv`).
+
+**Revised 2026-10-29 (red team, live).** The first draft had the reviewer App
+push the row straight to `main` under a branch-protection *bypass allowance*.
+GitHub answers **422**: bypass allowances are an organisation feature, and all
+three repos are personal. The row therefore travels as its own small PR:
+
+1. **Derive the row, or refuse.** Inputs are the verdict (the reviewer's
+   `task note` lines) and the accepted PR (the files it adds). A row is one id
+   and one evidence document. The id is the first source that names *exactly
+   one* `OVL_<unit>_<offset>` / `RES_<unit>_<offset>` (verdict notes, then PR
+   title, then PR body); the document is the added `docs/re/*.md` whose name
+   carries that unit and offset, the poolrad convention
+   (`tools/overlay/check_body_doc_pairing.py`: `U7F_STATE_FLAGS_0F7E.md` <-
+   `OVL_007F_0F7E`). Two ids, no matching document, two matching documents, or
+   an id already in the ledger all *refuse* and write the sentence on the
+   review task. Nothing is guessed: a wrong row is a credit nobody reviewed.
+2. **The reviewer App commits and opens the PR** on a branch
+   `accounting/pr<N>-<id>`, built on the current `main` commit (so the row is
+   inserted in sorted position in the ledger as it stands, not as it was when
+   the body PR opened). An existing branch without an open PR is refused, never
+   overwritten.
+3. **The author App approves it** — two distinct bot identities, which is what
+   branch protection counts and what GitHub enforces by refusing an App's
+   approval on its own PR.
+4. **Auto-merge is enabled**, and branch protection decides when it lands.
+
+Both PR numbers are recorded on the review task: `pr` stays the body PR, the
+new `accounting_pr` column carries the accounting PR, and an `accounting` event
+records the row, the URL, the observed state, and — when there is no PR — the
+reason. A GitHub failure on any step is appended to the verdict result and
+never undoes the verdict.
 
 ### 6.5 Filling the backlog
 
