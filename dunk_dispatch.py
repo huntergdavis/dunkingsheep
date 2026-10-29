@@ -579,7 +579,7 @@ def assigned_open_tasks(tasks, pane_id):
     for task in tasks or ():
         if str(task.get("status")) != "open":
             continue
-        if task.get("blocked_by") or task.get("block_reason"):
+        if task.get("blocked_by") or task.get("block_reason") or task.get("allocation_waiting"):
             continue
         assignees = [str(a) for a in (task.get("assignees") or [])]
         if wanted and wanted in assignees:

@@ -28,7 +28,7 @@ class NextJobs:
         with self._lock:
             return self._locks.setdefault(pane, threading.RLock())
 
-    def gate(self, pane):
+    def gate(self, pane, lanes=None):
         """Use the existing dispatch kill switch and lane opt-in resolver."""
         import dunk_core
         import dunk_api
@@ -36,8 +36,14 @@ class NextJobs:
         if not dunk_core.TURN_END_DISPATCH:
             return "disabled"
         try:
-            lanes = self.flock.resolve_lanes()
-            if pane not in dunk_api._dispatch_allowlist(self.flock, lanes=lanes):
+            lanes = self.flock.resolve_lanes() if lanes is None else lanes
+            registered = False
+            allocator = getattr(self.flock, "allocator", None)
+            if allocator is not None:
+                row = self.flock.tasks.db.execute(
+                    "SELECT enabled FROM allocation_workers WHERE pane_id=?", (pane,)).fetchone()
+                registered = bool(row and row["enabled"])
+            if pane not in dunk_api._dispatch_allowlist(self.flock, lanes=lanes) and not registered:
                 return "not_allowed"
             if not any(p["pane_id"] == pane for p in lanes) or dunk_panes.is_retired(pane):
                 return "unavailable_lane"
