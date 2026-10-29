@@ -60,6 +60,22 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 # delivery step to fail - the write either happened or it did not.
 STATES = ("queued", "read", "acked", "cancelled", "archived",
           "undeliverable")
+# Where an owner question arrived, so the answer goes back the same way
+# (FLAT_FLEET.md 7.2, owner 2026-10-29: "reply on the transport the question
+# arrived on"). `report` is the reporter's channel: the web shows it, Telegram
+# does not. A lane message has no transport at all.
+TRANSPORTS = ("web", "telegram", "report")
+
+
+def validate_transport(transport):
+    """None (a lane message) or one of TRANSPORTS."""
+    if transport in (None, ""):
+        return None
+    transport = str(transport).strip().lower()
+    if transport not in TRANSPORTS:
+        raise InboxError(f"transport must be one of {', '.join(TRANSPORTS)}; "
+                         f"got {transport!r}")
+    return transport
 # A mailbox key that is itself a pane id (older versions stored
 # dead-pane mail this way, with pane_id NULL).
 # The identity of last resort: a mailbox named after the pane. Both backends
@@ -85,7 +101,12 @@ CREATE TABLE IF NOT EXISTS messages (
     notify_state  TEXT,
     notify_reason TEXT,
     digest_id     TEXT,
-    digest_updated_at REAL
+    digest_updated_at REAL,
+    -- FLAT_FLEET.md 7.2: one owner mailbox, two transports. A question records
+    -- where it arrived (web|telegram|report) so the reply goes back the same way;
+    -- a reply carries reply_to = the question's id, which is also its ack link.
+    transport     TEXT,
+    reply_to      TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_by_mailbox
     ON messages (mailbox, state, created_at);
@@ -169,6 +190,12 @@ class Inbox:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
             if "digest_updated_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
+            for name in ("transport", "reply_to"):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS messages_by_transport "
+                "ON messages (mailbox, transport, created_at)")
             for name, kind in (("notify_at", "REAL"), ("notify_transport_id", "TEXT"),
                                ("notify_attempt", "INTEGER")):
                 if name not in columns:
@@ -230,11 +257,17 @@ class Inbox:
             return result
 
     def send(self, mailbox, body, subject=None, sender=None, mailbox_label=None,
-             pane_id=None, attachments=()):
-        """Put a message in a mailbox. Returns its row."""
+             pane_id=None, attachments=(), transport=None, reply_to=None):
+        """Put a message in a mailbox. Returns its row.
+
+        `transport` records where an owner question arrived; `reply_to` links a
+        reply to the question it answers (the same row is also acked, which is
+        what makes "answered" one fact instead of two).
+        """
         mailbox = str(mailbox or "").strip()
         if not mailbox:
             raise InboxError("a mailbox is required")
+        transport = validate_transport(transport)
         body = "" if body is None else str(body)
         if len(body.encode("utf-8")) > MAX_BODY_BYTES:
             raise InboxError(f"body is larger than {MAX_BODY_BYTES} bytes")
@@ -245,9 +278,10 @@ class Inbox:
             message_id = self._next_id()
             self.db.execute(
                 "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, "
-                "subject, body, state, created_at) VALUES (?,?,?,?,?,?,?,'queued',?)",
+                "subject, body, state, created_at, transport, reply_to) "
+                "VALUES (?,?,?,?,?,?,?,'queued',?,?,?)",
                 (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
-                 subject, body, _now()))
+                 subject, body, _now(), transport, reply_to))
             for index, blob in enumerate(stored, 1):
                 # The attachment ROW id is per message; the blob itself stays
                 # content-addressed and shared. Re-attaching the same file to
@@ -364,6 +398,38 @@ class Inbox:
                 f"SELECT * FROM messages WHERE {where} ORDER BY created_at LIMIT ?",
                 (*params, int(limit))).fetchall()
             return [self._summary(row) for row in rows]
+
+    def replies_to(self, message_id):
+        """Rows answering `message_id`, oldest first."""
+        with self._lock:
+            return [dict(row) for row in self.db.execute(
+                "SELECT * FROM messages WHERE reply_to = ? ORDER BY created_at",
+                (str(message_id),)).fetchall()]
+
+    def conversation(self, mailbox, limit=50, before=None):
+        """The mailbox as a conversation: questions and replies, oldest first.
+
+        A row with `reply_to` is an answer; a row nothing points at is a question
+        still waiting. `answered` is computed from the rows themselves, so a
+        mailbox cannot disagree with itself about whether something was answered
+        (FLAT_FLEET.md 7.2).
+        """
+        condition, params = mailbox_where(mailbox)
+        where = f"{condition} AND state != 'cancelled'"
+        if before is not None:
+            where += " AND created_at < ?"
+            params = (*params, float(before))
+        with self._lock:
+            rows = self.db.execute(
+                f"SELECT * FROM messages WHERE {where} ORDER BY created_at DESC LIMIT ?",
+                (*params, int(limit))).fetchall()
+            answered = {row["reply_to"] for row in rows if row["reply_to"]}
+            out = []
+            for row in reversed(rows):
+                item = dict(row)
+                item["answered"] = item["id"] in answered or bool(item["acked_at"])
+                out.append(item)
+            return out
 
     def read(self, mailbox, limit=10, peek=False, mark=True):
         """Full messages in queue order. Marks them read unless `peek` or `mark=False`.
@@ -872,6 +938,11 @@ class Inbox:
                           if row["state"] == "queued" else None),
             "body_bytes": len((row["body"] or "").encode("utf-8")),
             "digest_id": row["digest_id"] if "digest_id" in row.keys() else None,
+            # FLAT_FLEET.md 7.2: where an owner question arrived, and which
+            # question a reply answers. Every message carries both, lane mail
+            # with transport=None and reply_to=None.
+            "transport": row["transport"] if "transport" in row.keys() else None,
+            "reply_to": row["reply_to"] if "reply_to" in row.keys() else None,
             "attachments": blobs,
         }
 

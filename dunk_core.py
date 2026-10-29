@@ -1519,6 +1519,13 @@ class Flock:
                 f"address must name a live pane: use a current pane id, or a bare "
                 f"mailbox name without the parenthetical. reason=dead_lane.")
 
+        # 1b-bis. RESERVED MAILBOXES. The owner mailbox is not a pane: it is a
+        # person's channel with two transports (FLAT_FLEET.md 7.2). It must be
+        # addressable before any pane exists for it, and it must never fall
+        # through to "no live pane, refuse", because the owner is not a lane.
+        if spec.strip().lower() == self.OWNER_MAILBOX:
+            return self.OWNER_MAILBOX, "owner", None
+
         # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
         # live pane wins over any name: labels and titles are chosen by the agent
         # and change (claude rewrites its title every turn), while the registry
@@ -2211,6 +2218,80 @@ class Flock:
         key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         return {"mailbox": key,
                 "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
+
+    # -- the owner mailbox (FLAT_FLEET.md 7.2) --------------------------------
+
+    OWNER_MAILBOX = "owner"
+
+    def _owner_role(self, self_pane_id):
+        """Only the desk and the owner's own transport read or answer the owner.
+
+        The allowlist in dunk_roles is the enforcement; this is the second lock,
+        because this mailbox is a person's conversation with the fleet and a
+        lane reading it is not a permission question but a wrong one.
+        """
+        role = self.caller_role(self_pane_id) if self_pane_id else "owner"
+        if role not in ("desk", "web", "owner", "system"):
+            raise DunkError(f"the {self.OWNER_MAILBOX} mailbox is the desk's and the "
+                            f"owner's; role {role!r} may not read or answer it")
+        return role
+
+    @_as_dunk_error
+    def owner_conversation(self, limit=50, before=None, self_pane_id=None):
+        """The owner mailbox as one conversation: questions and their answers.
+
+        Telegram and the web are two transports for one mailbox, so this returns
+        the complete record; `transport` on each row says where it arrived and
+        `reply_to` says what it answers.
+        """
+        self._owner_role(self_pane_id)
+        rows = self.inbox.conversation(self.OWNER_MAILBOX, limit=int(limit or 50),
+                                       before=before)
+        # A reply is not a question waiting for an answer: `waiting` is the desk's
+        # work list, so a row that answers something is excluded even while it is
+        # unread (FLAT_FLEET.md 7.2).
+        waiting = [row["id"] for row in rows
+                   if row["state"] == "queued" and not row["answered"]
+                   and not row.get("reply_to")]
+        return {"mailbox": self.OWNER_MAILBOX, "messages": rows,
+                "count": len(rows), "waiting": waiting}
+
+    @_as_dunk_error
+    def owner_reply(self, message_id, body, self_pane_id=None):
+        """Answer one owner question: one reply row, linked, on the same transport.
+
+        The reply goes back the way the question came (owner 2026-10-29: Telegram
+        gets Telegram answers and nothing else). Answering also acks the question,
+        so "answered" is one fact in one row rather than a second table that can
+        disagree with it.
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError, normalise_mailbox
+        try:
+            question = self.inbox.get(message_id)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        if normalise_mailbox(question["mailbox"]) != self.OWNER_MAILBOX:
+            raise DunkError(f"{message_id} is not an {self.OWNER_MAILBOX} message "
+                            f"(mailbox {question['mailbox']!r})")
+        if question.get("reply_to"):
+            raise DunkError(f"{message_id} is itself a reply; answer the question it "
+                            "belongs to")
+        already = self.inbox.replies_to(question["message_id"])
+        if already:
+            raise DunkError(f"{message_id} was already answered by {already[0]['id']}; "
+                            "one answer per question, so the latency metric has one "
+                            "edge")
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise DunkError("a reply needs a body")
+        transport = question.get("transport")
+        reply = self.inbox.send(self.OWNER_MAILBOX, body, sender=self_pane_id or None,
+                                mailbox_label=self.OWNER_MAILBOX, transport=transport,
+                                reply_to=question["message_id"])
+        self.inbox.ack([question["message_id"]], mailbox=self.OWNER_MAILBOX)
+        return {"reply": reply, "question": message_id, "transport": transport,
+                "acked": question["message_id"]}
 
     @_as_dunk_error
     def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):

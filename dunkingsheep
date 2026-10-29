@@ -656,6 +656,21 @@ def build_parser():
     q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
     q.add_argument("pane_id")
     q.add_argument("--by")
+    q = osub.add_parser("conversation",
+                        help="the owner mailbox as one conversation (desk/web only)",
+                        epilog="Telegram and the web are two transports for one mailbox: "
+                               "this is the complete record, with the transport each "
+                               "message arrived on and the question each reply answers.")
+    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--before", type=float, help="only messages older than this unix time")
+    q = osub.add_parser("reply",
+                        help="answer one owner question (desk/web only)",
+                        epilog="The reply goes back on the transport the question arrived "
+                               "on, and answering acks the question, so 'answered' is one "
+                               "fact. One answer per question.")
+    q.add_argument("message_id")
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
     q = osub.add_parser("stats", help="owner-push counts and latency")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
@@ -1708,6 +1723,24 @@ def print_retired(result):
 def print_owner_push(result):
     print(f"pushed owner message {result['id']} for {result['pane_id']} "
           f"(no inbox row, nothing typed)")
+
+
+def print_owner_conversation(result):
+    print(f"mailbox {result.get('mailbox')}  messages {result.get('count', 0)}  "
+          f"waiting {len(result.get('waiting') or [])}")
+    for row in result.get("messages") or []:
+        mark = "->" if row.get("reply_to") else ("? " if row.get("state") == "queued" else "  ")
+        when = time.strftime("%m-%d %H:%M", time.localtime(row.get("created_at") or 0))
+        transport = row.get("transport") or "-"
+        print(f"{mark} {row.get('id'):>6} {when} {transport:<8} "
+              f"{(row.get('sender') or '-'):<8} {(row.get('body') or '').splitlines()[0][:90]}")
+
+
+def print_owner_reply(result):
+    reply = result.get("reply") or {}
+    print(f"answered {result.get('question')} with {reply.get('message_id')} "
+          f"on {result.get('transport') or 'no transport'} "
+          f"(question {result.get('acked')} acked)")
 
 
 def print_owner_take(result):
@@ -2991,6 +3024,20 @@ def run_client_command(client, args):
         if sub == "take":
             return client.call("owner_take", pane_id=args.pane_id,
                                by=args.by), print_owner_take
+        if sub == "conversation":
+            payload = {"limit": args.limit}
+            if args.before is not None:
+                payload["before"] = args.before
+            return client.call("owner_conversation", **payload), print_owner_conversation
+        if sub == "reply":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            if not body:
+                raise SystemExit("owner reply: a body or --body-file is required")
+            return client.call("owner_reply", message_id=args.message_id,
+                               body=" ".join(body)), print_owner_reply
         return client.call("owner_stats"), print_owner_stats
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]

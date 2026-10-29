@@ -105,8 +105,11 @@ ALLOW = {
     "web": None,
     "desk": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "inbox_fetch", "inbox_ack",
-        "owner_take", "owner_poll", "owner_receipts", "read_pane",
-        "turn_start", "turn_end",
+        "owner_take", "owner_poll", "owner_receipts", "owner_reply",
+        # The owner mailbox is the desk's whole job (FLAT_FLEET.md 7.2): read it,
+        # answer it. A lane reads its own mailbox, never a person's conversation.
+        "owner_conversation",
+        "read_pane", "turn_start", "turn_end",
     }),
     "planner": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "turn_start", "turn_end",

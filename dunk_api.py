@@ -702,6 +702,17 @@ def h_inbox_read(flock, args, self_pane_id):
                             self_pane_id=self_pane_id)
 
 
+def h_owner_conversation(flock, args, self_pane_id):
+    return flock.owner_conversation(limit=int(_opt(args, "limit", 50)),
+                                    before=args.get("before"),
+                                    self_pane_id=self_pane_id)
+
+
+def h_owner_reply(flock, args, self_pane_id):
+    return flock.owner_reply(args["message_id"], args["body"],
+                             self_pane_id=self_pane_id)
+
+
 def h_inbox_status(flock, args, self_pane_id):
     return flock.inbox_status(args["message_id"])
 
@@ -1727,6 +1738,34 @@ COMMANDS = [
         params={"message_id": MESSAGE_ID_PARAM},
         required=["message_id"],
     ),
+    # -- the owner mailbox (FLAT_FLEET.md 7.2) ------------------------------
+    Command(
+        "owner_conversation",
+        "The owner mailbox as one conversation: questions and their answers, "
+        "oldest first. Each row carries `transport` (web|telegram|report: where "
+        "it arrived) and `reply_to` (the question a reply answers), and "
+        "`answered` is computed from the rows, so it cannot disagree with "
+        "itself. Desk and owner only.",
+        h_owner_conversation,
+        params={
+            "limit": {"type": "integer", "description": "How many messages (default 50)."},
+            "before": {"type": "number",
+                       "description": "Only messages older than this unix time."},
+        },
+    ),
+    Command(
+        "owner_reply",
+        "Answer one owner question: writes one reply linked by reply_to, on the "
+        "SAME transport the question arrived on (Telegram gets Telegram answers, "
+        "the web shows everything), and acks the question. One answer per "
+        "question, so the reply-latency metric has one edge. Desk and owner only.",
+        h_owner_reply,
+        params={
+            "message_id": {"type": "string", "description": "The owner message being answered."},
+            "body": {"type": "string", "description": "The answer."},
+        },
+        required=["message_id", "body"],
+    ),
     # -- inboxes: machine-to-machine messaging that never types -------------
     Command(
         "inbox_send",
@@ -2585,13 +2624,16 @@ MCP_GROUPS = (
      "Agent-to-agent mailbox. action=send (preferred over typing), count, "
      "list, read (also returns your tasks), recover, status, ack, cancel, "
      "delete, stats, fetch. No size limit; a send nudges the recipient with "
-     "one line.",
+     "one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with "
+     "action=conversation and answered with action=reply, which keeps the "
+     "question's transport and links the answer to it (desk and owner only).",
      (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
       ("read", "inbox_read"), ("recover", "inbox_recover"),
       ("status", "inbox_status"), ("ack", "inbox_ack"),
       ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),
       ("stats", "inbox_stats"), ("fetch", "inbox_fetch"),
-      ("archive", "inbox_archive"))),
+      ("archive", "inbox_archive"),
+      ("conversation", "owner_conversation"), ("reply", "owner_reply"))),
     ("task",
      "Deterministic global task queue. action=next ATOMICALLY claims the "
      "highest-priority unblocked task (assigns you + in_progress + a lease); "
