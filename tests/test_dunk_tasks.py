@@ -15,6 +15,7 @@ import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 import dunk_tasks  # noqa: E402
+from dunk_roles import Roles  # noqa: E402
 from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
@@ -344,80 +345,10 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, metrics["current"]["by_status"]["blocked"])
         self.assertGreaterEqual(metrics["coverage"]["events_total"], 5)
 
-    def test_leader_held_counts_leader_assigned_tasks_with_the_unowned(self):
-        # The standing rule makes unowned global tasks leader-owned; a task
-        # explicitly assigned to the leader pane is theirs as well (t407 F1).
-        real_now = dunk_tasks._now
-        state = {"calls": 0}
-        def fake_now():
-            state["calls"] += 1
-            return 1000.0 if state["calls"] == 1 else 2000.0
-        dunk_tasks._now = fake_now
-        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
-        try:
-            old = self.store.add(GLOBAL, "carried")
-            assigned = self.store.add(GLOBAL, "explicit", assignees=["%15"])
-            self.store.add(GLOBAL, "worker task", assignees=["w1:p1"])
-            dunk_tasks._now = real_now
-            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
-        finally:
-            del os.environ["DUNKINGSHEEP_VP_PANE"]
-        held = metrics["current"]["leader_held"]
-        self.assertEqual(2, held["count"])
-        self.assertEqual(1000.0, held["oldest_created_at"])
-        self.assertEqual(4000.0, held["oldest_age_s"])
-        self.assertEqual("%15", held["leader_pane"])
-
-    def test_leader_held_counts_one_explicit_leader_task_alone(self):
-        # A DB holding only one global active task assigned to the leader
-        # pane reports leader_held count 1 - not zero with None ages.
-        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
-        try:
-            self.store.add(GLOBAL, "explicit", assignees=["%15"])
-            self.store.add(GLOBAL, "other", assignees=["w1:p1"])
-            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
-        finally:
-            del os.environ["DUNKINGSHEEP_VP_PANE"]
-        held = metrics["current"]["leader_held"]
-        self.assertEqual(1, held["count"])
-        self.assertIsNotNone(held["oldest_age_s"])
-
-    def test_cli_prints_leader_held_zero_unavailable_and_unknown_age(self):
-        # t407 F2: a known zero, an unavailable payload and a positive count
-        # with unknown age must look different on the wire.
-        import io
-        from contextlib import redirect_stdout
-        import types
-        src = open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                "dunkingsheep")).read()
-        mod = types.ModuleType("dunky")
-        mod.__file__ = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                                    "dunkingsheep")
-        exec(compile(src.split("if __name__")[0], "dunkingsheep", "exec"), mod.__dict__)
-        def render(current):
-            buffer = io.StringIO()
-            with redirect_stdout(buffer):
-                mod.print_task_metrics({"current": current, "throughput": {}})
-            for line in buffer.getvalue().splitlines():
-                if line.startswith("leader-held"):
-                    return line
-            return ""
-        self.assertEqual("leader-held tasks: 0",
-                         render({"leader_held": {"count": 0, "oldest_created_at": None,
-                                                 "oldest_age_s": None}}))
-        self.assertEqual("leader-held tasks: unavailable (payload predates the metric)",
-                         render({}))
-        self.assertEqual("leader-held tasks: 4 (oldest unknown)",
-                         render({"leader_held": {"count": 4, "oldest_created_at": None,
-                                                 "oldest_age_s": None}}))
-        self.assertEqual("leader-held tasks: 3 (oldest 1.4h)",
-                         render({"leader_held": {"count": 3, "oldest_age_s": 4900.0}}))
-        self.assertEqual("leader-held tasks: 3 (oldest 3.0d)",
-                         render({"leader_held": {"count": 3, "oldest_age_s": 259200.0}}))
-
-    def test_leader_held_counts_unowned_global_actives_with_deterministic_age(self):
-        # Owner #1708: unowned means leader-owned. Only active global tasks with
-        # no assignees count; assigned, pane-scoped and done tasks do not.
+    def test_leader_held_is_the_needs_owner_queue(self):
+        # FLAT_FLEET.md 5: no leader. `leader_held` keeps its name for the board
+        # and now counts the questions lanes asked the owner (blocked with a
+        # 'needs-owner:' reason), nothing else: unassigned work is the queue's.
         real_now = dunk_tasks._now
         state = {"calls": 0}
         def fake_now():
@@ -425,11 +356,12 @@ class TaskStoreTests(unittest.TestCase):
             return 1000.0 if state["calls"] == 1 else 2000.0
         dunk_tasks._now = fake_now
         try:
-            old = self.store.add(GLOBAL, "carried")
+            asked = self.store.add(GLOBAL, "which port?")
+            self.store.block(asked["id"], reason="needs-owner: which port do we target?")
+            self.store.add(GLOBAL, "unassigned work")
             self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
-            self.store.add("w9:lane", "private")
-            done = self.store.add(GLOBAL, "finished")
-            self.store.complete(done["id"], by="w1:p1")
+            other = self.store.add(GLOBAL, "blocked on a dependency")
+            self.store.block(other["id"], reason="waiting on PR 12")
         finally:
             dunk_tasks._now = real_now
         metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
@@ -437,9 +369,10 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, held["count"])
         self.assertEqual(1000.0, held["oldest_created_at"])
         self.assertEqual(4000.0, held["oldest_age_s"])
-        self.assertEqual(old["id"], self.store.get(old["id"])["id"])
+        self.assertIsNone(held["leader_pane"])
 
-    def test_leader_held_empty_when_everything_is_owned(self):
+    def test_leader_held_empty_when_nobody_asked_the_owner(self):
+        self.store.add(GLOBAL, "unassigned")
         self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
         metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
         held = metrics["current"]["leader_held"]
@@ -602,6 +535,8 @@ class FlockTaskTests(unittest.TestCase):
             inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
                         blob_dir=os.path.join(self.tmp.name, "blobs")),
             tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")),
         )
 
     def tearDown(self):
@@ -653,9 +588,12 @@ class FlockTaskTests(unittest.TestCase):
         read = self.flock.task_read(task["id"], self_pane_id="w2:p2")
         self.assertEqual("fleet work", read["title"])
 
-    def test_pane_caller_assigning_another_lane_on_global_is_unchanged(self):
-        # The VP-assigns workflow: a pane caller creates a global task and
-        # assigns another lane. Guard must not touch it.
+    def test_pane_caller_assigning_another_lane_on_global_needs_the_owner_role(self):
+        # The old VP-assigns workflow is gone (FLAT_FLEET.md 5): a lane pulls
+        # work with `task next`; only the owner hands work to a named lane.
+        with self.assertRaisesRegex(DunkError, "only to yourself"):
+            self.flock.task_add("assigned work", assignees=["w9:p9"], self_pane_id="w2:p1")
+        self.flock.roles.register("w2:p1", "owner")
         task = self.flock.task_add("assigned work", assignees=["w9:p9"],
                                    self_pane_id="w2:p1")
         self.assertEqual(GLOBAL, task["scope"])
@@ -882,12 +820,12 @@ class FlockTaskTests(unittest.TestCase):
 
 
 class TaskAddOwnershipTests(unittest.TestCase):
-    """t110 / owner #1708 wiring (b): `task add` creates work OWNED.
+    """FLAT_FLEET.md 5: `task add` creates work the QUEUE owns.
 
-    A task with no assignee is nobody's work - it shows in the list, is counted
-    against no one, and every lane can tell itself it is someone else's. So the
-    creating pane owns what it creates, an explicit `--assign` is delegation and
-    wins, and a caller with no pane needs a DECLARED leader rather than a guess.
+    Owner #1708 ("unowned means leader-owned") is retired with the leader: an
+    unassigned task is claimable by any lane whose role matches its kind, an
+    explicit `--assign` by the owner is delegation and is kept, and a lane may
+    assign only itself. No declared-leader environment variable exists.
     """
 
     def setUp(self):
@@ -899,7 +837,9 @@ class TaskAddOwnershipTests(unittest.TestCase):
             persist=False, restore=False,
             inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
                         blob_dir=os.path.join(self.tmp.name, "blobs")),
-            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")))
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")))
         self._leader = os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
 
     def tearDown(self):
@@ -912,15 +852,14 @@ class TaskAddOwnershipTests(unittest.TestCase):
         self.flock.tasks.close()
         self.tmp.cleanup()
 
-    def test_no_assign_is_owned_by_the_creating_pane(self):
+    def test_no_assign_is_unassigned_and_claimable(self):
         task = self.flock.task_add("work nobody asked for", self_pane_id="w2:p1")
-        self.assertEqual(["w2:p1"], task["assignees"],
-                         "an unassigned add must still have an owner")
+        self.assertEqual([], task["assignees"], "the queue owns unassigned work")
         self.assertEqual("w2:p1", task["created_by"])
-        self.assertEqual(["w2:p1"], self.flock.task_read(task["id"],
-                                                          self_pane_id="w2:p1")["assignees"])
+        self.assertTrue(task["claimable"])
 
-    def test_an_explicit_assign_is_delegation_and_is_kept(self):
+    def test_an_explicit_assign_by_the_owner_is_delegation_and_is_kept(self):
+        self.flock.roles.register("w2:p1", "owner")
         task = self.flock.task_add("for someone else", assignees=["w1:p2"],
                                    self_pane_id="w2:p1")
         self.assertEqual(["w1:p2"], task["assignees"],
@@ -930,25 +869,12 @@ class TaskAddOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("mine", assignees=["self"], self_pane_id="w2:p1")
         self.assertEqual(["w2:p1"], task["assignees"])
 
-    def test_a_declared_leader_owns_work_created_without_a_pane(self):
-        # The pane-less creators: systemd units, HTTP/web callers, the watchdog.
+    def test_work_created_without_a_pane_is_unassigned_too(self):
+        # The pane-less creators: systemd units, the web desk. A declared
+        # leader environment variable is ignored: there is no leader.
         os.environ["DUNKINGSHEEP_LEADER_PANE"] = "w9:pV"
         task = self.flock.task_add("raised by the daemon")
-        self.assertEqual(["w9:pV"], task["assignees"])
-
-    def test_no_pane_and_no_declared_leader_refuses_instead_of_writing_an_orphan(self):
-        os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
-        before = self.flock.task_list(scope="all")["tasks"]
-        # The message has to name the way out: this is a refusal, not a puzzle.
-        with self.assertRaisesRegex(DunkError, "must have an owner"):
-            self.flock.task_add("orphan")
-        with self.assertRaisesRegex(DunkError, "DUNKINGSHEEP_LEADER_PANE"):
-            self.flock.task_add("orphan")
-        with self.assertRaisesRegex(DunkError, "--assign"):
-            self.flock.task_add("orphan")
-        after = self.flock.task_list(scope="all")["tasks"]
-        self.assertEqual([t["id"] for t in before], [t["id"] for t in after],
-                         "the refusal must not leave a row behind")
+        self.assertEqual([], task["assignees"])
 
 
 if __name__ == "__main__":

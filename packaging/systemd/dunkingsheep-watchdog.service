@@ -2,6 +2,9 @@
 Description=Dunking Sheep exception watchdog (deterministic rules, no model)
 
 [Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2);
+# without it they are anonymous and every write is refused.
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
 Type=oneshot
 # Live only when ~/.config/dunkingsheep/watchdog.json has enabled=true AND
 # dry_run=false; a missing or invalid config exits 2 and touches no heartbeat.

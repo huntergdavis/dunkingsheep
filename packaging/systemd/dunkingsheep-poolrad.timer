@@ -1,0 +1,11 @@
+[Unit]
+Description=Poolrad backlog-sync every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

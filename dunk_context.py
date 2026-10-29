@@ -23,7 +23,13 @@ from pathlib import Path
 
 CLASSES = ("ground-truth", "fact", "provisional", "history")
 AUTHORITIES = ("owner", "measured", "agent")
-TYPES = ("principle", "decision", "reference", "lesson", "measurement", "incident")
+TYPES = ("principle", "decision", "reference", "lesson", "measurement", "incident",
+         "rule", "wiki")
+# Types only the owner may write (docs/FLAT_FLEET.md 8): a rule is a standing
+# instruction, and standing instructions come from one person.
+OWNER_ONLY_TYPES = ("rule", "principle")
+LEDGER_PATH = Path(os.environ.get(
+    "DUNKINGSHEEP_DIR", str(Path.home() / ".config" / "dunkingsheep"))) / "context-ledger.db"
 SCOPES = ("global", "project")
 DEFAULT_CAP = 8192
 PROVISIONAL_DAYS = 7
@@ -33,6 +39,79 @@ GLOBAL_DIR = Path(os.environ.get(
 
 class ContextError(ValueError):
     """A named refusal for the context store."""
+
+
+def _sha(text):
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class Ledger:
+    """What the daemon wrote: the table the digest trusts (FLAT_FLEET.md 8).
+
+    Every lane runs as the same Unix user, so a file under `context/` proves
+    nothing about who wrote it. The daemon records (store, slug, sha256) for
+    every entry it writes; the digest injects a ground truth only when the
+    file on disk still matches a row here, and `check` names every file that
+    does not. A lane can forge this table too; the ADR says so. It is the
+    strongest guarantee a same-uid fleet allows, and it stops every accident.
+
+    With no rows at all (before `context ledger adopt`) the ledger is in
+    bootstrap: nothing is refused, and `check` says to adopt.
+    """
+
+    def __init__(self, path=None):
+        import threading
+        self.path = Path(path or os.environ.get("DUNKINGSHEEP_CONTEXT_LEDGER") or LEDGER_PATH)
+        self._db = None
+        self._lock = threading.RLock()
+
+    def _connect(self):
+        if self._db is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # The daemon serves one thread per connection; one sqlite handle
+            # under the lock is simpler than a per-thread pool for a few rows.
+            self._db = sqlite3.connect(str(self.path), timeout=5, check_same_thread=False)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS entries (store TEXT NOT NULL, slug TEXT NOT NULL, "
+                "sha256 TEXT NOT NULL, cls TEXT, authority TEXT, written_at REAL NOT NULL, "
+                "by TEXT, PRIMARY KEY (store, slug))")
+            self._db.commit()
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
+        return self._db
+
+    def close(self):
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
+    def record(self, store_root_path, slug, text, cls=None, authority=None, by=None):
+        with self._lock:
+            db = self._connect()
+            db.execute("INSERT OR REPLACE INTO entries (store, slug, sha256, cls, authority, "
+                       "written_at, by) VALUES (?,?,?,?,?,?,?)",
+                       (str(store_root_path), slug, _sha(text), cls, authority, time.time(), by))
+            db.commit()
+
+    def status(self, store_root_path, slug, text):
+        """'recorded' | 'modified' | 'unrecorded' | 'bootstrap' (no rows at all)."""
+        with self._lock:
+            db = self._connect()
+            if not db.execute("SELECT 1 FROM entries LIMIT 1").fetchone():
+                return "bootstrap"
+            row = db.execute("SELECT sha256 FROM entries WHERE store = ? AND slug = ?",
+                             (str(store_root_path), slug)).fetchone()
+        if row is None:
+            return "unrecorded"
+        return "recorded" if row["sha256"] == _sha(text) else "modified"
+
+    def count(self):
+        with self._lock:
+            return self._connect().execute("SELECT COUNT(*) FROM entries").fetchone()[0]
 
 
 def store_root(path=None, *, global_store=False):
@@ -119,18 +198,27 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     by subject under the byte cap.
     """
     stores = select_stores(project_path, which=which)
-    truths, relevant = [], []
+    ledger = Ledger()
+    truths, relevant, unverified = [], [], []
     for name, store in stores.items():
         for entry in store.live_entries():
             if entry.get("error"):
                 continue
             if entry["class"] == "ground-truth":
-                truths.append((name, entry))
+                if store.verified(entry, ledger):
+                    truths.append((name, entry))
+                else:
+                    unverified.append((name, entry))
             elif subject is None or entry.get("subject") == subject:
                 relevant.append((name, entry))
     included = [(name, e) for name, e in truths]
     lines = [f"## Ground truths ({len(truths)})"]
-    lines += [f"- [{e['subject']}] {e['body'].splitlines()[0]}" for _n, e in truths] or ["- none"]
+    lines += [f"- [{e['subject']}] {e['body'].splitlines()[0]}{_stale_mark(e)}"
+              for _n, e in truths] or ["- none"]
+    if unverified:
+        lines.append(f"- ({len(unverified)} ground-truth file(s) not written by the daemon "
+                     f"were NOT injected: {', '.join(e['slug'] for _n, e in unverified)}; "
+                     "see `dunkingsheep context check`)")
     lines += ["", "## Relevant"]
     used = len("\n".join(lines).encode("utf-8"))
     omitted = 0
@@ -162,6 +250,18 @@ def digest_both(project_path=None, *, which=None, max_bytes=DEFAULT_CAP, subject
     return text
 
 
+def _stale_mark(entry):
+    """' (STALE ...)' when an entry is past its recheck_after; ground truths too."""
+    days = _days(entry.get("recheck_after"))
+    if not days:
+        return ""
+    try:
+        horizon = datetime.fromisoformat(str(entry["stated"])) + timedelta(days=days)
+    except ValueError:
+        return ""
+    return " (STALE - re-check before trusting)" if datetime.now() > horizon else ""
+
+
 def report(project_path=None, *, which=None):
     """stats/check/index over every selected store, always labelled."""
     out = {}
@@ -173,9 +273,36 @@ def report(project_path=None, *, which=None):
 
 
 class Store:
-    def __init__(self, path=None, *, global_store=False):
+    def __init__(self, path=None, *, global_store=False, ledger=None):
         self.root = store_root(path, global_store=global_store)
         self.scope = "global" if global_store else "project"
+        # None means "do not record": the daemon passes its Ledger; a local
+        # bootstrap run passes one explicitly; a bare Store never writes rows.
+        self.ledger = ledger
+
+    def _record(self, path, slug, meta, by=None):
+        if self.ledger is not None:
+            self.ledger.record(self.root, slug, Path(path).read_text(), cls=meta.get("class"),
+                               authority=meta.get("authority"), by=by)
+
+    def verified(self, entry, ledger=None):
+        """Does the file on disk match what the daemon wrote? (bootstrap counts.)"""
+        ledger = ledger or self.ledger or Ledger()
+        try:
+            text = Path(entry["path"]).read_text()
+        except OSError:
+            return False
+        return ledger.status(self.root, entry["slug"], text) in ("recorded", "bootstrap")
+
+    def adopt(self, ledger=None, by="adopt"):
+        """Bootstrap: record every live entry as-is. Owner's one-shot."""
+        ledger = ledger or self.ledger or Ledger()
+        adopted = []
+        for entry in self.live_entries():
+            ledger.record(self.root, entry["slug"], Path(entry["path"]).read_text(),
+                          cls=entry.get("class"), authority=entry.get("authority"), by=by)
+            adopted.append(entry["slug"])
+        return adopted
 
     # -- files ------------------------------------------------------------
     def ensure(self, *, meta_lines=None):
@@ -258,11 +385,16 @@ class Store:
 
     # -- writes -----------------------------------------------------------
     def add(self, body, *, cls, subject, type_, authority="agent", source="",
-            stated=None, recheck_after=None, supersedes=None, slug=None):
+            stated=None, recheck_after=None, supersedes=None, slug=None, by=None):
         if cls not in CLASSES:
             raise ContextError(f"class must be one of {CLASSES}")
         if authority not in AUTHORITIES:
             raise ContextError(f"authority must be one of {AUTHORITIES}")
+        if type_ not in TYPES:
+            raise ContextError(f"type must be one of {TYPES}; got {type_!r}")
+        if cls == "ground-truth" and authority != "owner":
+            raise ContextError("a ground truth has authority owner; an agent proposes a "
+                               "fact and the owner promotes it")
         self.ensure()
         slug = slug or f"{stated or _today()}-{_slug(subject)}"
         folder = self.root / cls
@@ -287,15 +419,17 @@ class Store:
             supersedes = old["slug"]
             old["superseded_by"] = slug
             Path(old["path"]).write_text(_render(old, old["body"]))
+            self._record(old["path"], old["slug"], old, by=by)
         meta = {"class": cls, "subject": subject, "type": type_, "scope": self.scope,
                 "authority": authority, "stated": stated or _today(), "source": source,
                 "recheck_after": recheck_after if recheck_after is not None
                 else ("7d" if cls == "provisional" else None),
                 "supersedes": supersedes, "superseded_by": None}
         path.write_text(_render(meta, body))
+        self._record(path, slug, meta, by=by)
         return {"slug": slug, "path": str(path), "class": cls}
 
-    def supersede(self, slug, new_body, **meta):
+    def supersede(self, slug, new_body, by=None, **meta):
         old = self.resolve(slug)
         if old is None:
             raise ContextError(f"entry {slug} not found")
@@ -304,9 +438,9 @@ class Store:
                         authority=meta.get("authority", old.get("authority") or "agent"),
                         source=meta.get("source") or old.get("source") or "",
                         recheck_after=meta.get("recheck_after", old.get("recheck_after")),
-                        supersedes=old["slug"])
+                        supersedes=old["slug"], by=by)
 
-    def retire(self, slug, reason=""):
+    def retire(self, slug, reason="", by=None):
         entry = self.resolve(slug)
         if entry is None:
             raise ContextError(f"entry {slug} not found")
@@ -315,11 +449,17 @@ class Store:
         body = entry["body"] + f"\n\n**Retired {_today()}**: {reason}\n"
         path = Path(entry["path"])
         path.write_text(_render(entry, body))
+        self._record(path, entry["slug"], entry, by=by)
         return {"slug": entry["slug"], "retired": True, "reason": reason}
 
     # -- checks -----------------------------------------------------------
     def check(self):
         problems, counts = [], {name: 0 for name in CLASSES}
+        ledger = self.ledger or Ledger()
+        if ledger.count() == 0:
+            problems.append({"slug": "-", "warning": True,
+                             "problem": "ledger is empty (bootstrap): every entry is trusted until "
+                                        "`dunkingsheep context ledger adopt` runs"})
         for entry in self.entries():
             if entry.get("error"):
                 problems.append({"slug": entry["slug"], "problem": entry["error"]})
@@ -328,6 +468,21 @@ class Store:
             if entry["class"] == "ground-truth" and entry["authority"] != "owner":
                 problems.append({"slug": entry["slug"],
                                  "problem": "ground truth with authority != owner (refused)"})
+            if entry["class"] == "ground-truth" and entry.get("type") not in OWNER_ONLY_TYPES + ("decision",):
+                problems.append({"slug": entry["slug"], "warning": True,
+                                 "problem": f"ground truth typed {entry.get('type')!r}; expected rule/principle/decision"})
+            if entry["class"] == "ground-truth" and not entry.get("recheck_after") \
+                    and not self.is_retired(entry):
+                problems.append({"slug": entry["slug"], "warning": True,
+                                 "problem": "ground truth has no recheck_after (rules go stale too)"})
+            ledger_state = ledger.status(self.root, entry["slug"], Path(entry["path"]).read_text())
+            if ledger_state == "unrecorded":
+                problems.append({"slug": entry["slug"],
+                                 "problem": "not written by the daemon (no ledger row); "
+                                            "a ground truth here is NOT injected"})
+            elif ledger_state == "modified":
+                problems.append({"slug": entry["slug"],
+                                 "problem": "edited on disk after the daemon wrote it; NOT injected"})
             if entry["class"] == "fact" and not entry.get("recheck_after"):
                 problems.append({"slug": entry["slug"], "problem": "fact has no recheck_after"})
             if entry.get("supersedes") and not (self.root / entry["class"] / f"{entry['supersedes']}.md").exists():

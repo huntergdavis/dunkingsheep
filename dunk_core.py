@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.103"
+VERSION = "2.71.0"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -121,7 +121,7 @@ def code_status():
 
 
 from dunk_inbox import Inbox, InboxError
-from dunk_tasks import Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
+from dunk_tasks import validate_verdict, Tasks, TaskError, GLOBAL as TASK_GLOBAL, validate_scope as validate_task_scope
 import dunk_stuck
 
 # The declared leader pane: who owns a task when the creator has no pane at all
@@ -130,6 +130,8 @@ import dunk_stuck
 # environment, not inferred from a roster that may be stale.
 TASK_LEADER_ENV = "DUNKINGSHEEP_LEADER_PANE"
 from dunk_superusers import Superusers, SuperuserError, DEFAULT_VP_NAME
+import dunk_roles
+from dunk_roles import Roles, RoleError
 from dunk_memory import MemoryStore, MemoryIngestor, memory_sources
 from dunk_metrics import Metrics, SCHEMA_VERSION as METRICS_SCHEMA_VERSION
 import dunk_metrics
@@ -697,7 +699,7 @@ class Flock:
     def __init__(self, herdr=None, state_file=STATE_FILE,
                  launches_file=LAUNCHES_FILE, persist=True,
                  restore=True, inbox=None, metrics=None, tasks=None,
-                 superusers=None, memory=None, stuck_config=None):
+                 superusers=None, memory=None, stuck_config=None, roles=None):
         self.herdr = get_backend(herdr)
         self.state_file = state_file
         self.launches_file = launches_file
@@ -791,6 +793,26 @@ class Flock:
         self.inbox = Inbox() if inbox is None else inbox
         self.tasks = Tasks() if tasks is None else tasks
         self.superusers = Superusers() if superusers is None else superusers
+        # ROLES replace the superuser allowlist (docs/FLAT_FLEET.md section 4). A
+        # Superusers fixture is still accepted so hermetic tests keep working: its
+        # pane entries become owner registrations, its names are ignored (a label
+        # is one `tmux select-pane -T` away for any lane).
+        if roles is None:
+            roles_path = None
+            if superusers is not None:
+                base = os.path.abspath(superusers.path)
+                roles_path = os.path.splitext(base)[0] + ".roles.json"
+            roles = Roles(path=roles_path,
+                          default=("worker" if superusers is not None else None))
+            if superusers is not None:
+                for pane in sorted(getattr(superusers, "panes", ()) or ()):
+                    if pane not in roles.lanes:
+                        roles.register(pane, "owner", by="superusers-fixture")
+        self.roles = roles
+        # Tests pass a Superusers fixture and add panes to it mid-test; honour its
+        # PANE entries (never names) only when one was passed explicitly.
+        self._legacy_superusers = superusers
+        self._role_pane_cache = {}          # pane_id -> (expires_at, pane_info)
         self._owns_memory = memory is None and self.persist_enabled
         self.memory = (memory if memory is not None
                        else (MemoryStore() if self.persist_enabled else None))
@@ -1821,11 +1843,8 @@ class Flock:
     def _desk_send_rights(self, pane_id):
         """Does the desk credential exist, and does it cover THIS pane?"""
         try:
-            import dunk_desk
-            desk = dunk_desk.DeskCredential()
-            panes = set(desk.panes())
-            return {"desk_credential": desk.has_token(),
-                    "desk_can_type": bool(desk.has_token() and pane_id in panes)}
+            has_web = any(t.get("role") == "web" for t in self.roles.tokens())
+            return {"desk_credential": has_web, "desk_can_type": has_web}
         except Exception:                        # noqa: BLE001 - capability never crashes
             return {"desk_credential": False, "desk_can_type": False}
 
@@ -2020,9 +2039,18 @@ class Flock:
         except Exception:                       # noqa: BLE001 - a fallback must not raise
             return False
 
-    def _mailbox_or_self(self, spec, self_pane_id, strict=False):
+    def _mailbox_or_self(self, spec, self_pane_id, strict=False, own_only=False):
         if spec:
-            return self.resolve_mailbox(spec, self_pane_id, strict=strict)[0]
+            resolved = self.resolve_mailbox(spec, self_pane_id, strict=strict)[0]
+            # Reading another lane's MAIL needs the owner role; counting it does not.
+            if own_only and self_pane_id and \
+                    self.caller_role(self_pane_id) not in ("owner", "web", "system"):
+                own = self._own_mailbox(self_pane_id)
+                if resolved != own:
+                    raise DunkError(
+                        f"mailbox {spec!r} is not yours ({own}); reading another lane's "
+                        "mail needs the owner role")
+            return resolved
         if not self_pane_id:
             raise DunkError("no mailbox given and no caller pane to default to")
         return self._own_mailbox(self_pane_id)
@@ -2040,6 +2068,13 @@ class Flock:
         if system_sender is not None:
             if system_sender not in SYSTEM_SENDERS:
                 raise DunkError(f"unknown system sender {system_sender!r}")
+            # Over the socket a system sender must hold the system token; in-process
+            # callers (the daemon's own loops, tests) are trusted code.
+            if (getattr(self._caller_state, "socket_peer_ok", None) is not None
+                    and self.caller_role(self_pane_id) not in ("system", "owner")):
+                raise DunkError(
+                    f"system sender {system_sender!r} requires the system token; a "
+                    "pane-less process without one is anonymous (FLAT_FLEET.md 4.1)")
             if self_pane_id:
                 raise DunkError("a system sender cannot be claimed from a pane")
         undeliverable_reason = None
@@ -2173,7 +2208,7 @@ class Flock:
 
     @_as_dunk_error
     def inbox_list(self, mailbox=None, unread_only=True, limit=50, self_pane_id=None):
-        key = self._mailbox_or_self(mailbox, self_pane_id)
+        key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         return {"mailbox": key,
                 "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
 
@@ -2193,7 +2228,7 @@ class Flock:
         A failure in 1 or 2 leaves the batch unread, which is the safe direction: the
         reader sees the same mail again rather than losing it.
         """
-        key = self._mailbox_or_self(mailbox, self_pane_id)
+        key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         messages = self.inbox.read(key, limit=limit, peek=True)
         result = {"mailbox": key, "messages": messages}
         if self_pane_id:
@@ -2246,7 +2281,8 @@ class Flock:
         """Ack only messages in the caller's own mailbox. Sender is irrelevant;
         an id from another mailbox is refused, never marked read there. The
         internal no-mailbox call (tests, in-process) keeps the old behaviour."""
-        key = self._mailbox_or_self(mailbox, self_pane_id) if (mailbox or self_pane_id) else None
+        key = (self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
+               if (mailbox or self_pane_id) else None)
         before = {}
         for message_id in ([message_ids] if isinstance(message_ids, str)
                            else list(message_ids)):
@@ -2342,15 +2378,9 @@ class Flock:
         The message names both ways out, because an unowned task is a silent
         failure and a refusal is a loud one.
         """
-        if self_pane_id:
-            return [self_pane_id]
-        leader = (os.environ.get(TASK_LEADER_ENV) or "").strip()
-        if leader:
-            return [leader]
-        raise DunkError(
-            "a task must have an owner: no creating pane and no declared leader "
-            f"(set {TASK_LEADER_ENV}). Pass --assign <pane>, or run the command from "
-            "the lane that should own it.")
+        # FLAT_FLEET.md 5: unassigned means claimable by any lane whose role
+        # matches the kind. The queue owns the work; nobody is handed it.
+        return []
 
     def _require_task_visible(self, task, self_pane_id):
         if not self_pane_id:
@@ -2364,7 +2394,8 @@ class Flock:
     @_as_dunk_error
     def task_add(self, title, scope=None, body=None, status=None, priority=None,
                  assignees=None, parent_id=None, depends_on=None,
-                 multi_assignee=False, self_pane_id=None):
+                 multi_assignee=False, self_pane_id=None, kind=None, author=None,
+                 repo=None, pr=None, head=None):
         target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
         # t278: a caller with NO pane (human CLI, a unit) could silently create a
         # task in another pane's PRIVATE queue - the task showed in `task list`, but
@@ -2385,25 +2416,36 @@ class Flock:
         # refusal above comes first on purpose: a no-pane attempt at another
         # pane's private queue is refused for its scope, not for its owner.
         owners = self._task_assignees(assignees, self_pane_id)
-        if not owners:
-            owners = self._default_task_owner(self_pane_id)
+        role = self.caller_role(self_pane_id)
+        if owners and role in ("desk", "planner", "worker", "reviewer") \
+                and any(owner != self_pane_id for owner in owners):
+            raise DunkError(
+                f"task add may assign only to yourself for role {role}; handing work "
+                "to another lane is the owner's (lanes pull with task next)")
+        if role in ("desk", "planner") and (kind or "work") != "work":
+            raise DunkError(f"role {role} files kind=work only")
+        if kind == "review" and role not in ("owner", "system", "web"):
+            raise DunkError("review tasks are filed by the review timer (system) or the owner")
+        if role in ("desk", "planner", "worker", "reviewer") and status not in (None, "", "open"):
+            raise DunkError(f"role {role} files open tasks; status moves through next/complete/block")
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
             priority=priority or "low",
             assignees=owners,
             parent_id=parent_id, depends_on=depends_on,
-            created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False))
+            created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False),
+            kind=kind or "work", author=author, repo=repo, pr=pr, head=head)
 
     @_as_dunk_error
     def task_list(self, scope=None, status=None, assignee=None, include_done=True,
-                  limit=200, self_pane_id=None):
+                  limit=200, self_pane_id=None, kind=None, needs_owner=False):
         explicit = None
         if scope is not None and str(scope).strip() not in ("", "all"):
             explicit = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
         tasks = self.tasks.list(
             scope=explicit, status=status, assignee=assignee,
             include_done=_truthy(include_done, True), limit=int(limit or 200),
-            self_pane_id=self_pane_id)
+            self_pane_id=self_pane_id, kind=kind, needs_owner=_truthy(needs_owner, False))
         return {"scope": explicit or "visible", "pane_id": self_pane_id,
                 "tasks": tasks}
 
@@ -2433,28 +2475,56 @@ class Flock:
             task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
 
     @_as_dunk_error
-    def task_complete(self, task_id, by=None, self_pane_id=None):
+    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        if task.get("kind") == "review":
+            role = self.caller_role(self_pane_id)
+            if role == "reviewer" and not self.roles.may_review(self_pane_id):
+                raise DunkError(f"{self_pane_id} may not review (provider not on the "
+                                "reviewer list)")
+            if role not in ("reviewer", "owner"):
+                raise DunkError(f"a review is completed by its reviewer lane, not role {role}")
+            if role == "reviewer" and task.get("author") and task["author"] == self_pane_id:
+                raise DunkError("a lane never accepts its own work (no-self-merge)")
+            if verdict is None:
+                raise DunkError("completing a review needs --verdict accept|needs-fix")
+            try:
+                verdict = validate_verdict(verdict)
+            except TaskError as error:
+                raise DunkError(str(error)) from None
+        elif verdict is not None:
+            raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
         # must not run inside the completion transaction); the transaction
         # re-reads the allowlist file itself under lock, so a revocation between
         # here and the UPDATE is caught there. Same three lines as is_superuser,
         # kept inline so the pane_info travels with the proof.
-        self.superusers.refresh()
         pane_info = self._pane_info(self_pane_id)
-        operator = bool(self_pane_id
-                        and self.superusers.is_superuser(self_pane_id, pane_info))
+        operator = bool(self_pane_id and self.caller_role(self_pane_id) in ("owner", "system"))
         self._authorize_task_complete(task, self_pane_id, operator=operator)
+        if task.get("kind") == "review":
+            # Authorized: record the verdict now, inside the lane's lease; the
+            # GitHub side effects wait until the completion has committed.
+            try:
+                self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
+            except TaskError as error:
+                raise DunkError(str(error)) from None
         # Automatic work belongs to the actual caller, never a caller-supplied
         # completion label (`by` is attribution only): past the guard a requesting
         # pane is always present, so completion always flows through the next-job
         # trigger with the pane recorded as the completer.
         plan = self.next_jobs.advance(
             self_pane_id, "completion", task_id,
-            operator_proof={"allowlist_path": self.superusers.path,
+            operator_proof={"allowlist_path": (self._legacy_superusers.path
+                                               if self._legacy_superusers is not None
+                                               else self.roles.path),
                             "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
-        return dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        result = dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        if task.get("kind") == "review":
+            result["github"] = self._after_review_verdict(dict(task), verdict,
+                                                          by=self_pane_id or by)
+        return result
 
     # Transport provenance decides what an unverifiable claim means (t423 P1).
     # The server marks every socket request (see set_socket_peer): a request
@@ -2912,6 +2982,11 @@ class Flock:
 
     def clear_caller(self):
         self._caller_state.value = None
+        self._caller_state.role = None
+        self._caller_state.role_pane = None
+        self._caller_state.service_token = None
+        self._caller_state.identity_bound = None
+        self._caller_state.identity_note = None
 
     def set_socket_peer(self, ok):
         """Record whether this request arrived over the socket with verifiable
@@ -2926,6 +3001,19 @@ class Flock:
         self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
+    def _claim_filters(self, self_pane_id):
+        """(kinds, exclude_author) for a claim, from the caller's role.
+
+        A reviewer pulls only `review` tasks it did not author; everyone else
+        pulls everything but reviews. The owner is unrestricted.
+        """
+        role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+        if role == "reviewer":
+            return (("review",), self_pane_id)
+        if role == "owner":
+            return (None, None)
+        return (("work", "verify", "report"), None)
+
     def task_next(self, scope=None, lease_seconds=None, self_pane_id=None,
                   allow_busy=False):
         """Atomically claim the next task; subscribe if the queue is empty.
@@ -2940,6 +3028,13 @@ class Flock:
         that hold a lease.
         """
         caller = self.current_caller()
+        if self_pane_id and self.caller_role(self_pane_id) == "reviewer" \
+                and not self.roles.may_review(self_pane_id):
+            raise DunkError(
+                f"{self_pane_id} is a reviewer lane on a provider that may not review "
+                f"({self.roles.provider_of(self_pane_id) or 'unknown'}; allowed: "
+                f"{', '.join(self.roles.reviewer_providers)}). Free models are the "
+                "worker tier.")
         value = "" if scope is None else str(scope).strip()
         follow_scope = TASK_GLOBAL
         if value in ("", "global"):
@@ -2952,11 +3047,13 @@ class Flock:
         elif value == "auto":
             target = TASK_GLOBAL
             if self_pane_id:
+                kinds, exclude_author = self._claim_filters(self_pane_id)
                 local = self.tasks.claim_next(scope=self_pane_id,
                                               pane_id=self_pane_id,
                                               lease_seconds=lease_seconds,
                                               caller=caller,
-                                              allow_busy=allow_busy)
+                                              allow_busy=allow_busy, kinds=kinds,
+                                              exclude_author=exclude_author)
                 if local.get("task"):
                     return local
         elif value == "mine":
@@ -2974,10 +3071,12 @@ class Flock:
             target = self._task_scope(value, self_pane_id, default=TASK_GLOBAL)
             follow_scope = target
 
+        kinds, exclude_author = self._claim_filters(self_pane_id)
         result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
                                        lease_seconds=lease_seconds,
                                        caller=caller,
-                                       allow_busy=allow_busy)
+                                       allow_busy=allow_busy, kinds=kinds,
+                                       exclude_author=exclude_author)
         if not result.get("task") and self_pane_id:
             with self._lock:
                 self.task_waiters[self_pane_id] = follow_scope
@@ -3593,79 +3692,346 @@ class Flock:
         except Exception:  # noqa: BLE001 - identity check must not crash
             return None
 
+    # -- roles ---------------------------------------------------------------
+
+    def _role_pane_info(self, pane_id):
+        """Pane record for role binding, cached 2 s: one tmux listing per
+        request under load is what made every read cost 3-9 s (t535)."""
+        if not pane_id:
+            return None
+        now = time.time()
+        hit = self._role_pane_cache.get(pane_id)
+        if hit and hit[0] > now:
+            return hit[1]
+        info = self._pane_info(pane_id)
+        self._role_pane_cache[pane_id] = (now + 2.0, info)
+        if len(self._role_pane_cache) > 512:
+            self._role_pane_cache = {k: v for k, v in self._role_pane_cache.items()
+                                     if v[0] > now}
+        return info
+
+    def caller_role(self, self_pane_id):
+        """The caller's role for this request: token first, then the registry.
+
+        Cached per request on the thread-local so the allowlist check and the
+        handlers agree on one answer even if a file changes mid-request.
+        """
+        cached = getattr(self._caller_state, "role", None)
+        # Cache only inside a socket request (the server clears it at the end);
+        # in-process callers and tests see every registry change immediately.
+        in_request = getattr(self._caller_state, "socket_peer_ok", None) is not None
+        if (in_request and cached is not None
+                and getattr(self._caller_state, "role_pane", None) == self_pane_id):
+            return cached
+        role = None
+        token = getattr(self._caller_state, "service_token", None)
+        if token:
+            role = self.roles.token_role(token)
+            if role is None:
+                log.warning("service token refused (unknown token)")
+        if role is None:
+            if self_pane_id:
+                # Only a registration that recorded a root pid needs the live pane
+                # record; an unregistered pane costs no terminal read at all.
+                entry = self.roles.entry(self_pane_id)
+                info = (self._role_pane_info(self_pane_id)
+                        if entry and entry.get("pane_pid") is not None else None)
+                role = self.roles.role_of(self_pane_id, info)
+                legacy = self._legacy_superusers
+                if (role == self.roles.default and legacy is not None
+                        and self_pane_id in getattr(legacy, "panes", ())):
+                    role = "owner"
+            else:
+                role = dunk_roles.DEFAULT_ROLE
+        self._caller_state.role = role
+        self._caller_state.role_pane = self_pane_id
+        return role
+
+    def set_service_token(self, token):
+        self._caller_state.service_token = token or None
+        self._caller_state.role = None
+
     def is_superuser(self, self_pane_id):
-        self.superusers.refresh()          # the file can change mid-turn
-        return self.superusers.is_superuser(self_pane_id,
-                                            self._pane_info(self_pane_id))
+        return self.caller_role(self_pane_id) == "owner"
 
     def require_superuser(self, self_pane_id, action):
-        """Fail closed: no non-empty allowlist means no destructive action."""
-        if self.superusers.empty():
+        """Fail closed: only the owner role may do destructive things."""
+        legacy = self._legacy_superusers
+        if not self.roles.has_owner() and not (legacy is not None and getattr(legacy, "panes", None)):
             raise DunkError(
-                "superuser allowlist is empty; run `dunkingsheep superuser "
-                "recover` from the VP pane, or add a pane/name as a superuser")
+                "no owner is registered; run `dunkingsheep lane register --role owner` "
+                "from the owner's pane (bootstrap), then retry")
         if not self.is_superuser(self_pane_id):
             raise DunkError(
-                f"{action} requires a superuser; {self_pane_id or 'this caller'} "
-                "is not on the allowlist. Non-superusers can use the inbox and "
-                "task queue.")
+                f"{action} requires a superuser (the owner role); {self_pane_id or 'this caller'} "
+                f"is {self.caller_role(self_pane_id)}. Non-owners use the inbox and task queue.")
+
+    def whoami(self, self_pane_id=None):
+        role = self.caller_role(self_pane_id)
+        entry = self.roles.entry(self_pane_id) if self_pane_id else None
+        caller = self.current_caller() or {}
+        return {"pane_id": self_pane_id, "role": role,
+                "registered": dict(entry) if entry else None,
+                "via_token": bool(getattr(self._caller_state, "service_token", None)),
+                "caller": {k: caller.get(k) for k in ("pid", "start", "name", "source")},
+                "bound": getattr(self._caller_state, "identity_bound", None),
+                "binding_note": getattr(self._caller_state, "identity_note", None)}
+
+    def lane_register(self, pane=None, role=None, provider=None, model=None,
+                      label=None, self_pane_id=None):
+        """Bind a role to a pane's root process. Owner/system only, except the
+        bootstrap: with no owner registered, a bound caller may register ITSELF
+        as owner (the equivalent of the old `superuser recover`)."""
+        role = str(role or "").strip().lower()
+        target = str(pane or "").strip() or self_pane_id
+        if not target:
+            raise DunkError("lane register needs a pane (or a caller pane for 'self')")
+        if target == "self":
+            target = self_pane_id
+        mine = self.caller_role(self_pane_id)
+        if mine == "system" and role == "owner":
+            raise DunkError("the system token cannot create owners; only the owner's pane does")
+        if mine not in ("owner", "system"):
+            bootstrap = (role == "owner" and not self.roles.has_owner()
+                         and target == self_pane_id and self_pane_id)
+            if not bootstrap:
+                raise DunkError(
+                    f"lane register requires the owner role (caller is {mine}); the one "
+                    "exception is registering yourself as the first owner")
+        info = self._pane_info(target) or {}
+        pane_pid = info.get("pane_pid")
+        start = None
+        if pane_pid not in (None, "", "None"):
+            try:
+                from dunk_callers import process_start
+                start = process_start(int(pane_pid))
+            except Exception:  # noqa: BLE001 - a missing /proc entry is recorded as None
+                start = None
+        try:
+            entry = self.roles.register(target, role, pane_pid=pane_pid, start=start,
+                                        provider=provider, model=model,
+                                        by=self_pane_id or "token", label=label
+                                        or info.get("label") or info.get("tab_label"))
+        except RoleError as error:
+            raise DunkError(str(error)) from None
+        self._role_pane_cache.pop(target, None)
+        self._caller_state.role = None
+        with self._lock:
+            self.last_message = f"Registered {target} as {role}"
+        return entry
+
+    def lane_unregister(self, pane, self_pane_id=None):
+        self.require_superuser(self_pane_id, "lane unregister")
+        entry = self.roles.unregister(pane)
+        self._role_pane_cache.pop(str(pane), None)
+        return {"pane_id": pane, "removed": entry}
+
+    def token_issue(self, role, label=None, self_pane_id=None):
+        """Mint a service token for a pane-less process (web desk, timers)."""
+        if self.roles.has_owner():
+            self.require_superuser(self_pane_id, "token issue")
+        elif role != "owner":
+            raise DunkError("no owner is registered yet; the first token must be an "
+                            "owner token (bootstrap), issued from the owner's terminal")
+        try:
+            token = self.roles.issue_token(role, label=label, by=self_pane_id)
+        except RoleError as error:
+            raise DunkError(str(error)) from None
+        return {"token": token, "role": role, "label": label or role,
+                "note": "shown once; store it in the service's 0600 token file"}
+
+    def token_revoke(self, label, self_pane_id=None):
+        self.require_superuser(self_pane_id, "token revoke")
+        return {"label": label, "revoked": self.roles.revoke_token(label)}
+
+    # -- GitHub Apps (docs/FLAT_FLEET.md 6) ---------------------------------
+
+    def _github_tokens(self):
+        tokens = getattr(self, "_github_token_cache", None)
+        if tokens is None:
+            import dunk_github
+            tokens = dunk_github.Tokens()
+            self._github_token_cache = tokens
+        return tokens
+
+    def gh_token(self, kind=None, self_pane_id=None):
+        """A short-lived installation token for the App this caller's role implies.
+
+        A worker gets the author App, a reviewer the reviewer App, the owner and
+        system whichever they ask for; everyone else gets `token: null` so the
+        gh wrapper leaves their own login alone.
+        """
+        import dunk_github
+        role = self.caller_role(self_pane_id)
+        try:
+            resolved = dunk_github.kind_for_role(role, kind)
+        except dunk_github.GitHubError as error:
+            raise DunkError(str(error)) from None
+        if resolved is None:
+            return {"token": None, "kind": None, "role": role,
+                    "note": "this role uses no App token (the owner keeps their own login)"}
+        try:
+            entry = self._github_tokens().get(resolved)
+        except dunk_github.GitHubError as error:
+            raise DunkError(str(error)) from None
+        if resolved == "author" and self_pane_id:
+            mints = getattr(self, "_gh_token_mints", None)
+            if mints is None:
+                mints = self._gh_token_mints = {}
+            mints[self_pane_id] = time.time()
+        return {"token": entry["token"], "kind": resolved, "role": role,
+                "slug": entry.get("slug"), "expires_at": entry.get("expires_at"),
+                "cached": entry.get("cached", False)}
+
+    def review_sync(self, dry_run=False, self_pane_id=None):
+        import dunk_review
+        return dunk_review.Sync(self, tokens=self._github_tokens()).run(dry_run=dry_run)
+
+    def poolrad_sync(self, limit=6, dry_run=False, self_pane_id=None):
+        import dunk_poolrad
+        return dunk_poolrad.Sync(self).run(limit=int(limit or 6), dry_run=dry_run)
+
+    def poolrad_progress(self, self_pane_id=None):
+        import dunk_poolrad
+        return dunk_poolrad.progress()
+
+    def review_list(self, self_pane_id=None):
+        tasks = self.tasks.list(scope=None, include_done=False, limit=500, kind="review")
+        now = time.time()
+        rows = []
+        for task in tasks:
+            rows.append({"task": task["id"], "status": task["status"], "repo": task.get("repo"),
+                         "pr": task.get("pr"), "head": (task.get("head") or "")[:12],
+                         "author": task.get("author"), "reviewer": task.get("claimed_by") or
+                         task.get("assignees") or [], "age_s": round(now - task["created_at"]),
+                         "verdict": task.get("verdict"), "title": task["title"]})
+        rows.sort(key=lambda r: -r["age_s"])
+        return {"reviews": rows, "count": len(rows),
+                "oldest_age_s": rows[0]["age_s"] if rows else None}
+
+    def _after_review_verdict(self, task, verdict, by=None):
+        try:
+            import dunk_review
+            return dunk_review.Sync(self, tokens=self._github_tokens()).on_verdict(
+                task, verdict, by=by)
+        except Exception as error:  # noqa: BLE001 - GitHub trouble never undoes a verdict
+            log.warning("review verdict side effects failed for %s: %s", task.get("id"), error)
+            return {"errors": [str(error)]}
+
+    # -- context store writes (docs/FLAT_FLEET.md 8) --------------------------
+
+    def _context_store(self, global_store=True, project_path=None):
+        import dunk_context
+        ledger = getattr(self, "_context_ledger", None)
+        if ledger is None:
+            ledger = self._context_ledger = dunk_context.Ledger()
+        if global_store or not project_path:
+            return dunk_context.Store(global_store=True, ledger=ledger)
+        return dunk_context.Store(project_path, ledger=ledger)
+
+    def context_add(self, body, cls, subject, type_="reference", authority="agent",
+                    source="", stated=None, recheck_after=None, supersedes=None,
+                    global_store=True, project_path=None, self_pane_id=None):
+        """Write an entry through the daemon. Rules come only from the owner:
+        class ground-truth, an owner-only type, or authority owner needs the
+        owner role; every other role writes facts under its own authority."""
+        import dunk_context
+        role = self.caller_role(self_pane_id)
+        wants_rule = (cls == "ground-truth" or type_ in dunk_context.OWNER_ONLY_TYPES
+                      or authority == "owner")
+        if wants_rule and role != "owner":
+            raise DunkError(
+                f"only the owner writes rules (class {cls}, type {type_}, authority "
+                f"{authority}); role {role} records a fact with --authority agent or "
+                "measured and the owner promotes it")
+        if role not in ("owner", "system") and authority == "measured" and not source:
+            raise DunkError("a measured fact needs --source (the command or file it came from)")
+        store = self._context_store(global_store, project_path)
+        if supersedes and role != "owner":
+            try:
+                old = store.resolve(supersedes)
+            except dunk_context.ContextError as error:
+                raise DunkError(str(error)) from None
+            if old is not None and (old["class"] == "ground-truth"
+                                    or old.get("authority") == "owner"):
+                raise DunkError("only the owner supersedes a rule")
+        try:
+            return store.add(body, cls=cls, subject=subject, type_=type_, authority=authority,
+                             source=source, stated=stated, recheck_after=recheck_after,
+                             supersedes=supersedes, by=self_pane_id or role)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_promote(self, slug, global_store=True, project_path=None, self_pane_id=None):
+        import dunk_context
+        self.require_superuser(self_pane_id, "context promote")
+        store = self._context_store(global_store, project_path)
+        entry = store.find(slug)
+        if entry is None:
+            raise DunkError(f"no entry {slug!r}")
+        try:
+            return store.add(entry["body"], cls="ground-truth", subject=entry["subject"],
+                             type_=(entry.get("type") if entry.get("type") in
+                                    dunk_context.OWNER_ONLY_TYPES + ("decision",) else "principle"),
+                             authority="owner", source=entry.get("source") or "",
+                             recheck_after=entry.get("recheck_after") or "90d",
+                             supersedes=entry["slug"], by=self_pane_id)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_supersede(self, slug, body, global_store=True, project_path=None,
+                          self_pane_id=None):
+        import dunk_context
+        store = self._context_store(global_store, project_path)
+        old = store.resolve(slug)
+        if old is None:
+            raise DunkError(f"no live entry {slug!r}")
+        role = self.caller_role(self_pane_id)
+        if (old["class"] == "ground-truth" or old.get("authority") == "owner") and role != "owner":
+            raise DunkError("only the owner supersedes a rule")
+        try:
+            return store.supersede(slug, body, by=self_pane_id or role)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
+
+    def context_retire(self, slug, reason="", global_store=True, project_path=None,
+                       self_pane_id=None):
+        import dunk_context
+        self.require_superuser(self_pane_id, "context retire")
+        store = self._context_store(global_store, project_path)
+        try:
+            return store.retire(slug, reason, by=self_pane_id)
+        except dunk_context.ContextError as error:
+            raise DunkError(str(error)) from None
 
     def superuser_status(self, self_pane_id=None):
         return {"superuser": self.is_superuser(self_pane_id),
-                "pane_id": self_pane_id,
-                **self.superusers.describe()}
+                "pane_id": self_pane_id, "role": self.caller_role(self_pane_id),
+                **self.roles.describe()}
 
     def superuser_add(self, entry, self_pane_id=None):
-        if not self.superusers.empty() and not self.is_superuser(self_pane_id):
-            raise DunkError("superuser add requires a superuser")
-        try:
-            value = self.superusers.add(entry)
-        except SuperuserError as error:
-            raise DunkError(str(error)) from None
-        with self._lock:
-            self.last_message = f"Added superuser {value}"
-        return {"added": value, **self.superuser_status(self_pane_id)}
+        """Legacy spelling of `lane register --role owner <pane>`; names refused."""
+        entry = str(entry or "").strip()
+        if not entry.startswith("%") and ":" not in entry:
+            raise DunkError("superuser add takes a pane id; names are no longer matched "
+                            "(a label is one `tmux select-pane -T` away for any lane)")
+        result = self.lane_register(pane=entry, role="owner", self_pane_id=self_pane_id)
+        return {"added": entry, **self.superuser_status(self_pane_id), "entry": result}
 
     def superuser_remove(self, entry, self_pane_id=None):
-        if not self.is_superuser(self_pane_id):
-            raise DunkError("superuser remove requires a superuser")
-        entry = str(entry or "").strip()
-        remaining = (len(self.superusers.panes) - (1 if ":" in entry else 0)
-                     + len(self.superusers.names) - (0 if ":" in entry else 1))
-        if remaining <= 0:
-            raise DunkError("refusing to remove the last superuser")
-        try:
-            removed = self.superusers.remove(entry)
-        except SuperuserError as error:
-            raise DunkError(str(error)) from None
-        with self._lock:
-            self.last_message = f"Removed superuser {entry}"
-        return {"removed": removed, "entry": entry,
+        self.require_superuser(self_pane_id, "superuser remove")
+        if len(self.roles.owners()) <= 1 and entry in self.roles.owners():
+            raise DunkError("refusing to remove the last owner")
+        removed = self.roles.unregister(entry)
+        return {"removed": bool(removed), "entry": entry,
                 **self.superuser_status(self_pane_id)}
 
     def superuser_recover(self, self_pane_id=None, name=None):
-        """Re-assert the caller's pane and the configured VP name.
-
-        Bootstrap (empty allowlist) is allowed; after that only an existing
-        superuser can recover. This is the setup/takeover step: the VP pane
-        gets its current TMUX_PANE (or HERDR_PANE_ID on the rollback) and name written into the allowlist.
-        """
+        """Bootstrap: register the caller's pane as owner when none exists."""
         if not self_pane_id:
             raise DunkError("superuser recover requires a known caller pane")
-        if not self.superusers.empty() and not self.is_superuser(self_pane_id):
-            raise DunkError(
-                "superuser recover requires an existing superuser; ask one to "
-                "run `dunkingsheep superuser add <your-pane>`")
-        name = str(name or DEFAULT_VP_NAME).strip()
-        try:
-            self.superusers.add(self_pane_id)
-            if name:
-                self.superusers.add(name)
-        except SuperuserError as error:
-            raise DunkError(str(error)) from None
-        with self._lock:
-            self.last_message = f"Recovered superuser {self_pane_id} ({name})"
-        return {"recovered": True, "pane_id": self_pane_id, "name": name,
+        result = self.lane_register(pane=self_pane_id, role="owner", self_pane_id=self_pane_id)
+        return {"recovered": True, "pane_id": self_pane_id, "entry": result,
                 **self.superuser_status(self_pane_id)}
 
     def require_send_self(self, target, self_pane_id, action):
@@ -3676,14 +4042,12 @@ class Flock:
         (dunk_desk.DeskCredential). It is not a superuser entry and grants nothing
         else; the flag is set per request by _authorise_send.
         """
-        if self.is_superuser(self_pane_id):
-            return
-        if getattr(getattr(self, "_caller_state", None), "desk_send", False):
+        if self.caller_role(self_pane_id) in ("owner", "web", "system"):
             return
         if not self_pane_id:
             raise DunkError(
-                f"{action} requires a superuser; non-superusers can use the "
-                "inbox and task queue")
+                f"{action} requires the owner role or a service token; anonymous "
+                "callers use the inbox and task queue")
         try:
             resolved = self.resolve_target(target, self_pane_id)["pane_id"]
         except DunkError:
@@ -3729,7 +4093,8 @@ class Flock:
         return out
 
     def create_workspace(self, label=None, cwd=None, command=None, focus=False,
-                         mailbox=None):
+                         mailbox=None, role=None, provider=None, model=None,
+                         self_pane_id=None):
         """New workspace (with its first tab and pane). `command`, if given, is
         typed + Enter into that pane once it exists.
 
@@ -3743,6 +4108,11 @@ class Flock:
         if mailbox and out.get("pane_id"):
             self._remember_lane(out["pane_id"], str(mailbox).strip(), declared=True)
             self._title_pane(out["pane_id"], mailbox)
+        if role and out.get("pane_id"):
+            out["role"] = self.lane_register(pane=out["pane_id"], role=role,
+                                             provider=provider, model=model,
+                                             label=mailbox or label,
+                                             self_pane_id=self_pane_id)
         return out
 
     def create_tab(self, workspace=None, label=None, cwd=None, command=None, focus=False,
@@ -3791,7 +4161,7 @@ class Flock:
         return workspace_id
 
     def start_agent(self, name, command, workspace=None, tab=None, split=None, cwd=None,
-                    focus=False, self_pane_id=None):
+                    focus=False, self_pane_id=None, role=None, provider=None, model=None):
         """Launch `command` in a new pane registered by name as agent `name`
         (on the herdr rollback: `herdr agent start`). Placement: inside `tab` (splitting it when
         `split` is right/down), else in `workspace` (id, label or 'self';
@@ -3838,11 +4208,19 @@ class Flock:
             command=shlex.join(argv), cwd=cwd or agent.get("cwd"),
             session=session.get("value"), session_kind=session.get("kind"),
             name=name, source="start_agent")
+        registered = None
+        if role and agent.get("pane_id"):
+            # Bind the role to the pane's root process now, from the daemon's own
+            # launch record: the one moment the identity is known for certain.
+            registered = self.lane_register(pane=agent.get("pane_id"), role=role,
+                                            provider=provider, model=model, label=name,
+                                            self_pane_id=self_pane_id)
         with self._lock:
             self.last_message = f"Started agent {name}"
         log.info("started agent %s -> %s: %s", name, agent.get("pane_id"), argv)
         return {"agent": agent, "pane_id": agent.get("pane_id"), "name": name,
-                "argv": result.get("argv") or argv, "child_pid": child_pid}
+                "argv": result.get("argv") or argv, "child_pid": child_pid,
+                "role": registered}
 
     def respawn_pane(self, pane_id, argv, rollback_argv=None, expected_pid=None,
                      expected_start=None, confirm_idle=False, reason=None,

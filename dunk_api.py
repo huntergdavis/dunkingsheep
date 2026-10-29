@@ -19,6 +19,7 @@ import json
 import os
 import sys
 
+import dunk_roles
 from dunk_core import DEFAULT_INTERVAL_MINUTES, DEFAULT_TEXT, DunkError, PANE_ID_RE, _as_dunk_error
 from dunk_tasks import PRIORITIES as TASK_PRIORITIES, STATUSES as TASK_STATUSES
 
@@ -282,37 +283,12 @@ def h_fire_dunk(flock, args, self_pane_id):
     )
 
 
-def h_desk_token(flock, args, self_pane_id):
-    """Create the narrow desk credential. Returns the token exactly once."""
-    import dunk_desk
-    panes = [part.strip() for part in str(args.get("panes") or "").split(",")
-             if part.strip()]
-    token = dunk_desk.DeskCredential().issue(panes)
-    return {"token": token, "panes": panes,
-            "permits": sorted(dunk_desk.DESK_VERBS),
-            "note": "store it in the desk's environment; it can only type into "
-                    "these panes, and it is not a superuser entry"}
-
-
 def _authorise_send(flock, command, args):
-    """Refuse a desk token used for anything but a listed verb on a listed pane.
-
-    A valid desk credential skips the self-only rule below; it never skips the
-    pane list, and it cannot be used for any other command because the token is
-    only inspected on these two paths.
-    """
-    token = (args.get("desk_token") or "").strip()
-    if not token:
-        return False
-    import dunk_desk
-    try:
-        dunk_desk.DeskCredential().permits(command, args.get("target"), token)
-    except dunk_desk.DeskError as error:
-        raise DunkError(f"desk credential refused: {error}") from None
-    # Per-request, per-thread: a process-wide flag would leak the permission into
-    # the next request handled by the same thread.
-    flock._caller_state.desk_send = True
-    return True
+    """Retired: the desk credential became the `web` service token (dunk_roles)."""
+    if (args.get("desk_token") or "").strip():
+        raise DunkError("desk_token is retired; present a web service token instead "
+                        "(dunkingsheep token issue --role web)")
+    return False
 
 
 def h_send_text(flock, args, self_pane_id):
@@ -590,6 +566,8 @@ def h_dispatch(flock, args, self_pane_id):
     """
     import dunk_dispatch
     action = args.get("action") or "status"
+    if action in ("add", "remove", "tick") and flock.caller_role(self_pane_id) not in ("owner", "system"):
+        raise DunkError(f"dispatch {action} requires the owner or system role; status and list are open")
     queue = dunk_dispatch.Queue()
     if action == "add":
         return queue.add(args["brief"], task_id=args.get("task_id"), lane=args.get("lane"))
@@ -832,7 +810,8 @@ def h_task_add(flock, args, self_pane_id):
         parent_id=args.get("parent_id"),
         depends_on=_task_values(args.get("depends_on")),
         multi_assignee=_bool(args.get("multi_assignee"), False),
-        self_pane_id=self_pane_id)
+        self_pane_id=self_pane_id, kind=args.get("kind"), author=args.get("author"),
+        repo=args.get("repo"), pr=args.get("pr"), head=args.get("head"))
 
 
 def h_task_list(flock, args, self_pane_id):
@@ -840,7 +819,8 @@ def h_task_list(flock, args, self_pane_id):
                            assignee=args.get("assignee"),
                            include_done=_bool(args.get("include_done"), True),
                            limit=int(_opt(args, "limit", 200)),
-                           self_pane_id=self_pane_id)
+                           self_pane_id=self_pane_id, kind=args.get("kind"),
+                           needs_owner=_bool(args.get("needs_owner"), False))
 
 
 def h_task_read(flock, args, self_pane_id):
@@ -848,6 +828,13 @@ def h_task_read(flock, args, self_pane_id):
 
 
 def h_task_update(flock, args, self_pane_id):
+    role = flock.caller_role(self_pane_id)
+    if role not in ("owner", "system", "web"):
+        touched = [key for key in ("status", "assignees", "multi_assignee", "block_reason") if key in args]
+        if touched:
+            raise DunkError(
+                f"task update cannot change {', '.join(touched)} for role {role}: status "
+                "moves through next/complete/block, and assignment is the owner's")
     fields = {}
     for key in ("title", "body", "status", "priority", "parent_id",
                 "block_reason"):
@@ -863,13 +850,17 @@ def h_task_update(flock, args, self_pane_id):
 
 
 def h_task_assign(flock, args, self_pane_id):
+    role = flock.caller_role(self_pane_id)
+    if role not in ("owner", "system", "web"):
+        raise DunkError(f"task assign requires the owner role (caller is {role}); "
+                        "lanes pull work with task next, they are not handed it")
     return flock.task_assign(args["id"], _task_values(args["assignees"]),
                              mode=args.get("mode") or "add",
                              self_pane_id=self_pane_id)
 
 
 def h_task_complete(flock, args, self_pane_id):
-    return flock.task_complete(args["id"], by=args.get("by"),
+    return flock.task_complete(args["id"], by=args.get("by"), verdict=args.get("verdict"),
                                self_pane_id=self_pane_id)
 
 
@@ -1061,6 +1052,8 @@ def h_create_workspace(flock, args, self_pane_id):
     return flock.create_workspace(
         label=args.get("label"), cwd=args.get("cwd"), command=args.get("command"),
         focus=_bool(args.get("focus"), False), mailbox=args.get("mailbox"),
+        role=args.get("role"), provider=args.get("provider"), model=args.get("model"),
+        self_pane_id=self_pane_id,
     )
 
 
@@ -1084,7 +1077,8 @@ def h_start_agent(flock, args, self_pane_id):
     return flock.start_agent(
         args["name"], args["command"], workspace=args.get("workspace"), tab=args.get("tab"),
         split=args.get("split"), cwd=args.get("cwd"), focus=_bool(args.get("focus"), False),
-        self_pane_id=self_pane_id,
+        self_pane_id=self_pane_id, role=args.get("role"), provider=args.get("provider"),
+        model=args.get("model"),
     )
 
 def h_respawn_pane(flock, args, self_pane_id):
@@ -1164,6 +1158,78 @@ def h_superuser_remove(flock, args, self_pane_id):
 
 def h_superuser_recover(flock, args, self_pane_id):
     return flock.superuser_recover(self_pane_id, name=args.get("name"))
+
+
+def h_whoami(flock, args, self_pane_id):
+    return flock.whoami(self_pane_id)
+
+
+def h_context_add(flock, args, self_pane_id):
+    return flock.context_add(
+        args["body"], args["cls"], args["subject"], type_=args.get("type") or "reference",
+        authority=args.get("authority") or "agent", source=args.get("source") or "",
+        stated=args.get("stated"), recheck_after=args.get("recheck_after"),
+        supersedes=args.get("supersedes"), global_store=_bool(args.get("global_store"), True),
+        project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_promote(flock, args, self_pane_id):
+    return flock.context_promote(args["slug"], global_store=_bool(args.get("global_store"), True),
+                                 project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_supersede(flock, args, self_pane_id):
+    return flock.context_supersede(args["slug"], args["body"],
+                                   global_store=_bool(args.get("global_store"), True),
+                                   project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_context_retire(flock, args, self_pane_id):
+    return flock.context_retire(args["slug"], reason=args.get("reason") or "",
+                                global_store=_bool(args.get("global_store"), True),
+                                project_path=args.get("project_path"), self_pane_id=self_pane_id)
+
+
+def h_gh_token(flock, args, self_pane_id):
+    return flock.gh_token(kind=args.get("kind"), self_pane_id=self_pane_id)
+
+
+def h_poolrad_sync(flock, args, self_pane_id):
+    return flock.poolrad_sync(limit=args.get("limit") or 6,
+                              dry_run=_bool(args.get("dry_run"), False), self_pane_id=self_pane_id)
+
+
+def h_poolrad_progress(flock, args, self_pane_id):
+    return flock.poolrad_progress(self_pane_id=self_pane_id)
+
+
+def h_review(flock, args, self_pane_id):
+    action = args.get("action") or "list"
+    if action == "sync":
+        return flock.review_sync(dry_run=_bool(args.get("dry_run"), False),
+                                 self_pane_id=self_pane_id)
+    if action == "list":
+        return flock.review_list(self_pane_id=self_pane_id)
+    raise DunkError(f"review: unknown action {action!r} (sync, list)")
+
+
+def h_lane_register(flock, args, self_pane_id):
+    return flock.lane_register(pane=args.get("pane"), role=args.get("role"),
+                               provider=args.get("provider"), model=args.get("model"),
+                               label=args.get("label"), self_pane_id=self_pane_id)
+
+
+def h_lane_unregister(flock, args, self_pane_id):
+    return flock.lane_unregister(args["pane"], self_pane_id=self_pane_id)
+
+
+def h_token_issue(flock, args, self_pane_id):
+    return flock.token_issue(args["role"], label=args.get("label"),
+                             self_pane_id=self_pane_id)
+
+
+def h_token_revoke(flock, args, self_pane_id):
+    return flock.token_revoke(args["label"], self_pane_id=self_pane_id)
 
 
 def h_shutdown(flock, args, self_pane_id):
@@ -1571,14 +1637,6 @@ COMMANDS = [
         required=["id"],
     ),
     Command(
-        "desk_token",
-        "Issue (or rotate) the desk credential: one token that may send_text/"
-        "send_keys to an explicit list of panes and do NOTHING else. Not a "
-        "superuser entry. Superuser-gated because it hands out typing rights.",
-        h_desk_token,
-        params={"panes": {"type": "string",
-                          "description": "comma-separated pane ids, e.g. %1,%2,%4"}}),
-    Command(
         "send_text",
         "Send a direct message or instruction to a pane: type text + Enter once, "
         "with no dunk created. Use it to talk to another agent (target its pane) "
@@ -1857,6 +1915,12 @@ COMMANDS = [
             "depends_on": TASK_DEPS_PARAM,
             "multi_assignee": {"type": "boolean",
                                "description": "Allow several agents to claim this task."},
+            "kind": {"type": "string", "enum": ["work", "review", "verify", "report"],
+                     "description": "work (default); review is filed by the review timer."},
+            "author": {"type": "string", "description": "lane that produced the artefact under review"},
+            "repo": {"type": "string", "description": "owner/name, for reviews"},
+            "pr": {"type": "integer", "description": "PR number, for reviews"},
+            "head": {"type": "string", "description": "exact commit under review"},
         },
         required=["title"],
     ),
@@ -1874,6 +1938,9 @@ COMMANDS = [
                              "description": "Include done/cancelled (default true)."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500,
                       "description": "Maximum tasks to return (default 200)."},
+            "kind": {"type": "string", "enum": ["work", "review", "verify", "report"]},
+            "needs_owner": {"type": "boolean",
+                            "description": "Only tasks blocked on a 'needs-owner:' question."},
         },
     ),
     Command(
@@ -1925,6 +1992,9 @@ COMMANDS = [
             "id": TASK_ID_PARAM,
             "by": {"type": "string",
                    "description": "Who completed it (defaults to caller pane)."},
+            "verdict": {"type": "string", "enum": ["accept", "needs-fix"],
+                        "description": "Review tasks only: the reviewer's verdict, "
+                                       "written by the daemon from the bound lane."},
         },
         required=["id"],
     ),
@@ -2215,7 +2285,9 @@ COMMANDS = [
         "start an agent there. Returns the new workspace, tab and pane ids; the "
         "pane id is a dunk target.",
         h_create_workspace,
-        params={
+        params={"role": {"type": "string", "enum": ["owner", "desk", "planner", "worker", "reviewer"], "description": "bind this role to the new pane (registered from the launch record)"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                
             "label": LABEL_PARAM,
             "cwd": CWD_PARAM,
             "command": RUN_COMMAND_PARAM,
@@ -2267,7 +2339,9 @@ COMMANDS = [
         "to place it in the dedicated sandbox workspace, never the caller's tab. "
         "Superusers only. Returns the agent's pane id, ready to dunk on.",
         h_start_agent,
-        params={
+        params={"role": {"type": "string", "enum": ["owner", "desk", "planner", "worker", "reviewer"], "description": "bind this role to the new pane (registered from the launch record)"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                
             "name": {"type": "string",
                      "description": "Agent name as the backend will show it, e.g. 'writer'."},
             "command": {"type": "string",
@@ -2371,6 +2445,98 @@ COMMANDS = [
     ),
     # -- superuser allowlist -------------------------------------------------
     Command(
+        "gh_token",
+        "A one-hour GitHub App installation token for the App this caller's role "
+        "implies (worker: author; reviewer: reviewer; owner/system: --kind). Lanes "
+        "never see a key; the gh wrapper and git-credential call this.",
+        h_gh_token, params={"kind": {"type": "string", "enum": ["author", "reviewer"]}}),
+    Command(
+        "review_sync",
+        "The review timer: open PRs -> one live review task per head; statuses and "
+        "approvals follow verdicts. System/owner only. dry_run reports without writing.",
+        lambda flock, args, pane: h_review(flock, dict(args, action="sync"), pane),
+        params={"dry_run": {"type": "boolean"}}),
+    Command(
+        "review_list",
+        "Live review tasks with PR, head, author lane, reviewer and age.",
+        lambda flock, args, pane: h_review(flock, dict(args, action="list"), pane)),
+    Command(
+        "context_add",
+        "Write a context entry through the daemon. Facts from any lane under its own "
+        "authority; ground truths, rules/principles and authority=owner need the owner.",
+        h_context_add,
+        params={"body": {"type": "string"}, "cls": {"type": "string",
+                "enum": ["ground-truth", "fact", "provisional", "history"]},
+                "subject": {"type": "string"}, "type": {"type": "string"},
+                "authority": {"type": "string", "enum": ["owner", "measured", "agent"]},
+                "source": {"type": "string"}, "stated": {"type": "string"},
+                "recheck_after": {"type": "string"}, "supersedes": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("body", "cls", "subject")),
+    Command(
+        "context_promote",
+        "Owner only: promote an entry to a ground truth (linked by supersession).",
+        h_context_promote,
+        params={"slug": {"type": "string"}, "global_store": {"type": "boolean"},
+                "project_path": {"type": "string"}},
+        required=("slug",)),
+    Command(
+        "context_supersede",
+        "Replace an entry, keeping both linked. Rules only by the owner.",
+        h_context_supersede,
+        params={"slug": {"type": "string"}, "body": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("slug", "body")),
+    Command(
+        "context_retire",
+        "Owner only: retire an entry with a reason (history kept).",
+        h_context_retire,
+        params={"slug": {"type": "string"}, "reason": {"type": "string"},
+                "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
+        required=("slug",)),
+    Command(
+        "poolrad_sync",
+        "Backlog-sync: run the poolrad strict-candidate exporter and file the next N "
+        "composable, uncredited, unfiled bodies as kind=work tasks. System/owner only.",
+        h_poolrad_sync, params={"limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "dry_run": {"type": "boolean"}}),
+    Command(
+        "poolrad_progress",
+        "Credited strict bodies, reviewed identities, the 815 CEILING, queue summary.",
+        h_poolrad_progress),
+    Command(
+        "whoami",
+        "This caller's role (owner/system/web/desk/planner/worker/reviewer/"
+        "anonymous), how it was bound, and what the kernel saw.",
+        h_whoami),
+    Command(
+        "lane_register",
+        "Bind a role to a pane's root process (owner/system only; a bound caller may "
+        "register itself as the FIRST owner). Roles are never matched by label.",
+        h_lane_register,
+        params={"pane": {"type": "string", "description": "pane id, or 'self'"},
+                "role": {"type": "string", "enum": ["owner", "desk", "planner", "worker", "reviewer"]},
+                "provider": {"type": "string", "description": "claude/codex/pi/opencode-go"},
+                "model": {"type": "string"},
+                "label": {"type": "string"}},
+        required=("role",)),
+    Command(
+        "lane_unregister",
+        "Remove a pane's role binding (owner only).",
+        h_lane_unregister, params={"pane": {"type": "string"}}, required=("pane",)),
+    Command(
+        "token_issue",
+        "Mint a service token for a pane-less process: web (the owner's transport), "
+        "system (timers), owner. Owner only; shown once.",
+        h_token_issue,
+        params={"role": {"type": "string", "enum": ["web", "system", "owner"]},
+                "label": {"type": "string"}},
+        required=("role",)),
+    Command(
+        "token_revoke",
+        "Revoke every service token with this label (owner only).",
+        h_token_revoke, params={"label": {"type": "string"}}, required=("label",)),
+    Command(
         "superuser_status",
         "Show the superuser allowlist and whether this caller is on it. "
         "Non-superusers may use the inbox and task queue only.",
@@ -2465,7 +2631,12 @@ MCP_GROUPS = (
      "this hour, and blocked lanes with reasons.",
      (("dispatch", "dispatch"), ("retire", "retire_pane"), ("unretire", "retire_pane"),
       ("retired", "retire_pane"),
-      ("lanes", "lanes"), ("lane_set", "lane_set"), ("desk_token", "desk_token"))),
+      ("lanes", "lanes"), ("lane_set", "lane_set"),
+      ("review_sync", "review_sync"), ("review_list", "review_list"),
+      ("gh_token", "gh_token"), ("poolrad_sync", "poolrad_sync"),
+      ("poolrad_progress", "poolrad_progress"), ("context_add", "context_add"),
+      ("context_promote", "context_promote"), ("context_supersede", "context_supersede"),
+      ("context_retire", "context_retire"))),
     ("pane",
      "Inspect and address a pane. action=list/read/delivery/send/send_keys/"
      "flush/clear_box/messages/get_message/cancel_message. delivery says whether "
@@ -2492,7 +2663,10 @@ MCP_GROUPS = (
     ("superuser",
      "The superuser allowlist. action=status/add/remove/recover. Destructive "
      "operations are refused unless the caller is on the list.",
-     (("status", "superuser_status"), ("add", "superuser_add"),
+     (("whoami", "whoami"), ("register", "lane_register"),
+      ("unregister", "lane_unregister"), ("token", "token_issue"),
+      ("revoke", "token_revoke"),
+      ("status", "superuser_status"), ("add", "superuser_add"),
       ("remove", "superuser_remove"), ("recover", "superuser_recover"))),
     ("memory",
      "Deterministic SQLite+FTS5 recall over every agent session. action=recall/"
@@ -2586,7 +2760,8 @@ SUPERUSER_ONLY = {
     "toggle_dunk", "stop_all", "fire_dunk",
     "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
-    "lane_set", "desk_token",
+    "lane_set", "lane_unregister", "token_issue", "token_revoke",
+    "review_sync", "context_promote", "context_retire", "poolrad_sync",
     "memory_backfill",
 }
 
@@ -2598,14 +2773,27 @@ def dispatch(flock, name, args=None, self_pane_id=None):
         raise DunkError(f"unknown command {name!r}")
     # Each dispatch starts from "no desk credential used", whatever the last
     # request on this thread did.
-    flock._caller_state.desk_send = False
-    if name in SUPERUSER_ONLY:
+    role = flock.caller_role(self_pane_id)
+    if name in SUPERUSER_ONLY and role not in ("system", "web"):
+        # The owner gate (names the bootstrap when no owner exists). Passing it
+        # IS the permission for these verbs; token roles fall through to the
+        # per-role table, which denies the fleet-destructive ones to `web`.
         flock.require_superuser(self_pane_id, name)
+    elif not dunk_roles.allowed(role, name):
+        raise DunkError(
+            f"{name} is not permitted for role {role}"
+            + (f" (pane {self_pane_id})" if self_pane_id else " (no pane, no token)")
+            + "; see docs/FLAT_FLEET.md section 4.3")
     args = dict(args or {})
+    if role == "desk":
+        args = dunk_roles.clamp_desk_args(name, args)
     missing = [key for key in command.required if args.get(key) in (None, "")]
     if missing:
         raise DunkError(f"{name}: missing required argument(s): {', '.join(missing)}")
     unknown = [key for key in args if key not in command.params]
     if unknown:
         raise DunkError(f"{name}: unknown argument(s): {', '.join(sorted(unknown))}")
-    return command.handler(flock, args, self_pane_id)
+    result = command.handler(flock, args, self_pane_id)
+    if role == "desk":
+        result = dunk_roles.clamp_desk_result(result)
+    return result

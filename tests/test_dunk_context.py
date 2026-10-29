@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from tests import _bootstrap  # noqa: F401
 
-from dunk_context import ContextError, Store
+from dunk_context import ContextError, Store, _render
 
 
 class ContextTests(unittest.TestCase):
@@ -65,8 +65,16 @@ class ContextTests(unittest.TestCase):
                 self.store.resolve(old["slug"])
 
     def test_an_agent_ground_truth_is_refused_by_check_and_index(self):
-        self.store.add("agents may propose but never promote", cls="ground-truth",
-                       subject="authority", type_="principle", authority="agent")
+        # add() refuses this outright now (FLAT_FLEET.md 8); a file dropped in
+        # by hand is what check and index must still refuse.
+        with self.assertRaises(ContextError):
+            self.store.add("agents may propose but never promote", cls="ground-truth",
+                           subject="authority", type_="principle", authority="agent")
+        self.store.ensure()
+        (self.store.root / "ground-truth" / "2026-10-29-authority.md").write_text(_render(
+            {"class": "ground-truth", "subject": "authority", "type": "principle",
+             "scope": self.store.scope, "authority": "agent", "stated": "2026-10-29"},
+            "agents may propose but never promote"))
         report = self.store.check()
         self.assertTrue(any("authority != owner" in p["problem"] for p in report["refusals"]))
         self.store.index()
@@ -236,11 +244,11 @@ class ContextCliTests(unittest.TestCase):
 
     def test_text_adds_inline_and_a_bare_sentence_is_a_named_refusal(self):
         added = self.run_cli("context", "add", "--text", "a claim", "--class", "fact",
-                             "--subject", "inline", "--authority", "agent")
+                             "--subject", "inline", "--authority", "agent", "--local")
         self.assertEqual(0, added.returncode, added.stderr)
         self.assertIn("added fact/", added.stdout)
         bare = self.run_cli("context", "add", "a bare sentence", "--class", "fact",
-                            "--subject", "x")
+                            "--subject", "x", "--local")
         self.assertEqual(2, bare.returncode)
         self.assertIn("no such file", bare.stderr)
         self.assertIn("--text", bare.stderr, "the refusal must name the form that works")
@@ -248,7 +256,7 @@ class ContextCliTests(unittest.TestCase):
 
     def test_a_bad_enum_is_a_named_refusal_not_a_traceback(self):
         bad = self.run_cli("context", "add", "--text", "x", "--class", "fact",
-                           "--subject", "y", "--authority", "stated")
+                           "--subject", "y", "--authority", "stated", "--local")
         self.assertEqual(2, bad.returncode)
         self.assertIn("authority must be one of", bad.stderr)
         self.assertNotIn("Traceback", bad.stderr)

@@ -78,14 +78,27 @@ def locked_allowlist(path):
     revoking between the check and the mutation blocks instead of slipping
     through; refusal inside the block rolls back with no effects."""
     with _locked(path, False):
-        with open(path, "r", encoding="utf-8") as handle:
-            yield _parse_allowlist(json.load(handle))
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            # No registry yet (bootstrap): nobody is an operator. Fail closed.
+            yield (set(), set())
+            return
+        yield _parse_allowlist(data)
 
 
 def _parse_allowlist(data):
-    """(panes, names) sets from decoded JSON; shared by load and locked reads."""
+    """(panes, names) sets from decoded JSON; shared by load and locked reads.
+
+    A roles file (dunk_roles: {"lanes": {pane: {"role": ...}}}) is accepted
+    too: its owner lanes are the panes, and it never yields names."""
     if not isinstance(data, dict):
         raise SuperuserError("allowlist must contain a JSON object")
+    if isinstance(data.get("lanes"), dict) and "panes" not in data:
+        owners = {str(pane).strip() for pane, entry in data["lanes"].items()
+                  if isinstance(entry, dict) and entry.get("role") == "owner"}
+        return (owners, set())
     panes = list(data.get("panes") or ())
     names = list(data.get("names") or ())
     for entry in data.get("superusers") or ():
@@ -121,8 +134,11 @@ def read_panes_locked(path):
     revocation landing in between. Raises on unreadable content: callers fail
     closed (a corrupt allowlist grants nothing)."""
     with _locked(path, False):
-        with open(path, "r", encoding="utf-8") as handle:
-            return _parse_allowlist(json.load(handle))
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return _parse_allowlist(json.load(handle))
+        except FileNotFoundError:
+            return (set(), set())
 
 
 class Superusers:

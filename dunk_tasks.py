@@ -66,6 +66,13 @@ DEFAULT_LEASE_S = float(os.environ.get("DUNKINGSHEEP_LEASE_S", "1800"))
 # per-pane task scope unusable the day the backend flipped (2026-10-24).
 _PANE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$")
 
+# Task kinds (docs/FLAT_FLEET.md 5). `work` is what a worker lane pulls;
+# `review` is filed by the review timer for a PR head and pulled only by a
+# reviewer lane that is not its author; `verify` and `report` are reserved.
+KINDS = ("work", "review", "verify", "report")
+DEFAULT_KIND = "work"
+VERDICTS = ("accept", "needs-fix")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT PRIMARY KEY,
@@ -85,11 +92,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_by  TEXT,
     completed_at  REAL,
     cancelled_at  REAL,
-    block_reason  TEXT
+    block_reason  TEXT,
+    kind          TEXT NOT NULL DEFAULT 'work',
+    author        TEXT,
+    repo          TEXT,
+    pr            INTEGER,
+    head          TEXT,
+    verdict       TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_by_scope
     ON tasks (scope, status, created_at);
 CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks (parent_id);
+-- One live review per PR head (tasks_one_review_per_head) is created in
+-- _migrate, after the kind/repo/pr/head columns exist on older databases: a
+-- duplicate is refused by the store, not by a check in the timer (the CoS
+-- filed twelve identical reviews for PR #117).
 CREATE TABLE IF NOT EXISTS task_leases (
     task_id     TEXT NOT NULL,
     pane_id     TEXT NOT NULL,
@@ -173,6 +190,20 @@ def validate_status(status):
     if status not in STATUSES:
         raise TaskError(f"status must be one of {', '.join(STATUSES)}")
     return status
+
+
+def validate_kind(kind):
+    kind = str(kind or DEFAULT_KIND).strip().lower()
+    if kind not in KINDS:
+        raise TaskError(f"kind must be one of {', '.join(KINDS)}; got {kind!r}")
+    return kind
+
+
+def validate_verdict(verdict):
+    verdict = str(verdict or "").strip().lower()
+    if verdict not in VERDICTS:
+        raise TaskError(f"verdict must be one of {', '.join(VERDICTS)}; got {verdict!r}")
+    return verdict
 
 
 def validate_priority(priority):
@@ -278,9 +309,17 @@ class Tasks:
         """Add columns introduced after the first database was created."""
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
         for name, ddl in (("multi_assignee", "INTEGER NOT NULL DEFAULT 0"),
-                          ("attempts", "INTEGER NOT NULL DEFAULT 0")):
+                          ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                          ("kind", "TEXT NOT NULL DEFAULT 'work'"),
+                          ("author", "TEXT"), ("repo", "TEXT"), ("pr", "INTEGER"),
+                          ("head", "TEXT"), ("verdict", "TEXT")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+        # The partial unique index needs the columns above to exist first.
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_review_per_head "
+            "ON tasks (kind, repo, pr, head) WHERE kind = 'review' AND head IS NOT NULL "
+            "AND status IN ('open', 'in_progress', 'blocked')")
         lease_columns = {row["name"] for row in self.db.execute(
             "PRAGMA table_info(task_leases)")}
         for name, ddl in (("caller_pid", "INTEGER"), ("caller_start", "TEXT"),
@@ -362,6 +401,16 @@ class Tasks:
         return {"task_id": str(task_id), "pane_id": str(pane_id or ""),
                 "from_task": meta["from_task"], "message_id": meta["message_id"],
                 "attempt": meta["attempt"], "reason": reason, "at": now}
+
+    def _fire(self, task_id, event, **extra):
+        """Run `on_event` callbacks after a commit. Callbacks must be cheap and
+        must not write the task store; a failing callback is logged, never raised."""
+        for callback in list(getattr(self, "on_event", ()) or ()):
+            try:
+                callback(task_id, event, **extra)
+            except Exception:  # noqa: BLE001 - observers never break the store
+                log.exception("task on_event callback failed task=%s event=%s",
+                              task_id, event)
 
     def _record(self, task_id, event, at=None, actor=None, scope=None,
                 priority=None, status_from=None, status_to=None,
@@ -459,13 +508,28 @@ class Tasks:
 
     def add(self, scope, title, body="", status=DEFAULT_STATUS,
             priority=DEFAULT_PRIORITY, assignees=None, parent_id=None,
-            depends_on=None, created_by=None, multi_assignee=False):
+            depends_on=None, created_by=None, multi_assignee=False,
+            kind=DEFAULT_KIND, author=None, repo=None, pr=None, head=None):
         scope = validate_scope(scope)
         title = str(title or "").strip()
         if not title:
             raise TaskError("a task needs a title")
         status = validate_status(status or DEFAULT_STATUS)
         priority = validate_priority(priority or DEFAULT_PRIORITY)
+        kind = validate_kind(kind)
+        author = str(author).strip() if author else None
+        repo = str(repo).strip() if repo else None
+        head = str(head).strip() if head else None
+        if pr not in (None, ""):
+            try:
+                pr = int(pr)
+            except (TypeError, ValueError):
+                raise TaskError(f"pr must be a number; got {pr!r}") from None
+        else:
+            pr = None
+        if kind == "review" and not (repo and pr and head):
+            raise TaskError("a review task needs repo, pr and head (the exact commit "
+                            "under review); the verdict is bound to that head")
 
         parent_id = str(parent_id).strip() if parent_id else None
         if parent_id:
@@ -484,21 +548,36 @@ class Tasks:
             try:
                 task_id = self._next_id()
                 now = _now()
-                self.db.execute(
-                    "INSERT INTO tasks (id, scope, title, body, status, priority, "
-                    "parent_id, multi_assignee, assignees, depends_on, created_at, "
-                    "updated_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (task_id, scope, title, "" if body is None else str(body),
-                     status, priority, parent_id, 1 if multi_assignee else 0,
-                     _encode(_as_list(assignees)), _encode(deps), now, now,
-                     created_by),
-                )
+                try:
+                    self.db.execute(
+                        "INSERT INTO tasks (id, scope, title, body, status, priority, "
+                        "parent_id, multi_assignee, assignees, depends_on, created_at, "
+                        "updated_at, created_by, kind, author, repo, pr, head) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (task_id, scope, title, "" if body is None else str(body),
+                         status, priority, parent_id, 1 if multi_assignee else 0,
+                         _encode(_as_list(assignees)), _encode(deps), now, now,
+                         created_by, kind, author, repo, pr, head),
+                    )
+                except sqlite3.IntegrityError as error:
+                    if "UNIQUE constraint failed: tasks.kind" not in str(error):
+                        raise
+                    existing = self.db.execute(
+                        "SELECT id FROM tasks WHERE kind = 'review' AND repo = ? AND pr = ? "
+                        "AND head = ? AND status IN ('open', 'in_progress', 'blocked')",
+                        (repo, pr, head)).fetchone()
+                    raise TaskError(
+                        f"a live review task for {repo}#{pr}@{head[:12]} already exists"
+                        f"{' (' + existing['id'] + ')' if existing else ''}") from None
                 self._record(task_id, "created", at=now, actor=created_by,
-                             scope=scope, priority=priority, status_to=status)
+                             scope=scope, priority=priority, status_to=status,
+                             meta={"kind": kind, "author": author} if kind != "work"
+                             or author else None)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
+        self._fire(task_id, "created")
         return self.get(task_id)
 
     def update(self, task_id, title=None, body=None, status=None, priority=None,
@@ -639,11 +718,33 @@ class Tasks:
                 raise
             return self.get(row["id"])
 
-    def complete(self, task_id, by=None):
+    def complete(self, task_id, by=None, verdict=None):
         row = self._require(task_id)
         if row["status"] == "done":
             return self.get(row["id"])
-        return self.update(row["id"], status="done", updated_by=by)
+        if verdict is not None:
+            self.set_verdict(row["id"], verdict, by=by)
+        result = self.update(row["id"], status="done", updated_by=by)
+        self._fire(row["id"], "completed", by=by, kind=row["kind"] if "kind" in row.keys() else None)
+        return result
+
+    def set_verdict(self, task_id, verdict, by=None):
+        """Record a review verdict. Written by the daemon from the bound reviewer
+        (Flock.task_complete), never from a free-text note."""
+        verdict = validate_verdict(verdict)
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute("UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ?",
+                                (verdict, _now(), str(task_id)))
+                self._record(task_id, "verdict", actor=by, meta={"verdict": verdict})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return verdict
 
     def next_job_handoffs(self, pane_id=None):
         """Latest durable state of each handoff, including terminal receipts."""
@@ -924,7 +1025,7 @@ class Tasks:
         return [GLOBAL, validate_scope(scope)]
 
     def list(self, scope=None, status=None, assignee=None, include_done=True,
-             limit=200, self_pane_id=None):
+             limit=200, self_pane_id=None, kind=None, needs_owner=False):
         scopes = self._visible_scopes(scope, self_pane_id)
         placeholders = ",".join("?" for _ in scopes)
         where = [f"scope IN ({placeholders})"]
@@ -934,6 +1035,12 @@ class Tasks:
             params.append(validate_status(status))
         elif not include_done:
             where.append("status NOT IN ('done', 'cancelled')")
+        if kind:
+            where.append("kind = ?")
+            params.append(validate_kind(kind))
+        if needs_owner:
+            # The one way a lane asks the owner anything (FLAT_FLEET.md 5).
+            where.append("status = 'blocked' AND block_reason LIKE 'needs-owner:%'")
         rows = self.db.execute(
             f"SELECT * FROM tasks WHERE {' AND '.join(where)}", params
         ).fetchall()
@@ -1068,7 +1175,7 @@ class Tasks:
                  ",".join(refused.get("task_ids") or []) or "-")
 
     def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None,
-                   caller=None, allow_busy=False):
+                   caller=None, allow_busy=False, kinds=None, exclude_author=None):
         """Atomically claim the next eligible task in ``scope``.
 
         The whole read-select-update runs under ``BEGIN IMMEDIATE``. SQLite
@@ -1146,8 +1253,15 @@ class Tasks:
                                 "pane_id": pane_id, "refused": refused}
 
                 chosen = None
+                wanted = set(kinds) if kinds else None
                 for task in candidates:
                     if task["blocked_by"]:
+                        continue
+                    # Role filters (FLAT_FLEET.md 5): a reviewer pulls only reviews
+                    # it did not author; a worker never pulls a review.
+                    if wanted is not None and task.get("kind", DEFAULT_KIND) not in wanted:
+                        continue
+                    if exclude_author and task.get("author") == exclude_author:
                         continue
                     if not self._claimable(task, pane_id):
                         continue
@@ -1409,8 +1523,6 @@ class Tasks:
         since = (until - float(window_s)) if since is None else float(since)
         bucket_s = 86400 if str(bucket).lower() == "day" else 3600
 
-        # Same VP-pane resolution the rest of the product uses (dunk_core).
-        leader_pane = os.environ.get("DUNKINGSHEEP_VP_PANE", _default_vp_pane)
         tasks = [self._decorate(row) for row in
                  self.db.execute("SELECT * FROM tasks").fetchall()]
         if scopes is not None:
@@ -1426,11 +1538,11 @@ class Tasks:
             by_priority[task["priority"]] = by_priority.get(task["priority"], 0) + 1
             by_scope["global" if task["is_global"] else "pane"] += 1
             if task["status"] in ("open", "in_progress", "blocked"):
-                if (not task["assignees"] and task["is_global"]) \
-                        or leader_pane in task["assignees"]:
-                    # owner #1708: unowned means leader-owned, so an active global
-                    # task with no assignee is work the leader is carrying. A task
-                    # explicitly assigned to the leader pane is theirs as well.
+                if task["status"] == "blocked" and str(task.get("block_reason") or
+                                                     "").startswith("needs-owner:"):
+                    # FLAT_FLEET.md 5: the only work a person is holding is a
+                    # question a lane asked the owner. (The key keeps its old
+                    # name, `leader_held`, for the board; the leader is the owner.)
                     leader_held.append(task)
                 for assignee in task["assignees"]:
                     by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
@@ -1511,7 +1623,7 @@ class Tasks:
                     "definition": ("global tasks with no assignee (owner #1708: "
                                    "unowned means leader-owned), plus tasks "
                                    "explicitly assigned to the leader pane"),
-                    "leader_pane": leader_pane or None,
+                    "leader_pane": None,     # there is no leader; these are needs-owner questions
                 },
             },
             "throughput": {

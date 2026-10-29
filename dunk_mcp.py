@@ -218,15 +218,37 @@ class McpServer:
             "instructions": INSTRUCTIONS,
         }
 
+    def _role(self):
+        """This process's role, asked once: the list of tools follows it."""
+        cached = getattr(self, "_role_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            role = (self._client_factory().call("whoami") or {}).get("role") or "anonymous"
+        except Exception:  # noqa: BLE001 - an unreachable daemon lists read-only tools
+            role = "anonymous"
+        self._role_cache = role
+        return role
+
     def list_tools(self):
-        return [
-            {
+        import dunk_roles
+        role = self._role()
+        tools = []
+        for command in self.tools:
+            actions = getattr(command, "actions", None)
+            if actions:
+                resolve = command.resolve
+                if not any(dunk_roles.allowed(role, resolve(a)) for a in actions
+                           if resolve(a)):
+                    continue
+            elif not dunk_roles.allowed(role, command.name):
+                continue
+            tools.append({
                 "name": command.name,
                 "description": command.description,
                 "inputSchema": command.input_schema(),
-            }
-            for command in self.tools
-        ]
+            })
+        return tools
 
     def call_tool(self, name, arguments):
         if not isinstance(arguments, dict):

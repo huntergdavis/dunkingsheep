@@ -3,6 +3,9 @@ Description=Dunking Sheep dispatcher: fill idle lanes from the standby queue
 After=default.target dunkingsheep.service
 
 [Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2);
+# without it they are anonymous and every write is refused.
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
 Type=oneshot
 ExecStart=/home/hunter/.local/bin/dunkingsheep dispatch tick
 TimeoutStartSec=240

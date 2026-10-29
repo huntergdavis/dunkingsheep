@@ -26,7 +26,7 @@ import time
 import threading
 
 from dunk_api import dispatch
-from dunk_callers import caller_from_peer
+from dunk_callers import caller_from_peer, caller_pane_auth_failure
 from dunk_core import CONFIG_DIR, VERSION, DunkError, Flock
 
 DEFAULT_SOCKET = os.path.join(CONFIG_DIR, "dunkingsheep.sock")
@@ -151,6 +151,58 @@ class FlockServer:
         except (AttributeError, OSError, struct.error):
             return None
 
+    def _bind_identity(self, claimed, caller, command):
+        """The pane a request acts as is the pane its process runs in, or none.
+
+        `self_pane_id` is a claim from the client (docs/FLAT_FLEET.md 4.1). Where
+        the kernel can check it - the pane record carries a root pid and the
+        peer's agent ancestor is in that pid's ancestry - a disagreeing claim is
+        replaced by nothing: the request runs as anonymous, the mismatch is
+        counted, and the caller sees it in `whoami`. Where it cannot be checked
+        (a backend that reports no pane pid, no /proc), the claim stands, as
+        before. DUNKINGSHEEP_BIND_IDENTITY=0 is the rollback switch.
+        """
+        state = self.flock._caller_state
+        state.identity_bound = None
+        state.identity_note = None
+        if not claimed or caller is None:
+            return claimed
+        if os.environ.get("DUNKINGSHEEP_BIND_IDENTITY", "1") == "0":
+            state.identity_note = "binding disabled by DUNKINGSHEEP_BIND_IDENTITY=0"
+            return claimed
+        if not os.path.isdir("/proc"):
+            state.identity_note = "no /proc; claim stands"
+            return claimed
+        try:
+            pane = self.flock._role_pane_info(claimed) or {}
+        except Exception:  # noqa: BLE001 - binding must not crash the request
+            pane = {}
+        pane_pid = pane.get("pane_pid")
+        if pane_pid in (None, "", "None"):
+            state.identity_note = "pane has no root pid; claim stands"
+            return claimed
+        if not os.path.isdir(f"/proc/{pane_pid}"):
+            # A pane whose root process is gone (or a backend that reports a
+            # pid the kernel does not know) cannot contradict the claim.
+            state.identity_note = f"pane root pid {pane_pid} not running; claim stands"
+            return claimed
+        reason = caller_pane_auth_failure(caller, pane_pid)
+        if reason is None:
+            state.identity_bound = True
+            state.identity_note = "bound to pane process"
+            return claimed
+        state.identity_bound = False
+        state.identity_note = f"claim {claimed} refused: {reason}; running anonymous"
+        log.warning("identity mismatch cmd=%s claimed=%r reason=%s caller_pid=%r "
+                    "caller_source=%r pane_pid=%r", command, claimed, reason,
+                    caller.get("pid"), caller.get("source"), pane_pid)
+        try:
+            self.flock.metrics.record("identity.mismatch", pane_id=claimed,
+                                      source=reason)
+        except Exception:  # noqa: BLE001 - a metric must never fail a request
+            pass
+        return None
+
     def handle_line(self, line, peer_pid=None):
         """Return (response dict, stop_after).
 
@@ -172,6 +224,8 @@ class FlockServer:
             return {"id": req_id, "ok": False, "error": "args must be an object"}, False
         caller = caller_from_peer(peer_pid, self_pane_id) if peer_pid else None
         self.flock.set_caller(caller)
+        self.flock.set_service_token(request.get("service_token"))
+        self_pane_id = self._bind_identity(self_pane_id, caller, name)
         # Transport provenance for completion authorization (t423): a socket
         # request whose peer credentials failed must not degrade into the
         # absent-caller state that trusted in-process code uses.

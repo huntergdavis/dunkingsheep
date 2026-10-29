@@ -138,6 +138,16 @@ is never locked out of a terminal that is not a tmux pane (#2087-#2093).
 model cannot review (ground truth `free-models-worker-tier`), and the check
 reads the launch record, not the lane's self-description.
 
+**Bootstrap.** With no registry file at all (a fresh install, the test
+suite) a pane the kernel can bind is a `worker`, so an un-set-up install
+still works. The first registration (`lane register --role owner`, or the
+legacy `superuser recover`) writes the file with `default: anonymous`; from
+then on an unregistered pane is read-only. Pane-less timers read their
+system token from `~/.config/dunkingsheep/system-token`
+(`DUNKINGSHEEP_SERVICE_TOKEN_FILE` in the packaged units); the web desk
+reads `web-token` the same way. `DUNKINGSHEEP_BIND_IDENTITY=0` on the daemon
+is the rollback switch for binding alone.
+
 ### 4.3 Allowlist (enforced in `dunk_api.dispatch`, next to `SUPERUSER_ONLY`)
 
 | Role | May call | Refused |
