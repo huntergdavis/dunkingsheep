@@ -5721,7 +5721,6 @@ class Flock:
                 federated_acted = self._federated_recovery_step(now)
             except Exception:
                 log.exception("federated recovery scan failed; retrying next tick")
-        self._dialog_observer_step(now=now)
         try:
             with self._lock:
                 candidates = dict(self.stuck_candidates)
@@ -5820,8 +5819,13 @@ class Flock:
         while not self._task_stop.wait(self.STUCK_OBSERVE_TICK_S):
             if self.closed:
                 return
+            # Dialog reporting is independent of automatic key recovery.
+            try:
+                self._dialog_observer_step()
+            except Exception:
+                log.exception("dialog observer step crashed; will retry")
             if not self.stuck_config.enabled:
-                continue                                # disabled: no observation at all
+                continue                                # key recovery disabled
             self._stuck_observer_step()
 
     def _outbox_worker(self, pane_id):

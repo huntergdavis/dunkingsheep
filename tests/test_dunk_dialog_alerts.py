@@ -60,10 +60,6 @@ class DialogAlertTests(unittest.TestCase):
                                     input='Please inspect dialog', text=True,
                                     capture_output=True, timeout=15, check=True)
 
-
-if __name__ == '__main__':
-    unittest.main()
-
 class DialogScanTests(unittest.TestCase):
     def test_no_pending_message_required_and_closed_dialog_resets_interval(self):
         import dunk_core
@@ -85,3 +81,7 @@ class DialogScanTests(unittest.TestCase):
             dunk_core.Flock._dialog_observer_step(flock, now=190)
         self.assertEqual(flock._note_stale_panel.call_args.args[2], 190)
         flock.herdr.send_keys.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()
