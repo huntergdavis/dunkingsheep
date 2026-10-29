@@ -1,0 +1,12 @@
+[Unit]
+Description=Dunking Sheep report: the deterministic fleet report, no model
+After=default.target dunkingsheep.service
+
+[Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2).
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+Type=oneshot
+# The report is a file every run, and a row in the owner mailbox on the `report`
+# transport once FF-9b lands. A failure to post never loses the file.
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon report run
+TimeoutStartSec=120

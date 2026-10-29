@@ -1054,6 +1054,7 @@ class SurfaceParityTests(unittest.TestCase):
             # t594: the transport half of the owner mailbox.
             "owner_ingest": "ingest", "owner_outbox": "outbox",
             "owner_delivered": "delivered",
+            "report_run": "run", "report_list": "list",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",

@@ -700,6 +700,25 @@ def build_parser():
     q.add_argument("transport", choices=["web", "telegram", "report"])
     q.add_argument("--external-id")
     q = osub.add_parser("stats", help="owner-push counts and latency")
+    p = sub.add_parser("report",
+                       help="the deterministic fleet report (no model)",
+                       description="Task metrics, lanes, needs-owner, review queue, "
+                                   "poolrad progress, budget and watchdog, measured at "
+                                   "generation time. Writes "
+                                   "~/.config/dunkingsheep/reports/<ts>.md and posts it "
+                                   "to the owner mailbox on the report transport when "
+                                   "that mailbox exists (FLAT_FLEET.md 7.3).")
+    rsub = p.add_subparsers(dest="report_command", metavar="<action>",
+                            parser_class=json_parser_class)
+    q = rsub.add_parser("run", help="generate one report")
+    q.add_argument("--no-post", action="store_true",
+                   help="write the file only; do not post to the owner mailbox")
+    q.add_argument("--prose", help="plain-language paragraph (rejected if it names a "
+                                   "task id or status the report does not contain)")
+    q.add_argument("--prose-file")
+    q.add_argument("--out-dir")
+    q = rsub.add_parser("list", help="the report files produced so far, newest first")
+    q.add_argument("--out-dir")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
     q = ssub.add_parser("capture", help="record one row per agent lane now")
@@ -1782,6 +1801,25 @@ def print_retired(result):
 def print_owner_push(result):
     print(f"pushed owner message {result['id']} for {result['pane_id']} "
           f"(no inbox row, nothing typed)")
+
+
+def print_report_run(result):
+    print(f"report {result.get('path')}  (generated {result.get('generated_at')})")
+    posted = result.get("posted") or {}
+    if posted.get("message_id"):
+        print(f"posted to the owner mailbox as {posted['message_id']} "
+              f"(transport {posted.get('transport') or 'none'})")
+    elif posted.get("error"):
+        print(f"NOT posted: {posted['error']}")
+    for problem in result.get("prose_rejected") or []:
+        print(f"prose rejected: {problem}")
+
+
+def print_report_list(result):
+    print(f"{result.get('count', 0)} report(s) in {result.get('dir')}")
+    for row in result.get("reports") or []:
+        print(f"  {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['at']))} "
+              f"{row['size']:>8} B  {row['path']}")
 
 
 def print_owner_conversation(result):
@@ -3116,6 +3154,19 @@ def run_client_command(client, args):
             return client.call("owner_delivered",
                                **{k: v for k, v in payload.items() if v is not None}), print_view
         return client.call("owner_stats"), print_owner_stats
+    if command == "report":
+        if args.report_command == "list":
+            return client.call("report_list", out_dir=args.out_dir), print_report_list
+        prose = args.prose
+        if args.prose_file:
+            with open(args.prose_file, encoding="utf-8") as handle:
+                prose = handle.read()
+        payload = {"post": not args.no_post}
+        if prose:
+            payload["prose"] = prose
+        if args.out_dir:
+            payload["out_dir"] = args.out_dir
+        return client.call("report_run", **payload), print_report_run
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
         payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {
