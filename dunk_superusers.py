@@ -69,6 +69,19 @@ def _locked(path, exclusive):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+@contextlib.contextmanager
+def locked_allowlist(path):
+    """Hold a shared allowlist lock across check-through-mutation (t423).
+
+    Yields (panes, names) read under SH. Callers keep the block open until the
+    authorized mutation (and its audit event) are recorded, so a writer
+    revoking between the check and the mutation blocks instead of slipping
+    through; refusal inside the block rolls back with no effects."""
+    with _locked(path, False):
+        with open(path, "r", encoding="utf-8") as handle:
+            yield _parse_allowlist(json.load(handle))
+
+
 def _parse_allowlist(data):
     """(panes, names) sets from decoded JSON; shared by load and locked reads."""
     if not isinstance(data, dict):

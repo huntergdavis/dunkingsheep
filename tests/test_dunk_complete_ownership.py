@@ -317,6 +317,83 @@ class CompleteOwnershipTests(unittest.TestCase):
         self.assertNotEqual("done", self.flock.tasks.get(task["id"])["status"])
         self.assertEqual([], self._completed_events(task["id"]))
 
+    def test_revocation_between_event_and_commit_rolls_back_everything(self):
+        """t430 boundary: the revocation lands after the completed event is
+        recorded but before commit, via a hook on handoff persistence. The
+        late re-verification must refuse, and the rollback must remove the
+        status change, the event and the handoff together."""
+        self.superusers.add("w1:p1")
+        task = self.flock.task_add("other work", self_pane_id="w2:p1")
+        self.flock.task_assign(task["id"], ["w2:p1"], self_pane_id="w2:p1")
+        # An eligible next task so the completion actually records a handoff
+        # (otherwise the hook never fires and the test would pass vacuously).
+        extra = self.flock.task_add("next work", self_pane_id="w1:p1")
+        self.flock.task_assign(extra["id"], ["w1:p1"], self_pane_id="w1:p1")
+        original_record = self.flock.tasks._record
+        fired = []
+
+        def interleave(task_id, event, **kwargs):
+            if task_id == task["id"] and event == "completed" and not fired:
+                fired.append(1)
+                other = Superusers(
+                    path=os.path.join(self.tmp.name, "superusers.json"))
+                other.remove("w1:p1")
+            return original_record(task_id, event, **kwargs)
+
+        with mock.patch.object(self.flock.tasks, "_record",
+                               side_effect=interleave):
+            with self.assertRaises(DunkError):
+                self.flock.task_complete(task["id"], self_pane_id="w1:p1")
+        self.assertTrue(fired, "the hook must fire inside the transaction")
+        current = self.flock.tasks.get(task["id"])
+        self.assertNotEqual("done", current["status"])
+        self.assertIsNone(current["completed_by"])
+        self.assertEqual([], self._completed_events(task["id"]))
+        self.assertEqual([], self.flock.tasks.next_job_handoffs("w1:p1"))
+
+    def test_lease_expiry_between_event_and_commit_rolls_back_everything(self):
+        """Same late window for ownership: the sole qualifying lease expires
+        after the event, and the late ownership re-read refuses and rolls
+        everything back. The lease is inserted directly (claim appends an
+        assignee row, which expiry would not remove - so a claimed task always
+        keeps its assignee basis; this fixture is a lease that never conferred
+        one). Expiry is time-travelled: nested store writes on the same
+        connection would commit the in-flight transaction early (assign guards
+        reentrancy that way), which models nothing real - separate connections
+        would block on the writer lock instead."""
+        import dunk_tasks as tasks_module
+        task = self.flock.tasks.add(GLOBAL, "leased work")
+        real_now = tasks_module._now()
+        now = real_now
+        self.flock.tasks.db.execute(
+            "INSERT INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at,"
+            " expires_at, caller_pid, caller_start, caller_name)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (task["id"], OWNER, now, now, now + 300, None, None, None))
+        self.flock.tasks.db.commit()
+        fired = []
+
+        def fake_now():
+            return real_now + (3600 if fired else 0)
+
+        original_record = self.flock.tasks._record
+
+        def interleave(task_id, event, **kwargs):
+            if task_id == task["id"] and event == "completed" and not fired:
+                fired.append(1)
+            return original_record(task_id, event, **kwargs)
+
+        with mock.patch.object(tasks_module, "_now", side_effect=fake_now):
+            with mock.patch.object(self.flock.tasks, "_record",
+                                   side_effect=interleave):
+                with self.assertRaisesRegex(DunkError, "changed during completion"):
+                    self.flock.task_complete(task["id"], self_pane_id=OWNER)
+        self.assertTrue(fired, "the hook must fire inside the transaction")
+        current = self.flock.tasks.get(task["id"])
+        self.assertNotEqual("done", current["status"])
+        self.assertEqual([], self._completed_events(task["id"]))
+        self.assertEqual([], self.flock.tasks.next_job_handoffs(OWNER))
+
     def test_transaction_accepts_unchanged_ownership(self):
         task = self._owned_task()
         plan = self.flock.tasks.advance_next_job(

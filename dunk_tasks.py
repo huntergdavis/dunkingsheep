@@ -36,7 +36,8 @@ from dunk_sqlite import connect as sqlite_connect
 # t423: in-transaction privilege revalidation must share the locked-read
 # protocol and matching semantics with the allowlist store (single source of
 # truth); dunk_superusers imports only stdlib, so this edge is acyclic.
-from dunk_superusers import match_allowlist, read_panes_locked
+from dunk_superusers import (locked_allowlist, match_allowlist,
+                             read_panes_locked)
 
 log = logging.getLogger("dunkingsheep.tasks")
 import threading
@@ -736,7 +737,32 @@ class Tasks:
                         plan["handoff"] = dict(handoff, task_id=chosen["id"], pane_id=pane_id)
                 self._record(from_task or "", "next_job_decision", at=now,
                              actor=pane_id, meta={k: v for k, v in plan.items() if k != "handoff"})
-                self.db.commit()
+                proof = operator_proof or {}
+                allowlist_path = proof.get("allowlist_path")
+                if (trigger == "completion" and allowlist_path and pane_id
+                        and from_task):
+                    # LATE authorization, held through commit (t423/t430): re-read
+                    # ownership plus the allowlist under SH and keep it held until
+                    # the commit below, so no writer lands between verification and
+                    # the durable decision (or its rollback). Refusal here rolls
+                    # back status, events and handoff together - zero effects.
+                    with locked_allowlist(allowlist_path) as (panes, names):
+                        late_row = self._require(from_task)
+                        late_owners = set(_decode(late_row["assignees"]))
+                        late_owners.update(
+                            lease["pane_id"]
+                            for lease in self.leases_for(from_task, _now())
+                            if lease.get("pane_id"))
+                        if (pane_id not in late_owners
+                                and not match_allowlist(panes, names, pane_id,
+                                                        proof.get("pane_info"))):
+                            raise TaskError(
+                                f"task {from_task} authorization changed during "
+                                f"completion (owners now: {', '.join(sorted(late_owners)) or 'no one recorded'}); "
+                                "completion refused with no effects")
+                        self.db.commit()
+                else:
+                    self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
