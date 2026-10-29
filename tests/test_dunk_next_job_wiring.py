@@ -31,6 +31,9 @@ PANE = 'w1:p1'
 CALLER = caller_from_peer(os.getpid())
 
 
+@unittest.skipUnless(
+    CALLER.get("pid") and CALLER.get("start") and os.path.isdir("/proc"),
+    "needs a resolvable kernel caller to bind the pane claim")
 class WiringTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='t372-private-')
@@ -46,6 +49,13 @@ class WiringTests(unittest.TestCase):
         self.inbox_path = os.path.join(self.tmp.name, 'inbox.db')
         self.herdr = FakeHerdr()
         self.herdr.panes[0].update(agent='pi', agent_status='idle')
+        # t423: the fake backend models a HEALTHY backend, which always reports
+        # pane pids (tmux/herdr do; pid-less records are an outage shape, covered
+        # by the ownership refusal tests). Bind the pane to the fixture caller's
+        # stable process - the exec-replaced-shell shape, where the pane's process
+        # IS the agent - so completions through this fixture exercise the real
+        # kernel binding instead of silently taking the label fallback.
+        self.herdr.panes[0]['pane_pid'] = CALLER['pid']
         self.herdr.screens[PANE] = '\u276f\u00a0\n'
         self.f = self.flock()
         self.tasks = self.f.tasks

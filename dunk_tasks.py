@@ -33,6 +33,11 @@ import re
 import sqlite3
 from dunk_pm import DEFAULT_VP_PANE as _default_vp_pane
 from dunk_sqlite import connect as sqlite_connect
+# t423: in-transaction privilege revalidation must share the locked-read
+# protocol and matching semantics with the allowlist store (single source of
+# truth); dunk_superusers imports only stdlib, so this edge is acyclic.
+from dunk_superusers import (locked_allowlist, match_allowlist,
+                             read_panes_locked)
 
 log = logging.getLogger("dunkingsheep.tasks")
 import threading
@@ -631,7 +636,8 @@ class Tasks:
         return list(latest.values())
 
     def advance_next_job(self, pane_id, *, trigger, from_task=None, caller=None,
-                         unread=0, pending_delivery=False, dispatch_reason=None):
+                         unread=0, pending_delivery=False, dispatch_reason=None,
+                         operator_proof=None):
         """Complete A, choose/claim B and journal its inbox id in ONE transaction.
 
         Clauses 1/4: every trigger uses the same decision while holding SQLite's
@@ -652,6 +658,34 @@ class Tasks:
                         self.db.commit()
                         return {"action": "skip", "reason": "already_completed",
                                 "task": self.get(from_task)}
+                    # P2 (t423 REVISE): ownership is rechecked on the freshly-read
+                    # row INSIDE this transaction, not just by the caller before it:
+                    # a reassignment landing between the wrapper guard and this UPDATE
+                    # must not complete as the removed owner. Operator privilege is
+                    # revalidated here too, on a fresh allowlist read serialized
+                    # against save() replacement (local file lock only - no
+                    # socket/terminal I/O in this transaction): a revocation landing
+                    # in the same window must not complete on a stale read.
+                    owners = set(_decode(row["assignees"]))
+                    owners.update(lease["pane_id"]
+                                  for lease in self.leases_for(from_task, now)
+                                  if lease.get("pane_id"))
+                    proof = operator_proof or {}
+                    fresh_operator = False
+                    allowlist_path = proof.get("allowlist_path")
+                    if (allowlist_path and proof.get("pane_id")
+                            and proof.get("pane_id") == pane_id):
+                        try:
+                            panes, names = read_panes_locked(allowlist_path)
+                            fresh_operator = match_allowlist(
+                                panes, names, pane_id, proof.get("pane_info"))
+                        except Exception:             # noqa: BLE001 - a corrupt
+                            fresh_operator = False    # allowlist grants nothing
+                    if pane_id not in owners and not fresh_operator:
+                        raise TaskError(
+                            f"task {from_task} is not owned by {pane_id} (owners: "
+                            f"{', '.join(sorted(owners)) or 'no one recorded'}); "
+                            "completion refused with no effects")
                     self.db.execute(
                         "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
                         "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
@@ -703,7 +737,32 @@ class Tasks:
                         plan["handoff"] = dict(handoff, task_id=chosen["id"], pane_id=pane_id)
                 self._record(from_task or "", "next_job_decision", at=now,
                              actor=pane_id, meta={k: v for k, v in plan.items() if k != "handoff"})
-                self.db.commit()
+                proof = operator_proof or {}
+                allowlist_path = proof.get("allowlist_path")
+                if (trigger == "completion" and allowlist_path and pane_id
+                        and from_task):
+                    # LATE authorization, held through commit (t423/t430): re-read
+                    # ownership plus the allowlist under SH and keep it held until
+                    # the commit below, so no writer lands between verification and
+                    # the durable decision (or its rollback). Refusal here rolls
+                    # back status, events and handoff together - zero effects.
+                    with locked_allowlist(allowlist_path) as (panes, names):
+                        late_row = self._require(from_task)
+                        late_owners = set(_decode(late_row["assignees"]))
+                        late_owners.update(
+                            lease["pane_id"]
+                            for lease in self.leases_for(from_task, _now())
+                            if lease.get("pane_id"))
+                        if (pane_id not in late_owners
+                                and not match_allowlist(panes, names, pane_id,
+                                                        proof.get("pane_info"))):
+                            raise TaskError(
+                                f"task {from_task} authorization changed during "
+                                f"completion (owners now: {', '.join(sorted(late_owners)) or 'no one recorded'}); "
+                                "completion refused with no effects")
+                        self.db.commit()
+                else:
+                    self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise

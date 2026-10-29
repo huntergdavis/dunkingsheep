@@ -1,4 +1,4 @@
-# Dunking Sheep 2.70.95 guide
+# Dunking Sheep 2.70.100 guide
 
 Dunking Sheep sends text (followed by Enter) into terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -488,7 +488,10 @@ fields: id, title, body, status (open|in_progress|blocked|done|cancelled),
         priority (urgent > high > medium > low), assignees (0..N),
         parent_id (subtasks), depends_on, attempts, and a lease
         (claimed_at, heartbeat_at, expires_at)
-rules:  global completion (any assignee completes it for all);
+rules:  global completion (completing marks it done for everyone) is
+        ownership-checked: an assignee, a live lease-holder, or a superuser
+        (CoS/VP) operator; foreign and unattributed completions are refused
+        with no effects;
         next = open/in_progress, unblocked, deps done, priority then age;
         atomic claim under BEGIN IMMEDIATE (two agents never win the
         same exclusive task); multi_assignee tasks accept several;

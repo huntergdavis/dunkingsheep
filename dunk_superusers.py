@@ -22,6 +22,8 @@ The write is atomic and the file is mode 0600. This module only owns the
 store; the daemon decides who may mutate it.
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
@@ -42,6 +44,85 @@ class SuperuserError(ValueError):
 def _classify(entry):
     entry = str(entry or "").strip()
     return ("pane", entry) if ":" in entry else ("name", entry)
+
+
+def _lock_path(path):
+    """Sidecar lock file beside the allowlist (same directory/filesystem)."""
+    return str(path) + ".lock"
+
+
+@contextlib.contextmanager
+def _locked(path, exclusive):
+    """Serialize allowlist writers against authorization readers (t423).
+
+    Writers (save) take EX across replacement; the task completion transaction
+    takes SH across its privilege re-read through the mutation. Lock ordering
+    is one-directional (SQLite writer lock, then this file lock; save takes
+    only the file lock), so no deadlock cycle exists. Locks release on close,
+    so a killed holder cannot wedge readers."""
+    with open(_lock_path(path), "a+b") as handle:
+        fcntl.flock(handle.fileno(),
+                    fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def locked_allowlist(path):
+    """Hold a shared allowlist lock across check-through-mutation (t423).
+
+    Yields (panes, names) read under SH. Callers keep the block open until the
+    authorized mutation (and its audit event) are recorded, so a writer
+    revoking between the check and the mutation blocks instead of slipping
+    through; refusal inside the block rolls back with no effects."""
+    with _locked(path, False):
+        with open(path, "r", encoding="utf-8") as handle:
+            yield _parse_allowlist(json.load(handle))
+
+
+def _parse_allowlist(data):
+    """(panes, names) sets from decoded JSON; shared by load and locked reads."""
+    if not isinstance(data, dict):
+        raise SuperuserError("allowlist must contain a JSON object")
+    panes = list(data.get("panes") or ())
+    names = list(data.get("names") or ())
+    for entry in data.get("superusers") or ():
+        kind, value = _classify(entry)
+        (panes if kind == "pane" else names).append(value)
+    return ({str(value).strip() for value in panes if str(value).strip()},
+            {str(value).strip() for value in names if str(value).strip()})
+
+
+def match_allowlist(panes, names, pane_id, pane_info=None):
+    """Pure membership test shared by cached and freshly-read sets (t423)."""
+    if not pane_id:
+        return False
+    pane_id = str(pane_id).strip()
+    if pane_id in (panes or ()):
+        return True
+    wanted = {name.strip().lower() for name in (names or ()) if name.strip()}
+    if not wanted:
+        return False
+    for field in ("label", "tab_label", "workspace_label"):
+        value = str((pane_info or {}).get(field) or "").strip().lower()
+        if value and value in wanted:
+            return True
+    return False
+
+
+def read_panes_locked(path):
+    """(panes, names) re-read from disk under a shared lock (t423).
+
+    Unlike cached attributes (refreshed opportunistically), this read is
+    serialized against save() replacement, so a completion transaction holding
+    it across its privilege check through its mutation cannot admit a
+    revocation landing in between. Raises on unreadable content: callers fail
+    closed (a corrupt allowlist grants nothing)."""
+    with _locked(path, False):
+        with open(path, "r", encoding="utf-8") as handle:
+            return _parse_allowlist(json.load(handle))
 
 
 class Superusers:
@@ -88,16 +169,23 @@ class Superusers:
                 data = json.load(handle)
         except (OSError, ValueError) as error:
             raise SuperuserError(f"cannot read {self.path}: {error}") from None
-        if not isinstance(data, dict):
-            raise SuperuserError(f"{self.path} must contain a JSON object")
-        panes = list(data.get("panes") or ())
-        names = list(data.get("names") or ())
-        for entry in data.get("superusers") or ():
-            kind, value = _classify(entry)
-            (panes if kind == "pane" else names).append(value)
-        self.panes = {str(value).strip() for value in panes if str(value).strip()}
-        self.names = {str(value).strip() for value in names if str(value).strip()}
+        try:
+            self.panes, self.names = _parse_allowlist(data)
+        except SuperuserError as error:
+            raise SuperuserError(f"{self.path}: {error}") from None
         self._stamp = self._file_stamp()
+
+    def read_panes_locked(self):
+        """(panes, names) re-read from disk under a shared lock (t423).
+
+        Unlike the cached attributes (refreshed opportunistically), this read
+        is serialized against save() replacement, so a completion transaction
+        holding it across its privilege check through its mutation cannot admit
+        a revocation landing in between. Raises on unreadable content: callers
+        fail closed (a corrupt allowlist grants nothing)."""
+        with _locked(self.path, False):
+            with open(self.path, "r", encoding="utf-8") as handle:
+                return _parse_allowlist(json.load(handle))
 
     def seed_defaults(self):
         """First run: the VP name, the owner name, and any panes the setup set.
@@ -123,19 +211,24 @@ class Superusers:
             "names": sorted(self.names),
             "updated_at": round(time.time(), 3),
         }
-        fd, temporary = tempfile.mkstemp(prefix="superusers-", dir=directory)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-                handle.write("\n")
-            os.replace(temporary, self.path)
+        # EX across write+replace: authorization readers holding SH across
+        # their check-then-mutate window cannot admit this replacement
+        # in between (t423). Readers without the lock still see whole old-or-new
+        # files (atomic replace), just without ordering.
+        with _locked(self.path, True):
+            fd, temporary = tempfile.mkstemp(prefix="superusers-", dir=directory)
             try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+                    handle.write("\n")
+                os.replace(temporary, self.path)
+                try:
+                    os.chmod(self.path, 0o600)
+                except OSError:
+                    pass
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
 
     # -- queries ------------------------------------------------------------
 
@@ -146,19 +239,7 @@ class Superusers:
         return not self.panes and not self.names
 
     def is_superuser(self, pane_id, pane_info=None):
-        if not pane_id:
-            return False
-        pane_id = str(pane_id).strip()
-        if pane_id in self.panes:
-            return True
-        wanted = {name.strip().lower() for name in self.names if name.strip()}
-        if not wanted:
-            return False
-        for field in ("label", "tab_label", "workspace_label"):
-            value = str((pane_info or {}).get(field) or "").strip().lower()
-            if value and value in wanted:
-                return True
-        return False
+        return match_allowlist(self.panes, self.names, pane_id, pane_info)
 
     def describe(self):
         return {
