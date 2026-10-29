@@ -2557,6 +2557,13 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        if command in ("poolrad", "review", "start-agent", "agent", "new-workspace",
+                       "workspace", "respawn-pane", "respawn"):
+            # Long daemon-side work: the poolrad exporter runs for minutes, a
+            # launch verifies the process started, a review sync talks to
+            # GitHub. A 15 s read deadline reported "no answer" for work that
+            # then completed (2026-10-29, the first backlog-sync).
+            client.timeout = max(client.timeout, 600.0)
         # Synchronous send paths wait for the daemon to *deliver*, and delivery can
         # need several pane reads (a typing check, a dead-session check, a submit
         # confirmation). On a loaded host those reads are slow enough that the
