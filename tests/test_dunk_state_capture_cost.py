@@ -219,30 +219,16 @@ class CheckToReadRaceTests(unittest.TestCase):
         self.assertTrue("pid reuse" in reason or "replaced" in reason, reason)
 
 
-def _seq_ticks(values, stable=2):
-    """Return a _proc_start_ticks stand-in that walks `values` then stays stable."""
-    remaining = list(values)
+def per_pid_ticks_then_recycled(state, starts, recycled_pid=1101, recycled=999):
+    """Correct start ticks per pid, until `state['reads']` moves past 0.
 
-    def ticks(pid):
-        return remaining.pop(0) if remaining else stable
-    return ticks
-
-
-def _ticks_then_recycled(good_calls, starts=None, recycled_pid=1101,
-                         recycled=999):
-    """Per-pid start ticks, correct for `good_calls` checks, then the agent is reused.
-
-    Per-pid matters: a stub that returns one constant makes the ROOT pid look
-    replaced on the very first check, which is how an earlier version of this
-    control skipped the root and never reached the read it was meant to test
-    (reviewer t500 addendum, exactly).
+    Reviewer t500 caveat: a constant initial value makes the ROOT pid look
+    replaced on its first check, so the root is skipped and the test never
+    reaches the read it is about. This helper keeps every initial identity
+    correct and recycles ONLY the target agent once the read under test starts.
     """
-    starts = dict(starts or {1001: 1, 1101: 2})
-    seen = {"n": 0}
-
     def ticks(pid):
-        seen["n"] += 1
-        if seen["n"] > good_calls and int(pid) == recycled_pid:
+        if state["reads"] > 0 and int(pid) == recycled_pid:
             return recycled
         return starts.get(int(pid))
     return ticks
@@ -270,8 +256,7 @@ class LaterReadBindingTests(unittest.TestCase):
                                   lambda pid: open_path), \
                 mock.patch.object(dunk_state, "_active_session_file",
                                   lambda cwd, started: (active, 1 if active else 0)), \
-                mock.patch.object(dunk_state, "_proc_start_ticks",
-                                  ticks if callable(ticks) else _seq_ticks(ticks)):
+                mock.patch.object(dunk_state, "_proc_start_ticks", ticks):
             return dunk_state.session_of(1001, kids=self.KIDS, starts=self.STARTS,
                                          cwd="/tmp/ws")
 
@@ -336,7 +321,8 @@ class LaterReadBindingTests(unittest.TestCase):
                 mock.patch.object(dunk_state, "_open_session_file", lambda pid: None), \
                 mock.patch.object(dunk_state, "_proc_start", lambda pid: 1000.0), \
                 mock.patch.object(dunk_state, "_proc_start_ticks",
-                                  lambda pid: 2 if state["reads"] == 0 else 999):
+                                  per_pid_ticks_then_recycled(
+                                      state, self.STARTS, recycled_pid=1101)):
             session, reason = dunk_state.session_of(1001, kids=self.KIDS,
                                                     starts=self.STARTS, cwd="/tmp/ws")
         self.assertNotEqual("foreign-ffff", session,
