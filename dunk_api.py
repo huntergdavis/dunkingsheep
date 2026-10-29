@@ -967,7 +967,7 @@ def h_list_panes(flock, args, self_pane_id):
     keep = ("pane_id", "is_self", "workspace_label", "tab_label", "agent",
             "agent_status", "agent_status_source", "agent_status_reason",
             "agent_status_inferred", "cwd", "terminal_title_stripped", "terminal_id",
-            "workspace_id", "tab_id")
+            "workspace_id", "tab_id", "pane_pid")
     return {
         "self_pane_id": self_pane_id,
         "panes": [{key: pane.get(key) for key in keep if key in pane} for pane in panes],
