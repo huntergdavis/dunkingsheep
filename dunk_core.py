@@ -348,14 +348,9 @@ DEAD_SESSION_MARKERS = (
 #   claude -> yes: the composer shows "ctrl+x ctrl+s to send now" and the message is
 #             processed after the current turn (proven 2026-10-24, not interleaved).
 #   pi     -> yes: "Alt+Up to edit all queued messages", processed after the turn.
-#   codex  -> NO: text typed into the composer during a turn is NOT retained. Measured
-#             on wR:p6 during a 54-minute turn: four notices reported sent, the
-#             composer sat at its placeholder, and the scrollback contained exactly one
-#             composer line - i.e. accepted and lost, which is worse than held.
-# The policy is "a busy agent is not a hold" - but only where the harness actually
-# queues. For a harness that does not, holding is the lesser evil, and the reason says
-# so. Anything unknown is treated as not-queueing (conservative).
-HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True}
+#   codex  -> yes, via Tab while working (Enter is not its queue action).
+# The old negative measurement used Enter and incorrectly became a busy hold.
+HARNESS_QUEUES_WHILE_BUSY = {"claude": True, "pi": True, "codex": True}
 
 # A pane can be alive, have unread mail, and still be unreachable: its input box
 # holds something that was never submitted, so every later send is held as "a
@@ -6177,7 +6172,7 @@ class Flock:
         # non-empty box is not evidence of a person. Foreign text is PRESERVED at send
         # time (submitted first, or left untouched), never a reason to stop the queue.
         # A harness that does not queue what we type while it works would LOSE the
-        # message (codex: measured). Hold for that tool only, and say why.
+        # message. Only unknown harnesses retain that capability hold.
         harness = self._pane_harness(pane_id)
         if not HARNESS_QUEUES_WHILE_BUSY.get(harness, False):
             # A working indicator sits a few lines above the composer (codex prints
@@ -6286,6 +6281,31 @@ class Flock:
         screen = self.read_screen(pane_id, lines=40, ansi=False)
         return _banner_marker(screen, DEAD_SESSION_MARKERS)
 
+    def _send_submit_key(self, pane_id, fallback="Enter", busy_hint=False):
+        """Submit using the harness's current queue action, under the caller's lock.
+
+        Codex Tab queues during a turn; Claude and pi queue with Enter. Re-read
+        on every attempt because the turn or a dialog can change between retries.
+        A learned Tab must never leak into a later idle send or another harness.
+        """
+        screen = self.read_screen(pane_id)
+        if screen is None:
+            return False, "submission unconfirmed: pane unreadable before key", None
+        if _modal_open(screen):
+            return False, "submission held: a dialog opened before the key", None
+        key = fallback if fallback in ("Enter", "C-m") else "Enter"
+        if self._pane_harness(pane_id) == "codex":
+            working = (busy_hint or self._read_status(pane_id) in
+                       ("working", "busy", "running", "processing")
+                       or _status_marker(screen, WORKING_MARKERS,
+                                         lines=CONSUMPTION_READ_LINES,
+                                         placeholder_safe=True, dim_ok=True)
+                       or "tab to queue message" in _strip_ansi(screen).lower())
+            if working:
+                key = "Tab"
+        ok, detail = self.herdr.send_keys(pane_id, key)
+        return ok, detail, key
+
     def _flush_once(self, pane_id, text):
         """One Enter, one short check. Used INSIDE the typing lock, so it must be short.
 
@@ -6294,13 +6314,14 @@ class Flock:
         which is the stall class the lock exists to prevent. If one press does not clear
         the box, the send is deferred and the outbox worker tries again.
         """
-        ok, detail = self.herdr.send_keys(pane_id, "Enter")
+        ok, detail, _key = self._send_submit_key(pane_id)
         if not ok:
             return False
         time.sleep(SUBMIT_POLL_S[0])
         return self._box_holds(pane_id, text) is False
 
-    def _press_until_submitted(self, pane_id, text, first_pressed=False):
+    def _press_until_submitted(self, pane_id, text, first_pressed=False, busy_hint=False,
+                               baseline=None):
         """Press Enter (each press under the typing mutex) until `text` leaves the box.
 
         Press Enter until `text` has left the input box. Returns
@@ -6315,7 +6336,7 @@ class Flock:
         # working before we sent is running SOMEONE's turn - possibly an earlier
         # message's - so its current "working" proves nothing about ours. Baseline
         # first; only a transition to working during the ladder may confirm.
-        pre_status = self._read_status(pane_id)
+        pre_status = baseline[0] if baseline is not None else self._read_status(pane_id)
         key = "Enter"          # what the press inside the mutex used, if any
         for attempt, gap in enumerate(SUBMIT_GAPS, start=1):
             # Let the pane fall quiet first; a burst of Enters does not submit.
@@ -6333,7 +6354,7 @@ class Flock:
                        or ("C-m" if attempt > SUBMIT_KEY_AFTER
                            and attempt % 2 == 1 else "Enter"))
                 with self._typing(pane_id):      # one keystroke burst per attempt
-                    ok, detail = self.herdr.send_keys(pane_id, key)
+                    ok, detail, key = self._send_submit_key(pane_id, key, busy_hint=busy_hint)
                 if not ok:
                     return False, detail
             deadline = time.time() + SUBMIT_CONFIRM_S
@@ -6353,7 +6374,7 @@ class Flock:
                         # Only repeated readable checks prove submission. A
                         # missing input box during redraw proves nothing.
                         if attempt > 1:
-                            self._submit_key[pane_id] = key
+                            self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                             log.info("%s: submitted after %d presses (%s)",
                                      pane_id, attempt, key)
                         self.metrics.record("submit.attempt", pane_id=pane_id,
@@ -6370,7 +6391,7 @@ class Flock:
                         # own echo in the transcript.
                         if self._turn_started(pane_id, pre_status):
                             if attempt > 1:
-                                self._submit_key[pane_id] = key
+                                self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                             self.metrics.record("submit.attempt", pane_id=pane_id,
                                                 outcome="ok-turn", attempts=attempt,
                                                 bytes=len((text or "").encode("utf-8")))
@@ -6381,7 +6402,7 @@ class Flock:
                 # other witness, and it is the one that survives an ambiguous box read.
                 if self._turn_started(pane_id, pre_status):
                     if attempt > 1:
-                        self._submit_key[pane_id] = key
+                        self._submit_key[pane_id] = key if key != "Tab" else "Enter"
                     self.metrics.record("submit.attempt", pane_id=pane_id,
                                         outcome="ok-turn", attempts=attempt,
                                         bytes=len((text or "").encode("utf-8")))
@@ -6670,13 +6691,24 @@ class Flock:
             if check_box and not self._ensure_box_clear(pane_id, allow_modal=allow_modal):
                 why = self._last_block_reason.get(pane_id) or "draft"
                 return False, f"{BOX_HOLD} ({why})"
+            # A long paste can scroll the active-turn indicator offscreen. Capture
+            # it before typing; Codex Tab also submits ordinary text if that turn
+            # finishes before the key, so this hint cannot interrupt the new state.
+            pre_status = self._read_status(pane_id)
+            before_paste = self.read_screen(pane_id) or ""
+            busy_hint = (self._pane_harness(pane_id) == "codex" and (
+                pre_status in ("working", "busy", "running", "processing")
+                or _status_marker(before_paste, WORKING_MARKERS,
+                                  lines=CONSUMPTION_READ_LINES,
+                                  placeholder_safe=True, dim_ok=True)
+                or "tab to queue message" in _strip_ansi(before_paste).lower()))
             ok, detail = self.herdr.send_text(pane_id, text)
             if not ok:
                 return False, detail
             self._remember_typed(pane_id, text)
             if not press_enter:
                 return True, "sent"
-            ok, detail = self.herdr.send_keys(pane_id, "Enter")
+            ok, detail, _key = self._send_submit_key(pane_id, busy_hint=busy_hint)
             if not ok:
                 return False, detail
         if guarded:
@@ -6692,7 +6724,6 @@ class Flock:
             # re-attempts.
             # t363: baseline before any press, so "working" can only confirm a
             # transition - a lane already working is running an earlier turn.
-            pre_status = self._read_status(pane_id)
             for attempt in range(GUARDED_PRESS_ATTEMPTS):
                 time.sleep(SUBMIT_POLL_S[min(attempt, len(SUBMIT_POLL_S) - 1)])
                 held = self._box_holds(pane_id, text)
@@ -6719,9 +6750,9 @@ class Flock:
                     return True, "sent (confirmed by the turn it started)"
                 key = self._submit_key.get(pane_id) or ("Enter" if attempt == 0 else "C-m")
                 with self._typing(pane_id):
-                    ok, _detail = self.herdr.send_keys(pane_id, key)
+                    ok, _detail, key = self._send_submit_key(pane_id, key, busy_hint=busy_hint)
                 if not ok:
-                    continue
+                    return False, _detail
             # The failure must be VISIBLE from the sender's side (VP i25123/i25315): a
             # recurrence then shows up in the journal as this line, not as an idle lane
             # somebody infers hours later.
@@ -6734,7 +6765,8 @@ class Flock:
                                "before this send; status alone cannot confirm a new "
                                "message - check the pane")
             return False, "text did not submit; it is still in the pane's input box"
-        return self._press_until_submitted(pane_id, text, first_pressed=True)
+        return self._press_until_submitted(pane_id, text, first_pressed=True,
+                                           busy_hint=busy_hint, baseline=(pre_status,))
 
     def flush_box(self, target, self_pane_id=None):
         """Submit whatever is sitting unsent in a pane's input box.
