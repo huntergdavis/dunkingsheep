@@ -653,9 +653,12 @@ class FlockTaskTests(unittest.TestCase):
         read = self.flock.task_read(task["id"], self_pane_id="w2:p2")
         self.assertEqual("fleet work", read["title"])
 
-    def test_pane_caller_assigning_another_lane_on_global_is_unchanged(self):
-        # The VP-assigns workflow: a pane caller creates a global task and
-        # assigns another lane. Guard must not touch it.
+    def test_pane_caller_assigning_another_lane_on_global_needs_the_owner_role(self):
+        # The old VP-assigns workflow is gone (FLAT_FLEET.md 5): a lane pulls
+        # work with `task next`; only the owner hands work to a named lane.
+        with self.assertRaisesRegex(DunkError, "only to yourself"):
+            self.flock.task_add("assigned work", assignees=["w9:p9"], self_pane_id="w2:p1")
+        self.flock.roles.register("w2:p1", "owner")
         task = self.flock.task_add("assigned work", assignees=["w9:p9"],
                                    self_pane_id="w2:p1")
         self.assertEqual(GLOBAL, task["scope"])
@@ -882,12 +885,12 @@ class FlockTaskTests(unittest.TestCase):
 
 
 class TaskAddOwnershipTests(unittest.TestCase):
-    """t110 / owner #1708 wiring (b): `task add` creates work OWNED.
+    """FLAT_FLEET.md 5: `task add` creates work the QUEUE owns.
 
-    A task with no assignee is nobody's work - it shows in the list, is counted
-    against no one, and every lane can tell itself it is someone else's. So the
-    creating pane owns what it creates, an explicit `--assign` is delegation and
-    wins, and a caller with no pane needs a DECLARED leader rather than a guess.
+    Owner #1708 ("unowned means leader-owned") is retired with the leader: an
+    unassigned task is claimable by any lane whose role matches its kind, an
+    explicit `--assign` by the owner is delegation and is kept, and a lane may
+    assign only itself. No declared-leader environment variable exists.
     """
 
     def setUp(self):
@@ -912,15 +915,14 @@ class TaskAddOwnershipTests(unittest.TestCase):
         self.flock.tasks.close()
         self.tmp.cleanup()
 
-    def test_no_assign_is_owned_by_the_creating_pane(self):
+    def test_no_assign_is_unassigned_and_claimable(self):
         task = self.flock.task_add("work nobody asked for", self_pane_id="w2:p1")
-        self.assertEqual(["w2:p1"], task["assignees"],
-                         "an unassigned add must still have an owner")
+        self.assertEqual([], task["assignees"], "the queue owns unassigned work")
         self.assertEqual("w2:p1", task["created_by"])
-        self.assertEqual(["w2:p1"], self.flock.task_read(task["id"],
-                                                          self_pane_id="w2:p1")["assignees"])
+        self.assertTrue(task["claimable"])
 
-    def test_an_explicit_assign_is_delegation_and_is_kept(self):
+    def test_an_explicit_assign_by_the_owner_is_delegation_and_is_kept(self):
+        self.flock.roles.register("w2:p1", "owner")
         task = self.flock.task_add("for someone else", assignees=["w1:p2"],
                                    self_pane_id="w2:p1")
         self.assertEqual(["w1:p2"], task["assignees"],
@@ -930,25 +932,12 @@ class TaskAddOwnershipTests(unittest.TestCase):
         task = self.flock.task_add("mine", assignees=["self"], self_pane_id="w2:p1")
         self.assertEqual(["w2:p1"], task["assignees"])
 
-    def test_a_declared_leader_owns_work_created_without_a_pane(self):
-        # The pane-less creators: systemd units, HTTP/web callers, the watchdog.
+    def test_work_created_without_a_pane_is_unassigned_too(self):
+        # The pane-less creators: systemd units, the web desk. A declared
+        # leader environment variable is ignored: there is no leader.
         os.environ["DUNKINGSHEEP_LEADER_PANE"] = "w9:pV"
         task = self.flock.task_add("raised by the daemon")
-        self.assertEqual(["w9:pV"], task["assignees"])
-
-    def test_no_pane_and_no_declared_leader_refuses_instead_of_writing_an_orphan(self):
-        os.environ.pop("DUNKINGSHEEP_LEADER_PANE", None)
-        before = self.flock.task_list(scope="all")["tasks"]
-        # The message has to name the way out: this is a refusal, not a puzzle.
-        with self.assertRaisesRegex(DunkError, "must have an owner"):
-            self.flock.task_add("orphan")
-        with self.assertRaisesRegex(DunkError, "DUNKINGSHEEP_LEADER_PANE"):
-            self.flock.task_add("orphan")
-        with self.assertRaisesRegex(DunkError, "--assign"):
-            self.flock.task_add("orphan")
-        after = self.flock.task_list(scope="all")["tasks"]
-        self.assertEqual([t["id"] for t in before], [t["id"] for t in after],
-                         "the refusal must not leave a row behind")
+        self.assertEqual([], task["assignees"])
 
 
 if __name__ == "__main__":

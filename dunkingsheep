@@ -384,6 +384,11 @@ def build_parser():
     q.add_argument("--parent", metavar="ID", help="parent task id (subtask)")
     q.add_argument("--multi", action="store_true",
                    help="allow several agents to claim this task")
+    q.add_argument("--kind", choices=["work", "review", "verify", "report"], default="work")
+    q.add_argument("--author", help="lane that produced the artefact under review")
+    q.add_argument("--repo", help="owner/name (reviews)")
+    q.add_argument("--pr", type=int, help="PR number (reviews)")
+    q.add_argument("--head", help="exact commit under review (reviews)")
 
     q = tsub.add_parser("list", aliases=["ls"], help="list visible tasks")
     q.add_argument("scope", nargs="?", help="'global', 'self' or a pane id")
@@ -391,6 +396,9 @@ def build_parser():
     q.add_argument("--assignee", metavar="PANE")
     q.add_argument("--all", action="store_true", help="include done/cancelled")
     q.add_argument("--limit", "-n", type=int, default=200)
+    q.add_argument("--kind", choices=["work", "review", "verify", "report"])
+    q.add_argument("--needs-owner", action="store_true",
+                   help="only tasks blocked on a 'needs-owner:' question")
 
     q = tsub.add_parser("read", help="read one task in full")
     q.add_argument("id")
@@ -416,6 +424,8 @@ def build_parser():
     q = tsub.add_parser("complete", help="complete a task for everyone")
     q.add_argument("id")
     q.add_argument("--by")
+    q.add_argument("--verdict", choices=["accept", "needs-fix"],
+                   help="review tasks: the verdict (recorded from your bound lane)")
 
     q = tsub.add_parser("block", help="mark a task blocked")
     q.add_argument("id")
@@ -2627,11 +2637,14 @@ def run_client_command(client, args):
                                assignees=args.assign or None,
                                depends_on=args.depends_on or None,
                                parent_id=args.parent,
-                               multi_assignee=args.multi), print_task
+                               multi_assignee=args.multi, kind=args.kind,
+                               author=args.author, repo=args.repo, pr=args.pr,
+                               head=args.head), print_task
         if sub in ("list", "ls"):
             return client.call("task_list", scope=args.scope, status=args.status,
                                assignee=args.assignee, include_done=args.all,
-                               limit=args.limit), print_task_list
+                               limit=args.limit, kind=args.kind,
+                               needs_owner=args.needs_owner), print_task_list
         if sub == "read":
             return client.call("task_read", id=args.id), print_task
         if sub == "update":
@@ -2653,7 +2666,8 @@ def run_client_command(client, args):
             return client.call("task_assign", id=args.id, assignees=args.assignees,
                                mode=args.mode), print_task
         if sub == "complete":
-            return client.call("task_complete", id=args.id, by=args.by), print_task
+            return client.call("task_complete", id=args.id, by=args.by,
+                               verdict=args.verdict), print_task
         if sub == "block":
             return client.call("task_block", id=args.id, reason=args.reason), print_task
         if sub == "unblock":

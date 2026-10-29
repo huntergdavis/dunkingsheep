@@ -808,7 +808,8 @@ def h_task_add(flock, args, self_pane_id):
         parent_id=args.get("parent_id"),
         depends_on=_task_values(args.get("depends_on")),
         multi_assignee=_bool(args.get("multi_assignee"), False),
-        self_pane_id=self_pane_id)
+        self_pane_id=self_pane_id, kind=args.get("kind"), author=args.get("author"),
+        repo=args.get("repo"), pr=args.get("pr"), head=args.get("head"))
 
 
 def h_task_list(flock, args, self_pane_id):
@@ -816,7 +817,8 @@ def h_task_list(flock, args, self_pane_id):
                            assignee=args.get("assignee"),
                            include_done=_bool(args.get("include_done"), True),
                            limit=int(_opt(args, "limit", 200)),
-                           self_pane_id=self_pane_id)
+                           self_pane_id=self_pane_id, kind=args.get("kind"),
+                           needs_owner=_bool(args.get("needs_owner"), False))
 
 
 def h_task_read(flock, args, self_pane_id):
@@ -856,7 +858,7 @@ def h_task_assign(flock, args, self_pane_id):
 
 
 def h_task_complete(flock, args, self_pane_id):
-    return flock.task_complete(args["id"], by=args.get("by"),
+    return flock.task_complete(args["id"], by=args.get("by"), verdict=args.get("verdict"),
                                self_pane_id=self_pane_id)
 
 
@@ -1862,6 +1864,12 @@ COMMANDS = [
             "depends_on": TASK_DEPS_PARAM,
             "multi_assignee": {"type": "boolean",
                                "description": "Allow several agents to claim this task."},
+            "kind": {"type": "string", "enum": ["work", "review", "verify", "report"],
+                     "description": "work (default); review is filed by the review timer."},
+            "author": {"type": "string", "description": "lane that produced the artefact under review"},
+            "repo": {"type": "string", "description": "owner/name, for reviews"},
+            "pr": {"type": "integer", "description": "PR number, for reviews"},
+            "head": {"type": "string", "description": "exact commit under review"},
         },
         required=["title"],
     ),
@@ -1879,6 +1887,9 @@ COMMANDS = [
                              "description": "Include done/cancelled (default true)."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 500,
                       "description": "Maximum tasks to return (default 200)."},
+            "kind": {"type": "string", "enum": ["work", "review", "verify", "report"]},
+            "needs_owner": {"type": "boolean",
+                            "description": "Only tasks blocked on a 'needs-owner:' question."},
         },
     ),
     Command(
@@ -1930,6 +1941,9 @@ COMMANDS = [
             "id": TASK_ID_PARAM,
             "by": {"type": "string",
                    "description": "Who completed it (defaults to caller pane)."},
+            "verdict": {"type": "string", "enum": ["accept", "needs-fix"],
+                        "description": "Review tasks only: the reviewer's verdict, "
+                                       "written by the daemon from the bound lane."},
         },
         required=["id"],
     ),

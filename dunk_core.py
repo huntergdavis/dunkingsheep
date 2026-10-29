@@ -2375,19 +2375,9 @@ class Flock:
         The message names both ways out, because an unowned task is a silent
         failure and a refusal is a loud one.
         """
-        if self_pane_id:
-            return [self_pane_id]
-        if self.caller_role(None) in ("system", "web", "owner"):
-            # A token-bearing service (the web desk, a timer) files work for the
-            # queue, not for itself: unassigned means claimable (FLAT_FLEET.md 5).
-            return []
-        leader = (os.environ.get(TASK_LEADER_ENV) or "").strip()
-        if leader:
-            return [leader]
-        raise DunkError(
-            "a task must have an owner: no creating pane and no declared leader "
-            f"(set {TASK_LEADER_ENV}). Pass --assign <pane>, or run the command from "
-            "the lane that should own it.")
+        # FLAT_FLEET.md 5: unassigned means claimable by any lane whose role
+        # matches the kind. The queue owns the work; nobody is handed it.
+        return []
 
     def _require_task_visible(self, task, self_pane_id):
         if not self_pane_id:
@@ -2401,7 +2391,8 @@ class Flock:
     @_as_dunk_error
     def task_add(self, title, scope=None, body=None, status=None, priority=None,
                  assignees=None, parent_id=None, depends_on=None,
-                 multi_assignee=False, self_pane_id=None):
+                 multi_assignee=False, self_pane_id=None, kind=None, author=None,
+                 repo=None, pr=None, head=None):
         target = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
         # t278: a caller with NO pane (human CLI, a unit) could silently create a
         # task in another pane's PRIVATE queue - the task showed in `task list`, but
@@ -2422,25 +2413,34 @@ class Flock:
         # refusal above comes first on purpose: a no-pane attempt at another
         # pane's private queue is refused for its scope, not for its owner.
         owners = self._task_assignees(assignees, self_pane_id)
-        if not owners:
-            owners = self._default_task_owner(self_pane_id)
+        role = self.caller_role(self_pane_id)
+        if owners and role in ("desk", "planner", "worker", "reviewer") \
+                and any(owner != self_pane_id for owner in owners):
+            raise DunkError(
+                f"task add may assign only to yourself for role {role}; handing work "
+                "to another lane is the owner's (lanes pull with task next)")
+        if role in ("desk", "planner") and (kind or "work") != "work":
+            raise DunkError(f"role {role} files kind=work only")
+        if kind == "review" and role not in ("owner", "system", "web"):
+            raise DunkError("review tasks are filed by the review timer (system) or the owner")
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
             priority=priority or "low",
             assignees=owners,
             parent_id=parent_id, depends_on=depends_on,
-            created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False))
+            created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False),
+            kind=kind or "work", author=author, repo=repo, pr=pr, head=head)
 
     @_as_dunk_error
     def task_list(self, scope=None, status=None, assignee=None, include_done=True,
-                  limit=200, self_pane_id=None):
+                  limit=200, self_pane_id=None, kind=None, needs_owner=False):
         explicit = None
         if scope is not None and str(scope).strip() not in ("", "all"):
             explicit = self._task_scope(scope, self_pane_id, default=TASK_GLOBAL)
         tasks = self.tasks.list(
             scope=explicit, status=status, assignee=assignee,
             include_done=_truthy(include_done, True), limit=int(limit or 200),
-            self_pane_id=self_pane_id)
+            self_pane_id=self_pane_id, kind=kind, needs_owner=_truthy(needs_owner, False))
         return {"scope": explicit or "visible", "pane_id": self_pane_id,
                 "tasks": tasks}
 
@@ -2470,8 +2470,25 @@ class Flock:
             task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
 
     @_as_dunk_error
-    def task_complete(self, task_id, by=None, self_pane_id=None):
+    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
+        if task.get("kind") == "review":
+            role = self.caller_role(self_pane_id)
+            if role == "reviewer" and not self.roles.may_review(self_pane_id):
+                raise DunkError(f"{self_pane_id} may not review (provider not on the "
+                                "reviewer list)")
+            if role not in ("reviewer", "owner"):
+                raise DunkError(f"a review is completed by its reviewer lane, not role {role}")
+            if role == "reviewer" and task.get("author") and task["author"] == self_pane_id:
+                raise DunkError("a lane never accepts its own work (no-self-merge)")
+            if verdict is None:
+                raise DunkError("completing a review needs --verdict accept|needs-fix")
+            try:
+                self.tasks.set_verdict(task["id"], verdict, by=self_pane_id or by)
+            except TaskError as error:
+                raise DunkError(str(error)) from None
+        elif verdict is not None:
+            raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
         # must not run inside the completion transaction); the transaction
         # re-reads the allowlist file itself under lock, so a revocation between
@@ -2968,6 +2985,19 @@ class Flock:
         self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
+    def _claim_filters(self, self_pane_id):
+        """(kinds, exclude_author) for a claim, from the caller's role.
+
+        A reviewer pulls only `review` tasks it did not author; everyone else
+        pulls everything but reviews. The owner is unrestricted.
+        """
+        role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+        if role == "reviewer":
+            return (("review",), self_pane_id)
+        if role == "owner":
+            return (None, None)
+        return (("work", "verify", "report"), None)
+
     def task_next(self, scope=None, lease_seconds=None, self_pane_id=None,
                   allow_busy=False):
         """Atomically claim the next task; subscribe if the queue is empty.
@@ -3001,11 +3031,13 @@ class Flock:
         elif value == "auto":
             target = TASK_GLOBAL
             if self_pane_id:
+                kinds, exclude_author = self._claim_filters(self_pane_id)
                 local = self.tasks.claim_next(scope=self_pane_id,
                                               pane_id=self_pane_id,
                                               lease_seconds=lease_seconds,
                                               caller=caller,
-                                              allow_busy=allow_busy)
+                                              allow_busy=allow_busy, kinds=kinds,
+                                              exclude_author=exclude_author)
                 if local.get("task"):
                     return local
         elif value == "mine":
@@ -3023,10 +3055,12 @@ class Flock:
             target = self._task_scope(value, self_pane_id, default=TASK_GLOBAL)
             follow_scope = target
 
+        kinds, exclude_author = self._claim_filters(self_pane_id)
         result = self.tasks.claim_next(scope=target, pane_id=self_pane_id,
                                        lease_seconds=lease_seconds,
                                        caller=caller,
-                                       allow_busy=allow_busy)
+                                       allow_busy=allow_busy, kinds=kinds,
+                                       exclude_author=exclude_author)
         if not result.get("task") and self_pane_id:
             with self._lock:
                 self.task_waiters[self_pane_id] = follow_scope
