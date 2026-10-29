@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.70.103"
+VERSION = "2.71.0"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
