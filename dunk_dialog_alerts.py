@@ -4,6 +4,7 @@ Never sends keys or answers a prompt. Owner delivery uses the web desk directly,
 so a blocked coordinator cannot swallow the alert. Failed sinks retry separately.
 """
 import hashlib
+from contextlib import closing
 import os
 from pathlib import Path
 import shutil
@@ -24,7 +25,10 @@ def post_owner(body):
 
 
 def notify(pane_id, generation, signature, *, owner_sink, vp_sink, path=None, now=None):
-    """Notify each sink once per pane/process/dialog; retry failed sinks after 60s.
+    """Notify each sink per pane/process/dialog; retry failures after 60s.
+
+    Successful alerts have a 30-minute cooldown, so a recurring identical dialog
+    cannot be silenced forever during a long-lived agent session.
 
     At-least-once: a crash after delivery but before commit can repeat an alert.
     It cannot silently mark an unsuccessful delivery complete.
@@ -43,17 +47,20 @@ def notify(pane_id, generation, signature, *, owner_sink, vp_sink, path=None, no
             "for the owner. No answer or key has been sent automatically.\n\n"
             f"Visible dialog: {signature[:500]}")
     results = []
-    with _LOCK, sqlite3.connect(path, timeout=5) as db:
+    with _LOCK, closing(sqlite3.connect(path, timeout=5)) as db:
         db.execute("CREATE TABLE IF NOT EXISTS alerts "
                    "(identity TEXT, sink TEXT, last_attempt REAL, delivered REAL, "
                    "PRIMARY KEY(identity,sink))")
         for name, sink in (("owner", owner_sink), ("vp", vp_sink)):
             row = db.execute("SELECT last_attempt,delivered FROM alerts WHERE identity=? AND sink=?",
                              (identity, name)).fetchone()
-            if row and (row[1] is not None or now - row[0] < RETRY_S):
+            # Re-alert a still-blocked or reopened identical dialog after 30m.
+            # This bounds permanent suppression without trusting redraws as closes.
+            if row and ((row[1] is not None and now - row[1] < 1800)
+                        or now - row[0] < RETRY_S):
                 continue
             db.execute("INSERT INTO alerts VALUES (?,?,?,NULL) ON CONFLICT(identity,sink) "
-                       "DO UPDATE SET last_attempt=excluded.last_attempt", (identity, name, now))
+                       "DO UPDATE SET last_attempt=excluded.last_attempt, delivered=NULL", (identity, name, now))
             db.commit()
             try:
                 result = sink(body)

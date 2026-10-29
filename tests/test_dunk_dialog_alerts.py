@@ -28,6 +28,11 @@ class DialogAlertTests(unittest.TestCase):
         self.assertEqual(self.owner.call_count, 3)
         self.assertEqual(self.vp.call_count, 3)
 
+    def test_recurrent_identical_dialog_is_not_suppressed_forever(self):
+        self.notify()
+        self.assertEqual(self.notify(now=1899), [])
+        self.assertEqual(len(self.notify(now=1900)), 2)
+
     def test_failed_owner_retries_without_repeating_successful_vp(self):
         self.owner.side_effect = RuntimeError('offline')
         self.assertEqual(self.notify()[0], ('owner', False, 'RuntimeError'))

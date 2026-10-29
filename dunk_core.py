@@ -6805,7 +6805,7 @@ class Flock:
         if screen is None:
             return ("gone", "")
         if _modal_open(screen):
-            return ("modal", _collapse(_strip_ansi(screen))[-120:])
+            return ("modal", _collapse(_strip_ansi(screen))[-4000:])
         text = self._recovery_box_text(pane_id, screen)
         return ("gone", "") if text is None else ("box", text)
 
