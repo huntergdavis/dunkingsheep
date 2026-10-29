@@ -126,11 +126,22 @@ def credit_state(readings):
             continue
         windows = reading.get("windows") or []
         by_name = {}
+        unidentified = False
         for window in windows:
             name = str(window.get("name") or "").strip()
             value = window.get("percent_remaining")
-            if name:
-                by_name[name] = value
+            if not name or name in by_name:
+                # A window we cannot identify, or two windows claiming the
+                # same name, means we do not know which numbers describe this
+                # subscription. Dropping the entry (the old behaviour) let an
+                # unmeasured window sit outside the minimum and left a swap
+                # allowed on partial evidence (reviewer %19's residual).
+                unidentified = True
+                continue
+            by_name[name] = value
+        if unidentified:
+            state[provider] = "unknown"
+            continue
         if not by_name:
             # pi reports a local session estimate, not plan quota. Its
             # availability cannot be decided from this reading, so it is

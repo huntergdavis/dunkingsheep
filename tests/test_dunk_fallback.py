@@ -295,6 +295,41 @@ class ReserveAndWindowPolicyTests(unittest.TestCase):
         self.assertIn("codex 42.0% left, above 5 reserve", decision["record"])
 
 
+class UnmeasuredWindowTests(unittest.TestCase):
+    """Reviewer %19 residual: an unmeasured window must not sit outside the
+    headroom minimum and leave a swap allowed on partial evidence."""
+
+    CLAUDE_SPENT = {"provider": "claude", "status": "ok",
+                    "windows": [{"name": "five_hour", "percent_remaining": 0.0},
+                                {"name": "weekly_all", "percent_remaining": 0.0}]}
+
+    def _plan(self, codex_windows):
+        codex = {"provider": "codex", "status": "ok", "windows": codex_windows}
+        credit = fb.credit_state([self.CLAUDE_SPENT, codex])
+        return credit, fb.plan_swap(pane("claude"), credit)
+
+    def test_unnamed_window_is_not_dropped_from_the_contract(self):
+        credit, decision = self._plan([{"name": "weekly",
+                                        "percent_remaining": 99.0},
+                                       {"percent_remaining": 0.0}])
+        self.assertEqual("unknown", credit["codex"])
+        self.assertEqual("skip", decision["action"])
+
+    def test_duplicate_window_names_are_not_last_wins(self):
+        credit, decision = self._plan([{"name": "weekly",
+                                        "percent_remaining": 0.0},
+                                       {"name": "weekly",
+                                        "percent_remaining": 99.0}])
+        self.assertEqual("unknown", credit["codex"])
+        self.assertEqual("skip", decision["action"])
+
+    def test_a_fully_identified_reading_still_swaps(self):
+        credit, decision = self._plan([{"name": "weekly",
+                                        "percent_remaining": 42.0}])
+        self.assertEqual("available", credit["codex"])
+        self.assertEqual("swap", decision["action"])
+
+
 class ReproducibilityTests(unittest.TestCase):
     def test_same_numbers_same_target_twice(self):
         credit = fb.credit_state(CLAUDE_CODEX_SPENT)
