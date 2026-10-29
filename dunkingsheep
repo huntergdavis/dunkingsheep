@@ -497,6 +497,13 @@ def build_parser():
     q = rsub.add_parser("sync", help="open PRs -> review tasks; statuses follow verdicts (system/owner)")
     q.add_argument("--dry-run", action="store_true")
     rsub.add_parser("list", help="live review tasks with PR, head, author, reviewer, age")
+    p = sub.add_parser("poolrad", help="the Poolrad backlog: backlog-sync fills it, progress reads it")
+    psub = p.add_subparsers(dest="poolrad_command", metavar="<subcommand>", parser_class=json_parser_class)
+    psub.required = True
+    q = psub.add_parser("backlog-sync", help="file the next N composable uncredited bodies as work (system/owner)")
+    q.add_argument("--limit", "-n", type=int, default=6)
+    q.add_argument("--dry-run", action="store_true")
+    psub.add_parser("progress", help="credited / identities / CEILING / queue summary")
     p = sub.add_parser("github", help="one-shot GitHub setup with the owner's own login")
     gsub = p.add_subparsers(dest="github_command", metavar="<subcommand>", parser_class=json_parser_class)
     gsub.required = True
@@ -1442,6 +1449,26 @@ def dunk_github_wrappers_install(bin_dir):
     return {"gh_wrapper": target, "real_gh": real, "git_credential_helper": helper,
             "note": "lanes use https remotes; the owner's own gh/ssh login is untouched "
                     "(gh-token prints nothing for the owner role)"}
+
+
+def print_poolrad_sync(result):
+    print(f"base {result.get('base') or '?'}; queue rows {((result.get('skipped') or {}).get('queue_rows'))}, "
+          f"credited {((result.get('skipped') or {}).get('credited'))}, already filed "
+          f"{((result.get('skipped') or {}).get('already_filed'))}")
+    for item in result.get("filed") or []:
+        print(f"  filed {item.get('task', '(dry)')} {item['id']} rank {item.get('rank')}")
+    for error in result.get("errors") or []:
+        print(f"  ! {error}")
+
+
+def print_poolrad_progress(result):
+    print(f"credited strict bodies: {result.get('credited')}  identities: {result.get('identities')}  "
+          f"CEILING {result.get('ceiling')}")
+    print(f"  {result.get('ceiling_note')}")
+    print(f"  composable in queue: {result.get('composable_bodies')} of {result.get('queue_candidates')} candidates; "
+          f"main {result.get('main')}")
+    if result.get("replaced") is None:
+        print(f"  replaced: n/a ({result.get('replaced_note')})")
 
 
 def print_review_sync(result):
@@ -2995,6 +3022,10 @@ def run_client_command(client, args):
         return result, _print_token
     if command == "git-credential":
         return _git_credential(client, args.operation), (lambda r: None)
+    if command == "poolrad":
+        if args.poolrad_command == "backlog-sync":
+            return client.call("poolrad_sync", limit=args.limit, dry_run=args.dry_run), print_poolrad_sync
+        return client.call("poolrad_progress"), print_poolrad_progress
     if command == "review":
         if args.review_command == "sync":
             return client.call("review_sync", dry_run=args.dry_run), print_review_sync

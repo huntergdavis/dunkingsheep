@@ -1192,6 +1192,15 @@ def h_gh_token(flock, args, self_pane_id):
     return flock.gh_token(kind=args.get("kind"), self_pane_id=self_pane_id)
 
 
+def h_poolrad_sync(flock, args, self_pane_id):
+    return flock.poolrad_sync(limit=args.get("limit") or 6,
+                              dry_run=_bool(args.get("dry_run"), False), self_pane_id=self_pane_id)
+
+
+def h_poolrad_progress(flock, args, self_pane_id):
+    return flock.poolrad_progress(self_pane_id=self_pane_id)
+
+
 def h_review(flock, args, self_pane_id):
     action = args.get("action") or "list"
     if action == "sync":
@@ -2484,6 +2493,16 @@ COMMANDS = [
                 "global_store": {"type": "boolean"}, "project_path": {"type": "string"}},
         required=("slug",)),
     Command(
+        "poolrad_sync",
+        "Backlog-sync: run the poolrad strict-candidate exporter and file the next N "
+        "composable, uncredited, unfiled bodies as kind=work tasks. System/owner only.",
+        h_poolrad_sync, params={"limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "dry_run": {"type": "boolean"}}),
+    Command(
+        "poolrad_progress",
+        "Credited strict bodies, reviewed identities, the 815 CEILING, queue summary.",
+        h_poolrad_progress),
+    Command(
         "whoami",
         "This caller's role (owner/system/web/desk/planner/worker/reviewer/"
         "anonymous), how it was bound, and what the kernel saw.",
@@ -2612,7 +2631,8 @@ MCP_GROUPS = (
       ("retired", "retire_pane"),
       ("lanes", "lanes"), ("lane_set", "lane_set"),
       ("review_sync", "review_sync"), ("review_list", "review_list"),
-      ("gh_token", "gh_token"), ("context_add", "context_add"),
+      ("gh_token", "gh_token"), ("poolrad_sync", "poolrad_sync"),
+      ("poolrad_progress", "poolrad_progress"), ("context_add", "context_add"),
       ("context_promote", "context_promote"), ("context_supersede", "context_supersede"),
       ("context_retire", "context_retire"))),
     ("pane",
@@ -2739,7 +2759,7 @@ SUPERUSER_ONLY = {
     "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
     "lane_set", "lane_register", "lane_unregister", "token_issue", "token_revoke",
-    "review_sync", "context_promote", "context_retire",
+    "review_sync", "context_promote", "context_retire", "poolrad_sync",
     "memory_backfill",
 }
 

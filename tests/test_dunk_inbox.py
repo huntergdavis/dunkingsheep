@@ -1042,6 +1042,7 @@ class SurfaceParityTests(unittest.TestCase):
             "lane_unregister": "lane", "whoami": "whoami",
             "token_issue": "token", "token_revoke": "token",
             "gh_token": "gh-token", "review_sync": "review", "review_list": "review",
+            "poolrad_sync": "poolrad", "poolrad_progress": "poolrad",
             "context_add": "context", "context_promote": "context",
             "context_supersede": "context", "context_retire": "context",
             "delivery_capability": "capability",

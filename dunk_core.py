@@ -3876,6 +3876,14 @@ class Flock:
         import dunk_review
         return dunk_review.Sync(self, tokens=self._github_tokens()).run(dry_run=dry_run)
 
+    def poolrad_sync(self, limit=6, dry_run=False, self_pane_id=None):
+        import dunk_poolrad
+        return dunk_poolrad.Sync(self).run(limit=int(limit or 6), dry_run=dry_run)
+
+    def poolrad_progress(self, self_pane_id=None):
+        import dunk_poolrad
+        return dunk_poolrad.progress()
+
     def review_list(self, self_pane_id=None):
         tasks = self.tasks.list(scope=None, include_done=False, limit=500, kind="review")
         now = time.time()

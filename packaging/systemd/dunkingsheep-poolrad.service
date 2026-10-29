@@ -1,0 +1,9 @@
+[Unit]
+Description=Poolrad backlog-sync: file the next composable uncredited bodies as work
+After=default.target dunkingsheep.service
+
+[Service]
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+Type=oneshot
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon poolrad backlog-sync --limit 6
+TimeoutStartSec=600
