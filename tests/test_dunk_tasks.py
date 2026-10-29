@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import logging
 import threading
 import unittest
 
@@ -13,6 +14,7 @@ import _bootstrap  # noqa: F401  (isolate live state)
 import dunk_api  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
+import dunk_tasks  # noqa: E402
 from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
@@ -101,7 +103,8 @@ class TaskStoreTests(unittest.TestCase):
             found = []
             barrier.wait()
             while True:
-                task = tasks.claim_next(GLOBAL, pane, lease_seconds=300)["task"]
+                task = tasks.claim_next(GLOBAL, pane, lease_seconds=300,
+                                        allow_busy=True)["task"]
                 if task is None:
                     break
                 found.append(task["id"])
@@ -133,7 +136,137 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual([(task["id"], "expired")],
                          [(item["task_id"], item["reason"]) for item in requeued])
         self.assertEqual("open", self.store.get(task["id"])["status"])
-        self.assertEqual([], self.store.get(task["id"])["assignees"])
+        # t145/owner2317: the claim made w1:p1 the owner, and expiry reopens the
+        # task for that owner instead of deleting the assignment. A task that
+        # should change hands needs an explicit assign/complete.
+        self.assertEqual(["w1:p1"], self.store.get(task["id"])["assignees"])
+
+    def test_busy_lane_is_refused_a_second_task(self):
+        """t145: a lane already holding in-progress work is not handed more.
+
+        The incident behind this task was a busy lane (codex-parity) being given
+        another lane's reaped task. A refusal must be a refusal, not a silent
+        empty result: the caller gets a reason and the second task stays open
+        and unassigned.
+        """
+        first = self.store.add(GLOBAL, "mine", priority="urgent",
+                               assignees=["w1:p1"])
+        second = self.store.add(GLOBAL, "second", priority="low")
+        claimed = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertEqual(first["id"], claimed["task"]["id"])
+        refused = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertIsNone(refused["task"])
+        self.assertEqual("busy", refused["refused"]["reason"])
+        self.assertEqual([first["id"]], refused["refused"]["task_ids"])
+        still = self.store.get(second["id"])
+        self.assertEqual("open", still["status"])
+        self.assertEqual([], still["assignees"])
+        self.assertEqual([], self.store.leases_for(second["id"]))
+
+    def test_busy_lane_may_take_parallel_work_only_with_the_explicit_flag(self):
+        first = self.store.add(GLOBAL, "first")
+        second = self.store.add(GLOBAL, "second", priority="urgent")
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.assertIsNone(self.store.claim_next(GLOBAL, "w1:p1")["task"])
+        allowed = self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300,
+                                        allow_busy=True)
+        self.assertEqual(first["id"], allowed["task"]["id"])
+        self.assertIsNone(allowed.get("refused"))
+        held = {lease["task_id"] for lease in self.store.leases_for_pane("w1:p1")}
+        self.assertEqual({first["id"], second["id"]}, held)
+
+    def test_refusal_reason_names_why_nothing_was_claimable(self):
+        self.assertEqual(
+            "empty",
+            self.store.claim_next(GLOBAL, "w1:p1")["refused"]["reason"])
+        task = self.store.add(GLOBAL, "owned", assignees=["w2:p2"])
+        refused = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual("owned_elsewhere", refused["refused"]["reason"])
+        self.assertEqual(["w2:p2"], refused["refused"]["owned_by"])
+        self.assertEqual(task["id"], refused["refused"]["task_ids"][0])
+        blocked = self.store.add(GLOBAL, "blocked", depends_on=[task["id"]])
+        refused = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual("owned_elsewhere", refused["refused"]["reason"],
+                         "an open task owned elsewhere still explains the refusal")
+        only_blocked = Tasks(os.path.join(self.tmp.name, "blocked.db"))
+        try:
+            gate = only_blocked.add(GLOBAL, "gate")
+            only_blocked.block(gate["id"], reason="paused")
+            waiting = only_blocked.add(GLOBAL, "waiting", depends_on=[gate["id"]])
+            refused = only_blocked.claim_next(GLOBAL, "w1:p1")
+            self.assertEqual("blocked", refused["refused"]["reason"])
+            self.assertEqual([waiting["id"]], refused["refused"]["task_ids"])
+        finally:
+            only_blocked.close()
+
+    def test_every_refusal_is_logged_with_the_pane_and_reason(self):
+        with self.assertLogs("dunkingsheep.tasks", level="INFO") as logs:
+            self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertIn("refused", logs.output[0])
+        self.assertIn("w1:p1", logs.output[0])
+        self.assertIn("empty", logs.output[0])
+
+    def test_expired_lease_keeps_the_durable_assignee_and_blocks_other_lanes(self):
+        """t145/owner2317: a lease is ACTIVITY, an assignment is OWNERSHIP.
+
+        Owner2317 found ten global tasks that lost their assignees 30 minutes
+        after a claim expired, which let the next global `task next` take work
+        that was never released. Expiry must reopen the task for its owner and
+        leave the ownership alone.
+        """
+        task = self.store.add(GLOBAL, "owned work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        requeued = self.store.reap(alive_source="live", alive_panes={"w1:p1"})
+        self.assertEqual([(task["id"], "expired")],
+                         [(item["task_id"], item["reason"]) for item in requeued])
+        reopened = self.store.get(task["id"])
+        self.assertEqual("open", reopened["status"])
+        self.assertEqual(["w1:p1"], reopened["assignees"],
+                         "expiry erased the durable owner")
+        stolen = self.store.claim_next(GLOBAL, "w2:p2")
+        self.assertIsNone(stolen["task"], "another lane took expired owned work")
+        self.assertEqual("owned_elsewhere", stolen["refused"]["reason"])
+        self.assertEqual(["w1:p1"], stolen["refused"]["owned_by"])
+        back = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual(task["id"], back["task"]["id"], "the owner could not reclaim")
+
+    def test_reap_advisory_names_the_sole_owner_when_that_owner_is_gone(self):
+        """The advisory must fire for the common case: the owner IS the pane
+        whose lease ended, and it is not in the live pane list. Filtering the
+        expiring claimant out of the owner set hides exactly that case (t145
+        review i32091)."""
+        task = self.store.add(GLOBAL, "dead owner work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        with self.assertLogs("dunkingsheep.tasks", level="INFO") as logs:
+            self.store.reap(alive_source="live", alive_panes={"w2:p2"})
+        self.assertTrue(any("reopened while owned" in line and "w1:p1" in line
+                            for line in logs.output),
+                        f"no advisory for a sole dead owner: {logs.output}")
+        self.assertEqual(["w1:p1"], self.store.get(task["id"])["assignees"])
+
+    def test_reap_advisory_is_silent_when_the_owner_is_alive(self):
+        self.store.add(GLOBAL, "live owner work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        logging.getLogger("dunkingsheep.tasks").setLevel(logging.INFO)
+        with self.assertNoLogs("dunkingsheep.tasks", level="INFO"):
+            self.store.reap(alive_source="live", alive_panes={"w1:p1"})
+
+    def test_release_keeps_the_durable_assignee_and_blocks_other_lanes(self):
+        task = self.store.add(GLOBAL, "owned work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.store.release(task["id"], "w1:p1")
+        released = self.store.get(task["id"])
+        self.assertEqual("open", released["status"])
+        self.assertEqual(["w1:p1"], released["assignees"],
+                         "release erased the durable owner")
+        self.assertIsNone(self.store.claim_next(GLOBAL, "w2:p2")["task"])
+        self.assertEqual(task["id"], self.store.claim_next(GLOBAL, "w1:p1")["task"]["id"])
 
     def test_pane_gone_alone_does_not_requeue(self):
         task = self.store.add(GLOBAL, "work")
@@ -199,6 +332,109 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(1, metrics["current"]["by_status"]["done"])
         self.assertEqual(1, metrics["current"]["by_status"]["blocked"])
         self.assertGreaterEqual(metrics["coverage"]["events_total"], 5)
+
+    def test_leader_held_counts_leader_assigned_tasks_with_the_unowned(self):
+        # The standing rule makes unowned global tasks leader-owned; a task
+        # explicitly assigned to the leader pane is theirs as well (t407 F1).
+        real_now = dunk_tasks._now
+        state = {"calls": 0}
+        def fake_now():
+            state["calls"] += 1
+            return 1000.0 if state["calls"] == 1 else 2000.0
+        dunk_tasks._now = fake_now
+        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
+        try:
+            old = self.store.add(GLOBAL, "carried")
+            assigned = self.store.add(GLOBAL, "explicit", assignees=["%15"])
+            self.store.add(GLOBAL, "worker task", assignees=["w1:p1"])
+            dunk_tasks._now = real_now
+            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        finally:
+            del os.environ["DUNKINGSHEEP_VP_PANE"]
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(2, held["count"])
+        self.assertEqual(1000.0, held["oldest_created_at"])
+        self.assertEqual(4000.0, held["oldest_age_s"])
+        self.assertEqual("%15", held["leader_pane"])
+
+    def test_leader_held_counts_one_explicit_leader_task_alone(self):
+        # A DB holding only one global active task assigned to the leader
+        # pane reports leader_held count 1 - not zero with None ages.
+        os.environ["DUNKINGSHEEP_VP_PANE"] = "%15"
+        try:
+            self.store.add(GLOBAL, "explicit", assignees=["%15"])
+            self.store.add(GLOBAL, "other", assignees=["w1:p1"])
+            metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        finally:
+            del os.environ["DUNKINGSHEEP_VP_PANE"]
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(1, held["count"])
+        self.assertIsNotNone(held["oldest_age_s"])
+
+    def test_cli_prints_leader_held_zero_unavailable_and_unknown_age(self):
+        # t407 F2: a known zero, an unavailable payload and a positive count
+        # with unknown age must look different on the wire.
+        import io
+        from contextlib import redirect_stdout
+        import types
+        src = open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                "dunkingsheep")).read()
+        mod = types.ModuleType("dunky")
+        mod.__file__ = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                    "dunkingsheep")
+        exec(compile(src.split("if __name__")[0], "dunkingsheep", "exec"), mod.__dict__)
+        def render(current):
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                mod.print_task_metrics({"current": current, "throughput": {}})
+            for line in buffer.getvalue().splitlines():
+                if line.startswith("leader-held"):
+                    return line
+            return ""
+        self.assertEqual("leader-held tasks: 0",
+                         render({"leader_held": {"count": 0, "oldest_created_at": None,
+                                                 "oldest_age_s": None}}))
+        self.assertEqual("leader-held tasks: unavailable (payload predates the metric)",
+                         render({}))
+        self.assertEqual("leader-held tasks: 4 (oldest unknown)",
+                         render({"leader_held": {"count": 4, "oldest_created_at": None,
+                                                 "oldest_age_s": None}}))
+        self.assertEqual("leader-held tasks: 3 (oldest 1.4h)",
+                         render({"leader_held": {"count": 3, "oldest_age_s": 4900.0}}))
+        self.assertEqual("leader-held tasks: 3 (oldest 3.0d)",
+                         render({"leader_held": {"count": 3, "oldest_age_s": 259200.0}}))
+
+    def test_leader_held_counts_unowned_global_actives_with_deterministic_age(self):
+        # Owner #1708: unowned means leader-owned. Only active global tasks with
+        # no assignees count; assigned, pane-scoped and done tasks do not.
+        real_now = dunk_tasks._now
+        state = {"calls": 0}
+        def fake_now():
+            state["calls"] += 1
+            return 1000.0 if state["calls"] == 1 else 2000.0
+        dunk_tasks._now = fake_now
+        try:
+            old = self.store.add(GLOBAL, "carried")
+            self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
+            self.store.add("w9:lane", "private")
+            done = self.store.add(GLOBAL, "finished")
+            self.store.complete(done["id"], by="w1:p1")
+        finally:
+            dunk_tasks._now = real_now
+        metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(1, held["count"])
+        self.assertEqual(1000.0, held["oldest_created_at"])
+        self.assertEqual(4000.0, held["oldest_age_s"])
+        self.assertEqual(old["id"], self.store.get(old["id"])["id"])
+
+    def test_leader_held_empty_when_everything_is_owned(self):
+        self.store.add(GLOBAL, "assigned", assignees=["w1:p1"])
+        metrics = self.store.metrics(window_s=3600, until=5000.0, scopes=[GLOBAL])
+        held = metrics["current"]["leader_held"]
+        self.assertEqual(0, held["count"])
+        self.assertIsNone(held["oldest_created_at"])
+        self.assertIsNone(held["oldest_age_s"])
 
     def test_metrics_bucket_throughput_by_hour(self):
         self.store.add(GLOBAL, "one")
@@ -331,6 +567,77 @@ class FlockTaskTests(unittest.TestCase):
                                    self_pane_id="w2:p1")
         self.assertEqual(GLOBAL, task["scope"])
         self.assertEqual(["w9:p9"], task["assignees"])
+
+    def test_t145_characterisation_pane_id_as_scope_claims_nothing(self):
+        """CHARACTERISATION of the observed CLI trap, NOT a desired-behaviour
+        assertion (t145). `task next <pane id>` reads that argument as a SCOPE
+        (Flock.task_next -> _task_scope), so an agent passing its own pane id
+        scans its empty private queue, gets no task, and is silently subscribed
+        to follow that empty scope while the global task it is assigned stays
+        open. The documented call (no argument = scope global) claims it.
+
+        This pins today's behaviour so the report is reproducible; a fix that
+        refuses a pane id as a scope (or reinterprets it as the caller) must
+        REPLACE this test rather than delete it, and the replacement fails
+        against this revision."""
+        task = self.flock.task_add("assigned work", priority="high",
+                                   assignees=["w2:p1"], self_pane_id="w2:p1")
+        trap = self.flock.task_next(scope="w2:p1", self_pane_id="w2:p1")
+        self.assertIsNone(trap["task"],
+                          "the pane's own id was read as a scope, not a caller")
+        self.assertTrue(trap.get("following"))
+        self.assertEqual("w2:p1", self.flock.task_waiters["w2:p1"],
+                         "the pane now follows its empty private scope")
+        still = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.assertEqual("open", still["status"], "the assigned task was never claimed")
+        self.assertEqual([], still["leases"])
+        claimed = self.flock.task_next(self_pane_id="w2:p1")
+        self.assertEqual(task["id"], claimed["task"]["id"],
+                         "the documented call claims the task it is assigned")
+        self.assertEqual("in_progress", claimed["task"]["status"])
+
+    def test_t145_cli_handler_reads_the_positional_as_a_scope(self):
+        """The exact CLI shape that produced the report: `task next %58`
+        arrives at h_task_next as {"scope": "%58"}, so the pane id is a scope.
+        This is the handler-level reproduction of the characterisation above."""
+        task = self.flock.task_add("assigned work", assignees=["%58"],
+                                   self_pane_id="%58")
+        trap = dunk_api.h_task_next(self.flock, {"scope": "%58"}, "%58")
+        self.assertIsNone(trap["task"])
+        self.assertTrue(trap.get("following"))
+        self.assertEqual("open",
+                         self.flock.task_read(task["id"], self_pane_id="%58")["status"])
+        claimed = dunk_api.h_task_next(self.flock, {}, "%58")
+        self.assertEqual(task["id"], claimed["task"]["id"])
+
+    def test_cli_handler_refuses_a_busy_pane_and_honours_allow_busy(self):
+        """The plumbing, not just the store: `task next` from a pane that holds
+        work is refused with a reason, keeps the documented auto-follow, and
+        `allow_busy` is what a lane must pass to take parallel work."""
+        first = self.flock.task_add("first", self_pane_id="w2:p1")
+        second = self.flock.task_add("second", self_pane_id="w2:p1")
+        claimed = dunk_api.h_task_next(self.flock, {}, "w2:p1")
+        self.assertEqual(first["id"], claimed["task"]["id"])
+        refused = dunk_api.h_task_next(self.flock, {}, "w2:p1")
+        self.assertIsNone(refused["task"])
+        self.assertEqual("busy", refused["refused"]["reason"])
+        self.assertEqual([first["id"]], refused["refused"]["task_ids"])
+        self.assertTrue(refused.get("following"),
+                        "an empty task_next still subscribes the pane for a push")
+        allowed = dunk_api.h_task_next(self.flock, {"allow_busy": True}, "w2:p1")
+        self.assertEqual(second["id"], allowed["task"]["id"])
+
+    def test_an_unleased_task_assigned_to_another_pane_is_not_claimable(self):
+        """t145 guard: after a lease is reaped the task has no lease row but
+        still names its owner, so a different pane must not be handed it."""
+        task = self.flock.task_add("owned elsewhere", assignees=["w9:p9"],
+                                   self_pane_id="w9:p9")
+        self.assertIsNone(self.flock.task_next(self_pane_id="w2:p1")["task"],
+                          "a foreign pane claimed work owned by w9:p9")
+        mine = self.flock.task_next(self_pane_id="w9:p9")
+        self.assertEqual(task["id"], mine["task"]["id"],
+                         "the named assignee could not claim its own task")
+
 
     def test_inbox_read_appends_global_and_pane_tasks(self):
         self.flock.inbox.send("Codex Site", "hello", sender="pm")

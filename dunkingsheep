@@ -241,6 +241,8 @@ def build_parser():
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--limit", "-n", type=int, default=10)
     q.add_argument("--peek", action="store_true", help="do not mark them read")
+    q = isub.add_parser("recover", help="replay the latest delivered batch after a lost read response")
+    q.add_argument("mailbox", nargs="?", help="agent name, pane id or 'self' (default self)")
     q = isub.add_parser("archive", help="archive a mailbox in bulk (no deletion)")
     q.add_argument("mailbox")
     q.add_argument("--before", help="only messages created before this ISO date/time or epoch")
@@ -425,6 +427,8 @@ def build_parser():
     q.add_argument("scope", nargs="?",
                    help="'global' (default), 'self', 'auto' or a pane id")
     q.add_argument("--lease", type=float, metavar="SECONDS")
+    q.add_argument("--allow-busy", action="store_true",
+                   help="take a second task while already holding in-progress work")
 
     q = tsub.add_parser("heartbeat", help="extend the lease on a claimed task")
     q.add_argument("id")
@@ -695,6 +699,20 @@ def build_parser():
     p.add_argument("--cwd")
     p.add_argument("--focus", action="store_true")
     p.add_argument("argv", nargs="+", metavar="COMMAND", help="the agent command line")
+    p = sub.add_parser("respawn-pane", aliases=["respawn"],
+                       help="guardedly replace an existing managed pane's process in place")
+    p.add_argument("pane")
+    p.add_argument("--expected-pid", type=int, required=True,
+                   help="exact live pane pid")
+    p.add_argument("--expected-start", required=True,
+                   help="exact /proc start time for --expected-pid")
+    p.add_argument("--confirm-idle", action="store_true",
+                   help="required; checked against turns/leases/mail/outbox/screen")
+    p.add_argument("--reason", help="why this pane is being replaced")
+    p.add_argument("--command-json", required=True,
+                   help="replacement argv as a JSON array of strings")
+    p.add_argument("--rollback-json",
+                   help="argv JSON to restore if the replacement fails")
     for name, help_text in (("rename", "rename a workspace, tab or pane"),
                             ("focus", "bring a workspace, tab or pane to the front"),
                             ("close", "close a workspace, tab or pane (kills what runs inside)")):
@@ -1029,7 +1047,23 @@ def print_task_list(result):
 def print_task_next(result):
     task = result.get("task")
     if not task:
-        print("no eligible task")
+        refused = result.get("refused") or {}
+        reason = refused.get("reason")
+        ids = refused.get("task_ids") or []
+        owners = refused.get("owned_by") or []
+        if reason == "busy":
+            held = ", ".join(ids) or "in-progress work"
+            print(f"refused (busy): this pane already holds {held}; "
+                  f"pass --allow-busy to take parallel work")
+        elif reason == "empty":
+            print("no eligible task: the queue is empty for this scope")
+        elif reason:
+            detail = f" ({', '.join(ids)})" if ids else ""
+            if owners:
+                detail += f" owned by {', '.join(owners)}"
+            print(f"no eligible task: refused ({reason}){detail}")
+        else:
+            print("no eligible task")
         if result.get("following"):
             print("following the queue: the daemon will push the next task "
                   "when this pane is idle")
@@ -1230,6 +1264,20 @@ def print_task_metrics(result):
     if assignees:
         print("open by assignee: "
               + ", ".join(f"{row['assignee']}={row['count']}" for row in assignees))
+    leader_held = current.get("leader_held")
+    if leader_held is None:
+        # An older daemon payload without the field: the number is unknown,
+        # which must not be confused with a measured zero.
+        print("leader-held tasks: unavailable (payload predates the metric)")
+    elif isinstance(leader_held, dict) and isinstance(leader_held.get("count"), int):
+        age = leader_held.get("oldest_age_s")
+        if leader_held["count"] == 0:
+            print("leader-held tasks: 0")
+        else:
+            age_text = (f" (oldest {age / 86400:.1f}d)" if age is not None and age >= 86400
+                        else f" (oldest {age / 3600:.1f}h)" if age is not None
+                        else " (oldest unknown)")
+            print(f"leader-held tasks: {leader_held['count']}{age_text}")
 
 
 def print_inbox_read(r):
@@ -1262,6 +1310,14 @@ def _print_inbox_tasks(r):
     if nxt:
         print(f"next: {nxt['id']} [{nxt['priority']}] {nxt['title']}")
     print()
+
+
+def print_inbox_recover(r):
+    messages = r["messages"]
+    if messages:
+        print(f"mailbox {r['mailbox']}: recovered {len(messages)} delivered message(s) "
+              f"- display them, then inbox ack")
+    print_inbox_read(r)
 
 
 def print_inbox_status(r):
@@ -1649,7 +1705,7 @@ _MUTATING_COMMANDS = (
     "stop-all", "add", "update", "set", "remove", "rm", "delete", "cancel",
     "cancel-message", "inbox", "task", "superuser", "desk-token", "lane", "lanes",
     "new-workspace", "workspace", "new-tab", "tab", "split", "start-agent", "agent",
-    "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
+    "respawn-pane", "respawn", "rename", "focus", "close", "retire", "retired", "owner", "state", "dispatch",
     "recover", "shutdown", "watchdog", "watchdog-deadman", "memory", "context",
 )
 
@@ -1681,6 +1737,15 @@ _READ_ONLY_SUBCOMMANDS = {
 
 def _is_mutating(words):
     """True when this invocation can change state, and so invalidates cached reads."""
+    # Global options precede the command. Their separate values are not command
+    # names: filtering only '-' words left '%35' at the front of
+    # '--self-pane %35 inbox read', so the completed drain never invalidated a
+    # cached inbox count. Equals forms and boolean globals consume one word.
+    words = list(words)
+    while words and words[0].startswith("-"):
+        option = words.pop(0)
+        if option in ("--self-pane", "--socket") and words:
+            words.pop(0)
     words = [word for word in words if not word.startswith("-")]
     if not words:
         return False
@@ -2026,6 +2091,8 @@ def main(argv=None):
         return 0
 
     _check_send_body(args)
+    if command in ("respawn-pane", "respawn"):
+        _respawn_argv(args)   # local argv refusal before the socket is opened
 
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
@@ -2228,6 +2295,28 @@ def _check_send_body(args):
                                literal=bool(getattr(args, "literal", False)))
 
 
+def _respawn_argv(args):
+    """Parse and validate respawn argv in one place.
+
+    Called both by the CLI dispatch and, before the socket is opened, by main().
+    Malformed JSON is a local argument error; it must not be reported as a
+    missing daemon, and a valid argv must still reach the normal daemon-absent
+    refusal. This preflight is why the CLI regression can use a nonexistent
+    socket and still exercise the dispatch parser.
+    """
+    try:
+        argv = json.loads(args.command_json)
+        rollback = json.loads(args.rollback_json) if args.rollback_json else None
+    except ValueError as error:
+        raise Refused(f"--command-json/--rollback-json must be JSON arrays: {error}")
+    if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
+        raise Refused("--command-json must be a non-empty JSON array of strings")
+    if rollback is not None and (not isinstance(rollback, list) or not rollback
+                                 or not all(isinstance(x, str) for x in rollback)):
+        raise Refused("--rollback-json must be a non-empty JSON array of strings")
+    return argv, rollback
+
+
 class Refused(SystemExit):
     """A named refusal: the message is the reason, the code is 2.
 
@@ -2409,6 +2498,8 @@ def run_client_command(client, args):
         if sub == "read":
             return client.call("inbox_read", mailbox=args.mailbox, limit=args.limit,
                                peek=args.peek), print_inbox_read
+        if sub == "recover":
+            return client.call("inbox_recover", mailbox=args.mailbox), print_inbox_recover
         if sub == "status":
             return client.call("inbox_status", message_id=args.message_id), print_inbox_status
         if sub in ("ack", "cancel", "delete"):
@@ -2438,7 +2529,7 @@ def run_client_command(client, args):
         tasks = client.call("task_list", limit=500).get("tasks") or []
         callers = [{"caller_pid": t.get("caller_pid"), "caller_start": t.get("caller_start"),
                     "caller_name": t.get("caller_name")} for t in tasks]
-        import dunk_load, json, os
+        import dunk_load, os
         policies = None
         policy_path = args.policies or os.path.expanduser("~/.config/dunkingsheep/load-policies.json")
         try:
@@ -2517,7 +2608,8 @@ def run_client_command(client, args):
                 lambda r: print(f"noted {r['noted']}: {r['event']}")
         if sub == "next":
             return client.call("task_next", scope=args.scope,
-                               lease_seconds=args.lease), print_task_next
+                               lease_seconds=args.lease,
+                               allow_busy=args.allow_busy), print_task_next
         if sub == "heartbeat":
             return client.call("task_heartbeat", id=args.id,
                                lease_seconds=args.lease), \
@@ -2644,6 +2736,13 @@ def run_client_command(client, args):
                            workspace=args.workspace, tab=args.tab, split=args.split,
                            cwd=args.cwd, focus=args.focus), \
             lambda r: print(f"started agent {r['name']} in {r['pane_id']}: {shlex.join(r['argv'])}")
+    if command in ("respawn-pane", "respawn"):
+        argv, rollback = _respawn_argv(args)
+        return client.call("respawn_pane", pane=args.pane, argv=argv,
+                           rollback_argv=rollback, expected_pid=args.expected_pid,
+                           expected_start=args.expected_start,
+                           confirm_idle=args.confirm_idle, reason=args.reason), \
+            lambda r: print(f"respawned pane {r['pane_id']} ({r['old_pid']} -> {r['pane_pid']}); reason={r.get('reason')}")
     if command == "rename":
         return client.call("rename", kind=args.kind, target=args.target, label=args.label), \
             lambda r: print(f"renamed {r['kind']} {r['id']} -> {r['label']!r}")

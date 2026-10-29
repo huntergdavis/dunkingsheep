@@ -736,6 +736,10 @@ def h_inbox_ack(flock, args, self_pane_id):
     return flock.inbox_ack(_ids(args), mailbox=args.get("mailbox"), self_pane_id=self_pane_id)
 
 
+def h_inbox_recover(flock, args, self_pane_id):
+    return flock.inbox_recover(args.get("mailbox"), self_pane_id=self_pane_id)
+
+
 def h_inbox_cancel(flock, args, self_pane_id):
     return flock.inbox_cancel(_ids(args))
 
@@ -862,7 +866,8 @@ def h_task_note(flock, args, self_pane_id):
 def h_task_next(flock, args, self_pane_id):
     return flock.task_next(scope=args.get("scope"),
                            lease_seconds=args.get("lease_seconds"),
-                           self_pane_id=self_pane_id)
+                           self_pane_id=self_pane_id,
+                           allow_busy=_bool(args.get("allow_busy"), False))
 
 
 def h_task_heartbeat(flock, args, self_pane_id):
@@ -1045,6 +1050,22 @@ def h_start_agent(flock, args, self_pane_id):
     return flock.start_agent(
         args["name"], args["command"], workspace=args.get("workspace"), tab=args.get("tab"),
         split=args.get("split"), cwd=args.get("cwd"), focus=_bool(args.get("focus"), False),
+        self_pane_id=self_pane_id,
+    )
+
+def h_respawn_pane(flock, args, self_pane_id):
+    argv = args.get("argv")
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(x, str) for x in argv):
+        raise DunkError("respawn_pane requires argv as a list of strings")
+    rollback = args.get("rollback_argv")
+    if rollback is not None and (not isinstance(rollback, (list, tuple))
+                                 or not rollback
+                                 or not all(isinstance(x, str) for x in rollback)):
+        raise DunkError("respawn_pane rollback_argv must be a list of strings")
+    return flock.respawn_pane(
+        args["pane"], list(argv), rollback_argv=list(rollback) if rollback else None,
+        expected_pid=args.get("expected_pid"), expected_start=args.get("expected_start"),
+        confirm_idle=_bool(args.get("confirm_idle"), False), reason=args.get("reason"),
         self_pane_id=self_pane_id,
     )
 
@@ -1683,7 +1704,8 @@ COMMANDS = [
         "inbox_read",
         "Read waiting messages in order, with their full bodies, and mark them "
         "read. This is the one an agent calls when it has mail. Use peek=true "
-        "to look without marking them read.",
+        "to look without marking them read. If the answer never arrives, "
+        "inbox_recover replays the batch instead of losing it.",
         h_inbox_read,
         params={"mailbox": MAILBOX_PARAM,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100,
@@ -1712,6 +1734,19 @@ COMMANDS = [
         params={"message_ids": MESSAGE_IDS_PARAM,
                 "mailbox": MAILBOX_PARAM},
         required=["message_ids"],
+    ),
+    Command(
+        "inbox_recover",
+        "Replay the latest delivered batch for a mailbox after a lost read "
+        "response: when an inbox_read answer never reached the client, the "
+        "batch is marked read but was displayed nowhere. Recover returns "
+        "those same messages so they can be displayed and then inbox_ack-ed. "
+        "The buffer holds one batch per mailbox and a full ack clears it; "
+        "acked mail never resurfaces. Visibility follows the read rule, not "
+        "the ack rule: like inbox read it is permissive, while ack stays "
+        "scoped to the caller's own mailbox.",
+        h_inbox_recover,
+        params={"mailbox": MAILBOX_PARAM},
     ),
     Command(
         "inbox_archive",
@@ -1895,10 +1930,17 @@ COMMANDS = [
         "work on, assign it to the caller and set it in_progress in one SQLite "
         "transaction. scope=global (default), self (own pane), auto (pane then "
         "global), or a pane id. Returns {task, lease_seconds, expires_at}; when "
-        "the queue is empty the caller is auto-subscribed for a push.",
+        "the queue is empty the caller is auto-subscribed for a push. A pane "
+        "already holding in-progress work is refused "
+        "({task:null, refused:{reason:'busy',task_ids:[...]}}) unless "
+        "allow_busy=true; every refusal is logged and names its reason "
+        "(empty/blocked/owned_elsewhere/leased/not_claimable/busy).",
         h_task_next,
         params={"scope": TASK_SCOPE_NEXT_PARAM,
-                "lease_seconds": TASK_LEASE_PARAM},
+                "lease_seconds": TASK_LEASE_PARAM,
+                "allow_busy": {"type": "boolean",
+                               "description": "Take a second task while already "
+                                              "holding in-progress work."}},
     ),
     Command(
         "task_heartbeat",
@@ -2190,6 +2232,30 @@ COMMANDS = [
         required=["name", "command"],
     ),
     Command(
+        "respawn_pane",
+        "Replace a managed pane's process in place, preserving the pane id, task "
+        "lease/ownership, mailbox and launch history.  Superuser/operator only.  "
+        "Requires the exact live pane pid/start, --confirm-idle evidence, an argv "
+        "command (no shell interpolation) and a rollback argv.  Refuses active "
+        "turns, unread mail, queued outbox, live task leases and any non-ready "
+        "delivery state; verifies the replacement and rolls back on failure.",
+        h_respawn_pane,
+        params={
+            "pane": {"type": "string", "description": "Existing managed pane id."},
+            "expected_pid": {"type": "integer", "description": "Exact live pane pid."},
+            "expected_start": {"type": "string",
+                               "description": "Exact /proc start time for expected_pid."},
+            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                     "description": "Replacement command argv; never a shell string."},
+            "rollback_argv": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                              "description": "Old command argv to restore on failure."},
+            "confirm_idle": {"type": "boolean",
+                            "description": "Required true; positive idle evidence is checked."},
+            "reason": {"type": "string", "description": "Why this pane is being replaced."},
+        },
+        required=["pane", "expected_pid", "expected_start", "argv", "confirm_idle"],
+    ),
+    Command(
         "rename",
         "Rename a workspace, tab or pane. Labels are how targets are named "
         "everywhere else, so name things as you want to address them.",
@@ -2301,10 +2367,12 @@ def mcp_commands():
 MCP_GROUPS = (
     ("inbox",
      "Agent-to-agent mailbox. action=send (preferred over typing), count, "
-     "list, read (also returns your tasks), status, ack, cancel, delete, "
-     "stats, fetch. No size limit; a send nudges the recipient with one line.",
+     "list, read (also returns your tasks), recover, status, ack, cancel, "
+     "delete, stats, fetch. No size limit; a send nudges the recipient with "
+     "one line.",
      (("send", "inbox_send"), ("count", "inbox_count"), ("list", "inbox_list"),
-      ("read", "inbox_read"), ("status", "inbox_status"), ("ack", "inbox_ack"),
+      ("read", "inbox_read"), ("recover", "inbox_recover"),
+      ("status", "inbox_status"), ("ack", "inbox_ack"),
       ("cancel", "inbox_cancel"), ("delete", "inbox_delete"),
       ("stats", "inbox_stats"), ("fetch", "inbox_fetch"),
       ("archive", "inbox_archive"))),
@@ -2368,7 +2436,8 @@ MCP_GROUPS = (
      "started without a workspace goes to the sandbox, never the caller's tab.",
      (("list", "list_workspaces"), ("create", "create_workspace"),
       ("create_tab", "create_tab"), ("split", "split_pane"),
-      ("start_agent", "start_agent"), ("rename", "rename"),
+      ("start_agent", "start_agent"), ("respawn_pane", "respawn_pane"),
+      ("rename", "rename"),
       ("focus", "focus"), ("close", "close"))),
     ("superuser",
      "The superuser allowlist. action=status/add/remove/recover. Destructive "
@@ -2465,7 +2534,7 @@ MCP_TOOL_MAP = mcp_tool_map()
 SUPERUSER_ONLY = {
     "add_dunk", "update_dunk", "remove_dunk", "start_dunk", "stop_dunk",
     "toggle_dunk", "stop_all", "fire_dunk",
-    "start_agent", "create_workspace", "create_tab", "split_pane",
+    "start_agent", "respawn_pane", "create_workspace", "create_tab", "split_pane",
     "rename", "focus", "close", "herdr", "shutdown", "memory_ingest",
     "lane_set", "desk_token",
     "memory_backfill",

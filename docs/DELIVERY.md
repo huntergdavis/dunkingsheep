@@ -236,4 +236,42 @@ Config (watchdog `stuck_recovery`, and the same numbers on the daemon):
 cannot honour the bound. The packaged watchdog timer runs every 10 minutes, which is
 too slow to gate a 120 s bound - the **actor is the daemon's outbox worker**, which
 re-checks every `MESSAGE_RECHECK_S` (5 s), so the bound holds whether or not the
-watchdog is running at all.
+watchdog is running at all. A standalone daemon observer also watches failed
+deliveries when no outbox worker remains. Both actors use the same persisted
+message identity and attempt budget.
+
+Scheduled dunks participate too: every actual expanded prompt records its
+pre-send pane generation and outcome, including an unconfirmed submission.
+This closes the t400 gap where a timer prompt could block later owner messages
+without ever entering the recovery candidate registry. Unknown composer geometry
+is never treated as consumption: only the existing strict full-composer matcher
+can resolve it, and recovery additionally requires affirmative idle evidence.
+Busy turns, dialogs, human edits and unaccounted styled text still refuse keys.
+Same-generation provenance for previous submitted echoes is retained with the
+candidate so the styled matcher can work after restart without guessing history.
+
+Scheduled sends reported as successful are observed too: the incident's d55
+prompt was logged as sent while still pending. For this case, recovery additionally
+requires the measured bold, non-dim current-composer boundary, full text equality
+and provenance for every excluded dim echo. This extra proof is checked again
+under the typing lock. A dim transcript echo or unknown styling cannot authorize
+replay. Ordinary direct-message success and explicit no-enter remain ineligible.
+
+Independent review found that first-line/prefix accounting could hide a human
+suffix or continuation beside a known dim echo. Accounting now includes the
+entire excluded span through the next sigil and requires exact normalized
+equality with recorded text. Truncated echoes (including ellipses), short
+prefixes and unaccounted transcript output fail closed. This deliberately
+refuses some genuine historical transcript frames, including the old %33
+capture: styling cannot prove the provenance of the omitted rows. Such frames
+still need guarded operator recovery; the watchdog is not universal recovery.
+
+Recovery reads a proven complete composer before consulting the legacy
+first-line/14-row reader. Long prompts therefore remain observable and keep
+the same one-attempt budget; an unchanged prompt after the retry is reported
+as unconsumed, not successful recovery.
+
+Older installed releases did not record scheduled candidates. An upgrade cannot
+retroactively prove the generation or intent of those existing prompts; they
+remain held for operator recovery. Do not fabricate candidates from a schedule's
+current text or press keys merely because a prompt looks familiar.

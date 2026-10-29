@@ -351,6 +351,50 @@ class Store:
     def index_path(self):
         return self.root / ".index.db"
 
+    # The columns search() reads. v2.35.0: files are truth, the FTS index is a
+    # disposable cache - so a cache carrying anything else is disposable too.
+    INDEX_COLUMNS = ("slug", "subject", "body", "class", "scope")
+    # Bounded: an FTS5 table is created by exactly this header. There is no
+    # schema parsing beyond it - a cache is not a document to interpret.
+    _FTS5_HEADER = re.compile(
+        r'^\s*CREATE\s+VIRTUAL\s+TABLE\s+["\[]?entries["\]]?\s+USING\s+fts5\s*\(', re.I)
+    # The one query shape search() uses: named columns, MATCH, rank. Probing it
+    # is how a cache proves it can ANSWER. Column names alone do not: an
+    # ordinary table with the same five columns passes a column check and then
+    # dies on MATCH ("no such column: entries", CoS review 2026-10-28).
+    # The term is a bare word on purpose: FTS5 parses the MATCH operand as a
+    # query, and a hyphen in it reads as an operator ("no such column: probe").
+    _PROBE = "SELECT slug FROM entries WHERE entries MATCH ? ORDER BY rank LIMIT 1"
+    _PROBE_TERM = "probe"
+
+    def index_compatible(self, path):
+        """True only when the cached index is an FTS5 table that can answer the
+        search query this code runs.
+
+        Three bounded controls - the fts5 creation header, the exact column
+        tuple, one probe of the MATCH/rank shape - and any doubt rebuilds:
+        v2.35.0 already says files are truth and the index is disposable, so a
+        cache another schema built is disposable too. Drift is ordinary (an
+        older release, another lane's build, a half-written file) and the
+        answer is always a rebuild, never an error the operator must decode.
+        """
+        try:
+            conn = sqlite_connect(path, readonly=True)
+            try:
+                row = conn.execute("SELECT sql FROM sqlite_master "
+                                   "WHERE type = 'table' AND name = 'entries'").fetchone()
+                if not row or not row[0] or not self._FTS5_HEADER.match(row[0]):
+                    return False
+                columns = conn.execute("PRAGMA table_info(entries)").fetchall()
+                if tuple(column[1] for column in columns) != self.INDEX_COLUMNS:
+                    return False
+                conn.execute(self._PROBE, (self._PROBE_TERM,)).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return False  # unreadable, corrupt, or unable to answer: rebuild
+        return True
+
     def index(self):
         self.ensure()
         path = self.index_path()
@@ -373,7 +417,7 @@ class Store:
 
     def search(self, query, *, cls=None, scope=None, limit=20):
         path = self.index_path()
-        if not path.exists():
+        if not path.exists() or not self.index_compatible(path):
             self.index()
         conn = sqlite_connect(path, readonly=True)
         sql = "SELECT slug, subject, class, scope FROM entries WHERE entries MATCH ?"

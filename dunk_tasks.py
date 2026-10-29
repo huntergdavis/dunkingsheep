@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sqlite3
+from dunk_pm import DEFAULT_VP_PANE as _default_vp_pane
 from dunk_sqlite import connect as sqlite_connect
 
 log = logging.getLogger("dunkingsheep.tasks")
@@ -920,8 +921,44 @@ class Tasks:
             return task["multi_assignee"] or assigned_to_me
         return False
 
+    def _busy_task_ids(self, pane_id, now):
+        """Ids of in-progress tasks this pane holds a live lease on."""
+        rows = self.db.execute(
+            "SELECT DISTINCT lease.task_id FROM task_leases AS lease "
+            "JOIN tasks AS task ON task.id = lease.task_id "
+            "WHERE lease.pane_id = ? AND lease.expires_at > ? "
+            "AND task.status = 'in_progress' ORDER BY lease.task_id",
+            (str(pane_id), now),
+        ).fetchall()
+        return [row["task_id"] for row in rows]
+
+    def _refusal(self, candidates, pane_id):
+        """Why nothing was claimable, as a reason plus the evidence for it."""
+        ids = [task["id"] for task in candidates]
+        if not candidates:
+            return {"reason": "empty", "task_ids": []}
+        blocked = [task["id"] for task in candidates if task["blocked_by"]]
+        if len(blocked) == len(candidates):
+            return {"reason": "blocked", "task_ids": blocked}
+        owned = [task for task in candidates if task["assignees"]
+                 and not task["multi_assignee"] and pane_id not in task["assignees"]]
+        if owned:
+            return {"reason": "owned_elsewhere",
+                    "task_ids": [task["id"] for task in owned],
+                    "owned_by": sorted({name for task in owned
+                                        for name in task["assignees"]})}
+        leased = [task["id"] for task in candidates if task["leases"]]
+        if leased:
+            return {"reason": "leased", "task_ids": leased}
+        return {"reason": "not_claimable", "task_ids": ids}
+
+    def _log_refusal(self, pane_id, target, refused):
+        log.info("task claim refused: pane=%s scope=%s reason=%s tasks=%s",
+                 pane_id, target, refused["reason"],
+                 ",".join(refused.get("task_ids") or []) or "-")
+
     def claim_next(self, scope=GLOBAL, pane_id=None, lease_seconds=None,
-                   caller=None):
+                   caller=None, allow_busy=False):
         """Atomically claim the next eligible task in ``scope``.
 
         The whole read-select-update runs under ``BEGIN IMMEDIATE``. SQLite
@@ -935,6 +972,12 @@ class Tasks:
         behind the request. The pane id stays the registry key; the pid/start
         is liveness, so a crashed agent's lease can be reclaimed while its
         shell pane still exists. The name is only a label.
+
+        A pane already holding in-progress work (a live lease) is REFUSED a
+        second task unless ``allow_busy`` is set: parallel work is an explicit
+        decision, not something a poll can take by accident (t145). Every
+        refusal returns ``refused`` with a reason and is logged, so "nothing to
+        do" and "you were refused" never look alike.
         """
         target = validate_scope(scope)
         if not pane_id:
@@ -960,6 +1003,16 @@ class Tasks:
                 candidates = [self._decorate(row) for row in rows]
                 candidates.sort(key=self._order_key)
 
+                now = _now()
+                if not allow_busy:
+                    busy = self._busy_task_ids(pane_id, now)
+                    if busy:
+                        self.db.commit()
+                        refused = {"reason": "busy", "task_ids": busy}
+                        self._log_refusal(pane_id, target, refused)
+                        return {"task": None, "scope": target,
+                                "pane_id": pane_id, "refused": refused}
+
                 chosen = None
                 for task in candidates:
                     if task["blocked_by"]:
@@ -970,10 +1023,12 @@ class Tasks:
                     break
 
                 if chosen is None:
+                    refused = self._refusal(candidates, pane_id)
                     self.db.commit()
-                    return {"task": None, "scope": target, "pane_id": pane_id}
+                    self._log_refusal(pane_id, target, refused)
+                    return {"task": None, "scope": target,
+                            "pane_id": pane_id, "refused": refused}
 
-                now = _now()
                 self._claim_locked(chosen, pane_id, lease_s, caller, now)
                 self.db.commit()
             except Exception:
@@ -1146,6 +1201,18 @@ class Tasks:
                             "pane_id": lease["pane_id"],
                             "reason": reason,
                         })
+                        # The claimant is an owner too (claim appends it), and
+                        # it is the common case: its lease ended and its pane is
+                        # gone. Filtering it out hid exactly that (t145/i32091).
+                        owners = _decode(row["assignees"])
+                        if (alive_panes is not None and owners
+                                and not any(owner in alive_panes for owner in owners)):
+                            # Advisory only: ownership is durable, so a dead
+                            # owner needs an explicit reassignment, not a lease
+                            # side effect. Nothing is mutated here.
+                            log.info("task %s reopened while owned by a pane that "
+                                     "is not live: owners=%s",
+                                     lease["task_id"], ",".join(owners))
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -1153,8 +1220,18 @@ class Tasks:
         return requeued
 
     def _after_lease_change(self, task_id, raw_assignees, now, pane_id, row=None):
-        """Remove one claimant from a task; reopen it if no one is left."""
-        assignees = [a for a in _decode(raw_assignees) if a != pane_id]
+        """Reopen a task when its last lease goes away; keep the OWNER.
+
+        A lease is activity: expiry, release and a reaped claim all end the
+        claim, not the assignment. Owner2317 found ten global tasks whose
+        assignees were deleted 30 minutes after a claim expired, which let the
+        next ``task next`` take work nobody had released. The assignee list is
+        therefore preserved here; only ``pane_id``'s lease is gone (the caller
+        has already deleted the lease row), and the task reopens for its owner
+        to reclaim. Re-owning work is an explicit ``assign``/``complete``
+        decision, never a side effect of a lease ending (t145).
+        """
+        assignees = _decode(raw_assignees)
         remaining = self.db.execute(
             "SELECT COUNT(*) AS n FROM task_leases WHERE task_id = ?", (task_id,)
         ).fetchone()["n"]
@@ -1200,6 +1277,8 @@ class Tasks:
         since = (until - float(window_s)) if since is None else float(since)
         bucket_s = 86400 if str(bucket).lower() == "day" else 3600
 
+        # Same VP-pane resolution the rest of the product uses (dunk_core).
+        leader_pane = os.environ.get("DUNKINGSHEEP_VP_PANE", _default_vp_pane)
         tasks = [self._decorate(row) for row in
                  self.db.execute("SELECT * FROM tasks").fetchall()]
         if scopes is not None:
@@ -1209,11 +1288,18 @@ class Tasks:
         by_priority = {priority: 0 for priority in PRIORITIES}
         by_scope = {"global": 0, "pane": 0}
         by_assignee = {}
+        leader_held = []
         for task in tasks:
             by_status[task["status"]] = by_status.get(task["status"], 0) + 1
             by_priority[task["priority"]] = by_priority.get(task["priority"], 0) + 1
             by_scope["global" if task["is_global"] else "pane"] += 1
             if task["status"] in ("open", "in_progress", "blocked"):
+                if (not task["assignees"] and task["is_global"]) \
+                        or leader_pane in task["assignees"]:
+                    # owner #1708: unowned means leader-owned, so an active global
+                    # task with no assignee is work the leader is carrying. A task
+                    # explicitly assigned to the leader pane is theirs as well.
+                    leader_held.append(task)
                 for assignee in task["assignees"]:
                     by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
 
@@ -1283,6 +1369,18 @@ class Tasks:
                     for assignee, count in sorted(
                         by_assignee.items(), key=lambda item: (-item[1], item[0]))
                 ],
+                "leader_held": {
+                    "count": len(leader_held),
+                    "oldest_created_at": (min(task["created_at"] for task in leader_held)
+                                          if leader_held else None),
+                    "oldest_age_s": (round(until - min(task["created_at"]
+                                                       for task in leader_held), 1)
+                                     if leader_held else None),
+                    "definition": ("global tasks with no assignee (owner #1708: "
+                                   "unowned means leader-owned), plus tasks "
+                                   "explicitly assigned to the leader pane"),
+                    "leader_pane": leader_pane or None,
+                },
             },
             "throughput": {
                 "created": counts.get("created", 0),

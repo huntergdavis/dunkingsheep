@@ -16,5 +16,7 @@ __pycache__/
 tasks.db
 venv/
 
-# append-only access log rewritten on every read (not source)
+# Generated context index is covered by *.db above. Keep both runtime files
+# untracked; an ignore rule cannot hide a file already in the Git index.
+# The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl

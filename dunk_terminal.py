@@ -228,7 +228,7 @@ class TmuxBackend(TerminalBackend):
     def capabilities(self):
         return frozenset({
             "screen", "scrollback", "send", "layout", "pane_identity",
-            "pane_pid", "close_guard", "resize",
+            "pane_pid", "close_guard", "resize", "respawn",
         })
 
     # -- process -----------------------------------------------------------
@@ -392,6 +392,16 @@ class TmuxBackend(TerminalBackend):
             if pane.get("pane_id") == pane_id:
                 return pane
         return None
+
+    def agent_child_pids(self, pane_pid):
+        """Kernel process entries for the agent behind `pane_pid` (t215).
+
+        The same shared observer HerdrClient uses (dunk_callers.pane_agent_pids):
+        tmux reports pane_pid for every pane, so startup verification checks
+        processes on the default backend instead of silently falling back to
+        screen-only. None where the platform offers no process table."""
+        from dunk_callers import pane_agent_pids
+        return pane_agent_pids(pane_pid)
 
     def list_tabs(self):
         code, out, err = self._tmux("list-windows", "-a", "-F", self.TAB_FORMAT)
@@ -605,6 +615,81 @@ class TmuxBackend(TerminalBackend):
         return True, {"agent": agent, "argv": list(argv), "pane_id": pane["pane_id"]}
 
     # -- mutations ---------------------------------------------------------
+
+    def respawn_pane(self, pane_id, argv, expected_pid=None, expected_start=None):
+        """Replace a managed pane's process in place, with an argv command.
+
+        This is the guarded same-pane primitive the fleet activation needs.  It
+        refuses a pane Dunking Sheep did not create, a pid/start that no longer
+        matches, and a start-time mismatch.  The caller supplies an argv list;
+        this method joins it with shlex and wraps it in the same visible-exit
+        shell as start_agent, so no caller string is interpreted as shell code.
+        """
+        if not pane_id:
+            return False, "a pane id is required"
+        if not argv:
+            return False, "an argv command is required"
+        pane = self.get_pane(pane_id)
+        if pane is None:
+            return False, f"pane {pane_id} is not visible"
+        if not self._managed("pane", pane_id):
+            return False, (f"refusing to respawn pane {pane_id}: Dunking Sheep did "
+                           "not create it")
+        old_pid = pane.get("pane_pid")
+        try:
+            old_pid_int = int(old_pid)
+        except (TypeError, ValueError):
+            return False, f"pane {pane_id} has no pane process id"
+        if expected_pid is not None and old_pid_int != int(expected_pid):
+            return False, (f"refusing: pane {pane_id} pid is {old_pid_int}, "
+                           f"expected {expected_pid}")
+        if expected_start is not None:
+            from dunk_callers import process_start
+            actual_start = process_start(old_pid_int)
+            if str(actual_start) != str(expected_start):
+                return False, (f"refusing: pane {pane_id} process start is "
+                               f"{actual_start!r}, expected {expected_start!r}")
+        command = self._agent_launch(shlex.join([str(part) for part in argv]))
+        # FINAL identity re-check immediately before the kill/spawn.  The caller
+        # has already checked its snapshot; this closes the window in which the
+        # pane could have been replaced while idle/mail/queue checks ran.
+        current = self.get_pane(pane_id)
+        if not current or current.get("pane_pid") is None:
+            return False, f"pane {pane_id} disappeared before respawn"
+        try:
+            current_pid = int(current.get("pane_pid"))
+        except (TypeError, ValueError):
+            return False, f"pane {pane_id} lost its pane pid before respawn"
+        if current_pid != old_pid_int:
+            return False, (f"refusing: pane {pane_id} was replaced between check and "
+                           f"mutation (pid {old_pid_int} -> {current_pid})")
+        if expected_start is not None:
+            from dunk_callers import process_start
+            if str(process_start(current_pid)) != str(expected_start):
+                return False, (f"refusing: pane {pane_id} process changed between check "
+                               "and mutation")
+        # RESIDUAL LIMIT, deliberately next to the re-check: tmux has no atomic
+        # compare-and-kill.  This read closes the window up to the last read; a
+        # pane replacement after it and before the respawn is still possible.
+        # Do not treat the check as atomic or delete it as redundant - closing
+        # that window would require a backend primitive that compares the pid
+        # and replaces the process in one operation.
+        code, out, err = self._tmux("respawn-pane", "-k", "-t", pane_id, command)
+        if code != 0:
+            return False, (err.strip() or out.strip() or "tmux respawn-pane failed")
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            current = self.get_pane(pane_id)
+            if current and current.get("pane_pid"):
+                try:
+                    new_pid = int(current["pane_pid"])
+                except (TypeError, ValueError):
+                    new_pid = None
+                if new_pid is not None and new_pid != old_pid_int:
+                    return True, {"pane_id": pane_id, "old_pid": old_pid_int,
+                                  "pane_pid": new_pid, "argv": list(argv)}
+            time.sleep(0.05)
+        return False, (f"pane {pane_id} did not show a new process after respawn")
 
     def rename(self, kind, target_id, label):
         commands = {

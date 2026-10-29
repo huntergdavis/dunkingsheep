@@ -466,6 +466,17 @@ class HerdrClient:
                 return out.lstrip("\n")
         return ""
 
+    def agent_child_pids(self, pane_pid):
+        """Kernel process entries for the agent behind `pane_pid`.
+
+        t215 REVISE: start-agent verifies the pane PROCESS before reporting
+        started. The pane process itself plus its direct children, via /proc
+        (see dunk_callers.pane_agent_pids); None when the platform offers no
+        process table, so the caller falls back to screen-only verification
+        instead of refusing blind."""
+        from dunk_callers import pane_agent_pids
+        return pane_agent_pids(pane_pid)
+
     @staticmethod
     def self_pane_id():
         """The pane this process runs in, if herdr launched it."""

@@ -223,10 +223,16 @@ def guide(markdown=False):
       "- split_pane(target, direction, cwd, command): a new shell pane right of or\n"
       "  below any pane.\n"
       "- start_agent(name, command, workspace|tab, split, cwd): launch an agent\n"
-      "  process under `name` (on the herdr rollback: registered with `herdr agent\n"
-      "  start`, so herdr lists it and tracks its status by that name). Returns its\n"
-      "  pane id. With `workspace`, the backend picks the tab; create_tab first\n"
-      "  and pass `tab` to control the tab's name.\n"
+"  process under `name` (on the herdr rollback: registered with `herdr agent\n"
+"  start`, so herdr lists it and tracks its status by that name). Returns its\n"
+"  pane id and, where the platform names processes, the agent's confirmed\n"
+"  child pid. Fail closed: a launch whose command never becomes a process\n"
+"  (missing binary, instant exit, vanished pane, or a pid seen but gone at\n"
+"  the deadline) is refused with the evidence, never reported started.\n"
+"  Process evidence is kernel comm/state/start watched across the whole\n"
+"  window, never a first-frame sighting or an argv basename.\n"
+"  With `workspace`, the backend picks the tab; create_tab first and pass\n"
+"  `tab` to control the tab's name.\n"
       "- rename(kind, target, label) / focus(kind, target) / close(kind, target)\n"
       "  for kind = workspace | tab | pane. close kills what runs inside, stops any\n"
       "  dunks aimed there, and refuses the caller's own pane, tab or workspace.\n"
@@ -429,6 +435,15 @@ def guide(markdown=False):
       "read that fails no longer consumes the mail. A REPEATED batch after an error\n"
       "is the fix working, not a bug: the same messages are offered again until a\n"
       "read completes. `--peek` still marks nothing at all.\n")
+    w("If a read answer never arrives (the mark committed, then the response was\n"
+      "lost), the batch is marked read but was displayed nowhere: "
+      + code("dunkingsheep inbox recover") +
+      " replays the latest delivered batch for display, and " +
+      code("dunkingsheep inbox ack") + " then consumes it. The buffer holds one\n"
+      "batch per mailbox; a newer read overwrites it and a full ack clears it.\n"
+      "Recover follows the read rule, not the ack rule: like inbox read it is\n"
+      "permissive (inspecting a stranded mailbox is how the backlog gets drained),\n"
+      "while ack stays scoped to the caller's own mailbox.\n")
     w("An agent whose MCP connection predates the inbox has a stale tool list and\n"
       "will not see inbox_read until it reconnects. The CLI works meanwhile, which\n"
       "is why the launcher is the first thing to install.\n")
@@ -452,7 +467,10 @@ def guide(markdown=False):
            "        atomic claim under BEGIN IMMEDIATE (two agents never win the\n"
            "        same exclusive task); multi_assignee tasks accept several;\n"
            "        lease default 1800s; expired or dead-pane leases requeue;\n"
-           "        push to idle followers reuses the dunk idle gate + inbox nudge"))
+           "        push to idle followers reuses the dunk idle gate + inbox nudge;\n"
+           "        a pane already holding in-progress work is refused more work\n"
+           "        (refused.reason='busy') unless --allow-busy; every refusal is\n"
+           "        logged with its reason (empty/blocked/owned_elsewhere/leased)"))
     w("`task_next` is the atomic pull: it selects, assigns you, sets in_progress\n"
       "and records a lease in one SQLite transaction. `task_heartbeat` extends the\n"
       "lease; `task_complete` completes it for everyone. `task_follow` is the\n"
@@ -464,6 +482,7 @@ def guide(markdown=False):
            "dunkingsheep task add \"Write tests\" --depends-on t12\n"
            "dunkingsheep task next                 # atomic claim (global by default)\n"
            "dunkingsheep task next auto            # own pane queue, then global\n"
+           "dunkingsheep task next --allow-busy    # take a second task on purpose\n"
            "dunkingsheep task heartbeat t12        # extend the lease\n"
            "dunkingsheep task complete t12         # global completion\n"
            "dunkingsheep task follow               # receive pushed work when idle\n"
