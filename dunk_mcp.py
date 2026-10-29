@@ -89,9 +89,9 @@ submit text already waiting in the box.
 
 Building the herd: workspace(action=\"create|create_tab|split\") open named
 spaces, tabs and panes (optionally running a command such as "claude" in the
-new pane); workspace(action=\"start_agent\") launches an agent registered with herdr by name; workspace(action=\"rename|focus|close\") manage them (close refuses your own pane/tab/workspace). The
-`herdr` tool runs any other herdr subcommand ("pane zoom self --on",
-"notification show Done", "api schema --json") and `herdr_help` returns herdr's
+new pane); workspace(action=\"start_agent\") launches an agent registered by name (tracked on the herdr rollback backend); workspace(action=\"rename|focus|close\") manage them (close refuses your own pane/tab/workspace). The
+the `herdr` tool runs any other rollback-backend subcommand ("pane zoom self --on",
+"notification show Done", "api schema --json") and `herdr_help` returns the rollback backend's
 own usage so you can discover what it offers.
 
 Meta-dunking recipe: dunk(action=\"add\", target=\"self\", interval_minutes=60,

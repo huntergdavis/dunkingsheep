@@ -255,9 +255,9 @@ class FlockTests(unittest.TestCase):
         self.assertEqual("w1:p2", self.flock.resolve_target("term_b")["pane_id"])
         # "alpha" matches both alpha panes, but only one hosts an agent.
         self.assertEqual("w1:p2", self.flock.resolve_target("alpha")["pane_id"])
-        with self.assertRaisesRegex(DunkError, "no herdr pane matches"):
+        with self.assertRaisesRegex(DunkError, "no pane matches"):
             self.flock.resolve_target("nothing-here")
-        with self.assertRaisesRegex(DunkError, "needs HERDR_PANE_ID"):
+        with self.assertRaisesRegex(DunkError, "needs TMUX_PANE"):
             self.flock.resolve_target("self")
         with self.assertRaisesRegex(DunkError, "ambiguous"):
             self.flock.resolve_target("/home/x")
@@ -1954,9 +1954,9 @@ class LayoutControlTests(unittest.TestCase):
         self.assertEqual("w2:t2", self.flock.resolve_tab("Sheep")["tab_id"])
         self.assertEqual("w2:t1", self.flock.resolve_tab("codex")["tab_id"])
         self.assertEqual("w1:t2", self.flock.resolve_tab("self", self_pane_id="w1:p2")["tab_id"])
-        with self.assertRaisesRegex(DunkError, "no herdr workspace"):
+        with self.assertRaisesRegex(DunkError, "no workspace matches"):
             self.flock.resolve_workspace("gamma")
-        with self.assertRaisesRegex(DunkError, "needs HERDR_PANE_ID"):
+        with self.assertRaisesRegex(DunkError, "needs TMUX_PANE"):
             self.flock.resolve_workspace("self")
         with self.assertRaisesRegex(DunkError, "ambiguous"):
             self.flock.resolve_tab("e")  # Codex Site, Sheep, Other
@@ -2048,7 +2048,7 @@ class LayoutControlTests(unittest.TestCase):
         self.assertFalse(self.flock.get(dunk["id"])["running"])
         self.assertEqual("Target closed", self.flock.get(dunk["id"])["status"])
         self.assertTrue(self.flock.get(bystander["id"])["running"])
-        with self.assertRaisesRegex(DunkError, "no herdr tab"):
+        with self.assertRaisesRegex(DunkError, "no tab matches"):
             self.flock.resolve_tab("Other")
         # Never close the caller's own pane, tab or workspace.
         for kind, target in (("pane", "self"), ("tab", "self"), ("workspace", "alpha")):

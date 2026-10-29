@@ -10,6 +10,11 @@ the hold exists to prevent, so tmux is not a supported default. Identity,
 screen, typing, the three-way close rail, and recovery passed or passed with
 notes; details below.
 
+> SUPERSEDED (t50, 2026-10-24): tmux is now the default backend
+> (`DEFAULT_BACKEND_NAME = "tmux"` in `dunk_terminal.py`); herdr stays
+> selectable via `DUNKINGSHEEP_TERMINAL_BACKEND=herdr` for the rollback week
+> only. The t35 trial narrative below is preserved as history.
+
 ## Why a seam
 
 Everything above the terminal (Flock, tasks, inbox, memory, the CLI, MCP) asks
@@ -34,7 +39,7 @@ class TerminalBackend:
     name = "base"
     def capabilities(self): ...
     # discovery, layout, send, read, close, agent start, annotations
-class HerdrBackend(TerminalBackend):   # default; wraps HerdrClient unchanged
+class HerdrBackend(TerminalBackend):   # rollback; wraps HerdrClient unchanged
 class TmuxBackend(TerminalBackend):    # sessions=workspaces, windows=tabs
 def get_backend(herdr=None): ...       # existing client/fake -> HerdrBackend
 ```
@@ -42,8 +47,8 @@ def get_backend(herdr=None): ...       # existing client/fake -> HerdrBackend
 Selection:
 
 ```
-DUNKINGSHEEP_TERMINAL_BACKEND=herdr   # default
-DUNKINGSHEEP_TERMINAL_BACKEND=tmux
+DUNKINGSHEEP_TERMINAL_BACKEND=tmux    # default
+DUNKINGSHEEP_TERMINAL_BACKEND=herdr   # rollback only
 ```
 
 An unknown value is a named refusal, never a silent fallback. The Flock wraps
@@ -216,7 +221,8 @@ disables the external read (tests do).
    ruling without a live kill: the real `w9:pH` decision is REFUSED, a
    same-level live decoy is refused and survives, and a positive-control kill
    proves the live path. **The live tmux trial (t35) then failed gate 2 (idle
-   hold), so herdr remains the default and nothing is removed.** Live tmux lanes
+   hold), so herdr remained the default at that time and nothing was removed.** (Superseded by t50:
+   tmux is the default; herdr is the rollback.) Live tmux lanes
    and the backend switch are closed as a decision, not deferred.
 4. Stdlib-only poll client — done.
 
@@ -352,7 +358,7 @@ this TTL as a "guard rail": it is what makes the hold safe to ship.
 
 | variable | meaning |
 |---|---|
-| `DUNKINGSHEEP_TERMINAL_BACKEND` | `herdr` (default) / `tmux` |
+| `DUNKINGSHEEP_TERMINAL_BACKEND` | `tmux` (default) / `herdr` (rollback) |
 | `DUNKINGSHEEP_TMUX_SOCKET` | tmux `-L` socket (default: user's) |
 | `DUNKINGSHEEP_TMUX_REGISTRY` | close-guard registry path |
 | `DUNKINGSHEEP_TMUX_GUARD_DIR` | guard dir put on agent PATHs |

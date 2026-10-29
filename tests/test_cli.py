@@ -235,7 +235,7 @@ class CliEndToEndTests(unittest.TestCase):
         proc = self.run_cli("get", "d77", expect=2)
         self.assertIn("no dunk with id", proc.stderr)
         proc = self.run_cli("add", "--target", "nowhere", expect=2)
-        self.assertIn("no herdr pane matches", proc.stderr)
+        self.assertIn("no pane matches", proc.stderr)
 
         # 9. remove both; shutdown; restart resumes cleanly.
         self.run_cli("remove", "d1")

@@ -352,5 +352,5 @@ def check():
         env=env, capture_output=True, text=True, timeout=60,
     )
     blob = (proc.stdout + proc.stderr).lower()
-    routed = "no herdr pane matches" in blob or "dunk" in blob
+    routed = "no pane matches" in blob or "no herdr pane matches" in blob or "dunk" in blob
     return {"ok": routed, "detail": (proc.stdout + proc.stderr).strip()[:300]}

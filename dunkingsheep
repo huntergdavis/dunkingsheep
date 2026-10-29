@@ -39,7 +39,7 @@ CLI_ABS = os.path.abspath(__file__)
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="dunkingsheep",
-        description="Send text into herdr panes on a schedule; control it from the "
+        description="Send text into terminal panes on a schedule; control it from the "
                     "keyboard, this CLI, a unix socket, or MCP.",
         epilog=SHORT,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -52,7 +52,7 @@ def build_parser():
     parser.add_argument("--socket", help="daemon socket path (default: $DUNKINGSHEEP_SOCKET "
                                          "or ~/.config/dunkingsheep/dunkingsheep.sock)")
     parser.add_argument("--self-pane", help="pane id to use for target 'self' "
-                                            "(default: $HERDR_PANE_ID)")
+                                            "(default: $TMUX_PANE, or $HERDR_PANE_ID on the rollback)")
     parser.add_argument("--no-start-daemon", action="store_true",
                         help="fail instead of auto-starting the daemon")
     # `--json` is also accepted after the subcommand (agents tend to put it last).
@@ -196,19 +196,19 @@ def build_parser():
     p.add_argument("--bin-dir", default="~/.local/bin",
                    help="where to install it (default ~/.local/bin)")
 
-    p = sub.add_parser("guard", help="install the herdr guard so agents cannot type over you",
+    p = sub.add_parser("guard", help="install the herdr guard (rollback backend) so agents cannot type over you",
                        formatter_class=argparse.RawDescriptionHelpFormatter,
-                       description="Agents that call the herdr CLI directly (herdr pane run, "
-                                   "pane send-text, pane send-keys, agent send) bypass every "
-                                   "protection in the daemon. The guard is a herdr wrapper, "
-                                   "first on PATH, that routes exactly those four through the "
-                                   "daemon instead. Every other herdr command is untouched.",
+                       description="Agents that call the terminal CLI directly bypass every "
+                                   "protection in the daemon. On the herdr rollback backend the guard "
+                                   "is a herdr wrapper, first on PATH, that routes exactly the four "
+                                   "typing commands through the daemon instead. Every other herdr "
+                                   "command is untouched.",
                        epilog="new shells pick it up; existing panes need a fresh shell")
     p.add_argument("action", nargs="?", default="status",
                    choices=["status", "install", "install-tmux", "uninstall", "check", "shadow", "unshadow"])
     p.add_argument("--no-shadow", action="store_true",
                    help="install the PATH wrapper only; do not take herdr's own place "
-                        "(agents herdr starts itself will not be covered)")
+                        "(agents the herdr server starts itself will not be covered)")
 
     # -- inboxes --------------------------------------------------------------
     inbox = sub.add_parser("inbox", help="per-agent inboxes: messaging that never types",
@@ -563,7 +563,7 @@ def build_parser():
     p.add_argument("--record", action="store_true",
                    help="snapshot live agent sessions into launches.json first")
     sub.add_parser("doctor",
-                   help="post-upgrade doctor: herdr surfaces + dunk target metadata")
+                   help="post-upgrade doctor: backend surfaces + dunk target metadata")
 
     p = sub.add_parser("owner", help="owner -> agent delivery: pushed, never typed")
     osub = p.add_subparsers(dest="owner_command", metavar="<action>", parser_class=json_parser_class)
@@ -658,10 +658,10 @@ def build_parser():
     p.add_argument("--since", type=float, help="window start as a unix timestamp")
     p.add_argument("--until", type=float, help="window end as a unix timestamp")
 
-    sub.add_parser("panes", help="list herdr panes (possible targets)")
+    sub.add_parser("panes", help="list terminal panes (possible targets)")
 
     # -- herdr layout control -------------------------------------------------
-    sub.add_parser("workspaces", aliases=["tabs"], help="list herdr workspaces and their tabs")
+    sub.add_parser("workspaces", aliases=["tabs"], help="list workspaces and their tabs")
 
     def placement(p, workspace=True):
         p.add_argument("--label", "-l", help="name it (how you will target it later)")
@@ -686,7 +686,7 @@ def build_parser():
     p.add_argument("--down", action="store_true", help="new pane below (default: right)")
     placement(p)
     p = sub.add_parser("start-agent", aliases=["agent"],
-                       help="launch an agent in a new pane, registered with herdr by name",
+                       help="launch an agent in a new pane, registered by name (tracked on the herdr rollback)",
                        epilog="example: dunkingsheep start-agent writer -w Site -- claude --model opus")
     p.add_argument("name")
     p.add_argument("--workspace", "-w", help="new tab in this workspace (id, label or 'self')")
@@ -706,11 +706,11 @@ def build_parser():
         if name == "close":
             p.add_argument("--force", action="store_true",
                            help="allow closing the caller's own pane/tab/workspace")
-    p = sub.add_parser("herdr", help="run any herdr subcommand through the daemon",
+    p = sub.add_parser("herdr", help="run any herdr subcommand through the daemon (rollback backend only; refused under tmux)",
                        epilog="example: dunkingsheep herdr pane zoom w9:p2 --on",
                        prefix_chars="\x00")  # let herdr's own flags through untouched
-    p.add_argument("argv", nargs="+", metavar="ARGS", help="herdr subcommand and arguments")
-    p = sub.add_parser("herdr-help", help="herdr's own usage: command groups, or one group's subcommands")
+    p.add_argument("argv", nargs="+", metavar="ARGS", help="herdr subcommand and arguments (rollback backend only)")
+    p = sub.add_parser("herdr-help", help="the rollback backend's own usage: command groups, or one group's subcommands (refused under tmux)")
     p.add_argument("topic", nargs="?", help="e.g. pane, tab, workspace, agent, wait")
 
     p = sub.add_parser("read", help="read recent output of a pane")
@@ -882,7 +882,7 @@ def print_dunk(dunk):
 def print_panes(result):
     panes = result.get("panes", [])
     if not panes:
-        print("no herdr panes (is the herdr server running?)")
+        print("no panes (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)")
         return
     print(f"{'PANE':<8} {'WORKSPACE':<20} {'TAB':<24} {'AGENT':<8} {'STATUS':<8} DIRECTORY")
     for pane in panes:
@@ -1148,7 +1148,7 @@ def print_health(result):
 
 def print_doctor(result):
     state = "ok" if result.get("ok") else "WARN"
-    print(f"doctor {state}  herdr {result.get('herdr_version')}  "
+    print(f"doctor {state}  backend {result.get('herdr_version')}  "
           f"launches {result.get('launches')}")
     panes = result.get("panes") or {}
     print(f"  panes {panes.get('total')} (agents {panes.get('with_agent')}, "
@@ -1166,7 +1166,7 @@ def print_doctor(result):
 
 def print_recover(result):
     mode = "apply" if result.get("apply") else "dry-run"
-    print(f"recover {mode}  herdr {result.get('herdr')}  ok {result.get('ok')}  "
+    print(f"recover {mode}  backend {result.get('herdr')}  ok {result.get('ok')}  "
           f"launches {result.get('launches')}")
     for item in result.get("plan") or []:
         agent = item.get("agent") or "-"
@@ -1449,7 +1449,7 @@ def print_messages(result):
 def print_workspaces(result):
     workspaces = result.get("workspaces", [])
     if not workspaces:
-        print("no herdr workspaces (is the herdr server running?)")
+        print("no workspaces (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)")
         return
     own = result.get("self") or {}
     for ws in workspaces:

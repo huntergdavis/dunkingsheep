@@ -5,12 +5,12 @@ Terminal adapter seam.
 Everything above this module (Flock, the task/inbox stores, the CLI, MCP)
 asks for placements, panes, screen text and sends. It must not know which
 terminal tool implements them. The first backend was herdr; tmux is the
-second (owner decision 2026-10-18: "tmux is the way"), and it is selected with
+second (owner decision 2026-10-18: "tmux is the way") and the default since
+t50 (2026-10-24). herdr stays selectable for the rollback window with
 
     DUNKINGSHEEP_TERMINAL_BACKEND=tmux
 
-Herdr stays the default until the tmux close guard has been demonstrated on
-real lanes. Nothing about herdr is removed before that.
+Nothing about herdr is removed before that window closes.
 
 The seam deliberately keeps the *grammar* of the tool inside the backend:
 herdr 0.9.5 starts an agent with `agent start NAME --kind KIND --pane ID`, while
@@ -805,8 +805,8 @@ def get_backend(herdr=None):
 
     Passing an existing herdr client/fake (tests, the daemon's constructor)
     wraps it in `HerdrBackend`; otherwise `DUNKINGSHEEP_TERMINAL_BACKEND`
-    selects herdr (default) or tmux. An unknown value is a named refusal, not
-    a silent fallback.
+    selects tmux (default) or herdr (rollback). An unknown value is a named
+    refusal, not a silent fallback.
     """
     if herdr is not None:
         if isinstance(herdr, TerminalBackend):
