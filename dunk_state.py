@@ -384,6 +384,16 @@ def capture(flock, *, source="periodic", now=None, store=None):
             launches[pane_id] = dict(entry, pane_id=pane_id)
     except (OSError, ValueError):
         launches = {}
+    # t496: ONE /proc walk per capture, not two per lane.
+    #
+    # session_of() and the env lookup below both accept a prebuilt
+    # pid -> children map, but neither was given one, so every lane rebuilt the
+    # whole map twice: 62 full /proc scans for 31 lanes, 5.3s of a measured
+    # 8.0s capture. On a 60-pane fleet through the daemon that pushed a
+    # 15s client timeout over the edge ("no answer after 15s", exit 3), while
+    # the daemon itself had burned only ~1.1s of CPU - it was polling /proc,
+    # not stuck on a lock.
+    kids = _proc_children()
     rows = []
     for lane in flock.resolve_lanes():
         if not lane.get("agent"):
@@ -394,10 +404,10 @@ def capture(flock, *, source="periodic", now=None, store=None):
         thinking = _flag(argv, _THINKING_FLAGS)
         session, session_reason = session_of(lane.get("pane_pid"),
                                              {"session": launch.get("session") or launch.get("session_id")},
-                                             cwd=lane.get("cwd"))
+                                             kids=kids, cwd=lane.get("cwd"))
         env = {}
         if lane.get("pane_pid"):
-            for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"]):
+            for candidate in [int(lane["pane_pid"])] + _descendants(lane["pane_pid"], kids):
                 found = _env_of(candidate)
                 if found.get("PI_SESSION_ID") or found.get("PI_MODEL"):
                     env = found
