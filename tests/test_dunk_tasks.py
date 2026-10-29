@@ -134,7 +134,10 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual([(task["id"], "expired")],
                          [(item["task_id"], item["reason"]) for item in requeued])
         self.assertEqual("open", self.store.get(task["id"])["status"])
-        self.assertEqual([], self.store.get(task["id"])["assignees"])
+        # t145/owner2317: the claim made w1:p1 the owner, and expiry reopens the
+        # task for that owner instead of deleting the assignment. A task that
+        # should change hands needs an explicit assign/complete.
+        self.assertEqual(["w1:p1"], self.store.get(task["id"])["assignees"])
 
     def test_busy_lane_is_refused_a_second_task(self):
         """t145: a lane already holding in-progress work is not handed more.
@@ -200,6 +203,43 @@ class TaskStoreTests(unittest.TestCase):
         self.assertIn("refused", logs.output[0])
         self.assertIn("w1:p1", logs.output[0])
         self.assertIn("empty", logs.output[0])
+
+    def test_expired_lease_keeps_the_durable_assignee_and_blocks_other_lanes(self):
+        """t145/owner2317: a lease is ACTIVITY, an assignment is OWNERSHIP.
+
+        Owner2317 found ten global tasks that lost their assignees 30 minutes
+        after a claim expired, which let the next global `task next` take work
+        that was never released. Expiry must reopen the task for its owner and
+        leave the ownership alone.
+        """
+        task = self.store.add(GLOBAL, "owned work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=0.05)
+        import time
+        time.sleep(0.1)
+        requeued = self.store.reap(alive_source="live", alive_panes={"w1:p1"})
+        self.assertEqual([(task["id"], "expired")],
+                         [(item["task_id"], item["reason"]) for item in requeued])
+        reopened = self.store.get(task["id"])
+        self.assertEqual("open", reopened["status"])
+        self.assertEqual(["w1:p1"], reopened["assignees"],
+                         "expiry erased the durable owner")
+        stolen = self.store.claim_next(GLOBAL, "w2:p2")
+        self.assertIsNone(stolen["task"], "another lane took expired owned work")
+        self.assertEqual("owned_elsewhere", stolen["refused"]["reason"])
+        self.assertEqual(["w1:p1"], stolen["refused"]["owned_by"])
+        back = self.store.claim_next(GLOBAL, "w1:p1")
+        self.assertEqual(task["id"], back["task"]["id"], "the owner could not reclaim")
+
+    def test_release_keeps_the_durable_assignee_and_blocks_other_lanes(self):
+        task = self.store.add(GLOBAL, "owned work", assignees=["w1:p1"])
+        self.store.claim_next(GLOBAL, "w1:p1", lease_seconds=300)
+        self.store.release(task["id"], "w1:p1")
+        released = self.store.get(task["id"])
+        self.assertEqual("open", released["status"])
+        self.assertEqual(["w1:p1"], released["assignees"],
+                         "release erased the durable owner")
+        self.assertIsNone(self.store.claim_next(GLOBAL, "w2:p2")["task"])
+        self.assertEqual(task["id"], self.store.claim_next(GLOBAL, "w1:p1")["task"]["id"])
 
     def test_pane_gone_alone_does_not_requeue(self):
         task = self.store.add(GLOBAL, "work")

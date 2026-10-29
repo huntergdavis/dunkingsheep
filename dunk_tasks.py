@@ -1200,6 +1200,16 @@ class Tasks:
                             "pane_id": lease["pane_id"],
                             "reason": reason,
                         })
+                        owners = [name for name in _decode(row["assignees"])
+                                  if name != lease["pane_id"]]
+                        if (alive_panes is not None and owners
+                                and not any(owner in alive_panes for owner in owners)):
+                            # Advisory only: ownership is durable, so a dead
+                            # owner needs an explicit reassignment, not a lease
+                            # side effect. Nothing is mutated here.
+                            log.info("task %s reopened while owned by a pane that "
+                                     "is not live: owners=%s",
+                                     lease["task_id"], ",".join(owners))
                 self.db.commit()
             except Exception:
                 self.db.rollback()
@@ -1207,8 +1217,18 @@ class Tasks:
         return requeued
 
     def _after_lease_change(self, task_id, raw_assignees, now, pane_id, row=None):
-        """Remove one claimant from a task; reopen it if no one is left."""
-        assignees = [a for a in _decode(raw_assignees) if a != pane_id]
+        """Reopen a task when its last lease goes away; keep the OWNER.
+
+        A lease is activity: expiry, release and a reaped claim all end the
+        claim, not the assignment. Owner2317 found ten global tasks whose
+        assignees were deleted 30 minutes after a claim expired, which let the
+        next ``task next`` take work nobody had released. The assignee list is
+        therefore preserved here; only ``pane_id``'s lease is gone (the caller
+        has already deleted the lease row), and the task reopens for its owner
+        to reclaim. Re-owning work is an explicit ``assign``/``complete``
+        decision, never a side effect of a lease ending (t145).
+        """
+        assignees = _decode(raw_assignees)
         remaining = self.db.execute(
             "SELECT COUNT(*) AS n FROM task_leases WHERE task_id = ?", (task_id,)
         ).fetchone()["n"]
