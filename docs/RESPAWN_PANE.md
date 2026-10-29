@@ -54,6 +54,34 @@ only to that reviewed per-lane hook file.
 
 These are checked before a process is touched. Task/mail stores are not written.
 
+## Native-session quiescence (t416)
+
+For a Codex command that resumes a native session, pane idleness is **not**
+session quiescence. An older shared app-server turn can still be running while
+the pane is blank and no task lease exists (measured `%30`, 2026-10-29: old turn
+`01a18644…` was still running when the replacement started `01a18645…`).
+
+The guard resolves the incoming `CODEX_HOME`, the exact thread row in its
+`state_5.sqlite`, and that row's exact rollout path. The first record must be a
+`session_meta` naming this session and cwd, and the rollout must end at a record
+boundary. It then refuses when any `task_started` has no matching
+`task_complete`; the refusal names the unfinished turn id. A quiet session is
+allowed only when its authenticated, complete trace has no active turn. Missing,
+empty, malformed, truncated, duplicate, start-less-completion, or wrong-session
+history is **not** treated as quiet.
+
+The final check re-reads the rollout stat immediately before mutation and
+refuses if it changed. **BOUND:** the re-read closes the window up to the read;
+a turn starting after it is not prevented. This is a bounded precondition, not
+atomic coordination with Codex's session writer.
+
+Tests: `tests.test_dunk_native_session` covers the saved `%30` timeline cut at
+06:07:44 (refuse naming the old turn), the older turn completed before respawn
+(allow), authenticated quiet history (allow), empty/missing/truncated/wrong-
+session evidence (refuse), malformed lines, cwd/path/session mismatch, and a
+change after the snapshot (refuse). Respawn integration covers active-turn
+refusal before any backend call and completed-turn allowance.
+
 ## Success and rollback
 
 On success the old launch record is preserved under `previous`, the new argv is
@@ -70,7 +98,7 @@ error says so; no success is claimed.
 
 ## Tests
 
-`python3 -m unittest tests.test_dunk_respawn_pane` covers success (old launch
+`python3 -m unittest tests.test_dunk_native_session tests.test_dunk_respawn_pane` covers the native guard controls and the existing respawn cases: success (old launch
 preserved), wrong pid/start, missing idle confirmation, active turn, unread,
 outbox, live lease, non-ready delivery, unsupported backend, failed start with
 rollback, dead replacement with rollback, stale-pid second attempt, pane

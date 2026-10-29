@@ -3667,6 +3667,23 @@ class Flock:
                             f"(state={delivery.get('state')!r}, "
                             f"reason={delivery.get('reason')!r})")
 
+        # Pane idleness is not native-session quiescence.  An older shared
+        # Codex app-server turn can still be running while the pane is blank and
+        # no task lease exists (t416).  Consult the exact private session row and
+        # rollout, and re-check the rollout immediately before mutation.
+        native_snapshot = None
+        pane_agent = str(pane.get("agent") or "").strip().lower()
+        argv_is_codex = any(os.path.basename(str(part)).lower() == "codex"
+                            for part in argv)
+        if pane_agent == "codex" or argv_is_codex:
+            from dunk_native_session import (NativeSessionRefusal,
+                                             check_native_session_quiescence)
+            try:
+                native_snapshot = check_native_session_quiescence(
+                    argv, pane.get("cwd"))
+            except NativeSessionRefusal as error:
+                raise DunkError(f"respawn-pane refused: {error}") from None
+
         old = dict(self.launches.get(pane_id) or {})
         rollback = list(rollback_argv or old.get("argv") or [])
         if not rollback:
@@ -3728,6 +3745,15 @@ class Flock:
             suffix = (" (rolled back)" if rolled else
                       " (rollback not verified)" if attempted else "")
             raise DunkError(message + suffix)
+
+        if native_snapshot is not None:
+            # BOUND: this final stat re-read closes the window up to the read;
+            # a turn that starts after it is not prevented. This is a bounded
+            # precondition, not atomic coordination with the native session.
+            try:
+                native_snapshot.assert_unchanged()
+            except NativeSessionRefusal as error:
+                raise DunkError(f"respawn-pane refused: {error}") from None
 
         try:
             ok, result = self.herdr.respawn_pane(
