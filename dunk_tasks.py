@@ -54,7 +54,7 @@ STATUSES = ("open", "in_progress", "blocked", "done", "cancelled")
 PRIORITIES = ("low", "medium", "high", "urgent")
 PRIORITY_RANK = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 DEFAULT_STATUS = "open"
-DEFAULT_PRIORITY = "medium"
+DEFAULT_PRIORITY = "low"
 # How long a claim stays valid without a heartbeat. A dead or stalled agent's
 # task returns to the queue after this, or as soon as its pane disappears.
 DEFAULT_LEASE_S = float(os.environ.get("DUNKINGSHEEP_LEASE_S", "1800"))
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title         TEXT NOT NULL,
     body          TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'open',
-    priority      TEXT NOT NULL DEFAULT 'medium',
+    priority      TEXT NOT NULL DEFAULT 'low',
     parent_id     TEXT,
     multi_assignee INTEGER NOT NULL DEFAULT 0,
     attempts      INTEGER NOT NULL DEFAULT 0,

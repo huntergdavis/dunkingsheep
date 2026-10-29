@@ -489,3 +489,50 @@ change does not enable paging. A previous channel field in telegram.json must
 be moved to the separate routing file before starting the revised bridge.
 
 A pending-page channel mismatch is recorded once as terminal status undelivered, with timestamp and reason. It never sets confirmed_at, never produces a delivered recovery, and is not automatically re-posted; resolving that terminal record requires operator review. This prevents a cutover mismatch from emitting the same self-error every tick.
+
+## Backlog starvation and current worker inventory
+
+`fleet.assignment_starvation` detects a gap upstream of automatic handoff:
+workers have no open/in-progress assignment while global open/blocked backlog
+waits. Handoff deliberately selects **already assigned** work; it does not
+allocate backlog or clear approval gates.
+
+The rule is disabled when migrating an older configuration. Enable it explicitly
+and set `worker_panes` to the actual worker inventory and `superuser_panes` to the
+coordinators who should resolve allocation problems. Every alert destination must
+also be present in the current `superusers.json` pane allowlist. Human panes and
+canaries need not be included. The example placeholders must be replaced before
+enabling the rule.
+
+For tmux fleets use `panes.source: "daemon"`. This reads the running daemon's
+canonical `list_panes` view with a five-second timeout, including declared turn
+activity; the legacy `herdr` source remains available. An unavailable or malformed
+inventory is reported as a coverage error, not an empty healthy fleet.
+
+The deterministic predicate requires at least `min_empty_workers` configured,
+present worker panes with no open/in-progress assignments, no live leases and
+no native turn start/end or claim/done event in `quiet_minutes`. Private assigned
+work excludes a worker too, but private backlog does not trigger a global alert.
+Only idle/done states count as confirmed idle; unknown states are listed separately
+as a visibility gap and must be checked before assigning work. Working/blocked
+states and missing panes do not count. Old global open/blocked tasks supply the
+backlog condition. "Open" does not assert runnable: dependencies and owner holds
+remain intact. Other workers' review closures do not hide empty queues.
+
+After `must_hold_runs` spaced observations, one fleet-level finding goes to the
+configured superusers through the guarded inbox transport. It contains affected
+workers, bounded task-ID samples, claim/done counts and a concrete request to
+verify activity, rank work, assign runnable items or resolve gates. It does not
+page the owner channel, enter keys, restart workers, reassign tasks or clear holds.
+`cooldown_minutes` suppresses repeats. Successful recipient submissions are saved
+individually, so retrying a failed recipient does not resend to successful ones.
+A submitted inbox item is **not** a verified read or turn start. Once the condition
+clears, its recipient state is discarded; a future episode must pass the hold
+again. The existing VP recovery digest remains the recovery notification.
+
+Task creation now defaults to `low` in the CLI, daemon API and store. Explicit
+higher priorities remain unchanged. Existing task selection orders priority
+first, then creation time (oldest first), then task ID for ties; updates do not
+make a task younger. Historical priorities are not silently rewritten because
+old records do not distinguish an explicitly selected medium priority from the
+former default. Re-ranking such items is an explicit, recorded operator action.

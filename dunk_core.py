@@ -2387,7 +2387,7 @@ class Flock:
             owners = self._default_task_owner(self_pane_id)
         return self.tasks.add(
             target, title, body=body or "", status=status or "open",
-            priority=priority or "medium",
+            priority=priority or "low",
             assignees=owners,
             parent_id=parent_id, depends_on=depends_on,
             created_by=self_pane_id, multi_assignee=_truthy(multi_assignee, False))
