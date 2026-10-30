@@ -671,6 +671,34 @@ def build_parser():
     q.add_argument("message_id")
     q.add_argument("body", nargs="*")
     q.add_argument("--body-file")
+    q = osub.add_parser("ingest",
+                        help="record one owner question that arrived on a transport (t594)",
+                        epilog="A bridge does not keep its own store: the question lands in "
+                               "the one owner mailbox with its transport, and 'owner reply' "
+                               "answers it back the same way. --external-id is the "
+                               "transport's own id (telegram:<update_id>), so a redelivered "
+                               "update returns the row it already produced.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
+    q.add_argument("--external-id")
+    q.add_argument("--subject", "-s")
+    q.add_argument("--attach", help="local file paths, comma separated")
+    q = osub.add_parser("outbox",
+                        help="owner-mailbox replies waiting for a transport (t594)",
+                        epilog="Only replies whose own transport matches are returned, so "
+                               "Telegram carries answers and nothing else: no briefs, no "
+                               "digests, no web echoes.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--limit", type=int, default=20)
+    q = osub.add_parser("delivered",
+                        help="record a transport's delivery receipt for one owner row (t594)",
+                        epilog="This receipt replaces telegram-status.json: a page is "
+                               "confirmed by the owner mailbox, not by a file read beside "
+                               "the bridge's credentials.")
+    q.add_argument("message_id")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--external-id")
     q = osub.add_parser("stats", help="owner-push counts and latency")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
@@ -3038,6 +3066,24 @@ def run_client_command(client, args):
                 raise SystemExit("owner reply: a body or --body-file is required")
             return client.call("owner_reply", message_id=args.message_id,
                                body=" ".join(body)), print_owner_reply
+        if sub == "ingest":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            payload = {"transport": args.transport, "body": " ".join(body),
+                       "external_id": args.external_id, "subject": args.subject,
+                       "attach": args.attach}
+            return client.call("owner_ingest",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
+        if sub == "outbox":
+            return client.call("owner_outbox", transport=args.transport,
+                               limit=args.limit), print_view
+        if sub == "delivered":
+            payload = {"message_id": args.message_id, "transport": args.transport,
+                       "external_id": args.external_id}
+            return client.call("owner_delivered",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
         return client.call("owner_stats"), print_owner_stats
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
