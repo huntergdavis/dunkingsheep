@@ -4975,6 +4975,42 @@ class Flock:
         return any(e.get("comm") in AGENT_NAMES and e.get("state") not in DEAD_STATES
                    for e in entries)
 
+    # t957: a FIRST-RUN dialog makes a freshly started lane look healthy and be
+    # inert. Measured by the owner-role lane: `start-agent` reported 'started agent
+    # reviewer-7 in %110', the pane registered with the right role, and then
+    # `read %110` returned NOTHING, a dunk sat at 'Held (typing)' for ever, and the
+    # daemon logged 'the composer text is not provably ours'. The lane had to be
+    # backed out by hand. These markers name the dialogs a CLI can put in the way of
+    # a prompt; a match is a refusal that QUOTES the line, so the failure says which
+    # dialog to answer rather than reporting a healthy lane that is asleep.
+    #
+    # A new dialog text is a one-line addition here. A false match costs a refusal
+    # that names the pane (visible, diagnosable); a miss costs an inert lane, which
+    # is the failure this constant exists to stop.
+    AGENT_DIALOG_MARKERS = (
+        "do you trust the files",       # claude code's first run in a directory
+        "trust this folder",
+        "trust the files in this folder",
+        "select login method",
+        "log in to claude",
+        "sign in to claude",
+        "choose a theme",
+        "press enter to continue",      # a first-run wizard's default prompt
+        "allow access to",
+        # t958: the CAPTURED codex approval dialog (tests/fakes.py::codex_approval_dialog,
+        # "captured from a real pane. The agent is waiting for a person to choose;
+        # nothing may be typed or pressed."). None of the markers above matched it, so a
+        # codex lane sitting behind it was reported healthy - the failure t957 exists for.
+        # It is matched only in the LIVE TAIL of the screen (see the scan below): the same
+        # line appears in codex_answered_dialog_in_scrollback, where the lane is healthy.
+        "press enter to confirm or esc to cancel",
+    )
+    # Only this many lines from the bottom are the live interface (the same reasoning -
+    # and the same number - as MODAL_TAIL_LINES: "Scanning the whole thing matched the
+    # transcript as well as the live interface ... that is how the daemon came to press
+    # Escape into working agents 1042 times").
+    AGENT_DIALOG_TAIL_LINES = 8
+
     def _agent_evidence(self, root_pid, names, since_start=None):
         """Descendant pids that are a RUNNING process of an expected agent.
 
@@ -5103,6 +5139,27 @@ class Flock:
                     matched = self._match_agent_process(entries, kind, since_start)
                     if matched:
                         seen = matched
+            # t957: a first-run dialog is a REFUSAL, not a slow start, and it is
+            # checked BEFORE the failure markers because the dialog is what the lane
+            # is waiting on. `not seen` does not exempt it: a live claude process
+            # sitting in a trust prompt is exactly the inert lane this catches.
+            # SCOPED TO THE LIVE TAIL (t958). Scanning the whole capture matched an
+            # ANSWERED dialog still in the transcript - tests/fakes.py::
+            # codex_answered_dialog_in_scrollback is that lane, and it is healthy - so a
+            # marker added for the live prompt would have refused every lane whose
+            # scrollback still showed one. The tail is the live interface; above it is
+            # history.
+            tail_lines = [row for row in captured.splitlines() if row.strip()]
+            tail = "\n".join(tail_lines[-self.AGENT_DIALOG_TAIL_LINES:]).lower()
+            for marker in self.AGENT_DIALOG_MARKERS:
+                if marker in tail:
+                    line = next((row for row in tail_lines[-self.AGENT_DIALOG_TAIL_LINES:]
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} started in pane {pane_id} but is NOT interactive: "
+                        f"a first-run dialog is waiting ({line.strip()!r}). Answer it once in "
+                        "that pane (or pre-seed the CLI's config) and start the agent again; "
+                        "a dunk sent here would sit unsubmitted (t957).")
             for marker in self.AGENT_FAILURE_MARKERS:
                 if marker in lowered and not seen:
                     line = next((row for row in captured.splitlines()

@@ -15,10 +15,13 @@
 pub mod atomic_json;
 pub mod clock;
 pub mod config;
+pub mod db;
 pub mod error;
 pub mod lock;
 pub mod proc;
 pub mod retry;
+pub mod stuck;
+pub mod terminal;
 
 pub use error::{refusal, DunkError};
 
