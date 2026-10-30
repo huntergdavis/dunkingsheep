@@ -422,12 +422,17 @@ a second run copies nothing. **Not yet done:** `web/app.py` still opens
 over the socket instead, which is the step that makes a web question appear in
 `inbox.db` rather than only in the migrated copy.
 
-**Not yet done (2026-10-30):** `bridges/telegram_bridge.py` still runs the old
-`send_briefs` firehose, so this build's Telegram unit forwards desk briefs as
-well as answers — the "answers only, no echoes, no reports" half of 7.2 is
-policy here, not behaviour. That switch is t594 (PR #135), which is not
-accepted; until it lands the unit is described by what it does (see
-`packaging/systemd/dunkingsheep-telegram.service`).
+**Implemented 2026-10-30 (t594):** `bridges/telegram_transport.py` holds the
+policy with no `web.app` import (page marker, 3-per-hour budget, reply
+selection), and `bridges/telegram_bridge.py` now asks the daemon for
+`owner_outbox(transport="telegram")`, sends each reply and receipts it with
+`owner_delivered`, so a brief, a digest or a web echo has no path to the phone;
+inbound text goes to `owner_ingest` with `transport=telegram` and
+`external_id=telegram:<update_id>`. `send_briefs` remains only as a name that
+resolves to the owner outbox. Pages are still read from the watchdog's rows by
+its own `PAGE OWNER` marker until pages move to the mailbox. **Not yet done:**
+a Telegram attachment still lands in the legacy desk store rather than the
+inbox blob store.
 
 ### 7.3 Reporter (replaces the VP)
 

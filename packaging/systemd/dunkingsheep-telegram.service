@@ -1,9 +1,8 @@
 [Unit]
-# The transport-only policy (Telegram carries answers to Telegram questions and
-# nothing else, FLAT_FLEET.md 7.2) is NOT in this build: bridges/telegram_bridge.py
-# still forwards desk briefs. It lands with t594 (PR #135); until then this unit is
-# described as what it does, not as what is planned.
-Description=Dunking Sheep Telegram bridge (desk briefs + answers; answers-only lands with t594)
+# FLAT_FLEET.md 7.2 (t594): the bridge sends owner-mailbox REPLIES for the telegram
+# transport plus watchdog pages, and nothing else - a brief, a digest or a web echo
+# has no path to the phone.
+Description=Dunking Sheep Telegram bridge (answers Telegram questions only)
 After=network-online.target dunkingsheep-web.service
 Wants=network-online.target
 
