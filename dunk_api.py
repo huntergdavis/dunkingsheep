@@ -719,6 +719,17 @@ def h_inbox_read(flock, args, self_pane_id):
                             self_pane_id=self_pane_id)
 
 
+def h_report_run(flock, args, self_pane_id):
+    return flock.report_run(post=_bool(args.get("post"), True),
+                            prose=args.get("prose"),
+                            out_dir=args.get("out_dir"),
+                            self_pane_id=self_pane_id)
+
+
+def h_report_list(flock, args, self_pane_id):
+    return flock.report_list(out_dir=args.get("out_dir"), self_pane_id=self_pane_id)
+
+
 def h_owner_conversation(flock, args, self_pane_id):
     return flock.owner_conversation(limit=int(_opt(args, "limit", 50)),
                                     before=args.get("before"),
@@ -1777,6 +1788,29 @@ COMMANDS = [
         params={"message_id": MESSAGE_ID_PARAM},
         required=["message_id"],
     ),
+    # -- the reporter (FLAT_FLEET.md 7.3) -----------------------------------
+    Command(
+        "report_run",
+        "Generate the deterministic fleet report: task metrics (24h), lanes "
+        "working/idle/dead, the needs-owner questions, the review queue with "
+        "ages, poolrad progress, budget and watchdog. No model. Writes "
+        "~/.config/dunkingsheep/reports/<ts>.md and posts it to the owner "
+        "mailbox on the `report` transport when that mailbox exists.",
+        h_report_run,
+        params={
+            "post": {"type": "boolean", "description": "Also post to the owner mailbox (default true)."},
+            "prose": {"type": "string",
+                      "description": "Optional plain-language paragraph; rejected if it "
+                                     "names a task id or status the report does not contain."},
+            "out_dir": {"type": "string", "description": "Directory for the report file."},
+        },
+    ),
+    Command(
+        "report_list",
+        "The report files produced so far, newest first.",
+        h_report_list,
+        params={"out_dir": {"type": "string", "description": "Directory holding the reports."}},
+    ),
     # -- the owner mailbox (FLAT_FLEET.md 7.2) ------------------------------
     Command(
         "owner_conversation",
@@ -2815,8 +2849,11 @@ MCP_GROUPS = (
     ("metrics",
      "Operations measurement. action=summary (counts, duration distributions, "
      "coverage), status (daemon health + counts), health (deterministic "
-     "self-check; repair=true fixes stale leases and a large WAL).",
-     (("summary", "metrics"), ("status", "status"), ("health", "health"))),
+     "self-check; repair=true fixes stale leases and a large WAL). "
+     "action=report generates the deterministic fleet report and posts it to the "
+     "owner mailbox on the report transport; action=reports lists the files.",
+     (("summary", "metrics"), ("status", "status"), ("health", "health"),
+      ("report", "report_run"), ("reports", "report_list"))),
     ("pm",
      "Project PMs. action=digest publishes or updates ONE digest per project "
      "under a stable id (pm-digest:<project>) with changed/blocked/"

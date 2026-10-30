@@ -4152,6 +4152,47 @@ class Flock:
                 "slug": entry.get("slug"), "expires_at": entry.get("expires_at"),
                 "cached": entry.get("cached", False)}
 
+    # -- the reporter (FLAT_FLEET.md 7.3) ------------------------------------
+
+    def _post_report(self, report, text):
+        """Put the report in the owner mailbox on the `report` transport.
+
+        Best effort by construction: the file on disk is the record, and a post
+        that fails must never lose it. Until the owner mailbox exists on this
+        base (FF-9b), this says so instead of pretending it posted.
+        """
+        import dunk_report
+        subject = f"Fleet report {report['iso']}"
+        try:
+            message = self.inbox.send(dunk_report.OWNER_MAILBOX, text,
+                                      subject=subject, sender="report",
+                                      mailbox_label=dunk_report.OWNER_MAILBOX,
+                                      transport=dunk_report.REPORT_TRANSPORT)
+        except TypeError:
+            # A base without the transport column (FF-9b not merged yet).
+            try:
+                message = self.inbox.send(dunk_report.OWNER_MAILBOX, text,
+                                          subject=subject, sender="report",
+                                          mailbox_label=dunk_report.OWNER_MAILBOX)
+            except Exception as error:  # noqa: BLE001
+                return {"error": f"not posted (owner mailbox unavailable): {error}"}
+        except Exception as error:  # noqa: BLE001
+            return {"error": f"not posted: {error}"}
+        return {"message_id": message.get("message_id"),
+                "transport": message.get("transport")}
+
+    def report_run(self, post=True, prose=None, out_dir=None, self_pane_id=None):
+        import dunk_report
+        result = dunk_report.run(self, post=post, prose=prose, out_dir=out_dir,
+                                 post_fn=self._post_report if post else None)
+        return {"path": result["path"], "prose_rejected": result["prose_rejected"],
+                "posted": result["posted"], "text": result["text"],
+                "generated_at": result["report"]["iso"]}
+
+    def report_list(self, out_dir=None, self_pane_id=None):
+        import dunk_report
+        return dunk_report.list_reports(out_dir=out_dir)
+
     def review_sync(self, dry_run=False, self_pane_id=None):
         import dunk_review
         return dunk_review.Sync(self, tokens=self._github_tokens()).run(dry_run=dry_run)

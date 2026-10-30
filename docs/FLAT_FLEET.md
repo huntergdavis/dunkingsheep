@@ -449,6 +449,22 @@ block is posted verbatim above the prose, and the daemon rejects prose that
 names a task id or a status absent from its input, so a summariser cannot
 round "merged" up to "done".
 
+**Implemented 2026-10-29 (t592):** `dunk_report.py` builds the deterministic
+block from the stores at generation time — task metrics (24h), lanes
+working/idle/dead (live panes, the leases they hold, registered lanes with no
+pane), the needs-owner questions quoted verbatim, the review queue with ages,
+poolrad progress, budget and the watchdog heartbeat. A section whose source
+cannot be read says "not measured here" rather than printing a zero, because a
+zero is a measurement. `dunkingsheep report run` writes
+`~/.config/dunkingsheep/reports/<ts>.md` (never overwriting an earlier report)
+and posts the same text to the owner mailbox on the `report` transport when
+that mailbox exists; `report list` shows the files. `report_run` is a desk/system
+verb, `report_list` is readable by every role. The optional prose pass is a
+parameter, not a feature of the timer: `prose_problems()` rejects prose naming a
+task id or a status the report does not contain, and rejected prose is dropped
+rather than posted above the numbers. Units:
+`packaging/systemd/dunkingsheep-report.{service,timer}` (every 4 hours).
+
 Three separate mechanisms address the VP mailbox today and each gets its own
 edit: `host_watch.py` (literal `"π - vp-of-agentry"` via subprocess),
 `dunkingsheep-watchdog-deadman.service` (`--to "vp of agentry"`), and

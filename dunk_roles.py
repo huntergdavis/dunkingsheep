@@ -66,6 +66,7 @@ READ_ONLY = frozenset({
     "status", "poll", "health", "help", "doctor", "whoami", "roster",
     "message_state", "reply_stats", "project_summary", "state_latest",
     "task_list", "task_read", "task_stats", "task_metrics", "task_followers",
+    "report_list",                 # reading report files is harmless (7.3)
     "metrics", "inbox_count", "inbox_stats", "inbox_status", "list_panes",
     "list_workspaces", "list_dunks", "get_dunk", "delivery",
     "delivery_capability", "lanes", "memory_recall", "memory_search",
@@ -98,7 +99,7 @@ ALLOW = {
         "inbox_fetch", "respawn_pane", "send_keys", "flush_box", "read_pane",
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
-        "gh_token", "review_sync", "context_add", "poolrad_sync",
+        "gh_token", "review_sync", "context_add", "poolrad_sync", "report_run",
         # t594: the Telegram bridge runs as a unit (system token), so `system` is the
         # role that ingests owner questions, drains a transport outbox and records
         # delivery receipts. A lane may do none of the three.
@@ -117,6 +118,7 @@ ALLOW = {
         # t594: the desk answers owner questions, so it reads the transport outbox
         # as well. It does not ingest or write receipts: that is the transport's job.
         "owner_outbox",
+        "report_run",           # posting a report to the owner is the desk's (7.3)
         "read_pane", "turn_start", "turn_end",
     }),
     "planner": READ_ONLY | frozenset({

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Dunking Sheep report every 4 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=4h
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
