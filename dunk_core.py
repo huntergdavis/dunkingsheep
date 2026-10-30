@@ -1324,6 +1324,38 @@ class Flock:
 
     # -- targets ----------------------------------------------------------------
 
+    def registry_pane_gap(self):
+        """Registered lanes that the terminal backend does not list (t714).
+
+        The pane list is evidence about TERMINALS, the role registry about
+        PROCESSES. When they disagree and the recorded process is still alive,
+        the lane exists and is unreachable: `dunkingsheep panes` omits it, mail
+        cannot be typed into it, and a close/dead guard reads it as gone (t699).
+        Measured 2026-10-29 22:15 for %103/%108/%109 and NOT reproducible later,
+        so the gap is made visible here rather than claimed fixed: a listing that
+        silently drops a live lane is indistinguishable from a lane that died.
+
+        Returns [] when the pane list or the registry cannot be read: an
+        unavailable source is not a disagreement.
+        """
+        try:
+            live = {pane.get("pane_id") for pane in self.herdr.list_panes()}
+        except Exception:  # noqa: BLE001 - no pane list, no gap claim
+            return []
+        try:
+            lanes = self.roles.describe().get("lanes") or {}
+        except Exception:  # noqa: BLE001 - no registry, no gap claim
+            return []
+        gap = []
+        for pane_id, entry in sorted(lanes.items()):
+            if pane_id in live:
+                continue
+            pid = entry.get("pane_pid")
+            alive = bool(pid) and process_alive(pid, entry.get("start"))
+            gap.append({"pane": pane_id, "label": entry.get("label"),
+                        "role": entry.get("role"), "pid": pid, "alive": alive})
+        return gap
+
     def list_panes(self, self_pane_id=None):
         panes = self.herdr.list_panes_grouped()
         for pane in panes:

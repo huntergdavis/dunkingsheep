@@ -1065,6 +1065,22 @@ def print_panes(result):
         )
     if result.get("self_pane_id"):
         print(f"* = this pane ({result['self_pane_id']})")
+    gap = result.get("registry_gap") or []
+    if gap:
+        # t714: the pane list is the terminal's opinion; the registry knows the
+        # PROCESS. A lane the list drops while its process runs is unreachable, not
+        # dead, and it must be visible here instead of quietly missing from a table.
+        print()
+        print(f"{len(gap)} registered lane(s) the backend pane list does not contain:")
+        for row in gap:
+            state = f"process ALIVE (pid {row['pid']})" if row.get("alive") else \
+                f"process gone (pid {row.get('pid') or 'not recorded'})"
+            print(f"  {row['pane']:<8} {_clip(row.get('label') or '-', 24):<24} "
+                  f"{_clip(row.get('role') or '-', 9):<9} {state}")
+        if any(row.get("alive") for row in gap):
+            print("  an ALIVE lane that is not in the list cannot be typed into: mail to it "
+                  "fails with reason=backend_missing_pane (restore the pane, or address "
+                  "the lane by mailbox name).")
 
 
 def print_inbox_archive(result):

@@ -1059,10 +1059,19 @@ def h_list_panes(flock, args, self_pane_id):
             "agent_status", "agent_status_source", "agent_status_reason",
             "agent_status_inferred", "cwd", "terminal_title_stripped", "terminal_id",
             "workspace_id", "tab_id", "pane_pid")
-    return {
+    # A LISTING THAT SILENTLY DROPS A LIVE LANE LOOKS LIKE A LANE THAT DIED (t714).
+    # The registry is the second opinion: whatever it knows and the pane list does
+    # not is reported beside the panes, with the process liveness, instead of
+    # vanishing. A flock that cannot answer (a fixture, an older caller) adds no key.
+    gap = getattr(flock, "registry_pane_gap", None)
+    registry_gap = gap() if callable(gap) else []
+    result = {
         "self_pane_id": self_pane_id,
         "panes": [{key: pane.get(key) for key in keep if key in pane} for pane in panes],
     }
+    if registry_gap:
+        result["registry_gap"] = registry_gap
+    return result
 
 
 def h_read_pane(flock, args, self_pane_id):
