@@ -105,6 +105,65 @@ class Sync:
                 out[(task.get("repo"), task.get("pr"), task.get("head"))] = task
         return out
 
+    def head_verdicts(self, repo, head, number=None):
+        """The verdicts recorded at one head, by DISTINCT lane (t662).
+
+        GitHub cannot tell two lanes apart - every lane approves as the same App - so
+        the count that decides whether a head is final has to come from the task store,
+        where `completed_by` is the lane. A lane that accepted twice is one lane; a
+        needs-fix from any lane stops the head even if others accept it.
+        """
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                      kind="review")
+        accepts, needs_fix = set(), set()
+        for task in tasks:
+            if task.get("repo") != repo or task.get("head") != head:
+                continue
+            if number is not None and task.get("pr") != number:
+                continue
+            if task["status"] != "done":
+                continue
+            lane = task.get("completed_by") or None
+            if task.get("verdict") == "accept" and lane:
+                accepts.add(str(lane))
+            elif task.get("verdict") == "needs-fix" and lane:
+                needs_fix.add(str(lane))
+        return sorted(accepts), sorted(needs_fix)
+
+    def _is_final(self, repo, head, number=None, lane=None):
+        """Is this head final: enough DISTINCT accepting lanes and no needs-fix?"""
+        accepts, needs_fix = self.head_verdicts(repo, head, number)
+        if lane and str(lane) not in accepts:
+            accepts = sorted(set(accepts) | {str(lane)})
+        required = dunk_github.required_verdicts(repo)
+        return (not needs_fix) and len(accepts) >= required, accepts, needs_fix, required
+
+    def _second_review(self, repo, number, head, first_lane, report=None):
+        """File the second review for a head whose first verdict was an accept (t662).
+
+        `author` is the lane that already accepted, and the claim filter excludes an
+        author from its own review, so the next reviewer cannot be the same lane. The
+        partial unique index allows it because the first review task is done.
+        """
+        title = (f"Review {repo.split('/')[-1]} PR #{number} {head[:8]} "
+                 f"(second reviewer: {first_lane} accepted)")[:120]
+        body = (f"SECOND REVIEW {repo}#{number} @ {head}\n"
+                f"Lane {first_lane} already accepted this exact head. "
+                f"{dunk_github.required_verdicts(repo)} distinct reviewer lanes are "
+                "required, so this task exists for a DIFFERENT lane; the claim filter "
+                f"keeps {first_lane} off it.\n\n"
+                "Verdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` "
+                "with the evidence in `task note` first.")
+        try:
+            task = self.flock.tasks.add("global", title, body=body, priority="high",
+                                        kind="review", author=first_lane, repo=repo,
+                                        pr=number, head=head, created_by="review-sync")
+        except Exception as error:  # noqa: BLE001
+            if report is not None:
+                report["errors"].append(f"second review {repo}#{number}: {error}")
+            return None
+        return task["id"]
+
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
                   "followups": [], "errors": []}
@@ -139,9 +198,20 @@ class Sync:
                 done = judged.get((repo, pr["number"], pr["head"]))
                 if done is not None:
                     # Already judged at this exact head. Accepted and still open:
-                    # protection may now be satisfied, so try the merge again.
+                    # protection may now be satisfied, so try the merge again - but
+                    # only when the DISTINCT-lane count is met (t662), and never when
+                    # any lane said needs-fix.
                     if done.get("verdict") == "accept" and not dry_run:
-                        self._merge(repo, pr["number"], pr["head"], token, report, done["id"])
+                        final, accepts, needs_fix, required = self._is_final(
+                            repo, pr["head"], pr["number"])
+                        if final:
+                            self._merge(repo, pr["number"], pr["head"], token, report,
+                                        done["id"])
+                        elif not live.get(key):
+                            # 1 of 2 accepted and nobody is reviewing: keep a second
+                            # review in the queue rather than waiting forever.
+                            self._second_review(repo, pr["number"], pr["head"],
+                                                accepts[0] if accepts else None, report)
                     continue
                 if current:
                     if not dry_run:
@@ -214,9 +284,37 @@ class Sync:
             out["errors"].append(str(error))
             return out
         if verdict == "accept":
+            # t662: a head is final only when ENOUGH DISTINCT lanes accepted it. The
+            # first accept posts pending and files the second review; only the verdict
+            # that meets the count approves and merges. A needs-fix anywhere stops it.
+            final, accepts, needs_fix, required = self._is_final(
+                repo, head, number, lane=by)
+            out["accepts"], out["required"] = accepts, required
+            if needs_fix and not final:
+                try:
+                    self.github.post_status(
+                        repo, head, "failure", token,
+                        f"needs-fix stands from {', '.join(needs_fix)}")
+                    out["status"] = "failure"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
+                return out
+            if not final:
+                try:
+                    self.github.post_status(
+                        repo, head, "pending", token,
+                        f"accepted by {len(accepts)} of {required} distinct reviewer "
+                        f"lanes ({', '.join(accepts)}) - second review filed")
+                    out["status"] = "pending"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
+                out["second_review"] = self._second_review(repo, number, head, by)
+                out["merged"] = False
+                return out
             try:
                 self.github.post_status(repo, head, "success", token,
-                                        f"accepted by {by or 'reviewer'} ({task['id']})")
+                                        f"accepted by {len(accepts)} distinct reviewer "
+                                        f"lanes ({', '.join(accepts)})")
                 out["status"] = "success"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"status: {error}")
