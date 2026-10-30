@@ -511,3 +511,34 @@
   background: var(--dash-panel-2);
   color: var(--dash-fg);
 }
+
+/* DESK_DESIGN 4.1 (t997): the decisions the owner owes, at the top of the desk.
+   One line per question, the lane's words verbatim, and the reply box on the row it
+   answers - so the owner never has to match a question to a task id by hand. */
+.ops-owner { border: 1px solid var(--line, #2a2a2a); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+.ops-owner h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: baseline; gap: 8px; }
+.ops-owner-count { font-size: 12px; opacity: .7; }
+.ops-owner ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.ops-owner-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.ops-owner-question { flex: 1 1 22ch; min-width: 0; }
+.ops-owner-age { font-size: 12px; opacity: .65; white-space: nowrap; }
+.ops-owner-blocks { font-size: 12px; opacity: .7; margin: 4px 0 0; }
+.ops-owner-reply { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.ops-owner-reply input { flex: 1 1 18ch; min-width: 0; }
+.ops-owner-notnow { opacity: .8; }
+.ops-owner-empty { opacity: .7; margin: 0 0 12px; }
+.ops-owner-asks { margin-top: 12px; border-top: 1px solid var(--line, #2a2a2a); padding-top: 10px; }
+.ops-owner-asks h3 { font-size: 13px; margin: 0 0 6px; display: flex; gap: 8px; align-items: baseline; }
+.ops-owner-asks li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.ops-chip { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; }
+.ops-chip-open { opacity: .8; }
+.ops-chip-in_progress { font-weight: 600; }
+.ops-chip-blocked { font-weight: 600; }
+.ops-chip-done { opacity: .55; }
+
+/* 390px: the reply box owns its own row so the question keeps the width it needs. */
+@media (max-width: 430px) {
+  .ops-owner { padding: 10px; }
+  .ops-owner-reply { flex-direction: column; }
+  .ops-owner-reply input, .ops-owner-reply button { width: 100%; }
+}
