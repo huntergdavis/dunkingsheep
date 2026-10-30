@@ -405,7 +405,7 @@
 @media (max-width: 699px) {
   .dash-header { justify-content: flex-start; }
   .dash-side { justify-content: flex-start; }
-  .dash-body { padding: 14px 13px 22px; }
+  .dash-body { padding: 14px 16px 22px; }
   .dash-stats { grid-template-columns: 1fr 1fr; }
   .dash-figure .num { font-size: 40px; }
 }
@@ -542,3 +542,7 @@
   .ops-owner-reply { flex-direction: column; }
   .ops-owner-reply input, .ops-owner-reply button { width: 100%; }
 }
+
+/* Short bubbles hug their text instead of stretching to the row (t1055). */
+.message-wrap { width: fit-content; max-width: 100%; }
+.message-wrap .cs-message__content-wrapper { width: fit-content; max-width: 100%; }
