@@ -82,6 +82,25 @@ def _systemd_installed():
     return os.path.exists(UNIT_PATH)
 
 
+def _service_owns_socket(socket_path):
+    """True when the production service owns this socket (t696).
+
+    A refused connect on a socket that EXISTS, or an active unit, means the daemon is
+    saturated, not absent: starting a `serve` from a worktree CLI then only worsens
+    the accept-queue pressure (six strays at once were measured).
+    """
+    if socket_path != DEFAULT_SOCKET:
+        return False
+    if os.path.exists(socket_path):
+        return True
+    if shutil.which("systemctl"):
+        try:
+            return _systemctl("is-active", "--quiet", SYSTEMD_UNIT).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return False
+
+
 def _systemctl(*args):
     """Run systemctl --user, supplying XDG_RUNTIME_DIR when the caller's shell
     does not have one (agents often do not)."""
@@ -504,6 +523,8 @@ class FlockClient:
         state = client.probe()
         if state == PROBE_RUNNING:
             return client
+        if state == PROBE_ABSENT and _service_owns_socket(client.socket_path):
+            state = PROBE_BUSY
         if state == PROBE_BUSY:
             for delay in BUSY_RETRY_DELAYS:
                 time.sleep(delay)
@@ -566,6 +587,10 @@ class FlockClient:
         # systemd carries its own environment, so requiring DUNKINGSHEEP_TMUX_SOCKET in the CALLER
         # would refuse the handoff to a correctly configured daemon - a fleet-wide outage caused by
         # a fix. The guard belongs where the guess would happen.
+        if supervised and os.environ.get("DUNKINGSHEEP_OWNER_START") != "1":
+            raise DaemonUnavailable(
+                "refusing to spawn a daemon on the production socket: only the owner "
+                "(DUNKINGSHEEP_OWNER_START=1) or systemd may create it")
         from dunk_terminal import backend_name as resolve_backend_name
         backend = resolve_backend_name()
         if backend == "tmux" and not os.environ.get("DUNKINGSHEEP_TMUX_SOCKET"):
