@@ -4972,8 +4972,16 @@ class Flock:
             return None
         if entries is None:
             return None
-        return any(e.get("comm") in AGENT_NAMES and e.get("state") not in DEAD_STATES
-                   for e in entries)
+        if any(e.get("comm") in AGENT_NAMES and e.get("state") not in DEAD_STATES
+               for e in entries):
+            return True
+        # The pane process and its DIRECT children saw no agent. An agent can sit deeper
+        # (`npx claude` -> node -> claude, `bash -lc 'exec pi'` behind a wrapper), so walk
+        # the whole descendant tree before calling the lane dead (review t1029).
+        try:
+            return bool(self._agent_evidence(info.get("pane_pid"), AGENT_NAMES))
+        except Exception:  # noqa: BLE001 - a failed walk is "cannot say", never "dead"
+            return None
 
     # t957: a FIRST-RUN dialog makes a freshly started lane look healthy and be
     # inert. Measured by the owner-role lane: `start-agent` reported 'started agent

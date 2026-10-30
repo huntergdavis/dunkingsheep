@@ -174,11 +174,24 @@ class PushOnIdleTests(unittest.TestCase):
         self.register(IDLE_SHELL, "worker", provider="pi")
         self.flock.herdr.agent_child_pids = lambda pid: [
             {"pid": 1, "comm": "sh", "state": "S", "start": 1, "argv": ["sh"]}]
+        self.flock._agent_evidence = lambda root, names, since_start=None: []
         task = self.flock.task_add("waiting work", self_pane_id="%95")
         with self.assertLogs("dunkingsheep", level="INFO") as captured:
             self.flock._push_tasks()
         self.assertEqual("open", self.claimed_task(task["id"])["status"])
         self.assertTrue(any("reason=no_live_agent" in m for m in captured.output))
+
+    def test_an_agent_deeper_than_a_direct_child_counts_as_alive(self):
+        """Review t1029: the direct-children view saw only shells; the descendant walk
+        finds the grandchild agent, so the lane is fed."""
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: [
+            {"pid": 1, "comm": "sh", "state": "S", "start": 1, "argv": ["sh"]},
+            {"pid": 3, "comm": "sh", "state": "S", "start": 1, "argv": ["sh"]}]
+        self.flock._agent_evidence = lambda root, names, since_start=None: [{"pid": 9, "comm": "claude"}]
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
 
     def test_a_worker_with_a_live_agent_is_fed(self):
         self.register(IDLE_SHELL, "worker", provider="pi")
