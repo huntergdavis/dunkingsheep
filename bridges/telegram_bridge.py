@@ -283,9 +283,12 @@ def send_owner_outbox(config: dict, bot: Telegram, client=None):
             # The receipt the watchdog and the desk read instead of a status file.
             client.call("owner_delivered", message_id=message_id, transport="telegram")
             return
-        config["page_sent_at"] = ([at for at in sent_page_times
-                                   if now - at < telegram_transport.PAGE_WINDOW_S]
-                                  + [now])
+        # Every delivered page spends the budget. sent_page_times is the live list, not
+        # the tick-start snapshot: rebuilding from the snapshot recorded ONE timestamp
+        # for N pages in a tick, so the next tick sent more than the hourly cap (t685).
+        sent_page_times[:] = [at for at in sent_page_times
+                              if now - at < telegram_transport.PAGE_WINDOW_S] + [now]
+        config["page_sent_at"] = list(sent_page_times)
         # Only a page that actually reached the phone moves the watermark, so a held
         # or failed page is selected again on the next tick (t667, finding 1). Pages
         # are capped in id order, so the delivered ids are a prefix and max() is the

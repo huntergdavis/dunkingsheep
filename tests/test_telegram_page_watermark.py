@@ -159,6 +159,36 @@ class PageWatermarkTests(unittest.TestCase):
         pending = [page["message_id"] for page in self.bridge._legacy_pages(config, "cos")]
         self.assertEqual(["page-12", "page-14"], pending)
 
+    def test_pages_delivered_in_one_tick_each_spend_the_hourly_budget(self):
+        """t685: three pages in one tick left ONE timestamp, so the next tick sent two more.
+
+        The cap is the safety property of the one path the owner kept for pages: five
+        pages inside the hour against a stated cap of three.
+        """
+        config = {"chat_id": 1, "last_page_id": 10}
+        bot, client = FakeBot(), FakeClient()
+        self.bridge.send_owner_outbox(config, bot, client=client)
+        self.assertEqual(3, len(bot.sent), "tick 1 should deliver the three pages")
+        self.assertEqual(3, len(config["page_sent_at"]),
+                         "three delivered pages must be three entries in the budget")
+        self.rows += [{"id": 15, "body": "PAGE OWNER outage: a fourth page"},
+                      {"id": 16, "body": "PAGE OWNER money: a fifth page"}]
+        self.bridge.send_owner_outbox(config, bot, client=client)
+        self.assertEqual(3, len(bot.sent),
+                         "the budget was spent in tick 1: tick 2 must hold, not send")
+        self.assertEqual(14, config["last_page_id"], "held pages must stay unread")
+        pending = [page["message_id"] for page in self.bridge._legacy_pages(config, "cos")]
+        self.assertEqual(["page-15", "page-16"], pending)
+
+    def test_a_page_older_than_the_window_does_not_count_after_a_tick(self):
+        old = self.bridge.time.time() - 2 * 3600
+        config = {"chat_id": 1, "last_page_id": 10, "page_sent_at": [old, old]}
+        bot = FakeBot()
+        self.bridge.send_owner_outbox(config, bot, client=FakeClient())
+        self.assertEqual(3, len(bot.sent), "stale entries must not spend the budget")
+        self.assertEqual(3, len(config["page_sent_at"]),
+                         "stale entries are pruned; only the three new pages remain")
+
     def test_a_first_run_carries_the_old_watermark_over(self):
         config = {"chat_id": 1, "last_brief_id": 13}
         pages = self.bridge._legacy_pages(config, "cos")
