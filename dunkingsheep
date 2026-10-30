@@ -1099,6 +1099,10 @@ def print_task(task):
         print(f"assignees   {', '.join(task['assignees'])}")
     if task.get("claimed_by"):
         print(f"claimed by  {', '.join(task['claimed_by'])}")
+    if task.get("pr"):
+        print(f"body pr     #{task['pr']}"
+              + (f" (accounting pr #{task['accounting_pr']})"
+                 if task.get("accounting_pr") else ""))
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
