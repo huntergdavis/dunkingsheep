@@ -168,6 +168,34 @@ class PushOnIdleTests(unittest.TestCase):
         self.flock._push_tasks()
         self.assertEqual("open", self.claimed_task(review["id"])["status"])
 
+    def test_a_registered_worker_whose_agent_exited_is_not_fed(self):
+        """Review t1010 finding 1: the wrapper ends in `exec sh`, so the pane pid and the
+        registration survive the agent; the sweep must not claim work for a bare shell."""
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: [
+            {"pid": 1, "comm": "sh", "state": "S", "start": 1, "argv": ["sh"]}]
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        with self.assertLogs("dunkingsheep", level="INFO") as captured:
+            self.flock._push_tasks()
+        self.assertEqual("open", self.claimed_task(task["id"])["status"])
+        self.assertTrue(any("reason=no_live_agent" in m for m in captured.output))
+
+    def test_a_worker_with_a_live_agent_is_fed(self):
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: [
+            {"pid": 1, "comm": "sh", "state": "S", "start": 1, "argv": ["sh"]},
+            {"pid": 2, "comm": "pi", "state": "S", "start": 2, "argv": ["pi"]}]
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
+
+    def test_an_unknown_process_table_never_blocks_a_push(self):
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: None
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
+
     def test_desk_and_planner_lanes_are_never_pushed_work(self):
         self.register(IDLE_SHELL, "desk")
         task = self.flock.task_add("waiting work", self_pane_id="%95")

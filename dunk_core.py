@@ -3819,6 +3819,12 @@ class Flock:
             if self.tasks.leases_for_pane(pane_id):
                 log.info("push skip pane=%s reason=holding_work", pane_id)
                 continue
+            if self._lane_agent_alive(pane_id) is False:
+                # A registration outlives its agent: the lane wrapper ends in `exec sh`,
+                # which keeps the pane pid, so the role still resolves after the agent
+                # exits. Feeding that shell starves a live lane of a task (review t1010).
+                log.info("push skip pane=%s reason=no_live_agent via=%s", pane_id, why)
+                continue
             role = self.caller_role(pane_id)
             if role == "reviewer" and not self.roles.may_review(pane_id):
                 log.info("push skip pane=%s reason=provider_may_not_review provider=%s",
@@ -3831,6 +3837,7 @@ class Flock:
             # without it the push path hands a worker a review it cannot complete.
             kinds, exclude_author = self._claim_filters(pane_id)
             if kinds is None and not self._may_pull_everything(pane_id):
+                log.info("push skip pane=%s reason=no_kind_for_role via=%s", pane_id, why)
                 continue
             try:
                 claimed = self.tasks.claim_next(
@@ -4952,6 +4959,21 @@ class Flock:
         "permission denied",
         "cannot execute",
     )
+
+    def _lane_agent_alive(self, pane_id):
+        """True when an agent process runs in the pane, False when the process table
+        answered and there is none (a bare shell), None when it cannot say (no /proc,
+        no pid): unknown never blocks a push, only evidence of a dead lane does."""
+        try:
+            from dunk_callers import AGENT_NAMES, DEAD_STATES
+            info = self._pane_info(pane_id) or {}
+            entries = self.herdr.agent_child_pids(info.get("pane_pid"))
+        except Exception:  # noqa: BLE001 - liveness must never stop the sweep
+            return None
+        if entries is None:
+            return None
+        return any(e.get("comm") in AGENT_NAMES and e.get("state") not in DEAD_STATES
+                   for e in entries)
 
     def _agent_evidence(self, root_pid, names, since_start=None):
         """Descendant pids that are a RUNNING process of an expected agent.
