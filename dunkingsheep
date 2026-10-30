@@ -1165,6 +1165,16 @@ def print_task(task):
     if task.get("lease_expires_at"):
         print(f"lease       {time.strftime('%Y-%m-%d %H:%M:%S',
                                         time.localtime(task['lease_expires_at']))}")
+    if task.get("notes"):
+        # t605: the evidence a lane recorded, in the view the next reader actually
+        # uses. Without it a reviewed task reads as unreviewed.
+        print()
+        print(f"notes (last {len(task['notes'])}):")
+        for row in task["notes"]:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["at"]))
+            print(f"  {when} {row.get('actor') or '-'} {row.get('event') or 'note'}")
+            for line in str(row.get("reason") or "").splitlines() or [""]:
+                print(f"    {line}")
 
 
 def print_task_list(result):
@@ -1491,10 +1501,23 @@ def dunk_github_wrappers_install(bin_dir):
         handle.write(GH_WRAPPER.replace("__REAL_GH__", real))
     os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     helper = "!dunkingsheep git-credential"
-    _sp.run(["git", "config", "--global", "--replace-all",
-             "credential.https://github.com.helper", helper], check=False)
+    key = "credential.https://github.com.helper"
+    # t599: this used --replace-all and DROPPED the owner's own
+    # '!gh auth git-credential', so his interactive login stopped being a fallback for
+    # every repo he touched. Ours goes FIRST (it is the lane credential) and every
+    # helper that was already there stays behind it, in the order it was in.
+    existing = [row for row in _sp.run(["git", "config", "--global", "--get-all", key],
+                                       capture_output=True, text=True).stdout.splitlines()
+                if row.strip()]
+    wanted = [helper] + [row for row in existing if row != helper]
+    if existing != wanted:
+        _sp.run(["git", "config", "--global", "--unset-all", key], check=False)
+        for row in wanted:
+            _sp.run(["git", "config", "--global", "--add", key, row], check=False)
     return {"gh_wrapper": target, "real_gh": real, "git_credential_helper": helper,
-            "note": "lanes use https remotes; the owner's own gh/ssh login is untouched "
+            "helpers": wanted,
+            "note": "lanes use https remotes; our helper is first and any helper already "
+                    "configured (the owner's gh login) is kept as the fallback "
                     "(gh-token prints nothing for the owner role)"}
 
 
@@ -1547,6 +1570,10 @@ def print_review_list(result):
 def print_whoami(result):
     print(f"pane {result.get('pane_id') or '-'}  role {result.get('role')}"
           + ("  (service token)" if result.get("via_token") else ""))
+    if result.get("identity_note"):
+        # t602: a lane with no pane is still attributed, by the terminal it came
+        # from. Silence here is what made an ssh lane look like a broken fleet.
+        print(f"  identity: {result['identity_note']}")
     if result.get("binding_note"):
         print(f"  binding: {result['binding_note']}")
     reg = result.get("registered")
@@ -3130,7 +3157,14 @@ def run_client_command(client, args):
             return client.call("review_sync", dry_run=args.dry_run), print_review_sync
         return client.call("review_list"), print_review_list
     if command == "whoami":
-        return client.call("whoami"), print_whoami
+        # The client's identity note travels with the answer: the daemon knows the
+        # pane (or its absence), the client knows WHY there is none.
+        def _whoami(result, _note=client.identity_note):
+            result = dict(result or {})
+            if _note:
+                result.setdefault("identity_note", _note)
+            return print_whoami(result)
+        return client.call("whoami"), _whoami
     if command == "token":
         sub = args.token_command
         if sub == "issue":

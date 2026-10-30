@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS task_leases (
     caller_pid   INTEGER,
     caller_start TEXT,
     caller_name  TEXT,
+    -- 1 when _claim_locked added this pane to tasks.assignees, 0 when the pane
+    -- was already an assignee (the owner's own assignment). release() removes
+    -- only what the claim added, so giving a claim back returns the task to the
+    -- queue instead of stranding it behind an assignee nobody chose (t595).
+    assignee_added INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (task_id, pane_id)
 );
 CREATE INDEX IF NOT EXISTS leases_by_pane ON task_leases (pane_id);
@@ -325,7 +330,8 @@ class Tasks:
         lease_columns = {row["name"] for row in self.db.execute(
             "PRAGMA table_info(task_leases)")}
         for name, ddl in (("caller_pid", "INTEGER"), ("caller_start", "TEXT"),
-                          ("caller_name", "TEXT")):
+                          ("caller_name", "TEXT"),
+                          ("assignee_added", "INTEGER NOT NULL DEFAULT 0")):
             if name not in lease_columns:
                 self.db.execute(f"ALTER TABLE task_leases ADD COLUMN {name} {ddl}")
 
@@ -764,7 +770,11 @@ class Tasks:
 
     def notes(self, task_id, event="note"):
         """Every note event on a task, oldest first: [{at, actor, meta, text}].
-        The review timer reads these because a verdict's evidence lives in them."""
+
+        A review verdict has to be able to read the evidence the reviewer
+        recorded, because "see the task notes" is only true if there are notes
+        (t621: two verdicts were filed with none, and the fix tasks they created
+        had nothing to work from)."""
         rows = self.db.execute(
             "SELECT at, actor, meta FROM task_events WHERE task_id = ? AND event = ? "
             "ORDER BY at, id", (str(task_id), event)).fetchall()
@@ -1030,6 +1040,37 @@ class Tasks:
             self.db.commit()
         return {"noted": str(task_id), "event": event, "actor": actor,
                 "meta": meta or {}}
+
+    def recent_notes(self, task_id, limit=3):
+        """The last `limit` events that carry a reason, oldest first (t605).
+
+        Evidence a lane wrote with `task note` lived only in task_events, so
+        `task read` showed a fully-reviewed task as if nobody had looked at it - the
+        reviewer's evidence was invisible to the next reader and the queue re-nudged
+        finished work. This is the read side of that record: no new storage, no
+        mutation, and a caller that asks for 0 gets none.
+        """
+        limit = int(limit or 0)
+        if limit <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT event, at, actor, meta FROM task_events WHERE task_id = ? "
+            "AND meta IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (str(task_id), limit * 4)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            reason = str((meta or {}).get("reason") or "").strip()
+            if not reason:
+                continue
+            out.append({"event": row["event"], "at": row["at"],
+                        "actor": row["actor"], "reason": reason})
+            if len(out) >= limit:
+                break
+        return list(reversed(out))
 
     # -- reading ------------------------------------------------------------
 
@@ -1324,16 +1365,17 @@ class Tasks:
         target = chosen["scope"]
         caller_pid, caller_start, caller_name = (caller.get(k) for k in ("pid", "start", "name"))
         assignees = list(chosen["assignees"])
-        if pane_id not in assignees:
+        added_assignee = pane_id not in assignees
+        if added_assignee:
             assignees.append(pane_id)
         expires = now + lease_s
         self.db.execute(
             "INSERT OR REPLACE INTO task_leases "
             "(task_id, pane_id, claimed_at, heartbeat_at, expires_at, "
-            "caller_pid, caller_start, caller_name) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "caller_pid, caller_start, caller_name, assignee_added) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (chosen["id"], pane_id, now, now, expires,
-             caller_pid, caller_start, caller_name),
+             caller_pid, caller_start, caller_name, 1 if added_assignee else 0),
         )
         self.db.execute(
             "UPDATE tasks SET status = 'in_progress', assignees = ?, "
@@ -1382,7 +1424,16 @@ class Tasks:
                 "expires_at": now + lease_s, "lease_seconds": lease_s}
 
     def release(self, task_id, pane_id):
-        """Give a claim back without completing it."""
+        """Give a claim back without completing it.
+
+        A claim that ADDED its pane to the assignee list takes it away again on
+        release. `_after_lease_change` deliberately keeps assignees (a lease is
+        activity, not an assignment), but the claim itself writes an assignee, and
+        leaving that behind made a released task unclaimable by everyone: open +
+        assignees + no multi_assignee means only the named pane may pull it, and
+        that pane just said no (t595, live on t568). An assignment the owner made
+        before the claim is untouched, because the lease records which one this is.
+        """
         with self._lock:
             if self.db.in_transaction:
                 self.db.commit()
@@ -1391,12 +1442,21 @@ class Tasks:
                 row = self._require(task_id)
                 task_id = row["id"]
                 now = _now()
+                lease = self.db.execute(
+                    "SELECT assignee_added FROM task_leases "
+                    "WHERE task_id = ? AND pane_id = ?",
+                    (task_id, str(pane_id)),
+                ).fetchone()
+                added = bool(lease["assignee_added"]) if lease is not None else False
                 self.db.execute(
                     "DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?",
                     (task_id, str(pane_id)),
                 )
+                assignees = _decode(row["assignees"])
+                if added:
+                    assignees = [item for item in assignees if item != str(pane_id)]
                 resulting = self._after_lease_change(
-                    task_id, row["assignees"], now, pane_id)
+                    task_id, _encode(assignees), now, pane_id)
                 self._record(task_id, "released", at=now, actor=pane_id,
                              scope=row["scope"], priority=row["priority"],
                              status_from=row["status"], status_to=resulting)

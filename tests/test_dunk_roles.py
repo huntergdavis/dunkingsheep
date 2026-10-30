@@ -101,6 +101,14 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(self.roles.may_review("w3:p1"))
         self.assertTrue(self.roles.may_review("w3:p2"))
 
+    def test_may_review_trusts_the_resolved_role_of_a_pid_bound_pane(self):
+        # Regression 2026-10-29: a reviewer registered with its root pid was
+        # re-resolved WITHOUT the live pane record inside may_review and fell
+        # to the default role, so every verdict was refused.
+        self.roles.register("w3:p3", "reviewer", provider="claude", pane_pid=4321)
+        self.assertFalse(self.roles.may_review("w3:p3"))            # no live record here
+        self.assertTrue(self.roles.may_review("w3:p3", role="reviewer"))
+
     def test_allowlist_shape(self):
         self.assertTrue(dunk_roles.allowed("owner", "shutdown"))
         self.assertFalse(dunk_roles.allowed("web", "shutdown"))
@@ -285,6 +293,14 @@ class ServerBindingTests(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual("owner", reply["result"]["role"])
         self.assertTrue(reply["result"]["bound"])
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "needs /proc")
+    def test_a_claim_for_a_pane_the_backend_does_not_know_runs_anonymous(self):
+        reply = self.request("w1:p2")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual("anonymous", reply["result"]["role"])
+        self.assertIsNone(reply["result"]["pane_id"])
+        self.assertIn("no such pane", reply["result"]["binding_note"])
 
     @unittest.skipUnless(os.path.isdir("/proc"), "needs /proc")
     def test_a_claim_the_process_does_not_belong_to_runs_anonymous(self):

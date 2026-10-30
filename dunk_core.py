@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.71.0"
+VERSION = "2.71.4"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -2598,8 +2598,19 @@ class Flock:
 
     @_as_dunk_error
     def task_read(self, task_id, self_pane_id=None):
-        return self._require_task_visible(
+        """One task, with the last few note reasons attached (t605).
+
+        The note is where a lane records what it ran, the head it worked on and what
+        it did NOT verify. Leaving that out of the read view made finished, reviewed
+        work look untouched, so a reader re-executed or re-reviewed it.
+        """
+        task = self._require_task_visible(
             self.tasks.get(task_id, pane_id=self_pane_id), self_pane_id)
+        try:
+            task["notes"] = self.tasks.recent_notes(task["id"], limit=3)
+        except Exception:  # noqa: BLE001 - a read view never fails on its evidence
+            task["notes"] = []
+        return task
 
     @_as_dunk_error
     def task_update(self, task_id, title=None, body=None, status=None,
@@ -2626,7 +2637,7 @@ class Flock:
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         if task.get("kind") == "review":
             role = self.caller_role(self_pane_id)
-            if role == "reviewer" and not self.roles.may_review(self_pane_id):
+            if role == "reviewer" and not self.roles.may_review(self_pane_id, role=role):
                 raise DunkError(f"{self_pane_id} may not review (provider not on the "
                                 "reviewer list)")
             if role not in ("reviewer", "owner"):
@@ -2639,6 +2650,28 @@ class Flock:
                 verdict = validate_verdict(verdict)
             except TaskError as error:
                 raise DunkError(str(error)) from None
+            # A verdict is a claim about work, and a claim needs evidence
+            # (docs/LANES.md reviewer brief; enforced here because a brief is a
+            # promise and this is the daemon). On 2026-10-29 two needs-fix
+            # verdicts were filed with no note anywhere: the follow-up fix tasks
+            # they created said "see the task notes" and there were none, so the
+            # work they blocked could not be started (t621).
+            self._require_review_evidence(task, self_pane_id)
+            # One verdict per head (t656). A cancelled task is not a place to put
+            # a verdict at all - a sweep may have cancelled it because the head
+            # was already judged - and a done one already carries the verdict the
+            # merge record was built on. Completing either used to succeed, which
+            # let a duplicate review flip an accepted head to needs-fix AND post a
+            # failure status over the standing success.
+            if task.get("status") == "cancelled":
+                raise DunkError(
+                    f"{task_id} is cancelled: a cancelled review takes no verdict. If the "
+                    "head still needs judging, the review timer files a review for it.")
+            if task.get("status") == "done":
+                raise DunkError(
+                    f"{task_id} is already done with verdict {task.get('verdict')!r}: a "
+                    "verdict is bound to the head it measured, so a second one is refused "
+                    "rather than overwriting the merge record")
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
@@ -3148,6 +3181,20 @@ class Flock:
         self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
+    def _may_pull_everything(self, pane_id):
+        """True when this pane's role may pull any kind (the owner).
+
+        A reviewer lane whose provider is not on `reviewer_providers` must not be
+        pushed review work at all: `task next` raises for it, and a push that
+        skipped the check would hand it a task it can never complete.
+        """
+        role = self.caller_role(pane_id) if pane_id else "anonymous"
+        if role == "owner":
+            return True
+        if role == "reviewer":
+            return self.roles.may_review(pane_id, role=role)
+        return False
+
     def _claim_filters(self, self_pane_id):
         """(kinds, exclude_author) for a claim, from the caller's role.
 
@@ -3175,8 +3222,8 @@ class Flock:
         that hold a lease.
         """
         caller = self.current_caller()
-        if self_pane_id and self.caller_role(self_pane_id) == "reviewer" \
-                and not self.roles.may_review(self_pane_id):
+        role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+        if role == "reviewer" and not self.roles.may_review(self_pane_id, role=role):
             raise DunkError(
                 f"{self_pane_id} is a reviewer lane on a provider that may not review "
                 f"({self.roles.provider_of(self_pane_id) or 'unknown'}; allowed: "
@@ -3627,9 +3674,18 @@ class Flock:
                 continue
             if self.tasks.leases_for_pane(pane_id):
                 continue
+            # The push path is the pull path (FLAT_FLEET.md 5): the same role ->
+            # kind rule and the same no-self-review rule, from the same function.
+            # It used to omit both, so a worker follower was pushed a review it
+            # could not complete and a reviewer could be pushed its own PR (t595,
+            # live on %100 / t568).
+            kinds, exclude_author = self._claim_filters(pane_id)
+            if kinds is None and not self._may_pull_everything(pane_id):
+                continue
             try:
                 claimed = self.tasks.claim_next(
-                    scope=followers[pane_id], pane_id=pane_id)
+                    scope=followers[pane_id], pane_id=pane_id, kinds=kinds,
+                    exclude_author=exclude_author)
             except Exception:
                 log.exception("task claim failed for %s", pane_id)
                 continue
@@ -3850,7 +3906,7 @@ class Flock:
         hit = self._role_pane_cache.get(pane_id)
         if hit and hit[0] > now:
             return hit[1]
-        info = self._pane_info(pane_id)
+        info = self._pane_info(pane_id)      # None when the backend knows no such pane
         self._role_pane_cache[pane_id] = (now + 2.0, info)
         if len(self._role_pane_cache) > 512:
             self._role_pane_cache = {k: v for k, v in self._role_pane_cache.items()
@@ -4055,6 +4111,42 @@ class Flock:
         rows.sort(key=lambda r: -r["age_s"])
         return {"reviews": rows, "count": len(rows),
                 "oldest_age_s": rows[0]["age_s"] if rows else None}
+
+    def _require_review_evidence(self, task, self_pane_id):
+        """Refuse a verdict unless this pane noted its evidence after it claimed.
+
+        The window is "after the claim" on purpose: a note written before the
+        review started is a plan, not a finding. An owner or system caller with no
+        lease is exempt (it is not the lane that judged the work), and that
+        exemption is stated rather than inferred from an empty note list.
+        """
+        lease = None
+        for candidate in (self.tasks.leases_for_pane(self_pane_id)
+                          if self_pane_id else []):
+            if candidate["task_id"] == task["id"]:
+                lease = candidate
+                break
+        if lease is None:
+            role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+            if role in ("owner", "system"):
+                return
+        claimed_at = lease["claimed_at"] if lease else task.get("created_at") or 0
+        notes = [note for note in self.tasks.notes(task["id"])
+                 if note["actor"] == self_pane_id and note["at"] >= claimed_at
+                 and note["text"].strip()]
+        if notes:
+            return
+        raise DunkError(
+            f"a verdict needs evidence: record what you ran and what you did NOT "
+            f"verify first, with `dunkingsheep task note {task['id']} --reason "
+            f"\"<commands, head sha, what is not verified>\"`. A note by another "
+            f"lane, or one written before you claimed, does not count.")
+
+    def _review_evidence(self, task):
+        """The reviewer's own note text, verbatim, for the follow-up and GitHub."""
+        notes = [note["text"].strip() for note in self.tasks.notes(task["id"])
+                 if note["text"].strip()]
+        return "\n\n".join(notes)
 
     def _after_review_verdict(self, task, verdict, by=None):
         try:
@@ -4715,21 +4807,14 @@ class Flock:
                     since_start = process_start(pane_pid)
             captured = self.herdr.read_pane(pane_id, lines=20) or ""
             lowered = captured.lower()
-            for marker in self.AGENT_FAILURE_MARKERS:
-                if marker in lowered:
-                    line = next((row for row in captured.splitlines()
-                                 if marker in row.lower()), captured.strip()[:200])
-                    raise DunkError(
-                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
-                        "The pane is up but the command never ran - check the PATH the pane "
-                        "inherits.")
-            # An agent that is drawing its own UI has started; a bare shell that has printed
-            # nothing yet is neither. Keep waiting for the rest of the window: a process
-            # sighting below is recorded, never returned early.
-            if "[agent exited rc=" in lowered:
-                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
-                raise DunkError(
-                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
+            # PROCESS EVIDENCE FIRST, TEXT SECOND (t599). A pi lane's first screen carries
+            # its launcher's own noise - ENOENT lines and sed errors from the wrapper - which
+            # matched the failure markers below and refused a start that had in fact worked.
+            # The consequence was not cosmetic: lane_register ran after this check, so a
+            # false refusal left the lane ANONYMOUS and the owner registered it by hand.
+            # A live process of the expected kind, bound to this generation, is direct
+            # evidence that the command ran; screen text is only a proxy for it, so the
+            # proxy may not overrule the evidence.
             if watch_procs:
                 entries = (self.herdr.agent_child_pids(pane_pid)
                            if pane_pid is not None else None)
@@ -4742,6 +4827,23 @@ class Flock:
                     matched = self._match_agent_process(entries, kind, since_start)
                     if matched:
                         seen = matched
+            for marker in self.AGENT_FAILURE_MARKERS:
+                if marker in lowered and not seen:
+                    line = next((row for row in captured.splitlines()
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
+                        "The pane is up but the command never ran - check the PATH the pane "
+                        "inherits.")
+            # An agent that is drawing its own UI has started; a bare shell that has printed
+            # nothing yet is neither. Keep waiting for the rest of the window: a process
+            # sighting above is recorded, never returned early. An explicit exit line is NOT
+            # gated on that sighting: t215 REVISE P1 measured a blank first frame with a live
+            # pid followed by rc=127, which is a refusal, not a start.
+            if "[agent exited rc=" in lowered:
+                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
+                raise DunkError(
+                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
             time.sleep(0.1)
         if not watch_procs:
             return None

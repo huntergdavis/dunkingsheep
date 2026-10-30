@@ -40,6 +40,13 @@ CONFIG_DIR = Path(os.environ.get("DUNKINGSHEEP_DIR",
 API = os.environ.get("DUNKINGSHEEP_GITHUB_API", "https://api.github.com")
 KINDS = ("author", "reviewer")
 DEFAULT_REPOS = ("huntergdavis/dunkingsheep", "huntergdavis/poolrad-decomp")
+# t662: how many DISTINCT reviewer lanes a head needs. Per-repo override in
+# github-repos.json ("required_verdicts": {"o/r": 2}); 1 is the old behaviour.
+DEFAULT_REQUIRED_VERDICTS = 1
+# The repos the fleet reviews today, so the rule holds without editing live config:
+# poolrad-decomp needs two distinct lanes, dunkingsheep one. github-repos.json
+# "required_verdicts" overrides either.
+REPO_REQUIRED_VERDICTS = {"huntergdavis/poolrad-decomp": 2}
 REVIEW_CONTEXT = "dunkingsheep/review"
 # Refresh a cached installation token this long before GitHub expires it, so a
 # push that starts at minute 59 does not die mid-transfer.
@@ -264,6 +271,17 @@ def post_status(repo, sha, state, token, description, target_url=None):
                     payload=payload)
 
 
+def merge_pull(repo, number, token, sha=None):
+    """Merge an accepted PR as the reviewer App once branch protection is satisfied.
+    GitHub answers 405 while a required check or review is still missing; the
+    caller treats that as 'not yet' and the next sync retries."""
+    payload = {"merge_method": "merge"}
+    if sha:
+        payload["sha"] = sha
+    return _request("PUT", f"{API}/repos/{repo}/pulls/{number}/merge", token=token,
+                    payload=payload)
+
+
 def review_pull(repo, number, event, body, token):
     """Approve or request changes on a PR as the reviewer App."""
     payload = {"event": event, "body": body}
@@ -451,6 +469,34 @@ def protection_payload(approvals, reviewer_app_id, bypass_app_slug=None):
         payload["required_pull_request_reviews"]["bypass_pull_request_allowances"] = {
             "apps": [bypass_app_slug]}
     return payload
+
+
+def required_verdicts(repo, config=None):
+    """How many DISTINCT reviewer lanes a head needs before it is final (t662).
+
+    GitHub cannot answer this: every lane approves as the same App identity, so two
+    APPROVEs from two lanes look like one reviewer to the API - and two approvals from
+    the SAME lane look like two. The count lives here, per repo, in
+    `github-repos.json`:
+
+        {"repos": ["o/r"], "required_verdicts": {"o/r": 2}}
+
+    Default 1: a repo that says nothing keeps the old single-verdict behaviour.
+    """
+    data = config
+    if data is None:
+        try:
+            with open(CONFIG_DIR / "github-repos.json", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            data = {}
+    table = data.get("required_verdicts") if isinstance(data, dict) else None
+    fallback = REPO_REQUIRED_VERDICTS.get(str(repo), DEFAULT_REQUIRED_VERDICTS)
+    try:
+        value = int((table or {}).get(str(repo), fallback))
+    except (TypeError, ValueError):
+        value = DEFAULT_REQUIRED_VERDICTS
+    return max(1, value)
 
 
 def repos_config():

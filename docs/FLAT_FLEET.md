@@ -422,6 +422,13 @@ a second run copies nothing. **Not yet done:** `web/app.py` still opens
 over the socket instead, which is the step that makes a web question appear in
 `inbox.db` rather than only in the migrated copy.
 
+**Not yet done (2026-10-30):** `bridges/telegram_bridge.py` still runs the old
+`send_briefs` firehose, so this build's Telegram unit forwards desk briefs as
+well as answers — the "answers only, no echoes, no reports" half of 7.2 is
+policy here, not behaviour. That switch is t594 (PR #135), which is not
+accepted; until it lands the unit is described by what it does (see
+`packaging/systemd/dunkingsheep-telegram.service`).
+
 ### 7.3 Reporter (replaces the VP)
 
 `dunkingsheep report` is deterministic and has no model: task metrics, lanes

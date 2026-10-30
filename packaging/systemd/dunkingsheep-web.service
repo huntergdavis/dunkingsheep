@@ -13,7 +13,9 @@ Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/web-token
 Environment=DUNKING_SHEEP_DIR=/home/hunter/.local/share/dunkingsheep/current
 Environment=VP_DATA_DIR=%h/.config/dunkingsheep/desk
 Environment=VP_CHANNELS_FILE=%h/.config/dunkingsheep/desk/channels.json
-Environment=VP_HERDR_WEBUI_LABEL=Terminal (tmux)
+# Quoted: an unquoted value with a space/parentheses is an INVALID assignment and
+# systemd silently drops it (systemd-analyze verify), so the label never reached the desk.
+Environment="VP_HERDR_WEBUI_LABEL=Terminal (tmux)"
 Restart=on-failure
 RestartSec=3
 UMask=0077

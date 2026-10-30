@@ -188,13 +188,84 @@ class Sync:
         self.github = github
 
     def _live_reviews(self):
-        tasks = self.flock.tasks.list(scope=None, include_done=False, limit=500,
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
                                       kind="review")
         by_pr = {}
         for task in tasks:
             if task["status"] in ("open", "in_progress", "blocked"):
                 by_pr[(task.get("repo"), task.get("pr"))] = task
         return by_pr
+
+    def _judged_heads(self):
+        """(repo, pr, head) -> verdict for every DONE review: a head that was
+        judged is never re-filed (2026-10-29: an accepted PR got a second review
+        task the next tick, whose pending status overwrote the success)."""
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                      kind="review")
+        out = {}
+        for task in tasks:
+            if task["status"] == "done" and task.get("verdict"):
+                out[(task.get("repo"), task.get("pr"), task.get("head"))] = task
+        return out
+
+    def head_verdicts(self, repo, head, number=None):
+        """The verdicts recorded at one head, by DISTINCT lane (t662).
+
+        GitHub cannot tell two lanes apart - every lane approves as the same App - so
+        the count that decides whether a head is final has to come from the task store,
+        where `completed_by` is the lane. A lane that accepted twice is one lane; a
+        needs-fix from any lane stops the head even if others accept it.
+        """
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                      kind="review")
+        accepts, needs_fix = set(), set()
+        for task in tasks:
+            if task.get("repo") != repo or task.get("head") != head:
+                continue
+            if number is not None and task.get("pr") != number:
+                continue
+            if task["status"] != "done":
+                continue
+            lane = task.get("completed_by") or None
+            if task.get("verdict") == "accept" and lane:
+                accepts.add(str(lane))
+            elif task.get("verdict") == "needs-fix" and lane:
+                needs_fix.add(str(lane))
+        return sorted(accepts), sorted(needs_fix)
+
+    def _is_final(self, repo, head, number=None, lane=None):
+        """Is this head final: enough DISTINCT accepting lanes and no needs-fix?"""
+        accepts, needs_fix = self.head_verdicts(repo, head, number)
+        if lane and str(lane) not in accepts:
+            accepts = sorted(set(accepts) | {str(lane)})
+        required = dunk_github.required_verdicts(repo)
+        return (not needs_fix) and len(accepts) >= required, accepts, needs_fix, required
+
+    def _second_review(self, repo, number, head, first_lane, report=None):
+        """File the second review for a head whose first verdict was an accept (t662).
+
+        `author` is the lane that already accepted, and the claim filter excludes an
+        author from its own review, so the next reviewer cannot be the same lane. The
+        partial unique index allows it because the first review task is done.
+        """
+        title = (f"Review {repo.split('/')[-1]} PR #{number} {head[:8]} "
+                 f"(second reviewer: {first_lane} accepted)")[:120]
+        body = (f"SECOND REVIEW {repo}#{number} @ {head}\n"
+                f"Lane {first_lane} already accepted this exact head. "
+                f"{dunk_github.required_verdicts(repo)} distinct reviewer lanes are "
+                "required, so this task exists for a DIFFERENT lane; the claim filter "
+                f"keeps {first_lane} off it.\n\n"
+                "Verdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` "
+                "with the evidence in `task note` first.")
+        try:
+            task = self.flock.tasks.add("global", title, body=body, priority="high",
+                                        kind="review", author=first_lane, repo=repo,
+                                        pr=number, head=head, created_by="review-sync")
+        except Exception as error:  # noqa: BLE001
+            if report is not None:
+                report["errors"].append(f"second review {repo}#{number}: {error}")
+            return None
+        return task["id"]
 
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
@@ -207,6 +278,8 @@ class Sync:
         lanes = self.flock.roles.describe().get("lanes") or {}
         mints = getattr(self.flock, "_gh_token_mints", {}) or {}
         live = self._live_reviews()
+        judged = self._judged_heads()
+        report["merged"] = []
         seen = set()
         listed = set()       # repos GitHub answered for; only their closed PRs are cancelled
         for repo in self.github.repos_config():
@@ -224,6 +297,24 @@ class Sync:
                 seen.add(key)
                 current = live.get(key)
                 if current and current.get("head") == pr["head"]:
+                    continue
+                done = judged.get((repo, pr["number"], pr["head"]))
+                if done is not None:
+                    # Already judged at this exact head. Accepted and still open:
+                    # protection may now be satisfied, so try the merge again - but
+                    # only when the DISTINCT-lane count is met (t662), and never when
+                    # any lane said needs-fix.
+                    if done.get("verdict") == "accept" and not dry_run:
+                        final, accepts, needs_fix, required = self._is_final(
+                            repo, pr["head"], pr["number"])
+                        if final:
+                            self._merge(repo, pr["number"], pr["head"], token, report,
+                                        done["id"])
+                        elif not live.get(key):
+                            # 1 of 2 accepted and nobody is reviewing: keep a second
+                            # review in the queue rather than waiting forever.
+                            self._second_review(repo, pr["number"], pr["head"],
+                                                accepts[0] if accepts else None, report)
                     continue
                 if current:
                     if not dry_run:
@@ -262,6 +353,19 @@ class Sync:
                 report["cancelled"].append(task["id"])
         return report
 
+    def _merge(self, repo, number, head, token, report, task_id=None):
+        try:
+            self.github.merge_pull(repo, number, token, sha=head)
+            report["merged"].append({"repo": repo, "pr": number, "head": head[:12],
+                                     "task": task_id})
+            return True
+        except dunk_github.GitHubError as error:
+            # 405 = protection not yet satisfied (approval count, other checks):
+            # not an error, the next tick retries. Anything else is reported.
+            if "405" not in str(error):
+                report["errors"].append(f"merge {repo}#{number}: {error}")
+            return False
+
     def _status(self, repo, sha, state, token, description, url, report):
         try:
             self.github.post_status(repo, sha, state, token, description, url)
@@ -283,9 +387,37 @@ class Sync:
             out["errors"].append(str(error))
             return out
         if verdict == "accept":
+            # t662: a head is final only when ENOUGH DISTINCT lanes accepted it. The
+            # first accept posts pending and files the second review; only the verdict
+            # that meets the count approves and merges. A needs-fix anywhere stops it.
+            final, accepts, needs_fix, required = self._is_final(
+                repo, head, number, lane=by)
+            out["accepts"], out["required"] = accepts, required
+            if needs_fix and not final:
+                try:
+                    self.github.post_status(
+                        repo, head, "failure", token,
+                        f"needs-fix stands from {', '.join(needs_fix)}")
+                    out["status"] = "failure"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
+                return out
+            if not final:
+                try:
+                    self.github.post_status(
+                        repo, head, "pending", token,
+                        f"accepted by {len(accepts)} of {required} distinct reviewer "
+                        f"lanes ({', '.join(accepts)}) - second review filed")
+                    out["status"] = "pending"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
+                out["second_review"] = self._second_review(repo, number, head, by)
+                out["merged"] = False
+                return out
             try:
                 self.github.post_status(repo, head, "success", token,
-                                        f"accepted by {by or 'reviewer'} ({task['id']})")
+                                        f"accepted by {len(accepts)} distinct reviewer "
+                                        f"lanes ({', '.join(accepts)})")
                 out["status"] = "success"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"status: {error}")
@@ -296,6 +428,15 @@ class Sync:
                 out["review"] = "approved"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"approve: {error}")
+            # Merge now if protection is satisfied (one approval repos); poolrad
+            # needs a second verdict first and the sync retries every tick.
+            try:
+                self.github.merge_pull(repo, number, token, sha=head)
+                out["merged"] = True
+            except dunk_github.GitHubError as error:
+                out["merged"] = False
+                if "405" not in str(error):
+                    out["errors"].append(f"merge: {error}")
             # FLAT_FLEET.md 6.4: an accepted body earns its ledger row as its own
             # PR, opened by the reviewer App and approved by the author App.
             try:
@@ -303,25 +444,42 @@ class Sync:
             except Exception as error:  # noqa: BLE001 - never undoes a verdict
                 out["accounting"] = {"errors": [str(error)]}
         else:
+            evidence = self._evidence(task)
+            standing = self._standing_accept(task)
+            if standing is not None:
+                # A failure status here would overwrite the success that branch
+                # protection reads, on a head that another review already
+                # accepted (t656). The verdict is recorded on its own task; the
+                # head's status is not this verdict's to flip.
+                out["status"] = "skipped_standing_accept"
+                out["standing_accept"] = standing
+                out["errors"].append(
+                    f"failure status not posted: {repo}#{number} @ {head[:12]} already "
+                    f"carries an accept verdict from {standing}")
+            else:
+                try:
+                    self.github.post_status(repo, head, "failure", token,
+                                            f"needs-fix per {task['id']}")
+                    out["status"] = "failure"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
             try:
-                self.github.post_status(repo, head, "failure", token,
-                                        f"needs-fix per {task['id']}")
-                out["status"] = "failure"
-            except dunk_github.GitHubError as error:
-                out["errors"].append(f"status: {error}")
-            try:
-                self.github.review_pull(repo, number, "REQUEST_CHANGES",
-                                        f"Needs fix per {task['id']} (reviewer lane "
-                                        f"{by or '?'}); see the task notes.", token)
+                # The evidence goes in the review body, not a pointer to it: the
+                # body that said "see the task notes" on 2026-10-29 pointed at
+                # nothing, and the fix tasks it created could not be worked (t621).
+                self.github.review_pull(
+                    repo, number, "REQUEST_CHANGES",
+                    self._review_body(task, by, head, evidence), token)
                 out["review"] = "changes_requested"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"request-changes: {error}")
             try:
                 followup = self.flock.tasks.add(
                     "global", f"Fix {repo.split('/')[-1]} PR #{number} per {task['id']}",
-                    body=f"Reviewer verdict needs-fix on {repo}#{number} @ {head}.\n"
-                         f"Read the notes on {task['id']}, push a fix to the same branch; "
-                         "the review timer files a new review for the new head.",
+                    body=(f"Reviewer verdict needs-fix on {repo}#{number} @ {head}.\n\n"
+                          f"The reviewer's evidence, verbatim:\n\n{evidence}\n\n"
+                          "Push a fix to the same branch; the review timer files a new "
+                          "review for the new head."),
                     priority="high", kind="work",
                     assignees=[task["author"]] if task.get("author") else None,
                     created_by="review-sync")
@@ -505,3 +663,47 @@ class Sync:
                                         "errors": out.get("errors") or []})
         except Exception as error:  # noqa: BLE001 - recording never undoes a verdict
             log.warning("could not record accounting for %s: %s", task.get("id"), error)
+
+    def _standing_accept(self, task):
+        """The task id of another DONE review that accepted this exact head, or None."""
+        repo, number, head = task.get("repo"), task.get("pr"), task.get("head")
+        if not (repo and number and head):
+            return None
+        try:
+            tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                          kind="review")
+        except Exception:  # noqa: BLE001 - a store read must not stop a verdict
+            return None
+        for other in tasks:
+            if (other["id"] != task["id"] and other.get("status") == "done"
+                    and other.get("verdict") == "accept"
+                    and (other.get("repo"), other.get("pr"), other.get("head"))
+                    == (repo, number, head)):
+                return other["id"]
+        return None
+
+    def _evidence(self, task):
+        """The reviewer's own notes, verbatim, or a sentence saying there are none.
+
+        `task complete --verdict` refuses a review with no note (t621), so an empty
+        result here means an older verdict or an owner-completed one; it is
+        reported as empty rather than silently omitted.
+        """
+        try:
+            notes = self.flock.tasks.notes(task["id"])
+        except Exception:  # noqa: BLE001 - a store without notes is not a failure
+            return "(no note store)"
+        text = "\n\n".join(note["text"].strip() for note in notes
+                            if note.get("text", "").strip())
+        return text or "(no evidence was recorded on the review task)"
+
+    def _review_body(self, task, by, head, evidence):
+        return "\n".join([
+            f"Needs fix per {task['id']} (reviewer lane {by or '?'}) at head {head}.",
+            "",
+            "The reviewer's evidence, verbatim:",
+            "",
+            evidence,
+            "",
+            "A verdict is bound to this head: a new push files a new review.",
+        ])

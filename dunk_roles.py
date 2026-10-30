@@ -340,9 +340,14 @@ class Roles:
         entry = self.entry(pane_id) or {}
         return (entry.get("provider") or "").strip().lower() or None
 
-    def may_review(self, pane_id):
-        """Reviewer role AND a provider on the reviewer list (free models never review)."""
-        if self.role_of(pane_id) != "reviewer":
+    def may_review(self, pane_id, role=None):
+        """Reviewer role AND a provider on the reviewer list (free models never review).
+
+        `role` is the caller's already-resolved role (Flock.caller_role, which
+        has the live pane record); resolving here without one would demote a
+        registered pane to the default (2026-10-29: every pi reviewer verdict
+        was refused)."""
+        if (role or self.role_of(pane_id)) != "reviewer":
             return False
         provider = self.provider_of(pane_id)
         return bool(provider and provider in {p.lower() for p in self.reviewer_providers})
