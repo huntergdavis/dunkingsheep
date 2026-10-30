@@ -180,3 +180,57 @@ class PaneLessVerbTests(unittest.TestCase):
         import dunk_client
         import dunk_roles
         self.assertEqual(frozenset(dunk_roles.READ_ONLY), dunk_client._READ_ONLY_COMMANDS)
+
+
+class ClientPatienceTests(unittest.TestCase):
+    """t693: the client deadline is patience, not capability - and reads retry once.
+
+    Measured on the live host at load 22 (8 cores, 15 pi lanes): `status` took
+    20.93 24.52 17.94 7.54 2.88 2.07 2.98 2.52 s (p50 ~5 s, p90 ~24.5 s). A 15 s
+    deadline failed 3 of 8 cheap reads, and a failed read is what marks a live lane
+    dead and an active review abandoned.
+    """
+
+    def test_the_default_deadline_covers_the_measured_p90(self):
+        import dunk_client
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                        self_pane_id="%1")
+        self.assertGreaterEqual(client.timeout, 30.0,
+                                "a 15 s cap fails on a box whose p90 is 24.5 s")
+        self.assertEqual(float(dunk_client.DEFAULT_TIMEOUT), client.timeout)
+
+    def test_an_explicit_deadline_still_wins(self):
+        import dunk_client
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                        self_pane_id="%1", timeout=7)
+        self.assertEqual(7.0, client.timeout)
+
+    def test_the_environment_can_override_it(self):
+        """No module reload: that replaces the exception classes and every other
+        test in the process then holds a stale IdentityRefused (seen while writing
+        this test). The rule lives in a pure function instead."""
+        import dunk_client
+        self.assertEqual(12.0, dunk_client.default_timeout(
+            {"DUNKINGSHEEP_CLIENT_TIMEOUT": "12"}))
+        self.assertEqual(45.0, dunk_client.default_timeout({}))
+        self.assertEqual(45.0, dunk_client.default_timeout(
+            {"DUNKINGSHEEP_CLIENT_TIMEOUT": "not-a-number"}))
+
+    def test_a_read_is_retried_once_and_a_write_is_not(self):
+        import dunk_client
+        calls = []
+
+        def boom(request):
+            calls.append(request["cmd"])
+            raise TimeoutError("no answer")
+
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                         self_pane_id="%1")
+        client._call_once = boom
+        with self.assertRaises(TimeoutError):
+            client.call("status")
+        self.assertEqual(["status", "status"], calls, "a read gets one retry")
+        calls.clear()
+        with self.assertRaises(TimeoutError):
+            client.call("task_next")
+        self.assertEqual(["task_next"], calls, "a write is never retried")

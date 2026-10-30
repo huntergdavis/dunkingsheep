@@ -111,6 +111,30 @@ def _current_pane_id():
         return None
 
 
+# t693: the client's patience, not the daemon's capability. Measured on the live
+# host at load 22 (8 cores, 15 pi lanes): `status` p50 ~5 s, p90 ~24.5 s, max 24.5 s.
+# A 15 s deadline turned 3 of 8 cheap read calls into failures, and a failed read is
+# what marks a live lane dead. 45 s covers the measured p90 with headroom;
+# DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+def default_timeout(environ=None):
+    """The client's patience, from the environment or 45 s (t693).
+
+    A function, not a module constant only, so a test can pin the rule without
+    reloading the module - reloading replaces the exception CLASSES too, and every
+    other test in the process then holds a stale IdentityRefused.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        return float(env.get("DUNKINGSHEEP_CLIENT_TIMEOUT") or 45.0)
+    except (TypeError, ValueError):
+        return 45.0
+
+
+DEFAULT_TIMEOUT = default_timeout()
+# A READ may be retried once on timeout (idempotent). A write never is.
+READ_RETRIES = 1
+
+
 class IdentityRefused(DunkError):
     """The caller's identity could not be established without guessing.
 
@@ -289,8 +313,17 @@ def identity_refusal_for(cmd, self_pane_id, has_token, note=None):
 
 
 class FlockClient:
-    def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
+    def __init__(self, socket_path=None, self_pane_id=None, timeout=None):
         self.socket_path = socket_path or SOCKET_PATH
+        # t693 MEASURED on the live host at load 22 (8 cores, 15 pi lanes):
+        # `dunkingsheep status` took 20.93 24.52 17.94 7.54 2.88 2.07 2.98 2.52 s
+        # - p50 ~5 s, p90 ~24.5 s - while `dunk-poll` (one socket batch, no CLI
+        # wrapper) took 1.54 6.61 3.18 s. A 15 s deadline on that box turned 3 of
+        # 8 cheap read calls into failures, and a failed read is what makes a live
+        # lane look dead and a review look abandoned. The deadline is a CLIENT
+        # patience setting, not a daemon capability: 45 s covers the measured p90
+        # with headroom, and DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         explicit = self_pane_id is not None
         if explicit:
             self.self_pane_id, self.identity_note = self_pane_id, "explicit"
@@ -307,7 +340,7 @@ class FlockClient:
             or os.environ.get("DUNKINGSHEEP_VERIFY_SELF") == "1"
         ):
             self.self_pane_id = _current_pane_id() or self.self_pane_id
-        self.timeout = timeout
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         self._next_id = 1
 
     @staticmethod
@@ -350,6 +383,22 @@ class FlockClient:
         if token:
             request["service_token"] = token
         self._next_id += 1
+        # t693: a read may be retried once on timeout. Reads are idempotent and a
+        # slow box answers the second attempt far more often than it fails twice
+        # (the first request warms the daemon's backend caches); a WRITE is never
+        # retried here, because the command may already have run.
+        attempts = 1 + (READ_RETRIES if cmd in _READ_ONLY_COMMANDS else 0)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self._call_once(request)
+            except (TimeoutError, socket.timeout) as error:
+                last_error = error
+                if attempt + 1 >= attempts:
+                    raise
+        raise last_error  # pragma: no cover - the loop either returns or raises
+
+    def _call_once(self, request):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         try:
@@ -381,12 +430,12 @@ class FlockClient:
             raise DunkError(response.get("error") or "unknown error")
         return response.get("result")
 
+    # -- availability -----------------------------------------------------------
+
     def __getattr__(self, name):
         if name in COMMANDS_BY_NAME:
             return lambda **args: self.call(name, **args)
         raise AttributeError(name)
-
-    # -- availability -----------------------------------------------------------
 
     def probe(self):
         """Classify the daemon WITHOUT side effects: running / busy / absent.
