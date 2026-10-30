@@ -1195,6 +1195,10 @@ def print_task(task):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
               + (f" (blocked by {', '.join(blocked)})" if blocked else ""))
+    if task.get("unblock_needed") and task.get("dependency_note"):
+        # t903: a blocked task whose dependencies are all satisfied is claimable the
+        # moment somebody unblocks it, and nothing used to say so.
+        print(f"unblock     {task['dependency_note']}")
     if task.get("parent_id"):
         print(f"parent      {task['parent_id']}")
     if task.get("block_reason"):
@@ -1972,6 +1976,8 @@ def print_messages(result):
                   f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
             if m.get("blocked_by"):
                 print(f"{'':<5} {'':>8} blocked by {m['blocked_by']}")
+            elif m.get("unblock_needed"):
+                print(f"{'':<5} {'':>8} dependencies satisfied - UNBLOCK to claim")
     if recent:
         if queued:
             print()
