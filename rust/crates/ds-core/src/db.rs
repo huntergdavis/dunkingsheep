@@ -201,6 +201,82 @@ impl Drop for Writer {
     }
 }
 
+/// A SYNCHRONOUS handle over the async writer actor (t978).
+///
+/// `Writer::call` is `async`, but every ported store method is a plain blocking call -
+/// that is the Python's shape, and keeping the signatures identical is the port's
+/// premise. This handle owns a current-thread runtime, starts the actor inside it, and
+/// `block_on`s each call, so a store reads exactly like the Python's:
+///
+/// ```ignore
+/// let writer = SyncWriter::spawn(path)?;
+/// writer.call(|connection| {
+///     connection.execute("INSERT INTO events (at, kind) VALUES (?1, ?2)", (1.0, "x"))?;
+///     Ok(())
+/// })?;
+/// ```
+///
+/// WHY THIS SHAPE (the t978 decision): the alternatives were a runtime per store (the
+/// same thing with the runtime visible in every store), or making the stores async
+/// (which changes every caller signature including the CLI's synchronous paths). This
+/// keeps the async surface where it already is and confines the runtime to one place.
+///
+/// Callers must NOT call this from inside a tokio runtime: `block_on` from within a
+/// runtime panics. The store layer runs on the daemon's synchronous command handlers,
+/// which is where the Python's blocking methods already ran.
+pub struct SyncWriter {
+    writer: std::sync::Arc<Writer>,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl std::fmt::Debug for SyncWriter {
+    /// The writer actor holds a channel and a task handle, neither of which is
+    /// useful in a debug line; the path is.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SyncWriter")
+            .field("path", &self.path())
+            .finish()
+    }
+}
+
+impl SyncWriter {
+    /// Open the database and start the writer actor inside a fresh runtime.
+    pub fn spawn(path: impl AsRef<Path>) -> Result<Self, DunkError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| DunkError::Refused(format!("tokio runtime: {error}")))?;
+        let writer = {
+            let _entered = runtime.enter(); // the actor task lives in this runtime
+            Writer::spawn(path)?
+        };
+        Ok(SyncWriter {
+            writer: std::sync::Arc::new(writer),
+            runtime,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.writer.path()
+    }
+
+    /// Run one write on the writer's connection, blocking until it is done.
+    pub fn call<T, F>(&self, work: F) -> Result<T, DunkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DunkError> + Send + 'static,
+    {
+        self.runtime.block_on(self.writer.call(work))
+    }
+
+    /// Drain the actor and stop it.
+    pub fn shutdown(self) {
+        let SyncWriter { writer, runtime } = self;
+        runtime.block_on(writer.shutdown());
+    }
+}
+
 /// A small pool of read-only connections (RUST_PORT.md 5.2).
 ///
 /// Reads are synchronous in `rusqlite`, so the pool is a `Mutex<Vec<Connection>>`:
