@@ -488,3 +488,247 @@ mod tests {
         assert_eq!(8, ROLES.len());
     }
 }
+
+// -- the registry store -------------------------------------------------------
+
+/// One lane's registration, exactly as `roles.json` holds it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LaneEntry {
+    /// The role bound to the pane.
+    pub role: String,
+    /// The pane's root process at registration time.
+    #[serde(default)]
+    pub pane_pid: Option<u32>,
+    /// That process's start time, so a reused pid is a different lane.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// The harness (`pi`, `claude`, `codex`).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The model, for the record.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Who registered it.
+    #[serde(default)]
+    pub by: Option<String>,
+    /// The display label.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The registry file, as the Python daemon writes it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Registry {
+    /// The role an unregistered pane gets.
+    #[serde(default = "default_role")]
+    pub default: String,
+    /// pane id -> registration.
+    #[serde(default)]
+    pub lanes: std::collections::BTreeMap<String, LaneEntry>,
+    /// Providers a reviewer lane may run on.
+    #[serde(default)]
+    pub reviewer_providers: Vec<String>,
+}
+
+fn default_role() -> String {
+    "anonymous".to_string()
+}
+
+/// A READ-ONLY view of the registry (owner decision 2026-10-30).
+///
+/// The Rust store reads the SAME `~/.config/dunkingsheep/roles.json` the Python daemon
+/// writes, same schema and same path, because the differential harness needs identical
+/// input on both sides. It is read-only: **the Python daemon stays the only writer** until
+/// a separate task moves the writer, so this struct has no save path on purpose - a second
+/// writer is how two processes overwrite each other's lane bindings.
+#[derive(Debug)]
+pub struct Roles {
+    path: std::path::PathBuf,
+    registry: Registry,
+    stamp: Option<(u64, u64)>,
+}
+
+impl Roles {
+    /// Read the registry from `path`. A missing file is the empty registry, not an error:
+    /// a fresh install has no registrations yet, and the daemon seeds it on first use.
+    pub fn load(path: std::path::PathBuf) -> Result<Roles, DunkError> {
+        let registry = match crate::atomic_json::read_json(&path)? {
+            Some(value) => serde_json::from_value(value)?,
+            None => Registry {
+                default: default_role(),
+                lanes: Default::default(),
+                reviewer_providers: Vec::new(),
+            },
+        };
+        let stamp = file_stamp(&path);
+        Ok(Roles {
+            path,
+            registry,
+            stamp,
+        })
+    }
+
+    /// Re-read the file when it changed under us.
+    ///
+    /// The Python's `refresh()` exists because the VP edited the file and the daemon kept
+    /// serving its in-memory copy, so a pane that WAS on the list was not a superuser until
+    /// the next restart (2026-10-24). A stat per check costs nothing; a restart does not.
+    pub fn refresh(&mut self) -> Result<bool, DunkError> {
+        let stamp = file_stamp(&self.path);
+        if stamp == self.stamp {
+            return Ok(false);
+        }
+        let registry = match crate::atomic_json::read_json(&self.path)? {
+            Some(value) => serde_json::from_value(value)?,
+            None => Registry {
+                default: default_role(),
+                lanes: Default::default(),
+                reviewer_providers: Vec::new(),
+            },
+        };
+        self.registry = registry;
+        self.stamp = stamp;
+        Ok(true)
+    }
+
+    /// The registry as read.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
+    /// The role bound to a pane, or the file's default.
+    pub fn role_of(&mut self, pane_id: &str) -> Result<String, DunkError> {
+        self.refresh()?;
+        Ok(self
+            .registry
+            .lanes
+            .get(pane_id)
+            .map(|entry| entry.role.clone())
+            .unwrap_or_else(|| self.registry.default.clone()))
+    }
+
+    /// The provider of a registered pane, lowercased.
+    pub fn provider_of(&mut self, pane_id: &str) -> Result<Option<String>, DunkError> {
+        self.refresh()?;
+        Ok(self
+            .registry
+            .lanes
+            .get(pane_id)
+            .and_then(|entry| entry.provider.clone())
+            .map(|provider| provider.trim().to_lowercase())
+            .filter(|provider| !provider.is_empty()))
+    }
+
+    /// Reviewer role AND a provider on the reviewer list (free models never review).
+    pub fn may_review(&mut self, pane_id: &str) -> Result<bool, DunkError> {
+        if self.role_of(pane_id)? != "reviewer" {
+            return Ok(false);
+        }
+        let Some(provider) = self.provider_of(pane_id)? else {
+            return Ok(false);
+        };
+        Ok(self
+            .registry
+            .reviewer_providers
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&provider)))
+    }
+}
+
+fn file_stamp(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    // mtime in nanoseconds plus the size: the pair changes when the file is rewritten,
+    // which is all `refresh()` needs (the Python compares st_mtime_ns and st_size too).
+    std::fs::metadata(path).ok().map(|meta| {
+        let nanos = (meta.mtime() as u64) * 1_000_000_000 + (meta.mtime_nsec() as u64);
+        (nanos, meta.len())
+    })
+}
+
+#[cfg(test)]
+mod store_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ds-roles-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("roles.json")
+    }
+
+    fn write(path: &std::path::Path, json: &str) {
+        let mut handle = std::fs::File::create(path).unwrap();
+        handle.write_all(json.as_bytes()).unwrap();
+        handle.sync_all().unwrap();
+    }
+
+    const REGISTRY: &str = r#"{
+      "default": "anonymous",
+      "lanes": {
+        "%100": {"role": "worker", "provider": "pi", "pane_pid": 1234, "label": "ds-worker-2"},
+        "%101": {"role": "reviewer", "provider": "claude"},
+        "%102": {"role": "reviewer", "provider": "pi"}
+      },
+      "reviewer_providers": ["claude", "codex"]
+    }"#;
+
+    #[test]
+    fn a_registered_lane_gets_its_role_and_an_unknown_one_gets_the_default() {
+        let path = fixture("roles");
+        write(&path, REGISTRY);
+        let mut roles = Roles::load(path).unwrap();
+        assert_eq!("worker", roles.role_of("%100").unwrap());
+        assert_eq!("reviewer", roles.role_of("%101").unwrap());
+        assert_eq!("anonymous", roles.role_of("%999").unwrap());
+    }
+
+    #[test]
+    fn only_a_reviewer_on_a_listed_provider_may_review() {
+        let path = fixture("review");
+        write(&path, REGISTRY);
+        let mut roles = Roles::load(path).unwrap();
+        assert!(
+            roles.may_review("%101").unwrap(),
+            "claude is a reviewer provider"
+        );
+        assert!(
+            !roles.may_review("%102").unwrap(),
+            "a pi reviewer is a worker-tier lane and must not review"
+        );
+        assert!(
+            !roles.may_review("%100").unwrap(),
+            "a worker is not a reviewer"
+        );
+    }
+
+    #[test]
+    fn a_missing_registry_is_the_empty_one_not_an_error() {
+        let path = fixture("missing");
+        let _ = std::fs::remove_file(&path);
+        let mut roles = Roles::load(path).unwrap();
+        assert_eq!("anonymous", roles.role_of("%1").unwrap());
+        assert!(!roles.may_review("%1").unwrap());
+    }
+
+    #[test]
+    fn a_changed_file_is_picked_up_without_a_restart() {
+        // The 2026-10-24 incident: the file was edited and the daemon kept its copy.
+        let path = fixture("refresh");
+        write(&path, REGISTRY);
+        let mut roles = Roles::load(path.clone()).unwrap();
+        assert_eq!("anonymous", roles.role_of("%200").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write(
+            &path,
+            &REGISTRY.replace(
+                r#""%102": {"role": "reviewer", "provider": "pi"}"#,
+                r#""%102": {"role": "reviewer", "provider": "pi"}, "%200": {"role": "desk"}"#,
+            ),
+        );
+        assert_eq!(
+            "desk",
+            roles.role_of("%200").unwrap(),
+            "refresh picks it up"
+        );
+    }
+}
