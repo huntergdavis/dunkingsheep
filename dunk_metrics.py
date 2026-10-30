@@ -75,6 +75,30 @@ KINDS = {
     "panel.blocking": "a dialog was open with a delivery waiting behind it",
     "turn.end.dispatch": ("the turn-end trigger fired: a lane that ended a turn was "
                           "prompted, or skipped with the reason it named"),
+    # t1011: these twelve were recorded and undocumented - a consumer reading KINDS could
+    # not interpret most of a summary. Each meaning is taken from the record() call sites
+    # (dunk_core, dunk_next_job, dunk_server, web/gameplay.py), and
+    # tests/test_dunk_metrics.py now greps those call sites so the map cannot drift again.
+    "turn.start": "a lane declared the start of a turn (source names the producer)",
+    "turn.end": "a lane declared the end of a turn, with the reason the trigger gave",
+    "turn.expired": ("a turn's TTL ran out without an end: the agent declared work and "
+                     "never reported finishing"),
+    "identity.mismatch": ("a caller's pane/pid claim did not match the live binding; the "
+                          "request was refused as unverified"),
+    "inbox.archived": "a message was aged out of a mailbox by retention",
+    "message.undeliverable": ("a queued send was given up on: the pane was dead or the "
+                              "message could not be delivered at all"),
+    "next_job.decision": ("the turn-end trigger decided what a finished lane should do "
+                          "next: claim, prompt, or skip with a reason"),
+    "pane.respawn": "a managed pane's process was replaced in place (respawn-pane)",
+    "pane.respawn.rollback": ("a respawn was rolled back to the previous argv after the new "
+                              "command failed to come up"),
+    "stuck.recover": ("the stuck-message machine pressed Enter on an unsubmitted composer, "
+                      "with the attempt number"),
+    "autocodeword": ("the desk auto-entered a codeword answer into the running game (the "
+                     "gameplay bridge's own event)"),
+    "loadstate": "a save slot was loaded through the gameplay bridge, verified or not",
+    "savestate": "a save slot was written through the gameplay bridge",
 }
 
 OUTCOMES = {
