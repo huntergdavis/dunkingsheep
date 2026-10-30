@@ -357,3 +357,15 @@ A task is sized for one lane session (≤ 600 lines of Rust including tests).
 Tasks are filed with `dunkingsheep task add --kind work -p <prio> --body
 <the task text verbatim>` and depend on each other with `--depends-on`; the
 queue orders them. Reviews are the fleet's normal review path.
+
+---
+
+## 10. Keeping the port in step
+
+The owner's rule (ground truth `rust-parity`): until the cutover, every Python change to the daemon, CLI or schemas (`dunk_*.py`, `dunkingsheep`, `packaging/`) is mirrored in Rust, or the PR says why it has no Rust equivalent. Nobody remembers this by hand, so `tools/rust_parity.py` does:
+
+1. It reads the commit named on the first line of `MANIFEST.md`, and diffs the Python tree between that commit and `HEAD` into **functions** (`fn:<file>::<Class.>name`, by AST, so comment edits are not changes), **registry commands** (`Command("name"`) and **schema columns** (`CREATE TABLE` bodies and `_migrate` tuples).
+2. It checks each added or changed item against `rust/crates` **by name**. No counterpart, or a counterpart older than the Python change (STALE), is reported; a removed item the Rust tree still has is reported too. A leading underscore is ignored (`_gate_unread` matches `gate_unread`).
+3. `--warn` prints GitHub annotations (the `rust-parity` workflow, warn-only, never fails a PR); `--file-tasks` files one `Rust parity: <module>` task per module with unported items, deduped by title (the daily `dunkingsheep-parity.timer`); `--check` exits 1 for scripts.
+
+What it does **not** know: whether the Rust behaviour is equal. A name match means a counterpart exists; the differential harness (section 7) is the judge. When you port an item, name the Rust function after the Python one (rule 2 of section 0) and the watcher clears it. When you regenerate the manifest (`tools/gen_manifest.py`), the base commit moves and the list resets.
