@@ -53,6 +53,9 @@ ALLOWLIST = {
     "tests/test_check_public_secrets.py": "the fixtures are deliberately shaped like secrets",
     "tools/memory_acceptance.py": "a REDACTION test fixture: the value is shaped like a "
                                   "key on purpose and the test asserts the store redacts it",
+    "tools/snapshot_memory_corpus.py": "the Rust port's golden memory corpus (T51): it seeds "
+                                       "fake credentials ('hunter2CorrectHorse', sk-live_abc...) "
+                                       "on purpose so the recall tests prove redaction",
 }
 
 TEXT_SUFFIXES = (".json", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".env", ".txt",
