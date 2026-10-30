@@ -532,7 +532,11 @@ def _capability(pane: str) -> dict:
     Returns {} when the daemon cannot answer, so callers can refuse rather than guess.
     """
     try:
-        payload = _flock().call("delivery_capability", pane=pane)
+        # The handler reads `target`, not `pane` (dunk_api.h_delivery_capability).
+        # Passing the wrong keyword raised, the except below swallowed it, and every
+        # lane came back with no capability - the send path 409'd and the fleet view
+        # said can_type False for everything (t641 review, finding 1).
+        payload = _flock().call("delivery_capability", target=pane)
         if isinstance(payload, dict):
             _CAP_CACHE[pane] = (time.time(), payload)
             return payload

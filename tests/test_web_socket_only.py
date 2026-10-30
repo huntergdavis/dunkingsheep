@@ -79,6 +79,50 @@ class SocketOnlyReads(unittest.TestCase):
             self.assertIn(command, calls,
                           f"{name} does not call the daemon's {command}")
 
+    # The keyword each daemon command actually reads (dunk_api's handlers). A call
+    # with the wrong keyword raises inside the desk's `except Exception`, which is
+    # silent by design - so the ARGUMENT NAMES are what a test has to pin, not the
+    # verb. t641 found `delivery_capability(pane=...)` where the handler reads
+    # `target`: every lane lost its capability and the send path 409'd, while a
+    # test that only checked the command name passed.
+    # (required keywords, every keyword the handler reads). A keyword the handler
+    # does not read is either silently ignored or a TypeError - both are how a
+    # wrong name hides, so the allowed set is pinned too.
+    ARGUMENTS = {"owner_stats": (set(), set()),
+                 "list_panes": (set(), set()),
+                 "roster": (set(), set()),
+                 "delivery_capability": ({"target"}, {"target"}),
+                 "read_pane": ({"target"}, {"target", "lines"}),
+                 "owner_push": ({"target", "body"}, {"target", "body", "subject"}),
+                 "send_text": ({"target", "text"},
+                               {"target", "text", "hold_while_typing", "wait_s",
+                                "press_enter"}),
+                 "state_latest": (set(), {"pane_id", "project", "limit"})}
+
+    def test_every_daemon_call_uses_the_argument_names_its_handler_reads(self):
+        tree = _tree(APP)
+        checked = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "call"):
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Constant)):
+                continue
+            command = node.args[0].value
+            if command not in self.ARGUMENTS:
+                continue
+            required, allowed = self.ARGUMENTS[command]
+            given = {keyword.arg for keyword in node.keywords if keyword.arg}
+            self.assertTrue(required <= given,
+                            f"{command} is called with {sorted(given)}; its handler "
+                            f"requires {sorted(required)}")
+            self.assertTrue(given <= allowed,
+                            f"{command} is called with {sorted(given - allowed)}, which its "
+                            f"handler does not read (it reads {sorted(allowed)})")
+            checked += 1
+        self.assertGreaterEqual(checked, 8, "the socket-only calls moved or were renamed")
+
     def test_the_fleet_view_asks_the_daemon_for_activity_and_unread(self):
         """state_latest replaces the agent-state.db read; roster the inbox.db one."""
         node = _function(_tree(APP), "api_fleet")
