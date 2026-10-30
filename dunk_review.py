@@ -476,6 +476,12 @@ class Sync:
                     out["errors"].append(f"status: {error}")
                 return out
             if not final:
+                # t852: a first accept on a two-verdict repo is HELD, not applied -
+                # the approval and the merge belong to the final accept (t662). That
+                # was correct and invisible: #1638 showed 0 reviews, no log line and
+                # a 'pending' status only, and an owner-role lane read it as a dead
+                # verdict path and filed an urgent task about it. A held verdict must
+                # say so, in the log, on the task and in the caller's result.
                 try:
                     self.github.post_status(
                         repo, head, "pending", token,
@@ -484,8 +490,31 @@ class Sync:
                     out["status"] = "pending"
                 except dunk_github.GitHubError as error:
                     out["errors"].append(f"status: {error}")
-                out["second_review"] = self._second_review(repo, number, head, by)
+                second = self._second_review(repo, number, head, by)
+                out["second_review"] = second
                 out["merged"] = False
+                out["held"] = {
+                    "reason": "not final: a second DISTINCT reviewer lane must accept",
+                    "accepts": accepts, "required": required,
+                    "second_review": second,
+                    "postponed": ["approval", "merge", "accounting"],
+                }
+                log.info("verdict HELD %s#%s @ %s: accepted by %d of %d distinct lanes "
+                         "(%s); approval, merge and accounting wait for the final accept; "
+                         "second review %s",
+                         repo, number, head[:12], len(accepts), required,
+                         ", ".join(accepts), second or "(not filed)")
+                try:
+                    self.flock.tasks.note(
+                        task["id"], event="verdict_held", actor="review-sync",
+                        meta={"reason": (f"accepted by {len(accepts)} of {required} distinct "
+                                         f"reviewer lanes ({', '.join(accepts)}); a second "
+                                         f"distinct lane must accept before the approval, the "
+                                         f"merge and the accounting row are written"),
+                              "second_review": second, "head": head})
+                except Exception as error:  # noqa: BLE001 - recording never rejects a verdict
+                    log.warning("could not record the held verdict for %s: %s",
+                                task.get("id"), error)
                 return out
             try:
                 self.github.post_status(repo, head, "success", token,
