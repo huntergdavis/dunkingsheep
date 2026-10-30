@@ -1,0 +1,55 @@
+# The Rust port's gates (TASKS.md rule 3: tests pass, clippy clean, fmt clean).
+#
+# There was no Rust workflow before this: the only workflow in the repo was
+# secret-scan.yml, so "clippy is a CI-only gate" (T02's note) meant "CI does not run
+# it either" - the gate existed in the task text and nowhere else. This adds the two
+# gates that were verified green on main before being added, and it says out loud
+# which one is NOT verified:
+#
+#   fmt + build + test   blocking. `cargo fmt --check`, `cargo build`, `cargo test`
+#                        all pass on main at the commit that added this file.
+#   clippy               NON-BLOCKING on purpose. The host that wrote this has no
+#                        clippy binary, so nobody has seen `clippy -- -D warnings`
+#                        green for this tree. Adding it as blocking would create a
+#                        gate that is red from birth, which is the defect class this
+#                        repo keeps re-learning (t675, t849, t896, t956): a gate that
+#                        always fails is a gate lanes ignore. Flip it to blocking in
+#                        the commit that first shows it green.
+name: rust
+
+on:
+  push:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+  build-and-test:
+    name: cargo build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo build --manifest-path rust/Cargo.toml --workspace
+      - run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  clippy:
+    name: cargo clippy (non-blocking until verified green)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings

@@ -77,6 +77,54 @@ class OwnerQuestionTests(unittest.TestCase):
                          "the chips come from the row's status")
         self.assertEqual(24, board["window_hours"])
 
+    def test_a_creator_that_merely_contains_owner_is_not_the_owner_mailbox(self):
+        tasks = [task("t1", created_by="owner-wt-x"), task("t2", created_by="co-owner"),
+                 task("t3", created_by="owner@web")]
+        board = ops_board._asks_board(FakeClient(tasks), NOW)
+        self.assertEqual(["t3"], [row["id"] for row in board["asks"]])
+
+    def test_asks_reach_the_compact_payload_the_ui_reads(self):
+        readings = {"tasks": ops_board._task_board(FakeClient([]), NOW),
+                    "asks": ops_board._asks_board(FakeClient([task("t1", created_by="owner")]), NOW)}
+        payload = ops_board.compact(readings, "2026-10-30T00:00:00Z")
+        self.assertEqual(["t1"], [a["id"] for a in payload["reference"]["asks"]["asks"]])
+
+    def test_answering_records_the_reply_then_unblocks(self):
+        calls = []
+
+        class Recorder:
+            def call(self, name, **kwargs):
+                calls.append((name, kwargs))
+                return {"ok": True}
+
+        ops_board.answer_question(Recorder(), "t9", "use B")
+        self.assertEqual([("task_note", {"id": "t9", "event": "owner_answer", "reason": "use B"}),
+                          ("task_unblock", {"id": "t9"})], calls)
+
+    def test_a_failed_note_leaves_the_task_blocked(self):
+        class Broken:
+            def __init__(self):
+                self.names = []
+
+            def call(self, name, **kwargs):
+                self.names.append(name)
+                raise RuntimeError("no")
+
+        client = Broken()
+        with self.assertRaises(RuntimeError):
+            ops_board.answer_question(client, "t9", "use B")
+        self.assertEqual(["task_note"], client.names)
+
+    def test_not_now_only_lowers_priority(self):
+        calls = []
+
+        class Recorder:
+            def call(self, name, **kwargs):
+                calls.append((name, kwargs))
+
+        ops_board.defer_question(Recorder(), "t9")
+        self.assertEqual([("task_update", {"id": "t9", "priority": "low"})], calls)
+
     def test_a_missing_source_is_reported_not_invented(self):
         class Broken:
             def call(self, *_args, **_kwargs):
@@ -119,8 +167,11 @@ class DeskBlockSourceTests(unittest.TestCase):
         self.assertIn("/ops-board/answer", source)
         self.assertIn("/ops-board/not-now", source)
         backend = self.read("web/app.py")
-        self.assertIn("task_unblock", backend, "the answer unblocks the task over the socket")
-        self.assertIn('priority="low"', backend, "'Not now' lowers the priority, nothing else")
+        self.assertIn("ops_board.answer_question", backend)
+        self.assertIn("ops_board.defer_question", backend)
+        board = self.read("bridges/ops_board.py")
+        self.assertIn('"task_unblock"', board, "the answer unblocks the task over the socket")
+        self.assertIn('priority="low"', board, "'Not now' lowers the priority, nothing else")
 
     def test_the_block_has_css_for_both_viewports(self):
         css = self.read("ui/src/dash.css")

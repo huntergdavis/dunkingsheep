@@ -23,7 +23,8 @@ WHAT THE FIXTURE PINS, and why each part is here rather than left to a live stor
 * **The filters.** one query each for harness, project and `since`, because those are
   SQL WHERE clauses a port can drop without any test noticing.
 
-Deterministic by construction: fixed ids, fixed timestamps, no wall clock, no live
+Deterministic by construction: fixed ids, fixed timestamps, a pinned clock (NOW, recorded
+in the fixture because recall() scores a freshness term from `now`), no live
 state, and an in-memory store per run. Two runs are byte-identical, which `--check`
 relies on.
 """
@@ -40,6 +41,11 @@ sys.path.insert(0, ROOT)
 import dunk_memory  # noqa: E402
 
 OUT = os.path.join(ROOT, "rust", "fixtures", "memory", "corpus.json")
+
+# recall() scores `0.25 * exp(-age_days / 30)` from time.time(); build() freezes the clock
+# here (400 days after the newest chunk, so the term is < 1e-6 and the pinned scores equal
+# the bare bm25 term) and the fixture records it, so a replay has no hidden input.
+NOW = 1_700_000_200.0 + 400 * 86400.0
 
 # Two sessions of different harnesses and projects, so the harness/project filters have
 # something to select between; a third is older, for `since`.
@@ -135,20 +141,27 @@ def build():
                 store.db.commit()
 
             expected = []
-            for spec in QUERIES:
-                params = dict(spec)
-                query = params.pop("query")
-                expected.append({
-                    "query": query,
-                    "kwargs": params,
-                    "recall": store.recall(query, **params),
-                })
-            context = store.context("lease queue pane", sessions=3, snippets_per_session=2)
-            stats = store.stats()
+            real_time = dunk_memory.time.time
+            dunk_memory.time.time = lambda: NOW
+            try:
+                for spec in QUERIES:
+                    params = dict(spec)
+                    query = params.pop("query")
+                    expected.append({
+                        "query": query,
+                        "kwargs": params,
+                        "recall": store.recall(query, **params),
+                    })
+                context = store.context("lease queue pane", sessions=3,
+                                        snippets_per_session=2)
+                stats = store.stats()
+            finally:
+                dunk_memory.time.time = real_time
         finally:
             store.close()
 
     return {
+        "now": NOW,
         "_note": ("Golden corpus for TASKS.md T51 (memory store port). Built by "
                   "tools/snapshot_memory_corpus.py; regenerate with --write, verify with "
                   "--check. Chunk texts are ALREADY redacted - a port that forgets a "

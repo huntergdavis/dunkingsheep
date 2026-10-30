@@ -35,7 +35,17 @@ from pydantic import BaseModel, Field
 from web.character_editor import EditorStore, router as character_editor_router
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = Path(os.getenv("VP_DATA_DIR", ROOT / "data")).resolve()
+# The desk's state lives OUTSIDE the repo, always (docs/FLAT_FLEET.md 9.2 rule 4): an
+# import inside a checkout or worktree used to create data/ beside the code, and two
+# lane branches then committed auth.json and the owner's messages to a public repo
+# (2026-10-29). There is no repo-root fallback.
+DESK_DIR_DEFAULT = Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"
+# `or`, NOT os.getenv's default: an EMPTY VP_DATA_DIR (Environment=VP_DATA_DIR=, a
+# supervisor that passes an unset variable as "", `env VP_DATA_DIR= ...`) would make
+# Path("") the CURRENT WORKING DIRECTORY - i.e. the repo, when a lane imports this
+# module from a checkout, which is the 2026-10-29 incident shape. The default only
+# applies to an unset variable, so the empty case has to be handled explicitly.
+DATA = Path(os.environ.get("VP_DATA_DIR") or DESK_DIR_DEFAULT).expanduser().resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
@@ -882,10 +892,10 @@ def operations_board(_: Annotated[str, Depends(require_auth)]):
 
 @app.post("/api/ops-board/answer")
 def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
-    """Answer a lane's needs-owner question: unblock the task with the reply as the note.
+    """Answer a lane's needs-owner question: record the reply as an `owner_answer` task
+    note, then unblock the task.
 
-    DESK_DESIGN 4.1 (t997): the desk's reply box posts `task unblock --note <reply>`. It
-    goes through the daemon over the socket with the desk's own credential - the web never
+    DESK_DESIGN 4.1 (t997): the desk's reply box. It goes through the daemon over the socket with the desk's own credential - the web never
     reads sqlite and never shells out - so the unblock is the same verb a lane would run.
     """
     task_id = str((payload or {}).get("task_id") or "").strip()
@@ -898,7 +908,7 @@ def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)
 
     try:
         client = ops_board._client()
-        result = client.call("task_unblock", id=task_id, reason=f"owner: {reply}")
+        result = ops_board.answer_question(client, task_id, reply)
     except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
         raise HTTPException(503, f"Could not unblock {task_id}: {type(exc).__name__}") from exc
     return {"task_id": task_id, "unblocked": True, "task": result}
@@ -918,7 +928,7 @@ def not_now_owner_question(payload: dict, _: Annotated[str, Depends(require_auth
 
     try:
         client = ops_board._client()
-        result = client.call("task_update", id=task_id, priority="low")
+        result = ops_board.defer_question(client, task_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, f"Could not lower {task_id}: {type(exc).__name__}") from exc
     return {"task_id": task_id, "priority": "low", "task": result}
