@@ -443,6 +443,38 @@ def _health_board(client) -> dict:
     }
 
 
+def _report_board(client, now: datetime) -> dict:
+    try:
+        listing = client.call("report_list")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(type(exc).__name__)
+    rows = listing.get("reports") if isinstance(listing, dict) else None
+    if not isinstance(rows, list):
+        return _unavailable("invalid report list")
+    items = [{"name": row.get("name"), "size": row.get("size"), "at": row.get("at"),
+              "age_s": _age_seconds(now, row.get("at"))} for row in rows[:5]]
+    for index, item in enumerate(items):
+        item["open"] = index == 0
+    return {"state": "ok", "count": listing.get("count", len(rows)), "items": items}
+
+
+def _poolrad_board(client) -> dict:
+    try:
+        progress = client.call("poolrad_progress")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(type(exc).__name__)
+    if not isinstance(progress, dict):
+        return _unavailable("invalid poolrad progress")
+    return {"state": "ok", "credited": progress.get("credited"),
+            "identities": progress.get("identities"),
+            "ceiling": progress.get("ceiling"),
+            "ceiling_note": progress.get("ceiling_note")
+            or "CEILING: an upper bound, not a verified denominator",
+            "credit_pending": progress.get("credit_pending"),
+            "main": progress.get("main"),
+            "queue_exported_at": progress.get("queue_exported_at")}
+
+
 # -- operations database ------------------------------------------------------
 
 
@@ -520,6 +552,8 @@ def compact(readings: dict, generated_at: str) -> dict:
                                 "generated_at": generated_at, "items": owner}},
         "reference": {"tasks": tasks, "lanes": panes, "schedules": dunks,
                       "asks": readings.get("asks") or _unavailable("missing source")},
+        "reports": source("reports"),
+        "poolrad_progress": source("poolrad"),
     }
 
 
@@ -537,7 +571,9 @@ def build(client, conn: sqlite3.Connection, *, now: datetime | None = None) -> d
                "dunks": lambda: _dunk_board(client, now),
                "health": lambda: _health_board(client),
                "host": lambda: _host_board(conn, now),
-               "asks": lambda: _asks_board(client, now)}
+               "asks": lambda: _asks_board(client, now),
+               "reports": lambda: _report_board(client, now),
+               "poolrad": lambda: _poolrad_board(client)}
     readers["reviews"] = lambda: _review_board(client, now)
     readings = {}
     for name, read in readers.items():
