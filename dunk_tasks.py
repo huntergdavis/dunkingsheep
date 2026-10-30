@@ -746,6 +746,27 @@ class Tasks:
                 raise
         return verdict
 
+    def notes(self, task_id, event="note"):
+        """Every note event on a task, oldest first: [{at, actor, meta, text}].
+
+        A review verdict has to be able to read the evidence the reviewer
+        recorded, because "see the task notes" is only true if there are notes
+        (t621: two verdicts were filed with none, and the fix tasks they created
+        had nothing to work from)."""
+        rows = self.db.execute(
+            "SELECT at, actor, meta FROM task_events WHERE task_id = ? AND event = ? "
+            "ORDER BY at, id", (str(task_id), event)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except ValueError:
+                meta = {}
+            text = meta.get("reason") or meta.get("text") or meta.get("note") or ""
+            out.append({"at": row["at"], "actor": row["actor"], "meta": meta,
+                        "text": str(text)})
+        return out
+
     def next_job_handoffs(self, pane_id=None):
         """Latest durable state of each handoff, including terminal receipts."""
         rows = self.db.execute(

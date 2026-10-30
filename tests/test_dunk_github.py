@@ -166,6 +166,9 @@ class TimerTests(unittest.TestCase):
         self.sync.run()
         task = self.flock.tasks.list(kind="review", include_done=False)[0]
         self.call("task_next", {}, pane=REVIEWER)
+        # A verdict needs evidence (t621): the reviewer notes what it ran first.
+        self.call("task_note", {"id": task["id"], "reason": "reproduced 4 tests, head aaaa"},
+                  pane=REVIEWER)
         self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
         done = self.call("task_complete", {"id": task["id"], "verdict": "accept"}, pane=REVIEWER)
         self.assertEqual("accept", done["verdict"])
@@ -177,6 +180,8 @@ class TimerTests(unittest.TestCase):
         self.sync.run()
         task = self.flock.tasks.list(kind="review", include_done=False)[0]
         self.call("task_next", {}, pane=REVIEWER)
+        self.call("task_note", {"id": task["id"], "reason": "the emitter does not reproduce"},
+                  pane=REVIEWER)
         self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
         done = self.call("task_complete", {"id": task["id"], "verdict": "needs-fix"}, pane=REVIEWER)
         self.assertEqual("changes_requested", done["github"]["review"])

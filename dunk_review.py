@@ -194,6 +194,7 @@ class Sync:
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"approve: {error}")
         else:
+            evidence = self._evidence(task)
             try:
                 self.github.post_status(repo, head, "failure", token,
                                         f"needs-fix per {task['id']}")
@@ -201,18 +202,22 @@ class Sync:
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"status: {error}")
             try:
-                self.github.review_pull(repo, number, "REQUEST_CHANGES",
-                                        f"Needs fix per {task['id']} (reviewer lane "
-                                        f"{by or '?'}); see the task notes.", token)
+                # The evidence goes in the review body, not a pointer to it: the
+                # body that said "see the task notes" on 2026-10-29 pointed at
+                # nothing, and the fix tasks it created could not be worked (t621).
+                self.github.review_pull(
+                    repo, number, "REQUEST_CHANGES",
+                    self._review_body(task, by, head, evidence), token)
                 out["review"] = "changes_requested"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"request-changes: {error}")
             try:
                 followup = self.flock.tasks.add(
                     "global", f"Fix {repo.split('/')[-1]} PR #{number} per {task['id']}",
-                    body=f"Reviewer verdict needs-fix on {repo}#{number} @ {head}.\n"
-                         f"Read the notes on {task['id']}, push a fix to the same branch; "
-                         "the review timer files a new review for the new head.",
+                    body=(f"Reviewer verdict needs-fix on {repo}#{number} @ {head}.\n\n"
+                          f"The reviewer's evidence, verbatim:\n\n{evidence}\n\n"
+                          "Push a fix to the same branch; the review timer files a new "
+                          "review for the new head."),
                     priority="high", kind="work",
                     assignees=[task["author"]] if task.get("author") else None,
                     created_by="review-sync")
@@ -220,3 +225,29 @@ class Sync:
             except Exception as error:  # noqa: BLE001
                 out["errors"].append(f"followup: {error}")
         return out
+
+    def _evidence(self, task):
+        """The reviewer's own notes, verbatim, or a sentence saying there are none.
+
+        `task complete --verdict` refuses a review with no note (t621), so an empty
+        result here means an older verdict or an owner-completed one; it is
+        reported as empty rather than silently omitted.
+        """
+        try:
+            notes = self.flock.tasks.notes(task["id"])
+        except Exception:  # noqa: BLE001 - a store without notes is not a failure
+            return "(no note store)"
+        text = "\n\n".join(note["text"].strip() for note in notes
+                            if note.get("text", "").strip())
+        return text or "(no evidence was recorded on the review task)"
+
+    def _review_body(self, task, by, head, evidence):
+        return "\n".join([
+            f"Needs fix per {task['id']} (reviewer lane {by or '?'}) at head {head}.",
+            "",
+            "The reviewer's evidence, verbatim:",
+            "",
+            evidence,
+            "",
+            "A verdict is bound to this head: a new push files a new review.",
+        ])
