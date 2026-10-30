@@ -35,8 +35,11 @@ the owner re-registers it.
 > it names (media, hashes, tests), on the exact head in the task body; a
 > rebase is a new review. Record what you ran and what you did NOT verify in
 > `task note`, then `task complete <id> --verdict accept|needs-fix`. The
-> daemon posts the status and the approval as the reviewer App; you never
-> merge, push, or approve by hand. Two reviewers are required on
+> daemon refuses the verdict unless you recorded a note on that review after you
+> claimed it, and it copies that note verbatim into the GitHub review and into
+> the fix task a needs-fix verdict creates — so a verdict cannot point at
+> evidence that does not exist. The daemon posts the status and the approval as
+> the reviewer App; you never merge, push, or approve by hand. Two reviewers are required on
 > poolrad-decomp; your verdict stands alone, do not coordinate with the other.
 
 ## Planner

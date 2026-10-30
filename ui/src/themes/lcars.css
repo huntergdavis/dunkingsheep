@@ -1,0 +1,162 @@
+/* Star Trek LCARS: orange bars on black, rounded display; local system fonts only. */
+:root[data-theme="lcars"] {
+  color-scheme: dark;
+  --bg: #050608;
+  --surface: #0d1014;
+  --surface-raised: #17202a;
+  --ink: #ffe9cf;
+  --muted: #c9b49c;
+  --accent: #ff9d1c;
+  --accent-contrast: #140d02;
+  --border: #8d7458;
+  --border-strong: #d7a45c;
+  --icon-button-border: var(--bg);
+  --icon-button-panel-border: var(--accent);
+  --success: #a5e3b3;
+  --warning: #ffd06b;
+  --danger: #ff9a8c;
+  --purple: #cbb0ff;
+  --orange: #ff9d1c;
+  --teal: #7fe0d4;
+  --radius: 18px;
+  --font-body: 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-display: 'Dosis', 'Helvetica Neue', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* LCARS component aliases use the same warm-on-black palette. */
+:root[data-theme="lcars"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --white: #fff3e2;
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(3, 4, 6, 0.82);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* interim effect consumers: t177 generalises into token hooks */
+:root[data-theme="lcars"] :is(h1, h2, .dash-nav-brand) {
+  font-family: var(--font-display);
+  text-shadow: none;
+}
+:root[data-theme="lcars"] :is(.cs-message, .cs-message__content) {
+  font-family: var(--font-body);
+}
+:root[data-theme="lcars"] :is(pre, code, kbd, samp) {
+  font-family: var(--font-mono);
+}
+
+/* LCARS component surfaces stay dark so legacy light-theme defaults do not
+   leak through; borders use the warm strong border, text uses the LCARS ink. */
+:root[data-theme="lcars"] {
+  --topbar-surface: var(--surface);
+  --topbar-border: var(--border-strong);
+  --activity-surface: var(--surface);
+  --activity-border: var(--border-strong);
+  --activity-toggle-surface: var(--surface-raised);
+  --activity-toggle-border: var(--border-strong);
+  --activity-toggle-ink: var(--muted);
+  --composer-border: var(--border-strong);
+  --jump-banner-surface: var(--surface);
+  --jump-banner-border: var(--border-strong);
+  --jump-banner-ink: var(--ink);
+  --jump-latest-surface: var(--surface-raised);
+  --jump-latest-border: var(--border-strong);
+  --jump-latest-ink: var(--ink);
+  --queue-help-surface: var(--surface);
+  --queue-help-surface-3: var(--surface-raised);
+  --queue-help-border: var(--border-strong);
+  --queue-help-border-2: var(--border-strong);
+  --queue-help-ink-2: var(--muted);
+  --queue-help-ink-3: var(--ink);
+  --search-head-surface: var(--surface);
+  --search-head-border-2: var(--border-strong);
+  --search-head-ink: var(--muted);
+  --search-more-surface: var(--surface);
+  --search-more-border: var(--border-strong);
+  --search-more-ink: var(--muted);
+  --sidebar-surface: var(--surface);
+  --sidebar-border: var(--border-strong);
+  --brand-mark-surface: var(--surface-raised);
+  --brand-mark-ink: var(--accent);
+  --older-marker-border: var(--border-strong);
+  --older-marker-ink-2: var(--muted);
+  --message-wrap-ink: var(--ink);
+  --settings-success-ink: var(--success);
+  --status-badge-ink: #455663;
+  --status-badge-ink-3: #7a5b1d;
+  --game-type-border: var(--border-strong);
+  --game-type-border-2: var(--border-strong);
+  --game-type-border-3: var(--border-strong);
+  --game-type-surface-3: var(--surface-raised);
+  --ops-credit-chart-border: var(--border-strong);
+  --ops-executive-border: var(--border-strong);
+  --ops-executive-head-border: var(--border-strong);
+  --ops-kpis-border: var(--border-strong);
+  --ops-lab-panel-border: var(--border-strong);
+  --ops-metrics-border: var(--border-strong);
+  --ops-mission-head-border: var(--border-strong);
+  --ops-panel-border: var(--border-strong);
+  --ops-source-border: var(--border-strong);
+  --ops-source-border-2: var(--border-strong);
+  --poolrad-stat-border: var(--border-strong);
+}

@@ -1,0 +1,93 @@
+.play-subviews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--control-boundary);
+  background: var(--dash-panel);
+}
+.play-subviews button[aria-pressed="true"] {
+  border-color: var(--dash-accent);
+  color: var(--dash-accent);
+}
+.play-subview-body { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.character-editor {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+  color: var(--dash-fg);
+  background: var(--dash-bg);
+  line-height: 1.5;
+}
+.character-editor h1, .character-editor h2, .character-editor h3 { font-family: var(--font-display); }
+.character-editor h1 { margin: 0 0 4px; font-size: 24px; }
+.character-editor h2 { margin: 0 0 12px; font-size: 18px; }
+.character-editor h3 { margin: 0 0 12px; font-size: 16px; }
+.character-editor p { margin: 8px 0 16px; }
+.editor-import-row, .editor-characters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.editor-panel {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--control-boundary);
+  border-radius: var(--radius);
+  background: var(--dash-panel);
+  color: var(--dash-fg);
+}
+.editor-panel label:not(.editor-profile) { display: block; margin-bottom: 6px; }
+.editor-panel input:not([type="checkbox"]), .editor-panel select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid var(--control-boundary);
+  border-radius: var(--radius);
+  background: var(--dash-panel-2);
+  color: var(--dash-fg);
+  font: inherit;
+}
+.editor-panel input[type="file"] { overflow: hidden; }
+.editor-panel input::file-selector-button { font: inherit; margin-right: 8px; padding: 6px; color: var(--dash-fg); background: var(--dash-panel-2); border: 1px solid var(--control-boundary); border-radius: var(--radius); }
+.editor-notice { padding: 12px 16px; border: 1px solid var(--control-boundary); background: var(--dash-panel); }
+.editor-section-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin: 22px 0 0; }
+.editor-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.editor-stats dt { font-size: 12px; }
+.editor-stats dd { margin: 0; font-size: 18px; font-weight: 700; }
+.editor-panel fieldset { min-width: 0; padding: 0; margin: 16px 0; border: 0; }
+.editor-panel legend { padding: 0; margin-bottom: 6px; font-weight: 700; }
+.editor-profile { display: flex; align-items: flex-start; gap: 10px; min-height: 32px; padding: 6px 0; }
+.editor-profile input { width: 24px; height: 24px; flex: none; margin: 0; accent-color: var(--dash-accent); }
+.editor-profile small { display: block; font-size: 12px; }
+.editor-copy-form, .editor-result { margin-top: 18px; }
+.editor-copy-form input { max-width: 480px; }
+.editor-panel button, .editor-download, .play-subviews button { min-height: 36px; }
+.dash-root .character-editor button, .dash-root .play-subviews button { border-color: var(--control-boundary); }
+.editor-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.editor-download {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--control-boundary);
+  border-radius: var(--radius);
+  background: var(--dash-panel-2);
+  color: var(--dash-fg);
+  font-weight: 700;
+  text-decoration: underline;
+}
+.character-editor details { margin-top: 12px; }
+.character-editor summary { min-height: 28px; cursor: pointer; }
+.character-editor code { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.editor-receipts { list-style: none; padding: 0; }
+.editor-receipts li { padding: 12px 0; border-top: 1px solid var(--control-boundary); }
+.editor-receipts strong, .editor-receipts span { display: block; }
+.editor-receipts dl { margin: 8px 0; }
+.editor-receipts dd { margin: 0 0 8px; }
+.character-editor :focus-visible, .play-subviews :focus-visible { outline: 2px solid var(--dash-accent); outline-offset: 3px; }
+@media (max-width: 700px) {
+  .character-editor { padding: 14px; }
+  .editor-import-row, .editor-characters { grid-template-columns: minmax(0, 1fr); }
+  .editor-panel { padding: 14px; }
+  .editor-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .play-subviews { padding: 10px 14px; }
+}

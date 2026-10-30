@@ -1,0 +1,33 @@
+/* Local OFL-1.1 Latin regular faces; full provenance in FONTS.md. */
+
+@font-face {
+  font-family: 'Oxanium';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./oxanium/oxanium-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Black Ops One';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./black-ops-one/black-ops-one-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Dosis';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./dosis/dosis-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Michroma';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./michroma/michroma-latin-400-normal.woff2') format('woff2');
+}

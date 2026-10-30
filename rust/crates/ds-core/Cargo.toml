@@ -1,0 +1,17 @@
+[package]
+name = "ds-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dunking Sheep core: the library every Rust binary shares (docs/rust/RUST_PORT.md section 2)."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# T02: the pinned crates from RUST_PORT.md section 3 that these six modules need.
+thiserror = "2"
+nix = { version = "0.29", features = ["fs", "process", "signal"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -20,3 +20,27 @@ venv/
 # untracked; an ignore rule cannot hide a file already in the Git index.
 # The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl
+.venv/
+ui/node_modules/
+ui/dist/
+
+# The desk's own secrets must never be published. Two commits on public PRs added
+# data/ on 2026-10-29 (plaintext desk password, API token, cookie store and the
+# owner's conversation; commit 52847e5 is still served by raw.githubusercontent -
+# a force-push does not unpublish a SHA). t746 landed these rules and
+# tools/check_public_secrets.py in CI; t756 adds the wider names and the LOCAL
+# refusal, because CI runs after the commit is already public and an ignore rule
+# cannot hide a file that is already in the index.
+data/
+auth.json
+owner-credentials
+*.sqlite3
+# Credential-shaped files (t746 secret guard).
+*-credentials
+*.pem
+*token*
+.env
+*.key
+
+# Rust build artefacts (T00): the workspace is built by every task.
+rust/target/

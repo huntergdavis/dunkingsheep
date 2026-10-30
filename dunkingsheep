@@ -489,6 +489,16 @@ def build_parser():
     p = sub.add_parser("gh-token", help="print a one-hour App token for this lane's role (empty for the owner)")
     p.add_argument("--kind", choices=["author", "reviewer"], help="owner/system only")
     p.add_argument("--quiet", action="store_true", help="print nothing when no token applies")
+    p = sub.add_parser("secrets-check",
+                       help="refuse a push/PR that would publish the desk's own secrets",
+                       description="Exits 1, with a named refusal, when this branch ADDS a "
+                                   "path that must never leave the host (data/, *.sqlite3, "
+                                   "*-credentials, *.pem, *token*, .env). Called by the git "
+                                   "credential helper and by the gh wrapper before "
+                                   "`gh pr create` (t756).")
+    p.add_argument("--base", help="diff against this ref (default: origin/main)")
+    p.add_argument("--cwd", help="repository to check (default: cwd)")
+    p.add_argument("--quiet", action="store_true")
     p = sub.add_parser("git-credential", help="git credential helper: `git config --global credential.helper '!dunkingsheep git-credential'`")
     p.add_argument("operation", nargs="?", default="get", choices=["get", "store", "erase"])
     p = sub.add_parser("review", help="the review timer and its queue")
@@ -656,7 +666,69 @@ def build_parser():
     q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
     q.add_argument("pane_id")
     q.add_argument("--by")
+    q = osub.add_parser("conversation",
+                        help="the owner mailbox as one conversation (desk/web only)",
+                        epilog="Telegram and the web are two transports for one mailbox: "
+                               "this is the complete record, with the transport each "
+                               "message arrived on and the question each reply answers.")
+    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--before", type=float, help="only messages older than this unix time")
+    q = osub.add_parser("reply",
+                        help="answer one owner question (desk/web only)",
+                        epilog="The reply goes back on the transport the question arrived "
+                               "on, and answering acks the question, so 'answered' is one "
+                               "fact. One answer per question.")
+    q.add_argument("message_id")
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
+    q = osub.add_parser("ingest",
+                        help="record one owner question that arrived on a transport (t594)",
+                        epilog="A bridge does not keep its own store: the question lands in "
+                               "the one owner mailbox with its transport, and 'owner reply' "
+                               "answers it back the same way. --external-id is the "
+                               "transport's own id (telegram:<update_id>), so a redelivered "
+                               "update returns the row it already produced.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
+    q.add_argument("--external-id")
+    q.add_argument("--subject", "-s")
+    q.add_argument("--attach", help="local file paths, comma separated")
+    q = osub.add_parser("outbox",
+                        help="owner-mailbox replies waiting for a transport (t594)",
+                        epilog="Only replies whose own transport matches are returned, so "
+                               "Telegram carries answers and nothing else: no briefs, no "
+                               "digests, no web echoes.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--limit", type=int, default=20)
+    q = osub.add_parser("delivered",
+                        help="record a transport's delivery receipt for one owner row (t594)",
+                        epilog="This receipt replaces telegram-status.json: a page is "
+                               "confirmed by the owner mailbox, not by a file read beside "
+                               "the bridge's credentials.")
+    q.add_argument("message_id")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--external-id")
     q = osub.add_parser("stats", help="owner-push counts and latency")
+    p = sub.add_parser("report",
+                       help="the deterministic fleet report (no model)",
+                       description="Task metrics, lanes, needs-owner, review queue, "
+                                   "poolrad progress, budget and watchdog, measured at "
+                                   "generation time. Writes "
+                                   "~/.config/dunkingsheep/reports/<ts>.md and posts it "
+                                   "to the owner mailbox on the report transport when "
+                                   "that mailbox exists (FLAT_FLEET.md 7.3).")
+    rsub = p.add_subparsers(dest="report_command", metavar="<action>",
+                            parser_class=json_parser_class)
+    q = rsub.add_parser("run", help="generate one report")
+    q.add_argument("--no-post", action="store_true",
+                   help="write the file only; do not post to the owner mailbox")
+    q.add_argument("--prose", help="plain-language paragraph (rejected if it names a "
+                                   "task id or status the report does not contain)")
+    q.add_argument("--prose-file")
+    q.add_argument("--out-dir")
+    q = rsub.add_parser("list", help="the report files produced so far, newest first")
+    q.add_argument("--out-dir")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
     q = ssub.add_parser("capture", help="record one row per agent lane now")
@@ -1003,6 +1075,22 @@ def print_panes(result):
         )
     if result.get("self_pane_id"):
         print(f"* = this pane ({result['self_pane_id']})")
+    gap = result.get("registry_gap") or []
+    if gap:
+        # t714: the pane list is the terminal's opinion; the registry knows the
+        # PROCESS. A lane the list drops while its process runs is unreachable, not
+        # dead, and it must be visible here instead of quietly missing from a table.
+        print()
+        print(f"{len(gap)} registered lane(s) the backend pane list does not contain:")
+        for row in gap:
+            state = f"process ALIVE (pid {row['pid']})" if row.get("alive") else \
+                f"process gone (pid {row.get('pid') or 'not recorded'})"
+            print(f"  {row['pane']:<8} {_clip(row.get('label') or '-', 24):<24} "
+                  f"{_clip(row.get('role') or '-', 9):<9} {state}")
+        if any(row.get("alive") for row in gap):
+            print("  an ALIVE lane that is not in the list cannot be typed into: mail to it "
+                  "fails with reason=backend_missing_pane (restore the pane, or address "
+                  "the lane by mailbox name).")
 
 
 def print_inbox_archive(result):
@@ -1087,22 +1175,45 @@ def print_inbox_list(r):
 def _task_row(task):
     scope = "global" if task.get("is_global") else task.get("scope")
     assignees = ",".join(task.get("assignees") or []) or "-"
-    return (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
-            f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
-            f"{_clip(task['title'], 50)}")
+    row = (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
+           f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
+           f"{_clip(task['title'], 50)}")
+    # t878/#164: a cancelled dependency is SATISFIED (t879), so the row is
+    # claimable - the note stays because "my dependency was cancelled" is something
+    # a reader needs to know, not something to hide behind eligibility.
+    dead = task.get("dead_dependencies") or []
+    if dead:
+        row += f"  [depends on cancelled {', '.join(dead)}: satisfied (t164), claimable]"
+    return row
 
 
 def print_task(task):
     print(f"{task['id']} [{task['priority']}] {task['status']}  {task['title']}")
+    if task.get("blocked_dependents"):
+        print(f"warning     cancelling this leaves {len(task['blocked_dependents'])} "
+              f"unclaimable dependent(s): {', '.join(task['blocked_dependents'])} - a "
+              "cancelled dependency can never be satisfied, so repoint or cancel them")
     print(f"scope       {task['scope']}")
     if task.get("assignees"):
         print(f"assignees   {', '.join(task['assignees'])}")
     if task.get("claimed_by"):
         print(f"claimed by  {', '.join(task['claimed_by'])}")
+    if task.get("pr"):
+        print(f"body pr     #{task['pr']}"
+              + (f" (accounting pr #{task['accounting_pr']})"
+                 if task.get("accounting_pr") else ""))
+    if task.get("dead_dependencies"):
+        print(f"cancelled deps {', '.join(task['dead_dependencies'])} "
+              "(satisfied since t164, so this row IS claimable; repoint with "
+              "`task update <id> --depends-on <good-id>` if you want a live edge)")
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
               + (f" (blocked by {', '.join(blocked)})" if blocked else ""))
+    if task.get("unblock_needed") and task.get("dependency_note"):
+        # t903: a blocked task whose dependencies are all satisfied is claimable the
+        # moment somebody unblocks it, and nothing used to say so.
+        print(f"unblock     {task['dependency_note']}")
     if task.get("parent_id"):
         print(f"parent      {task['parent_id']}")
     if task.get("block_reason"):
@@ -1118,6 +1229,16 @@ def print_task(task):
     if task.get("lease_expires_at"):
         print(f"lease       {time.strftime('%Y-%m-%d %H:%M:%S',
                                         time.localtime(task['lease_expires_at']))}")
+    if task.get("notes"):
+        # t605: the evidence a lane recorded, in the view the next reader actually
+        # uses. Without it a reviewed task reads as unreviewed.
+        print()
+        print(f"notes (last {len(task['notes'])}):")
+        for row in task["notes"]:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["at"]))
+            print(f"  {when} {row.get('actor') or '-'} {row.get('event') or 'note'}")
+            for line in str(row.get("reason") or "").splitlines() or [""]:
+                print(f"    {line}")
 
 
 def print_task_list(result):
@@ -1365,6 +1486,21 @@ def _git_credential(client, operation):
         return {}
     if attrs.get("protocol") != "https" or attrs.get("host") != "github.com":
         return {}
+    # t756: the credential handshake is the last moment before a push leaves the
+    # host, so it is where the desk's own secrets are refused. LIMIT, stated
+    # rather than implied: this blocks the lane's App token, but a helper
+    # configured behind it (the owner's `gh auth git-credential` fallback) can
+    # still authenticate the push, which is why `gh pr create` is checked too and
+    # why `.gitignore` carries the same names.
+    import dunk_secrets
+    message, error = dunk_secrets.refusal()
+    if message:
+        print(message, file=sys.stderr)
+        print("REFUSED by the dunkingsheep git credential helper (t756).", file=sys.stderr)
+        return {}
+    if error:
+        print(f"secrets-check: WARNING could not fully check this push: {error}",
+              file=sys.stderr)
     try:
         result = client.call("gh_token")
     except Exception:  # noqa: BLE001 - no daemon means no token, not a broken git
@@ -1413,6 +1549,15 @@ def _github_local(args):
 GH_WRAPPER = """#!/bin/sh
 # dunkingsheep gh wrapper: lanes act as their GitHub App; the owner keeps their login.
 # Installed by `dunkingsheep github wrappers`; do not edit.
+# t756: opening a PR publishes a branch, so the desk's own secrets are refused
+# here before gh runs. This path cannot be bypassed by a credential fallback.
+case "$1 $2" in
+  "pr create")
+    if ! dunkingsheep --no-start-daemon secrets-check; then
+      echo "REFUSED by the dunkingsheep gh wrapper (t756): fix the paths above." >&2
+      exit 1
+    fi ;;
+esac
 tok=$(dunkingsheep --no-start-daemon gh-token --quiet 2>/dev/null)
 if [ -n "$tok" ]; then
   GH_TOKEN="$tok" exec __REAL_GH__ "$@"
@@ -1444,10 +1589,23 @@ def dunk_github_wrappers_install(bin_dir):
         handle.write(GH_WRAPPER.replace("__REAL_GH__", real))
     os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     helper = "!dunkingsheep git-credential"
-    _sp.run(["git", "config", "--global", "--replace-all",
-             "credential.https://github.com.helper", helper], check=False)
+    key = "credential.https://github.com.helper"
+    # t599: this used --replace-all and DROPPED the owner's own
+    # '!gh auth git-credential', so his interactive login stopped being a fallback for
+    # every repo he touched. Ours goes FIRST (it is the lane credential) and every
+    # helper that was already there stays behind it, in the order it was in.
+    existing = [row for row in _sp.run(["git", "config", "--global", "--get-all", key],
+                                       capture_output=True, text=True).stdout.splitlines()
+                if row.strip()]
+    wanted = [helper] + [row for row in existing if row != helper]
+    if existing != wanted:
+        _sp.run(["git", "config", "--global", "--unset-all", key], check=False)
+        for row in wanted:
+            _sp.run(["git", "config", "--global", "--add", key, row], check=False)
     return {"gh_wrapper": target, "real_gh": real, "git_credential_helper": helper,
-            "note": "lanes use https remotes; the owner's own gh/ssh login is untouched "
+            "helpers": wanted,
+            "note": "lanes use https remotes; our helper is first and any helper already "
+                    "configured (the owner's gh login) is kept as the fallback "
                     "(gh-token prints nothing for the owner role)"}
 
 
@@ -1500,6 +1658,10 @@ def print_review_list(result):
 def print_whoami(result):
     print(f"pane {result.get('pane_id') or '-'}  role {result.get('role')}"
           + ("  (service token)" if result.get("via_token") else ""))
+    if result.get("identity_note"):
+        # t602: a lane with no pane is still attributed, by the terminal it came
+        # from. Silence here is what made an ssh lane look like a broken fleet.
+        print(f"  identity: {result['identity_note']}")
     if result.get("binding_note"):
         print(f"  binding: {result['binding_note']}")
     reg = result.get("registered")
@@ -1710,6 +1872,43 @@ def print_owner_push(result):
           f"(no inbox row, nothing typed)")
 
 
+def print_report_run(result):
+    print(f"report {result.get('path')}  (generated {result.get('generated_at')})")
+    posted = result.get("posted") or {}
+    if posted.get("message_id"):
+        print(f"posted to the owner mailbox as {posted['message_id']} "
+              f"(transport {posted.get('transport') or 'none'})")
+    elif posted.get("error"):
+        print(f"NOT posted: {posted['error']}")
+    for problem in result.get("prose_rejected") or []:
+        print(f"prose rejected: {problem}")
+
+
+def print_report_list(result):
+    print(f"{result.get('count', 0)} report(s) in {result.get('dir')}")
+    for row in result.get("reports") or []:
+        print(f"  {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['at']))} "
+              f"{row['size']:>8} B  {row['path']}")
+
+
+def print_owner_conversation(result):
+    print(f"mailbox {result.get('mailbox')}  messages {result.get('count', 0)}  "
+          f"waiting {len(result.get('waiting') or [])}")
+    for row in result.get("messages") or []:
+        mark = "->" if row.get("reply_to") else ("? " if row.get("state") == "queued" else "  ")
+        when = time.strftime("%m-%d %H:%M", time.localtime(row.get("created_at") or 0))
+        transport = row.get("transport") or "-"
+        print(f"{mark} {row.get('id'):>6} {when} {transport:<8} "
+              f"{(row.get('sender') or '-'):<8} {(row.get('body') or '').splitlines()[0][:90]}")
+
+
+def print_owner_reply(result):
+    reply = result.get("reply") or {}
+    print(f"answered {result.get('question')} with {reply.get('message_id')} "
+          f"on {result.get('transport') or 'no transport'} "
+          f"(question {result.get('acked')} acked)")
+
+
 def print_owner_take(result):
     messages = result.get("messages") or []
     if not messages:
@@ -1792,6 +1991,8 @@ def print_messages(result):
                   f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
             if m.get("blocked_by"):
                 print(f"{'':<5} {'':>8} blocked by {m['blocked_by']}")
+            elif m.get("unblock_needed"):
+                print(f"{'':<5} {'':>8} dependencies satisfied - UNBLOCK to claim")
     if recent:
         if queued:
             print()
@@ -1972,7 +2173,22 @@ def _be_nice():
 
 
 # Read only local files; never open a socket.
-LOCAL_ONLY_COMMANDS = ("context", "github")
+LOCAL_ONLY_COMMANDS = ("context", "github", "secrets-check")
+# Long daemon-side work: the poolrad exporter runs for minutes, a launch
+# verifies the process started, a review sync talks to GitHub. A 15 s read
+# deadline reported "no answer" for work that then completed (2026-10-29, the
+# first backlog-sync), and the timer unit recorded a failure for a success.
+LONG_DAEMON_COMMANDS = frozenset({"poolrad", "review", "start-agent", "agent",
+                                  "new-workspace", "workspace", "respawn-pane", "respawn"})
+LONG_DAEMON_TIMEOUT_S = 600.0
+
+
+def client_timeout_for(command, timeout):
+    """The socket read deadline for `command`: never below the client's own,
+    and at least LONG_DAEMON_TIMEOUT_S for the long daemon-side commands."""
+    if command in LONG_DAEMON_COMMANDS:
+        return max(float(timeout), LONG_DAEMON_TIMEOUT_S)
+    return timeout
 # Context WRITES go through the daemon (docs/FLAT_FLEET.md 8); reads stay local
 # so the digest never waits on a socket. --local is the owner's bootstrap path.
 CONTEXT_DAEMON_WRITES = ("add", "promote", "supersede", "retire")
@@ -2400,6 +2616,15 @@ def main(argv=None):
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
     # gets no standing rules exactly when the daemon is down.
+    if command == "secrets-check":
+        # An exit code, not a payload: the gh wrapper and the credential helper
+        # branch on it, so returning it through the (result, printer) path would
+        # print the refusal and still let the push through (t756).
+        import dunk_secrets
+        return dunk_secrets.main([arg for arg in
+                                  (["--base", args.base] if args.base else [])
+                                  + (["--cwd", args.cwd] if args.cwd else [])
+                                  + (["--quiet"] if args.quiet else [])])
     if command == "github":
         return _github_local(args)
     if command == "context" and args.context_command in CONTEXT_DAEMON_WRITES \
@@ -2427,6 +2652,7 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        client.timeout = client_timeout_for(command, client.timeout)
         # Synchronous send paths wait for the daemon to *deliver*, and delivery can
         # need several pane reads (a typing check, a dead-session check, a submit
         # confirmation). On a loaded host those reads are slow enough that the
@@ -2923,6 +3149,7 @@ def run_client_command(client, args):
             if args.assign is not None:
                 payload["assignees"] = args.assign
             if args.depends_on is not None:
+                # t878: the list is REPLACED, so a repoint repairs a dead edge.
                 payload["depends_on"] = args.depends_on
             if args.multi_assignee is not None:
                 payload["multi_assignee"] = args.multi_assignee
@@ -2932,7 +3159,7 @@ def run_client_command(client, args):
                                mode=args.mode), print_task
         if sub == "complete":
             return client.call("task_complete", id=args.id, by=args.by,
-                               verdict=args.verdict), print_task
+                               verdict=args.verdict, landed=args.landed), print_task
         if sub == "block":
             return client.call("task_block", id=args.id, reason=args.reason), print_task
         if sub == "unblock":
@@ -2991,7 +3218,52 @@ def run_client_command(client, args):
         if sub == "take":
             return client.call("owner_take", pane_id=args.pane_id,
                                by=args.by), print_owner_take
+        if sub == "conversation":
+            payload = {"limit": args.limit}
+            if args.before is not None:
+                payload["before"] = args.before
+            return client.call("owner_conversation", **payload), print_owner_conversation
+        if sub == "reply":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            if not body:
+                raise SystemExit("owner reply: a body or --body-file is required")
+            return client.call("owner_reply", message_id=args.message_id,
+                               body=" ".join(body)), print_owner_reply
+        if sub == "ingest":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            payload = {"transport": args.transport, "body": " ".join(body),
+                       "external_id": args.external_id, "subject": args.subject,
+                       "attach": args.attach}
+            return client.call("owner_ingest",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
+        if sub == "outbox":
+            return client.call("owner_outbox", transport=args.transport,
+                               limit=args.limit), print_view
+        if sub == "delivered":
+            payload = {"message_id": args.message_id, "transport": args.transport,
+                       "external_id": args.external_id}
+            return client.call("owner_delivered",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
         return client.call("owner_stats"), print_owner_stats
+    if command == "report":
+        if args.report_command == "list":
+            return client.call("report_list", out_dir=args.out_dir), print_report_list
+        prose = args.prose
+        if args.prose_file:
+            with open(args.prose_file, encoding="utf-8") as handle:
+                prose = handle.read()
+        payload = {"post": not args.no_post}
+        if prose:
+            payload["prose"] = prose
+        if args.out_dir:
+            payload["out_dir"] = args.out_dir
+        return client.call("report_run", **payload), print_report_run
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
         payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {
@@ -3033,7 +3305,14 @@ def run_client_command(client, args):
             return client.call("review_sync", dry_run=args.dry_run), print_review_sync
         return client.call("review_list"), print_review_list
     if command == "whoami":
-        return client.call("whoami"), print_whoami
+        # The client's identity note travels with the answer: the daemon knows the
+        # pane (or its absence), the client knows WHY there is none.
+        def _whoami(result, _note=client.identity_note):
+            result = dict(result or {})
+            if _note:
+                result.setdefault("identity_note", _note)
+            return print_whoami(result)
+        return client.call("whoami"), _whoami
     if command == "token":
         sub = args.token_command
         if sub == "issue":

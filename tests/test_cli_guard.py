@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,3 +147,62 @@ class StillWorkingTests(unittest.TestCase):
         self.assertNotIn(self.mod.EXIT_STILL_WORKING, (0, 2, 3),
                          "a slow batch must not share an exit code with a refusal")
         self.assertIn("dispatch", self.mod.BATCH_COMMANDS)
+
+
+class GitCredentialHelperInstallTests(unittest.TestCase):
+    """t599: installing our helper must not drop the owner's own gh helper.
+
+    Measured live 2026-10-29: the install ran `git config --global --replace-all`,
+    so `!gh auth git-credential` disappeared and the owner's interactive login
+    stopped working as a fallback for every repo he touched.
+    """
+
+    def setUp(self):
+        self.mod = load_cli()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = self.tmp.name
+        self.bin_dir = os.path.join(self.home, "bin")
+        os.makedirs(self.bin_dir)
+        # A real `gh` for the wrapper to exec, and an isolated global git config.
+        fake_gh = os.path.join(self.home, "real-gh")
+        Path(fake_gh).write_text("#!/bin/sh\nexit 0\n")
+        os.chmod(fake_gh, 0o755)
+        self.env = mock.patch.dict(os.environ, {
+            "HOME": self.home,
+            "GIT_CONFIG_GLOBAL": os.path.join(self.home, ".gitconfig"),
+            "PATH": self.home + os.pathsep + os.environ.get("PATH", ""),
+        })
+        self.env.start()
+        self._git("config", "--global", "credential.https://github.com.helper",
+                  "!gh auth git-credential")
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _git(self, *argv):
+        return subprocess.run(["git", *argv], capture_output=True, text=True)
+
+    def _helpers(self):
+        out = self._git("config", "--global", "--get-all",
+                        "credential.https://github.com.helper").stdout
+        return [row for row in out.splitlines() if row.strip()]
+
+    def test_ours_goes_first_and_the_owners_helper_is_kept(self):
+        result = self.mod.dunk_github_wrappers_install(self.bin_dir)
+        self.assertEqual("!dunkingsheep git-credential", result["git_credential_helper"])
+        self.assertEqual(["!dunkingsheep git-credential", "!gh auth git-credential"],
+                         self._helpers())
+
+    def test_a_second_install_does_not_duplicate_our_helper(self):
+        self.mod.dunk_github_wrappers_install(self.bin_dir)
+        self.mod.dunk_github_wrappers_install(self.bin_dir)
+        self.assertEqual(["!dunkingsheep git-credential", "!gh auth git-credential"],
+                         self._helpers())
+
+    def test_a_third_party_helper_keeps_its_relative_order(self):
+        self._git("config", "--global", "--add",
+                  "credential.https://github.com.helper", "store")
+        self.mod.dunk_github_wrappers_install(self.bin_dir)
+        self.assertEqual(["!dunkingsheep git-credential", "!gh auth git-credential", "store"],
+                         self._helpers())
