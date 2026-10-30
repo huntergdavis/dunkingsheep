@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 pub mod fakes;
+pub mod parse;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
@@ -26,6 +27,10 @@ pub struct Pane {
     pub window_id: String,
     pub cwd: String,
     pub command: String,
+    /// The stable, human-chosen label: the recorded start_agent name when there is
+    /// one, else the pane title, else the window name (the Python's `label`).
+    pub label: String,
+    /// tmux's own `#{pane_title}`, untouched (the Python's `terminal_title`).
     pub title: String,
     pub active: bool,
     pub workspace: String,
