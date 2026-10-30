@@ -1270,3 +1270,16 @@ class BlockEndsTheClaimTests(unittest.TestCase):
         self.flock.tasks.db.commit()
         self.flock.tasks.reap(alive_panes={"w2:p1"}, alive_source="live")
         self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_completing_deletes_the_lease(self):
+        """t872 completed at 03:05:09 and still held a live lease."""
+        task = self.flock.tasks.add("global", "duplicate")
+        self.flock.tasks.claim_next(scope="global", pane_id="w2:p1")
+        self.flock.tasks.complete(task["id"])
+        self.assertEqual([], self.flock.tasks.leases_for_pane("w2:p1"))
+
+    def test_cancelling_deletes_the_lease(self):
+        task = self.flock.tasks.add("global", "duplicate")
+        self.flock.tasks.claim_next(scope="global", pane_id="w2:p1")
+        self.flock.tasks.cancel(task["id"], reason="duplicate")
+        self.assertEqual([], self.flock.tasks.leases_for_pane("w2:p1"))

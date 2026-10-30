@@ -767,6 +767,7 @@ class Tasks:
         if verdict is not None:
             self.set_verdict(row["id"], verdict, by=by)
         result = self.update(row["id"], status="done", updated_by=by)
+        self._end_claim(row["id"])
         self._fire(row["id"], "completed", by=by, kind=row["kind"] if "kind" in row.keys() else None)
         return result
 
@@ -1020,6 +1021,19 @@ class Tasks:
                 self.db.rollback()
                 raise
 
+    def _end_claim(self, task_id):
+        """Delete every lease on a task that has reached a terminal status (t872).
+
+        A lease is the claim. Once the task is blocked, cancelled or done it is not
+        being worked, and a lease left behind is what the reaper requeues and the push
+        loop re-claims - measured three times today: block kept it (t872: blocked ->
+        requeued -> claimed, three rounds), release kept the assignee (t595), and
+        complete leaves it too (t872 completed at 03:05:09 still had one live lease).
+        """
+        with self._lock:
+            self.db.execute("DELETE FROM task_leases WHERE task_id = ?", (str(task_id),))
+            self.db.commit()
+
     def block(self, task_id, reason=None):
         """Block a task and END its claim (t872).
 
@@ -1031,9 +1045,7 @@ class Tasks:
         is not evidence of anything.
         """
         row = self.update(task_id, status="blocked", block_reason=reason)
-        with self._lock:
-            self.db.execute("DELETE FROM task_leases WHERE task_id = ?", (str(row["id"]),))
-            self.db.commit()
+        self._end_claim(row["id"])
         return self.get(row["id"])
 
     def unblock(self, task_id):
@@ -1043,7 +1055,9 @@ class Tasks:
         return self.update(row["id"], status="open", block_reason=None)
 
     def cancel(self, task_id, reason=None):
-        return self.update(task_id, status="cancelled", block_reason=reason)
+        row = self.update(task_id, status="cancelled", block_reason=reason)
+        self._end_claim(row["id"])
+        return self.get(row["id"])
 
     def delete(self, task_id):
         # F4: the checks and the delete are one write transaction.
