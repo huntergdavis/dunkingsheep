@@ -1,0 +1,24 @@
+{
+ "default": "anonymous",
+ "lanes": {
+  "%7": {
+   "by": "fixture",
+   "label": "golden-worker",
+   "provider": "pi",
+   "registered_at": 1793344595.895,
+   "role": "worker"
+  },
+  "%9": {
+   "by": "fixture",
+   "label": "golden-reviewer",
+   "provider": "claude",
+   "registered_at": 1793344595.896,
+   "role": "reviewer"
+  }
+ },
+ "reviewer_providers": [
+  "claude",
+  "codex"
+ ],
+ "updated_at": 1793344595.897
+}
