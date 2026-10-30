@@ -50,15 +50,34 @@ fi
 # The transport's own retry must not create a second question.
 $DS owner ingest telegram "acceptance question ${STAMP}" \
     --external-id "$TG_ID" --subject "t594 acceptance" >/tmp/t594-accept-2.json 2>&1
-if grep -q '"duplicate": *true' /tmp/t594-accept-2.json; then
+if python3 -c 'import json,sys; sys.exit(0 if json.load(open("/tmp/t594-accept-2.json")).get("duplicate") else 1)' 2>/dev/null; then
   pass "1b. a redelivered update did not become a second question"
 else
   fail "1b. redelivery created a second question (expected duplicate=true)"
 fi
 
 # -- 2. the answer goes out on telegram, and only there ------------------------
-QUESTION=$($DS --json owner conversation --limit 20 2>/dev/null \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); rows=d.get("messages") or []; print(next((r["message_id"] for r in rows if r.get("external_id")=="'"$TG_ID"'"), ""))' 2>/dev/null)
+# The id comes from the INGEST RESPONSE the script already wrote, not from a second
+# query. Measured 2026-10-30: the owner ran this as the owner role and line 2 reported
+# NOT OBSERVED because the read-back went through `--json owner conversation` and
+# found nothing - a harness gap that made a working behaviour look unmeasured (the
+# reply had already been proven by hand: i34486 transport=telegram reply_to=i34484
+# with a delivery receipt). One call, one source of truth, no flag-order dependency.
+QUESTION=$(python3 - "$TG_ID" <<'PY_ID'
+import json, sys
+tg = sys.argv[1]
+for path in ("/tmp/t594-accept-1.json", "/tmp/t594-accept-2.json"):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        continue
+    message = data.get("message") or {}
+    if message.get("external_id") in (None, tg):
+        print(message.get("message_id") or "")
+        break
+PY_ID
+)
 if [ -z "$QUESTION" ]; then
   skip "2. could not read the question id back; answer routing not measured"
 else
