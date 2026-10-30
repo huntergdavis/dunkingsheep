@@ -550,6 +550,34 @@ class AccountingTests(unittest.TestCase):
                          "no new commit for an open accounting PR")
         self.assertEqual(811, self.flock.tasks.get(done["id"])["accounting_pr"])
 
+    def test_an_accept_before_the_merge_files_no_accounting_pr(self):
+        """t835: #1637 was filed for body #1630 while #1630 was still open, so the
+        evidence doc it credited was not on main and check_evidence_docs failed."""
+        self.github.merge_blocked = True          # second verdict / protection pending
+        done = self.review_task()
+        self.assertFalse(done["github"]["merged"])
+        self.assertIn("not merged", done["github"]["accounting"]["skipped"])
+        self.assertEqual([], self.github.prs_opened, "no credit before the body lands")
+
+    def test_the_merge_files_exactly_one_accounting_pr(self):
+        """The row is written by the sync that OBSERVES the merge, once."""
+        self.github.merge_blocked = True
+        self.review_task()
+        self.assertEqual([], self.github.prs_opened)
+        self.github.merge_blocked = False
+        report = self.sync.run()
+        self.assertEqual([(POOLRAD, 1631)],
+                         [(repo, number) for repo, number, _sha in self.github.merged])
+        self.assertEqual(1, len(report["accounting"]), "the merge writes the row")
+        self.assertEqual(900, report["accounting"][0]["accounting_pr"])
+        self.assertEqual(1, len(self.github.prs_opened))
+        # Idempotent: a second sweep may retry the merge (the fake has no MERGED
+        # state), but it must never open a second accounting PR for the same body.
+        again = self.sync.run()
+        self.assertEqual(1, len(again["accounting"]))
+        self.assertIn("already open", again["accounting"][0]["reason"] or "")
+        self.assertEqual(1, len(self.github.prs_opened))
+
     def test_a_github_failure_on_the_commit_keeps_the_verdict(self):
         self.github.fail_branch = True
         done = self.review_task()

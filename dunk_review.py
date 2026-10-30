@@ -426,11 +426,43 @@ class Sync:
                 report["cancelled"].append(task["id"])
         return report
 
+    def _account_after_merge(self, repo, number, head, task_id, report):
+        """Open the ledger row for a body that just merged (t835), once.
+
+        Idempotent by construction: account() refuses a row that is already in the
+        ledger or whose branch already has an open PR, and it records every refusal
+        as a sentence on the review task.
+        """
+        try:
+            task = self.flock.tasks.get(task_id)
+        except Exception as error:  # noqa: BLE001 - a store read must not undo a merge
+            report["errors"].append(f"accounting {repo}#{number}: read {task_id}: {error}")
+            return
+        if (task.get("repo"), task.get("pr")) != (repo, number):
+            report["errors"].append(
+                f"accounting {repo}#{number}: {task_id} is "
+                f"{task.get('repo')}#{task.get('pr')}, not this PR")
+            return
+        try:
+            result = self.account(task, by=task.get("completed_by") or "review-sync")
+        except Exception as error:  # noqa: BLE001 - a credit step never undoes a merge
+            report["errors"].append(f"accounting {repo}#{number}: {error}")
+            return
+        report.setdefault("accounting", []).append(
+            {"repo": repo, "pr": number, "task": task_id,
+             "accounting_pr": result.get("accounting_pr"),
+             "reason": result.get("reason"), "errors": result.get("errors") or []})
+
     def _merge(self, repo, number, head, token, report, task_id=None):
         try:
             self.github.merge_pull(repo, number, token, sha=head)
             report["merged"].append({"repo": repo, "pr": number, "head": head[:12],
                                      "task": task_id})
+            # t835: the merge is what the accounting row waits for, so the sync that
+            # performs it is the sync that writes the row - the accept that was held
+            # back by branch protection no longer has to come back for it.
+            if task_id:
+                self._account_after_merge(repo, number, head, task_id, report)
             return True
         except dunk_github.GitHubError as error:
             # 405 = protection not yet satisfied (approval count, other checks):
@@ -512,10 +544,22 @@ class Sync:
                     out["errors"].append(f"merge: {error}")
             # FLAT_FLEET.md 6.4: an accepted body earns its ledger row as its own
             # PR, opened by the reviewer App and approved by the author App.
-            try:
-                out["accounting"] = self.account(task, by=by)
-            except Exception as error:  # noqa: BLE001 - never undoes a verdict
-                out["accounting"] = {"errors": [str(error)]}
+            #
+            # t835: the row waits for the MERGE, not for the verdict. #1637 was filed
+            # on an accept for body #1630 while #1630 was still open (it needs a
+            # second verdict), so the accounting PR pointed at an evidence doc that
+            # did not exist on main and check_evidence_docs failed. A verdict is not
+            # a merge: credit is written against main, so it is written after main has
+            # the body.
+            if out.get("merged"):
+                try:
+                    out["accounting"] = self.account(task, by=by)
+                except Exception as error:  # noqa: BLE001 - never undoes a verdict
+                    out["accounting"] = {"errors": [str(error)]}
+            else:
+                out["accounting"] = {"skipped": "the body PR is not merged yet; "
+                                     "the accounting row is written by the sync that "
+                                     "observes the merge (t835)"}
         else:
             evidence = self._evidence(task)
             standing = self._standing_accept(task)
