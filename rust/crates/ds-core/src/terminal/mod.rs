@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 pub mod fakes;
 pub mod parse;
+pub mod tmux;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
