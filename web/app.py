@@ -515,13 +515,12 @@ def _desk_token() -> str:
 
 def _pending_by_pane() -> dict | None:
     """Counts of untaken pushes, or None when the source cannot establish a count."""
+    # One socket call, not a CLI process: the desk reads the daemon, never spawns
+    # it (FLAT_FLEET.md 9.2 rule 1). The payload shape is the same dict the CLI
+    # printed, so the checks below are unchanged.
     try:
-        result = subprocess.run(["dunkingsheep", "--json", "owner", "stats"],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return None
-        payload = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        payload = _flock().call("owner_stats")
+    except Exception:  # noqa: BLE001 - a read that cannot answer is "unknown", not an error
         return None
     if (not isinstance(payload, dict) or payload.get("ok") is False
             or not isinstance(payload.get("pending"), list)):
@@ -544,13 +543,11 @@ def _capability(pane: str) -> dict:
     Returns {} when the daemon cannot answer, so callers can refuse rather than guess.
     """
     try:
-        result = subprocess.run(["dunkingsheep", "capability", pane, "--json"],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0 and result.stdout.strip():
-            payload = json.loads(result.stdout)
+        payload = _flock().call("delivery_capability", pane=pane)
+        if isinstance(payload, dict):
             _CAP_CACHE[pane] = (time.time(), payload)
             return payload
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except Exception:  # noqa: BLE001 - an unanswered capability is {}, never a guess
         pass
     return {}
 
@@ -718,19 +715,9 @@ def api_fleet():
 
     cfg = Path(os.path.expanduser("~/.config/dunkingsheep"))
     try:
-        result = subprocess.run(["dunkingsheep", "panes", "--json"], capture_output=True,
-                                text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        return unavailable("pane roster timed out")
-    except (OSError, subprocess.SubprocessError) as error:
+        listing = _flock().call("list_panes")
+    except Exception as error:  # noqa: BLE001 - the view says unavailable, it does not crash
         return unavailable(f"pane roster could not be read: {error}")
-    if result.returncode != 0:
-        return unavailable((result.stderr or result.stdout or
-                            f"pane roster exited {result.returncode}").strip())
-    try:
-        listing = json.loads(result.stdout)
-    except (ValueError, TypeError):
-        return unavailable("pane roster returned invalid JSON")
     if not isinstance(listing, dict) or not isinstance(listing.get("panes"), list):
         return unavailable("pane roster response is missing its panes list")
     panes = listing["panes"]

@@ -321,7 +321,13 @@ def compact(readings: dict, generated_at: str) -> dict:
 
 
 def build(client, conn: sqlite3.Connection, *, now: datetime | None = None) -> dict:
-    """Read only actionable sources; no throughput, inbox, credit or config panels."""
+    """Read only actionable sources; no throughput, inbox, credit or config panels.
+
+    `conn` is the private OPERATIONS database (host samples, provider budget),
+    not one of the daemon's stores: it is read by `_host_board` and
+    `ops_budget.build` and cannot move to the socket without a daemon command for
+    host samples. Everything else here is already a client call.
+    """
     now = now or _now()
     readers = {"tasks": lambda: _task_board(client, now),
                "panes": lambda: _pane_board(client),
@@ -360,8 +366,7 @@ class BoardCache:
 
         conn = connect()
         try:
-            client = _client()
-            return build(client, conn)
+            return build(_client(), conn)
         finally:
             conn.close()
 
