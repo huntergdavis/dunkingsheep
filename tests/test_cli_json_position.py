@@ -63,10 +63,6 @@ class JsonPositionTests(unittest.TestCase):
                          "depth")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class LongDeadlineTests(unittest.TestCase):
     def test_long_daemon_commands_get_a_ten_minute_read_deadline(self):
         import importlib.util
@@ -80,3 +76,6 @@ class LongDeadlineTests(unittest.TestCase):
         self.assertEqual(15.0, cli.client_timeout_for("status", 15.0))
         self.assertEqual(900.0, cli.client_timeout_for("poolrad", 900.0), "never below the client's own")
 
+
+if __name__ == "__main__":
+    unittest.main()
