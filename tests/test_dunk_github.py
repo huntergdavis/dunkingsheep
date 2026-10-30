@@ -59,6 +59,11 @@ class FakeGitHub:
     def review_pull(self, repo, number, event, body, token):
         self.reviews.append((repo, number, event, token))
 
+    def merge_pull(self, repo, number, token, sha=None):
+        if getattr(self, "merge_blocked", False):
+            raise dunk_github.GitHubError("GitHub PUT merge -> 405: Required status check is expected")
+        self.merged = getattr(self, "merged", []) + [(repo, number, sha)]
+
 
 def pull(number=7, head="a" * 40, branch="pi-worker-3/t124", login="dunkingsheep-author[bot]"):
     return {"number": number, "title": f"PR {number}", "url": f"https://x/{number}",
@@ -172,6 +177,23 @@ class TimerTests(unittest.TestCase):
         self.assertEqual("approved", done["github"]["review"])
         self.assertIn(("o/r", "a" * 40, "success", "tok-reviewer"), self.github.statuses)
         self.assertEqual([("o/r", 7, "APPROVE", "tok-reviewer")], self.github.reviews)
+
+    def test_an_accepted_head_is_never_refiled_and_is_merged_when_protection_allows(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.call("task_next", {}, pane=REVIEWER)
+        self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
+        self.github.merge_blocked = True       # poolrad-style: a second approval still missing
+        done = self.call("task_complete", {"id": task["id"], "verdict": "accept"}, pane=REVIEWER)
+        self.assertFalse(done["github"]["merged"])
+        again = self.sync.run()
+        self.assertEqual([], again["filed"], "a judged head gets no second review")
+        self.assertEqual(2, len(self.github.statuses))  # pending then success only
+        self.assertEqual("success", self.github.statuses[-1][2])
+        self.github.merge_blocked = False
+        third = self.sync.run()
+        self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
+        self.assertEqual(1, len(third["merged"]))
 
     def test_needs_fix_requests_changes_and_files_work_for_the_author(self):
         self.sync.run()

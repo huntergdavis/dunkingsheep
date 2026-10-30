@@ -264,6 +264,17 @@ def post_status(repo, sha, state, token, description, target_url=None):
                     payload=payload)
 
 
+def merge_pull(repo, number, token, sha=None):
+    """Merge an accepted PR as the reviewer App once branch protection is satisfied.
+    GitHub answers 405 while a required check or review is still missing; the
+    caller treats that as 'not yet' and the next sync retries."""
+    payload = {"merge_method": "merge"}
+    if sha:
+        payload["sha"] = sha
+    return _request("PUT", f"{API}/repos/{repo}/pulls/{number}/merge", token=token,
+                    payload=payload)
+
+
 def review_pull(repo, number, event, body, token):
     """Approve or request changes on a PR as the reviewer App."""
     payload = {"event": event, "body": body}
