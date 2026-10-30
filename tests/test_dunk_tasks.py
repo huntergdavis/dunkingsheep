@@ -137,6 +137,104 @@ class CancelledDependencyTests(unittest.TestCase):
         self.assertTrue(after["eligible"])
 
 
+def _merge_through_the_timer(store, repo, pr):
+    """Run the review timer's own merge path against a fake GitHub.
+
+    A test that can pass while the production call is absent is the reason the releasing
+    half of t906 slipped (t933 review), so this drives `dunk_review.Sync._merge` - the
+    function the timer calls when GitHub accepts the merge - rather than the helper it is
+    supposed to call.
+    """
+    import dunk_review
+
+    class _GitHub:
+        GitHubError = dunk_review.dunk_github.GitHubError
+
+        def merge_pull(self, repo, number, token, sha=None):
+            return None
+
+    class _Tokens:
+        def get(self, kind, now=None):
+            return {"token": "tok", "kind": kind}
+
+    class _Flock:
+        tasks = store
+
+    sync = dunk_review.Sync(_Flock(), tokens=_Tokens(), github=_GitHub())
+    report = {"merged": [], "errors": []}
+    sync._merge(repo, pr, "a" * 40, "tok", report)
+    return report
+
+
+class DoneButUnmergedTests(unittest.TestCase):
+    """t906: "done" on a STACKED branch must not open the dependents.
+
+    t768 (T02) was marked done while its six Rust modules sat in PR169, stacked on
+    T00's unmerged PR168 - so t784 (T05) became claimable on a tree with no
+    Cargo.toml. The queue satisfies a dependency on status=done and knew nothing
+    about where the work actually lives.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _pair(self, repo=None, pr=None):
+        dep = self.store.add(GLOBAL, "T02: the modules live in a stacked PR",
+                             repo=repo, pr=pr)
+        row = self.store.add(GLOBAL, "T05: the dependent")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, row["id"]
+
+    def test_a_stacked_completion_does_not_open_the_dependent(self):
+        dep, row_id = self._pair()
+        self.store.complete(dep["id"], landed=False)
+        row = self.store.get(row_id)
+        self.assertIn(dep["id"], row["blocked_by"], "an unmerged dependency still blocks")
+        self.assertEqual([dep["id"]], row["unlanded_dependencies"])
+        self.assertFalse(row["eligible"], "the dependent must not be claimable yet")
+        self.assertFalse(self.store.get(dep["id"])["landed"])
+
+    def test_the_merge_opens_the_dependent_without_a_manual_edit(self):
+        """t933: this must go THROUGH THE MERGE PATH, not through the helper.
+
+        The first version of this test called `mark_landed_for_pr` directly, so it
+        passed while no production caller existed - which is exactly how the releasing
+        half went missing. The test now performs the merge the timer performs and
+        asserts the dependent opens as a consequence.
+        """
+        dep, row_id = self._pair(repo="huntergdavis/dunkingsheep", pr=169)
+        self.store.complete(dep["id"], landed=False)
+        self.assertFalse(self.store.get(row_id)["eligible"])
+        report = _merge_through_the_timer(self.store, "huntergdavis/dunkingsheep", 169)
+        self.assertEqual([dep["id"]], report.get("landed"),
+                         "the merge path must flip the finished task, not a manual call")
+        row = self.store.get(row_id)
+        self.assertEqual([], row["blocked_by"])
+        self.assertEqual([], row["unlanded_dependencies"])
+        self.assertTrue(row["eligible"], "the dependent opens when the PR merges")
+
+    def test_a_plain_completion_still_satisfies_as_before(self):
+        dep, row_id = self._pair()
+        self.store.complete(dep["id"])
+        self.assertTrue(self.store.get(dep["id"])["landed"])
+        self.assertTrue(self.store.get(row_id)["eligible"])
+
+    def test_marking_landed_is_recorded(self):
+        dep, _ = self._pair()
+        self.store.complete(dep["id"], landed=False)
+        self.store.set_landed(dep["id"], landed=True, by="%109")
+        events = [row["event"] for row in self.store.db.execute(
+            "SELECT event FROM task_events WHERE task_id = ? AND event IN "
+            "('landed', 'unlanded') ORDER BY id", (dep["id"],))]
+        self.assertEqual(["unlanded", "landed"], events,
+                         "both moves are on the record, in order")
+
+
 class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

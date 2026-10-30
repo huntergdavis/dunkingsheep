@@ -468,6 +468,20 @@ class Sync:
             # back by branch protection no longer has to come back for it.
             if task_id:
                 self._account_after_merge(repo, number, head, task_id, report)
+            # t906 (t933 review): the RELEASING half. A task completed with --unmerged
+            # carries landed=0, so its dependents stay in blocked_by; this is the only
+            # place the merge is known to have succeeded, so this is where they open.
+            # Without this call the flag could only be flipped by hand and a dependent
+            # would wait for ever - a permanent block is harder to notice than a wrong
+            # handoff, because nothing errors.
+            try:
+                flipped = self.flock.tasks.mark_landed_for_pr(repo, number,
+                                                              by="review-sync")
+            except Exception as error:  # noqa: BLE001 - a bookkeeping miss must not fail the merge
+                report["errors"].append(f"landed {repo}#{number}: {error}")
+                flipped = []
+            if flipped:
+                report.setdefault("landed", []).extend(flipped)
             return True
         except dunk_github.GitHubError as error:
             # 405 = protection not yet satisfied (approval count, other checks):

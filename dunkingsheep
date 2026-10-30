@@ -3159,7 +3159,7 @@ def run_client_command(client, args):
                                mode=args.mode), print_task
         if sub == "complete":
             return client.call("task_complete", id=args.id, by=args.by,
-                               verdict=args.verdict), print_task
+                               verdict=args.verdict, landed=args.landed), print_task
         if sub == "block":
             return client.call("task_block", id=args.id, reason=args.reason), print_task
         if sub == "unblock":

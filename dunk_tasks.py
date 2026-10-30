@@ -101,7 +101,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     pr            INTEGER,
     head          TEXT,
     verdict       TEXT,
-    accounting_pr INTEGER
+    accounting_pr INTEGER,
+    -- t906: 1 when this task's work is on main. A task completed on a STACKED
+    -- branch is done but not landed, and its dependents must not open on it.
+    landed        INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS tasks_by_scope
     ON tasks (scope, status, created_at);
@@ -321,7 +324,7 @@ class Tasks:
                           ("kind", "TEXT NOT NULL DEFAULT 'work'"),
                           ("author", "TEXT"), ("repo", "TEXT"), ("pr", "INTEGER"),
                           ("head", "TEXT"), ("verdict", "TEXT"),
-                          ("accounting_pr", "INTEGER")):
+                          ("accounting_pr", "INTEGER"), ("landed", "INTEGER NOT NULL DEFAULT 1")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # The partial unique index needs the columns above to exist first.
@@ -446,6 +449,66 @@ class Tasks:
         ).fetchall()
         return {row["id"]: row["status"] for row in rows}
 
+    def _landed(self, ids):
+        """1/0 per dependency id: is its WORK on main (t906)? Default 1."""
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.db.execute(
+            f"SELECT id, landed FROM tasks WHERE id IN ({placeholders})", ids).fetchall()
+        return {row["id"]: bool(row["landed"]) for row in rows}
+
+    def set_landed(self, task_id, landed=True, by=None, repo=None, pr=None):
+        """Say that a finished task's work is (or is not yet) on main (t906).
+
+        `landed=0` is what a lane writes when it completes a task whose PR is
+        STACKED: the row is done, the work is not on main, and its dependents must
+        not open. The daemon flips it back to 1 from the merge path
+        (dunk_review._merge), so the dependents open when the merge lands, without a
+        manual edit.
+        """
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                value = 1 if landed else 0
+                self.db.execute(
+                    "UPDATE tasks SET landed = ?, updated_at = ? WHERE id = ?",
+                    (value, _now(), row["id"]))
+                self._record(row["id"], "landed" if value else "unlanded", at=_now(),
+                             actor=by, scope=row["scope"], priority=row["priority"],
+                             meta={"repo": repo, "pr": pr})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return self.get(task_id)
+
+    def mark_landed_for_pr(self, repo, pr, by=None):
+        """Flip every finished task that names repo#pr to landed (t906), returning ids."""
+        if not repo or not pr:
+            return []
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            rows = self.db.execute(
+                "SELECT id, status, landed FROM tasks WHERE repo = ? AND pr = ?",
+                (str(repo), int(pr))).fetchall()
+            flipped = []
+            for row in rows:
+                if row["status"] == "done" and not row["landed"]:
+                    self.db.execute(
+                        "UPDATE tasks SET landed = 1, updated_at = ? WHERE id = ?",
+                        (_now(), row["id"]))
+                    self._record(row["id"], "landed", at=_now(), actor=by,
+                                 scope=GLOBAL, meta={"repo": repo, "pr": pr,
+                                                     "reason": "the PR merged"})
+                    flipped.append(row["id"])
+            self.db.commit()
+        return flipped
+
     def _decorate(self, row, pane_id=None):
         task = dict(row)
         task["assignees"] = _decode(task.get("assignees"))
@@ -473,9 +536,19 @@ class Tasks:
         # ineligible (measured: t783 depends on t781, which was cancelled, so t783 was
         # open + claimable but eligible=False for ever, and an owner instruction to claim
         # it could not be carried out by any worker).
+        landed = self._landed(task["depends_on"])
         task["blocked_by"] = [
             dep for dep in task["depends_on"]
             if statuses.get(dep) not in ("done", "cancelled")
+            or (statuses.get(dep) == "done" and not landed.get(dep, True))
+        ]
+        # t906: a dependency that is DONE but whose PR has not merged opened its
+        # dependents early - t768 (T02) was done while PR169 sat on a stacked branch,
+        # and T05 was handed to a lane on a tree with no Cargo.toml. Name it so the
+        # row reads as "waiting for a merge" instead of "why is this not claimable".
+        task["unlanded_dependencies"] = [
+            dep for dep in task["depends_on"]
+            if statuses.get(dep) == "done" and not landed.get(dep, True)
         ]
         # t878/#164: a CANCELLED dependency IS satisfied (t879), so the row is
         # claimable - but it is worth SAYING so. Before #164 these rows were
@@ -831,13 +904,22 @@ class Tasks:
                 raise
             return self.get(row["id"])
 
-    def complete(self, task_id, by=None, verdict=None):
+    def complete(self, task_id, by=None, verdict=None, landed=True):
+        """Finish a task. `landed=False` marks a STACKED completion (t906).
+
+        Lanes complete work whose PR sits on another branch all the time (every Rust
+        port task did: T02's PR was stacked on T00's). Saying so in the same call is
+        the only moment the lane certainly knows, and it is what keeps the queue from
+        opening the dependents of work that is not on main.
+        """
         row = self._require(task_id)
         if row["status"] == "done":
             return self.get(row["id"])
         if verdict is not None:
             self.set_verdict(row["id"], verdict, by=by)
         result = self.update(row["id"], status="done", updated_by=by)
+        if not landed:
+            result = self.set_landed(row["id"], landed=False, by=by)
         self._fire(row["id"], "completed", by=by, kind=row["kind"] if "kind" in row.keys() else None)
         return result
 
