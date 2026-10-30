@@ -632,6 +632,7 @@ def h_dispatch(flock, args, self_pane_id):
     queued_ids = {str(item.get("task_id")) for item in queue.items() if item.get("task_id")}
     derived, coarse = dunk_dispatch.derive_board_items(
         tasks, dispatched_task_ids=(recent | queued_ids))
+    expired = []
     state = dunk_dispatch.tick(
         queue, panes, derived=derived,
         # t668: no `working` fast path. A lane that holds no lease is classified by
@@ -639,15 +640,25 @@ def h_dispatch(flock, args, self_pane_id):
         # status is passed through as information, exactly as delivery_state documents.
         delivery=lambda pane: flock.delivery_state(pane["pane_id"],
                                                    pane.get("agent_status"), pane=pane),
-        unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
+        unread=lambda pane: _gate_unread(flock, inbox, pane["pane_id"], expired),
         send=send, dry_run=bool(args.get("dry_run")),
         # Belt and braces: the filter above already reduced `panes`, and lane_plan applies the
         # allowlist again so a future caller cannot widen it by accident.
         lanes=allow)
+    state["unread_mail_expired"] = sorted(set(expired))
     state["retired"] = len(dunk_panes.all_retired())
     state["board_open"] = sum(1 for task in tasks if str(task.get("status")) == "open")
     state["coarse_tasks"] = coarse
     return state
+
+
+def _gate_unread(flock, inbox, pane_id, expired, window_s=600.0):
+    """t1053: the sweep's unread gate counts only fresh lane/owner mail."""
+    since = getattr(flock, "turn_end_at", {}).get(pane_id)
+    gate = inbox.gate_unread(pane_id, window_s=window_s, since=since)
+    if gate["expired"] and not gate["fresh"]:
+        expired.append(pane_id)             # reason=unread_mail_expired: fed anyway
+    return gate["fresh"]
 
 
 def h_clear_box(flock, args, self_pane_id):

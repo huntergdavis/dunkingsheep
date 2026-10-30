@@ -31,6 +31,22 @@ class InboxStoreTests(unittest.TestCase):
         self.inbox.close()
         self.tmp.cleanup()
 
+    def test_gate_ignores_daemon_announcements(self):
+        for n in range(5):
+            self.inbox.send("w", "TASK t1", subject=f"TASK t{n}", sender=None)
+        self.assertEqual({"fresh": 0, "expired": 0}, self.inbox.gate_unread("w"))
+
+    def test_gate_counts_fresh_lane_mail_then_lets_it_expire(self):
+        self.inbox.send("w", "hi", sender="%5")
+        self.assertEqual(1, self.inbox.gate_unread("w", window_s=600)["fresh"])
+        with mock.patch("dunk_inbox._now", return_value=time.time() + 601):
+            gate = self.inbox.gate_unread("w", window_s=600)
+        self.assertEqual({"fresh": 0, "expired": 1}, gate)
+
+    def test_gate_ignores_mail_older_than_last_turn_end(self):
+        self.inbox.send("w", "hi", sender="%5")
+        self.assertEqual(0, self.inbox.gate_unread("w", since=time.time() + 5)["fresh"])
+
     def test_send_read_and_count_in_queue_order(self):
         for n in range(3):
             self.inbox.send("writer", f"message {n}", sender="pm")
