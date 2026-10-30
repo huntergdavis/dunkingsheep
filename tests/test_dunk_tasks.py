@@ -545,6 +545,52 @@ class FlockTaskTests(unittest.TestCase):
         self.flock.tasks.close()
         self.tmp.cleanup()
 
+    def test_task_read_shows_the_latest_note_reasons(self):
+        """t605: notes live in task_events, so `task read` used to show a fully
+        reviewed task as if nobody had looked at it - and the queue re-nudged it."""
+        task = self.flock.task_add("reviewed work", self_pane_id="w2:p1")
+        self.flock.task_note(task["id"], reason="first: ran ctest 635/635",
+                             self_pane_id="w2:p1")
+        self.flock.task_note(task["id"],
+                             reason="second: head abc123; did NOT verify media",
+                             self_pane_id="w2:p1")
+        read = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        reasons = [row["reason"] for row in read["notes"]]
+        self.assertEqual(["first: ran ctest 635/635",
+                          "second: head abc123; did NOT verify media"], reasons,
+                         "oldest first, both visible")
+        self.assertEqual("w2:p1", read["notes"][0]["actor"])
+
+    def test_task_read_without_notes_is_empty_not_an_error(self):
+        task = self.flock.task_add("no notes yet", self_pane_id="w2:p1")
+        read = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.assertEqual([], read["notes"])
+
+    def test_task_read_keeps_only_the_last_three_notes(self):
+        task = self.flock.task_add("many notes", self_pane_id="w2:p1")
+        for index in range(5):
+            self.flock.task_note(task["id"], reason=f"note {index}",
+                                 self_pane_id="w2:p1")
+        read = self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.assertEqual(["note 2", "note 3", "note 4"],
+                         [row["reason"] for row in read["notes"]])
+
+    def test_task_read_is_still_read_only(self):
+        """The fix must not turn a read into a write: no new events, same state."""
+        task = self.flock.task_add("read me", self_pane_id="w2:p1")
+        self.flock.task_note(task["id"], reason="evidence", self_pane_id="w2:p1")
+        before = self.flock.tasks.db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+            (task["id"],)).fetchone()[0]
+        self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        self.flock.task_read(task["id"], self_pane_id="w2:p1")
+        after = self.flock.tasks.db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+            (task["id"],)).fetchone()[0]
+        self.assertEqual(before, after)
+        self.assertEqual("open", self.flock.task_read(
+            task["id"], self_pane_id="w2:p1")["status"])
+
     def test_self_assign_and_global_completion(self):
         task = self.flock.task_add("work", self_pane_id="w2:p1")
         assigned = self.flock.task_assign(task["id"], ["self"], self_pane_id="w2:p1")

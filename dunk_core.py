@@ -2451,8 +2451,19 @@ class Flock:
 
     @_as_dunk_error
     def task_read(self, task_id, self_pane_id=None):
-        return self._require_task_visible(
+        """One task, with the last few note reasons attached (t605).
+
+        The note is where a lane records what it ran, the head it worked on and what
+        it did NOT verify. Leaving that out of the read view made finished, reviewed
+        work look untouched, so a reader re-executed or re-reviewed it.
+        """
+        task = self._require_task_visible(
             self.tasks.get(task_id, pane_id=self_pane_id), self_pane_id)
+        try:
+            task["notes"] = self.tasks.notes(task["id"], limit=3)
+        except Exception:  # noqa: BLE001 - a read view never fails on its evidence
+            task["notes"] = []
+        return task
 
     @_as_dunk_error
     def task_update(self, task_id, title=None, body=None, status=None,
