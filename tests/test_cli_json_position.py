@@ -65,3 +65,18 @@ class JsonPositionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LongDeadlineTests(unittest.TestCase):
+    def test_long_daemon_commands_get_a_ten_minute_read_deadline(self):
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader("ds_cli", os.path.join(ROOT, "dunkingsheep"))
+        spec = importlib.util.spec_from_loader("ds_cli", loader)
+        cli = importlib.util.module_from_spec(spec)
+        loader.exec_module(cli)
+        for command in ("poolrad", "review", "start-agent", "respawn-pane"):
+            self.assertGreaterEqual(cli.client_timeout_for(command, 15.0), 600.0, command)
+        self.assertEqual(15.0, cli.client_timeout_for("status", 15.0))
+        self.assertEqual(900.0, cli.client_timeout_for("poolrad", 900.0), "never below the client's own")
+
