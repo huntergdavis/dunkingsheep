@@ -137,6 +137,35 @@ class CancelledDependencyTests(unittest.TestCase):
         self.assertTrue(after["eligible"])
 
 
+def _merge_through_the_timer(store, repo, pr):
+    """Run the review timer's own merge path against a fake GitHub.
+
+    A test that can pass while the production call is absent is the reason the releasing
+    half of t906 slipped (t933 review), so this drives `dunk_review.Sync._merge` - the
+    function the timer calls when GitHub accepts the merge - rather than the helper it is
+    supposed to call.
+    """
+    import dunk_review
+
+    class _GitHub:
+        GitHubError = dunk_review.dunk_github.GitHubError
+
+        def merge_pull(self, repo, number, token, sha=None):
+            return None
+
+    class _Tokens:
+        def get(self, kind, now=None):
+            return {"token": "tok", "kind": kind}
+
+    class _Flock:
+        tasks = store
+
+    sync = dunk_review.Sync(_Flock(), tokens=_Tokens(), github=_GitHub())
+    report = {"merged": [], "errors": []}
+    sync._merge(repo, pr, "a" * 40, "tok", report)
+    return report
+
+
 class DoneButUnmergedTests(unittest.TestCase):
     """t906: "done" on a STACKED branch must not open the dependents.
 
@@ -171,12 +200,19 @@ class DoneButUnmergedTests(unittest.TestCase):
         self.assertFalse(self.store.get(dep["id"])["landed"])
 
     def test_the_merge_opens_the_dependent_without_a_manual_edit(self):
+        """t933: this must go THROUGH THE MERGE PATH, not through the helper.
+
+        The first version of this test called `mark_landed_for_pr` directly, so it
+        passed while no production caller existed - which is exactly how the releasing
+        half went missing. The test now performs the merge the timer performs and
+        asserts the dependent opens as a consequence.
+        """
         dep, row_id = self._pair(repo="huntergdavis/dunkingsheep", pr=169)
         self.store.complete(dep["id"], landed=False)
         self.assertFalse(self.store.get(row_id)["eligible"])
-        flipped = self.store.mark_landed_for_pr("huntergdavis/dunkingsheep", 169,
-                                               by="review-sync")
-        self.assertEqual([dep["id"]], flipped)
+        report = _merge_through_the_timer(self.store, "huntergdavis/dunkingsheep", 169)
+        self.assertEqual([dep["id"]], report.get("landed"),
+                         "the merge path must flip the finished task, not a manual call")
         row = self.store.get(row_id)
         self.assertEqual([], row["blocked_by"])
         self.assertEqual([], row["unlanded_dependencies"])
