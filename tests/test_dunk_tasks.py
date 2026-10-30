@@ -1213,3 +1213,60 @@ class RowFactoryDriftTests(unittest.TestCase):
                                  "the factory is re-asserted so later reads work too")
             finally:
                 tasks.close()
+
+
+class BlockEndsTheClaimTests(unittest.TestCase):
+    """t872: blocking must end the claim, or the reaper resurrects the task.
+
+    Measured on the live queue: t872 was blocked at 09:06:28, REQUEUED at 09:35:00 and
+    CLAIMED again at 09:35:09 - the third round of the same duplicate filing. The
+    block left its lease behind, the reaper found a lease on a task that was not
+    in_progress, and `_after_lease_change` reopened it as `open`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), persist=False, restore=False,
+            state_file=os.path.join(self.tmp.name, "d.json"),
+            inbox=Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                        blob_dir=os.path.join(self.tmp.name, "b")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "t.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "r.json"),
+                        tokens_path=os.path.join(self.tmp.name, "k.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_blocking_deletes_the_lease(self):
+        task = self.flock.tasks.add("global", "duplicate")
+        self.flock.tasks.claim_next(scope="global", pane_id="w2:p1")
+        self.assertEqual(1, len(self.flock.tasks.leases_for_pane("w2:p1")))
+        self.flock.tasks.block(task["id"], reason="duplicate")
+        self.assertEqual([], self.flock.tasks.leases_for_pane("w2:p1"),
+                         "a blocked task is not being worked")
+
+    def test_the_reaper_does_not_reopen_a_blocked_task(self):
+        task = self.flock.tasks.add("global", "duplicate")
+        self.flock.tasks.claim_next(scope="global", pane_id="w2:p1")
+        # put the lease back the way the old code left it, then reap it
+        self.flock.tasks.block(task["id"], reason="duplicate")
+        self.flock.tasks.db.execute(
+            "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, "
+            "heartbeat_at, expires_at) VALUES (?,?,?,?,?)",
+            (task["id"], "w2:p1", 0.0, 0.0, 1.0))
+        self.flock.tasks.db.commit()
+        self.flock.tasks.reap(alive_panes={"w2:p1"}, alive_source="live")
+        self.assertEqual("blocked", self.flock.tasks.get(task["id"])["status"],
+                         "the reaper must not reopen a blocked task")
+
+    def test_the_reaper_still_reopens_an_in_progress_task(self):
+        task = self.flock.tasks.add("global", "live work")
+        self.flock.tasks.claim_next(scope="global", pane_id="w2:p1")
+        self.flock.tasks.db.execute("UPDATE task_leases SET expires_at = 1.0")
+        self.flock.tasks.db.commit()
+        self.flock.tasks.reap(alive_panes={"w2:p1"}, alive_source="live")
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
