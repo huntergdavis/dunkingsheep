@@ -36,11 +36,43 @@ class PureTests(unittest.TestCase):
                                          filed_ids={"OVL_0001_0005"}, limit=5)
         self.assertEqual(["OVL_0001_0001"], [r["id"] for r in picked])
 
-    def test_filed_ids_come_from_live_titles_only(self):
+    def test_a_filed_row_counts_in_every_status(self):
+        """t857: this test used to assert the opposite - that a DONE filing does not
+        count - which IS the defect: three merged-but-uncredited bodies were filed
+        four times each, and my own retry refiled ten rows the same way.
+
+        CANCELLED counts too, and that is a decision about the DECISION rather than
+        about the body: a cancelled filing was withdrawn by a person, and a timer
+        that re-files it undoes that cancel on the next tick - the resurrection shape
+        (t854) from the other side. The asymmetry settles it: a person can re-file a
+        body in one command, so counting cancelled costs nothing when its reason is
+        resolved, while NOT counting it costs a human's decision every thirty
+        minutes. (ds-worker-2 argued the other way first and conceded this reading.)
+        """
         tasks = [{"title": dunk_poolrad.task_title(row("OVL_0001_0001", 1)), "status": "open"},
                  {"title": dunk_poolrad.task_title(row("OVL_0001_0002", 2)), "status": "done"},
+                 {"title": dunk_poolrad.task_title(row("OVL_0001_0003", 3)),
+                  "status": "cancelled"},
+                 {"title": dunk_poolrad.task_title(row("OVL_0001_0004", 4)), "status": "blocked"},
                  {"title": "unrelated", "status": "open"}]
-        self.assertEqual({"OVL_0001_0001"}, dunk_poolrad.filed_ids_from_tasks(tasks))
+        self.assertEqual({"OVL_0001_0001", "OVL_0001_0002", "OVL_0001_0003",
+                          "OVL_0001_0004"},
+                         dunk_poolrad.filed_ids_from_tasks(tasks))
+
+    def test_the_body_carries_a_machine_readable_filing_key(self):
+        body = dunk_poolrad.task_body(row("OVL_0001_0001", 1), "abc123", "/repo")
+        self.assertIn("filed-key: poolrad-strict:OVL_0001_0001@abc123", body)
+        found = dunk_poolrad.filed_keys_from_tasks([{"body": body, "id": "t7",
+                                                     "status": "done"}])
+        self.assertEqual({"OVL_0001_0001": ("t7", "done")}, found)
+
+    def test_the_key_wins_over_the_title_when_both_are_present(self):
+        body = ("POOLRAD STRICT FULL-C BODY OVL_0001_0001\n"
+                "filed-key: poolrad-strict:OVL_0001_0009@deadbeef\n")
+        found = dunk_poolrad.filed_keys_from_tasks(
+            [{"body": body, "id": "t8", "status": "open",
+              "title": dunk_poolrad.task_title(row("OVL_0001_0001", 1))}])
+        self.assertEqual(["OVL_0001_0009"], list(found))
 
     def test_body_carries_base_method_and_acceptance(self):
         body = dunk_poolrad.task_body(row("OVL_0001_0001", 1), "abc123", "/repo")
@@ -86,6 +118,62 @@ class SyncTests(unittest.TestCase):
         report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=boom).run()
         self.assertEqual([], report["filed"])
         self.assertIn("exporter exploded", report["errors"][0])
+
+    def test_a_completed_filing_is_not_refiled(self):
+        """t857: the 4x refile. A done task for the row must stop the next pass."""
+        sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
+        first = sync.run(limit=2)
+        self.assertEqual(2, len(first["filed"]))
+        for entry in first["filed"]:
+            self.flock.tasks.complete(entry["task"])
+        again = sync.run(limit=2)
+        self.assertEqual(["OVL_0001_0003", "OVL_0001_0004"],
+                         [f["id"] for f in again["filed"]],
+                         "a completed filing was refiled")
+        self.assertEqual(2, len(again["skipped"]["already_filed_tasks"]))
+
+    def test_a_retry_after_a_partial_failure_files_only_the_remainder(self):
+        """The EAGAIN incident: the first pass dies mid-way, the retry must not
+        refile what the first pass already did."""
+        sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
+        sync.run(limit=2)                       # a partial pass: two rows filed
+        rest = sync.run(limit=10)               # the retry
+        self.assertEqual(["OVL_0001_0003", "OVL_0001_0004", "OVL_0001_0005"],
+                         [f["id"] for f in rest["filed"]])
+        self.assertEqual(5, len(self.flock.tasks.list(kind="work", include_done=True)),
+                         "the retry created a duplicate")
+
+    def test_the_exporter_status_skips_an_inline_in_strict_body(self):
+        """t872: the filer printed prior_translation.status into the body and ignored it.
+        A body inline in a strict-credited model has nothing to author."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "inline_in_strict"})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual([], report["filed"])
+        self.assertIn("inline_in_strict", report["skipped"]["closed"]["OVL_0001_0001"])
+
+    def test_a_main_model_body_without_a_checker_is_recorded_not_filed_as_authoring(self):
+        """55 of the 74 main_model rows have the body on main and no registered
+        checker: the work owed is the checker, so 'write the strict full-C body'
+        would be a task whose first sentence is false (OVL_03B0_06FB was filed
+        eight times that way)."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "main_model",
+                                             "main_files": ["src/recovered/x.c"]})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual([], report["filed"], "filed an authoring task for a body on main")
+        self.assertIn("OVL_0001_0001", report["body_on_main"])
+        self.assertIn("checker", report["body_on_main"]["OVL_0001_0001"]["why_not"])
+
+    def test_a_source_mention_row_is_still_filed(self):
+        """The bulk of the queue (308 rows) must keep being filed."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "source_mention"})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual(["OVL_0001_0001"], [f["id"] for f in report["filed"]])
 
     def test_dry_run_files_nothing(self):
         sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
@@ -181,12 +269,26 @@ class ClosedCandidateTests(unittest.TestCase):
         self.assertIn("DISPOSITION", closed["OVL_0068_0294"])
         self.assertIn("already on main", closed["OVL_006A_0824"])
 
-    def test_unit_tokens_match_the_file_shapes(self):
-        self.assertEqual({"006a_0824", "6a_0824"},
-                         dunk_poolrad._unit_tokens("OVL_006A_0824"))
-        self.assertEqual({"0038_0b1b", "38_0b1b"},
-                         dunk_poolrad._unit_tokens("OVL_0038_0B1B"))
+    def test_the_model_is_found_whatever_the_filename_says_in_the_middle(self):
+        """t862 (%100's measurement): the skip rule missed two of three bodies because
+        it looked for an ADJACENT 'unit_offset' token, and these filenames carry a
+        descriptive middle."""
+        for rid, model in (("OVL_0038_0CC3", "overlay_u38_0cc3_cpu.c"),
+                           ("OVL_0020_11AC", "overlay_u20_list_walk_11ac_cpu.c"),
+                           ("OVL_03B0_06FB", "overlay_u3b0_row_clear_06fb_cpu.c")):
+            self.write(f"tools/overlay/{rid.lower()}_audit.py",
+                       f"CHECKER_ROWS = ('{rid}',)\n")
+            self.write(f"src/recovered/{model}", "/* body */\n")
+            reason = dunk_poolrad.already_on_main(self.repo, rid)
+            self.assertIn("already on main", reason or "", f"{rid} ({model}) was missed")
+            self.assertIn(model, reason or "")
 
+    def test_a_same_unit_different_offset_is_not_a_match(self):
+        """Segment equality, not substring: the unit alone must not close a row."""
+        self.write("tools/overlay/ovl_0020_0001_audit.py",
+                   "CHECKER_ROWS = ('OVL_0020_0001',)\n")
+        self.write("src/recovered/overlay_u20_list_walk_11ac_cpu.c", "/* body */\n")
+        self.assertIsNone(dunk_poolrad.already_on_main(self.repo, "OVL_0020_0001"))
 
 class CreditPendingTests(unittest.TestCase):
     """t733: a body whose model is already on main is a missing LEDGER ROW.
@@ -411,6 +513,23 @@ class CreditPendingTests(unittest.TestCase):
         self.write_partial([("OVL_0020_11AC", "full")])
         self.assertEqual((True, None),
                          dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_model_is_not_closed_by_its_checker(self):
+        """%100's composition warning: a partial body keeps its authoring work even
+        when a registered checker audits a file on main. Before the guard, the partial
+        case survived only because the token bug made the skip return None."""
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda _repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]],
+                         "a partial model is still an authoring candidate")
+        self.assertNotIn("OVL_0020_11AC", report["skipped"]["closed"],
+                         "the checker closed a body whose model is only partial")
+        self.assertEqual({}, report["credit_pending"])
 
     def test_a_partial_body_stays_an_authoring_task(self):
         self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)

@@ -134,20 +134,67 @@ def task_body(row, base, repo):
         "the accounting commit is written by the review timer from the verdict (the",
         "strict manifest row), never by the author. A claim one step wider than its",
         "evidence is the defect this fleet records most; say what was NOT verified.",
+        # t857: a machine-readable key - (source doc, row id, base head) - so a filer
+        # can ask "was this exact filing already made?" without parsing a title or
+        # trusting a timestamp. The first version had no key at all, so a retry after
+        # a partial failure re-filed everything it had already done.
+        f"filed-key: {FILED_KEY_PREFIX}{row['id']}@{base}",
         f"filed by backlog-sync at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
     ]
     return "\n".join(lines)
 
 
-def filed_ids_from_tasks(tasks):
-    out = set()
+# t872: the exporter already answers "is this body on main?" in every queue row
+# (`prior_translation.status`), and the filer used to print that field into the task
+# body and then ignore it. Live split: source_mention 308, inline_in_model 23,
+# inline_in_strict 25, main_model 74.
+#
+# `inline_in_strict` means the body is inline in a model that already carries strict
+# credit, so there is nothing to author: skipped outright.
+#
+# `main_model` is NOT skipped outright, and that is deliberate: measured on the live
+# queue, 55 of the 74 have a model file on main but NO registered checker, so the
+# work that is actually owed is the checker and its evidence document - not "write the
+# strict full-C body", which is what filing them said (OVL_03B0_06FB was filed eight
+# times for this reason). Those rows go to the `body_on_main` bucket, which names what
+# is missing instead of filing a task whose first sentence is false.
+EXPORTER_INLINE_IN_STRICT = "inline_in_strict"
+EXPORTER_MAIN_MODEL = "main_model"
+
+FILED_KEY_PREFIX = "poolrad-strict:"
+FILED_KEY = re.compile(r"^filed-key: " + re.escape(FILED_KEY_PREFIX) +
+                       r"(?P<id>\S+?)@(?P<base>\S+)\s*$", re.MULTILINE)
+
+
+def filed_keys_from_tasks(tasks):
+    """{row id: (task id, status)} for every task that already filed this row.
+
+    EVERY status counts, not only the live ones (t857). The old version looked at
+    open/in_progress/blocked and the caller passed include_done=False, so a task
+    that was DONE or CANCELLED was invisible and the next pass re-filed it: %108
+    measured three merged-but-uncredited bodies filed four times each, and my own
+    T00-T14 retry refiled ten rows the same way. A row that has been filed is
+    filed; re-filing it is how a queue fills with duplicates of its own history.
+    """
+    out = {}
     for task in tasks:
-        title = task.get("title") or ""
-        if title.startswith(TITLE_PREFIX) and task.get("status") in ("open", "in_progress", "blocked"):
-            parts = title[len(TITLE_PREFIX):].split()
-            if parts:
-                out.add(parts[0])
+        status = task.get("status") or ""
+        body = task.get("body") or ""
+        match = FILED_KEY.search(body)
+        rid = match.group("id") if match else None
+        if rid is None:
+            title = task.get("title") or ""
+            if title.startswith(TITLE_PREFIX):
+                parts = title[len(TITLE_PREFIX):].split()
+                rid = parts[0] if parts else None
+        if rid and rid not in out:
+            out[rid] = (task.get("id"), status)
     return out
+
+
+def filed_ids_from_tasks(tasks):
+    """The row ids already filed, in any status (kept for callers that want ids)."""
+    return set(filed_keys_from_tasks(tasks))
 
 
 def disposition_closures(repo):
@@ -201,16 +248,30 @@ def registered_checker_ids(repo):
 
 
 def _unit_tokens(rid):
-    """'OVL_006A_0824' -> {'006a_0824', '6a_0824'} - the shapes files use."""
+    """'OVL_006A_0824' -> {'006a_0824', '6a_0824'} - the shapes files use.
+
+    An ADJACENT 'unit_offset' token is not enough: a descriptive middle in the
+    filename breaks it. `overlay_u20_list_walk_11ac_cpu.c` and
+    `overlay_u3b0_row_clear_06fb_cpu.c` are both models on main, and neither
+    contains '20_11ac' or '3b0_06fb', so the skip rule said "not on main" and
+    backlog-sync filed authoring work for bodies that were already written
+    (measured by %100 on the deployed build, 2026-10-30). The unit and the offset
+    are therefore also offered SEPARATELY, and the caller requires both in the
+    same filename.
+    """
     parts = str(rid or "").split("_")
     if len(parts) < 3:
         return set()
     unit, offset = parts[1].lower(), parts[2].lower()
-    tokens = {f"{unit}_{offset}"}
-    if unit.startswith("00"):
-        tokens.add(f"{unit[2:]}_{offset}")
-    elif unit.startswith("0"):
-        tokens.add(f"{unit[1:]}_{offset}")
+    shapes = {unit}
+    for trimmed in (unit[2:] if unit.startswith("00") else None,
+                    unit[1:] if unit.startswith("0") else None):
+        if trimmed:
+            shapes.add(trimmed)
+    # the house convention spells the unit `u<unit>` in the filename
+    tokens = {f"u{shape.lstrip('0') or '0'}" for shape in shapes}
+    tokens |= shapes
+    tokens.add(offset)
     return tokens
 
 
@@ -387,8 +448,17 @@ def already_on_main(repo, rid, checkers=None):
         names = [p.name.lower() for p in src.glob("*.c")]
     except OSError:
         names = []
+    parts = str(rid or "").split("_")
+    offset = parts[2].lower() if len(parts) >= 3 else ""
+    unit_shapes = {token for token in tokens if token != offset}
     for name in names:
-        if any(token in name for token in tokens):
+        # The filename must carry the OFFSET as a whole segment and ONE unit shape as
+        # a whole segment: `overlay_u20_list_walk_11ac_cpu.c` matches OVL_0020_11AC
+        # (segments u20 + 11ac) even though '20_11ac' never appears adjacently.
+        # Segment equality, not substring: 'u20' must not match 'u200', and the
+        # offset alone must not match an unrelated file.
+        segments = name.split("_")
+        if offset and offset in segments and unit_shapes & set(segments):
             return f"already on main ({checker} audits {name})"
     return None
 
@@ -413,8 +483,13 @@ class Sync:
         base = _git(self.repo, "rev-parse", "HEAD")
         report["base"] = base
         credited = credited_ids(self.repo)
-        live = self.flock.tasks.list(scope=None, include_done=False, limit=500, kind="work")
-        filed = filed_ids_from_tasks(live)
+        # include_done=True: a DONE or CANCELLED filing still means "this row was
+        # filed" (t857). The report names the task and its status, so a skip is
+        # never silent.
+        everything = self.flock.tasks.list(scope=None, include_done=True, limit=2000,
+                                           kind="work")
+        filed_keys = filed_keys_from_tasks(everything)
+        filed = set(filed_keys)
         # t686: a candidate a reviewed disposition has closed, or whose body and
         # checker are already on main, is not an authoring task. Both are decided
         # from the tree, not from a note, so the skip is reproducible.
@@ -428,7 +503,7 @@ class Sync:
         # 2026-10-29); the body goes on the OWNER's credit-pending list with the
         # commit and the PR that added the model, so credit can be reviewed against
         # that head. Decided from the tree, so the skip is reproducible.
-        credit, not_ready = {}, {}
+        credit, not_ready, body_on_main = {}, {}, {}
         for row in (queue.get("rows") or []):
             rid = row.get("id")
             if not rid:
@@ -449,18 +524,53 @@ class Sync:
                         not_ready[rid] = dict(evidence, why_not=why_not)
             if rid in closed:
                 continue
+            exporter_status = (row.get("prior_translation") or {}).get("status")
+            if exporter_status == EXPORTER_INLINE_IN_STRICT:
+                closed[rid] = (f"exporter says {exporter_status}: the body is inline in a "
+                               "model that already carries strict credit, so there is "
+                               "nothing to author")
+                continue
+            if exporter_status == EXPORTER_MAIN_MODEL:
+                # The body is on main but the credit is not ready - see the constant.
+                # `candidates()` filters on `closed`, so the row must land there to not
+                # be filed; it ALSO goes to `body_on_main`, which names the work that is
+                # really owed (the checker and its evidence document) instead of filing
+                # a task whose first sentence would be false.
+                why_not = ((not_ready.get(rid) or {}).get("why_not")
+                           or "exporter says the model is on main; no registered checker")
+                body_on_main[rid] = dict(
+                    not_ready.get(rid) or {"model": (row.get("prior_translation") or {}).get(
+                        "main_files") or []}, why_not=why_not)
+                closed[rid] = (f"exporter says {exporter_status}: the body is on main and "
+                               f"the credit is not ready ({why_not}) - the missing piece is "
+                               "the checker/evidence, not the body")
+                continue
+            if rid in not_ready:
+                # The model is on main but NOT credit-ready (t738: partial, or no
+                # registered checker). `already_on_main` would close it, which is the
+                # wrong answer - the authoring work is still owed. Before this guard
+                # the partial case survived only because the token bug made
+                # already_on_main return None by accident (%100 measured both).
+                continue
             reason = already_on_main(self.repo, rid, checkers=checkers)
             if reason:
                 closed[rid] = reason
         report["credit_pending"] = credit
         # Rows whose model EXISTS but is not credit-ready: still authoring candidates.
         report["models_not_credit_ready"] = not_ready
+        # t872: bodies the exporter says are on main whose credit is not ready. Not
+        # filed as authoring tasks (their first sentence would be false) and not
+        # silently dropped: the owner's list of "the checker is what is missing".
+        report["body_on_main"] = body_on_main
         if credit and not dry_run:
             written = record_credit_pending(credit, path=self.credit_path)
             report["credit_pending_file"] = (str(credit_pending_path(self.credit_path))
                                              if written else None)
         picked = candidates(queue, credited, filed, limit, closed=closed)
         report["skipped"] = {"credited": len(credited), "already_filed": len(filed),
+                             "already_filed_tasks": {rid: {"task": task_id, "status": status}
+                                                     for rid, (task_id, status)
+                                                     in sorted(filed_keys.items())},
                              "queue_rows": len(queue.get("rows") or []),
                              "closed": {rid: closed[rid] for rid in sorted(closed)}}
         for row in picked:

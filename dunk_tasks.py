@@ -467,8 +467,15 @@ class Tasks:
             min(lease["expires_at"] for lease in leases) if leases else None
         )
         statuses = self._statuses(task["depends_on"])
+        # t783: a CANCELLED dependency is satisfied, not outstanding. Cancelling a
+        # prerequisite is a decision that the dependent no longer waits for it; treating
+        # only "done" as satisfied made every dependent of a cancelled task permanently
+        # ineligible (measured: t783 depends on t781, which was cancelled, so t783 was
+        # open + claimable but eligible=False for ever, and an owner instruction to claim
+        # it could not be carried out by any worker).
         task["blocked_by"] = [
-            dep for dep in task["depends_on"] if statuses.get(dep) != "done"
+            dep for dep in task["depends_on"]
+            if statuses.get(dep) not in ("done", "cancelled")
         ]
         # t878: a CANCELLED dependency can never be satisfied, so the dependent row
         # was permanently unclaimable and invisible - it simply never came back from
