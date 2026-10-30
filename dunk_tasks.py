@@ -477,10 +477,10 @@ class Tasks:
             dep for dep in task["depends_on"]
             if statuses.get(dep) not in ("done", "cancelled")
         ]
-        # t878: a CANCELLED dependency can never be satisfied, so the dependent row
-        # was permanently unclaimable and invisible - it simply never came back from
-        # task next. Name the dead edges so a lane (and the owner) can see that the
-        # row needs a decision rather than more waiting.
+        # t878/#164: a CANCELLED dependency IS satisfied (t879), so the row is
+        # claimable - but it is worth SAYING so. Before #164 these rows were
+        # unclaimable and invisible; the fix is in the filter, and this field keeps
+        # the fact visible instead of turning a silent brick into a silent pass.
         task["dead_dependencies"] = [
             dep for dep in task["depends_on"] if statuses.get(dep) == "cancelled"
         ]

@@ -1178,11 +1178,12 @@ def _task_row(task):
     row = (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
            f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
            f"{_clip(task['title'], 50)}")
-    # t878: a CANCELLED dependency is unsatisfiable, so the row is unclaimable for
-    # good. It used to vanish from every queue without a word; say why, here.
+    # t878/#164: a cancelled dependency is SATISFIED (t879), so the row is
+    # claimable - the note stays because "my dependency was cancelled" is something
+    # a reader needs to know, not something to hide behind eligibility.
     dead = task.get("dead_dependencies") or []
     if dead:
-        row += f"  [BLOCKED: depends on cancelled {', '.join(dead)}]"
+        row += f"  [depends on cancelled {', '.join(dead)}: satisfied (t164), claimable]"
     return row
 
 
@@ -1202,9 +1203,9 @@ def print_task(task):
               + (f" (accounting pr #{task['accounting_pr']})"
                  if task.get("accounting_pr") else ""))
     if task.get("dead_dependencies"):
-        print(f"dead deps   {', '.join(task['dead_dependencies'])} (cancelled: this row "
-              "can never become claimable until the edge is dropped or repointed; "
-              "`task update <id> --drop-dependency <dep>`)")
+        print(f"cancelled deps {', '.join(task['dead_dependencies'])} "
+              "(satisfied since t164, so this row IS claimable; repoint with "
+              "`task update <id> --depends-on <good-id>` if you want a live edge)")
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"

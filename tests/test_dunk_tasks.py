@@ -43,24 +43,27 @@ class CancelledDependencyTests(unittest.TestCase):
         self.store.update(row["id"], depends_on=[dep["id"]])
         return dep, self.store.get(row["id"])
 
-    def test_a_cancelled_dependency_is_named_and_blocks_the_row(self):
+    def test_a_cancelled_dependency_is_named_and_the_row_stays_claimable(self):
+        """t879 made cancelled SATISFIED; t878 keeps the fact visible, not blocking."""
         dep, row = self._pair()
         self.store.cancel(dep["id"], reason="duplicate")
         after = self.store.get(row["id"])
         self.assertEqual([dep["id"]], after["dead_dependencies"])
-        self.assertIn(dep["id"], after["blocked_by"])
-        self.assertFalse(after["eligible"], "an unsatisfiable edge keeps it out of the queue")
+        self.assertNotIn(dep["id"], after["blocked_by"],
+                         "a cancelled dependency is satisfied (t164), not blocking")
+        self.assertTrue(after["eligible"], "the row must be claimable after the cancel")
 
     def test_cancel_names_the_dependents_it_strands(self):
         dep, row = self._pair()
         cancelled = self.store.cancel(dep["id"], reason="duplicate")
         self.assertEqual([row["id"]], cancelled["blocked_dependents"])
 
-    def test_repointing_the_edge_frees_the_row_without_cancelling_it(self):
+    def test_repointing_the_edge_replaces_the_dead_one(self):
         """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
         dep, row = self._pair()
         self.store.cancel(dep["id"], reason="duplicate")
-        self.assertFalse(self.store.get(row["id"])["eligible"])
+        self.assertTrue(self.store.get(row["id"])["eligible"],
+                        "claimable already (t164); a repoint still removes the dead edge")
         good = self.store.add(GLOBAL, "the canonical task")
         self.store.complete(good["id"])
         repaired = self.store.update(row["id"], depends_on=[good["id"]])
