@@ -88,3 +88,42 @@ class OwnerQuestionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeskBlockSourceTests(unittest.TestCase):
+    """The 4.1 block is a UI, but its contract is checkable without a browser (t997).
+
+    The owner deferred the 390/1440 captures by load; these assertions are what can be
+    held without them: the block renders the VERBATIM question (never a paraphrase), shows
+    what an answer unblocks, offers both actions, and collapses when there is nothing.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(self, rel):
+        with open(os.path.join(self.ROOT, rel), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_block_renders_the_question_the_board_carries(self):
+        source = self.read("ui/src/main.jsx")
+        self.assertIn("needs_owner_question", source,
+                      "the desk shows the board's question, not one it composes")
+        self.assertIn("row.blocks", source, "the desk says what an answer unblocks")
+
+    def test_the_block_collapses_when_nothing_is_waiting(self):
+        source = self.read("ui/src/main.jsx")
+        self.assertIn("Nothing needs your decision", source)
+
+    def test_both_actions_exist_and_post(self):
+        source = self.read("ui/src/main.jsx")
+        self.assertIn("/ops-board/answer", source)
+        self.assertIn("/ops-board/not-now", source)
+        backend = self.read("web/app.py")
+        self.assertIn("task_unblock", backend, "the answer unblocks the task over the socket")
+        self.assertIn('priority="low"', backend, "'Not now' lowers the priority, nothing else")
+
+    def test_the_block_has_css_for_both_viewports(self):
+        css = self.read("ui/src/dash.css")
+        self.assertIn(".ops-owner", css)
+        self.assertIn("@media (max-width: 430px)", css,
+                      "390px is the narrow viewport the acceptance names")

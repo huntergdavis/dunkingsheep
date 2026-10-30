@@ -880,6 +880,50 @@ def operations_board(_: Annotated[str, Depends(require_auth)]):
         raise HTTPException(503, f"Operations board unavailable: {type(exc).__name__}") from exc
 
 
+@app.post("/api/ops-board/answer")
+def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """Answer a lane's needs-owner question: unblock the task with the reply as the note.
+
+    DESK_DESIGN 4.1 (t997): the desk's reply box posts `task unblock --note <reply>`. It
+    goes through the daemon over the socket with the desk's own credential - the web never
+    reads sqlite and never shells out - so the unblock is the same verb a lane would run.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    reply = str((payload or {}).get("reply") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    if not reply:
+        raise HTTPException(400, "a reply is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = client.call("task_unblock", id=task_id, reason=f"owner: {reply}")
+    except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
+        raise HTTPException(503, f"Could not unblock {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "unblocked": True, "task": result}
+
+
+@app.post("/api/ops-board/not-now")
+def not_now_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """'Not now': lower the task's priority so the question stops sitting at the top.
+
+    The owner's ask (4.1) is a deferral, not an answer: the task stays blocked and the
+    lane still waits, but the desk stops ranking it first. A priority change, nothing else.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = client.call("task_update", id=task_id, priority="low")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, f"Could not lower {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "priority": "low", "task": result}
+
+
 @app.post("/api/ops-board/refresh")
 def refresh_operations_board(_: Annotated[str, Depends(require_auth)]):
     import ops_board
