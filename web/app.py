@@ -55,7 +55,16 @@ def _load_channels():
     path = Path(override).expanduser() if override else ROOT / "channels.json"
     if not path.exists():
         if override:
-            raise FileNotFoundError(f"VP_CHANNELS_FILE does not exist: {path}")
+            # t735: the units hardcode VP_CHANNELS_FILE=<desk>/channels.json, and the
+            # documented install ("cp -a vp-of-agentry/data desk") does not create it -
+            # channels.json lives one level ABOVE data/. A bare FileNotFoundError sent
+            # the operator hunting; name the source and the fix.
+            raise FileNotFoundError(
+                f"VP_CHANNELS_FILE does not exist: {path}. The channel registry is the "
+                "owner's channels.json, which the units point at inside the desk data "
+                "dir; copy it there (cp <checkout>/channels.json "
+                f"{path}) or unset VP_CHANNELS_FILE to fall back to "
+                "bridges/channels.example.json.")
         path = ROOT / "bridges" / "channels.example.json"
     payload = json.loads(path.read_text())
     if not isinstance(payload, list) or not payload:

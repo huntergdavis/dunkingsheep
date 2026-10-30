@@ -8,10 +8,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/hunter/.local/share/dunkingsheep/current
-ExecStart=/home/hunter/.local/share/dunkingsheep/current/.venv/bin/python bridges/telegram_bridge.py
-Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/web-token
-Environment=DUNKING_SHEEP_DIR=/home/hunter/.local/share/dunkingsheep/current
+# t735 (found at cutover): this unit named ~/.local/share/dunkingsheep/current/
+# .venv/bin/python, which the install never creates, ran a RELATIVE script with no
+# PYTHONPATH (so importlib could not find `web`, and dunk_telegram_routing was not on
+# the path), and passed NO subcommand while the script requires {setup,run,status} -
+# the cutover needed two drop-ins to start it. Every working unit here runs the
+# installed CLI wrapper instead, which carries its own path and takes a subcommand.
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon telegram-bridge run
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+# NO WorkingDirectory: no working unit sets one, and there is no `current` to point at.
+# NO DUNKINGSHEEP_DIR: that variable is the CONFIG dir (dunk_server derives SOCKET_PATH
+# and LOG_FILE from it), so a release path would send the bridge hunting for the daemon
+# socket, the role registry and inbox.db under the release tree.
 Environment=VP_DATA_DIR=%h/.config/dunkingsheep/desk
 Environment=VP_CHANNELS_FILE=%h/.config/dunkingsheep/desk/channels.json
 Restart=on-failure
