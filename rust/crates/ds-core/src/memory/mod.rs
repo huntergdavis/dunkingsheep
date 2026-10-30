@@ -6,6 +6,7 @@
 //! not here yet.
 
 pub mod pure;
+pub mod recall;
 
 pub use pure::{
     chunk_text, fts_query, fts_tokens, make_snippet, redact, DEFAULT_CHUNK_CHARS,
