@@ -60,6 +60,23 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 # delivery step to fail - the write either happened or it did not.
 STATES = ("queued", "read", "acked", "cancelled", "archived",
           "undeliverable")
+# Where an owner question arrived, so the answer goes back the same way
+# (FLAT_FLEET.md 7.2, owner 2026-10-29: "reply on the transport the question
+# arrived on"). `report` is the reporter's channel: the web shows it, Telegram
+# does not. A lane message has no transport at all.
+OWNER_MAILBOX = "owner"
+TRANSPORTS = ("web", "telegram", "report")
+
+
+def validate_transport(transport):
+    """None (a lane message) or one of TRANSPORTS."""
+    if transport in (None, ""):
+        return None
+    transport = str(transport).strip().lower()
+    if transport not in TRANSPORTS:
+        raise InboxError(f"transport must be one of {', '.join(TRANSPORTS)}; "
+                         f"got {transport!r}")
+    return transport
 # A mailbox key that is itself a pane id (older versions stored
 # dead-pane mail this way, with pane_id NULL).
 # The identity of last resort: a mailbox named after the pane. Both backends
@@ -85,7 +102,17 @@ CREATE TABLE IF NOT EXISTS messages (
     notify_state  TEXT,
     notify_reason TEXT,
     digest_id     TEXT,
-    digest_updated_at REAL
+    digest_updated_at REAL,
+    -- FLAT_FLEET.md 7.2: one owner mailbox, two transports. A question records
+    -- where it arrived (web|telegram|report) so the reply goes back the same way;
+    -- a reply carries reply_to = the question's id, which is also its ack link.
+    transport     TEXT,
+    reply_to      TEXT,
+    -- t594: the transport's own id for a row (dedupe key for redelivered
+    -- updates) and the delivery RECEIPT that replaces telegram-status.json.
+    external_id   TEXT,
+    delivered_at  REAL,
+    delivery_transport TEXT
 );
 CREATE INDEX IF NOT EXISTS messages_by_mailbox
     ON messages (mailbox, state, created_at);
@@ -169,6 +196,22 @@ class Inbox:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_id TEXT")
             if "digest_updated_at" not in columns:
                 self.db.execute("ALTER TABLE messages ADD COLUMN digest_updated_at REAL")
+            for name in ("transport", "reply_to"):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT")
+            # t594: a transport delivery needs an id to dedupe the transport's own
+            # retries (Telegram update_id) and a receipt the watchdog can read
+            # instead of a status file.
+            for name, kind in (("external_id", "TEXT"), ("delivered_at", "REAL"),
+                               ("delivery_transport", "TEXT")):
+                if name not in columns:
+                    self.db.execute(f"ALTER TABLE messages ADD COLUMN {name} {kind}")
+            self.db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS messages_by_external "
+                "ON messages (mailbox, external_id) WHERE external_id IS NOT NULL")
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS messages_by_transport "
+                "ON messages (mailbox, transport, created_at)")
             for name, kind in (("notify_at", "REAL"), ("notify_transport_id", "TEXT"),
                                ("notify_attempt", "INTEGER")):
                 if name not in columns:
@@ -230,11 +273,18 @@ class Inbox:
             return result
 
     def send(self, mailbox, body, subject=None, sender=None, mailbox_label=None,
-             pane_id=None, attachments=()):
-        """Put a message in a mailbox. Returns its row."""
+             pane_id=None, attachments=(), transport=None, reply_to=None,
+             external_id=None):
+        """Put a message in a mailbox. Returns its row.
+
+        `transport` records where an owner question arrived; `reply_to` links a
+        reply to the question it answers (the same row is also acked, which is
+        what makes "answered" one fact instead of two).
+        """
         mailbox = str(mailbox or "").strip()
         if not mailbox:
             raise InboxError("a mailbox is required")
+        transport = validate_transport(transport)
         body = "" if body is None else str(body)
         if len(body.encode("utf-8")) > MAX_BODY_BYTES:
             raise InboxError(f"body is larger than {MAX_BODY_BYTES} bytes")
@@ -245,9 +295,11 @@ class Inbox:
             message_id = self._next_id()
             self.db.execute(
                 "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, "
-                "subject, body, state, created_at) VALUES (?,?,?,?,?,?,?,'queued',?)",
+                "subject, body, state, created_at, transport, reply_to, external_id) "
+                "VALUES (?,?,?,?,?,?,?,'queued',?,?,?,?)",
                 (message_id, mailbox, mailbox_label or mailbox, pane_id, sender,
-                 subject, body, _now()))
+                 subject, body, _now(), transport, reply_to,
+                 str(external_id) if external_id else None))
             for index, blob in enumerate(stored, 1):
                 # The attachment ROW id is per message; the blob itself stays
                 # content-addressed and shared. Re-attaching the same file to
@@ -364,6 +416,38 @@ class Inbox:
                 f"SELECT * FROM messages WHERE {where} ORDER BY created_at LIMIT ?",
                 (*params, int(limit))).fetchall()
             return [self._summary(row) for row in rows]
+
+    def replies_to(self, message_id):
+        """Rows answering `message_id`, oldest first."""
+        with self._lock:
+            return [dict(row) for row in self.db.execute(
+                "SELECT * FROM messages WHERE reply_to = ? ORDER BY created_at",
+                (str(message_id),)).fetchall()]
+
+    def conversation(self, mailbox, limit=50, before=None):
+        """The mailbox as a conversation: questions and replies, oldest first.
+
+        A row with `reply_to` is an answer; a row nothing points at is a question
+        still waiting. `answered` is computed from the rows themselves, so a
+        mailbox cannot disagree with itself about whether something was answered
+        (FLAT_FLEET.md 7.2).
+        """
+        condition, params = mailbox_where(mailbox)
+        where = f"{condition} AND state != 'cancelled'"
+        if before is not None:
+            where += " AND created_at < ?"
+            params = (*params, float(before))
+        with self._lock:
+            rows = self.db.execute(
+                f"SELECT * FROM messages WHERE {where} ORDER BY created_at DESC LIMIT ?",
+                (*params, int(limit))).fetchall()
+            answered = {row["reply_to"] for row in rows if row["reply_to"]}
+            out = []
+            for row in reversed(rows):
+                item = dict(row)
+                item["answered"] = item["id"] in answered or bool(item["acked_at"])
+                out.append(item)
+            return out
 
     def read(self, mailbox, limit=10, peek=False, mark=True):
         """Full messages in queue order. Marks them read unless `peek` or `mark=False`.
@@ -501,6 +585,77 @@ class Inbox:
                     "DELETE FROM deliveries WHERE mailbox = ?", (mailbox,))
             self.db.commit()
             return remaining
+
+    def find_by_external_id(self, mailbox, external_id):
+        """The row a transport's own id already produced, or None (t594).
+
+        A transport retries: Telegram redelivers an update whose offset was not
+        committed, and a bridge restarted mid-send must not create a second
+        question for the same message. The unique index is the guard; this is the
+        read side of it.
+        """
+        if not external_id:
+            return None
+        with self._lock:
+            row = self.db.execute(
+                "SELECT * FROM messages WHERE mailbox = ? AND external_id = ?",
+                (str(mailbox), str(external_id))).fetchone()
+        return self._full(row) if row else None
+
+    def owner_outbox(self, transport, limit=20):
+        """Owner-mailbox REPLIES waiting to go out on `transport` (t594).
+
+        This is the whole of "Telegram carries answers to Telegram questions and
+        nothing else": a row qualifies only if it is a reply (`reply_to` set) and
+        its own `transport` is the one being drained. A question never qualifies
+        (it arrived FROM the transport), and neither does lane mail, which has no
+        transport at all - so a brief, a digest or a web echo cannot be picked up
+        here even by accident.
+        """
+        transport = validate_transport(transport)
+        if transport is None:
+            raise InboxError("an outbox needs a transport")
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM messages WHERE mailbox = ? AND transport = ? "
+                "AND reply_to IS NOT NULL AND delivered_at IS NULL "
+                "AND cancelled_at IS NULL ORDER BY created_at, id LIMIT ?",
+                (OWNER_MAILBOX, transport, int(limit))).fetchall()
+        return [self._full(row) for row in rows]
+
+    def mark_delivered(self, message_id, transport, external_id=None):
+        """Record that a transport accepted this row: the delivery RECEIPT (t594).
+
+        FLAT_FLEET.md 7.2 retires `telegram-status.json`: a page is confirmed by
+        this receipt on the owner mailbox instead of by a file the watchdog reads
+        beside the bridge's credentials. Idempotent, so a retry after a crash
+        between send and commit does not rewrite the first receipt.
+        """
+        transport = validate_transport(transport)
+        if transport is None:
+            raise InboxError("a delivery receipt needs a transport")
+        now = _now()
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id, mailbox, transport, delivered_at FROM messages "
+                "WHERE id = ?", (str(message_id),)).fetchone()
+            if row is None:
+                raise InboxError(f"no message with id {message_id!r}")
+            if row["mailbox"] != OWNER_MAILBOX:
+                raise InboxError(f"{message_id} is not an {OWNER_MAILBOX} message")
+            if row["transport"] != transport:
+                raise InboxError(
+                    f"{message_id} belongs to transport {row['transport']!r}, "
+                    f"not {transport!r}")
+            if row["delivered_at"] is not None:
+                return self.get(str(message_id))
+            self.db.execute(
+                "UPDATE messages SET delivered_at = ?, delivery_transport = ?, "
+                "external_id = COALESCE(external_id, ?) WHERE id = ?",
+                (now, transport, str(external_id) if external_id else None,
+                 str(message_id)))
+            self.db.commit()
+        return self.get(str(message_id))
 
     def get(self, message_id, with_body=True):
         with self._lock:
@@ -872,6 +1027,19 @@ class Inbox:
                           if row["state"] == "queued" else None),
             "body_bytes": len((row["body"] or "").encode("utf-8")),
             "digest_id": row["digest_id"] if "digest_id" in row.keys() else None,
+            # FLAT_FLEET.md 7.2: where an owner question arrived, and which
+            # question a reply answers. Every message carries both, lane mail
+            # with transport=None and reply_to=None.
+            "transport": row["transport"] if "transport" in row.keys() else None,
+            "reply_to": row["reply_to"] if "reply_to" in row.keys() else None,
+            # t594: the transport's own id and the delivery receipt a bridge writes
+            # (FLAT_FLEET.md 7.2 retires telegram-status.json in favour of this).
+            "external_id": (row["external_id"]
+                            if "external_id" in row.keys() else None),
+            "delivered_at": (row["delivered_at"]
+                             if "delivered_at" in row.keys() else None),
+            "delivery_transport": (row["delivery_transport"]
+                                   if "delivery_transport" in row.keys() else None),
             "attachments": blobs,
         }
 

@@ -96,3 +96,355 @@ class SyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClosedCandidateTests(unittest.TestCase):
+    """t686: a row a reviewed disposition closed, or whose body is already on main,
+    is not an authoring task. Both were filed twice today (t575/t576) and handed to a
+    lane as "write the strict full-C body" - the exact claim this fleet records most.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self.tmp.name, "repo")
+        for path in ("docs/re", "tools/overlay", "src/recovered"):
+            os.makedirs(os.path.join(self.repo, path), exist_ok=True)
+        self.state = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), persist=False, restore=False,
+            state_file=os.path.join(self.state.name, "d.json"),
+            inbox=Inbox(path=os.path.join(self.state.name, "i.db"),
+                        blob_dir=os.path.join(self.state.name, "b")),
+            tasks=Tasks(path=os.path.join(self.state.name, "t.db")),
+            roles=Roles(path=os.path.join(self.state.name, "r.json"),
+                        tokens_path=os.path.join(self.state.name, "k.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+        self.state.cleanup()
+
+    def write(self, relpath, text):
+        path = os.path.join(self.repo, relpath)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_a_disposition_document_closes_its_row(self):
+        self.write("docs/re/OVL_0068_0294_DISPOSITION.md",
+                   "Verdict: bounded model, no identity, no strict credit.\n")
+        closed = dunk_poolrad.disposition_closures(self.repo)
+        self.assertEqual({"OVL_0068_0294": "docs/re/OVL_0068_0294_DISPOSITION.md"}, closed)
+
+    def test_a_body_and_checker_on_main_close_its_row(self):
+        self.write("tools/overlay/ovl_006a_0824_cpu_audit.py",
+                   "CHECKER_ROWS = ('OVL_006A_0824',)\n")
+        self.write("src/recovered/overlay_u6a_0824_raw_cpu.c", "/* body */\n")
+        checkers = dunk_poolrad.registered_checker_ids(self.repo)
+        self.assertEqual("tools/overlay/ovl_006a_0824_cpu_audit.py",
+                         checkers["OVL_006A_0824"])
+        reason = dunk_poolrad.already_on_main(self.repo, "OVL_006A_0824",
+                                              checkers=checkers)
+        self.assertIn("already on main", reason)
+        self.assertIn("overlay_u6a_0824_raw_cpu.c", reason)
+
+    def test_a_checker_without_a_model_on_main_does_not_close_its_row(self):
+        self.write("tools/overlay/ovl_006a_0824_cpu_audit.py",
+                   "CHECKER_ROWS = ('OVL_006A_0824',)\n")
+        self.assertIsNone(dunk_poolrad.already_on_main(self.repo, "OVL_006A_0824"))
+
+    def test_candidates_never_return_a_closed_row(self):
+        queue = {"rows": [row("OVL_0068_0294", 1), row("OVL_0001_0001", 2)]}
+        picked = dunk_poolrad.candidates(
+            queue, credited=set(), filed_ids=set(), limit=5,
+            closed={"OVL_0068_0294": "closed by docs/re/OVL_0068_0294_DISPOSITION.md"})
+        self.assertEqual(["OVL_0001_0001"], [r["id"] for r in picked])
+
+    def test_a_dry_run_files_neither_row_and_names_both_reasons(self):
+        """The acceptance line: over a queue holding both rows, nothing is filed for
+        either, and the report says which rows it skipped and why."""
+        self.write("docs/re/OVL_0068_0294_DISPOSITION.md", "no strict credit\n")
+        self.write("tools/overlay/ovl_006a_0824_cpu_audit.py",
+                   "CHECKER_ROWS = ('OVL_006A_0824',)\n")
+        self.write("src/recovered/overlay_u6a_0824_raw_cpu.c", "/* body */\n")
+        queue = {"rows": [row("OVL_0068_0294", 1), row("OVL_006A_0824", 2),
+                          row("OVL_0001_0001", 3)]}
+        sync = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                 exporter=lambda _repo: queue)
+        report = sync.run(limit=6, dry_run=True)
+        filed = [entry["id"] for entry in report["filed"]]
+        self.assertNotIn("OVL_0068_0294", filed)
+        self.assertNotIn("OVL_006A_0824", filed)
+        self.assertEqual(["OVL_0001_0001"], filed, "the control row is still filed")
+        closed = report["skipped"]["closed"]
+        self.assertIn("DISPOSITION", closed["OVL_0068_0294"])
+        self.assertIn("already on main", closed["OVL_006A_0824"])
+
+    def test_unit_tokens_match_the_file_shapes(self):
+        self.assertEqual({"006a_0824", "6a_0824"},
+                         dunk_poolrad._unit_tokens("OVL_006A_0824"))
+        self.assertEqual({"0038_0b1b", "38_0b1b"},
+                         dunk_poolrad._unit_tokens("OVL_0038_0B1B"))
+
+
+class CreditPendingTests(unittest.TestCase):
+    """t733: a body whose model is already on main is a missing LEDGER ROW.
+
+    Measured 2026-10-29 (ds-worker-4): OVL_0038_0CC3 (merged in PR #1513),
+    OVL_0020_11AC and OVL_03B0_06FB were filed as strict-C AUTHORING tasks while
+    their model, header, checker and doc were already on main and only the credit
+    was missing. The authoring task cannot be done; the owner needs a credit review
+    against the PR head that added the model instead.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self.tmp.name, "repo")
+        for path in ("docs/re", "tools/overlay", "src/recovered"):
+            os.makedirs(os.path.join(self.repo, path), exist_ok=True)
+        self.git("-c", "init.defaultBranch=main", "init", cwd=self.repo)
+        self.git("config", "user.email", "t@example.com", cwd=self.repo)
+        self.git("config", "user.name", "t", cwd=self.repo)
+        self.state = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), persist=False, restore=False,
+            state_file=os.path.join(self.state.name, "d.json"),
+            inbox=Inbox(path=os.path.join(self.state.name, "i.db"),
+                        blob_dir=os.path.join(self.state.name, "b")),
+            tasks=Tasks(path=os.path.join(self.state.name, "t.db")),
+            roles=Roles(path=os.path.join(self.state.name, "r.json"),
+                        tokens_path=os.path.join(self.state.name, "k.json")))
+        self.pending_path = os.path.join(self.state.name, "credit-pending.json")
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+        self.state.cleanup()
+
+    def git(self, *args, cwd=None):
+        import subprocess
+        out = subprocess.run(["git", "-C", cwd or self.repo, *args],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, out.returncode, out.stderr)
+        return out.stdout.strip()
+
+    def _initial_commit(self):
+        try:
+            self.git("rev-parse", "--verify", "HEAD", cwd=self.repo)
+        except AssertionError:
+            with open(os.path.join(self.repo, "README.md"), "w", encoding="utf-8") as h:
+                h.write("repo\n")
+            self.git("add", "-A", cwd=self.repo)
+            self.git("commit", "-q", "-m", "init", cwd=self.repo)
+
+    def commit_model(self, name, pr=None):
+        """Add a model file on a side branch and merge it as PR `pr` if given."""
+        self.git("checkout", "-q", "-B", "main", cwd=self.repo)
+        self._initial_commit()
+        relative = os.path.join("src", "recovered", name)
+        branch = f"side-{pr}" if pr is not None else "main"
+        if pr is not None:
+            self.git("checkout", "-q", "-b", branch, "main", cwd=self.repo)
+        with open(os.path.join(self.repo, relative), "w", encoding="utf-8") as handle:
+            handle.write("/* model */\n")
+        self.git("add", "-A", cwd=self.repo)
+        self.git("commit", "-q", "-m", "add model", cwd=self.repo)
+        if pr is None:
+            return self.git("rev-parse", "HEAD", cwd=self.repo)
+        self.git("checkout", "-q", "main", cwd=self.repo)
+        self.git("merge", "-q", "--no-ff", "-m",
+                 f"Merge pull request #{pr} from x/y", branch, cwd=self.repo)
+        return self.git("rev-parse", "HEAD^2", cwd=self.repo)
+
+    # -- filename matching ---------------------------------------------------
+
+    def test_the_label_between_unit_and_offset_still_matches(self):
+        self.assertTrue(dunk_poolrad._model_name_matches(
+            "overlay_u20_list_walk_11ac_cpu.c", "OVL_0020_11AC"))
+        self.assertTrue(dunk_poolrad._model_name_matches(
+            "overlay_u3b0_row_clear_06fb_cpu.c", "OVL_03B0_06FB"))
+
+    def test_each_half_must_land_on_a_token_boundary(self):
+        self.assertFalse(dunk_poolrad._model_name_matches(
+            "overlay_u200_11ac.c", "OVL_0020_11AC"), "u20 must not match u200")
+        self.assertFalse(dunk_poolrad._model_name_matches(
+            "overlay_u20_11ac0.c", "OVL_0020_11AC"), "11ac must not match 11ac0")
+        self.assertFalse(dunk_poolrad._model_name_matches(
+            "overlay_u20_other.c", "OVL_0020_11AC"))
+
+    # -- evidence from the repo ---------------------------------------------
+
+    def test_the_evidence_names_the_file_the_commit_and_the_pr(self):
+        commit = self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        evidence = dunk_poolrad.model_evidence(self.repo, "OVL_0020_11AC")
+        self.assertEqual("src/recovered/overlay_u20_list_walk_11ac_cpu.c",
+                         evidence["model"])
+        self.assertEqual(commit, evidence["commit"])
+        self.assertEqual(1433, evidence["pr"])
+
+    def test_a_row_with_no_model_on_main_has_no_evidence(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.assertIsNone(dunk_poolrad.model_evidence(self.repo, "OVL_0001_0002"))
+
+    def test_a_commit_that_reached_main_without_a_pr_says_so(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c")
+        evidence = dunk_poolrad.model_evidence(self.repo, "OVL_0020_11AC")
+        self.assertIsNone(evidence["pr"], "no merge commit, no PR number invented")
+
+    # -- the sync ------------------------------------------------------------
+
+    def test_the_sync_files_a_credit_review_candidate_instead_of_an_authoring_task(self):
+        commit = self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        queue = {"rows": [row("OVL_0020_11AC", 1), row("OVL_0001_0002", 2)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue).run(limit=5)
+        self.assertEqual(["OVL_0001_0002"], [f["id"] for f in report["filed"]],
+                         "a body already on main must not be filed as authoring work")
+        self.assertEqual(commit, report["credit_pending"]["OVL_0020_11AC"]["commit"])
+        self.assertEqual(1433, report["credit_pending"]["OVL_0020_11AC"]["pr"])
+        self.assertIn("ledger credit pending", report["skipped"]["closed"]["OVL_0020_11AC"])
+
+    def test_the_credit_pending_file_is_written_once_and_keeps_the_first_evidence(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        sync = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                 exporter=lambda repo: queue,
+                                 credit_path=self.pending_path)
+        report = sync.run(limit=5)
+        self.assertEqual(str(self.pending_path), report["credit_pending_file"])
+        bodies = dunk_poolrad.credit_pending(self.pending_path)
+        self.assertEqual(1433, bodies["OVL_0020_11AC"]["pr"])
+        self.assertEqual(0o600, os.stat(self.pending_path).st_mode & 0o777)
+        # A later run re-derives the same row; the first-seen evidence must stand.
+        osmtime = os.stat(self.pending_path).st_mtime
+        second = dunk_poolrad.record_credit_pending(
+            {"OVL_0020_11AC": {"model": "other.c", "commit": "def", "pr": 8},
+             "OVL_0001_0002": {"model": "y.c", "commit": "ghi", "pr": 9}},
+            path=self.pending_path)
+        self.assertEqual(2, second["count"])
+        bodies = dunk_poolrad.credit_pending(self.pending_path)
+        self.assertEqual(1433, bodies["OVL_0020_11AC"]["pr"],
+                         "the first evidence is kept, not overwritten")
+        self.assertGreaterEqual(os.stat(self.pending_path).st_mtime, osmtime)
+
+    def test_progress_reports_the_recorded_count(self):
+        dunk_poolrad.record_credit_pending(
+            {"OVL_0001_0001": {"model": "m.c", "commit": "c", "pr": 1}},
+            path=self.pending_path)
+        summary = dunk_poolrad.progress(self.repo, credit_path=self.pending_path)
+        self.assertEqual(1, summary["credit_pending"])
+
+    def test_a_dry_run_records_nothing(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5,
+                                                                      dry_run=True)
+        self.assertEqual([], report["filed"])
+        self.assertIn("OVL_0020_11AC", report["credit_pending"])
+        self.assertFalse(os.path.exists(self.pending_path),
+                         "a dry run writes no owner-facing file")
+
+    def test_a_missing_file_reads_as_empty(self):
+        self.assertEqual({}, dunk_poolrad.credit_pending(self.pending_path))
+        with open(self.pending_path, "w", encoding="utf-8") as handle:
+            handle.write("{broken")
+        self.assertEqual({}, dunk_poolrad.credit_pending(self.pending_path))
+
+    # -- credit readiness (review of #149, t738) ------------------------------
+
+    def write_partial(self, rows):
+        """docs/re/partial_callee_models.csv rows: (id, status)."""
+        body = "id,status,evidence_doc\n" + "".join(
+            f"{rid},{status},{rid}.md\n" for rid, status in rows)
+        with open(os.path.join(self.repo, "docs", "re",
+                               "partial_callee_models.csv"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(body)
+
+    def write_checker(self, rid):
+        """A tools/overlay checker declaring CHECKER_ROWS for `rid` (t686)."""
+        with open(os.path.join(self.repo, "tools", "overlay", "check_x.py"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(f'CHECKER_ROWS = ["{rid}"]\n')
+
+    def test_a_filename_alone_does_not_make_a_body_credit_ready(self):
+        # The reviewer's finding: 49 of 74 name-matches on a live checkout had no
+        # registered checker, so "model on main" was read as "credit-ready".
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        ready, why_not = dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")
+        self.assertFalse(ready)
+        self.assertIn("no registered checker", why_not)
+
+    def test_a_model_with_a_checker_is_credit_ready(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.assertEqual((True, None),
+                         dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_model_is_never_credited(self):
+        # 4 rows are partial on main and all four model files exist; crediting one
+        # would put a partial model in the strict ledger.
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        ready, why_not = dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")
+        self.assertFalse(ready)
+        self.assertIn("partial", why_not)
+
+    def test_a_callback_model_is_never_credited(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "callback")])
+        self.assertFalse(dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")[0])
+
+    def test_a_full_status_with_a_checker_is_credit_ready(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "full")])
+        self.assertEqual((True, None),
+                         dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_body_stays_an_authoring_task(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]],
+                         "a partial model is still an authoring candidate")
+        self.assertEqual({}, report["credit_pending"])
+        self.assertIn("partial",
+                      report["models_not_credit_ready"]["OVL_0020_11AC"]["why_not"])
+        self.assertFalse(os.path.exists(self.pending_path))
+
+    def test_a_checkerless_body_stays_an_authoring_task(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]])
+        self.assertEqual({}, report["credit_pending"])
+        self.assertIn("no registered checker",
+                      report["models_not_credit_ready"]["OVL_0020_11AC"]["why_not"])
+
+    def test_a_credit_ready_body_is_not_filed_and_is_recorded(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual([], report["filed"])
+        self.assertIn("credit-ready", report["skipped"]["closed"]["OVL_0020_11AC"])
+        self.assertEqual(1, len(dunk_poolrad.credit_pending(self.pending_path)))

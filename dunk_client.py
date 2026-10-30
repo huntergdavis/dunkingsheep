@@ -22,7 +22,33 @@ import time
 from dunk_api import COMMANDS_BY_NAME
 from dunk_core import CONFIG_DIR, DunkError
 from dunk_roles import READ_ONLY as _READ_ONLY_COMMANDS
+
 from dunk_server import DEFAULT_SOCKET, LOG_FILE, SOCKET_PATH
+
+# t705: RETRY is a question about IDEMPOTENCY, not about permission.
+# `dunk_roles.READ_ONLY` is a role allowlist: what a pane may CALL. Nothing
+# keeps a WRITE out of it - PR #119 adds turn_start and turn_end to it - so
+# deciding `may I repeat this?` from that set meant that the day a write
+# joined the allowlist, a timed-out write would be sent twice, through an
+# import nobody reviewing the retry code could see. The repeat-safe verbs
+# are therefore named here, one at a time, and the answer for anything NOT
+# named is "no retry": a new read is not retried until someone says it is
+# safe, and a new write can never be retried by accident.
+#
+# Deliberately absent, though READ_ONLY lists them: lane_register and
+# superuser_recover (bootstrap WRITES: the first owner may register itself),
+# and dispatch (a dry run is a read, a real tick files tasks).
+IDEMPOTENT_READS = frozenset({
+    "status", "poll", "health", "help", "doctor", "whoami", "roster",
+    "message_state", "reply_stats", "project_summary", "state_latest",
+    "task_list", "task_read", "task_stats", "task_metrics", "task_followers",
+    "metrics", "inbox_count", "inbox_stats", "inbox_status", "list_panes",
+    "list_workspaces", "list_dunks", "get_dunk", "delivery",
+    "delivery_capability", "lanes", "memory_recall", "memory_search",
+    "memory_context", "memory_stats", "memory_status", "owner_stats",
+    "superuser_status", "pm_digest", "pm_routing", "list_messages",
+    "get_message", "review_list", "poolrad_progress", "owner_receipts",
+})
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI_PATH = os.path.join(HERE, "dunkingsheep")
@@ -109,6 +135,30 @@ def _current_pane_id():
         return pane.get("pane_id")
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+# t693: the client's patience, not the daemon's capability. Measured on the live
+# host at load 22 (8 cores, 15 pi lanes): `status` p50 ~5 s, p90 ~24.5 s, max 24.5 s.
+# A 15 s deadline turned 3 of 8 cheap read calls into failures, and a failed read is
+# what marks a live lane dead. 45 s covers the measured p90 with headroom;
+# DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+def default_timeout(environ=None):
+    """The client's patience, from the environment or 45 s (t693).
+
+    A function, not a module constant only, so a test can pin the rule without
+    reloading the module - reloading replaces the exception CLASSES too, and every
+    other test in the process then holds a stale IdentityRefused.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        return float(env.get("DUNKINGSHEEP_CLIENT_TIMEOUT") or 45.0)
+    except (TypeError, ValueError):
+        return 45.0
+
+
+DEFAULT_TIMEOUT = default_timeout()
+# A READ may be retried once on timeout (idempotent). A write never is.
+READ_RETRIES = 1
 
 
 class IdentityRefused(DunkError):
@@ -289,8 +339,17 @@ def identity_refusal_for(cmd, self_pane_id, has_token, note=None):
 
 
 class FlockClient:
-    def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
+    def __init__(self, socket_path=None, self_pane_id=None, timeout=None):
         self.socket_path = socket_path or SOCKET_PATH
+        # t693 MEASURED on the live host at load 22 (8 cores, 15 pi lanes):
+        # `dunkingsheep status` took 20.93 24.52 17.94 7.54 2.88 2.07 2.98 2.52 s
+        # - p50 ~5 s, p90 ~24.5 s - while `dunk-poll` (one socket batch, no CLI
+        # wrapper) took 1.54 6.61 3.18 s. A 15 s deadline on that box turned 3 of
+        # 8 cheap read calls into failures, and a failed read is what makes a live
+        # lane look dead and a review look abandoned. The deadline is a CLIENT
+        # patience setting, not a daemon capability: 45 s covers the measured p90
+        # with headroom, and DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         explicit = self_pane_id is not None
         if explicit:
             self.self_pane_id, self.identity_note = self_pane_id, "explicit"
@@ -307,7 +366,7 @@ class FlockClient:
             or os.environ.get("DUNKINGSHEEP_VERIFY_SELF") == "1"
         ):
             self.self_pane_id = _current_pane_id() or self.self_pane_id
-        self.timeout = timeout
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         self._next_id = 1
 
     @staticmethod
@@ -350,6 +409,23 @@ class FlockClient:
         if token:
             request["service_token"] = token
         self._next_id += 1
+        # t693: a read may be retried once on timeout. Reads are idempotent and a
+        # slow box answers the second attempt far more often than it fails twice
+        # (the first request warms the daemon's backend caches); a WRITE is never
+        # retried here, because the command may already have run. The decision
+        # reads IDEMPOTENT_READS, never the role allowlist (t705).
+        attempts = 1 + (READ_RETRIES if cmd in IDEMPOTENT_READS else 0)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self._call_once(request)
+            except (TimeoutError, socket.timeout) as error:
+                last_error = error
+                if attempt + 1 >= attempts:
+                    raise
+        raise last_error  # pragma: no cover - the loop either returns or raises
+
+    def _call_once(self, request):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         try:
@@ -381,12 +457,12 @@ class FlockClient:
             raise DunkError(response.get("error") or "unknown error")
         return response.get("result")
 
+    # -- availability -----------------------------------------------------------
+
     def __getattr__(self, name):
         if name in COMMANDS_BY_NAME:
             return lambda **args: self.call(name, **args)
         raise AttributeError(name)
-
-    # -- availability -----------------------------------------------------------
 
     def probe(self):
         """Classify the daemon WITHOUT side effects: running / busy / absent.

@@ -656,7 +656,69 @@ def build_parser():
     q = osub.add_parser("take", help="drain what is waiting for a pane (the extension calls this)")
     q.add_argument("pane_id")
     q.add_argument("--by")
+    q = osub.add_parser("conversation",
+                        help="the owner mailbox as one conversation (desk/web only)",
+                        epilog="Telegram and the web are two transports for one mailbox: "
+                               "this is the complete record, with the transport each "
+                               "message arrived on and the question each reply answers.")
+    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--before", type=float, help="only messages older than this unix time")
+    q = osub.add_parser("reply",
+                        help="answer one owner question (desk/web only)",
+                        epilog="The reply goes back on the transport the question arrived "
+                               "on, and answering acks the question, so 'answered' is one "
+                               "fact. One answer per question.")
+    q.add_argument("message_id")
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
+    q = osub.add_parser("ingest",
+                        help="record one owner question that arrived on a transport (t594)",
+                        epilog="A bridge does not keep its own store: the question lands in "
+                               "the one owner mailbox with its transport, and 'owner reply' "
+                               "answers it back the same way. --external-id is the "
+                               "transport's own id (telegram:<update_id>), so a redelivered "
+                               "update returns the row it already produced.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("body", nargs="*")
+    q.add_argument("--body-file")
+    q.add_argument("--external-id")
+    q.add_argument("--subject", "-s")
+    q.add_argument("--attach", help="local file paths, comma separated")
+    q = osub.add_parser("outbox",
+                        help="owner-mailbox replies waiting for a transport (t594)",
+                        epilog="Only replies whose own transport matches are returned, so "
+                               "Telegram carries answers and nothing else: no briefs, no "
+                               "digests, no web echoes.")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--limit", type=int, default=20)
+    q = osub.add_parser("delivered",
+                        help="record a transport's delivery receipt for one owner row (t594)",
+                        epilog="This receipt replaces telegram-status.json: a page is "
+                               "confirmed by the owner mailbox, not by a file read beside "
+                               "the bridge's credentials.")
+    q.add_argument("message_id")
+    q.add_argument("transport", choices=["web", "telegram", "report"])
+    q.add_argument("--external-id")
     q = osub.add_parser("stats", help="owner-push counts and latency")
+    p = sub.add_parser("report",
+                       help="the deterministic fleet report (no model)",
+                       description="Task metrics, lanes, needs-owner, review queue, "
+                                   "poolrad progress, budget and watchdog, measured at "
+                                   "generation time. Writes "
+                                   "~/.config/dunkingsheep/reports/<ts>.md and posts it "
+                                   "to the owner mailbox on the report transport when "
+                                   "that mailbox exists (FLAT_FLEET.md 7.3).")
+    rsub = p.add_subparsers(dest="report_command", metavar="<action>",
+                            parser_class=json_parser_class)
+    q = rsub.add_parser("run", help="generate one report")
+    q.add_argument("--no-post", action="store_true",
+                   help="write the file only; do not post to the owner mailbox")
+    q.add_argument("--prose", help="plain-language paragraph (rejected if it names a "
+                                   "task id or status the report does not contain)")
+    q.add_argument("--prose-file")
+    q.add_argument("--out-dir")
+    q = rsub.add_parser("list", help="the report files produced so far, newest first")
+    q.add_argument("--out-dir")
     p = sub.add_parser("state", help="continuous agent-state capture (the restartable-lane record)")
     ssub = p.add_subparsers(dest="state_command", metavar="<action>", parser_class=json_parser_class)
     q = ssub.add_parser("capture", help="record one row per agent lane now")
@@ -1003,6 +1065,22 @@ def print_panes(result):
         )
     if result.get("self_pane_id"):
         print(f"* = this pane ({result['self_pane_id']})")
+    gap = result.get("registry_gap") or []
+    if gap:
+        # t714: the pane list is the terminal's opinion; the registry knows the
+        # PROCESS. A lane the list drops while its process runs is unreachable, not
+        # dead, and it must be visible here instead of quietly missing from a table.
+        print()
+        print(f"{len(gap)} registered lane(s) the backend pane list does not contain:")
+        for row in gap:
+            state = f"process ALIVE (pid {row['pid']})" if row.get("alive") else \
+                f"process gone (pid {row.get('pid') or 'not recorded'})"
+            print(f"  {row['pane']:<8} {_clip(row.get('label') or '-', 24):<24} "
+                  f"{_clip(row.get('role') or '-', 9):<9} {state}")
+        if any(row.get("alive") for row in gap):
+            print("  an ALIVE lane that is not in the list cannot be typed into: mail to it "
+                  "fails with reason=backend_missing_pane (restore the pane, or address "
+                  "the lane by mailbox name).")
 
 
 def print_inbox_archive(result):
@@ -1099,6 +1177,10 @@ def print_task(task):
         print(f"assignees   {', '.join(task['assignees'])}")
     if task.get("claimed_by"):
         print(f"claimed by  {', '.join(task['claimed_by'])}")
+    if task.get("pr"):
+        print(f"body pr     #{task['pr']}"
+              + (f" (accounting pr #{task['accounting_pr']})"
+                 if task.get("accounting_pr") else ""))
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
@@ -1118,6 +1200,16 @@ def print_task(task):
     if task.get("lease_expires_at"):
         print(f"lease       {time.strftime('%Y-%m-%d %H:%M:%S',
                                         time.localtime(task['lease_expires_at']))}")
+    if task.get("notes"):
+        # t605: the evidence a lane recorded, in the view the next reader actually
+        # uses. Without it a reviewed task reads as unreviewed.
+        print()
+        print(f"notes (last {len(task['notes'])}):")
+        for row in task["notes"]:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["at"]))
+            print(f"  {when} {row.get('actor') or '-'} {row.get('event') or 'note'}")
+            for line in str(row.get("reason") or "").splitlines() or [""]:
+                print(f"    {line}")
 
 
 def print_task_list(result):
@@ -1727,6 +1819,43 @@ def print_owner_push(result):
           f"(no inbox row, nothing typed)")
 
 
+def print_report_run(result):
+    print(f"report {result.get('path')}  (generated {result.get('generated_at')})")
+    posted = result.get("posted") or {}
+    if posted.get("message_id"):
+        print(f"posted to the owner mailbox as {posted['message_id']} "
+              f"(transport {posted.get('transport') or 'none'})")
+    elif posted.get("error"):
+        print(f"NOT posted: {posted['error']}")
+    for problem in result.get("prose_rejected") or []:
+        print(f"prose rejected: {problem}")
+
+
+def print_report_list(result):
+    print(f"{result.get('count', 0)} report(s) in {result.get('dir')}")
+    for row in result.get("reports") or []:
+        print(f"  {time.strftime('%Y-%m-%d %H:%M', time.localtime(row['at']))} "
+              f"{row['size']:>8} B  {row['path']}")
+
+
+def print_owner_conversation(result):
+    print(f"mailbox {result.get('mailbox')}  messages {result.get('count', 0)}  "
+          f"waiting {len(result.get('waiting') or [])}")
+    for row in result.get("messages") or []:
+        mark = "->" if row.get("reply_to") else ("? " if row.get("state") == "queued" else "  ")
+        when = time.strftime("%m-%d %H:%M", time.localtime(row.get("created_at") or 0))
+        transport = row.get("transport") or "-"
+        print(f"{mark} {row.get('id'):>6} {when} {transport:<8} "
+              f"{(row.get('sender') or '-'):<8} {(row.get('body') or '').splitlines()[0][:90]}")
+
+
+def print_owner_reply(result):
+    reply = result.get("reply") or {}
+    print(f"answered {result.get('question')} with {reply.get('message_id')} "
+          f"on {result.get('transport') or 'no transport'} "
+          f"(question {result.get('acked')} acked)")
+
+
 def print_owner_take(result):
     messages = result.get("messages") or []
     if not messages:
@@ -1990,6 +2119,21 @@ def _be_nice():
 
 # Read only local files; never open a socket.
 LOCAL_ONLY_COMMANDS = ("context", "github")
+# Long daemon-side work: the poolrad exporter runs for minutes, a launch
+# verifies the process started, a review sync talks to GitHub. A 15 s read
+# deadline reported "no answer" for work that then completed (2026-10-29, the
+# first backlog-sync), and the timer unit recorded a failure for a success.
+LONG_DAEMON_COMMANDS = frozenset({"poolrad", "review", "start-agent", "agent",
+                                  "new-workspace", "workspace", "respawn-pane", "respawn"})
+LONG_DAEMON_TIMEOUT_S = 600.0
+
+
+def client_timeout_for(command, timeout):
+    """The socket read deadline for `command`: never below the client's own,
+    and at least LONG_DAEMON_TIMEOUT_S for the long daemon-side commands."""
+    if command in LONG_DAEMON_COMMANDS:
+        return max(float(timeout), LONG_DAEMON_TIMEOUT_S)
+    return timeout
 # Context WRITES go through the daemon (docs/FLAT_FLEET.md 8); reads stay local
 # so the digest never waits on a socket. --local is the owner's bootstrap path.
 CONTEXT_DAEMON_WRITES = ("add", "promote", "supersede", "retire")
@@ -2444,6 +2588,7 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        client.timeout = client_timeout_for(command, client.timeout)
         # Synchronous send paths wait for the daemon to *deliver*, and delivery can
         # need several pane reads (a typing check, a dead-session check, a submit
         # confirmation). On a loaded host those reads are slow enough that the
@@ -3008,7 +3153,52 @@ def run_client_command(client, args):
         if sub == "take":
             return client.call("owner_take", pane_id=args.pane_id,
                                by=args.by), print_owner_take
+        if sub == "conversation":
+            payload = {"limit": args.limit}
+            if args.before is not None:
+                payload["before"] = args.before
+            return client.call("owner_conversation", **payload), print_owner_conversation
+        if sub == "reply":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            if not body:
+                raise SystemExit("owner reply: a body or --body-file is required")
+            return client.call("owner_reply", message_id=args.message_id,
+                               body=" ".join(body)), print_owner_reply
+        if sub == "ingest":
+            body = args.body
+            if getattr(args, "body_file", None):
+                with open(args.body_file, encoding="utf-8") as handle:
+                    body = [handle.read()]
+            payload = {"transport": args.transport, "body": " ".join(body),
+                       "external_id": args.external_id, "subject": args.subject,
+                       "attach": args.attach}
+            return client.call("owner_ingest",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
+        if sub == "outbox":
+            return client.call("owner_outbox", transport=args.transport,
+                               limit=args.limit), print_view
+        if sub == "delivered":
+            payload = {"message_id": args.message_id, "transport": args.transport,
+                       "external_id": args.external_id}
+            return client.call("owner_delivered",
+                               **{k: v for k, v in payload.items() if v is not None}), print_view
         return client.call("owner_stats"), print_owner_stats
+    if command == "report":
+        if args.report_command == "list":
+            return client.call("report_list", out_dir=args.out_dir), print_report_list
+        prose = args.prose
+        if args.prose_file:
+            with open(args.prose_file, encoding="utf-8") as handle:
+                prose = handle.read()
+        payload = {"post": not args.no_post}
+        if prose:
+            payload["prose"] = prose
+        if args.out_dir:
+            payload["out_dir"] = args.out_dir
+        return client.call("report_run", **payload), print_report_run
     if command == "state":
         name = {"capture": "state_capture", "latest": "state_latest"}[args.state_command]
         payload = {"source": getattr(args, "source", None)} if args.state_command == "capture" else {

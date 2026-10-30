@@ -139,6 +139,12 @@ class VerdictEvidenceTests(unittest.TestCase):
         self.assertIn(EVIDENCE, followup["body"],
                       "the fix task says 'see the notes' again")
         self.assertIn("NOT verified", followup["body"])
+        # t723: the fix task is the only record that a lane worked on this head, so it
+        # must carry the PR identity; without it the next review of the same PR cannot
+        # attribute the head and no-self-review goes unenforced.
+        self.assertEqual("huntergdavis/dunkingsheep", followup["repo"])
+        self.assertEqual(119, followup["pr"])
+        self.assertTrue(followup["head"], "the fix task names the head it fixes")
 
     def test_the_github_review_body_carries_the_evidence_verbatim(self):
         task = self.claimed_review()

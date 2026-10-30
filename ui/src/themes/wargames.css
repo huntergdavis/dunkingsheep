@@ -1,0 +1,189 @@
+/* WarGames: amber mainframe phosphor, chunky mono readout; local system fonts only. */
+:root[data-theme="wargames"] {
+  color-scheme: dark;
+  --bg: #0a0a06;
+  --surface: #14140b;
+  --surface-raised: #1e1e10;
+  --ink: #ffd27f;
+  --muted: #c9a34d;
+  --accent: #ffb000;
+  --accent-contrast: #1a1000;
+  --border: #8a7430;
+  --border-strong: #a8892f;
+  --icon-button-border: var(--bg);
+  --icon-button-panel-border: var(--muted);
+  --success: #8fe37a;
+  --warning: #ffd27f;
+  --danger: #ff8a5c;
+  --purple: #d9a7ff;
+  --orange: #ffa94d;
+  --teal: #7fe0d0;
+  --radius: 0px;
+  --font-body: 'Courier New', 'Lucida Console', monospace;
+  --font-dashboard: var(--font-body);
+  --font-display: var(--font-body);
+  --font-mono: 'Courier New', 'Lucida Console', monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* WarGames component aliases use the amber terminal palette. */
+:root[data-theme="wargames"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(8, 8, 3, 0.82);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* WarGames remaps of inherited light-UI component tokens onto the amber terminal
+ * surfaces, so no component keeps a default-palette border/ink that vanishes
+ * against this theme's backgrounds. Tokens only. */
+:root[data-theme="wargames"] {
+  --topbar-surface: var(--surface);
+  --topbar-border: var(--border-strong);
+  --activity-surface: var(--surface);
+  --activity-border: var(--border-strong);
+  --composer-border: var(--border-strong);
+  --center-surface: var(--bg);
+  --sidebar-surface: var(--bg);
+  --sidebar-border: var(--border-strong);
+  --game-type-surface: var(--surface);
+  --game-type-surface-2: var(--bg);
+  --game-type-surface-3: var(--surface-raised);
+  --game-type-border: var(--border-strong);
+  --game-type-border-2: var(--border-strong);
+  --game-type-border-3: var(--border-strong);
+  --game-saves-surface: var(--surface);
+  --game-chat-surface: var(--surface);
+  --game-chat-actions-surface: var(--surface-raised);
+  --ops-executive-head-border: var(--border-strong);
+  --ops-signal-line-surface: var(--surface-raised);
+  --ops-capacity-line-surface: var(--surface-raised);
+  --ops-metrics-surface: var(--surface);
+  --ops-metrics-border: var(--border-strong);
+  --ops-source-surface-2: var(--surface-raised);
+  --ops-source-border-2: var(--danger);
+  --ops-mission-head-surface: var(--surface-raised);
+  --ops-mission-head-border: var(--border-strong);
+  --brand-mark-surface: var(--ink);
+  --brand-mark-ink: var(--accent-contrast);
+  --rune-choice-border-2: var(--accent-contrast);
+  --update-banner-surface: var(--ink);
+  --update-banner-border: var(--accent-contrast);
+  --search-head-surface: var(--surface-raised);
+  --search-head-ink: var(--muted);
+  --queue-help-surface: var(--surface-raised);
+  --queue-help-border: var(--border-strong);
+  --queue-help-ink-2: var(--ink);
+  --status-badge-surface: var(--surface-raised);
+  --status-badge-surface-2: var(--surface-raised);
+  --status-badge-surface-3: var(--surface-raised);
+  --status-badge-ink: var(--muted);
+  --status-badge-ink-2: var(--success);
+  --status-badge-ink-3: var(--warning);
+  --message-wrap-ink: var(--ink);
+  --message-wrap-surface: var(--surface-raised);
+  --icon-button-ink: var(--accent-contrast);
+  --override-actions-ink: var(--accent-contrast);
+  --empty-state-ink: var(--muted);
+  --empty-state-ink-2: var(--ink);
+  --older-marker-ink: var(--muted);
+  --older-marker-ink-2: var(--ink);
+  --message-meta-ink: var(--muted);
+  --identity-ink: var(--ink);
+  --identity-ink-2: var(--muted);
+  --sidebar-section-ink: var(--muted);
+  --sidebar-bottom-ink: var(--ink);
+  --channel-ink: var(--ink);
+  --channel-ink-2: var(--muted);
+  --eyebrow-ink: var(--muted);
+}
+
+/* WarGames remaps for the remaining light-panel and dark-panel control borders. */
+:root[data-theme="wargames"] {
+  --activity-toggle-surface: var(--surface-raised);
+  --activity-toggle-border: var(--border-strong);
+  --activity-toggle-ink: var(--ink);
+  --jump-banner-surface: var(--surface-raised);
+  --jump-banner-border: var(--border-strong);
+  --jump-banner-ink: var(--ink);
+  --jump-banner-ink-2: var(--accent);
+  --jump-latest-surface: var(--surface-raised);
+  --jump-latest-border: var(--border-strong);
+  --jump-latest-ink: var(--ink);
+  --queue-help-surface-3: var(--surface-raised);
+  --queue-help-border-2: var(--border-strong);
+  --queue-help-ink-3: var(--warning);
+  --search-more-surface: var(--surface-raised);
+  --search-more-border: var(--border-strong);
+  --search-more-ink: var(--ink);
+  --ops-credit-chart-border: var(--border-strong);
+  --ops-executive-border: var(--border-strong);
+  --ops-kpis-border: var(--border-strong);
+  --ops-lab-panel-border: var(--border-strong);
+  --ops-panel-border: var(--border-strong);
+  --ops-source-border: var(--border-strong);
+  --poolrad-stat-border: var(--border-strong);
+}
+
+:root[data-theme="wargames"] {
+  --settings-success-ink: var(--success);
+}

@@ -1,0 +1,128 @@
+/* Tron: black field, cyan gridline accents and techno system stacks. Tokens only. */
+:root[data-theme="tron"] {
+  color-scheme: dark;
+  --bg: #05080b;
+  --surface: #0a1016;
+  --surface-raised: #0e1920;
+  --ink: #dcf7ff;
+  --muted: #93b9c6;
+  --accent: #35e2ff;
+  --accent-contrast: #021014;
+  --border: #2f8ea1;
+  --border-strong: #43cfe6;
+  --icon-button-border: var(--bg);
+  --icon-button-panel-border: var(--accent);
+  --success: #7fffc4;
+  --warning: #ffd479;
+  --danger: #ff8fa3;
+  --purple: #c9a6ff;
+  --orange: #ffb37a;
+  --teal: #7fffe0;
+  --radius: 2px;
+  --font-body: 'Eurostile', 'Bank Gothic', 'Segoe UI', Verdana, sans-serif;
+  --font-display: 'Oxanium', 'Eurostile', 'Bank Gothic', 'Segoe UI', Verdana, sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-mono: 'Consolas', 'Liberation Mono', monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* Tron component aliases use the same black/cyan palette. */
+:root[data-theme="tron"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(2, 8, 12, 0.82);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* Legacy component boundaries remapped to clear 3:1 on their own panes. */
+:root[data-theme="tron"] {
+  --activity-border: #0b3f49;
+  --activity-toggle-border: #0b3f49;
+  --composer-border: #0b3f49;
+  --jump-banner-border: #0b3f49;
+  --jump-latest-border: #0b3f49;
+  --older-marker-border: #0b3f49;
+  --queue-help-border: #0b3f49;
+  --queue-help-border-2: #0b3f49;
+  --rune-choice-border-2: #0b3f49;
+  --search-head-border-2: #0b3f49;
+  --search-more-border: #0b3f49;
+  --topbar-border: #0b3f49;
+  --search-head-ink: #0b3f49;
+  --status-badge-ink: #0b3f49;
+  --status-badge-ink-3: #0b3f49;
+  --game-type-border: #35e2ff;
+  --game-type-border-2: #35e2ff;
+  --game-type-border-3: #35e2ff;
+  --ops-credit-chart-border: #35e2ff;
+  --ops-executive-border: #35e2ff;
+  --ops-executive-head-border: #35e2ff;
+  --ops-kpis-border: #35e2ff;
+  --ops-lab-panel-border: #35e2ff;
+  --ops-metrics-border: #35e2ff;
+  --ops-mission-head-border: #35e2ff;
+  --ops-panel-border: #35e2ff;
+  --ops-source-border: #35e2ff;
+  --ops-source-border-2: #35e2ff;
+  --poolrad-stat-border: #35e2ff;
+  --sidebar-border: #35e2ff;
+}

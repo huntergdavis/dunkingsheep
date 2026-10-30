@@ -309,9 +309,41 @@ CI state and a diff stat.
 In poolrad-decomp acceptance *is* a reviewer commit on `main` that updates
 the credited/replaced ledger ("Accept OVL_007F_063A (967 B): 289 strict /
 334 identities"). No approver may push code, so `review-sync` makes that
-commit deterministically from the verdict's numbers, as the reviewer App,
-under its bypass. It is the only write the reviewer App ever makes and it
-touches only the ledger files.
+commit deterministically from the verdict and the accepted PR. It is the only
+write the reviewer App ever makes and it touches only the ledger file
+(`docs/re/strict_full_c_addresses.csv`).
+
+**Revised 2026-10-29 (red team, live).** The first draft had the reviewer App
+push the row straight to `main` under a branch-protection *bypass allowance*.
+GitHub answers **422**: bypass allowances are an organisation feature, and all
+three repos are personal. The row therefore travels as its own small PR:
+
+1. **Derive the row, or refuse.** Inputs are the verdict (the reviewer's
+   `task note` lines) and the accepted PR (the files it adds). A row is one id
+   and one evidence document. The id is the first source that names *exactly
+   one* `OVL_<unit>_<offset>` / `RES_<unit>_<offset>` (verdict notes, then the
+   review task title, which carries the PR title, then the PR body); the document
+   is the added `docs/re/*.md` whose name
+   carries that unit and offset, the poolrad convention
+   (`tools/overlay/check_body_doc_pairing.py`: `U7F_STATE_FLAGS_0F7E.md` <-
+   `OVL_007F_0F7E`). Two ids, no matching document, two matching documents, or
+   an id already in the ledger all *refuse* and write the sentence on the
+   review task. Nothing is guessed: a wrong row is a credit nobody reviewed.
+2. **The reviewer App commits and opens the PR** on a branch
+   `accounting/pr<N>-<id>`, built on the current `main` commit (so the row is
+   inserted in sorted position in the ledger as it stands, not as it was when
+   the body PR opened). An existing branch without an open PR is refused, never
+   overwritten.
+3. **The author App approves it** — two distinct bot identities, which is what
+   branch protection counts and what GitHub enforces by refusing an App's
+   approval on its own PR.
+4. **Auto-merge is enabled**, and branch protection decides when it lands.
+
+Both PR numbers are recorded on the review task: `pr` stays the body PR, the
+new `accounting_pr` column carries the accounting PR, and an `accounting` event
+records the row, the URL, the observed state, and — when there is no PR — the
+reason. A GitHub failure on any step is appended to the verdict result and
+never undoes the verdict.
 
 ### 6.5 Filling the backlog
 
@@ -375,6 +407,33 @@ the `owner` mailbox's delivery receipt on the `telegram` transport instead of
 reading a status file. The 2,439 historical rows (744 owner, 1,695 agent) are migrated so the
 latency baseline survives; attachments move to the inbox blob store.
 
+**Implemented 2026-10-29 (t591):** `inbox.db` messages carry `transport`
+(`web` | `telegram` | `report`, NULL for lane mail) and `reply_to` (the question
+a reply answers); `owner` is a reserved mailbox name, so it resolves before any
+pane exists for it; `owner_conversation` reads the mailbox as one conversation
+with `answered` computed from the rows themselves, and `owner_reply` writes one
+reply on the question's own transport and acks the question in the same call —
+one answer per question, so reply latency has one edge. Both are desk/owner
+verbs (`docs/LANES.md` 4.3). `tools/migrate_owner_mailbox.py` copies the old
+store in: read-only source, ids recorded in `migrated_from`, source timestamps
+preserved so the latency baseline is real, attachments into the blob store, and
+a second run copies nothing. **Not yet done:** `web/app.py` still opens
+`messages.sqlite3` itself; it must call `owner_conversation` / `owner_reply`
+over the socket instead, which is the step that makes a web question appear in
+`inbox.db` rather than only in the migrated copy.
+
+**Implemented 2026-10-30 (t594):** `bridges/telegram_transport.py` holds the
+policy with no `web.app` import (page marker, 3-per-hour budget, reply
+selection), and `bridges/telegram_bridge.py` now asks the daemon for
+`owner_outbox(transport="telegram")`, sends each reply and receipts it with
+`owner_delivered`, so a brief, a digest or a web echo has no path to the phone;
+inbound text goes to `owner_ingest` with `transport=telegram` and
+`external_id=telegram:<update_id>`. `send_briefs` remains only as a name that
+resolves to the owner outbox. Pages are still read from the watchdog's rows by
+its own `PAGE OWNER` marker until pages move to the mailbox. **Not yet done:**
+a Telegram attachment still lands in the legacy desk store rather than the
+inbox blob store.
+
 ### 7.3 Reporter (replaces the VP)
 
 `dunkingsheep report` is deterministic and has no model: task metrics, lanes
@@ -389,6 +448,22 @@ not a pane with an inbox, opinions and rule-writing power. The deterministic
 block is posted verbatim above the prose, and the daemon rejects prose that
 names a task id or a status absent from its input, so a summariser cannot
 round "merged" up to "done".
+
+**Implemented 2026-10-29 (t592):** `dunk_report.py` builds the deterministic
+block from the stores at generation time — task metrics (24h), lanes
+working/idle/dead (live panes, the leases they hold, registered lanes with no
+pane), the needs-owner questions quoted verbatim, the review queue with ages,
+poolrad progress, budget and the watchdog heartbeat. A section whose source
+cannot be read says "not measured here" rather than printing a zero, because a
+zero is a measurement. `dunkingsheep report run` writes
+`~/.config/dunkingsheep/reports/<ts>.md` (never overwriting an earlier report)
+and posts the same text to the owner mailbox on the `report` transport when
+that mailbox exists; `report list` shows the files. `report_run` is a desk/system
+verb, `report_list` is readable by every role. The optional prose pass is a
+parameter, not a feature of the timer: `prose_problems()` rejects prose naming a
+task id or a status the report does not contain, and rejected prose is dropped
+rather than posted above the numbers. Units:
+`packaging/systemd/dunkingsheep-report.{service,timer}` (every 4 hours).
 
 Three separate mechanisms address the VP mailbox today and each gets its own
 edit: `host_watch.py` (literal `"π - vp-of-agentry"` via subprocess),

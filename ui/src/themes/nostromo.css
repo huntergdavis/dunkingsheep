@@ -1,0 +1,180 @@
+
+/* Nostromo: amber industrial readout; local system fonts only. */
+:root[data-theme="nostromo"] {
+  color-scheme: dark;
+  --bg: #10100c;
+  --surface: #19190f;
+  --surface-raised: #252315;
+  --ink: #f5edc9;
+  --muted: #c4b98b;
+  --accent: #f6bd60;
+  --accent-contrast: #161005;
+  --border: #8a7950;
+  --border-strong: #b0a16f;
+  --icon-button-border: var(--bg);
+  --icon-button-panel-border: var(--border-strong);
+  --success: #cad5a0;
+  --warning: #f6bd60;
+  --danger: #ffb0a1;
+  --purple: #d2c0a0;
+  --orange: #f6bd60;
+  --teal: #c3d9bf;
+  --radius: 1px;
+  --font-body: 'Liberation Mono', 'Courier New', monospace;
+  --font-mono: 'Liberation Mono', 'Courier New', monospace;
+  --font-dashboard: var(--font-body);
+  --font-display: 'Black Ops One', 'DejaVu Sans Condensed', 'Arial Narrow', sans-serif;
+  --scanline-strength: 0.12;
+  --overlay: repeating-linear-gradient(0deg, rgb(0 0 0 / var(--scanline-strength)) 0 1px, transparent 1px 4px);
+}
+
+/* Nostromo component aliases use the same semantic palette. */
+:root[data-theme="nostromo"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(12, 10, 3, 0.8);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* t203: new-theme contrast remediation. Component surfaces, borders and inks
+   resolve inside the Nostromo palette instead of inheriting Default's light
+   tokens. Borders use --border on --surface (two-part overlay bound 3.36:1) and
+   --border-strong on --surface-raised (4.82:1). */
+:root[data-theme="nostromo"] {
+  --topbar-surface: var(--surface);
+  --activity-surface: var(--surface);
+  --activity-toggle-surface: var(--surface);
+  --jump-banner-surface: var(--surface-raised);
+  --jump-latest-surface: var(--surface-raised);
+  --queue-help-surface: var(--surface-raised);
+  --queue-help-surface-2: var(--surface-raised);
+  --queue-help-surface-3: var(--surface-raised);
+  --brand-mark-surface: var(--surface-raised);
+  --search-head-surface: var(--surface);
+  --search-more-surface: var(--surface);
+  --status-badge-surface: var(--surface-raised);
+  --status-badge-surface-2: var(--surface-raised);
+  --status-badge-surface-3: var(--surface-raised);
+
+  --topbar-border: var(--border);
+  --composer-border: var(--border);
+  --older-marker-border: var(--border);
+  --activity-border: var(--border);
+  --activity-toggle-border: var(--border);
+  --search-head-border-2: var(--border);
+  --search-more-border: var(--border);
+  --jump-banner-border: var(--border-strong);
+  --jump-latest-border: var(--border-strong);
+  --queue-help-border: var(--border-strong);
+  --queue-help-border-2: var(--warning);
+  --game-type-border: var(--border-strong);
+  --game-type-border-2: var(--border-strong);
+  --game-type-border-3: var(--teal);
+  --ops-credit-chart-border: var(--border-strong);
+  --ops-executive-border: var(--border-strong);
+  --ops-executive-head-border: var(--border-strong);
+  --ops-kpis-border: var(--border-strong);
+  --ops-lab-panel-border: var(--border-strong);
+  --ops-metrics-border: var(--border-strong);
+  --ops-mission-head-border: var(--border-strong);
+  --ops-panel-border: var(--border-strong);
+  --ops-source-border: var(--border-strong);
+  --ops-source-border-2: var(--border-strong);
+  --poolrad-stat-border: var(--border-strong);
+  --sidebar-border: var(--border-strong);
+
+  --search-head-ink: var(--muted);
+  --search-more-ink: var(--muted);
+  --older-marker-ink-2: var(--muted);
+  --activity-toggle-ink: var(--muted);
+  --message-wrap-ink: var(--ink);
+  --brand-mark-ink: var(--accent);
+  --jump-banner-ink: var(--success);
+  --jump-latest-ink: var(--success);
+  --settings-success-ink: var(--success);
+  --queue-help-ink: var(--warning);
+  --queue-help-ink-2: var(--warning);
+  --queue-help-ink-3: var(--warning);
+  --status-badge-ink: var(--muted);
+  --status-badge-ink-2: var(--success);
+  --status-badge-ink-3: var(--warning);
+}
+
+/* interim effect consumers: t177 generalises into token hooks */
+:root[data-theme="nostromo"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  pointer-events: none;
+  background-image: var(--overlay);
+}
+:root[data-theme="nostromo"] :is(h1, h2, .dash-nav-brand) {
+  font-family: var(--font-display);
+  text-shadow: none;
+}
+:root[data-theme="nostromo"] :is(.cs-message, .cs-message__content) {
+  font-family: var(--font-body);
+}
+:root[data-theme="nostromo"] :is(pre, code, kbd, samp) {
+  font-family: var(--font-mono);
+}
+@media print, (forced-colors: active) {
+  :root[data-theme="nostromo"] body::after { display: none; }
+}

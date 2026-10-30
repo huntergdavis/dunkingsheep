@@ -29,10 +29,15 @@ Tier 2 re-review (VP i19817).
 
 - **VP** is the dunkingsheep inbox. Use it for watchdog coordination alerts. Alerts
   arrive from sender `watchdog` (see below).
-- **OWNER** is anything that reaches the owner's phone. With the CoS Telegram cutover, that is a CoS desk
-  brief (`POST /api/brief`), which `telegram_bridge.send_briefs` forwards.
-  **CoS desk briefs reach the owner** with the bridge configured to cos;
-  VP desk briefs remain separate. Do not put agent-only coordination into CoS briefs.
+- **OWNER** is the `owner` mailbox in `inbox.db`, and the phone is one of its
+  transports (FLAT_FLEET.md 7.2). The bridge no longer forwards briefs:
+  `send_briefs` survives only as a name for callers that still say it, and it now
+  sends the owner outbox, not briefs. What reaches Telegram is (a) replies whose question
+  arrived on Telegram, and (b) pages the watchdog writes into the desk store,
+  classified security / outage / money and capped at three per hour. A page that
+  the cap holds is retried on a later tick - the watermark advances only for a
+  page that was delivered - and nothing else (no reports, no digests, no web
+  echoes) is sent to the phone. Do not put agent-only coordination into pages.
 - **Delivery.** A page is DELIVERED only when the bridge's non-secret status
   file `vp-of-agentry/data/telegram-status.json`
   `{"channel": "cos", "last_brief_id": int, "updated_at": float}` shows `last_brief_id >= the

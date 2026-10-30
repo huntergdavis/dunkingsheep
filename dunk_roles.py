@@ -66,6 +66,7 @@ READ_ONLY = frozenset({
     "status", "poll", "health", "help", "doctor", "whoami", "roster",
     "message_state", "reply_stats", "project_summary", "state_latest",
     "task_list", "task_read", "task_stats", "task_metrics", "task_followers",
+    "report_list",                 # reading report files is harmless (7.3)
     "metrics", "inbox_count", "inbox_stats", "inbox_status", "list_panes",
     "list_workspaces", "list_dunks", "get_dunk", "delivery",
     "delivery_capability", "lanes", "memory_recall", "memory_search",
@@ -73,6 +74,10 @@ READ_ONLY = frozenset({
     "superuser_status", "pm_digest", "pm_routing", "list_messages",
     "get_message", "dispatch", "review_list", "poolrad_progress",
     "owner_receipts",      # delivery receipts the web desk reconciles (read-only)
+    # Turn events are bound to the caller's own pane by the kernel check in
+    # require_turn_caller; an unregistered lane must still be able to report
+    # busy/idle, or the delivery gate goes blind (two lanes stalled 2026-10-29).
+    "turn_start", "turn_end",
     # Bootstrap paths: the handlers gate these (first owner may self-register).
     "superuser_recover", "lane_register",
 })
@@ -98,15 +103,27 @@ ALLOW = {
         "inbox_fetch", "respawn_pane", "send_keys", "flush_box", "read_pane",
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
-        "gh_token", "review_sync", "context_add", "poolrad_sync",
+        "gh_token", "review_sync", "context_add", "poolrad_sync", "report_run",
+        # t594: the Telegram bridge runs as a unit (system token), so `system` is the
+        # role that ingests owner questions, drains a transport outbox and records
+        # delivery receipts. A lane may do none of the three.
+        "owner_ingest", "owner_outbox", "owner_delivered",
+        "owner_conversation", "owner_reply",
     }),
     # The owner's transport (the web desk): everything but the
     # fleet-destructive verbs, which stay on a human in a terminal.
     "web": None,
     "desk": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "inbox_fetch", "inbox_ack",
-        "owner_take", "owner_poll", "owner_receipts", "read_pane",
-        "turn_start", "turn_end",
+        "owner_take", "owner_poll", "owner_receipts", "owner_reply",
+        # The owner mailbox is the desk's whole job (FLAT_FLEET.md 7.2): read it,
+        # answer it. A lane reads its own mailbox, never a person's conversation.
+        "owner_conversation",
+        # t594: the desk answers owner questions, so it reads the transport outbox
+        # as well. It does not ingest or write receipts: that is the transport's job.
+        "owner_outbox",
+        "report_run",           # posting a report to the owner is the desk's (7.3)
+        "read_pane", "turn_start", "turn_end",
     }),
     "planner": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "turn_start", "turn_end",

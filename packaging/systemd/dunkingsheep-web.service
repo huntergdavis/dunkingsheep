@@ -1,0 +1,27 @@
+[Unit]
+Description=Dunking Sheep web desk (front desk, terminals, operations, play)
+After=network-online.target dunkingsheep.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# One repo (docs/FLAT_FLEET.md 9): the desk runs from the same release tree as the daemon.
+# t735: `current` is created by no installer step and bridges/run.sh was mode 644 in
+# git (203/EXEC, restart counter 17). The wrapper is the stable path; run.sh is now
+# 100755 in the index.
+ExecStart=/home/hunter/.local/share/dunkingsheep/current/bridges/run.sh
+# The desk is the owner's transport: role web by token (FLAT_FLEET.md 4.3).
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/web-token
+# t735: DUNKING_SHEEP_DIR is the CONFIG dir, not the install - removed.
+#Environment=DUNKING_SHEEP_DIR=/home/hunter/.local/share/dunkingsheep/current
+Environment=VP_DATA_DIR=%h/.config/dunkingsheep/desk
+Environment=VP_CHANNELS_FILE=%h/.config/dunkingsheep/desk/channels.json
+# Quoted: an unquoted value with a space/parentheses is an INVALID assignment and
+# systemd silently drops it (systemd-analyze verify), so the label never reached the desk.
+Environment="VP_HERDR_WEBUI_LABEL=Terminal (tmux)"
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

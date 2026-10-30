@@ -20,6 +20,18 @@ venv/
 # untracked; an ignore rule cannot hide a file already in the Git index.
 # The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl
+.venv/
+ui/node_modules/
+ui/dist/
+
+# t746: a public repo published data/auth.json, data/owner-credentials and
+# data/messages.sqlite3 from a `git add -A` after a test run (commit 52847e5, still
+# served by raw.githubusercontent - a force-push does not unpublish a SHA). These
+# rules are the durable half of that fix; tools/check_public_secrets.py is the other.
+data/
+auth.json
+owner-credentials
+*.sqlite3
 
 # Rust build artefacts (T00): the workspace is built by every task.
 rust/target/

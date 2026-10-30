@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     repo          TEXT,
     pr            INTEGER,
     head          TEXT,
-    verdict       TEXT
+    verdict       TEXT,
+    accounting_pr INTEGER
 );
 CREATE INDEX IF NOT EXISTS tasks_by_scope
     ON tasks (scope, status, created_at);
@@ -317,7 +318,8 @@ class Tasks:
                           ("attempts", "INTEGER NOT NULL DEFAULT 0"),
                           ("kind", "TEXT NOT NULL DEFAULT 'work'"),
                           ("author", "TEXT"), ("repo", "TEXT"), ("pr", "INTEGER"),
-                          ("head", "TEXT"), ("verdict", "TEXT")):
+                          ("head", "TEXT"), ("verdict", "TEXT"),
+                          ("accounting_pr", "INTEGER")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # The partial unique index needs the columns above to exist first.
@@ -752,6 +754,20 @@ class Tasks:
                 raise
         return verdict
 
+    def set_accounting_pr(self, task_id, number):
+        """Record the accounting PR a review's accept verdict opened (FLAT_FLEET 6.4).
+        The body PR stays in `pr`; both numbers are then on the one review task."""
+        with self._lock:
+            row = self._require(task_id)
+            self.db.execute(
+                "UPDATE tasks SET accounting_pr = ?, updated_at = ? WHERE id = ?",
+                (int(number), _now(), str(task_id)))
+            self._record(str(task_id), "accounting", at=_now(), scope=row["scope"],
+                         priority=row["priority"], meta={"accounting_pr": int(number),
+                                                          "body_pr": row["pr"]})
+            self.db.commit()
+        return int(number)
+
     def notes(self, task_id, event="note"):
         """Every note event on a task, oldest first: [{at, actor, meta, text}].
 
@@ -1025,6 +1041,37 @@ class Tasks:
         return {"noted": str(task_id), "event": event, "actor": actor,
                 "meta": meta or {}}
 
+    def recent_notes(self, task_id, limit=3):
+        """The last `limit` events that carry a reason, oldest first (t605).
+
+        Evidence a lane wrote with `task note` lived only in task_events, so
+        `task read` showed a fully-reviewed task as if nobody had looked at it - the
+        reviewer's evidence was invisible to the next reader and the queue re-nudged
+        finished work. This is the read side of that record: no new storage, no
+        mutation, and a caller that asks for 0 gets none.
+        """
+        limit = int(limit or 0)
+        if limit <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT event, at, actor, meta FROM task_events WHERE task_id = ? "
+            "AND meta IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (str(task_id), limit * 4)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            reason = str((meta or {}).get("reason") or "").strip()
+            if not reason:
+                continue
+            out.append({"event": row["event"], "at": row["at"],
+                        "actor": row["actor"], "reason": reason})
+            if len(out) >= limit:
+                break
+        return list(reversed(out))
+
     # -- reading ------------------------------------------------------------
 
     def get(self, task_id, pane_id=None):
@@ -1077,6 +1124,39 @@ class Tasks:
             tasks = [task for task in tasks if assignee in task["assignees"]]
         tasks.sort(key=self._order_key)
         return tasks[: int(limit)]
+
+    def authors_of(self, repo, pr):
+        """Pane ids that WORKED on (repo, pr), from the work tasks (t723).
+
+        `tasks.author` cannot be relied on for a head a lane pushed through the
+        author App: the review timer sees an App identity it cannot map back, so
+        author is NULL for exactly the PRs a lane wrote, and the no-self-review
+        guard (which reads `author`) never fired (2026-10-30: a reviewer could
+        have accepted its own rebase of dunkingsheep#124). The work tasks for the
+        same repo+pr DO name the lane: their assignees, their completer, and their
+        recorded author. A rebase pushed under a fix task is covered by that task.
+
+        Review tasks are excluded on purpose: a reviewer's own earlier review of
+        the same PR is not authorship, and counting it would refuse the second
+        reviewer's legitimate verdict.
+        """
+        try:
+            number = int(pr)
+        except (TypeError, ValueError):
+            return []
+        if not repo or number <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT assignees, completed_by, author FROM tasks "
+            "WHERE repo = ? AND pr = ? AND kind != 'review'", (str(repo), number)
+        ).fetchall()
+        panes = set()
+        for row in rows:
+            panes.update(str(pane) for pane in _decode(row["assignees"]) if pane)
+            for key in ("completed_by", "author"):
+                if row[key]:
+                    panes.add(str(row[key]))
+        return sorted(panes)
 
     def next(self, scope=None, self_pane_id=None):
         """The next eligible task in the global queue and in a pane queue.
