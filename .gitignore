@@ -40,3 +40,6 @@ owner-credentials
 *token*
 .env
 *.key
+
+# The Rust port workspace (T00): build output only.
+rust/target/
