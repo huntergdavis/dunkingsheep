@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::json;
 
 use crate::db;
 use crate::error::DunkError;
@@ -163,9 +164,17 @@ impl Tasks {
         let body = body.to_string();
         let now = crate::clock::now_s();
         let id = self.writer.call(move |conn| {
-            let next: i64 = conn.query_row(
-                "SELECT COALESCE(MAX(CAST(SUBSTR(id, 2) AS INTEGER)), 0) + 1 FROM tasks",
-                [], |row| row.get(0)).map_err(db::map_sqlite)?;
+            // t1018 finding 5: ONE statement allocates and returns the number, which is
+            // exactly the Python's F1 fix ("the old SELECT-then-upsert let two processes
+            // compute the same number"). The SELECT-MAX form the slice used is the pattern
+            // that comment names.
+            let next: i64 = conn
+                .query_row(
+                    "INSERT INTO counters (name, value) VALUES ('task', 1) \
+                     ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value",
+                    [], |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)?;
             let id = format!("t{next}");
             conn.execute(
                 "INSERT INTO tasks (id, scope, title, body, status, priority, kind, assignees, depends_on, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -212,22 +221,88 @@ impl Tasks {
         id: &str,
         status: &str,
         reason: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<Task, DunkError> {
         let wanted = id.to_string();
         let id = wanted.clone();
         let status = status.to_string();
         let reason = reason.map(|r| r.to_string());
+        let actor = actor.map(|a| a.to_string());
         let now = crate::clock::now_s();
         self.writer
             .call(move |conn| {
-                let changed = conn.execute(
-                "UPDATE tasks SET status = ?, block_reason = ?, updated_at = ? WHERE id = ?",
-                params![status, reason, now, id],
-            ).map_err(db::map_sqlite)?;
-                if changed == 0 {
-                    return Err(DunkError::Refused(format!("no task with id {id:?}")));
+                // t1018 finding 1 (a t854 regression): a terminal status is FINAL, and
+                // the guard must be the WHERE clause, not a read-then-write check - the
+                // Python's update() refuses with this sentence and backs it with
+                // `WHERE id = ? AND status = ?` so a concurrent cancel still wins.
+                let current: String = conn
+                    .query_row("SELECT status FROM tasks WHERE id = ?", params![id],
+                               |row| row.get(0))
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                if is_terminal(current.as_str()) && current != status {
+                    return Err(DunkError::Refused(format!(
+                        "task {id} is {current}; a finished task is not reopened by an edit (t854)")));
                 }
-                if is_terminal(&status) {
+                // FINDING 2: the transition writes the columns that give it meaning, and
+                // exactly one event row - task_metrics is computed from those rows, so a
+                // silent transition is invisible to the metrics.
+                let (completed_by, completed_at, cancelled_at, block_reason) = match
+                    status.as_str()
+                {
+                    "done" => (actor.clone(), Some(now), None, None),
+                    "cancelled" => (None, None, Some(now), reason.clone()),
+                    "blocked" => (None, None, None, reason.clone()),
+                    _ => (None, None, None, None),
+                };
+                let changed = conn
+                    .execute(
+                        "UPDATE tasks SET status = ?, updated_at = ?, completed_by = ?, \
+                         completed_at = ?, cancelled_at = ?, block_reason = ? \
+                         WHERE id = ? AND status = ?",
+                        params![status, now, completed_by, completed_at, cancelled_at,
+                                block_reason, id, current],
+                    )
+                    .map_err(db::map_sqlite)?;
+                if changed == 0 {
+                    // Someone moved it between our read and our write: re-read and refuse
+                    // rather than resurrect it (the t854 race, one level down).
+                    let now_status: String = conn
+                        .query_row("SELECT status FROM tasks WHERE id = ?", params![id],
+                                   |row| row.get(0))
+                        .map_err(db::map_sqlite)?;
+                    if is_terminal(now_status.as_str()) {
+                        return Err(DunkError::Refused(format!(
+                            "task {id} is {now_status}; a finished task is not reopened by an                              edit (t854)")));
+                    }
+                    return Err(DunkError::Retryable(format!(
+                        "task {id} changed to {now_status} while this edit was applied; read it again (t854)")));
+                }
+                let event = match status.as_str() {
+                    "done" => "completed",
+                    "cancelled" => "cancelled",
+                    "blocked" => "blocked",
+                    other if current == "blocked" && other == "open" => "unblocked",
+                    _ => "status",
+                };
+                let duration_ms = if status == "done" {
+                    let created: f64 = conn
+                        .query_row("SELECT created_at FROM tasks WHERE id = ?", params![id],
+                                   |row| row.get(0))
+                        .map_err(db::map_sqlite)?;
+                    Some(((now - created) * 1000.0) as i64)
+                } else {
+                    None
+                };
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, status_from, \
+                     status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?)",
+                    params![id, event, now, actor, current, status, duration_ms,
+                            reason.clone().map(|r| json!({"reason": r}).to_string())],
+                )
+                .map_err(db::map_sqlite)?;
+                if ends_claim(status.as_str()) {
                     conn.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
                         .map_err(db::map_sqlite)?;
                 }
@@ -239,22 +314,22 @@ impl Tasks {
 
     /// `block`: a task that waits on somebody, with the reason recorded.
     pub async fn block(&self, id: &str, reason: &str) -> Result<Task, DunkError> {
-        self.set_status(id, "blocked", Some(reason)).await
+        self.set_status(id, "blocked", Some(reason), None).await
     }
 
     /// `unblock`: back to open, reason cleared.
     pub async fn unblock(&self, id: &str) -> Result<Task, DunkError> {
-        self.set_status(id, "open", None).await
+        self.set_status(id, "open", None, None).await
     }
 
     /// `cancel`: withdrawn, reason kept, claim ended.
     pub async fn cancel(&self, id: &str, reason: &str) -> Result<Task, DunkError> {
-        self.set_status(id, "cancelled", Some(reason)).await
+        self.set_status(id, "cancelled", Some(reason), None).await
     }
 
     /// `complete`: done, claim ended.
     pub async fn complete(&self, id: &str) -> Result<Task, DunkError> {
-        self.set_status(id, "done", None).await
+        self.set_status(id, "done", None, None).await
     }
 
     /// Insert a lease directly (test helper: claiming is T12's job).
@@ -318,15 +393,20 @@ impl Tasks {
         let now = crate::clock::now_s();
         self.writer
             .call(move |conn| {
+                // t1018 finding 3: the meta is built BY serde_json, so a reason with a
+                // newline or a tab is escaped the way the Python's json.dumps escapes it.
+                // The hand-rolled escaper handled only backslash and quote, so a
+                // multi-line evidence note wrote INVALID JSON - and recent_notes() skips
+                // unparseable rows, which would make the normal shape of a reviewer's
+                // note invisible (the t605 problem this API exists to fix). An empty meta
+                // is "{}", not NULL, as the Python writes it.
+                let meta = match reason.as_deref() {
+                    Some(text) => json!({ "reason": text }).to_string(),
+                    None => "{}".to_string(),
+                };
                 conn.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
-                    params![
-                        id,
-                        event,
-                        now,
-                        actor,
-                        reason.map(|r| format!("{{\"reason\": {}}}", serde_json_string(&r)))
-                    ],
+                    params![id, event, now, actor, meta],
                 )
                 .map_err(db::map_sqlite)?;
                 Ok(())
@@ -403,13 +483,15 @@ impl Tasks {
 
 /// A status after which the task is not being worked (`dunk_tasks` terminal set).
 fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "cancelled" | "blocked")
+    matches!(status, "done" | "cancelled")
 }
 
-/// A JSON string literal, for the event meta.
-fn serde_json_string(text: &str) -> String {
-    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+/// A status after which the CLAIM is over, terminal or not (`_end_claim`, t872).
+///
+/// `blocked` belongs here and not in `is_terminal`: a blocked task must be unblockable,
+/// which is why the slice's single set refused `unblock` (t1018 finding 1).
+fn ends_claim(status: &str) -> bool {
+    matches!(status, "done" | "cancelled" | "blocked")
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -459,6 +541,9 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         ("head", "TEXT"),
         ("verdict", "TEXT"),
         ("accounting_pr", "INTEGER"),
+        // t1018 finding 4: the Python's _migrate adds `landed` (t906); without it here a
+        // 25-column live file never gains the column the landed rule reads.
+        ("landed", "INTEGER NOT NULL DEFAULT 1"),
     ];
     let have: Vec<String> = conn
         .prepare("PRAGMA table_info(tasks)")
@@ -471,6 +556,50 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         if !have.iter().any(|column| column == name) {
             conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {name} {decl}"), [])
                 .map_err(db::map_sqlite)?;
+        }
+    }
+    // t1018 finding 4: the SCHEMA comment cites the CoS's twelve duplicate reviews of
+    // PR #117 as the reason for this index, and the index was not created - a fresh store
+    // had NO indexes at all. Every index and the counters table the Python's _migrate
+    // makes are created here, after the column migrations (the review index needs the
+    // kind/repo/pr/head columns to exist).
+    for statement in [
+        "CREATE INDEX IF NOT EXISTS tasks_by_scope ON tasks (scope, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS tasks_by_parent ON tasks (parent_id)",
+        "CREATE INDEX IF NOT EXISTS leases_by_pane ON task_leases (pane_id)",
+        "CREATE INDEX IF NOT EXISTS task_events_by_time ON task_events (at)",
+        "CREATE INDEX IF NOT EXISTS task_events_by_task ON task_events (task_id, at)",
+        "CREATE INDEX IF NOT EXISTS task_events_by_event ON task_events (event, at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS tasks_one_review_per_head ON tasks \
+             (kind, repo, pr, head) WHERE kind = 'review' AND head IS NOT NULL \
+             AND status IN ('open', 'in_progress', 'blocked')",
+        // The Python allocates ids with a single-statement UPSERT on this table (the F1
+        // fix); without it the port would fall back to the SELECT-then-INSERT the Python
+        // comment names as the bug.
+        "CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+    ] {
+        conn.execute(statement, []).map_err(db::map_sqlite)?;
+    }
+    // The lease columns an older file may be missing (the Python migrates these too).
+    let lease_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(task_leases)")
+        .map_err(db::map_sqlite)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db::map_sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db::map_sqlite)?;
+    for (column, kind) in [
+        ("caller_pid", "INTEGER"),
+        ("caller_start", "TEXT"),
+        ("caller_name", "TEXT"),
+        ("assignee_added", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !lease_columns.iter().any(|have| have == column) {
+            conn.execute(
+                &format!("ALTER TABLE task_leases ADD COLUMN {column} {kind}"),
+                [],
+            )
+            .map_err(db::map_sqlite)?;
         }
     }
     Ok(())
@@ -663,5 +792,248 @@ mod tests {
             "the kind column was added by the migration"
         );
         assert_eq!("low", task.priority);
+    }
+
+    /// t1018 finding 1: a terminal status is FINAL (the t854 rule the slice lost).
+    /// Reproduced there: block() after complete() gave "blocked"; unblock() after
+    /// complete() gave "open".
+    #[tokio::test]
+    async fn a_finished_task_is_not_reopened_by_an_edit() {
+        let tasks = store("terminal-guard").await;
+        let task = tasks.add("global", "finished work", "").await.unwrap();
+        tasks
+            .set_status(&task.id, "done", None, Some("%109"))
+            .await
+            .unwrap();
+        let blocked = tasks.block(&task.id, "late").await.unwrap_err();
+        assert!(
+            blocked
+                .to_string()
+                .contains("is done; a finished task is not reopened"),
+            "{blocked}"
+        );
+        let cancelled = tasks.add("global", "cancelled work", "").await.unwrap();
+        tasks
+            .set_status(&cancelled.id, "cancelled", Some("duplicate"), None)
+            .await
+            .unwrap();
+        let unblocked = tasks.unblock(&cancelled.id).await.unwrap_err();
+        assert!(
+            unblocked.to_string().contains("is cancelled"),
+            "{unblocked}"
+        );
+        // ...and a BLOCKED task is still unblockable: 'blocked' ends the claim, it is not
+        // terminal (the slice had it in the terminal set, which refused unblock).
+        let waiting = tasks.add("global", "waiting work", "").await.unwrap();
+        tasks
+            .block(&waiting.id, "waiting on the owner")
+            .await
+            .unwrap();
+        assert_eq!("open", tasks.unblock(&waiting.id).await.unwrap().status);
+    }
+
+    /// t1018 finding 2: a transition writes the columns and ONE event row - the metrics
+    /// are computed from those rows, so a silent transition is invisible to them.
+    #[tokio::test]
+    async fn a_transition_records_its_columns_and_its_event() {
+        let tasks = store("transition-columns").await;
+        let task = tasks.add("global", "work", "").await.unwrap();
+        let done = tasks
+            .set_status(&task.id, "done", None, Some("%109"))
+            .await
+            .unwrap();
+        let row = tasks
+            .writer
+            .call({
+                let id = task.id.clone();
+                move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT completed_at, completed_by FROM tasks WHERE id = ?",
+                            params![id],
+                            |row| {
+                                Ok((
+                                    row.get::<_, Option<f64>>(0)?,
+                                    row.get::<_, Option<String>>(1)?,
+                                ))
+                            },
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        assert!(row.0.is_some(), "completed_at is written");
+        assert_eq!(Some("%109".to_string()), row.1, "completed_by is written");
+        assert!(!done.status.is_empty());
+        let events: Vec<String> = tasks
+            .writer
+            .call({
+                let id = task.id.clone();
+                move |conn| {
+                    let mut stmt = conn
+                        .prepare("SELECT event FROM task_events WHERE task_id = ? ORDER BY id")
+                        .unwrap();
+                    Ok(stmt
+                        .query_map(params![id], |row| row.get(0))
+                        .unwrap()
+                        .collect::<Result<Vec<String>, _>>()
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            vec!["completed".to_string()],
+            events,
+            "exactly one event row per transition, named as the Python names it"
+        );
+
+        let cancelled = tasks.add("global", "withdrawn", "").await.unwrap();
+        tasks.cancel(&cancelled.id, "duplicate").await.unwrap();
+        let cancelled_at: Option<f64> = tasks
+            .writer
+            .call({
+                let id = cancelled.id.clone();
+                move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT cancelled_at FROM tasks WHERE id = ?",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        assert!(cancelled_at.is_some(), "cancelled_at is written");
+    }
+
+    /// t1018 finding 3: a multi-line reason is VALID json (the normal shape of an
+    /// evidence note) and an empty meta is "{}", not NULL - recent_notes() skips rows it
+    /// cannot parse, so an escaped-wrong note would be invisible in task read.
+    #[tokio::test]
+    async fn a_multi_line_note_is_valid_json() {
+        let tasks = store("note-json").await;
+        let task = tasks.add("global", "reviewed work", "").await.unwrap();
+        let reason = "line one\nline two\twith a tab \\ and a \" quote";
+        tasks
+            .note(&task.id, "note", "%109", Some(reason))
+            .await
+            .unwrap();
+        let meta: String = tasks
+            .writer
+            .call({
+                let id = task.id.clone();
+                move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT meta FROM task_events WHERE task_id = ?",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&meta).expect("a note with a newline must write valid JSON");
+        assert_eq!(reason, parsed["reason"].as_str().unwrap());
+        // An empty note writes "{}" (the Python does), not NULL.
+        let empty = tasks.add("global", "no reason", "").await.unwrap();
+        tasks.note(&empty.id, "note", "%109", None).await.unwrap();
+        let meta: String = tasks
+            .writer
+            .call({
+                let id = empty.id.clone();
+                move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT meta FROM task_events WHERE task_id = ?",
+                            params![id],
+                            |row| row.get(0),
+                        )
+                        .unwrap())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!("{}", meta);
+    }
+
+    /// t1018 finding 4: a fresh store has the indexes and the counters table the
+    /// Python's _migrate creates - including the unique review index whose absence let
+    /// the CoS file twelve identical reviews of PR #117.
+    #[tokio::test]
+    async fn a_fresh_store_has_the_indexes_and_the_counters_table() {
+        let tasks = store("indexes").await;
+        let (indexes, tables): (Vec<String>, Vec<String>) = tasks
+            .writer
+            .call(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+                    .unwrap();
+                let indexes = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                    .unwrap();
+                let tables = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                Ok((indexes, tables))
+            })
+            .await
+            .unwrap();
+        for index in [
+            "tasks_by_scope",
+            "tasks_by_parent",
+            "leases_by_pane",
+            "task_events_by_time",
+            "task_events_by_task",
+            "task_events_by_event",
+            "tasks_one_review_per_head",
+        ] {
+            assert!(
+                indexes.iter().any(|have| have == index),
+                "{index} is missing"
+            );
+        }
+        assert!(
+            tables.iter().any(|table| table == "counters"),
+            "counters is missing"
+        );
+    }
+
+    /// t1018 finding 5: ids come from the counter UPSERT, so two writers cannot compute
+    /// the same number (the Python's F1 fix; the slice used SELECT MAX + 1).
+    #[tokio::test]
+    async fn ids_come_from_the_counter_not_from_a_select_max() {
+        let tasks = store("ids").await;
+        let first = tasks.add("global", "one", "").await.unwrap();
+        let second = tasks.add("global", "two", "").await.unwrap();
+        assert_eq!("t1", first.id);
+        assert_eq!("t2", second.id, "the counter, not a MAX scan");
+        let value: i64 = tasks
+            .writer
+            .call(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT value FROM counters WHERE name = 'task'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(2, value);
     }
 }
