@@ -882,11 +882,13 @@ def operations_board(_: Annotated[str, Depends(require_auth)]):
 
 @app.post("/api/ops-board/answer")
 def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
-    """Answer a lane's needs-owner question: unblock the task with the reply as the note.
+    """Answer a lane's needs-owner question: record the reply, then unblock the task.
 
-    DESK_DESIGN 4.1 (t997): the desk's reply box posts `task unblock --note <reply>`. It
-    goes through the daemon over the socket with the desk's own credential - the web never
-    reads sqlite and never shells out - so the unblock is the same verb a lane would run.
+    DESK_DESIGN 4.1 (t997). The daemon's `task_unblock` takes only the id and clears the
+    block reason (the question), so the reply is recorded FIRST as a task note, and the
+    task's assignees get it by mail; a failed note leaves the task blocked, because an
+    unblock that drops the answer reopens the task with nothing for the lane to act on.
+    Everything goes through the daemon over the socket with the desk's own credential.
     """
     task_id = str((payload or {}).get("task_id") or "").strip()
     reply = str((payload or {}).get("reply") or "").strip()
@@ -898,10 +900,20 @@ def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)
 
     try:
         client = ops_board._client()
-        result = client.call("task_unblock", id=task_id, reason=f"owner: {reply}")
+        client.call("task_note", id=task_id, event="owner-answer", reason=reply)
+        result = client.call("task_unblock", id=task_id)
     except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
         raise HTTPException(503, f"Could not unblock {task_id}: {type(exc).__name__}") from exc
-    return {"task_id": task_id, "unblocked": True, "task": result}
+    delivered = []
+    task = result.get("task", result) if isinstance(result, dict) else {}
+    for assignee in (task.get("assignees") or []) if isinstance(task, dict) else []:
+        try:
+            client.call("inbox_send", to=assignee, body=f"Owner answer on {task_id}: {reply}",
+                        subject=f"owner answer: {task_id}")
+            delivered.append(assignee)
+        except Exception:  # noqa: BLE001 - the note is the record; mail is the nudge
+            pass
+    return {"task_id": task_id, "unblocked": True, "task": result, "delivered_to": delivered}
 
 
 @app.post("/api/ops-board/not-now")

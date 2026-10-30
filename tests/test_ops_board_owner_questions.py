@@ -5,6 +5,7 @@ VERBATIM, what the answer unblocks, and the owner's own recent asks with status 
 all from the task rows, never a summary the board invented.
 """
 
+import importlib.util
 import os
 import sys
 import unittest
@@ -121,6 +122,36 @@ class DeskBlockSourceTests(unittest.TestCase):
         backend = self.read("web/app.py")
         self.assertIn("task_unblock", backend, "the answer unblocks the task over the socket")
         self.assertIn('priority="low"', backend, "'Not now' lowers the priority, nothing else")
+
+    @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")
+    def test_the_answer_is_recorded_and_delivered_before_the_task_reopens(self):
+        import sys, types
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from web import app as desk
+
+        calls = []
+
+        class Client:
+            def call(self, verb, **args):
+                calls.append((verb, args))
+                if verb == "task_unblock":
+                    return {"id": args["id"], "assignees": ["%9"]}
+                return {}
+
+        fake = types.SimpleNamespace(_client=lambda: Client())
+        sys.modules["ops_board"], saved = fake, sys.modules.get("ops_board")
+        try:
+            out = desk.answer_owner_question({"task_id": "t1", "reply": "use B"}, "x")
+        finally:
+            if saved is not None:
+                sys.modules["ops_board"] = saved
+            else:
+                del sys.modules["ops_board"]
+        verbs = [verb for verb, _ in calls]
+        self.assertEqual(["task_note", "task_unblock", "inbox_send"], verbs)
+        self.assertEqual("use B", calls[0][1]["reason"])
+        self.assertIn("use B", calls[2][1]["body"])
+        self.assertEqual(["%9"], out["delivered_to"])
 
     def test_the_block_has_css_for_both_viewports(self):
         css = self.read("ui/src/dash.css")
