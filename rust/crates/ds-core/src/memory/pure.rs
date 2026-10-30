@@ -15,15 +15,33 @@ use std::sync::OnceLock;
 /// same inputs - the markers and the boundaries have to match exactly, because the
 /// redaction is what keeps a credential out of the memory store.
 const SECRET_PATTERNS: &[(&str, &str)] = &[
-    (r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", "[REDACTED:private-key]"),
-    (r"\b(sk|rk|pk|ak)-[A-Za-z0-9_\-]{16,}\b", "[REDACTED:api-key]"),
+    (
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        "[REDACTED:private-key]",
+    ),
+    (
+        r"\b(sk|rk|pk|ak)-[A-Za-z0-9_\-]{16,}\b",
+        "[REDACTED:api-key]",
+    ),
     (r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", "[REDACTED:github-token]"),
-    (r"\bgithub_pat_[A-Za-z0-9_]{20,}\b", "[REDACTED:github-token]"),
-    (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "[REDACTED:slack-token]"),
+    (
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+        "[REDACTED:github-token]",
+    ),
+    (
+        r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+        "[REDACTED:slack-token]",
+    ),
     (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED:aws-key]"),
     (r"\bAIza[0-9A-Za-z_\-]{30,}\b", "[REDACTED:google-key]"),
-    (r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}", "${1} [REDACTED:bearer]"),
-    (r#"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization)\b\s*[:=]\s*['"]?([^\s'"]{6,})"#, "${1}=[REDACTED]"),
+    (
+        r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}",
+        "${1} [REDACTED:bearer]",
+    ),
+    (
+        r#"(?i)\b(api[_-]?key|secret|token|password|passwd|authorization)\b\s*[:=]\s*['"]?([^\s'"]{6,})"#,
+        "${1}=[REDACTED]",
+    ),
 ];
 
 /// The compiled patterns, built once. `(?s)` makes `.` match newlines for the

@@ -21,6 +21,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # compiled patterns (pane ids, box detection)" - the redaction patterns are the
 # same kind, and a hand-written matcher for ten credential shapes would be worse.
 regex = "1"
+# T51 (memory/ingest.rs): chunk dedupe digests; `sha2` is on the RUST_PORT.md section 3 list.
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

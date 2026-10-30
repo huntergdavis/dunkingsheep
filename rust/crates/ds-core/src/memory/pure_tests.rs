@@ -47,7 +47,10 @@ fn chunk_boundaries_fall_on_whitespace_not_mid_word() {
 #[test]
 fn redaction() {
     let cleaned = redact("key sk-live-abcdef0123456789abcdef and password=hunter2");
-    assert!(!cleaned.contains("sk-live-abcdef0123456789abcdef"), "{cleaned}");
+    assert!(
+        !cleaned.contains("sk-live-abcdef0123456789abcdef"),
+        "{cleaned}"
+    );
     assert!(!cleaned.contains("hunter2"), "{cleaned}");
     assert!(cleaned.contains("[REDACTED"), "{cleaned}");
 }
@@ -56,16 +59,28 @@ fn redaction() {
 fn every_secret_shape_gets_its_own_marker() {
     let cases = [
         ("sk-live-abcdef0123456789abcdef", "[REDACTED:api-key]"),
-        ("ghp_abcdefghijklmnopqrstuvwxyz0123456789", "[REDACTED:github-token]"),
-        ("github_pat_abcdefghijklmnopqrstuvwxyz", "[REDACTED:github-token]"),
+        (
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "[REDACTED:github-token]",
+        ),
+        (
+            "github_pat_abcdefghijklmnopqrstuvwxyz",
+            "[REDACTED:github-token]",
+        ),
         ("xoxb-1234567890", "[REDACTED:slack-token]"),
         ("AKIAIOSFODNN7EXAMPLE", "[REDACTED:aws-key]"),
-        ("AIzaSyA1234567890abcdefghijklmnopqrstu", "[REDACTED:google-key]"),
+        (
+            "AIzaSyA1234567890abcdefghijklmnopqrstu",
+            "[REDACTED:google-key]",
+        ),
     ];
     for (secret, marker) in cases {
         let cleaned = redact(&format!("before {secret} after"));
         assert!(!cleaned.contains(secret), "{secret} survived: {cleaned}");
-        assert!(cleaned.contains(marker), "{secret} -> {cleaned} (wanted {marker})");
+        assert!(
+            cleaned.contains(marker),
+            "{secret} -> {cleaned} (wanted {marker})"
+        );
     }
     // A private key block, where `.` has to match newlines (Python's re.S).
     let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----";
@@ -88,7 +103,9 @@ fn ordinary_text_is_untouched() {
 #[test]
 fn fts_query_is_safe() {
     assert_eq!(None, fts_query("***", "AND"));
-    assert!(fts_query("flux capacitor!", "AND").expect("query").contains("\"flux\""));
+    assert!(fts_query("flux capacitor!", "AND")
+        .expect("query")
+        .contains("\"flux\""));
     assert_eq!(Some("\"flux\"".to_string()), fts_query("flux", "AND"));
     assert_eq!(
         Some("\"flux\" OR \"capacitor\"".to_string()),
@@ -101,7 +118,10 @@ fn fts_query_is_safe() {
 
 #[test]
 fn tokens_are_words_of_two_or_more_and_at_most_sixteen() {
-    assert_eq!(vec!["flux".to_string(), "cap".to_string()], fts_tokens("flux a cap!"));
+    assert_eq!(
+        vec!["flux".to_string(), "cap".to_string()],
+        fts_tokens("flux a cap!")
+    );
     let many: String = (0..20).map(|n| format!("t{n} ")).collect();
     assert_eq!(16, fts_tokens(&many).len());
 }
