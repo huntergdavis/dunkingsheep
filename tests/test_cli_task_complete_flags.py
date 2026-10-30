@@ -59,3 +59,17 @@ class TaskCompleteFlagTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DaemonAcceptsLandedTests(unittest.TestCase):
+    """The pair that failed live: the CLI sends `landed`, so the daemon's command must accept it."""
+
+    def test_the_task_complete_command_declares_landed(self):
+        import dunk_api
+        command = dunk_api.COMMANDS_BY_NAME["task_complete"]
+        self.assertIn("landed", command.params)
+
+    def test_a_none_landed_means_landed(self):
+        import dunk_api, inspect
+        src = inspect.getsource(dunk_api.h_task_complete)
+        self.assertIn("landed is None", src)

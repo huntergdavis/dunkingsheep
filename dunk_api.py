@@ -923,8 +923,10 @@ def h_task_assign(flock, args, self_pane_id):
 
 
 def h_task_complete(flock, args, self_pane_id):
+    landed = args.get("landed")
     return flock.task_complete(args["id"], by=args.get("by"), verdict=args.get("verdict"),
-                               self_pane_id=self_pane_id)
+                               self_pane_id=self_pane_id,
+                               landed=True if landed is None else _bool(landed, True))
 
 
 def h_task_block(flock, args, self_pane_id):
@@ -2169,6 +2171,10 @@ COMMANDS = [
             "verdict": {"type": "string", "enum": ["accept", "needs-fix"],
                         "description": "Review tasks only: the reviewer's verdict, "
                                        "written by the daemon from the bound lane."},
+            "landed": {"type": "boolean",
+                       "description": "false = the work is done but its PR is NOT on main "
+                                      "(a stacked branch); dependents stay closed (t906). "
+                                      "Default true."},
         },
         required=["id"],
     ),
