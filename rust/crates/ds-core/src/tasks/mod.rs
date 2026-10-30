@@ -333,6 +333,72 @@ impl Tasks {
             })
             .await
     }
+    /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
+    ///
+    /// The verdict is bound to the task's head by the row itself, so it is written here
+    /// and not as free text: a review task's `verdict` is what the distinct-lane count
+    /// reads. Only `accept` and `needs-fix` are verdicts - anything else is a refusal,
+    /// because a typo that became a verdict would count as a lane's judgement.
+    pub async fn set_verdict(
+        &self,
+        id: &str,
+        verdict: &str,
+        by: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let verdict = verdict.trim().to_lowercase();
+        if verdict != "accept" && verdict != "needs-fix" {
+            return Err(DunkError::Refused(format!(
+                "verdict must be one of accept, needs-fix; got {verdict:?}"
+            )));
+        }
+        let wanted = id.to_string();
+        let id = wanted.clone();
+        let by = by.map(|b| b.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let changed = conn
+                    .execute(
+                        "UPDATE tasks SET verdict = ?, updated_at = ? WHERE id = ?",
+                        params![verdict, now, id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                if changed == 0 {
+                    return Err(DunkError::Refused(format!("no task with id {id:?}")));
+                }
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
+                    params![
+                        id,
+                        "verdict",
+                        now,
+                        by,
+                        format!("{{\"verdict\": \"{verdict}\"}}")
+                    ],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await?;
+        self.get(&wanted).await
+    }
+
+    /// The verdict recorded on a task, if any (`Task` does not carry it: see `verdict_of`).
+    pub async fn verdict_of(&self, id: &str) -> Result<Option<String>, DunkError> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT verdict FROM tasks WHERE id = ?",
+                    params![id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(db::map_sqlite)
+                .map(|found| found.flatten())
+            })
+            .await
+    }
 }
 
 /// A status after which the task is not being worked (`dunk_tasks` terminal set).
@@ -476,6 +542,71 @@ mod tests {
         let store = store("missing").await;
         let error = store.block("t999", "x").await.unwrap_err();
         assert!(error.to_string().contains("no task with id"));
+    }
+
+    #[tokio::test]
+    async fn a_verdict_is_bound_and_a_typo_is_refused() {
+        let store = store("verdict").await;
+        let task = store.add("global", "review it", "").await.unwrap();
+        store
+            .set_verdict(&task.id, "ACCEPT", Some("w2:p2"))
+            .await
+            .unwrap();
+        assert_eq!(
+            Some("accept".to_string()),
+            store.verdict_of(&task.id).await.unwrap()
+        );
+        let error = store
+            .set_verdict(&task.id, "approved", None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("verdict must be one of"));
+    }
+
+    #[tokio::test]
+    async fn a_copy_of_the_live_store_lists_the_same_rows() {
+        // T11's acceptance, as far as this slice can honestly reach it: open a COPY of
+        // the live tasks.db (never the live file) and compare the rows the store reads
+        // against a direct query on the same copy. It does NOT compare against the
+        // Python's list output - that needs the differential harness (T01) - so this
+        // proves the reader, not the parity.
+        let live = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".config/dunkingsheep/tasks.db");
+        if !live.exists() {
+            return; // no live store on this host: nothing to copy, and a skip is honest
+        }
+        let dir = std::env::temp_dir().join(format!("ds-store-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("tasks-copy.db");
+        let _ = std::fs::remove_file(&copy);
+        std::fs::copy(&live, &copy).unwrap();
+        let store = Tasks::open(&copy).await.unwrap();
+        let rows = store.list("global").await.unwrap_or_default();
+        // the same copy, read directly: the store must agree with its own source
+        let conn = rusqlite::Connection::open(&copy).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE scope = 'global'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count as usize,
+            rows.len(),
+            "the store lists every global row the file holds"
+        );
+        for task in rows.iter().take(5) {
+            let (title, status): (String, String) = conn
+                .query_row(
+                    "SELECT title, status FROM tasks WHERE id = ?",
+                    params![task.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(title, task.title);
+            assert_eq!(status, task.status);
+        }
     }
 
     #[tokio::test]
