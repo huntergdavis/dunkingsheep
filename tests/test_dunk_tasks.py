@@ -819,6 +819,90 @@ class FlockTaskTests(unittest.TestCase):
         self.assertGreater(heartbeat["expires_at"], 0)
 
 
+class PushAndReleaseTests(unittest.TestCase):
+    """t595: the push path obeys the same role rules as the pull path, and a
+    released claim goes back to the queue instead of stranding behind an
+    assignee the claim itself added."""
+
+    WORKER, REVIEWER, OWNER = "w2:p1", "w2:p2", "w9:p9"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.roles = Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                           tokens_path=os.path.join(self.tmp.name, "tokens.json"))
+        self.flock = Flock(
+            herdr=self.herdr,
+            state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=self.roles)
+        self.roles.register(self.OWNER, "owner")
+        self.roles.register(self.WORKER, "worker", provider="pi", label="pi-worker-1")
+        self.roles.register(self.REVIEWER, "reviewer", provider="claude",
+                            label="pi-review-1")
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def review(self, author=None, number=1631):
+        return self.flock.tasks.add(
+            GLOBAL, f"Review PR #{number}", priority="high", kind="review",
+            author=author, repo="huntergdavis/poolrad-decomp", pr=number,
+            head="d" * 40, created_by="review-sync")
+
+    def test_a_worker_follower_is_never_pushed_a_review(self):
+        task = self.review()                     # the only candidate
+        self.flock.task_follow(self_pane_id=self.WORKER)
+        self.flock._push_tasks()
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.WORKER),
+                         "a worker was pushed a review it cannot complete")
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_a_reviewer_follower_is_not_pushed_a_review_it_authored(self):
+        own = self.review(author=self.REVIEWER, number=1632)
+        self.flock.task_follow(self_pane_id=self.REVIEWER)
+        self.flock._push_tasks()
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.REVIEWER),
+                         "a reviewer was pushed its own PR (no-self-review)")
+        self.assertEqual("open", self.flock.tasks.get(own["id"])["status"])
+        # And a review by someone else IS pushed to that reviewer.
+        other = self.review(author=self.WORKER, number=1633)
+        self.flock._push_tasks()
+        self.assertEqual([other["id"]],
+                         [lease["task_id"] for lease in
+                          self.flock.tasks.leases_for_pane(self.REVIEWER)])
+
+    def test_a_released_unassigned_task_is_claimable_by_another_pane(self):
+        task = self.flock.tasks.add(GLOBAL, "free work")
+        self.assertEqual([], task["assignees"])
+        self.flock.task_next(self_pane_id=self.WORKER)
+        held = self.flock.tasks.get(task["id"])
+        self.assertEqual([self.WORKER], held["assignees"],
+                         "the claim adds the claimant as assignee")
+        released = self.flock.task_release(task["id"], self_pane_id=self.WORKER)
+        self.assertEqual([], released["assignees"],
+                         "the release left the claim's own assignee behind")
+        self.assertEqual("open", released["status"])
+        self.assertTrue(self.flock.tasks._claimable(
+            self.flock.tasks.get(task["id"]), self.REVIEWER),
+            "another pane still cannot claim a released task")
+
+    def test_an_owner_assignment_survives_claim_and_release(self):
+        task = self.flock.tasks.add(GLOBAL, "owner-owned work",
+                                    assignees=[self.OWNER])
+        self.flock.task_next(self_pane_id=self.OWNER)
+        self.assertEqual([self.OWNER], self.flock.tasks.get(task["id"])["assignees"])
+        released = self.flock.task_release(task["id"], self_pane_id=self.OWNER)
+        self.assertEqual([self.OWNER], released["assignees"],
+                         "release deleted an assignment the claim did not make")
+
+
 class TaskAddOwnershipTests(unittest.TestCase):
     """FLAT_FLEET.md 5: `task add` creates work the QUEUE owns.
 

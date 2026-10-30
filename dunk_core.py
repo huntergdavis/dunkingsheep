@@ -3001,6 +3001,20 @@ class Flock:
         self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
+    def _may_pull_everything(self, pane_id):
+        """True when this pane's role may pull any kind (the owner).
+
+        A reviewer lane whose provider is not on `reviewer_providers` must not be
+        pushed review work at all: `task next` raises for it, and a push that
+        skipped the check would hand it a task it can never complete.
+        """
+        role = self.caller_role(pane_id) if pane_id else "anonymous"
+        if role == "owner":
+            return True
+        if role == "reviewer":
+            return self.roles.may_review(pane_id, role=role)
+        return False
+
     def _claim_filters(self, self_pane_id):
         """(kinds, exclude_author) for a claim, from the caller's role.
 
@@ -3480,9 +3494,18 @@ class Flock:
                 continue
             if self.tasks.leases_for_pane(pane_id):
                 continue
+            # The push path is the pull path (FLAT_FLEET.md 5): the same role ->
+            # kind rule and the same no-self-review rule, from the same function.
+            # It used to omit both, so a worker follower was pushed a review it
+            # could not complete and a reviewer could be pushed its own PR (t595,
+            # live on %100 / t568).
+            kinds, exclude_author = self._claim_filters(pane_id)
+            if kinds is None and not self._may_pull_everything(pane_id):
+                continue
             try:
                 claimed = self.tasks.claim_next(
-                    scope=followers[pane_id], pane_id=pane_id)
+                    scope=followers[pane_id], pane_id=pane_id, kinds=kinds,
+                    exclude_author=exclude_author)
             except Exception:
                 log.exception("task claim failed for %s", pane_id)
                 continue
