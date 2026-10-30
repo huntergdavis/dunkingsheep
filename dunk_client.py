@@ -22,7 +22,33 @@ import time
 from dunk_api import COMMANDS_BY_NAME
 from dunk_core import CONFIG_DIR, DunkError
 from dunk_roles import READ_ONLY as _READ_ONLY_COMMANDS
+
 from dunk_server import DEFAULT_SOCKET, LOG_FILE, SOCKET_PATH
+
+# t705: RETRY is a question about IDEMPOTENCY, not about permission.
+# `dunk_roles.READ_ONLY` is a role allowlist: what a pane may CALL. Nothing
+# keeps a WRITE out of it - PR #119 adds turn_start and turn_end to it - so
+# deciding `may I repeat this?` from that set meant that the day a write
+# joined the allowlist, a timed-out write would be sent twice, through an
+# import nobody reviewing the retry code could see. The repeat-safe verbs
+# are therefore named here, one at a time, and the answer for anything NOT
+# named is "no retry": a new read is not retried until someone says it is
+# safe, and a new write can never be retried by accident.
+#
+# Deliberately absent, though READ_ONLY lists them: lane_register and
+# superuser_recover (bootstrap WRITES: the first owner may register itself),
+# and dispatch (a dry run is a read, a real tick files tasks).
+IDEMPOTENT_READS = frozenset({
+    "status", "poll", "health", "help", "doctor", "whoami", "roster",
+    "message_state", "reply_stats", "project_summary", "state_latest",
+    "task_list", "task_read", "task_stats", "task_metrics", "task_followers",
+    "metrics", "inbox_count", "inbox_stats", "inbox_status", "list_panes",
+    "list_workspaces", "list_dunks", "get_dunk", "delivery",
+    "delivery_capability", "lanes", "memory_recall", "memory_search",
+    "memory_context", "memory_stats", "memory_status", "owner_stats",
+    "superuser_status", "pm_digest", "pm_routing", "list_messages",
+    "get_message", "review_list", "poolrad_progress", "owner_receipts",
+})
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI_PATH = os.path.join(HERE, "dunkingsheep")
@@ -386,8 +412,9 @@ class FlockClient:
         # t693: a read may be retried once on timeout. Reads are idempotent and a
         # slow box answers the second attempt far more often than it fails twice
         # (the first request warms the daemon's backend caches); a WRITE is never
-        # retried here, because the command may already have run.
-        attempts = 1 + (READ_RETRIES if cmd in _READ_ONLY_COMMANDS else 0)
+        # retried here, because the command may already have run. The decision
+        # reads IDEMPOTENT_READS, never the role allowlist (t705).
+        attempts = 1 + (READ_RETRIES if cmd in IDEMPOTENT_READS else 0)
         last_error = None
         for attempt in range(attempts):
             try:
