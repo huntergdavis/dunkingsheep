@@ -90,6 +90,175 @@ WEB_ROUTES = """## Web routes (web/app.py as of PR #120, for T62)
 - `get /dash/` (line 1930)
 - `get /dash/{path:path}` (line 1935)"""
 
+# t766: the asserted error strings, recorded (see error_strings_section).
+# The selector the manifest was generated from is NOT recoverable as a rule;
+# this list is the decision, and error_strings_section checks every entry is
+# still asserted under tests/ so the document cannot claim a string the suite
+# dropped.
+ASSERTED_ERROR_STRINGS = [
+    '/tmp/my-own-scratch',
+    '01a18644',
+    'CODEX_HOME',
+    'DECLARED by more than one live pane',
+    'DUNKINGSHEEP_TMUX_SOCKET',
+    'Meta-dunking',
+    'RAISED',
+    'UNKNOWN',
+    '[socket/cli only]',
+    'a verdict needs evidence',
+    'active turn',
+    'add_dunk(',
+    'alive_source|fixture',
+    'already cancelled',
+    'already done with verdict ',
+    'already exists',
+    'already gone',
+    'ambiguous',
+    'attributed_cores',
+    'before',
+    'body or an attachment',
+    'caller',
+    'caller is not authenticated',
+    'cannot be verified',
+    'cannot change status',
+    'canonical JSON',
+    'changed during completion',
+    'channel',
+    'clamped to 60 min',
+    'command is required',
+    'completed by its reviewer',
+    'confirm-idle',
+    'confirmed by the turn',
+    'confirmed idle',
+    'could not create the workspace x: workspace limit',
+    'could not rename tab w2:t2: nope',
+    'could not start agent ',
+    'cwd mismatch',
+    'daemon',
+    'dead pane id is not a mailbox',
+    'dead since 2026-10-24 08:00',
+    'default',
+    'did not submit',
+    'direction',
+    'dispatch',
+    'does not support',
+    'dunk_sqlite.py',
+    'dunkingsheep-tests-',
+    'duplicate task_started',
+    'ever run',
+    'exited immediately',
+    'expected',
+    'expected ',
+    'filed by the review timer',
+    'gone at the end',
+    'has no start',
+    'herdr pane commands',
+    'ignoring ambient DUNKINGSHEEP_CLAUDE_STATUS',
+    'ignoring ambient DUNKINGSHEEP_DIR',
+    'inbox.undeliverable',
+    'is cancelled',
+    'isolated per-lane',
+    'keys are required',
+    'kind must be',
+    'label is required',
+    'live task lease',
+    'live wrapper|no codex child|rollback not verified',
+    'malformed',
+    'may not review',
+    'may only act as the author App',
+    'may only type into its own pane|requires',
+    'missing required',
+    'names are no longer matched',
+    'names thread',
+    'needs --verdict',
+    'needs TMUX_PANE',
+    'needs repo, pr and head',
+    'never became a process',
+    'never ran|No such file',
+    'never ran|not found',
+    'never ran|not found|cannot execute',
+    'newest-body',
+    'newline-delimited JSON',
+    'no dunk with id',
+    'no dunkingsheep daemon',
+    'no lanes list',
+    'no live pane',
+    'no mailbox given',
+    'no message with id',
+    'no owner is registered',
+    'no pane matches',
+    'no process id',
+    'no queued message',
+    'no such file',
+    'no tab matches',
+    'no target',
+    'no workspace matches',
+    'non-guard tmux',
+    'not a git repository',
+    'not allowed',
+    'not in the private state',
+    'not inside pane',
+    'not live',
+    'not owned',
+    'not permitted for role anonymous',
+    'not permitted for role desk|requires a superuser',
+    'not permitted for role web',
+    'not permitted for role worker',
+    'not permitted for role worker|requires a superuser',
+    'not visible',
+    'not yours',
+    'not.*complet|owned|owner',
+    'not.there',
+    'nothing after the sigil',
+    'nothing to submit',
+    'only the owner supersedes a rule',
+    'only the owner writes rules',
+    'only to yourself',
+    'outbox',
+    'partial line',
+    'pass --force',
+    'private',
+    'process start',
+    'reason=dead_lane',
+    'reason=unhoused_lane',
+    'reason=unknown_name',
+    'refused',
+    'refused before mutation',
+    'refusing to auto-start a tmux daemon',
+    'refusing to close',
+    'request',
+    'requires a superuser',
+    'requires a superuser|not permitted',
+    'requires a superuser|not permitted for role',
+    'requires the owner role',
+    'requires the system token',
+    'retry the request',
+    'rolled back',
+    'rollout does not exist',
+    'scope must be',
+    'selected real tmux',
+    'self-pane',
+    'send_text',
+    'session_meta',
+    'session_meta names',
+    'shared',
+    'slot.1',
+    'split must be',
+    'submission unconfirmed',
+    'timed out',
+    'type must be one of',
+    'unattributed_cores',
+    'unfinished turn.*turn-old',
+    'unknown argument',
+    'unknown command',
+    'unknown provider',
+    'unknown terminal backend',
+    'unknown_name',
+    'unread',
+    'width too small',
+    'working',
+]
+
 FILES_ON_DISK = """## Files on disk (~/.config/dunkingsheep)
 
 agent-state.db, context-ledger.db, desk.json, dialog-alerts.db, dispatch-state.json, dispatch.db, dispatch_lanes.json, dunks.json, github-app-author.json, github-app-reviewer.json, github-repos.json, github-tokens.json, health.json, inbox.db, lanes.json, launches.json, load-state.json, memory.db, metrics.db, owner-push.db, pm-routing.json, retired-panes.json, roles.json, service-tokens.json, superusers.json, tasks.db, tmux-panes.json, tmux-trial-panes.json, usage.json, watchdog.json, watchdog_deadman_state.json, watchdog_deadman_status.json, watchdog_state.json; plus `context/` (markdown store), `attachments/` (inbox blobs), `bin/` (wrappers), `system-token`, `web-token`, `github-app-*.pem`, `dunkingsheep.sock`, `daemon.log`."""
@@ -318,31 +487,34 @@ def units_section():
 
 
 def error_strings_section():
-    """The 161 asserted strings.
+    """The 161 strings tests assert on, as a recorded list (t766 decision).
 
-    TODO(T00): the selector that produces exactly these 161 is not recovered. What
-    is proven: they are not "every asserted literal" (1481 candidates, 157 shared,
-    and the list contains non-messages such as CODEX_HOME/before/caller). Until it
-    is recovered this section is emitted from the closest rule we have, and
-    --check will report the difference rather than pretend it matches.
+    The owner-role lane decided this on t766: the list is the ASSERTED set the test
+    suite carries, not the product of a source sweep. Measured 2026-10-30: every
+    mechanical rule for recovering it fails - string literals that are operands of
+    assert* calls number 1,481 and cover 157 of the 161, so 4 come from somewhere
+    else; assertRaisesRegex alone covers 114; a permission-shaped allowlist matches
+    nothing. A rule that nearly matches is worse than a list, because it changes
+    silently when a test is edited.
+
+    So the list is data and it is CHECKED rather than derived: every recorded string
+    must still appear somewhere under tests/, or --check names it and fails. A
+    string that is no longer asserted is a claim this document can no longer make.
     """
-    literals = {}
-    for path in (ROOT / "tests").rglob("*.py"):
-        try:
-            tree = ast.parse(path.read_text())
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                    and node.func.attr in {"assertIn", "assertNotIn", "assertRegex",
-                                           "assertRaisesRegex", "assertEqual"}:
-                for arg in node.args:
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str) \
-                            and arg.value.strip():
-                        literals[arg.value] = True
-    out = ["## Error strings tests assert on (keep byte-identical)", ""]
-    out += ["- `%s`" % s for s in sorted(literals)]
-    return "\n".join(out) + "\n"
+    haystack = _tests_text()
+    absent = [text for text in ASSERTED_ERROR_STRINGS if text not in haystack]
+    if absent:
+        raise SystemExit("the manifest would assert strings no test asserts any more: "
+                         + ", ".join(repr(text) for text in absent[:5]))
+    return ("## Error strings tests assert on (keep byte-identical)\n\n"
+            + "\n".join("- `%s`" % text for text in ASSERTED_ERROR_STRINGS)
+            + "\n")
+
+
+def _tests_text():
+    """Every test source concatenated: the drift check's haystack."""
+    return "\n".join(path.read_text(errors="ignore")
+                     for path in sorted((ROOT / "tests").rglob("*.py")))
 
 
 def build():
