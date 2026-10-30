@@ -654,7 +654,7 @@ def h_dispatch(flock, args, self_pane_id):
 
 def _gate_unread(flock, inbox, pane_id, expired, window_s=600.0):
     """t1053: the sweep's unread gate counts only fresh lane/owner mail."""
-    since = getattr(flock, "turn_end_at", {}).get(pane_id)
+    since = (getattr(flock, "turns", {}).get(pane_id) or {}).get("ended_at")
     gate = inbox.gate_unread(pane_id, window_s=window_s, since=since)
     if gate["expired"] and not gate["fresh"]:
         expired.append(pane_id)             # reason=unread_mail_expired: fed anyway
