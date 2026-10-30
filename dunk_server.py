@@ -174,9 +174,19 @@ class FlockServer:
             state.identity_note = "no /proc; claim stands"
             return claimed
         try:
-            pane = self.flock._role_pane_info(claimed) or {}
+            pane = self.flock._role_pane_info(claimed)
+            backend_ok = True
         except Exception:  # noqa: BLE001 - binding must not crash the request
-            pane = {}
+            pane, backend_ok = None, False
+        if pane is None and backend_ok:
+            # The backend answered and knows no such pane: a made-up id (a test
+            # run's 'w1:p2' claimed live review tasks on 2026-10-29) is nobody.
+            state.identity_bound = False
+            state.identity_note = f"claim {claimed} refused: no such pane; running anonymous"
+            log.warning("identity mismatch cmd=%s claimed=%r reason=no_such_pane caller_pid=%r",
+                        command, claimed, caller.get("pid"))
+            return None
+        pane = pane or {}
         pane_pid = pane.get("pane_pid")
         if pane_pid in (None, "", "None"):
             state.identity_note = "pane has no root pid; claim stands"

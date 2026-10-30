@@ -10,6 +10,7 @@ Every call opens a short-lived connection; unix sockets make that cheap and it
 keeps the client stateless and reconnect-free.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -20,11 +21,49 @@ import time
 
 from dunk_api import COMMANDS_BY_NAME
 from dunk_core import CONFIG_DIR, DunkError
+from dunk_roles import READ_ONLY as _READ_ONLY_COMMANDS
+
 from dunk_server import DEFAULT_SOCKET, LOG_FILE, SOCKET_PATH
+
+# t705: RETRY is a question about IDEMPOTENCY, not about permission.
+# `dunk_roles.READ_ONLY` is a role allowlist: what a pane may CALL. Nothing
+# keeps a WRITE out of it - PR #119 adds turn_start and turn_end to it - so
+# deciding `may I repeat this?` from that set meant that the day a write
+# joined the allowlist, a timed-out write would be sent twice, through an
+# import nobody reviewing the retry code could see. The repeat-safe verbs
+# are therefore named here, one at a time, and the answer for anything NOT
+# named is "no retry": a new read is not retried until someone says it is
+# safe, and a new write can never be retried by accident.
+#
+# Deliberately absent, though READ_ONLY lists them: lane_register and
+# superuser_recover (bootstrap WRITES: the first owner may register itself),
+# and dispatch (a dry run is a read, a real tick files tasks).
+IDEMPOTENT_READS = frozenset({
+    "status", "poll", "health", "help", "doctor", "whoami", "roster",
+    "message_state", "reply_stats", "project_summary", "state_latest",
+    "task_list", "task_read", "task_stats", "task_metrics", "task_followers",
+    "metrics", "inbox_count", "inbox_stats", "inbox_status", "list_panes",
+    "list_workspaces", "list_dunks", "get_dunk", "delivery",
+    "delivery_capability", "lanes", "memory_recall", "memory_search",
+    "memory_context", "memory_stats", "memory_status", "owner_stats",
+    "superuser_status", "pm_digest", "pm_routing", "list_messages",
+    "get_message", "review_list", "poolrad_progress", "owner_receipts",
+})
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI_PATH = os.path.join(HERE, "dunkingsheep")
 START_TIMEOUT_S = 8.0
+
+# Probe states. "busy" is the one the old code collapsed into "not running".
+PROBE_RUNNING = "running"
+PROBE_BUSY = "busy"
+PROBE_ABSENT = "absent"
+
+# Errnos that mean "nothing is listening" rather than "listening but stuck".
+ABSENT_ERRNOS = {errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK, errno.EADDRNOTAVAIL}
+
+# Bounded backoff for a busy daemon: three retries, ~7.5 s total, no loop.
+BUSY_RETRY_DELAYS = (0.5, 2.0, 5.0)
 
 
 SYSTEMD_UNIT = "dunkingsheep.service"
@@ -59,6 +98,19 @@ class DaemonUnavailable(RuntimeError):
     """The daemon is not running and could not be started."""
 
 
+class DaemonBusy(DaemonUnavailable):
+    """The daemon is UP but did not answer in time.
+
+    Measured 2026-10-29: a saturated daemon (listen accept queue full, Recv-Q
+    129 against a backlog of 128, ~3250 server threads at load 40 on 8 CPUs)
+    refuses or times out connections while it is perfectly alive. The old code
+    classified every such failure as "not running", asked systemd to start a
+    second daemon, and then reported "daemon did not come up" - a false
+    diagnosis that invites a restart of a healthy daemon. It subclasses
+    DaemonUnavailable so existing handlers keep working.
+    """
+
+
 def _current_pane_id():
     """The herdr pane this process is actually in, per herdr 0.9.5.
 
@@ -83,6 +135,30 @@ def _current_pane_id():
         return pane.get("pane_id")
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+# t693: the client's patience, not the daemon's capability. Measured on the live
+# host at load 22 (8 cores, 15 pi lanes): `status` p50 ~5 s, p90 ~24.5 s, max 24.5 s.
+# A 15 s deadline turned 3 of 8 cheap read calls into failures, and a failed read is
+# what marks a live lane dead. 45 s covers the measured p90 with headroom;
+# DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+def default_timeout(environ=None):
+    """The client's patience, from the environment or 45 s (t693).
+
+    A function, not a module constant only, so a test can pin the rule without
+    reloading the module - reloading replaces the exception CLASSES too, and every
+    other test in the process then holds a stale IdentityRefused.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        return float(env.get("DUNKINGSHEEP_CLIENT_TIMEOUT") or 45.0)
+    except (TypeError, ValueError):
+        return 45.0
+
+
+DEFAULT_TIMEOUT = default_timeout()
+# A READ may be retried once on timeout (idempotent). A write never is.
+READ_RETRIES = 1
 
 
 class IdentityRefused(DunkError):
@@ -164,7 +240,8 @@ def exported_pane_id(environ=None):
     return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
 
 
-def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None):
+def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None,
+                     allow_unresolved=False):
     """(pane_id, note) for this caller, refusing only a LYING environment.
 
     The terminal we are IN beats a claim inherited from somewhere else, and a claim
@@ -209,7 +286,14 @@ def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None):
     if pane:
         return pane, f"resolved by terminal ({note})"
     if _terminal_exists(lookup):
-        # A terminal exists but identifies no single pane: a question, not an id.
+        # A terminal exists but identifies no single pane (t602): an ssh session whose
+        # tty no tmux pane owns. This used to be a refusal before any daemon call, so
+        # even `whoami` and `status` were unreachable and the fleet was blind from
+        # that lane. The identity is still NOT invented - it is anonymous - and the
+        # caller decides whether that is enough: read-only verbs proceed, a write
+        # verb refuses and names the labelled-token exit.
+        if allow_unresolved:
+            return None, f"anonymous: the terminal resolved to no single pane ({note})"
         raise IdentityRefused(
             f"identity refused: the terminal exists but resolved to no single pane "
             f"({note}). Set TMUX_PANE, or run inside a tmux pane.")
@@ -235,14 +319,46 @@ def _terminal_exists(lookup):
     return (text.startswith("/dev/") or "owns /dev/" in text or "claimed by" in text)
 
 
+def identity_refusal_for(cmd, self_pane_id, has_token, note=None):
+    """Why a pane-less caller may not run `cmd`, or None when it may (t602).
+
+    A terminal that resolves to no pane is anonymous, not broken: the read-only
+    verbs must work from there (that is the difference between a blind fleet and a
+    lane that needs a token). The rule is the daemon's own allowlist, so the client
+    and the daemon cannot drift apart. The refusal names the exit, because a lane
+    that cannot run any command cannot discover one.
+    """
+    if self_pane_id or has_token or cmd in _READ_ONLY_COMMANDS:
+        return None
+    where = f" ({note})" if note else ""
+    return (f"identity refused: {cmd} needs a lane and this terminal resolved to no "
+            f"pane{where}. Read-only commands work here. For a write, run it inside a "
+            "tmux pane, or issue a labelled, revocable token on a pane that has one: "
+            "dunkingsheep token issue --role owner --label <why>  (then set "
+            "DUNKINGSHEEP_SERVICE_TOKEN to it).")
+
+
 class FlockClient:
-    def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
+    def __init__(self, socket_path=None, self_pane_id=None, timeout=None):
         self.socket_path = socket_path or SOCKET_PATH
+        # t693 MEASURED on the live host at load 22 (8 cores, 15 pi lanes):
+        # `dunkingsheep status` took 20.93 24.52 17.94 7.54 2.88 2.07 2.98 2.52 s
+        # - p50 ~5 s, p90 ~24.5 s - while `dunk-poll` (one socket batch, no CLI
+        # wrapper) took 1.54 6.61 3.18 s. A 15 s deadline on that box turned 3 of
+        # 8 cheap read calls into failures, and a failed read is what makes a live
+        # lane look dead and a review look abandoned. The deadline is a CLIENT
+        # patience setting, not a daemon capability: 45 s covers the measured p90
+        # with headroom, and DUNKINGSHEEP_CLIENT_TIMEOUT overrides it per lane.
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         explicit = self_pane_id is not None
         if explicit:
             self.self_pane_id, self.identity_note = self_pane_id, "explicit"
         else:
-            self.self_pane_id, self.identity_note = resolve_identity()
+            # t602: an ssh lane whose tty no tmux pane owns resolves to NO pane. It is
+            # anonymous, not refused, so the read-only verbs still work from there;
+            # `call()` refuses the writes and names the token exit.
+            self.self_pane_id, self.identity_note = resolve_identity(
+                allow_unresolved=True)
         # The terminal already exported our identity. Only pay for a
         # `pane current` round-trip when asked to verify a possibly-stale env.
         if not explicit and (
@@ -250,7 +366,7 @@ class FlockClient:
             or os.environ.get("DUNKINGSHEEP_VERIFY_SELF") == "1"
         ):
             self.self_pane_id = _current_pane_id() or self.self_pane_id
-        self.timeout = timeout
+        self.timeout = float(timeout if timeout is not None else DEFAULT_TIMEOUT)
         self._next_id = 1
 
     @staticmethod
@@ -273,6 +389,12 @@ class FlockClient:
 
     def call(self, cmd, **args):
         """Send one command; return its result or raise DunkError / OSError."""
+        # t602: no pane and no token is enough for a READ, and not enough for a write.
+        refusal = identity_refusal_for(cmd, self.self_pane_id,
+                                       bool(self.service_token()),
+                                       self.identity_note)
+        if refusal:
+            raise IdentityRefused(refusal)
         # A SYSTEM SENDER has no pane by definition (the watchdog runs from a timer).
         # Attaching one - from the environment or a parent service - made the daemon
         # refuse the claim, so monitoring went silent while the rule still fired.
@@ -287,24 +409,46 @@ class FlockClient:
         if token:
             request["service_token"] = token
         self._next_id += 1
+        # t693: a read may be retried once on timeout. Reads are idempotent and a
+        # slow box answers the second attempt far more often than it fails twice
+        # (the first request warms the daemon's backend caches); a WRITE is never
+        # retried here, because the command may already have run. The decision
+        # reads IDEMPOTENT_READS, never the role allowlist (t705).
+        attempts = 1 + (READ_RETRIES if cmd in IDEMPOTENT_READS else 0)
+        last_error = None
+        for attempt in range(attempts):
+            try:
+                return self._call_once(request)
+            except (TimeoutError, socket.timeout) as error:
+                last_error = error
+                if attempt + 1 >= attempts:
+                    raise
+        raise last_error  # pragma: no cover - the loop either returns or raises
+
+    def _call_once(self, request):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
-        # Retry only the connect: a 20-agent burst can overflow a short listen
-        # backlog. Once connected, do not retry (the command may have run).
-        for attempt in range(3):
-            try:
-                sock.connect(self.socket_path)
-                break
-            except (ConnectionRefusedError, ConnectionResetError,
-                    TimeoutError, socket.timeout):
-                if attempt == 2:
-                    raise
-                time.sleep(0.05 * (attempt + 1))
         try:
-            sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
-            reader = sock.makefile("rb")
-            raw = reader.readline()
+            # Retry only the connect: a 20-agent burst can overflow a short listen
+            # backlog. Once connected, do not retry (the command may have run).
+            for attempt in range(3):
+                try:
+                    sock.connect(self.socket_path)
+                    break
+                except (ConnectionRefusedError, ConnectionResetError,
+                        TimeoutError, socket.timeout):
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+            try:
+                sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                reader = sock.makefile("rb")
+                raw = reader.readline()
+            finally:
+                sock.close()
         finally:
+            # A failed connect used to escape without closing the socket, so a
+            # retry storm leaked one fd per attempt on the client side too.
             sock.close()
         if not raw:
             raise DaemonUnavailable("daemon closed the connection without replying")
@@ -313,35 +457,79 @@ class FlockClient:
             raise DunkError(response.get("error") or "unknown error")
         return response.get("result")
 
+    # -- availability -----------------------------------------------------------
+
     def __getattr__(self, name):
         if name in COMMANDS_BY_NAME:
             return lambda **args: self.call(name, **args)
         raise AttributeError(name)
 
-    # -- availability -----------------------------------------------------------
+    def probe(self):
+        """Classify the daemon WITHOUT side effects: running / busy / absent.
 
-    def is_running(self):
+        "absent" means nothing is listening (no socket, ENOENT, ECONNREFUSED).
+        "busy" means something is listening but no reply arrived (accept queue
+        full, EAGAIN, reset, or a reply that never completed) - the daemon is
+        alive and starting another one is wrong.
+        "running" means a status reply arrived (a refused command still proves
+        the daemon answered, so a DunkError counts as running).
+        """
         try:
             self.call("status")
-            return True
-        except (OSError, DaemonUnavailable, DunkError, ValueError):
-            return False
+            return PROBE_RUNNING
+        except DunkError:
+            return PROBE_RUNNING
+        except DaemonUnavailable:
+            return PROBE_BUSY
+        except OSError as error:
+            if error.errno in ABSENT_ERRNOS:
+                return PROBE_ABSENT
+            return PROBE_BUSY
+        except (TimeoutError, socket.timeout, ValueError):
+            return PROBE_BUSY
+
+    def is_running(self):
+        return self.probe() == PROBE_RUNNING
 
     @classmethod
     def connect_or_start(cls, socket_path=None, self_pane_id=None, start=True,
                          timeout=START_TIMEOUT_S):
-        """Return a client whose daemon is reachable, starting one if needed."""
+        """Return a client whose daemon is reachable, starting one if needed.
+
+        A BUSY daemon is never "started": it is retried with bounded backoff,
+        because the retry storm is what fills its accept queue in the first
+        place. Only an ABSENT daemon is started.
+        """
         client = cls(socket_path=socket_path, self_pane_id=self_pane_id)
-        if client.is_running():
+        state = client.probe()
+        if state == PROBE_RUNNING:
             return client
+        if state == PROBE_BUSY:
+            for delay in BUSY_RETRY_DELAYS:
+                time.sleep(delay)
+                if client.probe() == PROBE_RUNNING:
+                    return client
+            raise DaemonBusy(
+                f"the dunkingsheep daemon on {client.socket_path} is running but "
+                f"did not answer (listen queue full or server saturated). Do NOT "
+                f"restart it or start a second one; retry in ~10s. See {LOG_FILE}"
+            )
         if not start:
             raise DaemonUnavailable(f"no dunkingsheep daemon on {client.socket_path}")
         client.start_daemon()
         deadline = time.time() + timeout
+        last = PROBE_ABSENT
         while time.time() < deadline:
-            if client.is_running():
+            last = client.probe()
+            if last == PROBE_RUNNING:
                 return client
             time.sleep(0.1)
+        if last == PROBE_BUSY:
+            raise DaemonBusy(
+                f"the dunkingsheep daemon on {client.socket_path} was started but "
+                f"is saturated and did not answer; it is alive, so do NOT start "
+                f"another one. Retry in ~10s. See {LOG_FILE}"
+            )
         raise DaemonUnavailable(
             f"daemon did not come up on {client.socket_path}; see {LOG_FILE}"
         )

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import _bootstrap  # noqa: F401
+import dunk_api
 import dunk_callers as callers
 import dunk_core
 
@@ -95,6 +96,58 @@ class TurnAuthenticationLogTests(unittest.TestCase):
         with patch.object(callers, "_stat", side_effect=rows.get), patch.object(dunk_core.log, "warning") as warn:
             self.flock.require_turn_caller("%35", "%35")
         warn.assert_not_called()
+
+
+class TurnEventGateTests(unittest.TestCase):
+    """The commands an anonymous pane may now call, gated by the kernel.
+
+    dunk_roles lets every pane call turn_start/turn_end (an unregistered lane
+    must still report busy/idle or the delivery gate goes blind, 2026-10-29).
+    These tests pin the half that keeps the widening safe: the dispatch
+    handlers reach the turn store only for the caller's OWN pane, only when the
+    caller is provably under that pane's process tree, and never at all for a
+    foreign pane label.
+    """
+
+    def setUp(self):
+        self.flock = dunk_core.Flock.__new__(dunk_core.Flock)
+        self.flock._caller_state = SimpleNamespace(
+            value={"pid": 300, "start": "a", "source": "agent"})
+        self.flock.herdr = SimpleNamespace(
+            get_pane=Mock(return_value={"pane_pid": 200}))
+        self.flock.turn_start = Mock(return_value={"turn_id": "t-1"})
+        self.flock.turn_end = Mock(return_value={"turn_id": "t-1", "ended": True})
+        self.own_rows = {300: proc(300, 250), 250: proc(250, 200), 200: proc(200, 1)}
+
+    def test_own_pane_from_its_process_tree_is_allowed(self):
+        with patch.object(callers, "_stat", side_effect=self.own_rows.get):
+            started = dunk_api.h_turn_start(self.flock, {"pane": "%35"}, "%35")
+            ended = dunk_api.h_turn_end(self.flock, {"pane": "%35"}, "%35")
+        self.assertEqual({"turn_id": "t-1"}, started)
+        self.assertTrue(ended["ended"])
+        self.flock.turn_start.assert_called_once()
+        self.flock.turn_end.assert_called_once()
+
+    def test_another_pane_is_refused_before_any_effect(self):
+        for handler, args in ((dunk_api.h_turn_start, {"pane": "%29"}),
+                              (dunk_api.h_turn_end, {"pane": "%29"})):
+            with self.subTest(handler=handler.__name__):
+                with self.assertRaisesRegex(dunk_core.DunkError, "caller's own pane"):
+                    handler(self.flock, args, "%35")
+        self.flock.turn_start.assert_not_called()
+        self.flock.turn_end.assert_not_called()
+        self.flock.herdr.get_pane.assert_not_called()
+
+    def test_own_pane_from_outside_its_process_tree_is_refused(self):
+        outside = {300: proc(300, 250), 250: proc(250, 1), 1: proc(1, 0)}
+        with patch.object(callers, "_stat", side_effect=outside.get):
+            for handler in (dunk_api.h_turn_start, dunk_api.h_turn_end):
+                with self.subTest(handler=handler.__name__):
+                    with self.assertRaisesRegex(dunk_core.DunkError,
+                                                "caller is not authenticated"):
+                        handler(self.flock, {"pane": "%35"}, "%35")
+        self.flock.turn_start.assert_not_called()
+        self.flock.turn_end.assert_not_called()
 
 
 if __name__ == "__main__":

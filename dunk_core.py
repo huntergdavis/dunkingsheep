@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.71.3"
+VERSION = "2.71.4"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -442,6 +442,16 @@ class AmbiguousTarget(DunkError):
     """A target matched more than one pane. Distinct from "no such pane",
     because a mailbox may be a name with no pane behind it, but it must never
     be a name that stands for several panes at once."""
+
+
+def _note_text(note):
+    """The evidence text of one task note, whichever key it carries (t704).
+
+    Tasks.notes() emits "reason"; two readers here were written for "text". The
+    mismatch made every review verdict that had a note raise KeyError, which is a
+    silent stop for the whole review queue.
+    """
+    return str((note or {}).get("text") or (note or {}).get("reason") or "")
 
 
 def _as_dunk_error(method):
@@ -1314,6 +1324,38 @@ class Flock:
 
     # -- targets ----------------------------------------------------------------
 
+    def registry_pane_gap(self):
+        """Registered lanes that the terminal backend does not list (t714).
+
+        The pane list is evidence about TERMINALS, the role registry about
+        PROCESSES. When they disagree and the recorded process is still alive,
+        the lane exists and is unreachable: `dunkingsheep panes` omits it, mail
+        cannot be typed into it, and a close/dead guard reads it as gone (t699).
+        Measured 2026-10-29 22:15 for %103/%108/%109 and NOT reproducible later,
+        so the gap is made visible here rather than claimed fixed: a listing that
+        silently drops a live lane is indistinguishable from a lane that died.
+
+        Returns [] when the pane list or the registry cannot be read: an
+        unavailable source is not a disagreement.
+        """
+        try:
+            live = {pane.get("pane_id") for pane in self.herdr.list_panes()}
+        except Exception:  # noqa: BLE001 - no pane list, no gap claim
+            return []
+        try:
+            lanes = self.roles.describe().get("lanes") or {}
+        except Exception:  # noqa: BLE001 - no registry, no gap claim
+            return []
+        gap = []
+        for pane_id, entry in sorted(lanes.items()):
+            if pane_id in live:
+                continue
+            pid = entry.get("pane_pid")
+            alive = bool(pid) and process_alive(pid, entry.get("start"))
+            gap.append({"pane": pane_id, "label": entry.get("label"),
+                        "role": entry.get("role"), "pid": pid, "alive": alive})
+        return gap
+
     def list_panes(self, self_pane_id=None):
         panes = self.herdr.list_panes_grouped()
         for pane in panes:
@@ -1482,23 +1524,24 @@ class Flock:
         spec = str(spec or "").strip()
         if not spec:
             raise DunkError("a target mailbox is required")
-        panes = self.herdr.list_panes_grouped()
-        # 1. An exact pane id (or terminal id) is unambiguous and always wins.
-        for pane in panes:
-            if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
-                return self._mailbox_for_pane(pane)
-        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
+        # An exact pane id needs ONE backend call, not the three a grouped listing
+        # costs (pane, tab and workspace lists): the id branches below read only
+        # ids, and a send to a lane the terminal has lost must fail in well under a
+        # second (t699: a 15 s client timeout read as "the daemon is hung").
+        if (_PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec)
+                or _HERDR_ID_RE.match(spec)):
+            panes = self.herdr.list_panes()
+            for pane in panes:
+                if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
+                    return self._mailbox_for_pane(pane)
             if not strict:
                 # READS STAY PERMISSIVE. A dead pane id is a name mail can still be
                 # filed under - that is how 78 stranded messages exist, and they
                 # have to be readable and archivable or the triage cannot run.
                 # Only a SEND refuses here (measured regression, 2026-10-24).
                 return spec, spec, None
-            raise DunkError(
-                f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
-                "pane id is not a name. If that lane still exists, address it by "
-                "mailbox name; if it does not, the send fails here instead of "
-                "queueing into nothing. reason=dead_lane.")
+            raise self._pane_refusal(spec)
+        panes = self.herdr.list_panes_grouped()
         # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
         # that id decides. Without this the whole string fell through to step 3 and
         # became a mailbox NAME with no pane: mail addressed to
@@ -1514,10 +1557,14 @@ class Flock:
                 # A decorated address is a mailbox NAME too ('PM (par-a) (wW:p1)'
                 # is exactly what the triage list shows). Reading it must work.
                 return spec, spec, None
-            raise DunkError(
-                f"target {spec!r} names pane {hinted}, which is not live. A decorated "
-                f"address must name a live pane: use a current pane id, or a bare "
-                f"mailbox name without the parenthetical. reason=dead_lane.")
+            raise self._pane_refusal(hinted, spec)
+
+        # 1b-bis. RESERVED MAILBOXES. The owner mailbox is not a pane: it is a
+        # person's channel with two transports (FLAT_FLEET.md 7.2). It must be
+        # addressable before any pane exists for it, and it must never fall
+        # through to "no live pane, refuse", because the owner is not a lane.
+        if spec.strip().lower() == self.OWNER_MAILBOX:
+            return self.OWNER_MAILBOX, "owner", None
 
         # 1c. The LANE REGISTRY, read backwards. A mailbox recorded against a
         # live pane wins over any name: labels and titles are chosen by the agent
@@ -1598,8 +1645,66 @@ class Flock:
         return any(str(p.get("agent") or "").lower() == low
                    for p in self.herdr.list_panes())
 
+    def _pane_refusal(self, pane_id, spec=None):
+        """The send-time refusal for a pane id the backend does not list.
+
+        A backend pane list is evidence about a TERMINAL, never about a process.
+        On 2026-10-29 (t699) the registry listed %108, %109 and %103 as lanes
+        while `dunkingsheep panes` carried none of them; sends then said
+        'dead_lane' for panes whose pids were running, which is a wrong answer
+        that also destroys mail nobody can recover (the refusal is raised before
+        the message is stored). So the registry is asked before the word 'dead'
+        is used: a registration that still proves a live root process is not a
+        dead lane, it is a terminal gap, and it gets its own reason.
+        """
+        registered, alive, pid = self._registered_pane(pane_id)
+        target = f"target {spec!r} names pane {pane_id}" if spec else f"pane {pane_id!r}"
+        if registered and alive:
+            return DunkError(
+                f"{target}, which is REGISTERED and whose recorded process is ALIVE "
+                f"(pid {pid}), but the terminal backend does not list that pane: no "
+                "message was stored and nothing was typed. reason=backend_missing_pane. "
+                "Restore the pane (respawn / lane register) or address the lane by its "
+                "mailbox name, which keeps mail for a lane between panes.")
+        when = " (its registered root process is no longer running)" if registered and pid else ""
+        if spec:
+            return DunkError(
+                f"{target}, which is not live{when}. A decorated address must name a "
+                "live pane: use a current pane id, or a bare mailbox name without the "
+                "parenthetical. reason=dead_lane.")
+        return DunkError(
+            f"no live pane {pane_id!r}{when}; a dead pane id is not a mailbox, and a "
+            "pane id is not a name. If that lane still exists, address it by "
+            "mailbox name; if it does not, the send fails here instead of "
+            "queueing into nothing. reason=dead_lane.")
+
+    def _registered_pane(self, pane_id):
+        """(registered, process_alive, pid) from the role registry. No backend call.
+
+        'Alive' means the registration recorded a root pid AND that pid still
+        carries the recorded starttime (a reused %N is a different process).
+        """
+        entry = {}
+        try:
+            entry = self.roles.entry(pane_id) or {}
+        except Exception:                       # noqa: BLE001 - a registry must not break a refusal
+            return False, False, None
+        if not entry:
+            return False, False, None
+        pid = entry.get("pane_pid")
+        if pid in (None, "", "None"):
+            return True, False, None
+        return True, bool(process_alive(pid, entry.get("start"))), pid
+
     def _mailbox_for_pane(self, pane):
         panes = self.herdr.list_panes_grouped()
+        # Re-read the pane from the SAME listing `unique()` searches: a caller may
+        # hand us a row from the plain idle list, which carries no tab or workspace
+        # label, and then every name field would read empty and the mailbox would
+        # fall back to the pane id (measured on the id fast path, t699).
+        wanted = pane.get("pane_id") or pane.get("terminal_id")
+        pane = next((p for p in panes
+                     if wanted in (p.get("pane_id"), p.get("terminal_id"))), pane)
 
         def unique(field):
             value = pane.get(field)
@@ -2212,6 +2317,146 @@ class Flock:
         return {"mailbox": key,
                 "messages": self.inbox.list(key, unread_only=unread_only, limit=limit)}
 
+    # -- the owner mailbox (FLAT_FLEET.md 7.2) --------------------------------
+
+    OWNER_MAILBOX = "owner"
+
+    def _owner_role(self, self_pane_id):
+        """Only the desk and the owner's own transport read or answer the owner.
+
+        The allowlist in dunk_roles is the enforcement; this is the second lock,
+        because this mailbox is a person's conversation with the fleet and a
+        lane reading it is not a permission question but a wrong one.
+        """
+        role = self.caller_role(self_pane_id) if self_pane_id else "owner"
+        if role not in ("desk", "web", "owner", "system"):
+            raise DunkError(f"the {self.OWNER_MAILBOX} mailbox is the desk's and the "
+                            f"owner's; role {role!r} may not read or answer it")
+        return role
+
+    @_as_dunk_error
+    def owner_conversation(self, limit=50, before=None, self_pane_id=None):
+        """The owner mailbox as one conversation: questions and their answers.
+
+        Telegram and the web are two transports for one mailbox, so this returns
+        the complete record; `transport` on each row says where it arrived and
+        `reply_to` says what it answers.
+        """
+        self._owner_role(self_pane_id)
+        rows = self.inbox.conversation(self.OWNER_MAILBOX, limit=int(limit or 50),
+                                       before=before)
+        # A reply is not a question waiting for an answer: `waiting` is the desk's
+        # work list, so a row that answers something is excluded even while it is
+        # unread (FLAT_FLEET.md 7.2).
+        waiting = [row["id"] for row in rows
+                   if row["state"] == "queued" and not row["answered"]
+                   and not row.get("reply_to")]
+        return {"mailbox": self.OWNER_MAILBOX, "messages": rows,
+                "count": len(rows), "waiting": waiting}
+
+    @_as_dunk_error
+    def owner_ingest(self, body, transport, external_id=None, subject=None,
+                     attachments=(), self_pane_id=None):
+        """Record one owner question that arrived on `transport` (t594).
+
+        This is the inbound half of FLAT_FLEET.md 7.2: a bridge does not write a
+        store of its own, it puts the question in the one owner mailbox with the
+        transport it arrived on, and `owner_reply` answers it back the same way.
+        `external_id` is the transport's own id (Telegram's `telegram:<update_id>`),
+        so a redelivered update returns the row it already produced instead of a
+        second question.
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError, validate_transport
+        try:
+            transport = validate_transport(transport)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        if transport is None:
+            raise DunkError("an ingested owner question needs a transport")
+        if external_id:
+            existing = self.inbox.find_by_external_id(self.OWNER_MAILBOX,
+                                                      external_id)
+            if existing is not None:
+                return {"message": existing, "duplicate": True,
+                        "transport": transport}
+        try:
+            message = self.inbox.send(self.OWNER_MAILBOX, body, subject=subject,
+                                      sender=None, mailbox_label=self.OWNER_MAILBOX,
+                                      transport=transport, external_id=external_id,
+                                      attachments=attachments)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        self._invalidate_view()
+        return {"message": message, "duplicate": False, "transport": transport}
+
+    @_as_dunk_error
+    def owner_outbox(self, transport, limit=20, self_pane_id=None):
+        """Replies waiting for `transport` to deliver them (t594).
+
+        Only owner-mailbox replies whose own transport matches are returned, which
+        is what keeps Telegram to answers and nothing else (no briefs, no digests,
+        no web echoes).
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError
+        try:
+            rows = self.inbox.owner_outbox(transport, limit=limit)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        return {"transport": transport, "messages": rows, "count": len(rows)}
+
+    @_as_dunk_error
+    def owner_delivered(self, message_id, transport, external_id=None,
+                        self_pane_id=None):
+        """Record a transport's delivery receipt for one owner row (t594)."""
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError
+        try:
+            message = self.inbox.mark_delivered(message_id, transport,
+                                                external_id=external_id)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        return {"message": message, "transport": transport,
+                "delivered_at": message.get("delivered_at")}
+
+    @_as_dunk_error
+    def owner_reply(self, message_id, body, self_pane_id=None):
+        """Answer one owner question: one reply row, linked, on the same transport.
+
+        The reply goes back the way the question came (owner 2026-10-29: Telegram
+        gets Telegram answers and nothing else). Answering also acks the question,
+        so "answered" is one fact in one row rather than a second table that can
+        disagree with it.
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError, normalise_mailbox
+        try:
+            question = self.inbox.get(message_id)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        if normalise_mailbox(question["mailbox"]) != self.OWNER_MAILBOX:
+            raise DunkError(f"{message_id} is not an {self.OWNER_MAILBOX} message "
+                            f"(mailbox {question['mailbox']!r})")
+        if question.get("reply_to"):
+            raise DunkError(f"{message_id} is itself a reply; answer the question it "
+                            "belongs to")
+        already = self.inbox.replies_to(question["message_id"])
+        if already:
+            raise DunkError(f"{message_id} was already answered by {already[0]['id']}; "
+                            "one answer per question, so the latency metric has one "
+                            "edge")
+        body = "" if body is None else str(body)
+        if not body.strip():
+            raise DunkError("a reply needs a body")
+        transport = question.get("transport")
+        reply = self.inbox.send(self.OWNER_MAILBOX, body, sender=self_pane_id or None,
+                                mailbox_label=self.OWNER_MAILBOX, transport=transport,
+                                reply_to=question["message_id"])
+        self.inbox.ack([question["message_id"]], mailbox=self.OWNER_MAILBOX)
+        return {"reply": reply, "question": message_id, "transport": transport,
+                "acked": question["message_id"]}
+
     @_as_dunk_error
     def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
         """Read a batch WITHOUT consuming it, build the whole result, then commit.
@@ -2451,8 +2696,19 @@ class Flock:
 
     @_as_dunk_error
     def task_read(self, task_id, self_pane_id=None):
-        return self._require_task_visible(
+        """One task, with the last few note reasons attached (t605).
+
+        The note is where a lane records what it ran, the head it worked on and what
+        it did NOT verify. Leaving that out of the read view made finished, reviewed
+        work look untouched, so a reader re-executed or re-reviewed it.
+        """
+        task = self._require_task_visible(
             self.tasks.get(task_id, pane_id=self_pane_id), self_pane_id)
+        try:
+            task["notes"] = self.tasks.recent_notes(task["id"], limit=3)
+        except Exception:  # noqa: BLE001 - a read view never fails on its evidence
+            task["notes"] = []
+        return task
 
     @_as_dunk_error
     def task_update(self, task_id, title=None, body=None, status=None,
@@ -2475,7 +2731,8 @@ class Flock:
             task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
 
     @_as_dunk_error
-    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None):
+    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None,
+                      landed=True):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         if task.get("kind") == "review":
             role = self.caller_role(self_pane_id)
@@ -2486,12 +2743,58 @@ class Flock:
                 raise DunkError(f"a review is completed by its reviewer lane, not role {role}")
             if role == "reviewer" and task.get("author") and task["author"] == self_pane_id:
                 raise DunkError("a lane never accepts its own work (no-self-merge)")
+            if role == "reviewer" and self_pane_id:
+                # t723: `author` is NULL for a head a lane pushed through the author
+                # App, which is the NORMAL path ('fix X, push to the branch'), so the
+                # guard above never fired on exactly the PRs a lane wrote (2026-10-30:
+                # a reviewer could have accepted its own rebase of dunkingsheep#124).
+                # The work tasks for the same repo+pr name the lane, so authorship is
+                # read from them; a store that cannot answer fails CLOSED, because an
+                # unverified reviewer is the bug this guard exists to stop.
+                worked = set()
+                if task.get("repo") and task.get("pr"):
+                    try:
+                        worked = set(self.tasks.authors_of(task["repo"], task["pr"]))
+                    except Exception as error:  # noqa: BLE001
+                        raise DunkError(
+                            f"cannot verify that {self_pane_id} is not the author of "
+                            f"{task.get('repo')}#{task.get('pr')}: {error}. "
+                            "no-self-review is checked before a verdict is recorded, "
+                            "so this review is refused until the task store answers.")
+                if self_pane_id in worked:
+                    raise DunkError(
+                        f"a lane never accepts its own work (no-self-merge): "
+                        f"{self_pane_id} worked on {task.get('repo')}#{task.get('pr')} "
+                        f"(task author, assignee or completer), so it cannot review "
+                        f"this head. Another reviewer lane completes {task_id}.")
             if verdict is None:
                 raise DunkError("completing a review needs --verdict accept|needs-fix")
             try:
                 verdict = validate_verdict(verdict)
             except TaskError as error:
                 raise DunkError(str(error)) from None
+            # A verdict is a claim about work, and a claim needs evidence
+            # (docs/LANES.md reviewer brief; enforced here because a brief is a
+            # promise and this is the daemon). On 2026-10-29 two needs-fix
+            # verdicts were filed with no note anywhere: the follow-up fix tasks
+            # they created said "see the task notes" and there were none, so the
+            # work they blocked could not be started (t621).
+            self._require_review_evidence(task, self_pane_id)
+            # One verdict per head (t656). A cancelled task is not a place to put
+            # a verdict at all - a sweep may have cancelled it because the head
+            # was already judged - and a done one already carries the verdict the
+            # merge record was built on. Completing either used to succeed, which
+            # let a duplicate review flip an accepted head to needs-fix AND post a
+            # failure status over the standing success.
+            if task.get("status") == "cancelled":
+                raise DunkError(
+                    f"{task_id} is cancelled: a cancelled review takes no verdict. If the "
+                    "head still needs judging, the review timer files a review for it.")
+            if task.get("status") == "done":
+                raise DunkError(
+                    f"{task_id} is already done with verdict {task.get('verdict')!r}: a "
+                    "verdict is bound to the head it measured, so a second one is refused "
+                    "rather than overwriting the merge record")
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
@@ -2521,6 +2824,15 @@ class Flock:
                             "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
         result = dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        if not landed:
+            # t906: the work is done and NOT on main (a stacked branch). Record it in
+            # the same act, because this is the moment the lane certainly knows; the
+            # dependents stay closed until the merge path flips it back.
+            try:
+                self.tasks.set_landed(task_id, landed=False, by=self_pane_id or by)
+                result["landed"] = False
+            except TaskError as error:
+                raise DunkError(str(error)) from None
         if task.get("kind") == "review":
             result["github"] = self._after_review_verdict(dict(task), verdict,
                                                           by=self_pane_id or by)
@@ -3001,6 +3313,20 @@ class Flock:
         self._caller_state.socket_peer_ok = None
 
     @_as_dunk_error
+    def _may_pull_everything(self, pane_id):
+        """True when this pane's role may pull any kind (the owner).
+
+        A reviewer lane whose provider is not on `reviewer_providers` must not be
+        pushed review work at all: `task next` raises for it, and a push that
+        skipped the check would hand it a task it can never complete.
+        """
+        role = self.caller_role(pane_id) if pane_id else "anonymous"
+        if role == "owner":
+            return True
+        if role == "reviewer":
+            return self.roles.may_review(pane_id, role=role)
+        return False
+
     def _claim_filters(self, self_pane_id):
         """(kinds, exclude_author) for a claim, from the caller's role.
 
@@ -3480,9 +3806,18 @@ class Flock:
                 continue
             if self.tasks.leases_for_pane(pane_id):
                 continue
+            # The push path is the pull path (FLAT_FLEET.md 5): the same role ->
+            # kind rule and the same no-self-review rule, from the same function.
+            # It used to omit both, so a worker follower was pushed a review it
+            # could not complete and a reviewer could be pushed its own PR (t595,
+            # live on %100 / t568).
+            kinds, exclude_author = self._claim_filters(pane_id)
+            if kinds is None and not self._may_pull_everything(pane_id):
+                continue
             try:
                 claimed = self.tasks.claim_next(
-                    scope=followers[pane_id], pane_id=pane_id)
+                    scope=followers[pane_id], pane_id=pane_id, kinds=kinds,
+                    exclude_author=exclude_author)
             except Exception:
                 log.exception("task claim failed for %s", pane_id)
                 continue
@@ -3703,7 +4038,7 @@ class Flock:
         hit = self._role_pane_cache.get(pane_id)
         if hit and hit[0] > now:
             return hit[1]
-        info = self._pane_info(pane_id)
+        info = self._pane_info(pane_id)      # None when the backend knows no such pane
         self._role_pane_cache[pane_id] = (now + 2.0, info)
         if len(self._role_pane_cache) > 512:
             self._role_pane_cache = {k: v for k, v in self._role_pane_cache.items()
@@ -3879,9 +4214,58 @@ class Flock:
             if mints is None:
                 mints = self._gh_token_mints = {}
             mints[self_pane_id] = time.time()
+            # t723: remember it on disk too. A review filed for a head this lane
+            # pushes has author=NULL (the App is shared by every lane), so the
+            # no-self-review guard needs a record that outlives the process.
+            try:
+                import dunk_github
+                dunk_github.record_author_mint(self_pane_id)
+            except Exception:                       # noqa: BLE001 - never fail a token
+                pass
         return {"token": entry["token"], "kind": resolved, "role": role,
                 "slug": entry.get("slug"), "expires_at": entry.get("expires_at"),
                 "cached": entry.get("cached", False)}
+
+    # -- the reporter (FLAT_FLEET.md 7.3) ------------------------------------
+
+    def _post_report(self, report, text):
+        """Put the report in the owner mailbox on the `report` transport.
+
+        Best effort by construction: the file on disk is the record, and a post
+        that fails must never lose it. Until the owner mailbox exists on this
+        base (FF-9b), this says so instead of pretending it posted.
+        """
+        import dunk_report
+        subject = f"Fleet report {report['iso']}"
+        try:
+            message = self.inbox.send(dunk_report.OWNER_MAILBOX, text,
+                                      subject=subject, sender="report",
+                                      mailbox_label=dunk_report.OWNER_MAILBOX,
+                                      transport=dunk_report.REPORT_TRANSPORT)
+        except TypeError:
+            # A base without the transport column (FF-9b not merged yet).
+            try:
+                message = self.inbox.send(dunk_report.OWNER_MAILBOX, text,
+                                          subject=subject, sender="report",
+                                          mailbox_label=dunk_report.OWNER_MAILBOX)
+            except Exception as error:  # noqa: BLE001
+                return {"error": f"not posted (owner mailbox unavailable): {error}"}
+        except Exception as error:  # noqa: BLE001
+            return {"error": f"not posted: {error}"}
+        return {"message_id": message.get("message_id"),
+                "transport": message.get("transport")}
+
+    def report_run(self, post=True, prose=None, out_dir=None, self_pane_id=None):
+        import dunk_report
+        result = dunk_report.run(self, post=post, prose=prose, out_dir=out_dir,
+                                 post_fn=self._post_report if post else None)
+        return {"path": result["path"], "prose_rejected": result["prose_rejected"],
+                "posted": result["posted"], "text": result["text"],
+                "generated_at": result["report"]["iso"]}
+
+    def report_list(self, out_dir=None, self_pane_id=None):
+        import dunk_report
+        return dunk_report.list_reports(out_dir=out_dir)
 
     def review_sync(self, dry_run=False, self_pane_id=None):
         import dunk_review
@@ -3908,6 +4292,46 @@ class Flock:
         rows.sort(key=lambda r: -r["age_s"])
         return {"reviews": rows, "count": len(rows),
                 "oldest_age_s": rows[0]["age_s"] if rows else None}
+
+    def _require_review_evidence(self, task, self_pane_id):
+        """Refuse a verdict unless this pane noted its evidence after it claimed.
+
+        The window is "after the claim" on purpose: a note written before the
+        review started is a plan, not a finding. An owner or system caller with no
+        lease is exempt (it is not the lane that judged the work), and that
+        exemption is stated rather than inferred from an empty note list.
+        """
+        lease = None
+        for candidate in (self.tasks.leases_for_pane(self_pane_id)
+                          if self_pane_id else []):
+            if candidate["task_id"] == task["id"]:
+                lease = candidate
+                break
+        if lease is None:
+            role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+            if role in ("owner", "system"):
+                return
+        claimed_at = lease["claimed_at"] if lease else task.get("created_at") or 0
+        # t605 made Tasks.notes() return "reason"; these two readers were written
+        # against a "text" key, so EVERY verdict with a note raised KeyError on main
+        # (measured: tests.test_dunk_github 7 errors, all through task_complete).
+        # Accept either name: the row is the same evidence under both.
+        notes = [note for note in self.tasks.notes(task["id"])
+                 if note["actor"] == self_pane_id and note["at"] >= claimed_at
+                 and _note_text(note).strip()]
+        if notes:
+            return
+        raise DunkError(
+            f"a verdict needs evidence: record what you ran and what you did NOT "
+            f"verify first, with `dunkingsheep task note {task['id']} --reason "
+            f"\"<commands, head sha, what is not verified>\"`. A note by another "
+            f"lane, or one written before you claimed, does not count.")
+
+    def _review_evidence(self, task):
+        """The reviewer's own note text, verbatim, for the follow-up and GitHub."""
+        notes = [_note_text(note).strip() for note in self.tasks.notes(task["id"])
+                 if _note_text(note).strip()]
+        return "\n\n".join(notes)
 
     def _after_review_verdict(self, task, verdict, by=None):
         try:
@@ -4568,21 +4992,14 @@ class Flock:
                     since_start = process_start(pane_pid)
             captured = self.herdr.read_pane(pane_id, lines=20) or ""
             lowered = captured.lower()
-            for marker in self.AGENT_FAILURE_MARKERS:
-                if marker in lowered:
-                    line = next((row for row in captured.splitlines()
-                                 if marker in row.lower()), captured.strip()[:200])
-                    raise DunkError(
-                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
-                        "The pane is up but the command never ran - check the PATH the pane "
-                        "inherits.")
-            # An agent that is drawing its own UI has started; a bare shell that has printed
-            # nothing yet is neither. Keep waiting for the rest of the window: a process
-            # sighting below is recorded, never returned early.
-            if "[agent exited rc=" in lowered:
-                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
-                raise DunkError(
-                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
+            # PROCESS EVIDENCE FIRST, TEXT SECOND (t599). A pi lane's first screen carries
+            # its launcher's own noise - ENOENT lines and sed errors from the wrapper - which
+            # matched the failure markers below and refused a start that had in fact worked.
+            # The consequence was not cosmetic: lane_register ran after this check, so a
+            # false refusal left the lane ANONYMOUS and the owner registered it by hand.
+            # A live process of the expected kind, bound to this generation, is direct
+            # evidence that the command ran; screen text is only a proxy for it, so the
+            # proxy may not overrule the evidence.
             if watch_procs:
                 entries = (self.herdr.agent_child_pids(pane_pid)
                            if pane_pid is not None else None)
@@ -4595,6 +5012,23 @@ class Flock:
                     matched = self._match_agent_process(entries, kind, since_start)
                     if matched:
                         seen = matched
+            for marker in self.AGENT_FAILURE_MARKERS:
+                if marker in lowered and not seen:
+                    line = next((row for row in captured.splitlines()
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
+                        "The pane is up but the command never ran - check the PATH the pane "
+                        "inherits.")
+            # An agent that is drawing its own UI has started; a bare shell that has printed
+            # nothing yet is neither. Keep waiting for the rest of the window: a process
+            # sighting above is recorded, never returned early. An explicit exit line is NOT
+            # gated on that sighting: t215 REVISE P1 measured a blank first frame with a live
+            # pid followed by rc=127, which is a refusal, not a start.
+            if "[agent exited rc=" in lowered:
+                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
+                raise DunkError(
+                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
             time.sleep(0.1)
         if not watch_procs:
             return None

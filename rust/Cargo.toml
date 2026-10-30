@@ -1,0 +1,20 @@
+# The Rust port workspace (docs/rust/RUST_PORT.md section 2, TASKS.md T00).
+#
+# Phase 1 (daemon, CLI, MCP) is the cutover unit and lives in ds-core + ds-cli +
+# ds-mcp; ds-tui and ds-web are phase 3. Members are added by the task that
+# creates them, so this file stays small and `cargo build` on the bare workspace
+# keeps working at every step.
+[workspace]
+resolver = "2"
+members = [
+    "crates/ds-core",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

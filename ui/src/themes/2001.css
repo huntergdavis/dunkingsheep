@@ -1,0 +1,153 @@
+
+/* 2001: white panels, restrained red, and local system sans faces. */
+:root[data-theme="2001"] {
+  color-scheme: light;
+  --bg: #f7f7f3;
+  --surface: #fffefb;
+  --surface-raised: #ebebe6;
+  --ink: #202126;
+  --muted: #595b63;
+  --accent: #a61f2b;
+  --accent-contrast: #ffffff;
+  --border: #84868c;
+  --border-strong: #595b63;
+  --icon-button-border: var(--topbar-border);
+  --icon-button-panel-border: var(--border-strong);
+  --success: #285a43;
+  --warning: #795000;
+  --danger: #a61f2b;
+  --purple: #625174;
+  --orange: #8c4821;
+  --teal: #28616a;
+  --radius: 3px;
+  --font-body: 'Liberation Sans', Arial, sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-display: 'Michroma', 'DejaVu Sans', 'Avenir Next', sans-serif;
+  --font-mono: 'Liberation Mono', 'Courier New', monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* 2001 component aliases use the light semantic palette. */
+:root[data-theme="2001"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(20, 21, 24, 0.32);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* t203: new-theme contrast remediation. Component surfaces, borders and inks
+   resolve inside the 2001 palette instead of inheriting Default's tokens. */
+:root[data-theme="2001"] {
+  --channel-surface-2: var(--surface-raised);
+  --game-chat-actions-surface: var(--surface-raised);
+  --game-error-surface: var(--surface-raised);
+
+  --topbar-border: var(--border);
+  --composer-border: var(--border);
+  --older-marker-border: var(--border);
+  --activity-border: var(--border);
+  --activity-toggle-border: var(--border);
+  --jump-banner-border: var(--border);
+  --jump-latest-border: var(--border);
+  --queue-help-border: var(--border);
+  --queue-help-border-2: var(--border);
+  --search-head-border-2: var(--border);
+  --search-more-border: var(--border);
+  --login-card-border: var(--border-strong);
+  --game-type-border: var(--border);
+  --game-type-border-2: var(--border);
+  --game-type-border-3: var(--surface);
+  --ops-credit-chart-border: var(--border);
+  --ops-executive-border: var(--border);
+  --ops-executive-head-border: var(--border);
+  --ops-kpis-border: var(--border);
+  --ops-lab-panel-border: var(--border);
+  --ops-metrics-border: var(--border);
+  --ops-panel-border: var(--border);
+  --ops-source-border: var(--border);
+  --ops-source-border-2: var(--border);
+  --ops-mission-head-border: var(--surface);
+  --poolrad-stat-border: var(--border);
+  --sidebar-border: var(--border);
+
+  --game-chat-actions-ink: var(--ink);
+  --search-head-ink: var(--muted);
+  --status-badge-ink: var(--muted);
+  --status-badge-ink-3: var(--warning);
+}
+
+/* interim effect consumers: t177 generalises into token hooks */
+:root[data-theme="2001"] body::after {
+  content: none;
+  background-image: var(--overlay);
+  pointer-events: none;
+}
+:root[data-theme="2001"] :is(h1, h2, .dash-nav-brand) {
+  font-family: var(--font-display);
+  text-shadow: none;
+}
+:root[data-theme="2001"] :is(.cs-message, .cs-message__content) {
+  font-family: var(--font-body);
+}
+:root[data-theme="2001"] :is(pre, code, kbd, samp) {
+  font-family: var(--font-mono);
+}
