@@ -23,3 +23,12 @@ venv/
 .venv/
 ui/node_modules/
 ui/dist/
+
+# t746: a public repo published data/auth.json, data/owner-credentials and
+# data/messages.sqlite3 from a `git add -A` after a test run (commit 52847e5, still
+# served by raw.githubusercontent - a force-push does not unpublish a SHA). These
+# rules are the durable half of that fix; tools/check_public_secrets.py is the other.
+data/
+auth.json
+owner-credentials
+*.sqlite3
