@@ -118,5 +118,38 @@ class SecretScanTests(unittest.TestCase):
             self.assertIn(wanted, rules, f"{wanted} must be ignored on main")
 
 
+    # -- t778: the two behaviours that would erode the gate --------------------
+
+    def test_two_credentials_in_one_file_are_both_reported(self):
+        # The gate failed either way; the human who decides what to rotate was
+        # told about one of the two.
+        self.track("conf.py",
+                   "Password: hunter2CorrectHorseBattery\n"
+                   "api_token = aaaaaaaaaaaaaaaaaaaa\n")
+        findings = scanner.scan(self.repo)
+        self.assertEqual(2, len(findings), findings)
+        self.assertIn("conf.py:1:", findings[0])
+        self.assertIn("conf.py:2:", findings[1])
+
+    def test_a_long_snake_case_identifier_being_CALLED_is_not_a_secret(self):
+        # `secret = compute_owner_credentials_path()` matched the 16+ character
+        # value rule, so ordinary code was reported as a cleartext secret - and
+        # the remedy a lane reaches for is an allowlist entry.
+        self.track("code.py",
+                   "secret = compute_owner_credentials_path()\n"
+                   "private_key = load_private_key_from_disk()\n")
+        self.assertEqual([], scanner.scan(self.repo))
+
+    def test_a_plain_assignment_is_still_a_finding(self):
+        # The call rule must not become a hole: same length, no call.
+        self.track("code.py", "api_token = aaaaaaaaaaaaaaaaaaaa\n")
+        self.assertEqual(1, len(scanner.scan(self.repo)))
+
+    def test_a_quoted_secret_before_a_call_still_reports(self):
+        # A string literal that happens to be followed by a call on the next line
+        # is still a credential; the call rule reads the value it just matched.
+        self.track("code.py", 'api_token = "ghp_aaaaaaaaaaaaaaaaaaaaaaaa"\nprint(x)\n')
+        self.assertEqual(1, len(scanner.scan(self.repo)))
+
 if __name__ == "__main__":
     unittest.main()
