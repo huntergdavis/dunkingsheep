@@ -39,7 +39,16 @@ class PureTests(unittest.TestCase):
     def test_a_filed_row_counts_in_every_status(self):
         """t857: this test used to assert the opposite - that a DONE filing does not
         count - which IS the defect: three merged-but-uncredited bodies were filed
-        four times each, and my own retry refiled ten rows the same way."""
+        four times each, and my own retry refiled ten rows the same way.
+
+        CANCELLED counts too, and that is a decision about the DECISION rather than
+        about the body: a cancelled filing was withdrawn by a person, and a timer
+        that re-files it undoes that cancel on the next tick - the resurrection shape
+        (t854) from the other side. The asymmetry settles it: a person can re-file a
+        body in one command, so counting cancelled costs nothing when its reason is
+        resolved, while NOT counting it costs a human's decision every thirty
+        minutes. (ds-worker-2 argued the other way first and conceded this reading.)
+        """
         tasks = [{"title": dunk_poolrad.task_title(row("OVL_0001_0001", 1)), "status": "open"},
                  {"title": dunk_poolrad.task_title(row("OVL_0001_0002", 2)), "status": "done"},
                  {"title": dunk_poolrad.task_title(row("OVL_0001_0003", 3)),
