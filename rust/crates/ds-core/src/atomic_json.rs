@@ -17,12 +17,18 @@ use crate::error::DunkError;
 /// A missing file is the normal first-run state (the Python's `except OSError:
 /// return {}`); malformed JSON is a named refusal, because silently replacing a
 /// corrupt registry would throw away what a human could still fix.
-pub fn read_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, DunkError> {
+pub fn read_or_default<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> Result<T, DunkError> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .map_err(|error| DunkError::Refused(format!("{} is not valid JSON: {error}", path.display()))),
+        Ok(text) => serde_json::from_str(&text).map_err(|error| {
+            DunkError::Refused(format!("{} is not valid JSON: {error}", path.display()))
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(error) => Err(DunkError::Refused(format!("read {}: {error}", path.display()))),
+        Err(error) => Err(DunkError::Refused(format!(
+            "read {}: {error}",
+            path.display()
+        ))),
     }
 }
 
@@ -31,9 +37,9 @@ pub fn read_or_default<T: serde::de::DeserializeOwned + Default>(path: &Path) ->
 /// The temp file must be in the same directory as the target: `rename` is only
 /// atomic within a filesystem, and `/tmp` is not the config directory.
 pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkError> {
-    let directory = path.parent().ok_or_else(|| {
-        DunkError::Refused(format!("{} has no parent directory", path.display()))
-    })?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| DunkError::Refused(format!("{} has no parent directory", path.display())))?;
     fs::create_dir_all(directory)?;
     let text = serde_json::to_string_pretty(value)? + "\n";
     let temporary = temporary_path(path);
@@ -41,11 +47,13 @@ pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkErro
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)                    // created 0600, before any content
+            .mode(0o600) // created 0600, before any content
             .open(&temporary)
-            .map_err(|error| DunkError::Refused(format!("create {}: {error}", temporary.display())))?;
+            .map_err(|error| {
+                DunkError::Refused(format!("create {}: {error}", temporary.display()))
+            })?;
         file.write_all(text.as_bytes())?;
-        file.sync_all()?;                   // the data is on disk before the rename
+        file.sync_all()?; // the data is on disk before the rename
     }
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
     fs::rename(&temporary, path).map_err(|error| {
@@ -56,7 +64,10 @@ pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkErro
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -84,7 +95,11 @@ mod tests {
         let dir = tempdir();
         let path = dir.path().join("roles.json");
         write(&path, &json!({"default": "anonymous", "lanes": {}})).unwrap();
-        assert_eq!(0o600, mode(&path).unwrap(), "credentials file must not be group/world readable");
+        assert_eq!(
+            0o600,
+            mode(&path).unwrap(),
+            "credentials file must not be group/world readable"
+        );
         let back: serde_json::Value = read_or_default(&path).unwrap();
         assert_eq!(json!({"default": "anonymous", "lanes": {}}), back);
     }
@@ -121,7 +136,10 @@ mod tests {
             while !flag.load(std::sync::atomic::Ordering::Relaxed) {
                 let value: serde_json::Value =
                     serde_json::from_str(&fs::read_to_string(&reader_path).unwrap()).unwrap();
-                assert!(value["n"].is_number(), "a reader saw a partial file: {value}");
+                assert!(
+                    value["n"].is_number(),
+                    "a reader saw a partial file: {value}"
+                );
                 seen += 1;
             }
             seen

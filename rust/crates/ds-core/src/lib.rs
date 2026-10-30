@@ -20,7 +20,7 @@ pub mod lock;
 pub mod proc;
 pub mod retry;
 
-pub use error::{DunkError, refusal};
+pub use error::{refusal, DunkError};
 
 /// The port manifest this crate is written against (docs/rust/MANIFEST.md).
 ///
