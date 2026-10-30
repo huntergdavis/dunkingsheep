@@ -194,6 +194,7 @@ class TimerTests(unittest.TestCase):
         third = self.sync.run()
         self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
         self.assertEqual(1, len(third["merged"]))
+        self.assertEqual("success", self.github.statuses[-1][2], "retry re-asserts success")
 
     def test_needs_fix_requests_changes_and_files_work_for_the_author(self):
         self.sync.run()

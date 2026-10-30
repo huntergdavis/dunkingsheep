@@ -141,6 +141,10 @@ class Sync:
                     # Already judged at this exact head. Accepted and still open:
                     # protection may now be satisfied, so try the merge again.
                     if done.get("verdict") == "accept" and not dry_run:
+                        # Re-assert the success status first: an older tick may
+                        # have overwritten it with pending (2026-10-29, PR #122).
+                        self._status(repo, pr["head"], "success", token,
+                                     f"accepted ({done['id']})", pr["url"], report)
                         self._merge(repo, pr["number"], pr["head"], token, report, done["id"])
                     continue
                 if current:
