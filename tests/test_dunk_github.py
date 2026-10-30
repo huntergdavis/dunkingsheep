@@ -682,6 +682,16 @@ class DistinctReviewerTests(unittest.TestCase):
         self.assertEqual(REVIEWER, second["author"],
                          "the lane that accepted is excluded from the second review")
         self.assertEqual("a" * 40, second["head"])
+        # t852: a held verdict must SAY it is held. #1638 showed 0 reviews, no log
+        # line and a pending status, and an owner lane read it as a dead path.
+        held = done["github"]["held"]
+        self.assertEqual(["approval", "merge", "accounting"], held["postponed"])
+        self.assertEqual(1, held["accepts"].count(REVIEWER))
+        self.assertEqual(2, held["required"])
+        self.assertIn("second DISTINCT reviewer lane", held["reason"])
+        notes = [n for n in self.flock.tasks.notes(done["id"], event="verdict_held")]
+        self.assertEqual(1, len(notes), "the task records why nothing was posted")
+        self.assertIn("second distinct lane must accept", notes[0]["text"])
 
     def test_the_same_lane_accepting_twice_is_one_lane(self):
         self.sync.run()
