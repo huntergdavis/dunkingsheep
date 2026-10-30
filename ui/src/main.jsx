@@ -799,7 +799,21 @@ function OpsBoard({ standalone = false }) {
           {owner?.state !== 'ok' && <p>Owner task assignments unavailable.</p>}
           {owner?.state === 'ok' && !owner.items.length && <p className="dash-muted">No tasks explicitly assigned to you.</p>}
         </section>
+        {board.poolrad_progress && <section className="ops-poolrad-tile" data-ops-section="poolrad" title={evidence(board.poolrad_progress)}>
+          <h2>Poolrad progress</h2>
+          {board.poolrad_progress.state === 'ok'
+            ? <p>{board.poolrad_progress.credited ?? 'unknown'} credited / {board.poolrad_progress.identities ?? 'unknown'} identities · CEILING {board.poolrad_progress.ceiling ?? 'unknown'} <small>{board.poolrad_progress.ceiling_note}</small></p>
+            : <p>{board.poolrad_progress.error || 'Unavailable'}</p>}
+        </section>}
         {board.budget && <Budget data={board.budget} />}
+        {board.reports && <section className="ops-reports" data-ops-section="reports" title={evidence(board.reports)}>
+          <h2>Reports</h2>
+          {board.reports.state !== 'ok' ? <p>{board.reports.error || 'Unavailable'}</p>
+            : board.reports.items.map(r => <details key={r.name} open={r.open}>
+              <summary>{r.name} <small>{new Date(r.at * 1000).toLocaleString()}</small></summary>
+              <p className="dash-muted">{r.size} bytes · body is not served over the daemon socket yet</p>
+            </details>)}
+        </section>}
         <section className="ops-reference" data-ops-section="reference">
           <h2>Reference</h2>
           <PoolradReference data={poolrad.data} error={poolrad.error} />
