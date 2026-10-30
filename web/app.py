@@ -486,42 +486,30 @@ def api_pane_text(pane: str, lines: int = 40):
     hit = _PANE_TEXT_CACHE.get(pane)
     if hit and (now - hit[0]) < _PANE_TEXT_TTL_S:
         return {"pane": pane, "text": hit[1], "readonly": True}
+    # The daemon owns the pane read (`read_pane`), including how many lines and
+    # what a dead pane looks like; the desk does not shell out to tmux
+    # (FLAT_FLEET.md 9.2 rule 1).
     try:
-        result = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane],
-                                capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError) as error:
+        result = _flock().call("read_pane", target=pane, lines=max(1, min(lines, 200)))
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001 - an unreadable pane is a sentence
         return {"pane": pane, "text": "", "readonly": True,
-                "reason": f"tmux could not be read: {error}"}
-    if result.returncode != 0:
-        return {"pane": pane, "text": "", "readonly": True,
-                "reason": (result.stderr or "capture-pane failed").strip()}
-    text = "\n".join(result.stdout.splitlines()[-max(1, min(lines, 200)):])
+                "reason": f"the daemon could not read the pane: {error}"}
+    text = str((result or {}).get("text") or "")
     _PANE_TEXT_CACHE[pane] = (now, text)
     return {"pane": pane, "text": text, "readonly": True,
             "note": "read-only: typing goes through the delivery path, not this endpoint"}
 
 
-def _desk_token() -> str:
-    """The narrow desk credential, if one has been minted. Read per call: it can be issued
-    while the desk is running, and a cached empty value would need a restart to notice."""
-    token = (os.environ.get("DUNKINGSHEEP_DESK_TOKEN") or "").strip()
-    if token:
-        return token
-    try:
-        return Path("data/desk-token.txt").read_text().strip()
-    except OSError:
-        return ""
-
-
 def _pending_by_pane() -> dict | None:
     """Counts of untaken pushes, or None when the source cannot establish a count."""
+    # One socket call, not a CLI process: the desk reads the daemon, never spawns
+    # it (FLAT_FLEET.md 9.2 rule 1). The payload shape is the same dict the CLI
+    # printed, so the checks below are unchanged.
     try:
-        result = subprocess.run(["dunkingsheep", "--json", "owner", "stats"],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return None
-        payload = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        payload = _flock().call("owner_stats")
+    except Exception:  # noqa: BLE001 - a read that cannot answer is "unknown", not an error
         return None
     if (not isinstance(payload, dict) or payload.get("ok") is False
             or not isinstance(payload.get("pending"), list)):
@@ -544,13 +532,15 @@ def _capability(pane: str) -> dict:
     Returns {} when the daemon cannot answer, so callers can refuse rather than guess.
     """
     try:
-        result = subprocess.run(["dunkingsheep", "capability", pane, "--json"],
-                                capture_output=True, text=True, timeout=10)
-        if result.returncode == 0 and result.stdout.strip():
-            payload = json.loads(result.stdout)
+        # The handler reads `target`, not `pane` (dunk_api.h_delivery_capability).
+        # Passing the wrong keyword raised, the except below swallowed it, and every
+        # lane came back with no capability - the send path 409'd and the fleet view
+        # said can_type False for everything (t641 review, finding 1).
+        payload = _flock().call("delivery_capability", target=pane)
+        if isinstance(payload, dict):
             _CAP_CACHE[pane] = (time.time(), payload)
             return payload
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except Exception:  # noqa: BLE001 - an unanswered capability is {}, never a guess
         pass
     return {}
 
@@ -609,37 +599,29 @@ def _send_to_pane(pane: str, text: str):
     if not cap.get("alive"):
         raise HTTPException(status_code=409, detail=f"{pane} is not alive: nothing to send to")
     route = cap.get("send")
-    desk_token = _desk_token()
-    if route == "guarded" and not desk_token:
-        raise HTTPException(
-            status_code=409,
-            detail=("no desk credential is configured yet: the daemon grants typed sends "
-                    "only through a narrow desk token (send to listed panes). Issue one with "
-                    "`dunkingsheep desk-token --panes ...` and put it in data/desk-token.txt "
-                    "or DUNKINGSHEEP_DESK_TOKEN. Until then this lane cannot be typed into."))
-    argv = (["dunkingsheep", "--json", "owner", "push", pane, text] if route == "owner_push"
-            else ["dunkingsheep", "send", pane, text, "--desk-token", desk_token, "--json"]
-            if route == "guarded"
-            else None)
-    if argv is None:
+    if route not in ("owner_push", "guarded"):
         raise HTTPException(status_code=409,
                             detail=f"{pane} declares no send route ({route!r}); not guessing")
+    # One socket call per route, and the daemon's own vocabulary decides what
+    # happened: the desk is the `web` role, which holds the typed route by design
+    # (require_send_self exempts it), so the retired desk credential is not needed
+    # to type any more.
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=25)
-    except (OSError, subprocess.SubprocessError) as error:
+        payload = (_flock().call("owner_push", target=pane, body=text)
+                   if route == "owner_push"
+                   else _flock().call("send_text", target=pane, text=text))
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001 - a dead daemon is a 502, not a traceback
         raise HTTPException(status_code=502, detail=f"delivery path unavailable: {error}")
-    detail = (result.stdout or result.stderr or "").strip()[:400]
+    if not isinstance(payload, dict):
+        payload = {}
+    detail = str(payload.get("message") or payload.get("outcome") or "").strip()[:400]
 
     if route == "owner_push":
-        if result.returncode != 0:
-            raise HTTPException(status_code=409, detail=detail or "refused")
         # Forward the daemon's own outcome (now "stored"), never synthesise "ok": a push is
         # stored, not delivered, and the difference is the whole point of the field.
-        pushed = {}
-        try:
-            pushed = json.loads(result.stdout or "{}")
-        except ValueError:
-            pushed = {}
+        pushed = payload
         outcome = str(pushed.get("outcome") or "").strip().lower()
         if not outcome:
             raise HTTPException(status_code=502,
@@ -653,18 +635,13 @@ def _send_to_pane(pane: str, text: str):
     # Guarded: the daemon answers with a machine-readable outcome. Branch on THAT - not on
     # the exit code and not on prose. Two earlier versions of this function got the false
     # success and then the false failure, both by parsing sentences.
-    payload = {}
-    try:
-        payload = json.loads(result.stdout or "{}")
-    except ValueError:
-        payload = {}
     outcome = str(payload.get("outcome") or "").strip().lower()
     message_id = payload.get("message_id")
 
     if outcome == "refused":
         return {"ok": False, "pane": pane, "route": route, "outcome": outcome,
                 "message_id": message_id, "detail": payload.get("message") or detail}
-    if not outcome and result.returncode != 0:
+    if not outcome:
         raise HTTPException(status_code=409, detail=detail or "No daemon outcome")
     if outcome == "queued":
         return {"ok": True, "pane": pane, "route": route, "outcome": "queued",
@@ -718,19 +695,9 @@ def api_fleet():
 
     cfg = Path(os.path.expanduser("~/.config/dunkingsheep"))
     try:
-        result = subprocess.run(["dunkingsheep", "panes", "--json"], capture_output=True,
-                                text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        return unavailable("pane roster timed out")
-    except (OSError, subprocess.SubprocessError) as error:
+        listing = _flock().call("list_panes")
+    except Exception as error:  # noqa: BLE001 - the view says unavailable, it does not crash
         return unavailable(f"pane roster could not be read: {error}")
-    if result.returncode != 0:
-        return unavailable((result.stderr or result.stdout or
-                            f"pane roster exited {result.returncode}").strip())
-    try:
-        listing = json.loads(result.stdout)
-    except (ValueError, TypeError):
-        return unavailable("pane roster returned invalid JSON")
     if not isinstance(listing, dict) or not isinstance(listing.get("panes"), list):
         return unavailable("pane roster response is missing its panes list")
     panes = listing["panes"]
@@ -742,22 +709,33 @@ def api_fleet():
     except (OSError, ValueError):
         registry = {}
 
+    # The same two answers, asked of the daemon instead of its databases
+    # (FLAT_FLEET.md 9.2 rule 1). `state_latest` is agent_state through the socket
+    # (newest first, so the first row per pane is the latest), and `roster` already
+    # carries each lane's unread count. A read that fails leaves the maps empty,
+    # which the view already renders as "unknown" rather than as zero.
     activity, waiting, sessions = {}, {}, {}
     try:
-        db = sqlite3.connect(f"file:{cfg / 'agent-state.db'}?mode=ro", uri=True)
-        db.row_factory = sqlite3.Row
-        for row in db.execute(
-                "select pane_id, max(at) at, session_id from agent_state group by pane_id"):
-            activity[row["pane_id"]] = row["at"]
-            sessions[row["pane_id"]] = row["session_id"]
-    except sqlite3.Error:
+        state = _flock().call("state_latest", limit=500)
+        for row in (state.get("rows") or []):
+            pane_key = row.get("pane_id")
+            if not pane_key or pane_key in activity:
+                continue
+            if row.get("at") is not None:
+                activity[pane_key] = row["at"]
+            sessions[pane_key] = row.get("session_id")
+    except Exception:  # noqa: BLE001 - a missing source is unknown, not zero
         pass
     try:
-        db = sqlite3.connect(f"file:{cfg / 'inbox.db'}?mode=ro", uri=True)
-        for box, count in db.execute(
-                "select mailbox, count(*) from messages where state='queued' group by mailbox"):
-            waiting[box] = count
-    except sqlite3.Error:
+        roster = _flock().call("roster")
+        for lane in (roster.get("lanes") or []):
+            unread = (lane.get("inbox") or {}).get("unread")
+            if unread is None:
+                continue
+            for key in (lane.get("name"), lane.get("pane_id")):
+                if key:
+                    waiting[key] = unread
+    except Exception:  # noqa: BLE001
         pass
 
     # Last TURN, not last capture: the capture age says when the row was written, which is
@@ -817,7 +795,10 @@ def api_fleet():
             "pending_state": "ok" if pending is not None else "unknown",
             # Whether the desk can actually reach the typed route for this lane: the
             # capability says what it would take, this says whether we hold the credential.
-            "can_type": bool(_desk_token()),
+            # The typed route belongs to the `web` role now (the daemon exempts it
+            # from send-self), so "can we type" is "does this lane declare the
+            # guarded route", not "do we hold a retired credential".
+            "can_type": (cap or {}).get("send") == "guarded",
         })
     rows.sort(key=lambda row: (row["project"] or "", row["pane_id"]))
     import fleet_inventory
