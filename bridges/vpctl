@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Local agent CLI for publishing durable briefs to the VP desk.
+
+Usage: echo 'Status...' | ./vpctl brief --channel vp
+"""
+import argparse
+import json
+import mimetypes
+import os
+import sys
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]   # repo root: one repo (FLAT_FLEET.md 9)
+
+
+def answer_ids(value):
+    try:
+        ids = [int(part) for part in value.split(",")]
+        if not ids or any(item <= 0 for item in ids):
+            raise ValueError
+        return list(dict.fromkeys(ids))
+    except ValueError:
+        raise argparse.ArgumentTypeError("answers must be positive message IDs separated by commas")
+
+
+parser = argparse.ArgumentParser(description="VP of Agentry local API client")
+sub = parser.add_subparsers(dest="command", required=True)
+brief = sub.add_parser("brief", help="Publish a Markdown brief from stdin")
+brief.add_argument("--channel", default="vp")
+brief.add_argument("--answers", type=answer_ids, default=[], metavar="ID[,ID]",
+                   help="Link this brief to owner messages in the same channel (first answer wins)")
+brief.add_argument("--attach", action="append", type=Path, default=[], help="Attach a local file (up to 25 MB)")
+status = sub.add_parser("status", help="Read channel status")
+args = parser.parse_args()
+auth = json.loads((ROOT / "data" / "auth.json").read_text())
+base = os.getenv("VP_BASE_URL", "http://127.0.0.1:8787")
+if args.command == "brief":
+    body = sys.stdin.read().strip()
+    if not body:
+        parser.error("brief text must be provided on stdin")
+    attachment_ids = []
+    for source in args.attach:
+        content = source.read_bytes()
+        if len(content) > 25 * 1024 * 1024:
+            parser.error(f"attachment exceeds 25 MB: {source}")
+        boundary = "vpctl" + uuid.uuid4().hex
+        filename = source.name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        upload = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+                  f"Content-Type: {mime}\r\n\r\n").encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(
+            base + "/api/uploads", data=upload,
+            headers={"Authorization": "Bearer " + auth["token"],
+                     "Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                attachment_ids.append(json.loads(response.read())["id"])
+        except urllib.error.HTTPError as exc:
+            print(exc.read().decode(), file=sys.stderr)
+            sys.exit(1)
+    path, payload = "/api/brief", {"channel": args.channel, "body": body,
+                                   "attachment_ids": attachment_ids, "answers": args.answers}
+else:
+    path, payload = "/api/channels", None
+request = urllib.request.Request(
+    base + path,
+    data=json.dumps(payload).encode() if payload is not None else None,
+    headers={"Authorization": "Bearer " + auth["token"], "Content-Type": "application/json"},
+    method="POST" if payload is not None else "GET",
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        print(response.read().decode())
+except urllib.error.HTTPError as exc:
+    print(exc.read().decode(), file=sys.stderr)
+    sys.exit(1)

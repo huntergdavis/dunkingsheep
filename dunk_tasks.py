@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     repo          TEXT,
     pr            INTEGER,
     head          TEXT,
-    verdict       TEXT
+    verdict       TEXT,
+    accounting_pr INTEGER
 );
 CREATE INDEX IF NOT EXISTS tasks_by_scope
     ON tasks (scope, status, created_at);
@@ -317,7 +318,8 @@ class Tasks:
                           ("attempts", "INTEGER NOT NULL DEFAULT 0"),
                           ("kind", "TEXT NOT NULL DEFAULT 'work'"),
                           ("author", "TEXT"), ("repo", "TEXT"), ("pr", "INTEGER"),
-                          ("head", "TEXT"), ("verdict", "TEXT")):
+                          ("head", "TEXT"), ("verdict", "TEXT"),
+                          ("accounting_pr", "INTEGER")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # The partial unique index needs the columns above to exist first.
@@ -752,6 +754,20 @@ class Tasks:
                 raise
         return verdict
 
+    def set_accounting_pr(self, task_id, number):
+        """Record the accounting PR a review's accept verdict opened (FLAT_FLEET 6.4).
+        The body PR stays in `pr`; both numbers are then on the one review task."""
+        with self._lock:
+            row = self._require(task_id)
+            self.db.execute(
+                "UPDATE tasks SET accounting_pr = ?, updated_at = ? WHERE id = ?",
+                (int(number), _now(), str(task_id)))
+            self._record(str(task_id), "accounting", at=_now(), scope=row["scope"],
+                         priority=row["priority"], meta={"accounting_pr": int(number),
+                                                          "body_pr": row["pr"]})
+            self.db.commit()
+        return int(number)
+
     def notes(self, task_id, event="note"):
         """Every note event on a task, oldest first: [{at, actor, meta, text}].
 
@@ -1025,7 +1041,7 @@ class Tasks:
         return {"noted": str(task_id), "event": event, "actor": actor,
                 "meta": meta or {}}
 
-    def notes(self, task_id, limit=3):
+    def recent_notes(self, task_id, limit=3):
         """The last `limit` events that carry a reason, oldest first (t605).
 
         Evidence a lane wrote with `task note` lived only in task_events, so

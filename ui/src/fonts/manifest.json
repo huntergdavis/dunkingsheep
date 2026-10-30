@@ -1,0 +1,82 @@
+[
+  {
+    "family": "Oxanium",
+    "role": "geometric techno",
+    "package": "@fontsource/oxanium",
+    "package_version": "5.3.0",
+    "font_version": [
+      "Version 2.000"
+    ],
+    "style": "normal",
+    "weight": 400,
+    "subset": "latin",
+    "path": "web/src/fonts/oxanium/oxanium-latin-400-normal.woff2",
+    "source_url": "https://cdn.jsdelivr.net/npm/@fontsource/oxanium@5.3.0/files/oxanium-latin-400-normal.woff2",
+    "sha256": "e77dffc577755217c83aead133969093df038412ee7f85520361b24f22dad377",
+    "bytes": 8816,
+    "license": "OFL-1.1",
+    "license_path": "web/src/fonts/oxanium/LICENSE.txt",
+    "license_url": "https://raw.githubusercontent.com/google/fonts/main/ofl/oxanium/OFL.txt",
+    "license_sha256": "fe17c0f2581d71b4e1ea7e636e7f4877c29223e11bb1dd1a871e8c3f2a86336b"
+  },
+  {
+    "family": "Black Ops One",
+    "role": "industrial stencil",
+    "package": "@fontsource/black-ops-one",
+    "package_version": "5.3.0",
+    "font_version": [
+      "Version 1.004; ttfautohint (v1.8.4.7-5d5b)"
+    ],
+    "style": "normal",
+    "weight": 400,
+    "subset": "latin",
+    "path": "web/src/fonts/black-ops-one/black-ops-one-latin-400-normal.woff2",
+    "source_url": "https://cdn.jsdelivr.net/npm/@fontsource/black-ops-one@5.3.0/files/black-ops-one-latin-400-normal.woff2",
+    "sha256": "6e4c5eb97c2b5a41ebe33f4462385d551dabef7aa28cae7b3d6b77e63529eee5",
+    "bytes": 31408,
+    "license": "OFL-1.1",
+    "license_path": "web/src/fonts/black-ops-one/LICENSE.txt",
+    "license_url": "https://raw.githubusercontent.com/google/fonts/main/ofl/blackopsone/OFL.txt",
+    "license_sha256": "f67ca4a200424868ee8fcd5464d7b35ac1cbf7723f6bfdbd19a8524689fab9a8"
+  },
+  {
+    "family": "Dosis",
+    "role": "rounded display",
+    "package": "@fontsource/dosis",
+    "package_version": "5.3.0",
+    "font_version": [
+      "Version 3.002"
+    ],
+    "style": "normal",
+    "weight": 400,
+    "subset": "latin",
+    "path": "web/src/fonts/dosis/dosis-latin-400-normal.woff2",
+    "source_url": "https://cdn.jsdelivr.net/npm/@fontsource/dosis@5.3.0/files/dosis-latin-400-normal.woff2",
+    "sha256": "613f26d923d84672cacd9e37ffadce6bc265bb02b6125c9e9c3721e905f5215b",
+    "bytes": 16616,
+    "license": "OFL-1.1",
+    "license_path": "web/src/fonts/dosis/LICENSE.txt",
+    "license_url": "https://raw.githubusercontent.com/google/fonts/main/ofl/dosis/OFL.txt",
+    "license_sha256": "6dfa3951f0c829518b284608fcc1acb196cba1536b1ae1713a49deccde1ccc53"
+  },
+  {
+    "family": "Michroma",
+    "role": "wide caps / letterspaced",
+    "package": "@fontsource/michroma",
+    "package_version": "5.3.0",
+    "font_version": [
+      "Version 1.100; ttfautohint (v1.8.4.7-5d5b);gftools[0.9.29]"
+    ],
+    "style": "normal",
+    "weight": 400,
+    "subset": "latin",
+    "path": "web/src/fonts/michroma/michroma-latin-400-normal.woff2",
+    "source_url": "https://cdn.jsdelivr.net/npm/@fontsource/michroma@5.3.0/files/michroma-latin-400-normal.woff2",
+    "sha256": "754fdb31c9906e82cf9c0ecb1d0b528073818fc2c418a39932c83a34cca027b6",
+    "bytes": 17908,
+    "license": "OFL-1.1",
+    "license_path": "web/src/fonts/michroma/LICENSE.txt",
+    "license_url": "https://raw.githubusercontent.com/google/fonts/main/ofl/michroma/OFL.txt",
+    "license_sha256": "33c39ce59a45bfb0dae3280e98bdb46be59d6d68efc62d4dc5fae90a26d2f393"
+  }
+]

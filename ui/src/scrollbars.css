@@ -1,0 +1,68 @@
+/* Always-visible, grabbable classic scrollbars (owner #941 and #943).
+ *
+ * Per-app only: no OS, desktop, GTK or browser-wide setting is touched.
+ * The owner is on a trackpad, and the auto-hiding overlay scrollbar was both
+ * invisible at rest and too thin to hit, so every scroll container in this
+ * app gets a real, classic scrollbar that is always drawn, always takes
+ * space, and is wide enough to grab.
+ *
+ * The structure is identical on every surface; the colours follow the
+ * surface's own theme through the --sb-* variables, so the herdr shell and
+ * the framed dashboards match while the desk keeps its light chrome.
+ *
+ * Contrast (thumb against track):
+ *   dark  track #181825, thumb #6c7086 = 3.59:1, hover #7f849c = 4.75:1
+ *   light track #e6e9ef, thumb #6f7987 = 3.63:1, hover #5c6673 = 4.79:1
+ * The old pairs (#45475a on #181825 = 1.92:1, #585b70 = 2.63:1) were below
+ * the 3:1 the owner asked for and are not used.
+ */
+
+:root {
+  --sb-size: 14px;
+  --sb-radius: 6px;
+  --sb-track: #181825;
+  --sb-thumb: #6c7086;
+  --sb-thumb-hover: #7f849c;
+}
+
+/* The desk's own light chrome (the old chat surfaces). */
+.shell { --sb-track: #e6e9ef; --sb-thumb: #6f7987; --sb-thumb-hover: #5c6673; }
+
+/* Every dark surface: the herdr palette, the same as the shell. */
+.dash-root { --sb-track: #181825; --sb-thumb: #6c7086; --sb-thumb-hover: #7f849c; }
+
+/* Chromium and WebKit: a styled webkit scrollbar is always classic, never
+   an overlay, so it is visible at rest and always takes layout space. */
+::-webkit-scrollbar { width: var(--sb-size); height: var(--sb-size); }
+::-webkit-scrollbar-track { background: var(--sb-track); border-radius: var(--sb-radius); }
+::-webkit-scrollbar-thumb {
+  background: var(--sb-thumb);
+  border-radius: var(--sb-radius);
+  /* A practical minimum length: never a sliver you cannot grab. */
+  min-height: 48px;
+  min-width: 48px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--sb-thumb-hover); }
+::-webkit-scrollbar-corner { background: var(--sb-track); }
+
+/* Firefox has no webkit pseudo-elements: classic width plus the two
+   colours. Scoped to Firefox on purpose - a global `scrollbar-width` in
+   Chromium switches to the native scrollbar path, which then IGNORES
+   ::-webkit-scrollbar-thumb { min-height } and renders a sliver thumb on
+   long content. Chromium and Safari must keep the pseudo-element path. */
+@supports (-moz-appearance: none) {
+  * { scrollbar-width: auto; scrollbar-color: var(--sb-thumb) var(--sb-track); }
+}
+
+/* Reserve the gutter on the main scrollers so content never shifts when a
+   scrollbar appears. Small fixed-height boxes keep their natural width: a
+   reserved gutter there would only add dead space. */
+html,
+body,
+.dash-body,
+.dash-table-wrap,
+.ops-table-wrap,
+.conversation,
+.activity-body,
+.search-results,
+.game-view { scrollbar-gutter: stable; }

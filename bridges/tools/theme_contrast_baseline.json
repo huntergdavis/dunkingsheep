@@ -1,0 +1,2714 @@
+{
+  "version": 2,
+  "status": "design triage; exact-value BASELINE-FAIL deferrals, not PASS or whole-page acceptance",
+  "reference": "https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html",
+  "policy": "Decorative static separators can receive narrow design waivers; controls, selected/focus cues and text are retained for fixes. The remaining waivers expire with t192 and do not override stricter owner acceptance. The t203 new-theme entries were removed on repair, not re-waived: every Nostromo (38) and 2001 (42) row now meets its floor in theme-owned tokens.",
+  "review": {
+    "source": "VP i26980 relaying pi-review-1",
+    "confirmedScopedWaivers": 42,
+    "correctedToFix": 2,
+    "limits": "static CSS classification, not rendered reachability",
+    "remediationTask": "t203",
+    "remediation": "t203 repaired all 80 new-theme rows in web/src/themes/{nostromo,2001}.css and removed them from this baseline; no new-theme waiver was renewed. Removal is recorded in this file's git history and in docs/THEME_CONTRAST_GATE.md."
+  },
+  "inputs": [
+    {
+      "id": "default-crt",
+      "source_head": "4a85540b66aa57185becc1ea12072b5c3fe6ac85",
+      "input_sha256": "b8f8402339a52c92e62e61a0c1c78775aceae0872ec7934ad4a73e9ec11fda7f",
+      "entry_start": 0,
+      "entry_count": 97,
+      "expires_with": "t192"
+    }
+  ],
+  "provenance_policy": "Input ranges index the ordered entries array and must cover it exactly once. input_sha256 preserves the cited original input; adjusted_input_sha256 identifies the same approved new-theme file with only expires_with changed to t203. Historical reason text is preserved verbatim; expires_with is authoritative under the recorded VP override. The remediated t203 input range (entry_start 99, entry_count 80) was removed when its rows were repaired; its original input hashes above are historical and no longer describe an entry range in this file. The default-crt input hash still identifies the original 99-row triage; its current 97-entry range excludes only the two exact keys recorded in baseline_retirements.",
+  "entries": [
+    {
+      "theme": "default",
+      "pair": "activity-border/activity-surface",
+      "foreground_value": "#dfe6ea",
+      "background_value": "#eef2f4",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static activity-pane separator; headings and pane layout identify the region. No control, focus or selected-state cue is waived. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1200515095442358,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 81,
+          "selector": ".activity",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 150,
+          "selector": ".activity",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#888c8e"
+    },
+    {
+      "theme": "default",
+      "pair": "activity-toggle-border/activity-toggle-surface",
+      "foreground_value": "#dce5e9",
+      "background_value": "#f5f8f7",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1963199534462652,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 154,
+          "selector": ".activity-toggle",
+          "context": [
+            "@media (max-width:1150px)"
+          ]
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8a9092"
+    },
+    {
+      "theme": "default",
+      "pair": "border/bg",
+      "foreground_value": "#313244",
+      "background_value": "#11111b",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4915572109682538,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 485,
+          "selector": ".message-dock textarea, .message-dock select",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 486,
+          "selector": ".message-dock button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5f606e"
+    },
+    {
+      "theme": "default",
+      "pair": "border/surface",
+      "foreground_value": "#313244",
+      "background_value": "#181825",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3963360701234397,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 102,
+          "selector": ".login-card",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 420,
+          "selector": ".login-card",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 40,
+          "selector": ".dash-nav",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 120,
+          "selector": ".dash-nav-boards > .dash-nav-links",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 146,
+          "selector": ".dash-header",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 197,
+          "selector": ".dash-panel",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 215,
+          "selector": ".dash-stat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 255,
+          "selector": ".dash-empty, .dash-error",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 280,
+          "selector": ".dash-figure",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 339,
+          "selector": ".dash-root .composer",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 365,
+          "selector": ".dash-reference",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 378,
+          "selector": ".dash-root .game-tools",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 379,
+          "selector": ".dash-root .game-type, .dash-root .game-saves",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 381,
+          "selector": ".dash-root .game-chat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 464,
+          "selector": ".dash-terminal textarea",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 465,
+          "selector": ".dash-terminal-text",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 475,
+          "selector": ".chat-new-messages",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 476,
+          "selector": ".dash-root .dock-trigger",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 479,
+          "selector": ".message-dock",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#636471"
+    },
+    {
+      "theme": "default",
+      "pair": "border/surface-raised",
+      "foreground_value": "#313244",
+      "background_value": "#1e1e2e",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3045546331415323,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 67,
+          "selector": ".dash-nav-mark",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 316,
+          "selector": ".dash-health li",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 330,
+          "selector": ".dash-root .message-wrap .cs-message__content",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 361,
+          "selector": ".dash-root .search-head, .dash-root .search-head button",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 428,
+          "selector": ".login-card .brand-mark",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#686976"
+    },
+    {
+      "theme": "default",
+      "pair": "composer-border/topbar-surface",
+      "foreground_value": "#e1e7eb",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Composer section separator; editor and button boundaries remain separately gated. This does not waive any input boundary. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2476600749949796,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 67,
+          "selector": ".composer",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#929598"
+    },
+    {
+      "theme": "default",
+      "pair": "dash-border/bg",
+      "foreground_value": "#313244",
+      "background_value": "#11111b",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4915572109682538,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 485,
+          "selector": ".message-dock textarea, .message-dock select",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 486,
+          "selector": ".message-dock button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5f606e"
+    },
+    {
+      "theme": "default",
+      "pair": "dash-border/surface",
+      "foreground_value": "#313244",
+      "background_value": "#181825",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3963360701234397,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 40,
+          "selector": ".dash-nav",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 120,
+          "selector": ".dash-nav-boards > .dash-nav-links",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 146,
+          "selector": ".dash-header",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 197,
+          "selector": ".dash-panel",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 215,
+          "selector": ".dash-stat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 255,
+          "selector": ".dash-empty, .dash-error",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 280,
+          "selector": ".dash-figure",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 339,
+          "selector": ".dash-root .composer",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 365,
+          "selector": ".dash-reference",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 378,
+          "selector": ".dash-root .game-tools",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 379,
+          "selector": ".dash-root .game-type, .dash-root .game-saves",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 381,
+          "selector": ".dash-root .game-chat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 464,
+          "selector": ".dash-terminal textarea",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 465,
+          "selector": ".dash-terminal-text",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 475,
+          "selector": ".chat-new-messages",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 476,
+          "selector": ".dash-root .dock-trigger",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 479,
+          "selector": ".message-dock",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#636471"
+    },
+    {
+      "theme": "default",
+      "pair": "dash-border/surface-raised",
+      "foreground_value": "#313244",
+      "background_value": "#1e1e2e",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3045546331415323,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 67,
+          "selector": ".dash-nav-mark",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 316,
+          "selector": ".dash-health li",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 330,
+          "selector": ".dash-root .message-wrap .cs-message__content",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 361,
+          "selector": ".dash-root .search-head, .dash-root .search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#686976"
+    },
+    {
+      "theme": "default",
+      "pair": "dash-chip-border/dash-chip-surface",
+      "foreground_value": "#3f5d4a",
+      "background_value": "#16241c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.2068000357364093,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 193,
+          "selector": ".dash-chip.ok",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#567160"
+    },
+    {
+      "theme": "default",
+      "pair": "dash-chip-border-2/dash-chip-surface-2",
+      "foreground_value": "#6a3b48",
+      "background_value": "#241a1f",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.8767715949366248,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 194,
+          "selector": ".dash-chip.bad",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 263,
+          "selector": ".dash-error",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#845d68"
+    },
+    {
+      "theme": "default",
+      "pair": "file-pill-border/file-pill-surface",
+      "foreground_value": "#dbe6de",
+      "background_value": "#f3f8ee",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1883969197804107,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 79,
+          "selector": ".file-pill",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#89908b"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border/game-chat-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#0d1a24",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.6140473221711915,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 473,
+          "selector": ".game-chat",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#526874"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border/game-saves-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#0f2130",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5003695035862854,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 456,
+          "selector": ".game-saves",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#586d78"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border/game-type-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#142634",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4162670679305418,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 451,
+          "selector": ".game-type",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5c717c"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border/sidebar-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#101d2c",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5567624298287486,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 463,
+          "selector": ".game-wheel",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 496,
+          "selector": ".codewheel-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#556b76"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border-2/game-chat-actions-surface",
+      "foreground_value": "#2c4b5c",
+      "background_value": "#18313f",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.46332604974677,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 487,
+          "selector": ".game-chat-actions button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#637a86"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border-2/game-type-surface-2",
+      "foreground_value": "#2c4b5c",
+      "background_value": "#0a141c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0076069986839395,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 453,
+          "selector": ".game-type input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 458,
+          "selector": ".game-saves input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 459,
+          "selector": ".game-saves select",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 465,
+          "selector": ".game-wheel input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 466,
+          "selector": ".game-wheel select",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 485,
+          "selector": ".game-chat-input textarea",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#4b6574"
+    },
+    {
+      "theme": "default",
+      "pair": "game-type-border-3/game-type-surface-3",
+      "foreground_value": "#3d8a6c",
+      "background_value": "#2f6f57",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4297766933444875,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 454,
+          "selector": ".game-type button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 461,
+          "selector": ".game-saves button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 468,
+          "selector": ".game-wheel button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 488,
+          "selector": ".game-chat-actions button.primary.send",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#98c1b1"
+    },
+    {
+      "theme": "default",
+      "pair": "jump-banner-border/jump-banner-surface",
+      "foreground_value": "#d2e7be",
+      "background_value": "#edf6e6",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Informational banner frame; message text and its action are separately identifiable. Action text/focus contrast remains required. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1892401320801493,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 134,
+          "selector": ".jump-banner",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#849177"
+    },
+    {
+      "theme": "default",
+      "pair": "jump-latest-border/jump-latest-surface",
+      "foreground_value": "#bfd9aa",
+      "background_value": "#e8f5dc",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.350175644612505,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 138,
+          "selector": ".jump-latest",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#7f9071"
+    },
+    {
+      "theme": "default",
+      "pair": "older-marker-border/topbar-surface",
+      "foreground_value": "#d8e0e5",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.336432470788954,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 40,
+          "selector": ".older-marker button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#909599"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-credit-chart-border/ops-credit-chart-surface",
+      "foreground_value": "#44606d",
+      "background_value": "#142936",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer chart/model card frame, not plotted lines, axes or data glyphs. Chart graphical marks and text remain separately required. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.2423862104360586,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 288,
+          "selector": ".ops-credit-chart,.ops-model",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5b737f"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-executive-border/ops-executive-surface",
+      "foreground_value": "#496270",
+      "background_value": "#1c3544",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.9879189606843957,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#697e89"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-executive-border/ops-executive-surface-2",
+      "foreground_value": "#496270",
+      "background_value": "#172733",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.375026068633185,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5c727f"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-executive-border/ops-executive-surface-3",
+      "foreground_value": "#496270",
+      "background_value": "#13232d",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.4995029185714674,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#576e7b"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-executive-head-border/ops-capacity-line-surface",
+      "foreground_value": "#385564",
+      "background_value": "#213643",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Divider below labelled capacity/signal text rows; it does not encode the row value or status. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5845569668588242,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 283,
+          "selector": ".ops-capacity-line",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#6a808b"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-executive-head-border/ops-signal-line-surface",
+      "foreground_value": "#385564",
+      "background_value": "#293c44",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Divider below labelled capacity/signal text rows; it does not encode the row value or status. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.453633869033,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 285,
+          "selector": ".ops-signal-line",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#718690"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-kpis-border/ops-kpis-surface",
+      "foreground_value": "#597083",
+      "background_value": "#203545",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static labelled KPI tile frame; value, label and layout convey the content without the outline. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.456959588207574,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 334,
+          "selector": ".ops-kpis>div",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#697e8f"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-lab-panel-border/ops-lab-panel-surface",
+      "foreground_value": "#4b6b70",
+      "background_value": "#132a36",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled panel frame; table rules, disclosure control, text and focus indicators are outside this waiver. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.57496458237904,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 242,
+          "selector": ".ops-lab-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#58757a"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-metrics-border/ops-chart-surface",
+      "foreground_value": "#36505b",
+      "background_value": "#172b37",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static metrics-panel separators; text, chart graphical marks and interactive components remain separately gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.7085100458165514,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 345,
+          "selector": ".ops-chart",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 361,
+          "selector": ".ops-grid>div",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 402,
+          "selector": ".ops-stats>div",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 407,
+          "selector": ".ops-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#61757e"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-metrics-border/ops-metrics-surface",
+      "foreground_value": "#36505b",
+      "background_value": "#10212d",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static metrics-panel separators; text, chart graphical marks and interactive components remain separately gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.9220731235354,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 224,
+          "selector": ".ops-metrics",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#576d76"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-mission-head-border/ops-mission-head-surface",
+      "foreground_value": "#678b70",
+      "background_value": "#254839",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Separator under the labelled mission heading, not a control or state indicator. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.665644614512371,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 228,
+          "selector": ".ops-mission-head",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#72947b"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-panel-border/ops-health-surface",
+      "foreground_value": "#2f4a55",
+      "background_value": "#132330",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.702460350354094,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 417,
+          "selector": ".ops-health li",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#596f78"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-source-border/ops-source-surface",
+      "foreground_value": "#3d6b5a",
+      "background_value": "#17342c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.2053319932171567,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 399,
+          "selector": ".ops-source",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#588071"
+    },
+    {
+      "theme": "default",
+      "pair": "ops-source-border-2/ops-source-surface-2",
+      "foreground_value": "#7a4a3a",
+      "background_value": "#2f1f1c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.150614494107836,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 400,
+          "selector": ".ops-source.bad",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8c6355"
+    },
+    {
+      "theme": "default",
+      "pair": "poolrad-stat-border/poolrad-stat-surface",
+      "foreground_value": "#3f5d6d",
+      "background_value": "#1d3342",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static labelled statistic-card outline; the numeric value and its label carry the information. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.8685110015251638,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 386,
+          "selector": ".poolrad-stat",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#657d8a"
+    },
+    {
+      "theme": "default",
+      "pair": "queue-help-border/queue-help-surface",
+      "foreground_value": "#d5b981",
+      "background_value": "#fff7e6",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.7769513118374005,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 204,
+          "selector": ".queue-help button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#a38d63"
+    },
+    {
+      "theme": "default",
+      "pair": "queue-help-border-2/queue-help-surface-3",
+      "foreground_value": "#e7c77c",
+      "background_value": "#fff4db",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Long-wait container frame; main.jsx renders explicit waiting/action-needed text and alert semantics. Send-now control and all text remain gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4943900098026048,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 209,
+          "selector": ".queue-help.long-wait",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#a18b57"
+    },
+    {
+      "theme": "default",
+      "pair": "rune-choice-border-2/brand-mark-surface",
+      "foreground_value": "#b6ee78",
+      "background_value": "#d7efb8",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix theme-owned rune-choice boundary/selected-state contrast. The selected selector is meaningful control state, so no decorative waiver. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.0928408937071405,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 509,
+          "selector": ".rune-choice[aria-pressed=\"true\"]",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#6c8e48"
+    },
+    {
+      "theme": "default",
+      "pair": "search-head-border-2/search-head-surface",
+      "foreground_value": "#e2e7ea",
+      "background_value": "#f9fafb",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1924363142357421,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 94,
+          "selector": ".search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8e9193"
+    },
+    {
+      "theme": "default",
+      "pair": "search-head-ink/search-head-surface",
+      "foreground_value": "#86929b",
+      "background_value": "#f9fafb",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 3.045404309508075,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 94,
+          "selector": ".search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#6b757c"
+    },
+    {
+      "theme": "default",
+      "pair": "search-more-border/search-more-surface",
+      "foreground_value": "#dbe5e8",
+      "background_value": "#f7f9fa",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2136440015662555,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 133,
+          "selector": ".search-more",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8b9193"
+    },
+    {
+      "theme": "default",
+      "pair": "sidebar-border/sidebar-surface",
+      "foreground_value": "#243547",
+      "background_value": "#101d2c",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static sidebar/main-content separator; navigation labels and their selected/focus states remain gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3574075848923295,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 10,
+          "selector": ".sidebar",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5d6977"
+    },
+    {
+      "theme": "default",
+      "pair": "status-badge-ink/status-badge-surface",
+      "foreground_value": "#5f7280",
+      "background_value": "#edf1f3",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 4.393894402021144,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 33,
+          "selector": ".status-badge",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5e707e"
+    },
+    {
+      "theme": "default",
+      "pair": "status-badge-ink-3/status-badge-surface-3",
+      "foreground_value": "#8c6b28",
+      "background_value": "#fff2d9",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 4.461204837584184,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 35,
+          "selector": ".status-badge.idle",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 164,
+          "selector": ".status-badge.waiting",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8b6a28"
+    },
+    {
+      "theme": "default",
+      "pair": "topbar-border/topbar-surface",
+      "foreground_value": "#e4e9ed",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix shared topbar-border theme token: style.css also consumes it on .icon-button, so a separator-only waiver would exempt a control boundary. Preserve this exact-value FAIL as a temporary baseline until t192; independently reviewed correction i26980.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2225475216564594,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 29,
+          "selector": ".topbar",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#929597"
+    },
+    {
+      "theme": "crt",
+      "pair": "activity-border/activity-surface",
+      "foreground_value": "#dfe6ea",
+      "background_value": "#eef2f4",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static activity-pane separator; headings and pane layout identify the region. No control, focus or selected-state cue is waived. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1200515095442358,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 81,
+          "selector": ".activity",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 150,
+          "selector": ".activity",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#888c8e"
+    },
+    {
+      "theme": "crt",
+      "pair": "activity-toggle-border/activity-toggle-surface",
+      "foreground_value": "#dce5e9",
+      "background_value": "#f5f8f7",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1963199534462652,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 154,
+          "selector": ".activity-toggle",
+          "context": [
+            "@media (max-width:1150px)"
+          ]
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8a9092"
+    },
+    {
+      "theme": "crt",
+      "pair": "border/bg",
+      "foreground_value": "#315c3d",
+      "background_value": "#07110b",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.494260910001495,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 485,
+          "selector": ".message-dock textarea, .message-dock select",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 486,
+          "selector": ".message-dock button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#40684b"
+    },
+    {
+      "theme": "crt",
+      "pair": "border/file-pill-surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 79,
+          "selector": ".file-pill",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "border/rune-choice-surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 507,
+          "selector": ".rune-choice",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "border/surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#0b1910",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.3508970915804595,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 102,
+          "selector": ".login-card",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 420,
+          "selector": ".login-card",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 40,
+          "selector": ".dash-nav",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 120,
+          "selector": ".dash-nav-boards > .dash-nav-links",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 146,
+          "selector": ".dash-header",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 197,
+          "selector": ".dash-panel",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 215,
+          "selector": ".dash-stat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 255,
+          "selector": ".dash-empty, .dash-error",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 280,
+          "selector": ".dash-figure",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 339,
+          "selector": ".dash-root .composer",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 365,
+          "selector": ".dash-reference",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 378,
+          "selector": ".dash-root .game-tools",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 379,
+          "selector": ".dash-root .game-type, .dash-root .game-saves",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 381,
+          "selector": ".dash-root .game-chat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 464,
+          "selector": ".dash-terminal textarea",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 465,
+          "selector": ".dash-terminal-text",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 475,
+          "selector": ".chat-new-messages",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 476,
+          "selector": ".dash-root .dock-trigger",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 479,
+          "selector": ".message-dock",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#456c50"
+    },
+    {
+      "theme": "crt",
+      "pair": "border/surface-raised",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 79,
+          "selector": ".file-pill",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 507,
+          "selector": ".rune-choice",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 67,
+          "selector": ".dash-nav-mark",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 316,
+          "selector": ".dash-health li",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 330,
+          "selector": ".dash-root .message-wrap .cs-message__content",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 361,
+          "selector": ".dash-root .search-head, .dash-root .search-head button",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 428,
+          "selector": ".login-card .brand-mark",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "composer-border/topbar-surface",
+      "foreground_value": "#e1e7eb",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Composer section separator; editor and button boundaries remain separately gated. This does not waive any input boundary. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2476600749949796,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 67,
+          "selector": ".composer",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#929598"
+    },
+    {
+      "theme": "crt",
+      "pair": "dash-border/bg",
+      "foreground_value": "#315c3d",
+      "background_value": "#07110b",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.494260910001495,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 485,
+          "selector": ".message-dock textarea, .message-dock select",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 486,
+          "selector": ".message-dock button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#40684b"
+    },
+    {
+      "theme": "crt",
+      "pair": "dash-border/surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#0b1910",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.3508970915804595,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 40,
+          "selector": ".dash-nav",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 120,
+          "selector": ".dash-nav-boards > .dash-nav-links",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 146,
+          "selector": ".dash-header",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 197,
+          "selector": ".dash-panel",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 215,
+          "selector": ".dash-stat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 255,
+          "selector": ".dash-empty, .dash-error",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 280,
+          "selector": ".dash-figure",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 339,
+          "selector": ".dash-root .composer",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 365,
+          "selector": ".dash-reference",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 378,
+          "selector": ".dash-root .game-tools",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 379,
+          "selector": ".dash-root .game-type, .dash-root .game-saves",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 381,
+          "selector": ".dash-root .game-chat",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 464,
+          "selector": ".dash-terminal textarea",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 465,
+          "selector": ".dash-terminal-text",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 475,
+          "selector": ".chat-new-messages",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 476,
+          "selector": ".dash-root .dock-trigger",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 479,
+          "selector": ".message-dock",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#456c50"
+    },
+    {
+      "theme": "crt",
+      "pair": "dash-border/surface-raised",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the shared theme border role: at least one listed consumer identifies an input, action, selected item or focusable control. Decorative consumers sharing this role do not justify waiving the control failures; alias duplicates share one palette fix. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/dash.css",
+          "line": 67,
+          "selector": ".dash-nav-mark",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 316,
+          "selector": ".dash-health li",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 330,
+          "selector": ".dash-root .message-wrap .cs-message__content",
+          "context": []
+        },
+        {
+          "source": "web/src/dash.css",
+          "line": 361,
+          "selector": ".dash-root .search-head, .dash-root .search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "file-pill-border/file-pill-surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 79,
+          "selector": ".file-pill",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "file-pill-border/surface-raised",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 79,
+          "selector": ".file-pill",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border/game-chat-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#0d1a24",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.6140473221711915,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 473,
+          "selector": ".game-chat",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#526874"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border/game-saves-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#0f2130",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5003695035862854,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 456,
+          "selector": ".game-saves",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#586d78"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border/game-type-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#142634",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4162670679305418,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 451,
+          "selector": ".game-type",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5c717c"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border/sidebar-surface",
+      "foreground_value": "#24404f",
+      "background_value": "#101d2c",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Container separators around labelled game sections; inputs and buttons use separate border-2/border-3 tokens and remain fix-in-theme. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5567624298287486,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 463,
+          "selector": ".game-wheel",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 496,
+          "selector": ".codewheel-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#556b76"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border-2/game-chat-actions-surface",
+      "foreground_value": "#2c4b5c",
+      "background_value": "#18313f",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.46332604974677,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 487,
+          "selector": ".game-chat-actions button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#637a86"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border-2/game-type-surface-2",
+      "foreground_value": "#2c4b5c",
+      "background_value": "#0a141c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0076069986839395,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 453,
+          "selector": ".game-type input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 458,
+          "selector": ".game-saves input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 459,
+          "selector": ".game-saves select",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 465,
+          "selector": ".game-wheel input",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 466,
+          "selector": ".game-wheel select",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 485,
+          "selector": ".game-chat-input textarea",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#4b6574"
+    },
+    {
+      "theme": "crt",
+      "pair": "game-type-border-3/game-type-surface-3",
+      "foreground_value": "#3d8a6c",
+      "background_value": "#2f6f57",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4297766933444875,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 454,
+          "selector": ".game-type button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 461,
+          "selector": ".game-saves button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 468,
+          "selector": ".game-wheel button",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 488,
+          "selector": ".game-chat-actions button.primary.send",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#98c1b1"
+    },
+    {
+      "theme": "crt",
+      "pair": "jump-banner-border/jump-banner-surface",
+      "foreground_value": "#d2e7be",
+      "background_value": "#edf6e6",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Informational banner frame; message text and its action are separately identifiable. Action text/focus contrast remains required. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1892401320801493,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 134,
+          "selector": ".jump-banner",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#849177"
+    },
+    {
+      "theme": "crt",
+      "pair": "jump-latest-border/jump-latest-surface",
+      "foreground_value": "#bfd9aa",
+      "background_value": "#e8f5dc",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.350175644612505,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 138,
+          "selector": ".jump-latest",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#7f9071"
+    },
+    {
+      "theme": "crt",
+      "pair": "older-marker-border/topbar-surface",
+      "foreground_value": "#d8e0e5",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.336432470788954,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 40,
+          "selector": ".older-marker button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#909599"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-credit-chart-border/ops-credit-chart-surface",
+      "foreground_value": "#44606d",
+      "background_value": "#142936",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer chart/model card frame, not plotted lines, axes or data glyphs. Chart graphical marks and text remain separately required. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.2423862104360586,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 288,
+          "selector": ".ops-credit-chart,.ops-model",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5b737f"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-executive-border/ops-executive-surface",
+      "foreground_value": "#496270",
+      "background_value": "#1c3544",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.9879189606843957,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#697e89"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-executive-border/ops-executive-surface-2",
+      "foreground_value": "#496270",
+      "background_value": "#172733",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.375026068633185,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5c727f"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-executive-border/ops-executive-surface-3",
+      "foreground_value": "#496270",
+      "background_value": "#13232d",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled executive-card frame; the three reported backgrounds are gradient stops. No meaningful chart/control/state cue uses this frame. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.4995029185714674,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 226,
+          "selector": ".ops-executive",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#576e7b"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-executive-head-border/ops-capacity-line-surface",
+      "foreground_value": "#385564",
+      "background_value": "#213643",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Divider below labelled capacity/signal text rows; it does not encode the row value or status. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.5845569668588242,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 283,
+          "selector": ".ops-capacity-line",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#6a808b"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-executive-head-border/ops-signal-line-surface",
+      "foreground_value": "#385564",
+      "background_value": "#293c44",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Divider below labelled capacity/signal text rows; it does not encode the row value or status. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.453633869033,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 285,
+          "selector": ".ops-signal-line",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#718690"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-kpis-border/ops-kpis-surface",
+      "foreground_value": "#597083",
+      "background_value": "#203545",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static labelled KPI tile frame; value, label and layout convey the content without the outline. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.456959588207574,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 334,
+          "selector": ".ops-kpis>div",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#697e8f"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-lab-panel-border/ops-lab-panel-surface",
+      "foreground_value": "#4b6b70",
+      "background_value": "#132a36",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Outer labelled panel frame; table rules, disclosure control, text and focus indicators are outside this waiver. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.57496458237904,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 242,
+          "selector": ".ops-lab-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#58757a"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-metrics-border/ops-chart-surface",
+      "foreground_value": "#36505b",
+      "background_value": "#172b37",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static metrics-panel separators; text, chart graphical marks and interactive components remain separately gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.7085100458165514,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 345,
+          "selector": ".ops-chart",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 361,
+          "selector": ".ops-grid>div",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 402,
+          "selector": ".ops-stats>div",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 407,
+          "selector": ".ops-panel",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#61757e"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-metrics-border/ops-metrics-surface",
+      "foreground_value": "#36505b",
+      "background_value": "#10212d",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static metrics-panel separators; text, chart graphical marks and interactive components remain separately gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.9220731235354,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 224,
+          "selector": ".ops-metrics",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#576d76"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-mission-head-border/ops-mission-head-surface",
+      "foreground_value": "#678b70",
+      "background_value": "#254839",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Separator under the labelled mission heading, not a control or state indicator. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 2.665644614512371,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 228,
+          "selector": ".ops-mission-head",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#72947b"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-panel-border/ops-health-surface",
+      "foreground_value": "#2f4a55",
+      "background_value": "#132330",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.702460350354094,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 417,
+          "selector": ".ops-health li",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#596f78"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-source-border/ops-source-surface",
+      "foreground_value": "#3d6b5a",
+      "background_value": "#17342c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.2053319932171567,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 399,
+          "selector": ".ops-source",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#588071"
+    },
+    {
+      "theme": "crt",
+      "pair": "ops-source-border-2/ops-source-surface-2",
+      "foreground_value": "#7a4a3a",
+      "background_value": "#2f1f1c",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.150614494107836,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 400,
+          "selector": ".ops-source.bad",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8c6355"
+    },
+    {
+      "theme": "crt",
+      "pair": "poolrad-stat-border/poolrad-stat-surface",
+      "foreground_value": "#3f5d6d",
+      "background_value": "#1d3342",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static labelled statistic-card outline; the numeric value and its label carry the information. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.8685110015251638,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 386,
+          "selector": ".poolrad-stat",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#657d8a"
+    },
+    {
+      "theme": "crt",
+      "pair": "queue-help-border/queue-help-surface",
+      "foreground_value": "#d5b981",
+      "background_value": "#fff7e6",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.7769513118374005,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 204,
+          "selector": ".queue-help button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#a38d63"
+    },
+    {
+      "theme": "crt",
+      "pair": "queue-help-border-2/queue-help-surface-3",
+      "foreground_value": "#e7c77c",
+      "background_value": "#fff4db",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Long-wait container frame; main.jsx renders explicit waiting/action-needed text and alert semantics. Send-now control and all text remain gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.4943900098026048,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 209,
+          "selector": ".queue-help.long-wait",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#a18b57"
+    },
+    {
+      "theme": "crt",
+      "pair": "rune-choice-border/rune-choice-surface",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix theme-owned rune-choice boundary/selected-state contrast. The selected selector is meaningful control state, so no decorative waiver. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 507,
+          "selector": ".rune-choice",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "rune-choice-border/surface-raised",
+      "foreground_value": "#315c3d",
+      "background_value": "#11271a",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix theme-owned rune-choice boundary/selected-state contrast. The selected selector is meaningful control state, so no decorative waiver. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 2.0533654347634944,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 507,
+          "selector": ".rune-choice",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#50745a"
+    },
+    {
+      "theme": "crt",
+      "pair": "rune-choice-border-2/brand-mark-surface",
+      "foreground_value": "#8fffab",
+      "background_value": "#d7efb8",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix theme-owned rune-choice boundary/selected-state contrast. The selected selector is meaningful control state, so no decorative waiver. Temporary baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.0077875645878063,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 509,
+          "selector": ".rune-choice[aria-pressed=\"true\"]",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#519161"
+    },
+    {
+      "theme": "crt",
+      "pair": "search-head-border-2/search-head-surface",
+      "foreground_value": "#e2e7ea",
+      "background_value": "#f9fafb",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.1924363142357421,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 94,
+          "selector": ".search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8e9193"
+    },
+    {
+      "theme": "crt",
+      "pair": "search-head-ink/search-head-surface",
+      "foreground_value": "#86929b",
+      "background_value": "#f9fafb",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 3.045404309508075,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 94,
+          "selector": ".search-head button",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#6b757c"
+    },
+    {
+      "theme": "crt",
+      "pair": "search-more-border/search-more-surface",
+      "foreground_value": "#dbe5e8",
+      "background_value": "#f7f9fa",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix the theme-owned control, attachment, status or information boundary. The current source does not establish that this boundary is safely decorative; no waiver inferred. Temporary exact-value baseline expires with t192.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2136440015662555,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 133,
+          "selector": ".search-more",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8b9193"
+    },
+    {
+      "theme": "crt",
+      "pair": "sidebar-border/sidebar-surface",
+      "foreground_value": "#243547",
+      "background_value": "#101d2c",
+      "floor": 3.0,
+      "decision": "scoped-waiver",
+      "reason": "Static sidebar/main-content separator; navigation labels and their selected/focus states remain gated. Scope: exact recorded theme/pair/values and listed CSS consumers only; re-review on semantic/selector change or t192 completion. Static design classification, not rendered conformance.",
+      "expires_with": "t192",
+      "measured_ratio": 1.3574075848923295,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 10,
+          "selector": ".sidebar",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5d6977"
+    },
+    {
+      "theme": "crt",
+      "pair": "status-badge-ink/status-badge-surface",
+      "foreground_value": "#5f7280",
+      "background_value": "#edf1f3",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 4.393894402021144,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 33,
+          "selector": ".status-badge",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#5e707e"
+    },
+    {
+      "theme": "crt",
+      "pair": "status-badge-ink-3/status-badge-surface-3",
+      "foreground_value": "#8c6b28",
+      "background_value": "#fff2d9",
+      "floor": 4.5,
+      "decision": "fix-in-theme",
+      "reason": "Fix text color in the owning theme: this is actual label/status text below4.5, not decorative graphics. No waiver; preserve the current FAIL as an exact-value temporary baseline until t192.",
+      "expires_with": "t192",
+      "measured_ratio": 4.461204837584184,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 35,
+          "selector": ".status-badge.idle",
+          "context": []
+        },
+        {
+          "source": "web/src/style.css",
+          "line": 164,
+          "selector": ".status-badge.waiting",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#8b6a28"
+    },
+    {
+      "theme": "crt",
+      "pair": "topbar-border/topbar-surface",
+      "foreground_value": "#e4e9ed",
+      "background_value": "#fff",
+      "floor": 3.0,
+      "decision": "fix-in-theme",
+      "reason": "Fix shared topbar-border theme token: style.css also consumes it on .icon-button, so a separator-only waiver would exempt a control boundary. Preserve this exact-value FAIL as a temporary baseline until t192; independently reviewed correction i26980.",
+      "expires_with": "t192",
+      "measured_ratio": 1.2225475216564594,
+      "evidence": [
+        {
+          "source": "web/src/style.css",
+          "line": 29,
+          "selector": ".topbar",
+          "context": []
+        }
+      ],
+      "suggestion_for_this_pair_only": "#929597"
+    }
+  ],
+  "remediation": {
+    "task": "t203",
+    "repaired": {
+      "nostromo": 38,
+      "2001": 42
+    },
+    "fixes": {
+      "nostromo": 17,
+      "2001": 21
+    },
+    "waiversNotRenewed": {
+      "nostromo": 21,
+      "2001": 21
+    },
+    "files": [
+      "web/src/themes/nostromo.css",
+      "web/src/themes/2001.css"
+    ],
+    "evidence": "docs/THEME_CONTRAST_GATE.md#t203-new-theme-remediation"
+  },
+  "baseline_retirements": [
+    {
+      "task": "t192",
+      "authorization": "VP i32556 within t126/t192",
+      "source_head": "0f871ae92539266f27a04b8ef853c35c9faa02e3",
+      "input_id": "default-crt",
+      "removed_keys": [
+        {
+          "theme": "default",
+          "pair": "border-strong/surface-raised"
+        },
+        {
+          "theme": "default",
+          "pair": "dash-border-2/surface-raised"
+        }
+      ],
+      "reason": "The Default strong-border role now measures 3.3580619107970655:1 on surface-raised against a 3:1 floor; focused rendered queue/Theme-select checks independently reproduced the computed colors.",
+      "evidence": "docs/THEME_CONTRAST_GATE.md#default-strong-border-baseline-retirement",
+      "limits": "Only these two fix entries are retired. Other entries, waivers, expiry tasks and floors are unchanged; no t192 or full accessibility completion."
+    }
+  ]
+}

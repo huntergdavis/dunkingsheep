@@ -1,0 +1,22 @@
+[Unit]
+# FLAT_FLEET.md 7.2 (t594): the bridge sends owner-mailbox REPLIES for the telegram
+# transport plus watchdog pages, and nothing else - a brief, a digest or a web echo
+# has no path to the phone.
+Description=Dunking Sheep Telegram bridge (answers Telegram questions only)
+After=network-online.target dunkingsheep-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hunter/.local/share/dunkingsheep/current
+ExecStart=/home/hunter/.local/share/dunkingsheep/current/.venv/bin/python bridges/telegram_bridge.py
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/web-token
+Environment=DUNKING_SHEEP_DIR=/home/hunter/.local/share/dunkingsheep/current
+Environment=VP_DATA_DIR=%h/.config/dunkingsheep/desk
+Environment=VP_CHANNELS_FILE=%h/.config/dunkingsheep/desk/channels.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

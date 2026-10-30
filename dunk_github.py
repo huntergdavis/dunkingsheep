@@ -294,6 +294,162 @@ def review_pull(repo, number, event, body, token):
                     token=token, payload=payload)
 
 
+# -- accounting PRs (FLAT_FLEET.md 6.4, revised 2026-10-29) -------------------
+#
+# The original 6.4 had the reviewer App push the ledger row straight to main
+# under a branch-protection bypass. GitHub answers 422 for bypass allowances on
+# a personal repo (they are org-only), so the row travels as its own small PR
+# instead: the reviewer App commits and opens it, the author App approves it
+# (two distinct bot identities, which is what branch protection counts), and
+# auto-merge lands it once the checks are satisfied.
+
+GRAPHQL = API.rstrip("/") + "/graphql"
+
+
+def graphql(query, token, variables=None):
+    """A GraphQL call; a 200 response carrying `errors` is a failure, not a result."""
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+    _status, data = _request("POST", GRAPHQL, token=token, payload=payload)
+    if isinstance(data, dict) and data.get("errors"):
+        raise GitHubError("GitHub GraphQL: " + "; ".join(
+            str(error.get("message") if isinstance(error, dict) else error)
+            for error in data["errors"]))
+    return (data or {}).get("data") or {}
+
+
+def get_ref(repo, ref, token):
+    """The commit sha a branch points at right now."""
+    _status, data = _request("GET", f"{API}/repos/{repo}/git/ref/heads/{ref}",
+                             token=token)
+    return data["object"]["sha"]
+
+
+def ref_exists(repo, branch, token):
+    try:
+        get_ref(repo, branch, token)
+        return True
+    except GitHubError as error:
+        if "-> 404" in str(error) or "-> 409" in str(error):
+            return False
+        raise
+
+
+def commit_tree(repo, sha, token):
+    """The tree sha of a commit."""
+    _status, data = _request("GET", f"{API}/repos/{repo}/git/commits/{sha}", token=token)
+    return data["tree"]["sha"]
+
+
+def file_text(repo, path, ref, token):
+    """(text, blob_sha) for one file at `ref`; (None, None) when it is not there."""
+    import base64
+    try:
+        _status, data = _request(
+            "GET", f"{API}/repos/{repo}/contents/{path}?ref={ref}", token=token)
+    except GitHubError as error:
+        if "-> 404" in str(error):
+            return None, None
+        raise
+    if isinstance(data, list):
+        raise GitHubError(f"{repo}/{path} is a directory, not a file")
+    if data.get("encoding") != "base64":
+        raise GitHubError(f"{repo}/{path}: unexpected encoding {data.get('encoding')!r}")
+    return base64.b64decode(data.get("content") or "").decode("utf-8"), data.get("sha")
+
+
+def pr_files(repo, number, token):
+    """Every file a PR changes: [{filename, status, previous_filename}]."""
+    out = []
+    for page in range(1, 11):          # 1,000 files is more than a body PR here has
+        _status, batch = _request(
+            "GET", f"{API}/repos/{repo}/pulls/{number}/files?per_page=100&page={page}",
+            token=token)
+        for item in batch or []:
+            out.append({"filename": item.get("filename") or "",
+                        "status": item.get("status") or "",
+                        "previous_filename": item.get("previous_filename")})
+        if not batch or len(batch) < 100:
+            break
+    return out
+
+
+def create_tree(repo, base_tree, entries, token):
+    """A tree on top of `base_tree`; entries are git tree entries (path, mode, content)."""
+    _status, data = _request("POST", f"{API}/repos/{repo}/git/trees", token=token,
+                             payload={"base_tree": base_tree, "tree": entries})
+    return data["sha"]
+
+
+def create_commit(repo, message, tree, parents, token):
+    _status, data = _request("POST", f"{API}/repos/{repo}/git/commits", token=token,
+                             payload={"message": message, "tree": tree,
+                                      "parents": list(parents)})
+    return data["sha"]
+
+
+def create_ref(repo, branch, sha, token):
+    """Create `refs/heads/<branch>` at `sha`. Fails when the branch already exists,
+    which is the compare-and-swap that keeps two daemons from fighting over it."""
+    _status, data = _request("POST", f"{API}/repos/{repo}/git/refs", token=token,
+                             payload={"ref": f"refs/heads/{branch}", "sha": sha})
+    return data["object"]["sha"]
+
+
+def open_pull(repo, title, head, base, body, token):
+    """Open a PR; {number, url, node_id, head}."""
+    _status, data = _request("POST", f"{API}/repos/{repo}/pulls", token=token,
+                             payload={"title": title, "head": head, "base": base,
+                                      "body": body})
+    return {"number": int(data["number"]), "url": data.get("html_url"),
+            "node_id": data.get("node_id"),
+            "head": (data.get("head") or {}).get("sha")}
+
+
+def pulls_for_head(repo, branch, token):
+    """Open PRs whose head branch is `branch` (owner: the repo, so no org filter)."""
+    owner = repo.split("/")[0]
+    _status, batch = _request(
+        "GET", f"{API}/repos/{repo}/pulls?state=open&head={owner}:{branch}&per_page=20",
+        token=token)
+    return [{"number": int(pr["number"]), "url": pr.get("html_url"),
+             "node_id": pr.get("node_id")} for pr in (batch or [])]
+
+
+def enable_auto_merge(repo, number, token, method="MERGE"):
+    """Queue the PR for auto-merge as soon as branch protection is satisfied."""
+    _status, data = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    node_id = data.get("node_id")
+    if not node_id:
+        raise GitHubError(f"{repo}#{number}: no node id for the auto-merge mutation")
+    result = graphql(
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) {"
+        " enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) {"
+        " pullRequest { number } } }",
+        token, {"id": node_id, "method": str(method).upper()})
+    return result.get("enablePullRequestAutoMerge") or {}
+
+
+def disable_auto_merge(repo, number, token):
+    _status, data = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    node_id = data.get("node_id")
+    if not node_id:
+        raise GitHubError(f"{repo}#{number}: no node id for the auto-merge mutation")
+    return graphql(
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id})"
+        " { pullRequest { number } } }", token, {"id": node_id})
+
+
+def pull_state(repo, number, token):
+    """{state, merged, mergeable_state, review_decision, auto_merge} for a PR."""
+    _status, pr = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    return {"state": pr.get("state"), "merged": bool(pr.get("merged")),
+            "merged_at": pr.get("merged_at"),
+            "mergeable_state": pr.get("mergeable_state"),
+            "auto_merge": bool(pr.get("auto_merge"))}
+
+
 # -- branch protection (owner's own login; a one-shot, not a lane path) ----------
 
 def protection_payload(approvals, reviewer_app_id, bypass_app_slug=None):
