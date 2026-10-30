@@ -26,6 +26,15 @@ use super::{
     RESIZE_MIN,
 };
 
+/// `SEND_TEXT_CHUNK_CHARS` (herdr_client.py:21): a long message is typed in chunks,
+/// because a TUI's input buffer does not take an arbitrary length in one keystroke run.
+pub const SEND_TEXT_CHUNK_CHARS: usize = 900;
+/// `SEND_TEXT_CHUNK_DELAY_S` (herdr_client.py:22): the pause between chunks.
+pub const SEND_TEXT_CHUNK_DELAY_S: f64 = 0.05;
+/// `SEND_TEXT_SETTLE_DELAY_S` (dunk_terminal.py): the pause before Enter, so the text is
+/// in the composer before the submission arrives.
+pub const SEND_TEXT_SETTLE_DELAY_S: f64 = 0.2;
+
 /// The tmux field format, verbatim from `TmuxBackend.PANE_FORMAT`.
 pub const PANE_FORMAT: &str = "#{pane_id}\x1f#{session_id}\x1f#{window_id}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_active}\x1f#{session_name}\x1f#{window_name}\x1f#{window_index}\x1f#{session_index}\x1f#{pane_pid}\x1f#{pane_width}\x1f#{pane_height}";
 pub const TAB_FORMAT: &str =
@@ -461,18 +470,36 @@ impl Terminal for TmuxBackend {
     }
 
     fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
-        // Literal, after `--`: a `;` in the text must not be read as a tmux separator.
-        let result = self.run(&["send-keys", "-t", pane_id, "-l", "--", text])?;
-        if result.code != 0 {
-            return Err(TerminalError::refused(
-                result.message("tmux send-keys failed"),
-            ));
+        // FINDING 4: the Python refuses an empty target with "No target".
+        if pane_id.is_empty() {
+            return Err(TerminalError::refused("No target"));
+        }
+        // FINDING 1: CHUNKED, and with a pause between chunks, exactly as the Python's
+        // `_text_chunks` + SEND_TEXT_CHUNK_DELAY_S do. A 5 KB message is 6 tmux invocations
+        // there and was ONE here; the limit exists because a TUI's input buffer does not
+        // take an arbitrary length in one keystroke run, and the tests only ever exercised
+        // a 35-character command.
+        let chunks = text_chunks(text, SEND_TEXT_CHUNK_CHARS);
+        for (index, chunk) in chunks.iter().enumerate() {
+            // Literal, after `--`: a `;` in the text must not be read as a tmux separator.
+            let result = self.run(&["send-keys", "-t", pane_id, "-l", "--", chunk])?;
+            if result.code != 0 {
+                return Err(TerminalError::refused(
+                    result.message("tmux send-keys failed"),
+                ));
+            }
+            if index + 1 < chunks.len() {
+                sleep_s(SEND_TEXT_CHUNK_DELAY_S);
+            }
         }
         Ok(())
     }
 
     fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
         self.send_text(pane_id, text)?;
+        // FINDING 2: the Python lets the text SETTLE before Enter. Pressing immediately is
+        // the typed-but-not-submitted shape the fleet keeps fixing.
+        sleep_s(SEND_TEXT_SETTLE_DELAY_S);
         let enter = self.run(&["send-keys", "-t", pane_id, "Enter"])?;
         if enter.code != 0 {
             return Err(TerminalError::refused(
@@ -501,7 +528,9 @@ impl Terminal for TmuxBackend {
         ansi: bool,
     ) -> Result<Option<String>, TerminalError> {
         match self.capture_pane(pane_id, lines, ansi) {
-            Ok(text) => Ok(Some(text)),
+            // FINDING 3: the Python returns `out.lstrip("\n")`; a capture that starts with
+            // a blank line is not the same screen text as one that does not.
+            Ok(text) => Ok(Some(text.trim_start_matches('\n').to_string())),
             // An unreadable/unknown pane is None in the Python, and None is NOT an empty
             // composer (dunk_stuck.verify depends on that distinction).
             Err(error) if !error.backend_unavailable => Ok(None),
@@ -509,16 +538,41 @@ impl Terminal for TmuxBackend {
         }
     }
 
-    fn agent_status(&self, _pane_id: &str) -> Option<String> {
-        // The parser fills `agent_status` with "unknown" today; nothing here knows a
-        // harness's own status, and guessing would be worse than the word.
+    fn agent_status(&self, pane_id: &str) -> Option<String> {
+        // FINDING 4: the Python's base implementation is `get_pane(...).get("agent_status")`,
+        // so a pane that does not exist is None - not "unknown". Nothing here knows a
+        // harness's own status, so a live pane answers the word rather than a guess.
+        self.get_pane(pane_id)?;
         Some("unknown".to_string())
     }
 
     fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
-        // `send-keys -l --` sends the text LITERALLY (the Python's chunked send),
-        // then a separate Enter: a single send-keys would interpret a `;` in the
-        // text as a tmux command separator.
+        if pane_id.is_empty() {
+            return Err(TerminalError::refused("No target"));
+        }
+        // The same chunked literal send as `send_text`, then a settle and a separate Enter:
+        // a single send-keys would read a `;` in the text as a tmux command separator.
+        let chunks = text_chunks(command, SEND_TEXT_CHUNK_CHARS);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let result = self.run(&["send-keys", "-t", pane_id, "-l", "--", chunk])?;
+            if result.code != 0 {
+                return Err(TerminalError::refused(
+                    result.message("tmux send-keys failed"),
+                ));
+            }
+            if index + 1 < chunks.len() {
+                sleep_s(SEND_TEXT_CHUNK_DELAY_S);
+            }
+        }
+        sleep_s(SEND_TEXT_SETTLE_DELAY_S);
+        let result = self.run(&["send-keys", "-t", pane_id, "Enter"])?;
+        if result.code != 0 {
+            return Err(TerminalError::refused(
+                result.message("tmux send-keys Enter failed"),
+            ));
+        }
+        return Ok(());
+        #[allow(unreachable_code)]
         let result = self.run(&["send-keys", "-t", pane_id, "-l", "--", command])?;
         if result.code != 0 {
             return Err(TerminalError::refused(
@@ -564,6 +618,37 @@ impl TmuxBackend {
                 .count(),
             _ => 0,
         }
+    }
+}
+
+/// Split text into chunk-sized pieces WITHOUT splitting a CRLF pair (the Python's
+/// `_text_chunks`). Empty text yields no chunks, which is what the Python's generator
+/// does too.
+pub fn text_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    let characters: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut index = 0;
+    while index < characters.len() {
+        let mut end = (index + max_chars).min(characters.len());
+        // Do not cut a CRLF in half.
+        if end < characters.len() && characters[end - 1] == '\r' && characters[end] == '\n' {
+            end -= 1;
+            if end == index {
+                end += 1; // a chunk of one CR is still forward progress
+            }
+        }
+        chunks.push(characters[index..end].iter().collect());
+        index = end;
+    }
+    chunks
+}
+
+fn sleep_s(seconds: f64) {
+    if seconds > 0.0 {
+        std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
     }
 }
 

@@ -122,8 +122,11 @@ fn a_created_pane_can_be_closed_and_the_kill_argv_is_right() {
     assert!(calls.contains("kill-pane -t %2"), "{calls}");
 }
 
+/// t994 finding 5 + 1: this asserted the DEFECTIVE behaviour and was named for
+/// send_keys while calling run_command. It now asserts what the Python does: chunked
+/// literal sends, then a settle, then Enter.
 #[test]
-fn send_keys_is_literal_then_enter() {
+fn run_command_is_literal_chunked_and_settles_before_enter() {
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let mut backend = TmuxBackend::new(fake);
@@ -138,6 +141,146 @@ fn send_keys_is_literal_then_enter() {
     assert!(
         calls.contains("send-keys -t %2 Enter"),
         "a separate Enter: {calls}"
+    );
+}
+
+/// t994 finding 1: a long message is typed in CHUNKS, as the Python's
+/// `_text_chunks(text)` + SEND_TEXT_CHUNK_DELAY_S do. A 5 KB message was ONE argv here and
+/// six in Python; the limit exists because a TUI's input buffer does not take an arbitrary
+/// length in one keystroke run.
+#[test]
+fn a_long_message_is_sent_in_chunks() {
+    let dir = tempdir();
+    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
+    let mut backend = TmuxBackend::new(fake);
+    let message = "x".repeat(2000); // 3 chunks of <= 900
+    backend.send_text("%2", &message).expect("typed");
+    let calls = fs::read_to_string(dir.path().join("argv.txt")).unwrap();
+    let literals = calls.lines().filter(|line| line.contains("-l --")).count();
+    assert_eq!(
+        3, literals,
+        "2000 chars at 900 per chunk is 3 argv calls: {calls}"
+    );
+    for line in calls.lines().filter(|line| line.contains("-l --")) {
+        let payload = line.split("-l -- ").nth(1).unwrap_or("");
+        assert!(
+            payload.chars().count() <= 900,
+            "a chunk is at most 900 chars: {line}"
+        );
+    }
+}
+
+/// t994 finding 1 (the splitter itself): no chunk may cut a CRLF pair in half, and empty
+/// text produces no chunks at all (the Python's generator yields nothing).
+#[test]
+fn chunks_never_split_a_crlf_pair_and_empty_text_yields_none() {
+    let text = format!("{}\r\nabc", "y".repeat(899)); // the CRLF lands on the boundary
+    let chunks = ds_core::terminal::tmux::text_chunks(&text, 900);
+    assert_eq!(2, chunks.len(), "{chunks:?}");
+    assert!(
+        !chunks[0].ends_with('\r'),
+        "the CR was moved to the next chunk: {chunks:?}"
+    );
+    assert!(chunks[1].starts_with("\r\n"), "{chunks:?}");
+    assert!(ds_core::terminal::tmux::text_chunks("", 900).is_empty());
+}
+
+/// t994 finding 2: the text SETTLES before Enter (SEND_TEXT_SETTLE_DELAY_S = 0.2 s).
+/// Timing is measured through the fake tmux, which stamps each invocation.
+#[test]
+fn enter_waits_for_the_text_to_settle() {
+    let dir = tempdir();
+    let script = dir.path().join("tmux");
+    let log = dir.path().join("stamps.txt");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$(date +%s%N)\" \"$*\" >> {log}\nexit 0\n",
+            log = log.display()
+        ),
+    )
+    .expect("script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script).expect("stat").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+    }
+    let mut backend = TmuxBackend::new(script);
+    backend.send_text_and_enter("%2", "short").expect("sent");
+    let stamps: Vec<String> = std::fs::read_to_string(&log)
+        .expect("stamps")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        2,
+        stamps.len(),
+        "one literal send and one Enter: {stamps:?}"
+    );
+    let nanos = |line: &str| {
+        line.split_whitespace()
+            .next()
+            .unwrap_or("0")
+            .parse::<u128>()
+            .unwrap_or(0)
+    };
+    let gap_ms = (nanos(&stamps[1]).saturating_sub(nanos(&stamps[0]))) / 1_000_000;
+    assert!(
+        gap_ms >= 150,
+        "Enter came {gap_ms} ms after the text; the settle is 200 ms"
+    );
+}
+
+/// t994 finding 3: read_pane strips leading newlines, as the Python's `out.lstrip("\\n")`.
+#[test]
+fn read_pane_strips_leading_newlines() {
+    let dir = tempdir();
+    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
+    let listing = pane_line("%2", "$2", "@2", "bash", "2202");
+    let script = dir.path().join("tmux2");
+    // One script that answers list-panes with the pane, capture-pane with a blank first line.
+    std::fs::write(&script, format!(
+        "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '%s\\n' '{listing}' ;;\n  capture-pane) printf '\\n\\nhello\\n' ;;\n  *) exit 0 ;;\nesac\n"))
+        .expect("script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&script).expect("stat").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).expect("chmod");
+    }
+    let backend = TmuxBackend::new(script);
+    let screen = backend
+        .read_pane("%2", 40, false)
+        .expect("read")
+        .expect("a screen");
+    assert!(
+        screen.starts_with("hello"),
+        "leading newlines are stripped: {screen:?}"
+    );
+}
+
+/// t994 finding 4: an empty target is refused and a missing pane has NO status.
+#[test]
+fn an_empty_target_is_refused_and_a_missing_pane_has_no_status() {
+    let dir = tempdir();
+    // A fake that serves the canned pane, so "%2" EXISTS and "%404" does not.
+    let listing = pane_line("%2", "$2", "@2", "bash", "2202");
+    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let mut backend = TmuxBackend::new(fake);
+    let error = backend.send_text("", "hello").unwrap_err();
+    assert_eq!("No target", error.to_string());
+    assert_eq!(
+        Some("unknown".to_string()),
+        backend.agent_status("%2"),
+        "a live pane answers the word rather than a guess"
+    );
+    assert_eq!(
+        None,
+        backend.agent_status("%404"),
+        "a missing pane is not 'unknown'"
     );
 }
 
