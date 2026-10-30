@@ -21,11 +21,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::parse::{parse_panes, parse_tabs, parse_workspaces, safe_name, PANE_SEP};
-use super::{AgentSpec, Pane, Tab, Terminal, TerminalError, Workspace};
+use super::{
+    AgentSpec, Pane, Resize, ResizedPane, Tab, Terminal, TerminalError, Workspace, RESIZE_MAX,
+    RESIZE_MIN,
+};
 
 /// The tmux field format, verbatim from `TmuxBackend.PANE_FORMAT`.
 pub const PANE_FORMAT: &str = "#{pane_id}\x1f#{session_id}\x1f#{window_id}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_active}\x1f#{session_name}\x1f#{window_name}\x1f#{window_index}\x1f#{session_index}\x1f#{pane_pid}\x1f#{pane_width}\x1f#{pane_height}";
-pub const TAB_FORMAT: &str = "#{window_id}\x1f#{session_id}\x1f#{window_name}\x1f#{window_index}\x1f#{window_active}";
+pub const TAB_FORMAT: &str =
+    "#{window_id}\x1f#{session_id}\x1f#{window_name}\x1f#{window_index}\x1f#{window_active}";
 pub const WORKSPACE_FORMAT: &str = "#{session_id}\x1f#{session_name}\x1f#{session_index}";
 
 /// What one tmux invocation returned.
@@ -73,7 +77,10 @@ impl Default for TmuxBackend {
 
 impl TmuxBackend {
     pub fn new(tmux_bin: impl Into<PathBuf>) -> Self {
-        TmuxBackend { tmux_bin: tmux_bin.into(), created: BTreeSet::new() }
+        TmuxBackend {
+            tmux_bin: tmux_bin.into(),
+            created: BTreeSet::new(),
+        }
     }
 
     /// The registry of what this backend created (panes/tabs/workspaces, by id).
@@ -90,9 +97,12 @@ impl TmuxBackend {
 
     /// One tmux invocation, argv exactly as given.
     pub fn run(&self, args: &[&str]) -> Result<CommandResult, TerminalError> {
-        let output = Command::new(&self.tmux_bin).args(args).output().map_err(|error| {
-            TerminalError::unavailable(format!("{}: {error}", self.tmux_bin.display()))
-        })?;
+        let output = Command::new(&self.tmux_bin)
+            .args(args)
+            .output()
+            .map_err(|error| {
+                TerminalError::unavailable(format!("{}: {error}", self.tmux_bin.display()))
+            })?;
         Ok(CommandResult {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -107,19 +117,22 @@ impl TmuxBackend {
         }
         // A tab/workspace is only ours if every pane under it is ours too, so a
         // session an operator added a pane to cannot be killed by us.
-        let under: Vec<&Pane> = panes.iter().filter(|pane| match kind {
-            "tab" => pane.window_id == target_id,
-            "workspace" => pane.session_id == target_id,
-            _ => pane.pane_id == target_id,
-        }).collect();
-        under.into_iter().all(|pane| self.created.contains(&pane.pane_id)
-                              || self.created.contains(&pane.window_id)
-                              || self.created.contains(&pane.session_id))
+        let under: Vec<&Pane> = panes
+            .iter()
+            .filter(|pane| match kind {
+                "tab" => pane.window_id == target_id,
+                "workspace" => pane.session_id == target_id,
+                _ => pane.pane_id == target_id,
+            })
+            .collect();
+        under.into_iter().all(|pane| {
+            self.created.contains(&pane.pane_id)
+                || self.created.contains(&pane.window_id)
+                || self.created.contains(&pane.session_id)
+        })
     }
 
-    fn capture_pane(&self, pane_id: &str, lines: i64, ansi: bool)
-        -> Result<String, TerminalError>
-    {
+    fn capture_pane(&self, pane_id: &str, lines: i64, ansi: bool) -> Result<String, TerminalError> {
         let mut args = vec!["capture-pane", "-p"];
         if ansi {
             args.push("-e");
@@ -128,7 +141,9 @@ impl TmuxBackend {
         args.extend(["-S", start.as_str(), "-t", pane_id]);
         let result = self.run(&args)?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux capture-pane failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux capture-pane failed"),
+            ));
         }
         Ok(result.stdout)
     }
@@ -160,7 +175,9 @@ impl Terminal for TmuxBackend {
     }
 
     fn get_pane(&self, pane_id: &str) -> Option<Pane> {
-        self.list_panes().into_iter().find(|pane| pane.pane_id == pane_id)
+        self.list_panes()
+            .into_iter()
+            .find(|pane| pane.pane_id == pane_id)
     }
 
     fn list_tabs(&self) -> Vec<Tab> {
@@ -180,7 +197,10 @@ impl Terminal for TmuxBackend {
     fn list_panes_grouped(&self) -> std::collections::BTreeMap<String, Vec<Pane>> {
         let mut grouped: std::collections::BTreeMap<String, Vec<Pane>> = Default::default();
         for pane in self.list_panes() {
-            grouped.entry(pane.workspace.clone()).or_default().push(pane);
+            grouped
+                .entry(pane.workspace.clone())
+                .or_default()
+                .push(pane);
         }
         grouped
     }
@@ -191,12 +211,16 @@ impl Terminal for TmuxBackend {
         // inventing one - a caller that needs ancestry must not read "no children"
         // as "no agent".
         Err(TerminalError::refused(
-            "agent child pids need proc.rs (T03); not ported in T22".to_string()))
+            "agent child pids need proc.rs (T03); not ported in T22".to_string(),
+        ))
     }
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>
-    {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
         let name = safe_name(label.unwrap_or("dunkingsheep"), "dunkingsheep");
         let mut args = vec!["new-session", "-d", "-s", name.as_str()];
         if let Some(cwd) = cwd {
@@ -204,13 +228,18 @@ impl Terminal for TmuxBackend {
         }
         let result = self.run(&args)?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux new-session failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux new-session failed"),
+            ));
         }
         let sessions = self.list_workspaces();
-        let created = sessions.iter().find(|workspace| workspace.label == name)
+        let created = sessions
+            .iter()
+            .find(|workspace| workspace.label == name)
             .or_else(|| sessions.last())
-            .ok_or_else(|| TerminalError::refused(
-                "new-session succeeded but the session list did not show it"))?;
+            .ok_or_else(|| {
+                TerminalError::refused("new-session succeeded but the session list did not show it")
+            })?;
         self.created.insert(created.workspace_id.clone());
         if focus {
             self.focus("workspace", &created.workspace_id)?;
@@ -218,9 +247,13 @@ impl Terminal for TmuxBackend {
         Ok(created.clone())
     }
 
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>
-    {
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
         let name = safe_name(label.unwrap_or("tab"), "tab");
         let mut args = vec!["new-window", "-d", "-P", "-F", "#{window_id}"];
         if let Some(workspace_id) = workspace_id {
@@ -232,12 +265,20 @@ impl Terminal for TmuxBackend {
         }
         let result = self.run(&args)?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux new-window failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux new-window failed"),
+            ));
         }
         let tab_id = result.stdout.trim().to_string();
-        let tab = self.list_tabs().into_iter().find(|tab| tab.tab_id == tab_id)
-            .ok_or_else(|| TerminalError::refused(
-                format!("new-window created {tab_id} but the tab list did not show it")))?;
+        let tab = self
+            .list_tabs()
+            .into_iter()
+            .find(|tab| tab.tab_id == tab_id)
+            .ok_or_else(|| {
+                TerminalError::refused(format!(
+                    "new-window created {tab_id} but the tab list did not show it"
+                ))
+            })?;
         self.created.insert(tab.tab_id.clone());
         if focus {
             self.focus("tab", &tab.tab_id)?;
@@ -245,9 +286,12 @@ impl Terminal for TmuxBackend {
         Ok(tab)
     }
 
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>
-    {
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError> {
         let mut args = vec!["split-window", "-t", pane_id];
         match direction {
             "down" => args.push("-v"),
@@ -259,7 +303,9 @@ impl Terminal for TmuxBackend {
         }
         let result = self.run(&args)?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux split-window failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux split-window failed"),
+            ));
         }
         let new_pane = result.stdout.trim().to_string();
         let pane = self.get_pane(&new_pane).ok_or_else(|| {
@@ -272,17 +318,34 @@ impl Terminal for TmuxBackend {
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
         // An agent is started in a pane that already exists: T37 owns the layout
         // decision (workspace/tab/split) and calls create_* first.
-        let pane = spec.tab_id.as_deref()
-            .and_then(|tab| self.list_panes().into_iter().find(|pane| pane.window_id == tab))
-            .ok_or_else(|| TerminalError::refused(
-                "start_agent needs an existing target pane (create_workspace/\
-                 create_tab/split_pane first; T37 owns the layout)".to_string()))?;
+        let pane = spec
+            .tab_id
+            .as_deref()
+            .and_then(|tab| {
+                self.list_panes()
+                    .into_iter()
+                    .find(|pane| pane.window_id == tab)
+            })
+            .ok_or_else(|| {
+                TerminalError::refused(
+                    "start_agent needs an existing target pane (create_workspace/\
+                 create_tab/split_pane first; T37 owns the layout)"
+                        .to_string(),
+                )
+            })?;
         let argv: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
         let command = shell_join(&argv);
-        let result = self.run(&["respawn-pane", "-k", "-t", pane.pane_id.as_str(),
-                                command.as_str()])?;
+        let result = self.run(&[
+            "respawn-pane",
+            "-k",
+            "-t",
+            pane.pane_id.as_str(),
+            command.as_str(),
+        ])?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux respawn-pane failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux respawn-pane failed"),
+            ));
         }
         Ok(self.get_pane(&pane.pane_id).unwrap_or(pane))
     }
@@ -314,7 +377,9 @@ impl Terminal for TmuxBackend {
         };
         let result = self.run(&[command, "-t", target_id])?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message(&format!("tmux {command} failed"))));
+            return Err(TerminalError::refused(
+                result.message(&format!("tmux {command} failed")),
+            ));
         }
         self.created.remove(target_id);
         Ok(())
@@ -334,33 +399,135 @@ impl Terminal for TmuxBackend {
         Ok(())
     }
 
+    fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError> {
+        // The Python's own bounds, refused BEFORE tmux is touched (measured: tmux
+        // refuses 'width too small'/'width too large' without changing the layout, so
+        // there is nothing to learn by asking it).
+        if !(RESIZE_MIN..=RESIZE_MAX).contains(&cols) || !(RESIZE_MIN..=RESIZE_MAX).contains(&rows)
+        {
+            return Err(TerminalError::refused(format!(
+                "cols and rows must be between {RESIZE_MIN} and {RESIZE_MAX}"
+            )));
+        }
+        let Some(before) = self.get_pane(pane_id) else {
+            return Err(TerminalError::refused(format!("no such pane {pane_id}")));
+        };
+        let window = before.tab_id();
+        let geometry_before = self.window_geometry(&window);
+        let attached = self.client_count(&before.workspace);
+        let result = self.run(&[
+            "resize-window",
+            "-t",
+            pane_id,
+            "-x",
+            &cols.to_string(),
+            "-y",
+            &rows.to_string(),
+        ])?;
+        if result.code != 0 {
+            // A refusal changed nothing, so reporting before/after geometry would
+            // imply a partial result that tmux did not produce.
+            return Err(TerminalError::refused(
+                result.message("tmux refused the resize"),
+            ));
+        }
+        let geometry_after = self.window_geometry(&window);
+        let target = geometry_after.get(pane_id).copied();
+        let mut resized = Vec::new();
+        for (pane, size) in &geometry_after {
+            let was = geometry_before.get(pane).copied();
+            if Some(*size) == was {
+                continue;
+            }
+            resized.push(ResizedPane {
+                pane_id: pane.clone(),
+                cols: size.0,
+                rows: size.1,
+                cols_before: was.map(|size| size.0),
+                rows_before: was.map(|size| size.1),
+            });
+        }
+        Ok(Resize {
+            pane_id: pane_id.to_string(),
+            requested_cols: cols,
+            requested_rows: rows,
+            cols: target.map(|size| size.0),
+            rows: target.map(|size| size.1),
+            window_pane_count: geometry_after.len(),
+            resized_panes: resized,
+            clients_attached: attached,
+            overridable_by_client: attached > 0,
+        })
+    }
+
     fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
         // `send-keys -l --` sends the text LITERALLY (the Python's chunked send),
         // then a separate Enter: a single send-keys would interpret a `;` in the
         // text as a tmux command separator.
         let result = self.run(&["send-keys", "-t", pane_id, "-l", "--", command])?;
         if result.code != 0 {
-            return Err(TerminalError::refused(result.message("tmux send-keys failed")));
+            return Err(TerminalError::refused(
+                result.message("tmux send-keys failed"),
+            ));
         }
         let enter = self.run(&["send-keys", "-t", pane_id, "Enter"])?;
         if enter.code != 0 {
-            return Err(TerminalError::refused(enter.message("tmux send-keys Enter failed")));
+            return Err(TerminalError::refused(
+                enter.message("tmux send-keys Enter failed"),
+            ));
         }
         Ok(())
     }
 }
 
+impl TmuxBackend {
+    /// Measured cols/rows of every pane in one window, keyed by pane id.
+    ///
+    /// The Python asks tmux a second time for this (`_window_geometry`); the panes
+    /// listing already carries both fields, so this is the same measurement without a
+    /// second subprocess - and it is measured AFTER the call, which is the point.
+    fn window_geometry(&self, window_id: &str) -> std::collections::BTreeMap<String, (i64, i64)> {
+        let mut geometry = std::collections::BTreeMap::new();
+        for pane in self.list_panes() {
+            if pane.window_id == window_id || pane.tab_id() == window_id {
+                geometry.insert(pane.pane_id.clone(), (pane.width, pane.height));
+            }
+        }
+        geometry
+    }
+
+    /// How many clients are attached to a session (`tmux list-clients`).
+    ///
+    /// A failed call is 0 clients rather than an error: the resize already happened,
+    /// and "we could not tell" must not turn a success into a failure.
+    fn client_count(&self, workspace_id: &str) -> usize {
+        match self.run(&["list-clients", "-t", workspace_id]) {
+            Ok(result) if result.code == 0 => result
+                .stdout
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count(),
+            _ => 0,
+        }
+    }
+}
+
 /// The Python's `shlex.join` for an argv a shell will read back.
 pub fn shell_join(argv: &[&str]) -> String {
-    argv.iter().map(|part| {
-        if !part.is_empty() && part.chars().all(|character| {
-            character.is_ascii_alphanumeric() || "-_./:=@%+".contains(character)
-        }) {
-            part.to_string()
-        } else {
-            format!("'{}'", part.replace('\'', "'\\''"))
-        }
-    }).collect::<Vec<_>>().join(" ")
+    argv.iter()
+        .map(|part| {
+            if !part.is_empty()
+                && part.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "-_./:=@%+".contains(character)
+                })
+            {
+                part.to_string()
+            } else {
+                format!("'{}'", part.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The separator the parsed formats use (exported for tests and callers).
@@ -370,9 +537,7 @@ pub fn pane_separator() -> char {
 
 /// A convenience for a caller that wants `capture-pane` without the trait.
 impl TmuxBackend {
-    pub fn capture(&self, pane_id: &str, lines: i64, ansi: bool)
-        -> Result<String, TerminalError>
-    {
+    pub fn capture(&self, pane_id: &str, lines: i64, ansi: bool) -> Result<String, TerminalError> {
         self.capture_pane(pane_id, lines, ansi)
     }
 }
@@ -380,5 +545,7 @@ impl TmuxBackend {
 /// The temp path helper the tests use to point at a fake tmux.
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    path.metadata().map(|meta| meta.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    path.metadata()
+        .map(|meta| meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
