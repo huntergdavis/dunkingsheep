@@ -181,13 +181,16 @@ fn archiving_never_infers_from_a_name_prefix_or_an_age() {
     .iter()
     .map(|value| value.to_string())
     .collect();
-    let selected = retired_mailboxes(&candidates, std::slice::from_ref(&record), &[], &[]);
+    let mut selected = retired_mailboxes(&candidates, std::slice::from_ref(&record), &[], &[]);
+    // The Python returns a SET; this port returns it sorted, so the assertion is on
+    // membership and dedupe, not on an order the Python never promised (t980).
+    selected.sort();
     assert_eq!(
         vec![
-            "wW:p4".to_string(),
-            "par-d (wW:p4)".to_string(),
+            "crackdown-codex".to_string(),
             "par-d".to_string(),
-            "crackdown-codex".to_string()
+            "par-d (wW:p4)".to_string(),
+            "wW:p4".to_string()
         ],
         selected
     );
@@ -249,5 +252,96 @@ fn the_written_json_matches_the_pythons_bytes() {
     assert_eq!(
         expected, text,
         "the JSON text differs from json.dumps(indent=2, sort_keys=True)"
+    );
+}
+
+/// t980 finding 1: `mailbox_retired` strips ANY trailing parenthetical, not only a pane
+/// id. The first version used the strict archive rule and diverged on 40 of 107 live
+/// spellings - always "Python suppresses the alert, Rust keeps it".
+#[test]
+fn mailbox_retired_strips_any_trailing_parenthetical() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("retired-panes.json");
+    let record = Retired {
+        pane_id: "par-d".to_string(),
+        reason: "superseded-by:par-a".to_string(),
+        by: None,
+        labels: vec!["Par-D".to_string()],
+        mailboxes: vec!["par-d".to_string()],
+        retired_at: 1_000.0,
+    };
+    let mut records: Records = Records::new();
+    records.insert("par-d".to_string(), record);
+    write(&path, &records).expect("write");
+    // A non-pane parenthetical: the Python strips it and matches the mailbox name.
+    assert!(
+        mailbox_retired("par-d (old)", &path),
+        "a non-pane parenthetical is stripped, so the mailbox is retired"
+    );
+    assert!(
+        mailbox_retired("Par-D (beta)", &path),
+        "the label match is on the plain form"
+    );
+    // A pane-id parenthetical still resolves through the pane id.
+    assert!(mailbox_retired("par-d (wW:p4)", &path));
+    // And a name that only CONTAINS brackets in the middle is not stripped.
+    assert!(!mailbox_retired("x (old) y", &path));
+}
+
+/// t980 finding 2: `now or time.time()` treats a zero timestamp as FALSY, so a retire
+/// call with 0 stores a REAL time rather than a record `valid_retirements` would drop.
+#[test]
+fn a_zero_timestamp_is_filled_in_rather_than_written_as_undated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("retired-panes.json");
+    let retired = retire("%9", "superseded", None, &[], &[], &path, Some(0.0)).expect("retired");
+    assert!(retired.retired_at > 0.0, "a zero now is replaced by the clock, as the Python's                                        'now or time.time()' does");
+}
+
+/// t980 finding 3: the write path takes the Python's BOUNDED wait (5 s) rather than
+/// waiting for ever - a wedged holder must turn into a refusal.
+#[test]
+fn the_write_path_gives_up_rather_than_waiting_for_ever() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("busy.json");
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let held = crate::lock::Guard::try_acquire(&lock_path, crate::lock::Mode::Exclusive)
+        .expect("lock")
+        .expect("acquired");
+    let started = std::time::Instant::now();
+    let error = write(&path, &Records::new()).unwrap_err();
+    let waited = started.elapsed();
+    assert!(
+        error.to_string().contains("identity record is busy"),
+        "{error}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_secs(4),
+        "it waited about the timeout: {waited:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "and did not wait for ever: {waited:?}"
+    );
+    drop(held);
+}
+
+/// t980 smaller note: the result is deduplicated, as the Python's set is.
+#[test]
+fn the_archive_selection_is_a_set_not_a_list() {
+    let record = Retired {
+        pane_id: "wW:p4".to_string(),
+        reason: "superseded".to_string(),
+        by: None,
+        labels: vec!["par-d (wW:p4)".to_string()],
+        mailboxes: vec!["par-d (wW:p4)".to_string()],
+        retired_at: 1_000.0,
+    };
+    let candidates = vec!["par-d (wW:p4)".to_string(), "par-d (wW:p4)".to_string()];
+    let selected = retired_mailboxes(&candidates, std::slice::from_ref(&record), &[], &[]);
+    assert_eq!(
+        1,
+        selected.len(),
+        "the same key twice is one archive target"
     );
 }

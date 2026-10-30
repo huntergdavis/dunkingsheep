@@ -75,7 +75,12 @@ pub fn load(path: &Path) -> Records {
 
 /// `_write`: exclusive lock, then an atomic replace.
 pub fn write(path: &Path, records: &Records) -> Result<(), DunkError> {
-    lock::with_exclusive(&lock_path(path), || atomic_json::write(path, records))
+    // The Python's identity_guard gives up after 5 s with 'identity record is busy'; an
+    // unbounded wait would hang the writer behind a wedged holder instead of refusing
+    // (t980 finding 3).
+    lock::with_exclusive_timeout(&lock_path(path), std::time::Duration::from_secs(5), || {
+        atomic_json::write(path, records)
+    })
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -127,7 +132,10 @@ pub fn retire(
         by: by.map(|value| value.to_string()),
         labels: names,
         mailboxes: boxes,
-        retired_at: now.unwrap_or_else(|| {
+        // The Python writes `now or time.time()`, and 0 is FALSY there: a caller that
+        // passes 0 gets the clock, not a record that `valid_retirements` drops as
+        // undated (a retirement that silently protects nothing - t980 finding 2).
+        retired_at: now.filter(|value| *value > 0.0).unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_secs_f64())
@@ -185,7 +193,30 @@ fn pane_in_mailbox(text: &str) -> Option<&str> {
     None
 }
 
-/// `name (w9:pH)` -> `name`: drop a trailing parenthetical pane id.
+/// Drop ANY trailing parenthetical: `re.sub(r"\s*\([^)]*\)\s*$", "", text)`.
+///
+/// This is `mailbox_retired`'s rule, and it is BROADER than the archive rule below on
+/// purpose: a mailbox row can read `PM (par-a)`, where `par-a` is neither a pane id nor
+/// a registered label, and the Python still treats `PM` as the mailbox name. The first
+/// version of this port used the narrow rule for both, which diverged on 40 of 107 live
+/// spellings (t980 finding 1) - always in the direction "Python suppresses the alert,
+/// Rust keeps it".
+fn plain_any_parenthetical(value: &str) -> String {
+    let text = value.trim();
+    if !text.ends_with(')') {
+        return text.to_string();
+    }
+    match text.rfind('(') {
+        Some(open) => text[..open].trim().to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// `name (w9:pH)` -> `name`: drop a trailing parenthetical PANE ID.
+///
+/// This is `retired_mailboxes`' rule (`_ARCHIVE_SUFFIX`), which must stay strict: a
+/// suffix that is not a pane id cannot be resolved against the retired set, so the
+/// candidate is left unresolved rather than archived on a name match.
 fn plain(value: &str) -> String {
     let text = value.trim();
     if let Some(open) = text.rfind('(') {
@@ -223,7 +254,7 @@ pub fn mailbox_retired(mailbox: &str, path: &Path) -> bool {
             return true;
         }
     }
-    let bare = plain(text);
+    let bare = plain_any_parenthetical(text);
     records.values().any(|record| {
         record
             .labels
@@ -301,7 +332,7 @@ pub fn retired_mailboxes(
                 .map(|n| plain(n)),
         );
     }
-    let mut selected = Vec::new();
+    let mut selected: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for value in candidates {
         let text = value.trim();
         let name = plain(text);
@@ -357,10 +388,11 @@ pub fn retired_mailboxes(
         };
         if eligible {
             // retain the exact stored key for the SQL update
-            selected.push(value.clone());
+            // The Python returns a SET: the same key twice is one archive target.
+            selected.insert(value.clone());
         }
     }
-    selected
+    selected.into_iter().collect()
 }
 
 #[cfg(test)]
