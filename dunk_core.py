@@ -4874,6 +4874,30 @@ class Flock:
         "cannot execute",
     )
 
+    # t957: a FIRST-RUN dialog makes a freshly started lane look healthy and be
+    # inert. Measured by the owner-role lane: `start-agent` reported 'started agent
+    # reviewer-7 in %110', the pane registered with the right role, and then
+    # `read %110` returned NOTHING, a dunk sat at 'Held (typing)' for ever, and the
+    # daemon logged 'the composer text is not provably ours'. The lane had to be
+    # backed out by hand. These markers name the dialogs a CLI can put in the way of
+    # a prompt; a match is a refusal that QUOTES the line, so the failure says which
+    # dialog to answer rather than reporting a healthy lane that is asleep.
+    #
+    # A new dialog text is a one-line addition here. A false match costs a refusal
+    # that names the pane (visible, diagnosable); a miss costs an inert lane, which
+    # is the failure this constant exists to stop.
+    AGENT_DIALOG_MARKERS = (
+        "do you trust the files",       # claude code's first run in a directory
+        "trust this folder",
+        "trust the files in this folder",
+        "select login method",
+        "log in to claude",
+        "sign in to claude",
+        "choose a theme",
+        "press enter to continue",      # a first-run wizard's default prompt
+        "allow access to",
+    )
+
     def _agent_evidence(self, root_pid, names, since_start=None):
         """Descendant pids that are a RUNNING process of an expected agent.
 
@@ -5002,6 +5026,19 @@ class Flock:
                     matched = self._match_agent_process(entries, kind, since_start)
                     if matched:
                         seen = matched
+            # t957: a first-run dialog is a REFUSAL, not a slow start, and it is
+            # checked BEFORE the failure markers because the dialog is what the lane
+            # is waiting on. `not seen` does not exempt it: a live claude process
+            # sitting in a trust prompt is exactly the inert lane this catches.
+            for marker in self.AGENT_DIALOG_MARKERS:
+                if marker in lowered:
+                    line = next((row for row in captured.splitlines()
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} started in pane {pane_id} but is NOT interactive: "
+                        f"a first-run dialog is waiting ({line.strip()!r}). Answer it once in "
+                        "that pane (or pre-seed the CLI's config) and start the agent again; "
+                        "a dunk sent here would sit unsubmitted (t957).")
             for marker in self.AGENT_FAILURE_MARKERS:
                 if marker in lowered and not seen:
                     line = next((row for row in captured.splitlines()

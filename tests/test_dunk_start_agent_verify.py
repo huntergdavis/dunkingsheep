@@ -113,6 +113,35 @@ class StartAgentVerifyTests(unittest.TestCase):
             self._start(["$ \n", "\n[agent exited rc=127]\n"],
                         proc=[self._child(["/usr/bin/claude"], comm="claude")])
 
+    def test_a_first_run_trust_dialog_is_refused_and_named(self):
+        """t957: a lane that reported 'started' and was inert behind a dialog.
+
+        Measured by the owner-role lane: start-agent said 'started agent reviewer-7 in
+        %110', the role registered, then `read %110` was blank, a dunk sat at 'Held
+        (typing)' and the stuck machine logged 'the composer text is not provably
+        ours'. The pane was up; the CLI was waiting for a dialog nobody answered.
+        """
+        screen = ("Do you trust the files in this folder?\n"
+                  "❯ 1. Yes, proceed\n  2. No, exit\n")
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*trust the files"):
+            self._start(screen)
+
+    def test_a_first_run_login_dialog_is_refused_too(self):
+        screen = "Select login method:\n❯ 1. Claude account\n  2. API key\n"
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*login method"):
+            self._start(screen)
+
+    def test_the_dialog_refusal_wins_over_a_live_process(self):
+        """A live claude sitting in a trust prompt is exactly the inert lane: the
+        process evidence must not excuse it (unlike launcher noise, t599)."""
+        with self.assertRaisesRegex(DunkError, "NOT interactive"):
+            self._start("Do you trust the files in this folder?\n",
+                        proc=[self._child(["claude"])])
+
+    def test_a_welcome_screen_with_no_dialog_still_starts(self):
+        result = self._start("✻ Welcome to Claude Code\n❯ \n")
+        self.assertEqual("probe", result["name"])
+
     def test_a_clean_screen_with_no_process_is_refused(self):
         """Criterion (a): a bare idle shell is not a running agent where pids exist."""
         with self.assertRaisesRegex(DunkError, "never became a process"):
