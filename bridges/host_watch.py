@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parent
-_DESK = Path(os.environ.get("VP_DATA_DIR") or (Path(os.environ.get("DUNKINGSHEEP_DIR", str(Path.home() / ".config" / "dunkingsheep"))) / "desk"))
+_DESK = Path(os.environ.get("VP_DATA_DIR") or (Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"))
 STATE = _DESK / "host-watch-state.json"
 LOCK = _DESK / "host-watch.lock"
 GIB = 1024**3

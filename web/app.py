@@ -39,8 +39,13 @@ ROOT = Path(__file__).resolve().parents[1]
 # import inside a checkout or worktree used to create data/ beside the code, and two
 # lane branches then committed auth.json and the owner's messages to a public repo
 # (2026-10-29). There is no repo-root fallback.
-DESK_DIR_DEFAULT = Path(os.getenv("DUNKINGSHEEP_DIR", str(Path.home() / ".config" / "dunkingsheep"))) / "desk"
-DATA = Path(os.getenv("VP_DATA_DIR", DESK_DIR_DEFAULT)).expanduser().resolve()
+DESK_DIR_DEFAULT = Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"
+# `or`, NOT os.getenv's default: an EMPTY VP_DATA_DIR (Environment=VP_DATA_DIR=, a
+# supervisor that passes an unset variable as "", `env VP_DATA_DIR= ...`) would make
+# Path("") the CURRENT WORKING DIRECTORY - i.e. the repo, when a lane imports this
+# module from a checkout, which is the 2026-10-29 incident shape. The default only
+# applies to an unset variable, so the empty case has to be handled explicitly.
+DATA = Path(os.environ.get("VP_DATA_DIR") or DESK_DIR_DEFAULT).expanduser().resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
