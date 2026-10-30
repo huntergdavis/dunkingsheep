@@ -3826,7 +3826,7 @@ class Flock:
                 log.info("push skip pane=%s reason=no_live_agent via=%s", pane_id, why)
                 continue
             role = self.caller_role(pane_id)
-            if role == "reviewer" and not self.roles.may_review(pane_id):
+            if role == "reviewer" and not self.roles.may_review(pane_id, role=role):
                 log.info("push skip pane=%s reason=provider_may_not_review provider=%s",
                          pane_id, self.roles.provider_of(pane_id) or "unknown")
                 continue

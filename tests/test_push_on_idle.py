@@ -193,6 +193,17 @@ class PushOnIdleTests(unittest.TestCase):
         self.flock._push_tasks()
         self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
 
+    def test_a_pid_bound_reviewer_on_an_allowed_provider_is_fed(self):
+        """Live 2026-10-30: the sweep re-resolved the role without the live pane record, so
+        a registered pi reviewer was skipped as provider_may_not_review."""
+        self.register(IDLE_SHELL, "reviewer", provider="pi")
+        self.flock.roles.reviewer_providers = ["claude", "codex", "pi"]
+        self.flock.herdr.agent_child_pids = lambda pid: None
+        task = self.flock.tasks.add("global", "review me", kind="review", repo="o/r", pr=1,
+                                    head="h" * 8, created_by="review-sync")
+        self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
+
     def test_a_worker_with_a_live_agent_is_fed(self):
         self.register(IDLE_SHELL, "worker", provider="pi")
         self.flock.herdr.agent_child_pids = lambda pid: [
