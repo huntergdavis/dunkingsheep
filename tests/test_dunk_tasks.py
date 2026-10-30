@@ -20,6 +20,63 @@ from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
+class CancelledDependencyTests(unittest.TestCase):
+    """t878: a cancelled dependency must SURFACE, not silently brick the dependents.
+
+    Two duplicate rows were cancelled on 2026-10-30 and seven dependents became
+    permanently unclaimable: the queue satisfies an edge only on 'done', a cancelled
+    dependency can never be satisfied, and nothing said so - the rows simply never
+    came back from `task next`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _pair(self):
+        dep = self.store.add(GLOBAL, "the dependency that gets cancelled")
+        row = self.store.add(GLOBAL, "the row that depends on it")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, self.store.get(row["id"])
+
+    def test_a_cancelled_dependency_is_named_and_blocks_the_row(self):
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        after = self.store.get(row["id"])
+        self.assertEqual([dep["id"]], after["dead_dependencies"])
+        self.assertIn(dep["id"], after["blocked_by"])
+        self.assertFalse(after["eligible"], "an unsatisfiable edge keeps it out of the queue")
+
+    def test_cancel_names_the_dependents_it_strands(self):
+        dep, row = self._pair()
+        cancelled = self.store.cancel(dep["id"], reason="duplicate")
+        self.assertEqual([row["id"]], cancelled["blocked_dependents"])
+
+    def test_repointing_the_edge_frees_the_row_without_cancelling_it(self):
+        """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        self.assertFalse(self.store.get(row["id"])["eligible"])
+        good = self.store.add(GLOBAL, "the canonical task")
+        self.store.complete(good["id"])
+        repaired = self.store.update(row["id"], depends_on=[good["id"]])
+        self.assertEqual([good["id"]], repaired["depends_on"],
+                         "the list is replaced, not appended to")
+        self.assertEqual([], repaired["dead_dependencies"])
+        self.assertTrue(repaired["eligible"], "a repointed row is claimable again")
+
+    def test_a_done_dependency_is_not_dead(self):
+        dep, row = self._pair()
+        self.store.complete(dep["id"])
+        after = self.store.get(row["id"])
+        self.assertEqual([], after["dead_dependencies"])
+        self.assertTrue(after["eligible"])
+
+
 class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
