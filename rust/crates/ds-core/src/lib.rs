@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod registry;
 pub mod retry;
 pub mod stuck;
+pub mod terminal;
 
 pub use error::{DunkError, refusal};
 
