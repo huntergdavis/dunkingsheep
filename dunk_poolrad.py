@@ -38,6 +38,7 @@ EXPORT_ARGS = [
     "--ovr", "resources/DOS/POOLRAD/GAME.OVR", "--repo", ".", "--no-git",
 ]
 STRICT_MANIFEST = "docs/re/strict_full_c_addresses.csv"
+PARTIAL_MODELS = "docs/re/partial_callee_models.csv"
 IDENTITIES = "docs/re/reviewed_function_identities.csv"
 METHOD_DOC = "docs/re/STRICT_CANDIDATE_QUEUE.md"
 TITLE_PREFIX = "Poolrad strict C:"
@@ -331,6 +332,44 @@ def credit_pending(path=None):
     return dict(bodies) if isinstance(bodies, dict) else {}
 
 
+def model_statuses(repo):
+    """Row id -> status from docs/re/partial_callee_models.csv (t733/t738).
+
+    The repo itself marks some models PARTIAL or CALLBACK. A filename on main says
+    nothing about whether a body is credit-ready, so the status is read rather than
+    inferred from the file's presence: on main (599ad279) 4 rows are partial and 2
+    callback, and all four partial model files exist. Crediting one of those would
+    put a partial model in the strict ledger - the exact overclaim this fleet
+    records most (review of #149, t738).
+    """
+    path = Path(repo) / PARTIAL_MODELS
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            return {row["id"].strip(): (row.get("status") or "").strip().lower()
+                    for row in csv.DictReader(handle) if row.get("id")}
+    except OSError:
+        return {}
+
+
+def credit_ready(repo, rid, checkers=None, statuses=None):
+    """(ready, why_not) for calling a row's model "on main, credit pending" (t738).
+
+    Three conditions, each the repo's own statement:
+      * a model file on main (model_evidence),
+      * NOT marked partial/callback in partial_callee_models.csv,
+      * a registered CHECKER_ROWS entry (registered_checker_ids).
+    Anything short of all three stays in the authoring queue: a name is not a body.
+    """
+    checkers = registered_checker_ids(repo) if checkers is None else checkers
+    statuses = model_statuses(repo) if statuses is None else statuses
+    if rid not in checkers:
+        return False, "no registered checker"
+    status = statuses.get(rid)
+    if status and status not in ("full",):
+        return False, f"model status {status} in {PARTIAL_MODELS}"
+    return True, None
+
+
 def already_on_main(repo, rid, checkers=None):
     """The model source + a registered checker for this row are both on main (t686).
 
@@ -389,7 +428,7 @@ class Sync:
         # 2026-10-29); the body goes on the OWNER's credit-pending list with the
         # commit and the PR that added the model, so credit can be reviewed against
         # that head. Decided from the tree, so the skip is reproducible.
-        credit = {}
+        credit, not_ready = {}, {}
         for row in (queue.get("rows") or []):
             rid = row.get("id")
             if not rid:
@@ -397,15 +436,25 @@ class Sync:
             if rid not in credited:
                 evidence = model_evidence(self.repo, rid)
                 if evidence:
-                    credit[rid] = evidence
-                    closed[rid] = (f"model already on main ({evidence['model']}); "
-                                   "ledger credit pending, nothing to author")
+                    ready, why_not = credit_ready(self.repo, rid, checkers=checkers)
+                    if ready:
+                        credit[rid] = evidence
+                        closed[rid] = (f"model already on main ({evidence['model']}) "
+                                       "and credit-ready; ledger credit pending, "
+                                       "nothing to author")
+                    else:
+                        # A filename on main is not a credit-ready body (t738): the row
+                        # stays in the authoring queue, and the reason travels so the
+                        # report does not claim it was skipped for the strong reason.
+                        not_ready[rid] = dict(evidence, why_not=why_not)
             if rid in closed:
                 continue
             reason = already_on_main(self.repo, rid, checkers=checkers)
             if reason:
                 closed[rid] = reason
         report["credit_pending"] = credit
+        # Rows whose model EXISTS but is not credit-ready: still authoring candidates.
+        report["models_not_credit_ready"] = not_ready
         if credit and not dry_run:
             written = record_credit_pending(credit, path=self.credit_path)
             report["credit_pending_file"] = (str(credit_pending_path(self.credit_path))

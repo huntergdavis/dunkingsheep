@@ -298,6 +298,7 @@ class CreditPendingTests(unittest.TestCase):
 
     def test_the_sync_files_a_credit_review_candidate_instead_of_an_authoring_task(self):
         commit = self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
         queue = {"rows": [row("OVL_0020_11AC", 1), row("OVL_0001_0002", 2)]}
         report = dunk_poolrad.Sync(self.flock, repo=self.repo,
                                    exporter=lambda repo: queue).run(limit=5)
@@ -309,6 +310,7 @@ class CreditPendingTests(unittest.TestCase):
 
     def test_the_credit_pending_file_is_written_once_and_keeps_the_first_evidence(self):
         self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
         queue = {"rows": [row("OVL_0020_11AC", 1)]}
         sync = dunk_poolrad.Sync(self.flock, repo=self.repo,
                                  exporter=lambda repo: queue,
@@ -339,6 +341,7 @@ class CreditPendingTests(unittest.TestCase):
 
     def test_a_dry_run_records_nothing(self):
         self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
         queue = {"rows": [row("OVL_0020_11AC", 1)]}
         report = dunk_poolrad.Sync(self.flock, repo=self.repo,
                                    exporter=lambda repo: queue,
@@ -354,3 +357,94 @@ class CreditPendingTests(unittest.TestCase):
         with open(self.pending_path, "w", encoding="utf-8") as handle:
             handle.write("{broken")
         self.assertEqual({}, dunk_poolrad.credit_pending(self.pending_path))
+
+    # -- credit readiness (review of #149, t738) ------------------------------
+
+    def write_partial(self, rows):
+        """docs/re/partial_callee_models.csv rows: (id, status)."""
+        body = "id,status,evidence_doc\n" + "".join(
+            f"{rid},{status},{rid}.md\n" for rid, status in rows)
+        with open(os.path.join(self.repo, "docs", "re",
+                               "partial_callee_models.csv"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(body)
+
+    def write_checker(self, rid):
+        """A tools/overlay checker declaring CHECKER_ROWS for `rid` (t686)."""
+        with open(os.path.join(self.repo, "tools", "overlay", "check_x.py"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(f'CHECKER_ROWS = ["{rid}"]\n')
+
+    def test_a_filename_alone_does_not_make_a_body_credit_ready(self):
+        # The reviewer's finding: 49 of 74 name-matches on a live checkout had no
+        # registered checker, so "model on main" was read as "credit-ready".
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        ready, why_not = dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")
+        self.assertFalse(ready)
+        self.assertIn("no registered checker", why_not)
+
+    def test_a_model_with_a_checker_is_credit_ready(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.assertEqual((True, None),
+                         dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_model_is_never_credited(self):
+        # 4 rows are partial on main and all four model files exist; crediting one
+        # would put a partial model in the strict ledger.
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        ready, why_not = dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")
+        self.assertFalse(ready)
+        self.assertIn("partial", why_not)
+
+    def test_a_callback_model_is_never_credited(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "callback")])
+        self.assertFalse(dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC")[0])
+
+    def test_a_full_status_with_a_checker_is_credit_ready(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "full")])
+        self.assertEqual((True, None),
+                         dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_body_stays_an_authoring_task(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]],
+                         "a partial model is still an authoring candidate")
+        self.assertEqual({}, report["credit_pending"])
+        self.assertIn("partial",
+                      report["models_not_credit_ready"]["OVL_0020_11AC"]["why_not"])
+        self.assertFalse(os.path.exists(self.pending_path))
+
+    def test_a_checkerless_body_stays_an_authoring_task(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]])
+        self.assertEqual({}, report["credit_pending"])
+        self.assertIn("no registered checker",
+                      report["models_not_credit_ready"]["OVL_0020_11AC"]["why_not"])
+
+    def test_a_credit_ready_body_is_not_filed_and_is_recorded(self):
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual([], report["filed"])
+        self.assertIn("credit-ready", report["skipped"]["closed"]["OVL_0020_11AC"])
+        self.assertEqual(1, len(dunk_poolrad.credit_pending(self.pending_path)))
