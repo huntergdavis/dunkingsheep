@@ -345,3 +345,25 @@ fn the_archive_selection_is_a_set_not_a_list() {
         "the same key twice is one archive target"
     );
 }
+
+#[test]
+fn one_malformed_record_keeps_the_good_ones_effective() {
+    let (_dir, path) = store();
+    std::fs::write(
+        &path,
+        r#"{"wW:p4": {"pane_id": "wW:p4", "reason": "superseded", "retired_at": 1.0},
+            "wW:p5": "hand-edited into nonsense"}"#,
+    )
+    .expect("write");
+    let records = load(&path);
+    assert_eq!(records.len(), 1);
+    assert!(records.contains_key("wW:p4"));
+    assert!(mailbox_retired("wW:p4", &path));
+}
+
+#[test]
+fn a_wholly_unparseable_file_still_reads_as_empty() {
+    let (_dir, path) = store();
+    std::fs::write(&path, "{not json").expect("write");
+    assert!(load(&path).is_empty());
+}

@@ -69,8 +69,26 @@ impl Serialize for Retired {
 pub type Records = BTreeMap<String, Retired>;
 
 /// `_load`: a missing or unreadable file means nothing is retired, never an error.
+///
+/// PER-RECORD TOLERANCE (t1017): the Python keeps every well-formed record when ONE is
+/// malformed, because its consumers skip non-dict values. Deserialising straight into
+/// `Records` failed the whole parse on one bad record, and every retirement then stopped
+/// protecting anything - 'retired' silently turned back into 'paging every four hours'
+/// - in a file a human edits. So parse to raw values and convert record by record,
+/// skipping (and logging) the bad ones. A wholly unparseable file still reads as empty.
 pub fn load(path: &Path) -> Records {
-    atomic_json::read_or_default(path).unwrap_or_default()
+    let raw: BTreeMap<String, serde_json::Value> =
+        atomic_json::read_or_default(path).unwrap_or_default();
+    let mut records = Records::new();
+    for (key, value) in raw {
+        match serde_json::from_value::<Retired>(value) {
+            Ok(record) => {
+                records.insert(key, record);
+            }
+            Err(error) => eprintln!("skipping malformed retired-pane record {key:?}: {error}"),
+        }
+    }
+    records
 }
 
 /// `_write`: exclusive lock, then an atomic replace.
