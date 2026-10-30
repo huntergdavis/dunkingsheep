@@ -80,6 +80,12 @@ pub fn redact(text: &str) -> String {
     out
 }
 
+/// Python's `str.strip()`: Unicode White_Space plus U+001C..U+001F (`str.isspace`),
+/// which `str::trim` does not remove.
+fn py_strip(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
 /// Default chunk size and overlap (`DEFAULT_CHUNK_CHARS` / `DEFAULT_OVERLAP_CHARS`).
 pub const DEFAULT_CHUNK_CHARS: usize = 2_000;
 pub const DEFAULT_OVERLAP_CHARS: usize = 200;
@@ -90,7 +96,7 @@ pub const DEFAULT_OVERLAP_CHARS: usize = 200;
 /// character must not be split mid-sequence (that would be invalid UTF-8 in Rust
 /// where Python would just carry the character).
 pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<String> {
-    let trimmed = text.trim();
+    let trimmed = py_strip(text);
     if trimmed.is_empty() {
         return Vec::new();
     }
@@ -120,7 +126,7 @@ pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<Str
             }
         }
         let piece: String = chars[start..end].iter().collect();
-        let piece = piece.trim().to_string();
+        let piece = py_strip(&piece).to_string();
         if !piece.is_empty() {
             chunks.push(piece);
         }
@@ -174,6 +180,8 @@ pub fn make_snippet(text: &str, tokens: &[String], max_chars: usize) -> String {
     let Some(position) = position else {
         return text.chars().take(max_chars).collect();
     };
+    // `find` gives a BYTE offset into `lowered`; the Python indexes by code point.
+    let position = lowered[..position].chars().count();
     let start = position.saturating_sub(max_chars / 3);
     text.chars().skip(start).take(max_chars).collect()
 }
