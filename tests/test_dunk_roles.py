@@ -295,6 +295,14 @@ class ServerBindingTests(unittest.TestCase):
         self.assertTrue(reply["result"]["bound"])
 
     @unittest.skipUnless(os.path.isdir("/proc"), "needs /proc")
+    def test_a_claim_for_a_pane_the_backend_does_not_know_runs_anonymous(self):
+        reply = self.request("w1:p2")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual("anonymous", reply["result"]["role"])
+        self.assertIsNone(reply["result"]["pane_id"])
+        self.assertIn("no such pane", reply["result"]["binding_note"])
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "needs /proc")
     def test_a_claim_the_process_does_not_belong_to_runs_anonymous(self):
         reply = self.request("w5:p2")
         self.assertTrue(reply["ok"], reply)
