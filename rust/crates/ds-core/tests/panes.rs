@@ -137,3 +137,58 @@ fn the_file_is_private_and_a_malformed_one_reads_as_empty() {
     assert!(panes.all().expect("read").is_empty());
     assert!(!panes.is_retired("%110").expect("read"));
 }
+
+// -- review t985: two Python behaviours the first port lost --------------------
+
+#[test]
+fn a_pane_id_is_matched_through_surrounding_whitespace() {
+    // Python: `str(pane_id or "").strip() in _load(path)`. The first port used the id
+    // verbatim, so `is_retired(" %110 ")` was false where Python answers true - and an
+    // id pasted out of a log line carries whitespace, which is the normal case.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let panes = store(&directory);
+    panes
+        .retire("%110", "superseded", None, &[], &[], NOW)
+        .expect("retired");
+    for spelling in ["%110", " %110", "%110 ", "\t%110\n", "  %110  "] {
+        assert!(
+            panes.is_retired(spelling).expect("read"),
+            "is_retired({spelling:?}) must find %110"
+        );
+        assert_eq!(
+            Some("superseded".to_string()),
+            panes.reason_of(spelling).expect("read"),
+            "reason_of({spelling:?}) must find %110 too"
+        );
+    }
+    assert!(!panes.is_retired(" ").expect("read"), "empty is not a pane");
+}
+
+#[test]
+fn a_zero_timestamp_is_stamped_now_not_written_as_zero() {
+    // Python: `"retired_at": now or time.time()`, so 0 means "stamp now"; and
+    // origin/main's valid_retirements REFUSES a record whose at is 0, because an
+    // undated retirement must not withdraw identity protection. Writing the 0 through
+    // produced a record its own consumer rejects.
+    let directory = tempfile::tempdir().expect("tempdir");
+    let panes = store(&directory);
+    let before = ds_core::clock::now_s();
+    let record = panes
+        .retire("%110", "superseded", None, &[], &[], 0.0)
+        .expect("retired");
+    let after = ds_core::clock::now_s();
+    assert!(
+        record.retired_at > 0.0,
+        "a zero stamp must not reach the record"
+    );
+    assert!(
+        record.retired_at >= before && record.retired_at <= after,
+        "the stamp must be the clock, not a guess: {} not in [{before}, {after}]",
+        record.retired_at
+    );
+    // and a caller-supplied stamp is still honoured exactly
+    let stamped = panes
+        .retire("%111", "superseded", None, &[], &[], 1234.5)
+        .expect("retired");
+    assert_eq!(1234.5, stamped.retired_at);
+}

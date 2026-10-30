@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::atomic_json;
+use crate::clock;
 use crate::error::DunkError;
 use crate::lock::{Guard, Mode};
 
@@ -122,7 +123,12 @@ impl RetiredPanes {
             by: by.map(str::to_string),
             labels: names,
             mailboxes: boxes,
-            retired_at: now,
+            // (3) The Python does `"retired_at": now or time.time()`, so 0 means
+            // "stamp now" - and origin/main's `valid_retirements` refuses a record whose
+            // `at` is 0, because an undated retirement must not withdraw identity
+            // protection. Writing the 0 through produced a record the consumer rejects,
+            // which is worse than either honest option; this stamps the clock instead.
+            retired_at: if now > 0.0 { now } else { clock::now_s() },
         };
         data.insert(pane_id.to_string(), retired.clone());
         self.save(&data)?;
@@ -145,15 +151,25 @@ impl RetiredPanes {
         Ok(self.load()?.into_values().collect())
     }
 
+    /// The Python's `str(pane_id or "").strip()`: a pane id is compared the way it is
+    /// stored, so `" %110 "` finds `%110` here exactly as it does there.
+    ///
+    /// Measured (review t985): the first port used `contains_key(pane_id)` with no
+    /// trim, so `is_retired(" %110 ")` was `Ok(false)` where Python answers `True`.
+    /// A caller that pastes an id out of a log line is the normal case, not an edge.
+    fn key(pane_id: &str) -> &str {
+        pane_id.trim()
+    }
+
     pub fn is_retired(&self, pane_id: &str) -> Result<bool, DunkError> {
-        Ok(self.load()?.contains_key(pane_id))
+        Ok(self.load()?.contains_key(Self::key(pane_id)))
     }
 
     /// The reason a pane is retired, for a report that says WHY rather than just "gone".
     pub fn reason_of(&self, pane_id: &str) -> Result<Option<String>, DunkError> {
         Ok(self
             .load()?
-            .get(pane_id)
+            .get(Self::key(pane_id))
             .map(|retired| retired.reason.clone()))
     }
 }
