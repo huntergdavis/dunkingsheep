@@ -17,6 +17,7 @@ pub mod clock;
 pub mod config;
 pub mod error;
 pub mod lock;
+pub mod proc;
 pub mod retry;
 
 pub use error::{DunkError, refusal};
