@@ -213,6 +213,124 @@ def _unit_tokens(rid):
     return tokens
 
 
+def _merge_pr(repo, commit):
+    """The PR number that carried `commit`, from the merge commit's subject (t733).
+
+    `git log --merges --ancestry-path` lists the merges above the commit newest
+    first; the OLDEST of those is the one that brought it in, so the list is read
+    backwards. A commit that reached main without a merge commit (a fast-forward
+    or a direct push) has no PR here, and the answer is None - never a guess from
+    a number that happens to appear in an unrelated subject.
+    """
+    log = _git(repo, "log", "--merges", "--ancestry-path", f"{commit}..HEAD",
+               "--format=%s")
+    for subject in reversed([line for line in log.splitlines() if line.strip()]):
+        match = re.search(r"#(\d+)", subject)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _model_name_matches(name, rid):
+    """True when a recovered-model filename carries this row's unit AND offset (t733).
+
+    The files insert a human label between the two, so the tokens are not adjacent:
+    OVL_0020_11AC is `overlay_u20_list_walk_11ac_cpu.c` and OVL_03B0_06FB is
+    `overlay_u3b0_row_clear_06fb_cpu.c`. Matching on adjacency alone missed two of
+    the three rows this task was opened for. Leading zeros are optional on both
+    halves (`006a` -> `u6a`), and each half must land on a token boundary so
+    `u20` does not match `u200` and `11ac` does not match `11ac0`.
+    """
+    parts = str(rid or "").split("_")
+    if len(parts) < 3:
+        return False
+    unit = (parts[1].lower().lstrip("0") or "0")
+    offset = (parts[2].lower().lstrip("0") or "0")
+    low = str(name or "").lower()
+    unit_hit = re.search(rf"(^|[_/])u{re.escape(unit)}([_/.]|$)", low)
+    offset_hit = re.search(rf"(^|_)0*{re.escape(offset)}([_/.]|$)", low)
+    return bool(unit_hit and offset_hit)
+
+
+def model_evidence(repo, rid):
+    """Where this row's model ALREADY lives on main: (model, commit, pr) or None (t733).
+
+    Measured 2026-10-29 (ds-worker-4): OVL_0038_0CC3, OVL_0020_11AC and
+    OVL_03B0_06FB were filed as 'write the strict full-C body' when the model,
+    header, checker and doc were already on main and only the LEDGER CREDIT was
+    missing. Filing that task hands a lane work that cannot be done. This looks at
+    the tree, not at a note: a file under src/recovered whose name carries the
+    row's unit+offset tokens, the commit that added it, and the PR that carried it.
+    """
+    src = Path(repo) / "src" / "recovered"
+    try:
+        names = sorted(p.name for p in src.glob("*.c"))
+    except OSError:
+        return None
+    for name in names:
+        if not _model_name_matches(name, rid):
+            continue
+        relative = f"src/recovered/{name}"
+        commit = _git(repo, "log", "-1", "--format=%H", "--", relative)
+        if not commit:
+            continue
+        return {"model": relative, "commit": commit, "pr": _merge_pr(repo, commit)}
+    return None
+
+
+def credit_pending_path(path=None):
+    return Path(path) if path else CONFIG_DIR / "poolrad" / "credit-pending.json"
+
+
+def record_credit_pending(entries, path=None):
+    """Merge `entries` ({id: evidence}) into the credit-pending list (t733).
+
+    This file is the OWNER's queue: each body whose model is already on main but
+    whose ledger row is missing, with the commit and PR that added the model, so a
+    credit review can be filed against that head instead of an authoring task
+    against nothing. Merged by id and rewritten atomically; an entry already there
+    keeps its first-seen evidence.
+    """
+    path = credit_pending_path(path)
+    data = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    bodies = data.get("bodies") if isinstance(data.get("bodies"), dict) else {}
+    for rid, evidence in (entries or {}).items():
+        if rid in bodies:
+            continue
+        bodies[rid] = dict(evidence, first_seen=round(time.time(), 3))
+    payload = {"bodies": bodies, "count": len(bodies),
+               "updated_at": round(time.time(), 3)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = str(path) + ".tmp"
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=1, sort_keys=True)
+        os.replace(temporary, path)
+    except OSError as error:                       # never lose a sync to a write
+        log.warning("credit-pending record not written (%s): %s", path, error)
+        return None
+    return payload
+
+
+def credit_pending(path=None):
+    """The recorded credit-pending bodies, {id: evidence} (t733)."""
+    try:
+        with open(credit_pending_path(path), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    bodies = data.get("bodies") if isinstance(data, dict) else None
+    return dict(bodies) if isinstance(bodies, dict) else {}
+
+
 def already_on_main(repo, rid, checkers=None):
     """The model source + a registered checker for this row are both on main (t686).
 
@@ -237,10 +355,13 @@ def already_on_main(repo, rid, checkers=None):
 
 
 class Sync:
-    def __init__(self, flock, repo=DEFAULT_REPO, exporter=export_queue):
+    def __init__(self, flock, repo=DEFAULT_REPO, exporter=export_queue, credit_path=None):
         self.flock = flock
         self.repo = repo
         self.exporter = exporter
+        # Injectable so a test (and a scratch run) never writes the owner's real
+        # credit-pending list (t733).
+        self.credit_path = credit_path
 
     def run(self, limit=6, dry_run=False, priority="medium"):
         report = {"repo": self.repo, "base": None, "filed": [], "skipped": None,
@@ -262,13 +383,33 @@ class Sync:
         for rid, where in disposition_closures(self.repo).items():
             closed[rid] = f"closed by {where}"
         checkers = registered_checker_ids(self.repo)
+        # t733: a row whose MODEL is already on main is not an authoring task - it is
+        # a missing LEDGER ROW. Filing it as "write the strict full-C body" hands a
+        # lane work that cannot be done (OVL_0038_0CC3/OVL_0020_11AC/OVL_03B0_06FB,
+        # 2026-10-29); the body goes on the OWNER's credit-pending list with the
+        # commit and the PR that added the model, so credit can be reviewed against
+        # that head. Decided from the tree, so the skip is reproducible.
+        credit = {}
         for row in (queue.get("rows") or []):
             rid = row.get("id")
-            if not rid or rid in closed:
+            if not rid:
+                continue
+            if rid not in credited:
+                evidence = model_evidence(self.repo, rid)
+                if evidence:
+                    credit[rid] = evidence
+                    closed[rid] = (f"model already on main ({evidence['model']}); "
+                                   "ledger credit pending, nothing to author")
+            if rid in closed:
                 continue
             reason = already_on_main(self.repo, rid, checkers=checkers)
             if reason:
                 closed[rid] = reason
+        report["credit_pending"] = credit
+        if credit and not dry_run:
+            written = record_credit_pending(credit, path=self.credit_path)
+            report["credit_pending_file"] = (str(credit_pending_path(self.credit_path))
+                                             if written else None)
         picked = candidates(queue, credited, filed, limit, closed=closed)
         report["skipped"] = {"credited": len(credited), "already_filed": len(filed),
                              "queue_rows": len(queue.get("rows") or []),
@@ -289,7 +430,7 @@ class Sync:
         return report
 
 
-def progress(repo=DEFAULT_REPO, queue_path=QUEUE_JSON):
+def progress(repo=DEFAULT_REPO, queue_path=QUEUE_JSON, credit_path=None):
     credited = credited_ids(repo)
     summary = {}
     try:
@@ -309,4 +450,7 @@ def progress(repo=DEFAULT_REPO, queue_path=QUEUE_JSON):
                          "dashboard integration; not available here yet",
         "main": _git(repo, "rev-parse", "--short", "HEAD"),
         "queue_exported_at": (os.path.getmtime(queue_path) if os.path.exists(queue_path) else None),
+        # t733: bodies whose model is already on main and whose ledger row is not.
+        # The OWNER files one review per entry against the PR head that added it.
+        "credit_pending": len(credit_pending(credit_path)),
     }
