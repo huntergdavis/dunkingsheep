@@ -20,23 +20,24 @@ pub const MAX_BODY_BYTES: i64 = 8 * 1024 * 1024;
 /// (FLAT_FLEET.md 7.2); `None` is a lane message.
 pub const TRANSPORTS: [&str; 3] = ["web", "telegram", "report"];
 
-/// Message states, in the order the Python lists them.
-pub const STATES: [&str; 7] = [
+/// Message states, in the order the Python lists them (`dunk_inbox.STATES`).
+pub const STATES: [&str; 6] = [
     "queued",
     "read",
     "acked",
     "cancelled",
     "archived",
-    "hold",
-    "failed",
+    "undeliverable",
 ];
 
-/// The schema, verbatim from `dunk_inbox.SCHEMA` up to the messages table.
+/// The messages table, verbatim from `dunk_inbox.SCHEMA` (23 columns). The live
+/// table has 26: [`MIGRATED_COLUMNS`] are what `_migrate` adds to an older file, and
+/// the Python's `ALTER`s are idempotent, so a fresh install gets them from the T15b
+/// migration, not from this string. `tests/inbox_pure.rs` compares the union to
+/// `rust/fixtures/state/schema.json`.
 ///
-/// Kept as one string because both later slices install it; the attachments,
-/// counters and deliveries tables follow the same pattern and are added by T15b with
-/// the write methods that need them (a schema this slice cannot exercise would be
-/// untested text).
+/// The attachments, counters and deliveries tables are added by T15b with the write
+/// methods that need them.
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (
     id            TEXT PRIMARY KEY,
     mailbox       TEXT NOT NULL,
@@ -59,9 +60,16 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS messages (
     transport     TEXT,
     reply_to      TEXT,
     external_id   TEXT,
-    delivery_at   REAL,
-    delivery_detail TEXT NOT NULL DEFAULT ''
+    delivered_at  REAL,
+    delivery_transport TEXT
 );";
+
+/// Columns `dunk_inbox._migrate` adds on top of [`SCHEMA`] (name, type).
+pub const MIGRATED_COLUMNS: [(&str, &str); 3] = [
+    ("notify_at", "REAL"),
+    ("notify_transport_id", "TEXT"),
+    ("notify_attempt", "INTEGER"),
+];
 
 /// `'vp of agentry (w9:pH)'` and `'vp of agentry'` are ONE mailbox.
 ///
@@ -178,7 +186,7 @@ pub fn validate_transport(transport: Option<&str>) -> Result<Option<String>, Str
         Ok(Some(transport))
     } else {
         Err(format!(
-            "transport must be one of {}; got {:?}",
+            "transport must be one of {}; got '{}'",
             TRANSPORTS.join(", "),
             transport
         ))
@@ -195,27 +203,50 @@ pub fn retention_cutoff(now: f64, retention_s: f64) -> f64 {
     now - retention_s
 }
 
-/// Is this message old enough to prune?
-pub fn is_expired(created_at: f64, now: f64, retention_s: f64) -> bool {
-    created_at < retention_cutoff(now, retention_s)
+/// The purge rule: `state != 'queued' AND COALESCE(acked_at, cancelled_at, read_at,
+/// archived_at, created_at) < cutoff`. Unread mail is NEVER purged by age, and a row's
+/// age is when it was last acted on, not when it arrived.
+#[allow(clippy::too_many_arguments)]
+pub fn is_expired(
+    state: &str,
+    created_at: f64,
+    read_at: Option<f64>,
+    acked_at: Option<f64>,
+    archived_at: Option<f64>,
+    cancelled_at: Option<f64>,
+    now: f64,
+    retention_s: f64,
+) -> bool {
+    if state == "queued" {
+        return false;
+    }
+    let age_from = acked_at
+        .or(cancelled_at)
+        .or(read_at)
+        .or(archived_at)
+        .unwrap_or(created_at);
+    age_from < retention_cutoff(now, retention_s)
 }
 
-/// The size limits, as a named refusal rather than a silent truncation.
+/// The size limits, as a named refusal rather than a silent truncation. The texts are
+/// the Python's (`body is larger than ...`, the attachment line, the store-full line).
+/// `blob_total_bytes` is the store's size AFTER adding this attachment.
 pub fn check_sizes(
     body_bytes: i64,
+    attachment_name: &str,
     attachment_bytes: i64,
     blob_total_bytes: i64,
 ) -> Result<(), String> {
     if body_bytes > MAX_BODY_BYTES {
-        return Err(format!(
-            "body is {body_bytes} bytes; the limit is {MAX_BODY_BYTES}"
-        ));
+        return Err(format!("body is larger than {MAX_BODY_BYTES} bytes"));
     }
     if attachment_bytes > MAX_ATTACHMENT_BYTES {
-        return Err(format!("attachment is {attachment_bytes} bytes; the limit is                             {MAX_ATTACHMENT_BYTES}"));
+        return Err(format!(
+            "{attachment_name} is {attachment_bytes} bytes, over the {MAX_ATTACHMENT_BYTES} byte attachment limit"
+        ));
     }
     if blob_total_bytes > MAX_BLOB_BYTES {
-        return Err(format!("the attachment store would hold {blob_total_bytes} bytes; the                             limit is {MAX_BLOB_BYTES}"));
+        return Err("attachment store is full; delete some mail first".to_string());
     }
     Ok(())
 }

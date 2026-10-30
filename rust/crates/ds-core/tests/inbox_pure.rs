@@ -10,16 +10,25 @@ fn the_limits_and_vocabulary_are_the_pythons() {
     assert_eq!(64 * 1024 * 1024, MAX_ATTACHMENT_BYTES);
     assert_eq!(8 * 1024 * 1024, MAX_BODY_BYTES);
     assert_eq!(["web", "telegram", "report"], TRANSPORTS);
-    for state in ["queued", "read", "acked", "cancelled", "archived"] {
-        assert!(STATES.contains(&state), "{state} is a message state");
-    }
+    assert_eq!(
+        [
+            "queued",
+            "read",
+            "acked",
+            "cancelled",
+            "archived",
+            "undeliverable"
+        ],
+        STATES
+    );
     assert!(inbox::SCHEMA.contains("CREATE TABLE IF NOT EXISTS messages"));
     for column in [
         "mailbox",
         "transport",
         "reply_to",
         "external_id",
-        "delivery_at",
+        "delivered_at",
+        "delivery_transport",
     ] {
         assert!(
             inbox::SCHEMA.contains(column),
@@ -150,23 +159,102 @@ fn an_external_id_is_the_transport_and_the_id() {
 }
 
 #[test]
-fn retention_expires_only_what_is_older_than_the_window() {
+fn retention_purges_by_last_action_and_never_unread_mail() {
+    let old = NOW - RETENTION_S - 1.0;
+    let day = 24.0 * 3600.0;
     assert_eq!(NOW - RETENTION_S, inbox::retention_cutoff(NOW, RETENTION_S));
-    assert!(inbox::is_expired(NOW - RETENTION_S - 1.0, NOW, RETENTION_S));
-    assert!(
-        !inbox::is_expired(NOW - RETENTION_S, NOW, RETENTION_S),
-        "exactly at the cutoff is not yet expired"
-    );
-    assert!(!inbox::is_expired(NOW - 60.0, NOW, RETENTION_S));
+    let expired = |state, created, read, acked, archived, cancelled| {
+        inbox::is_expired(
+            state,
+            created,
+            read,
+            acked,
+            archived,
+            cancelled,
+            NOW,
+            RETENTION_S,
+        )
+    };
+    // an unread row 8 days old is NEVER purged by age
+    assert!(!expired("queued", NOW - 8.0 * day, None, None, None, None));
+    // read 8 days ago: expired; created 8 days ago but read yesterday: not
+    assert!(expired("read", old, Some(old), None, None, None));
+    assert!(!expired(
+        "read",
+        NOW - 8.0 * day,
+        Some(NOW - day),
+        None,
+        None,
+        None
+    ));
+    // COALESCE order is acked, cancelled, read, archived, created
+    assert!(!expired(
+        "acked",
+        old,
+        Some(old),
+        Some(NOW - day),
+        None,
+        None
+    ));
+    assert!(expired("archived", old, None, None, Some(old), None));
+    assert!(expired("undeliverable", old, None, None, None, None));
+    // exactly at the cutoff is not yet expired
+    assert!(!expired("read", NOW - RETENTION_S, None, None, None, None));
 }
 
 #[test]
 fn a_size_over_a_limit_is_a_named_refusal_not_a_truncation() {
-    assert!(inbox::check_sizes(10, 10, 10).is_ok());
-    let body = inbox::check_sizes(MAX_BODY_BYTES + 1, 0, 0).unwrap_err();
-    assert!(body.contains("the limit is"), "{body}");
-    let attachment = inbox::check_sizes(0, MAX_ATTACHMENT_BYTES + 1, 0).unwrap_err();
-    assert!(attachment.contains("attachment is"), "{attachment}");
-    let blob = inbox::check_sizes(0, 0, inbox::MAX_BLOB_BYTES + 1).unwrap_err();
-    assert!(blob.contains("attachment store"), "{blob}");
+    assert!(inbox::check_sizes(10, "a.txt", 10, 10).is_ok());
+    let body = inbox::check_sizes(MAX_BODY_BYTES + 1, "", 0, 0).unwrap_err();
+    assert_eq!(format!("body is larger than {MAX_BODY_BYTES} bytes"), body);
+    let attachment = inbox::check_sizes(0, "a.bin", MAX_ATTACHMENT_BYTES + 1, 0).unwrap_err();
+    assert_eq!(
+        format!(
+            "a.bin is {} bytes, over the {MAX_ATTACHMENT_BYTES} byte attachment limit",
+            MAX_ATTACHMENT_BYTES + 1
+        ),
+        attachment
+    );
+    let blob = inbox::check_sizes(0, "", 0, inbox::MAX_BLOB_BYTES + 1).unwrap_err();
+    assert_eq!("attachment store is full; delete some mail first", blob);
+}
+
+#[test]
+fn the_unknown_transport_text_quotes_like_the_python() {
+    let error = inbox::validate_transport(Some("signal")).unwrap_err();
+    assert_eq!(
+        "transport must be one of web, telegram, report; got 'signal'",
+        error
+    );
+}
+
+/// The schema is compared to the live database's fixture by COLUMN NAME: the 23 in
+/// SCHEMA plus the 3 `_migrate` adds must be exactly the 26 the fixture holds.
+#[test]
+fn the_schema_columns_are_the_fixtures_columns() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../fixtures/state/schema.json"))
+            .expect("schema.json");
+    let table = fixture["inbox"]
+        .as_array()
+        .expect("inbox statements")
+        .iter()
+        .filter_map(|s| s.as_str())
+        .find(|s| s.starts_with("CREATE TABLE messages"))
+        .expect("messages table");
+    let columns = |text: &str| -> std::collections::BTreeSet<String> {
+        let body = &text[text.find('(').expect("(") + 1..text.rfind(')').expect(")")];
+        body.split(',')
+            .filter_map(|part| part.split_whitespace().next())
+            .map(String::from)
+            .collect()
+    };
+    let mut ours = columns(inbox::SCHEMA.trim_end_matches(';'));
+    ours.remove("IF");
+    for (name, _) in inbox::MIGRATED_COLUMNS {
+        ours.insert(name.to_string());
+    }
+    let theirs = columns(table);
+    assert_eq!(26, theirs.len());
+    assert_eq!(theirs, ours);
 }
