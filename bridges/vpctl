@@ -16,6 +16,45 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]   # repo root: one repo (FLAT_FLEET.md 9)
 
 
+def desk_data_dir():
+    """The LIVE desk's data directory - credentials are not repo files (t867).
+
+    <repo>/data is a checkout directory. After the FF-9 cutover the desk runs from
+    the release tree with its store under the config dir, so reading ROOT/data
+    meant reading a dead copy: vpctl sent that copy's token, the desk answered 401
+    'Sign in required', and the owner's scheduled brief was refused. An import of
+    web.app inside a checkout also BOOTSTRAPS a fresh auth.json there (t739 lost
+    three such files to a public branch), so a repo copy drifts by construction.
+
+    Order: VP_DATA_DIR (what the desk itself reads) -> the installed desk under
+    DUNKINGSHEEP_DIR/desk. There is deliberately NO repo-root fallback: a silent
+    fallback is how the wrong token got sent for two hours.
+    """
+    override = os.getenv("VP_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    config = Path(os.getenv("DUNKINGSHEEP_DIR",
+                            str(Path.home() / ".config" / "dunkingsheep")))
+    return config / "desk"
+
+
+def load_auth():
+    data = desk_data_dir()
+    path = data / "auth.json"
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        raise SystemExit(
+            f"vpctl: no desk credentials at {path}.\n"
+            "  The desk generates auth.json on first start; point vpctl at it with\n"
+            "  VP_DATA_DIR=<the desk's data dir> (the desk reads the same variable),\n"
+            "  or set DUNKINGSHEEP_DIR if the install is not ~/.config/dunkingsheep.\n"
+            "  Do not copy a credentials file into a repo checkout: a checkout that\n"
+            "  imports web.app generates its OWN auth.json and the copies drift (t867).")
+    except ValueError as error:
+        raise SystemExit(f"vpctl: {path} is not valid JSON: {error}")
+
+
 def answer_ids(value):
     try:
         ids = [int(part) for part in value.split(",")]
@@ -35,7 +74,7 @@ brief.add_argument("--answers", type=answer_ids, default=[], metavar="ID[,ID]",
 brief.add_argument("--attach", action="append", type=Path, default=[], help="Attach a local file (up to 25 MB)")
 status = sub.add_parser("status", help="Read channel status")
 args = parser.parse_args()
-auth = json.loads((ROOT / "data" / "auth.json").read_text())
+auth = load_auth()
 base = os.getenv("VP_BASE_URL", "http://127.0.0.1:8787")
 if args.command == "brief":
     body = sys.stdin.read().strip()
