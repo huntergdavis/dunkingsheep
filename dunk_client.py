@@ -21,6 +21,7 @@ import time
 
 from dunk_api import COMMANDS_BY_NAME
 from dunk_core import CONFIG_DIR, DunkError
+from dunk_roles import READ_ONLY as _READ_ONLY_COMMANDS
 from dunk_server import DEFAULT_SOCKET, LOG_FILE, SOCKET_PATH
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -189,7 +190,8 @@ def exported_pane_id(environ=None):
     return env.get("TMUX_PANE") or env.get("HERDR_PANE_ID") or None
 
 
-def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None):
+def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None,
+                     allow_unresolved=False):
     """(pane_id, note) for this caller, refusing only a LYING environment.
 
     The terminal we are IN beats a claim inherited from somewhere else, and a claim
@@ -234,7 +236,14 @@ def resolve_identity(explicit=None, environ=None, tty_lookup=None, detect=None):
     if pane:
         return pane, f"resolved by terminal ({note})"
     if _terminal_exists(lookup):
-        # A terminal exists but identifies no single pane: a question, not an id.
+        # A terminal exists but identifies no single pane (t602): an ssh session whose
+        # tty no tmux pane owns. This used to be a refusal before any daemon call, so
+        # even `whoami` and `status` were unreachable and the fleet was blind from
+        # that lane. The identity is still NOT invented - it is anonymous - and the
+        # caller decides whether that is enough: read-only verbs proceed, a write
+        # verb refuses and names the labelled-token exit.
+        if allow_unresolved:
+            return None, f"anonymous: the terminal resolved to no single pane ({note})"
         raise IdentityRefused(
             f"identity refused: the terminal exists but resolved to no single pane "
             f"({note}). Set TMUX_PANE, or run inside a tmux pane.")
@@ -260,6 +269,25 @@ def _terminal_exists(lookup):
     return (text.startswith("/dev/") or "owns /dev/" in text or "claimed by" in text)
 
 
+def identity_refusal_for(cmd, self_pane_id, has_token, note=None):
+    """Why a pane-less caller may not run `cmd`, or None when it may (t602).
+
+    A terminal that resolves to no pane is anonymous, not broken: the read-only
+    verbs must work from there (that is the difference between a blind fleet and a
+    lane that needs a token). The rule is the daemon's own allowlist, so the client
+    and the daemon cannot drift apart. The refusal names the exit, because a lane
+    that cannot run any command cannot discover one.
+    """
+    if self_pane_id or has_token or cmd in _READ_ONLY_COMMANDS:
+        return None
+    where = f" ({note})" if note else ""
+    return (f"identity refused: {cmd} needs a lane and this terminal resolved to no "
+            f"pane{where}. Read-only commands work here. For a write, run it inside a "
+            "tmux pane, or issue a labelled, revocable token on a pane that has one: "
+            "dunkingsheep token issue --role owner --label <why>  (then set "
+            "DUNKINGSHEEP_SERVICE_TOKEN to it).")
+
+
 class FlockClient:
     def __init__(self, socket_path=None, self_pane_id=None, timeout=15.0):
         self.socket_path = socket_path or SOCKET_PATH
@@ -267,7 +295,11 @@ class FlockClient:
         if explicit:
             self.self_pane_id, self.identity_note = self_pane_id, "explicit"
         else:
-            self.self_pane_id, self.identity_note = resolve_identity()
+            # t602: an ssh lane whose tty no tmux pane owns resolves to NO pane. It is
+            # anonymous, not refused, so the read-only verbs still work from there;
+            # `call()` refuses the writes and names the token exit.
+            self.self_pane_id, self.identity_note = resolve_identity(
+                allow_unresolved=True)
         # The terminal already exported our identity. Only pay for a
         # `pane current` round-trip when asked to verify a possibly-stale env.
         if not explicit and (
@@ -298,6 +330,12 @@ class FlockClient:
 
     def call(self, cmd, **args):
         """Send one command; return its result or raise DunkError / OSError."""
+        # t602: no pane and no token is enough for a READ, and not enough for a write.
+        refusal = identity_refusal_for(cmd, self.self_pane_id,
+                                       bool(self.service_token()),
+                                       self.identity_note)
+        if refusal:
+            raise IdentityRefused(refusal)
         # A SYSTEM SENDER has no pane by definition (the watchdog runs from a timer).
         # Attaching one - from the environment or a parent service - made the daemon
         # refuse the claim, so monitoring went silent while the rule still fired.

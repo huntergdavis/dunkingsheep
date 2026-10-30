@@ -85,9 +85,25 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(0, proc.returncode, (proc.stdout or "") + (proc.stderr or ""))
             self.assertNotIn("identity refused", proc.stderr or "")
 
-    def test_a_terminal_with_no_pane_is_refused(self):
+    def test_a_terminal_with_no_pane_is_refused_unless_unresolved_is_allowed(self):
+        """t602: this used to be refused before any daemon call, so an ssh lane whose
+        tty no tmux pane owns could not even run `whoami`. The identity is still not
+        invented - it is anonymous - and the client decides per verb."""
         with self.assertRaisesRegex(IdentityRefused, "refused"):
             resolve_identity(environ={}, tty_lookup=lookup(None, "no tmux pane owns /dev/pts/70"))
+        pane, note = resolve_identity(environ={},
+                                      tty_lookup=lookup(None, "no tmux pane owns /dev/pts/70"),
+                                      allow_unresolved=True)
+        self.assertIsNone(pane)
+        self.assertIn("anonymous", note)
+        self.assertIn("/dev/pts/70", note, "the note must name the terminal it came from")
+
+    def test_a_lying_claim_is_still_refused_even_when_unresolved_is_allowed(self):
+        """The refusal that matters - an inherited pane id - does not soften (t602)."""
+        with self.assertRaisesRegex(IdentityRefused, "refused"):
+            resolve_identity(environ={"TMUX_PANE": "%9"},
+                             tty_lookup=lookup("%4", "resolved by /dev/pts/66"),
+                             allow_unresolved=True)
 
     def test_an_unreadable_claim_with_no_terminal_keeps_the_claim(self):
         """A host without tmux, or a runner with no pty: refuse to INVENT an
@@ -129,3 +145,38 @@ class RealTerminalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PaneLessVerbTests(unittest.TestCase):
+    """t602: what a lane with no pane may still do, decided per verb."""
+
+    def test_read_only_verbs_run_from_a_terminal_that_owns_no_pane(self):
+        import dunk_client
+        for verb in ("status", "whoami", "task_read", "poll", "health"):
+            self.assertIsNone(
+                dunk_client.identity_refusal_for(verb, None, False,
+                                                 "anonymous: no pane"),
+                f"{verb} must work from an ssh lane")
+
+    def test_a_write_verb_is_refused_and_names_the_labelled_token_exit(self):
+        import dunk_client
+        refusal = dunk_client.identity_refusal_for("task_next", None, False,
+                                                   "anonymous: no pane")
+        self.assertIsNotNone(refusal)
+        self.assertIn("token issue --role owner --label", refusal,
+                      "a lane that can run nothing cannot discover the exit")
+        self.assertIn("read-only", refusal.lower())
+
+    def test_a_service_token_is_enough_for_a_write(self):
+        import dunk_client
+        self.assertIsNone(dunk_client.identity_refusal_for("task_next", None, True))
+
+    def test_a_lane_with_a_pane_is_never_refused(self):
+        import dunk_client
+        self.assertIsNone(dunk_client.identity_refusal_for("task_next", "%17", False))
+
+    def test_the_client_rule_is_the_daemons_own_read_only_list(self):
+        """If these drift, a verb can be writable for the daemon and read-only here."""
+        import dunk_client
+        import dunk_roles
+        self.assertEqual(frozenset(dunk_roles.READ_ONLY), dunk_client._READ_ONLY_COMMANDS)
