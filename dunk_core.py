@@ -4012,7 +4012,7 @@ class Flock:
     def _review_evidence(self, task):
         """The reviewer's own note text, verbatim, for the follow-up and GitHub."""
         notes = [_note_text(note).strip() for note in self.tasks.notes(task["id"])
-                 if note["text"].strip()]
+                 if _note_text(note).strip()]
         return "\n\n".join(notes)
 
     def _after_review_verdict(self, task, verdict, by=None):

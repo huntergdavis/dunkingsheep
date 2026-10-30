@@ -49,7 +49,11 @@ class FakeGitHub:
         return [dict(p, repo=repo) for p in self.pulls]
 
     def pull_detail(self, repo, number, token):
-        return {"additions": 10, "deletions": 2, "changed_files": 1, "body": "pr body"}
+        # GET /repos/{r}/pulls/{n}: mergeable is a BOOLEAN and mergeable_state is
+        # free text ("dirty" = conflicts, "blocked" = a pending check, "clean").
+        detail = {"additions": 10, "deletions": 2, "changed_files": 1, "body": "pr body"}
+        detail.update(getattr(self, "details", {}).get(number, {}))
+        return detail
 
     def post_status(self, repo, sha, state, token, description, target_url=None):
         if self.fail_status:
@@ -67,10 +71,21 @@ class FakeGitHub:
 
 def pull(number=7, head="a" * 40, branch="pi-worker-3/t124", login="dunkingsheep-author[bot]",
          mergeable=None):
-    return {"number": number, "title": f"PR {number}", "url": f"https://x/{number}",
-            "draft": False, "head": head, "branch": branch, "base": "main",
-            "login": login, "created_at": "2026-10-29T20:00:00Z",
-            "updated_at": "2026-10-29T20:00:00Z", "mergeable": mergeable}
+    """One row of GET /repos/{r}/pulls, as GitHub actually answers it.
+
+    The LIST endpoint carries no `mergeable` and no `mergeable_state` on
+    github.com (measured 2026-10-30: the keys are absent), which is why t704's
+    skip cannot read them from here. `mergeable` is accepted only so a test can
+    put a stale value in the list payload and prove it is ignored; the real
+    signal comes from pull_detail() below.
+    """
+    row = {"number": number, "title": f"PR {number}", "url": f"https://x/{number}",
+           "draft": False, "head": head, "branch": branch, "base": "main",
+           "login": login, "created_at": "2026-10-29T20:00:00Z",
+           "updated_at": "2026-10-29T20:00:00Z"}
+    if mergeable is not None:
+        row["mergeable"] = mergeable
+    return row
 
 
 class PureTests(unittest.TestCase):
@@ -391,32 +406,53 @@ class ConflictedHeadTests(unittest.TestCase):
         self.flock.tasks.close()
         self.tmp.cleanup()
 
-    def sync(self, pulls):
+    def sync(self, pulls, detail=None):
         github = FakeGitHub(pulls)
         github.merged = []
+        github.details = {7: dict(detail or {})}
         return dunk_review.Sync(self.flock, tokens=self.tokens, github=github)
 
     def review_tasks(self):
         return self.flock.tasks.list(kind="review", include_done=False)
 
-    def test_a_conflicting_pr_gets_no_review_task(self):
-        report = self.sync([pull(mergeable="conflicting")]).run()
+    def test_a_conflicted_pr_gets_no_review_task(self):
+        """Measured shape: GET /pulls/7 answers mergeable=false, state=dirty."""
+        report = self.sync([pull()], {"mergeable": False, "mergeable_state": "dirty"}).run()
         self.assertEqual([], report["filed"], "no reviewer turn on an unmergeable head")
         self.assertEqual([], self.review_tasks())
         self.assertEqual([{"repo": "o/r", "pr": 7, "head": "a" * 12}],
                          report["conflicted"], "the report names it, so it is not silent")
 
-    def test_an_unknown_mergeable_state_still_files(self):
-        """The list endpoint returns null while GitHub computes it: UNKNOWN is not
-        a reason to stall the whole review queue."""
-        report = self.sync([pull(mergeable=None)]).run()
+    def test_the_list_payload_is_not_trusted_for_mergeable(self):
+        """The list endpoint carries no mergeable at all, and a stale string in it
+        must not decide anything: the word "conflicting" is GraphQL-only."""
+        report = self.sync([pull(mergeable="conflicting")],
+                           {"mergeable": True, "mergeable_state": "clean"}).run()
         self.assertEqual(1, len(report["filed"]))
         self.assertEqual([], report["conflicted"])
 
-    def test_a_mergeable_pr_is_filed_and_merged_as_before(self):
-        github = FakeGitHub([pull(mergeable="mergeable")])
-        github.merged = []
-        sync = dunk_review.Sync(self.flock, tokens=self.tokens, github=github)
-        report = sync.run()
-        self.assertEqual(1, len(report["filed"]))
+    def test_an_unknown_mergeable_still_files(self):
+        """mergeable=None means GitHub has not computed it yet - `unknown` or
+        `dirty`-less - and UNKNOWN must never stall the review queue."""
+        for detail in ({"mergeable": None, "mergeable_state": "unknown"}, {}):
+            with self.subTest(detail=detail):
+                self.flock.tasks.close()
+                self.flock.tasks = Tasks(path=os.path.join(self.tmp.name,
+                                                           f"tasks-{len(detail)}.db"))
+                report = self.sync([pull()], detail).run()
+                self.assertEqual(1, len(report["filed"]))
+                self.assertEqual([], report["conflicted"])
+
+    def test_a_mergeable_pr_is_filed_as_before(self):
+        report = self.sync([pull()], {"mergeable": True,
+                                      "mergeable_state": "blocked"}).run()
+        self.assertEqual(1, len(report["filed"]), "a blocked-by-checks PR is still reviewed")
         self.assertEqual([], report["conflicted"])
+
+    def test_a_failed_lookup_files_the_review_and_reports_the_error(self):
+        github = FakeGitHub([pull()])
+        github.pull_detail = lambda *a, **k: (_ for _ in ()).throw(
+            dunk_github.GitHubError("GitHub GET pulls/7 -> 500"))
+        report = dunk_review.Sync(self.flock, tokens=self.tokens, github=github).run()
+        self.assertEqual(1, len(report["filed"]), "an API error is not evidence of a conflict")
+        self.assertTrue(any("mergeable o/r#7" in e for e in report["errors"]))

@@ -164,6 +164,32 @@ class Sync:
             return None
         return task["id"]
 
+    def conflicting(self, repo, number, token, report=None):
+        """True / False when GitHub says, None when it will not say (t704).
+
+        GET /repos/{repo}/pulls/{number} answers `mergeable` as a BOOLEAN and
+        `mergeable_state` as free text ("dirty" for conflicts, "blocked" for a
+        pending check, "clean", "unknown"). `mergeable: false` is the conflict
+        signal; `None` means GitHub has not computed it yet. UNKNOWN is not a
+        conflict: it must never stall the review queue, so it falls through and the
+        head is filed as before.
+        """
+        try:
+            detail = self.github.pull_detail(repo, number, token)
+        except dunk_github.GitHubError as error:
+            if report is not None:
+                report["errors"].append(f"mergeable {repo}#{number}: {error}")
+            return None
+        if not isinstance(detail, dict):
+            return None
+        mergeable = detail.get("mergeable")
+        state = str(detail.get("mergeable_state") or "").strip().lower()
+        if mergeable is False or state == "dirty":
+            return True
+        if mergeable is True or state in ("clean", "blocked", "unstable", "behind"):
+            return False
+        return None
+
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
                   "followups": [], "conflicted": [], "errors": []}
@@ -190,16 +216,22 @@ class Sync:
             for pr in pulls:
                 if pr["draft"] or not pr["head"]:
                     continue
-                # t704: a CONFLICTING head cannot merge, so a reviewer turn spent on it
-                # is wasted - measured tonight on #120 (reviewed at 9781629 while
-                # conflicted) and #124 (an APPROVED head 5e2e8b3 already conflicted).
-                # Only an EXPLICIT "conflicting" skips: the list endpoint returns null
-                # while GitHub computes it, and null is UNKNOWN, not a reason to stall
-                # the whole review queue.
-                if str(pr.get("mergeable") or "").lower() == "conflicting":
+                # t704: a conflicted head cannot merge, so a reviewer turn on it is
+                # wasted - measured on #120 (reviewed at 9781629 while conflicted) and
+                # #124 (an APPROVED head 5e2e8b3 already conflicted).
+                #
+                # The signal is NOT the list endpoint: GET /repos/{r}/pulls carries no
+                # mergeable/mergeable_state at all on github.com (measured 2026-10-30:
+                # the keys are absent, not null), and the single-PR GET returns
+                # mergeable as a BOOLEAN with mergeable_state as free text - the word
+                # "conflicting" exists only in GraphQL. So this asks per PR, and only
+                # for a head that would otherwise be filed now.
+                conflict = self.conflicting(repo, pr["number"], token,
+                                            report=report)
+                if conflict is True:
                     report.setdefault("conflicted", []).append(
                         {"repo": repo, "pr": pr["number"], "head": pr["head"][:12]})
-                    log.info("review not filed: %s#%s is CONFLICTING at %s",
+                    log.info("review not filed: %s#%s is conflicted at %s",
                              repo, pr["number"], pr["head"][:12])
                     continue
                 key = (repo, pr["number"])
