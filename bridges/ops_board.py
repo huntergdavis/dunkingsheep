@@ -107,7 +107,7 @@ def _task_board(client, now: datetime) -> dict:
     try:
         throughput = _throughput(client.call("task_metrics", window_s=86400), now)
     except Exception as exc:  # noqa: BLE001
-        throughput = {"completed_last_hour": None, "completed_last_24h": None,
+        throughput = {"completed_current_bucket": None, "completed_last_24h": None,
                       "error": type(exc).__name__}
     tasks = listing.get("tasks") if isinstance(listing, dict) else listing
     if not isinstance(tasks, list):
@@ -187,28 +187,29 @@ def _throughput(metrics: dict, now: datetime | None = None) -> dict:
     must not re-derive what the daemon already measures, or the two numbers will
     disagree and nobody will know which is the measurement.
 
-    "Last hour" is the trailing 3600 s of buckets, not the newest bucket alone - a
-    bucket is an hour, and its newest entry is usually PARTIAL (the first live read
-    after this was written showed 14 completed in the current, incomplete bucket).
-    Reporting a partial bucket as "the last hour" is the same class of error as the
-    frozen stamp the manifest gate had to fix.
+    The buckets are hourly, so there is no trailing hour here: the tile reports the
+    CURRENT (partial) bucket under that name, with its start time, never as "the last
+    hour" (reviewer finding on #198: it read 0 twenty minutes into an hour with 12).
     """
     throughput = (metrics or {}).get("throughput") or {}
     buckets = throughput.get("buckets") or []
     if not isinstance(buckets, list) or not buckets:
-        return {"completed_last_hour": None, "completed_last_24h": None,
+        return {"completed_current_bucket": None, "completed_last_24h": None,
                 "note": "no buckets in the metrics payload"}
     now_s = (now or _now()).timestamp()
-    hour = [row for row in buckets
-            if isinstance(row, dict) and row.get("bucket") is not None
-            and now_s - float(row["bucket"]) <= 3600]
-    day = [row for row in buckets
-           if isinstance(row, dict) and row.get("bucket") is not None
-           and now_s - float(row["bucket"]) <= 86400]
+    rows = [row for row in buckets
+            if isinstance(row, dict) and row.get("bucket") is not None]
+    day = [row for row in rows if now_s - float(row["bucket"]) <= 86400]
     total = lambda rows: sum(int(row.get("completed") or 0) for row in rows)
-    return {"completed_last_hour": total(hour), "completed_last_24h": total(day),
+    # The daemon's buckets are HOURLY, so no trailing hour can be built from them:
+    # the newest bucket is the current, partial hour and is reported as exactly that.
+    newest = max(rows, key=lambda row: float(row["bucket"]), default=None)
+    current = newest if newest and now_s - float(newest["bucket"]) < 3600 else None
+    return {"completed_current_bucket": int(current.get("completed") or 0) if current else 0,
+            "bucket_started_at": float(newest["bucket"]) if newest else None,
+            "completed_last_24h": total(day),
             "completed_in_window": throughput.get("completed"),
-            "note": "trailing 3600 s / 86400 s of task_metrics buckets"}
+            "note": "current (partial) hourly bucket; last_24h sums buckets started in 86400 s"}
 
 
 def _review_board(client, now: datetime) -> dict:
@@ -316,14 +317,20 @@ def _pane_board(client, now: datetime | None = None) -> dict:
     working = sum(1 for pane in items if pane.get("agent_status") == "working")
     idle = sum(1 for pane in items if pane.get("agent_status") == "idle")
     gap = (panes or {}).get("registry_gap") or []
-    dead = [row for row in gap if row.get("alive") is False]
+    dead = [dict(row, pane_id=row.get("pane_id") or row.get("pane"))
+            for row in gap if row.get("alive") is False]
+    # A lane is a pane with a declared turn or an agent; a bare shell tab is not an
+    # unaccounted lane and is counted on its own (reviewer finding 2 on #198).
+    is_lane = lambda pane: bool(pane.get("agent")) or pane.get("agent_status") in ("working", "idle")
+    bare = sum(1 for pane in items if not is_lane(pane))
     return {"state": "ok", "total": len(items), "working": working, "idle": idle,
+            "bare_panes": bare,
             "dead": len(dead), "dead_items": dead,
             # A pane the backend lists with no declared turn is unknown; a lane the
             # registry knows and the backend does NOT list, with its process alive, is
             # the t714 case: unreachable, and also not dead.
-            "unknown": sum(1 for pane in items
-                           if pane.get("agent_status") not in ("working", "idle"))
+            "unknown": sum(1 for pane in items if is_lane(pane)
+                           and pane.get("agent_status") not in ("working", "idle"))
                        + sum(1 for row in gap if row.get("alive") is True),
             "items": items}
 

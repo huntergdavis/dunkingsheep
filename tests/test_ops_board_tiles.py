@@ -132,14 +132,25 @@ class BriefTileTests(unittest.TestCase):
         # The trailing 3600 s window holds ONLY the bucket 1800 s old: the 5400 s one
         # is outside it. (My first expectation here was 11 - the bucket arithmetic I
         # did in my head, not the window the code takes. The code was right.)
-        self.assertEqual(4, tile["completed_last_hour"])
+        self.assertEqual(4, tile["completed_current_bucket"])
         self.assertEqual(17, tile["completed_last_24h"])
         self.assertEqual(17, tile["completed_in_window"])
+
+    def test_hourly_buckets_report_the_current_bucket_not_a_trailing_hour(self):
+        hour = NOW.timestamp() - NOW.timestamp() % 3600
+        metrics = {"throughput": {"completed": 19, "buckets": [
+            {"bucket": hour - 3600, "completed": 7}, {"bucket": hour, "completed": 12}]}}
+        from bridges import ops_board
+        tile = ops_board._throughput(metrics, datetime.datetime.fromtimestamp(hour + 1200, datetime.timezone.utc))
+        self.assertEqual(12, tile["completed_current_bucket"])
+        self.assertEqual(hour, tile["bucket_started_at"])
+        gone = ops_board._throughput(metrics, datetime.datetime.fromtimestamp(hour + 3700, datetime.timezone.utc))
+        self.assertEqual(0, gone["completed_current_bucket"], "a stale bucket is not this hour")
 
     def test_throughput_without_buckets_says_so_instead_of_zero(self):
         replies = dict(self.replies, task_metrics={"throughput": {"completed": 0}})
         tile = board(replies)["brief"]["throughput"]
-        self.assertIsNone(tile["completed_last_hour"],
+        self.assertIsNone(tile["completed_current_bucket"],
                           "no buckets is 'not measured', not 'zero completed'")
         self.assertIn("no buckets", tile["note"],
                       "the tile must SAY why it is null, not just be null")
@@ -147,7 +158,7 @@ class BriefTileTests(unittest.TestCase):
     def test_a_failing_metric_read_does_not_take_the_backlog_with_it(self):
         replies = dict(self.replies, task_metrics=RuntimeError("daemon busy"))
         brief = board(replies)["brief"]
-        self.assertIsNone(brief["throughput"]["completed_last_hour"])
+        self.assertIsNone(brief["throughput"]["completed_current_bucket"])
         self.assertIsNone(brief["throughput"]["completed_last_24h"])
         self.assertEqual(3, brief["backlog"]["open"],
                          "the backlog is still measured when throughput is not")
@@ -172,8 +183,10 @@ class BriefTileTests(unittest.TestCase):
         self.assertEqual(1, tile["idle"])
         self.assertEqual(1, tile["dead"],
                          "a registered lane whose pane is gone is DEAD, not unknown")
-        # one pane with no declared turn + one live-but-unlisted lane
-        self.assertEqual(2, tile["unknown"])
+        # the live-but-unlisted lane only: a bare shell tab (%3) is not an unaccounted lane
+        self.assertEqual(1, tile["unknown"])
+        self.assertEqual(1, tile["bare_panes"])
+        self.assertEqual("%9", tile["dead_items"][0]["pane_id"])
 
     def test_a_live_but_unlisted_lane_is_not_called_dead(self):
         replies = dict(self.replies, list_panes={
