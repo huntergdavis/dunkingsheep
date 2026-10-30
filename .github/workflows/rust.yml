@@ -1,0 +1,30 @@
+name: Rust
+
+# The Rust port's gate (docs/rust/RUST_PORT.md 0.3). `clippy` is NOT installable on the
+# build host (no rustup there; `cargo` is the distro package and has no clippy
+# subcommand), so this workflow is the ONLY place the `clippy -D warnings` bar is
+# enforced - a lane is held to build + test + fmt locally and must say so in its PR.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy (CI-only gate; not installable on the build host)
+        run: cargo clippy --all-targets -- -D warnings
