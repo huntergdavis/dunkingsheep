@@ -27,7 +27,10 @@ fail() { say "FAIL  $*"; FAILED=$((FAILED + 1)); }
 skip() { say "NOT OBSERVED  $*"; }
 
 # -- precondition: the deployed daemon must know the verbs ---------------------
-if ! $DS help 2>/dev/null | grep -q "owner_ingest\|owner ingest"; then
+# Probe the VERB, not the help text: `help` does not list subcommands, so grepping it
+# reported "not deployed" against a build that had the verb (measured 2026-10-29 23:57
+# on the deployed release d722815, which has owner_ingest/outbox/delivered).
+if ! $DS --json owner outbox telegram --limit 1 >/dev/null 2>&1; then
   say "REFUSING: this daemon does not expose owner ingest/outbox/delivered yet."
   say "Deploy PR128 (+ PR135) first; running now would measure the old build."
   exit 2
