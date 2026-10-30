@@ -85,13 +85,25 @@ class Sync:
         self.github = github
 
     def _live_reviews(self):
-        tasks = self.flock.tasks.list(scope=None, include_done=False, limit=500,
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
                                       kind="review")
         by_pr = {}
         for task in tasks:
             if task["status"] in ("open", "in_progress", "blocked"):
                 by_pr[(task.get("repo"), task.get("pr"))] = task
         return by_pr
+
+    def _judged_heads(self):
+        """(repo, pr, head) -> verdict for every DONE review: a head that was
+        judged is never re-filed (2026-10-29: an accepted PR got a second review
+        task the next tick, whose pending status overwrote the success)."""
+        tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                      kind="review")
+        out = {}
+        for task in tasks:
+            if task["status"] == "done" and task.get("verdict"):
+                out[(task.get("repo"), task.get("pr"), task.get("head"))] = task
+        return out
 
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
@@ -104,6 +116,8 @@ class Sync:
         lanes = self.flock.roles.describe().get("lanes") or {}
         mints = getattr(self.flock, "_gh_token_mints", {}) or {}
         live = self._live_reviews()
+        judged = self._judged_heads()
+        report["merged"] = []
         seen = set()
         listed = set()       # repos GitHub answered for; only their closed PRs are cancelled
         for repo in self.github.repos_config():
@@ -121,6 +135,13 @@ class Sync:
                 seen.add(key)
                 current = live.get(key)
                 if current and current.get("head") == pr["head"]:
+                    continue
+                done = judged.get((repo, pr["number"], pr["head"]))
+                if done is not None:
+                    # Already judged at this exact head. Accepted and still open:
+                    # protection may now be satisfied, so try the merge again.
+                    if done.get("verdict") == "accept" and not dry_run:
+                        self._merge(repo, pr["number"], pr["head"], token, report, done["id"])
                     continue
                 if current:
                     if not dry_run:
@@ -159,6 +180,19 @@ class Sync:
                 report["cancelled"].append(task["id"])
         return report
 
+    def _merge(self, repo, number, head, token, report, task_id=None):
+        try:
+            self.github.merge_pull(repo, number, token, sha=head)
+            report["merged"].append({"repo": repo, "pr": number, "head": head[:12],
+                                     "task": task_id})
+            return True
+        except dunk_github.GitHubError as error:
+            # 405 = protection not yet satisfied (approval count, other checks):
+            # not an error, the next tick retries. Anything else is reported.
+            if "405" not in str(error):
+                report["errors"].append(f"merge {repo}#{number}: {error}")
+            return False
+
     def _status(self, repo, sha, state, token, description, url, report):
         try:
             self.github.post_status(repo, sha, state, token, description, url)
@@ -193,6 +227,15 @@ class Sync:
                 out["review"] = "approved"
             except dunk_github.GitHubError as error:
                 out["errors"].append(f"approve: {error}")
+            # Merge now if protection is satisfied (one approval repos); poolrad
+            # needs a second verdict first and the sync retries every tick.
+            try:
+                self.github.merge_pull(repo, number, token, sha=head)
+                out["merged"] = True
+            except dunk_github.GitHubError as error:
+                out["merged"] = False
+                if "405" not in str(error):
+                    out["errors"].append(f"merge: {error}")
         else:
             try:
                 self.github.post_status(repo, head, "failure", token,
