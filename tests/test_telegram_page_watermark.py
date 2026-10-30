@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 import types
+import pathlib
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -285,3 +286,58 @@ class CaptionedAttachmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TelegramUnitTests(unittest.TestCase):
+    """t594: the unit must name variables the code reads and a path that exists.
+
+    Measured 2026-10-29 on the install: releases/<sha>/ with NO .venv and no
+    `current` symlink, so the previous ExecStart (.../current/.venv/bin/python)
+    could only fail with 203/EXEC; and the unit set DUNKING_SHEEP_DIR, which no
+    module reads (they all read DUNKINGSHEEP_DIR), so the line did nothing.
+    """
+
+    UNIT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "packaging", "systemd", "dunkingsheep-telegram.service")
+
+    def text(self):
+        with open(self.UNIT, encoding="utf-8") as handle:
+            return handle.read()
+
+    def env(self):
+        out = {}
+        for line in self.text().splitlines():
+            if line.startswith("Environment="):
+                key, _, value = line[len("Environment="):].partition("=")
+                out[key] = value
+        return out
+
+    def test_every_environment_key_is_one_the_code_reads(self):
+        """A misspelled key is a silent no-op, which is what this one was."""
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pattern = re.compile(r'os[.]environ(?:[.]get)?[(]\s*["\']([A-Z_]+)["\']')
+        read = set()
+        for path in pathlib.Path(root).rglob("*.py"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            read.update(pattern.findall(text))
+        for key in self.env():
+            # Only the daemon namespace: VP_* is read by the web app, which this
+            # test does not import (it needs fastapi).
+            if not key.startswith("DUNKINGSHEEP"):
+                continue
+            self.assertIn(key, read, f"{key} is set by the unit but no module reads it")
+
+    def test_the_bridge_uses_the_system_token_not_the_owners_transport(self):
+        """owner_ingest/outbox/delivered are granted to `system`; the bridge is a unit."""
+        self.assertTrue(self.env()["DUNKINGSHEEP_SERVICE_TOKEN_FILE"].endswith("system-token"))
+
+    def test_the_exec_start_does_not_need_a_current_symlink_or_a_venv(self):
+        exec_start = [line for line in self.text().splitlines()
+                      if line.startswith("ExecStart=")][0]
+        self.assertNotIn(".venv", exec_start,
+                         "the install creates no per-release venv")
+        self.assertIn("/usr/bin/python3", exec_start)
