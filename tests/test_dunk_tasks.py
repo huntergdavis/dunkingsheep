@@ -20,6 +20,101 @@ from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
+class TerminalStatusTests(unittest.TestCase):
+    """t854: a cancelled or done task is FINAL, whatever verb arrives late.
+
+    Measured on t780: a steward's 'cancelled' was overwritten by a lane's
+    in-flight 'blocked' (last writer wins), cancelled_at was left NULL, and the
+    lease reaper then reopened the blocked duplicate and handed cancelled work
+    back to the queue.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _task(self):
+        return self.store.add(GLOBAL, "a duplicate the steward will cancel")
+
+    def test_cancel_then_block_leaves_it_cancelled_and_says_so(self):
+        task = self._task()
+        self.store.cancel(task["id"], reason="duplicate of the other one")
+        with self.assertRaisesRegex(TaskError, "is cancelled; a finished task is not"):
+            self.store.block(task["id"], reason="late block from a lane")
+        row = self.store.get(task["id"])
+        self.assertEqual("cancelled", row["status"])
+        self.assertIsNotNone(row["cancelled_at"], "the cancelled record survives")
+
+    def test_a_done_task_cannot_be_blocked_or_reopened(self):
+        task = self._task()
+        self.store.complete(task["id"])
+        for move in ({"status": "blocked"}, {"status": "open"}, {"status": "in_progress"}):
+            with self.assertRaisesRegex(TaskError, "is done; a finished task is not"):
+                self.store.update(task["id"], **move)
+        with self.assertRaisesRegex(TaskError, "is done; a finished task is not"):
+            self.store.block(task["id"], reason="late")
+        self.assertEqual("done", self.store.get(task["id"])["status"])
+
+    def test_an_expired_lease_on_a_cancelled_task_requeues_nothing(self):
+        task = self._task()
+        self.store.claim_next(pane_id="%108", lease_seconds=1)
+        self.store.cancel(task["id"], reason="duplicate")
+        self.assertEqual([], self.store.reap(now=10 ** 12),
+                         "a cancelled task is not requeued by an expired lease")
+        self.assertEqual("cancelled", self.store.get(task["id"])["status"])
+
+    def test_a_cancel_that_lands_mid_edit_is_not_resurrected(self):
+        """The rowcount guard: a read-then-write check is the same race one level down."""
+        task = self._task()
+        real_require = self.store._require
+        state = {"first": True}
+
+        def stale_require(task_id):
+            row = real_require(task_id)
+            if state["first"]:
+                state["first"] = False
+                self.store.cancel(task["id"], reason="steward cancelled it")
+                return row          # the status this writer READ, before the cancel
+            return row
+
+        self.store._require = stale_require
+        try:
+            with self.assertRaisesRegex(TaskError, "is cancelled|changed to cancelled"):
+                self.store.block(task["id"], reason="late block")
+        finally:
+            self.store._require = real_require
+        self.assertEqual("cancelled", real_require(task["id"])["status"])
+
+    def test_two_threads_cancelling_and_blocking_end_cancelled(self):
+        for _ in range(6):
+            task = self._task()
+            errors = []
+
+            def cancel():
+                try:
+                    self.store.cancel(task["id"], reason="steward")
+                except TaskError as error:      # a refusal is an acceptable outcome
+                    errors.append(error)
+
+            def block():
+                try:
+                    self.store.block(task["id"], reason="lane")
+                except TaskError as error:
+                    errors.append(error)
+
+            threads = [threading.Thread(target=cancel), threading.Thread(target=block)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual("cancelled", self.store.get(task["id"])["status"],
+                             "cancelled must win over blocked, whichever ran first")
+
+
 class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

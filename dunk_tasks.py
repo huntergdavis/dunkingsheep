@@ -71,6 +71,8 @@ _PANE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$")
 # reviewer lane that is not its author; `verify` and `report` are reserved.
 KINDS = ("work", "review", "verify", "report")
 DEFAULT_KIND = "work"
+# t854: a task in one of these states is finished; no verb may move it.
+TERMINAL_STATUSES = ("done", "cancelled")
 VERDICTS = ("accept", "needs-fix")
 
 SCHEMA = """
@@ -652,12 +654,44 @@ class Tasks:
                 if not sets:
                     self.db.commit()
                     return self.get(task_id)
+                # t854: a terminal status is FINAL. cancel() and block() are both
+                # update(status=...), so two concurrent calls used to be a
+                # last-writer-wins race: on t780 a steward's 'cancelled' was overwritten
+                # by a lane's in-flight 'blocked', the reaper then reopened the blocked
+                # task and handed the cancelled duplicate back to the queue (and
+                # cancelled_at was NULL, so the record no longer said it was cancelled).
+                #
+                # Two guards, because one is not enough:
+                #  1. if we READ a terminal status, a status change is refused here;
+                #  2. the status UPDATE is conditional on the status we read, so a
+                #     cancel that lands between our read and our write still wins - the
+                #     loser's rowcount is 0 and it raises instead of resurrecting.
+                if "status" in sets and row["status"] in TERMINAL_STATUSES \
+                        and sets["status"] != row["status"]:
+                    raise TaskError(
+                        f"task {task_id} is {row['status']}; a finished task is not "
+                        "reopened by an edit (t854)")
                 sets["updated_at"] = now
                 assignments = ", ".join(f"{key} = ?" for key in sets)
-                self.db.execute(
-                    f"UPDATE tasks SET {assignments} WHERE id = ?",
-                    (*sets.values(), task_id),
-                )
+                changes_status = ("status" in sets and sets["status"] != row["status"])
+                if changes_status:
+                    cursor = self.db.execute(
+                        f"UPDATE tasks SET {assignments} WHERE id = ? AND status = ?",
+                        (*sets.values(), task_id, row["status"]))
+                else:
+                    cursor = self.db.execute(
+                        f"UPDATE tasks SET {assignments} WHERE id = ?",
+                        (*sets.values(), task_id))
+                if changes_status and cursor.rowcount == 0:
+                    self.db.rollback()
+                    current = self._require(task_id)["status"]
+                    if current in TERMINAL_STATUSES:
+                        raise TaskError(
+                            f"task {task_id} is {current}; a finished task is not reopened "
+                            "by an edit (t854)")
+                    raise TaskError(
+                        f"task {task_id} changed to {current} while this edit was applied; "
+                        "read it again (t854)")
                 if "status" in sets and sets["status"] != row["status"]:
                     new_status = sets["status"]
                     if new_status == "done":
