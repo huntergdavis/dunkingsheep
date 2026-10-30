@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]   # repo root: one repo (FLAT_FLEET.md 9)
-DATA = Path(os.environ.get("VP_DATA_DIR", ROOT / "data"))
+DATA = Path(os.environ.get("VP_DATA_DIR") or (Path(os.environ.get("DUNKINGSHEEP_DIR", str(Path.home() / ".config" / "dunkingsheep"))) / "desk"))
 DB = Path(os.environ.get("VP_OPS_DB", DATA / "operations.sqlite3"))
 MESSAGE_DB = DATA / "messages.sqlite3"
 DUNK_EVENTS_DB = Path(os.environ.get("DUNK_EVENTS_DB", Path.home() / ".config/dunkingsheep/metrics.db"))

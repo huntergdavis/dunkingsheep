@@ -35,7 +35,12 @@ from pydantic import BaseModel, Field
 from web.character_editor import EditorStore, router as character_editor_router
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = Path(os.getenv("VP_DATA_DIR", ROOT / "data")).resolve()
+# The desk's state lives OUTSIDE the repo, always (docs/FLAT_FLEET.md 9.2 rule 4): an
+# import inside a checkout or worktree used to create data/ beside the code, and two
+# lane branches then committed auth.json and the owner's messages to a public repo
+# (2026-10-29). There is no repo-root fallback.
+DESK_DIR_DEFAULT = Path(os.getenv("DUNKINGSHEEP_DIR", str(Path.home() / ".config" / "dunkingsheep"))) / "desk"
+DATA = Path(os.getenv("VP_DATA_DIR", DESK_DIR_DEFAULT)).expanduser().resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
