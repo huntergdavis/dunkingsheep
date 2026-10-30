@@ -1,0 +1,14 @@
+[package]
+name = "ds-core"
+description = "Dunking Sheep core: the ported daemon (docs/rust/RUST_PORT.md)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lib]
+name = "ds_core"
+path = "src/lib.rs"

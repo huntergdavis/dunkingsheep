@@ -20,3 +20,6 @@ venv/
 # untracked; an ignore rule cannot hide a file already in the Git index.
 # The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl
+# Rust build output (T00). A release tree must never carry target/ - it is
+# machine-specific and hundreds of MB.
+rust/target/

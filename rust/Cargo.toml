@@ -1,0 +1,21 @@
+# Rust port of the dunkingsheep daemon (docs/rust/RUST_PORT.md).
+#
+# T00 creates the EMPTY workspace: no crate has code yet, so `cargo build` proves
+# the toolchain and the workspace wiring and nothing else. Crates arrive with the
+# tasks that name them (TASKS.md), one task per file, per RUST_PORT.md section 0.
+[workspace]
+resolver = "2"
+members = ["crates/ds-core"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "UNLICENSED"
+publish = false
+
+# Dependency policy is RUST_PORT.md section 3: no crate may be added by a task that
+# does not name it. The list is deliberately empty at T00 - the first dependency is
+# tokio, and it arrives with the task that needs an async runtime (T01/T05), not with
+# the workspace.
+[workspace.dependencies]
