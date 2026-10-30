@@ -18,6 +18,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod lock;
+pub mod panes;
 pub mod proc;
 pub mod retry;
 pub mod stuck;
