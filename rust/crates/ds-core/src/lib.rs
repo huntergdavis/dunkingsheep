@@ -18,5 +18,6 @@ pub mod config;
 pub mod error;
 pub mod lock;
 pub mod retry;
+pub mod roles;
 
 pub use error::DunkError;
