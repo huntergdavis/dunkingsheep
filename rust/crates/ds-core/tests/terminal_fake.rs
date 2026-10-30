@@ -40,12 +40,19 @@ fn panes_group_by_workspace() {
 #[test]
 fn a_layout_mutation_changes_the_world_and_is_recorded() {
     let mut fake = FakeTerminal::new();
-    let tab = fake.create_tab(Some("w1"), Some("review"), Some("/tmp"), true)
+    let tab = fake
+        .create_tab(Some("w1"), Some("review"), Some("/tmp"), true)
         .expect("the fake accepts a tab");
     assert_eq!(4, fake.list_tabs().len());
-    assert_eq!(vec![("create_tab".to_string(), tab.tab_id.clone())], fake.layout_calls);
+    assert_eq!(
+        vec![("create_tab".to_string(), tab.tab_id.clone())],
+        fake.layout_calls
+    );
     let pane = fake.split_pane("w1:p1", "right", None).expect("split");
-    assert_eq!("/home/hunter/work", pane.cwd, "a split inherits the pane it came from");
+    assert_eq!(
+        "/home/hunter/work", pane.cwd,
+        "a split inherits the pane it came from"
+    );
     assert_eq!("bash", pane.command);
     assert_eq!(4, fake.list_panes().len());
 }
@@ -57,8 +64,15 @@ fn the_next_mutation_fails_once_then_succeeds() {
     let error = fake.create_tab(None, None, None, false).unwrap_err();
     assert_eq!("tmux: window not found", error.to_string());
     assert!(!error.backend_unavailable);
-    assert_eq!(3, fake.list_tabs().len(), "a refused mutation changed nothing");
-    assert!(fake.create_tab(None, None, None, false).is_ok(), "the switch cleared");
+    assert_eq!(
+        3,
+        fake.list_tabs().len(),
+        "a refused mutation changed nothing"
+    );
+    assert!(
+        fake.create_tab(None, None, None, false).is_ok(),
+        "the switch cleared"
+    );
 }
 
 #[test]
@@ -67,15 +81,22 @@ fn an_unavailable_backend_refuses_with_the_hint() {
     assert!(!fake.is_available());
     let error = fake.run_command("w1:p1", "ls").unwrap_err();
     assert!(error.backend_unavailable);
-    assert_eq!("tmux server not running - start it with `tmux new -d`", error.to_string());
+    assert_eq!(
+        "tmux server not running - start it with `tmux new -d`",
+        error.to_string()
+    );
     assert!(fake.runs.is_empty());
 }
 
 #[test]
 fn typing_a_command_is_recorded_not_executed() {
     let mut fake = FakeTerminal::new();
-    fake.run_command("w2:p2", "dunkingsheep status").expect("recorded");
-    assert_eq!(vec![("w2:p2".to_string(), "dunkingsheep status".to_string())], fake.runs);
+    fake.run_command("w2:p2", "dunkingsheep status")
+        .expect("recorded");
+    assert_eq!(
+        vec![("w2:p2".to_string(), "dunkingsheep status".to_string())],
+        fake.runs
+    );
 }
 
 #[test]
@@ -102,9 +123,16 @@ fn the_trait_is_object_safe_so_a_backend_can_be_swapped_at_runtime() {
     // (t50), which only works if the daemon holds a `Box<dyn Terminal>`.
     let mut backend: Box<dyn Terminal> = Box::new(FakeTerminal::new());
     assert!(backend.is_available());
-    let pane = backend.start_agent(&AgentSpec { name: "worker-1".to_string(),
-                                                argv: vec!["pi".to_string()],
-                                                ..AgentSpec::default() }).expect("started");
+    let pane = backend
+        .start_agent(&AgentSpec {
+            name: "worker-1".to_string(),
+            argv: vec!["pi".to_string()],
+            ..AgentSpec::default()
+        })
+        .expect("started");
     assert_eq!("worker-1", pane.title);
-    assert!(backend.list_panes().iter().any(|pane| pane.pane_id == "w1:p-worker-1"));
+    assert!(backend
+        .list_panes()
+        .iter()
+        .any(|pane| pane.pane_id == "w1:p-worker-1"));
 }

@@ -14,39 +14,98 @@ use super::{AgentSpec, Pane, Tab, Terminal, TerminalError, Workspace};
 /// point of the fake is that every test sees the SAME world.
 fn canned_panes() -> Vec<Pane> {
     vec![
-        Pane { pane_id: "w1:p1".into(), session_id: "s1".into(), window_id: "w1".into(),
-               cwd: "/home/hunter/work".into(), command: "bash".into(),
-               label: "π - work".into(), title: "π - work".into(), active: true, workspace: "work".into(),
-               tab: "1".into(), window_index: 1, workspace_index: 1,
-               pane_pid: Some(1101), width: 120, height: 40 },
-        Pane { pane_id: "w2:p2".into(), session_id: "s2".into(), window_id: "w2".into(),
-               cwd: "/home/hunter/work".into(), command: "claude".into(),
-               label: "π - review".into(), title: "π - review".into(), active: true, workspace: "work".into(),
-               tab: "2".into(), window_index: 2, workspace_index: 1,
-               pane_pid: Some(2202), width: 120, height: 40 },
-        Pane { pane_id: "w3:p3".into(), session_id: "s3".into(), window_id: "w3".into(),
-               cwd: "/home/hunter/other".into(), command: "bash".into(),
-               label: "π - other".into(), title: "π - other".into(), active: true, workspace: "other".into(),
-               tab: "1".into(), window_index: 1, workspace_index: 2,
-               pane_pid: Some(3303), width: 100, height: 30 },
+        Pane {
+            pane_id: "w1:p1".into(),
+            session_id: "s1".into(),
+            window_id: "w1".into(),
+            cwd: "/home/hunter/work".into(),
+            command: "bash".into(),
+            label: "π - work".into(),
+            title: "π - work".into(),
+            active: true,
+            workspace: "work".into(),
+            tab: "1".into(),
+            window_index: Some(1),
+            workspace_index: Some(1),
+            pane_pid: Some(1101),
+            width: Some(120),
+            height: Some(40),
+        },
+        Pane {
+            pane_id: "w2:p2".into(),
+            session_id: "s2".into(),
+            window_id: "w2".into(),
+            cwd: "/home/hunter/work".into(),
+            command: "claude".into(),
+            label: "π - review".into(),
+            title: "π - review".into(),
+            active: true,
+            workspace: "work".into(),
+            tab: "2".into(),
+            window_index: Some(2),
+            workspace_index: Some(1),
+            pane_pid: Some(2202),
+            width: Some(120),
+            height: Some(40),
+        },
+        Pane {
+            pane_id: "w3:p3".into(),
+            session_id: "s3".into(),
+            window_id: "w3".into(),
+            cwd: "/home/hunter/other".into(),
+            command: "bash".into(),
+            label: "π - other".into(),
+            title: "π - other".into(),
+            active: true,
+            workspace: "other".into(),
+            tab: "1".into(),
+            window_index: Some(1),
+            workspace_index: Some(2),
+            pane_pid: Some(3303),
+            width: Some(100),
+            height: Some(30),
+        },
     ]
 }
 
 fn canned_tabs() -> Vec<Tab> {
     vec![
-        Tab { tab_id: "w1".into(), workspace_id: "w1".into(), label: "1".into(),
-              index: 1, active: true },
-        Tab { tab_id: "w2".into(), workspace_id: "w2".into(), label: "2".into(),
-              index: 2, active: true },
-        Tab { tab_id: "w3".into(), workspace_id: "w3".into(), label: "1".into(),
-              index: 1, active: true },
+        Tab {
+            tab_id: "w1".into(),
+            workspace_id: "w1".into(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        },
+        Tab {
+            tab_id: "w2".into(),
+            workspace_id: "w2".into(),
+            label: "2".into(),
+            index: 2,
+            active: true,
+        },
+        Tab {
+            tab_id: "w3".into(),
+            workspace_id: "w3".into(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        },
     ]
 }
 
 fn canned_workspaces() -> Vec<Workspace> {
     vec![
-        Workspace { workspace_id: "w1".into(), label: "work".into(), index: 1 },
-        Workspace { workspace_id: "w2".into(), label: "other".into(), index: 2 },
+        Workspace {
+            workspace_id: "w1".into(),
+            label: "work".into(),
+            index: 1,
+        },
+        Workspace {
+            workspace_id: "w2".into(),
+            label: "other".into(),
+            index: 2,
+        },
     ]
 }
 
@@ -90,7 +149,10 @@ impl FakeTerminal {
     }
 
     pub fn unavailable() -> Self {
-        FakeTerminal { available: false, ..Self::default() }
+        FakeTerminal {
+            available: false,
+            ..Self::default()
+        }
     }
 
     fn next_id(&mut self, prefix: &str) -> String {
@@ -126,7 +188,10 @@ impl Terminal for FakeTerminal {
     }
 
     fn get_pane(&self, pane_id: &str) -> Option<Pane> {
-        self.panes.iter().find(|pane| pane.pane_id == pane_id).cloned()
+        self.panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .cloned()
     }
 
     fn list_tabs(&self) -> Vec<Tab> {
@@ -140,7 +205,10 @@ impl Terminal for FakeTerminal {
     fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>> {
         let mut grouped: BTreeMap<String, Vec<Pane>> = BTreeMap::new();
         for pane in &self.panes {
-            grouped.entry(pane.workspace.clone()).or_default().push(pane.clone());
+            grouped
+                .entry(pane.workspace.clone())
+                .or_default()
+                .push(pane.clone());
         }
         grouped
     }
@@ -149,9 +217,12 @@ impl Terminal for FakeTerminal {
         Ok(self.children.get(&pane_pid).cloned().unwrap_or_default())
     }
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>
-    {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -163,13 +234,17 @@ impl Terminal for FakeTerminal {
         };
         self.workspaces.push(workspace.clone());
         self.record("create_workspace", &workspace_id);
-        let _ = (cwd, focus);       // the fake records the intent, the mutation is the list
+        let _ = (cwd, focus); // the fake records the intent, the mutation is the list
         Ok(workspace)
     }
 
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>
-    {
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -187,13 +262,17 @@ impl Terminal for FakeTerminal {
         Ok(tab)
     }
 
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>
-    {
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
-        let source = self.get_pane(pane_id)
+        let source = self
+            .get_pane(pane_id)
             .ok_or_else(|| TerminalError::refused(format!("no such pane {pane_id}")))?;
         let pane_id = self.next_id("w9:p");
         let pane = Pane {
@@ -203,8 +282,18 @@ impl Terminal for FakeTerminal {
             label: format!("{} ({direction})", source.label),
             title: format!("{} ({direction})", source.title),
             active: true,
-            width: if direction == "down" { source.width } else { source.width / 2 },
-            height: if direction == "down" { source.height / 2 } else { source.height },
+            // t943: the size is Option, so a split of an unknown size stays unknown
+            // instead of inventing 0.
+            width: if direction == "down" {
+                source.width
+            } else {
+                source.width.map(|w| w / 2)
+            },
+            height: if direction == "down" {
+                source.height.map(|h| h / 2)
+            } else {
+                source.height
+            },
             ..source
         };
         self.panes.push(pane.clone());
@@ -221,18 +310,21 @@ impl Terminal for FakeTerminal {
             pane_id: pane_id.clone(),
             session_id: "s1".into(),
             window_id: "w1".into(),
-            cwd: spec.cwd.clone().unwrap_or_else(|| "/home/hunter/work".into()),
+            cwd: spec
+                .cwd
+                .clone()
+                .unwrap_or_else(|| "/home/hunter/work".into()),
             command: spec.argv.first().cloned().unwrap_or_default(),
             label: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
             title: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
             active: true,
             workspace: "work".into(),
             tab: "1".into(),
-            window_index: 1,
-            workspace_index: 1,
+            window_index: Some(1),
+            workspace_index: Some(1),
             pane_pid: Some(9000 + self.counter),
-            width: 120,
-            height: 40,
+            width: Some(120),
+            height: Some(40),
         };
         self.panes.push(pane.clone());
         self.record("start_agent", &pane_id);
@@ -245,15 +337,21 @@ impl Terminal for FakeTerminal {
         }
         match kind {
             "tab" => {
-                let tab = self.tabs.iter_mut().find(|tab| tab.tab_id == target_id)
+                let tab = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.tab_id == target_id)
                     .ok_or_else(|| TerminalError::refused(format!("no such tab {target_id}")))?;
                 tab.label = label.to_string();
             }
             "workspace" => {
-                let workspace = self.workspaces.iter_mut()
+                let workspace = self
+                    .workspaces
+                    .iter_mut()
                     .find(|workspace| workspace.workspace_id == target_id)
-                    .ok_or_else(|| TerminalError::refused(
-                        format!("no such workspace {target_id}")))?;
+                    .ok_or_else(|| {
+                        TerminalError::refused(format!("no such workspace {target_id}"))
+                    })?;
                 workspace.label = label.to_string();
             }
             other => return Err(TerminalError::refused(format!("cannot rename a {other}"))),

@@ -35,11 +35,11 @@ pub struct Pane {
     pub active: bool,
     pub workspace: String,
     pub tab: String,
-    pub window_index: i64,
-    pub workspace_index: i64,
+    pub window_index: Option<i64>,
+    pub workspace_index: Option<i64>,
     pub pane_pid: Option<i64>,
-    pub width: i64,
-    pub height: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
 }
 
 impl Pane {
@@ -81,11 +81,17 @@ pub struct TerminalError {
 
 impl TerminalError {
     pub fn refused(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: false }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: false,
+        }
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: true }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: true,
+        }
     }
 }
 
@@ -130,15 +136,27 @@ pub trait Terminal: std::fmt::Debug {
     /// Child pids of a pane's shell, for the process-ancestry guard.
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError>;
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>;
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>;
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>;
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError>;
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError>;
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError>;
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
-    fn rename(&mut self, kind: &str, target_id: &str, label: &str)
-        -> Result<(), TerminalError>;
+    fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError>;
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     /// Type one command line into a pane (the fake records it instead).
