@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 
 desk = importlib.import_module("web.app")
+import telegram_transport
 from dunk_telegram_routing import resolve_telegram_channel
 CONFIG = desk.DATA / "telegram.json"
 LOCK = desk.DATA / "telegram.lock"
@@ -197,14 +198,29 @@ def process_update(update: dict, config: dict, bot: Telegram):
         bot.call("sendMessage", chat_id=chat_id, text=_message_status(channel))
         return
     external_id = f"telegram:{update['update_id']}"
-    with desk._db() as conn:
-        previous = conn.execute("SELECT id,delivery,channel FROM messages WHERE role='owner' AND external_id=?",
-                                (external_id,)).fetchone()
-    if previous:
-        bot.call("sendMessage", chat_id=chat_id, text=f"{_channel_name(previous['channel'])} message #{previous['id']}: {previous['delivery']}")
+    client = _daemon()
+    # The attachment decides the path, not the text: a photo or a file usually
+    # ARRIVES WITH A CAPTION, and `text` is that caption. Branching on the text
+    # first recorded the caption and returned, so the attachment was never
+    # downloaded and the owner was told the message had been recorded (t667,
+    # finding 2). A plain message still takes the text-only path below.
+    file_spec = _attachment(message)
+    # t594: the question is a row in the ONE owner mailbox, recorded with the transport
+    # it arrived on. The daemon dedupes on external_id, so a redelivered update returns
+    # the row it already produced instead of asking the owner's question twice.
+    if file_spec is None:
+        if text.strip():
+            ingested = client.call("owner_ingest", body=text, transport="telegram",
+                                   external_id=external_id, subject=None)
+            message_id = ingested["message"]["message_id"]
+            again = " (already recorded)" if ingested.get("duplicate") else ""
+            bot.call("sendMessage", chat_id=chat_id,
+                     text=f"{name} message #{message_id}{again}. I'll reply here when ready.")
+            return
+        bot.call("sendMessage", chat_id=chat_id,
+                 text="I can receive text, photos, and files. Other Telegram items need the web desk.")
         return
     attachments = []
-    file_spec = _attachment(message)
     if file_spec:
         file_id, filename, mime, file_size = file_spec
         if file_size is not None and file_size > DOWNLOAD_LIMIT:
@@ -216,13 +232,139 @@ def process_update(update: dict, config: dict, bot: Telegram):
         except ValueError as exc:
             bot.call("sendMessage", chat_id=chat_id, text=str(exc))
             return
-    if not text.strip() and not attachments:
+    if not attachments:
         bot.call("sendMessage", chat_id=chat_id, text="I can receive text, photos, and files. Other Telegram items need the web desk.")
         return
+    # NAMED GAP: an attachment still lands in the desk's legacy store, not the owner
+    # mailbox, because the blob store move is not part of this change.
     item = desk.post_message(desk.MessageIn(channel=channel, body=text, attachment_ids=attachments,
                                              external_id=external_id), "api")
     bot.call("sendMessage", chat_id=chat_id,
              text=f"{name} message #{item['id']}: {item['delivery']}. I’ll reply here when ready.")
+
+
+def _daemon():
+    """The daemon client the bridge talks to (t594: the mailbox lives there).
+
+    A unit proves its role with a service token, so FlockClient() picks it up from
+    DUNKINGSHEEP_SERVICE_TOKEN(_FILE); the bridge never opens inbox.db itself.
+    """
+    from dunk_client import FlockClient
+    return FlockClient()
+
+
+def send_owner_outbox(config: dict, bot: Telegram, client=None):
+    """Deliver what Telegram may carry, and nothing else (t594, FLAT_FLEET 7.2).
+
+    Answers to Telegram questions, and pages. The reply list comes from the daemon's
+    owner outbox, which only returns REPLIES whose question arrived on this transport,
+    so a web answer, a brief, a digest or an echo has no path to the phone. Pages are
+    still read from the watchdog's existing rows during the transition (they carry the
+    PAGE OWNER marker and the 3-per-hour cap); when the watchdog writes owner rows, the
+    same cap applies to those instead.
+    """
+    chat_id = config.get("chat_id")
+    if chat_id is None:
+        return []
+    client = client or _daemon()
+    channel = _prepare_route(config)
+    replies = (client.call("owner_outbox", transport="telegram") or {}).get("messages") or []
+    pages = _legacy_pages(config, channel)
+    now = time.time()
+    sent_page_times = [float(at) for at in (config.get("page_sent_at") or [])]
+    items = telegram_transport.outbox_items(replies, pages, sent_page_times, now=now)
+
+    def send(body):
+        for part in _chunks(body):
+            bot.call("sendMessage", chat_id=chat_id, text=part)
+
+    def mark_delivered(message_id, kind):
+        if kind == "reply":
+            # The receipt the watchdog and the desk read instead of a status file.
+            client.call("owner_delivered", message_id=message_id, transport="telegram")
+            return
+        # Every delivered page spends the budget. sent_page_times is the live list, not
+        # the tick-start snapshot: rebuilding from the snapshot recorded ONE timestamp
+        # for N pages in a tick, so the next tick sent more than the hourly cap (t685).
+        sent_page_times[:] = [at for at in sent_page_times
+                              if now - at < telegram_transport.PAGE_WINDOW_S] + [now]
+        config["page_sent_at"] = list(sent_page_times)
+        # Only a page that actually reached the phone moves the watermark, so a held
+        # or failed page is selected again on the next tick (t667, finding 1). Pages
+        # are capped in id order, so the delivered ids are a prefix and max() is the
+        # right watermark.
+        for item in items:
+            if item.get("message_id") == message_id and item.get("id") is not None:
+                config["last_page_id"] = max(int(config.get("last_page_id") or 0),
+                                             int(item["id"]))
+        save_config(config)
+        _write_status_file(config.get("last_page_id") or 0, channel)
+
+    sent = telegram_transport.deliver(items, send, mark_delivered)
+    for item in items:
+        if item.get("hold"):
+            print(f"telegram held {item['message_id']}: {item['reason']}",
+                  file=sys.stderr, flush=True)
+    return sent
+
+
+def _legacy_pages(config: dict, channel: str):
+    """Pages the watchdog still writes into the desk store, by its own marker.
+
+    Temporary and named: FLAT_FLEET 7.2 moves pages onto the owner mailbox. Until
+    then this keeps PAGES working (the one exception the owner kept) while the brief
+    path - which carried reports, digests and web echoes - is gone.
+    """
+    watermark = _page_watermark(config, channel)
+    # The page filter is in SQL, not in Python after the LIMIT. Filtering after the
+    # LIMIT made a page invisible as soon as 20 ordinary agent rows sat past the
+    # watermark: since the watermark now moves only for a DELIVERED page (the fix
+    # for "held means dropped"), those rows never moved it, so the window filled
+    # with non-pages and every later page was starved - silently (t678). A page is
+    # the one exception the owner kept; a security page that never reaches the
+    # phone is the worst place for that. The marker is the same one is_page() uses.
+    with desk._db() as conn:
+        rows = conn.execute(
+            "SELECT id,body FROM messages WHERE channel=? AND role='agent' AND id>? "
+            "AND UPPER(body) LIKE ? ORDER BY id LIMIT 20",
+            (channel, watermark, f"%{telegram_transport.PAGE_MARKER.upper()}%")).fetchall()
+    pages = []
+    for row in rows:
+        if telegram_transport.is_page(row["body"]):
+            pages.append({"message_id": f"page-{row['id']}", "id": row["id"],
+                          "body": row["body"]})
+    # The watermark is NOT advanced here. It used to be set to the highest row read
+    # before delivery, so a page held by the 3/hour cap - or one whose send raised
+    # and stopped the batch - was never selected again: "held" meant "dropped", and
+    # only a stderr line said so (t667, finding 1). It now advances in
+    # mark_delivered, one delivered page at a time.
+    return pages
+
+
+def _page_watermark(config: dict, channel: str) -> int:
+    """Where to start looking for pages, and never a scan of history.
+
+    `last_page_id` is this path's own marker. On the first run after the upgrade
+    there is none, so the old `last_brief_id` carries over (same table, same
+    monotonic ids). With neither - a fresh config - the watermark starts at the
+    current newest row: paging the last 20 historical rows to the owner's phone on
+    the first tick is exactly what a first tick must not do (t667, finding 3).
+    """
+    stored = config.get("last_page_id")
+    if stored is not None:
+        return int(stored)
+    carried = config.get("last_brief_id")
+    if carried is not None:
+        config["last_page_id"] = int(carried)
+        save_config(config)
+        return int(carried)
+    with desk._db() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(id),0) AS newest FROM messages "
+                           "WHERE channel=?", (channel,)).fetchone()
+    newest = int(row["newest"] or 0)
+    config["last_page_id"] = newest
+    save_config(config)
+    return newest
 
 
 def _chunks(body: str, limit: int = 3900):
@@ -238,37 +380,12 @@ def _chunks(body: str, limit: int = 3900):
 
 
 def send_briefs(config: dict, bot: Telegram):
-    chat_id = config.get("chat_id")
-    if chat_id is None:
-        return
-    channel = _prepare_route(config)
-    if config.get("last_brief_id") is None:
-        config["last_brief_id"] = _latest_brief_id(channel)
-        save_config(config)
-        return
-    with desk._db() as conn:
-        rows = conn.execute("SELECT id,body FROM messages WHERE channel=? AND role='agent' AND id>? ORDER BY id LIMIT 20",
-                            (channel, config["last_brief_id"])).fetchall()
-        briefs = [(row["id"], row["body"], [dict(item) for item in conn.execute(
-            "SELECT path,mime FROM attachments WHERE message_id=? ORDER BY created_at", (row["id"],))]) for row in rows]
-    for message_id, body, attachments in briefs:
-        parts = [("text", part) for part in _chunks(f"{_channel_name(channel)} BRIEF #{message_id}\n\n{body}")]
-        parts += [("file", item) for item in attachments]
-        start = config.get("outbound_part", 0) if config.get("outbound_message_id") == message_id else 0
-        for index in range(start, len(parts)):
-            kind, value = parts[index]
-            if kind == "text":
-                bot.call("sendMessage", chat_id=chat_id, text=value)
-            else:
-                bot.send_file(chat_id, Path(value["path"]), value["mime"])
-            config["outbound_message_id"] = message_id
-            config["outbound_part"] = index + 1
-            save_config(config)
-        config["last_brief_id"] = message_id
-        config.pop("outbound_message_id", None)
-        config.pop("outbound_part", None)
-        save_config(config)
-        _write_status_file(config["last_brief_id"], channel)
+    """Retired by t594: the brief path carried reports, digests and web echoes.
+
+    Kept as a name so a caller that still says `send_briefs` gets the owner outbox
+    instead of the old firehose.
+    """
+    return send_owner_outbox(config, bot)
 
 
 def _write_status_file(last_brief_id: int, channel: str) -> None:
