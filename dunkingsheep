@@ -1444,10 +1444,23 @@ def dunk_github_wrappers_install(bin_dir):
         handle.write(GH_WRAPPER.replace("__REAL_GH__", real))
     os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     helper = "!dunkingsheep git-credential"
-    _sp.run(["git", "config", "--global", "--replace-all",
-             "credential.https://github.com.helper", helper], check=False)
+    key = "credential.https://github.com.helper"
+    # t599: this used --replace-all and DROPPED the owner's own
+    # '!gh auth git-credential', so his interactive login stopped being a fallback for
+    # every repo he touched. Ours goes FIRST (it is the lane credential) and every
+    # helper that was already there stays behind it, in the order it was in.
+    existing = [row for row in _sp.run(["git", "config", "--global", "--get-all", key],
+                                       capture_output=True, text=True).stdout.splitlines()
+                if row.strip()]
+    wanted = [helper] + [row for row in existing if row != helper]
+    if existing != wanted:
+        _sp.run(["git", "config", "--global", "--unset-all", key], check=False)
+        for row in wanted:
+            _sp.run(["git", "config", "--global", "--add", key, row], check=False)
     return {"gh_wrapper": target, "real_gh": real, "git_credential_helper": helper,
-            "note": "lanes use https remotes; the owner's own gh/ssh login is untouched "
+            "helpers": wanted,
+            "note": "lanes use https remotes; our helper is first and any helper already "
+                    "configured (the owner's gh login) is kept as the fallback "
                     "(gh-token prints nothing for the owner role)"}
 
 
