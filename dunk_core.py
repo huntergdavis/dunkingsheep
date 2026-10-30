@@ -444,6 +444,16 @@ class AmbiguousTarget(DunkError):
     be a name that stands for several panes at once."""
 
 
+def _note_text(note):
+    """The evidence text of one task note, whichever key it carries (t704).
+
+    Tasks.notes() emits "reason"; two readers here were written for "text". The
+    mismatch made every review verdict that had a note raise KeyError, which is a
+    silent stop for the whole review queue.
+    """
+    return str((note or {}).get("text") or (note or {}).get("reason") or "")
+
+
 def _as_dunk_error(method):
     """An unknown message id is a caller mistake like any other, so it should
     come back as a plain message rather than as an internal error."""
@@ -4187,9 +4197,13 @@ class Flock:
             if role in ("owner", "system"):
                 return
         claimed_at = lease["claimed_at"] if lease else task.get("created_at") or 0
+        # t605 made Tasks.notes() return "reason"; these two readers were written
+        # against a "text" key, so EVERY verdict with a note raised KeyError on main
+        # (measured: tests.test_dunk_github 7 errors, all through task_complete).
+        # Accept either name: the row is the same evidence under both.
         notes = [note for note in self.tasks.notes(task["id"])
                  if note["actor"] == self_pane_id and note["at"] >= claimed_at
-                 and note["text"].strip()]
+                 and _note_text(note).strip()]
         if notes:
             return
         raise DunkError(
@@ -4200,8 +4214,8 @@ class Flock:
 
     def _review_evidence(self, task):
         """The reviewer's own note text, verbatim, for the follow-up and GitHub."""
-        notes = [note["text"].strip() for note in self.tasks.notes(task["id"])
-                 if note["text"].strip()]
+        notes = [_note_text(note).strip() for note in self.tasks.notes(task["id"])
+                 if _note_text(note).strip()]
         return "\n\n".join(notes)
 
     def _after_review_verdict(self, task, verdict, by=None):

@@ -250,14 +250,28 @@ def open_pulls(repo, token):
             "base": (pr.get("base") or {}).get("ref"),
             "login": ((pr.get("user") or {}).get("login") or ""),
             "created_at": pr.get("created_at"), "updated_at": pr.get("updated_at"),
+            # t704: the list endpoint often returns null while GitHub computes this,
+            # so a caller must treat None as UNKNOWN (file the review) and only an
+            # explicit "conflicting" as a reason to skip.
+            "mergeable": pr.get("mergeable"),
+            "mergeable_state": pr.get("mergeable_state"),
         })
     return out
 
 
 def pull_detail(repo, number, token):
+    """One PR, with the two fields that say whether it can merge (t704).
+
+    GET /repos/{r}/pulls/{n} answers `mergeable` as a BOOLEAN and
+    `mergeable_state` as free text ("dirty" = conflicts, "blocked" = a pending
+    check, "clean", "unknown"). The LIST endpoint carries neither (measured
+    2026-10-30: its merge-ish keys are auto_merge, merge_commit_sha, merged_at),
+    which is why review-sync asks here - and only for a head it is about to file.
+    """
     _status, pr = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
     return {"additions": pr.get("additions"), "deletions": pr.get("deletions"),
             "changed_files": pr.get("changed_files"), "mergeable": pr.get("mergeable"),
+            "mergeable_state": pr.get("mergeable_state"),
             "body": pr.get("body") or ""}
 
 
