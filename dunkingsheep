@@ -2119,6 +2119,21 @@ def _be_nice():
 
 # Read only local files; never open a socket.
 LOCAL_ONLY_COMMANDS = ("context", "github")
+# Long daemon-side work: the poolrad exporter runs for minutes, a launch
+# verifies the process started, a review sync talks to GitHub. A 15 s read
+# deadline reported "no answer" for work that then completed (2026-10-29, the
+# first backlog-sync), and the timer unit recorded a failure for a success.
+LONG_DAEMON_COMMANDS = frozenset({"poolrad", "review", "start-agent", "agent",
+                                  "new-workspace", "workspace", "respawn-pane", "respawn"})
+LONG_DAEMON_TIMEOUT_S = 600.0
+
+
+def client_timeout_for(command, timeout):
+    """The socket read deadline for `command`: never below the client's own,
+    and at least LONG_DAEMON_TIMEOUT_S for the long daemon-side commands."""
+    if command in LONG_DAEMON_COMMANDS:
+        return max(float(timeout), LONG_DAEMON_TIMEOUT_S)
+    return timeout
 # Context WRITES go through the daemon (docs/FLAT_FLEET.md 8); reads stay local
 # so the digest never waits on a socket. --local is the owner's bootstrap path.
 CONTEXT_DAEMON_WRITES = ("add", "promote", "supersede", "retire")
@@ -2573,6 +2588,7 @@ def main(argv=None):
             client.timeout = max(client.timeout, 180.0)
         if wait:
             client.timeout = max(client.timeout, float(wait) + 10.0)
+        client.timeout = client_timeout_for(command, client.timeout)
         # Synchronous send paths wait for the daemon to *deliver*, and delivery can
         # need several pane reads (a typing check, a dead-session check, a submit
         # confirmation). On a loaded host those reads are slow enough that the

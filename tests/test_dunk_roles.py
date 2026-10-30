@@ -109,6 +109,13 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(self.roles.may_review("w3:p3"))            # no live record here
         self.assertTrue(self.roles.may_review("w3:p3", role="reviewer"))
 
+    def test_turn_events_are_open_to_every_pane_but_kernel_bound(self):
+        # An unregistered (anonymous) lane must still report busy/idle for ITS
+        # OWN pane; the daemon's require_turn_caller refuses any other pane.
+        self.assertTrue(dunk_roles.allowed("anonymous", "turn_start"))
+        self.assertTrue(dunk_roles.allowed("anonymous", "turn_end"))
+        self.assertFalse(dunk_roles.allowed("anonymous", "send_text"))
+
     def test_allowlist_shape(self):
         self.assertTrue(dunk_roles.allowed("owner", "shutdown"))
         self.assertFalse(dunk_roles.allowed("web", "shutdown"))
