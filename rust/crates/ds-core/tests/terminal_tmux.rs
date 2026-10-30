@@ -21,7 +21,8 @@ fn fake_tmux(dir: &PathBuf, stdout: &str, code: i32) -> PathBuf {
     let log = dir.join("argv.txt");
     let body = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\ncat <<'OUT'\n{stdout}\nOUT\nexit {code}\n",
-        log = log.display());
+        log = log.display()
+    );
     fs::write(&script, body).expect("write fake tmux");
     let mut permissions = fs::metadata(&script).expect("stat").permissions();
     permissions.set_mode(0o755);
@@ -34,8 +35,23 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 fn pane_line(pane: &str, session: &str, window: &str, command: &str, pid: &str) -> String {
-    [pane, session, window, "/home/hunter/work", command, "title", "1", "work", "1",
-     "2", "1", pid, "120", "40"].join(SEP)
+    [
+        pane,
+        session,
+        window,
+        "/home/hunter/work",
+        command,
+        "title",
+        "1",
+        "work",
+        "1",
+        "2",
+        "1",
+        pid,
+        "120",
+        "40",
+    ]
+    .join(SEP)
 }
 
 #[test]
@@ -50,15 +66,24 @@ fn list_panes_parses_the_canned_listing() {
     assert_eq!("claude", panes[0].command);
     assert_eq!(Some(2202), panes[0].pane_pid);
     let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap();
-    assert!(argv.contains("list-panes -a -F"), "the argv carries the format: {argv}");
-    assert!(argv.contains("{pane_id}"), "the format is passed through verbatim: {argv}");
+    assert!(
+        argv.contains("list-panes -a -F"),
+        "the argv carries the format: {argv}"
+    );
+    assert!(
+        argv.contains("{pane_id}"),
+        "the format is passed through verbatim: {argv}"
+    );
 }
 
 #[test]
 fn a_missing_server_is_an_empty_world_not_an_error() {
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(),
-                         "no server running on /tmp/tmux-1000/default", 1);
+    let fake = fake_tmux(
+        &dir.path().to_path_buf(),
+        "no server running on /tmp/tmux-1000/default",
+        1,
+    );
     let backend = TmuxBackend::new(fake);
     assert!(backend.list_panes().is_empty());
     assert!(backend.list_tabs().is_empty());
@@ -102,11 +127,18 @@ fn send_keys_is_literal_then_enter() {
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let mut backend = TmuxBackend::new(fake);
-    backend.run_command("%2", "dunkingsheep status; echo hi").expect("typed");
+    backend
+        .run_command("%2", "dunkingsheep status; echo hi")
+        .expect("typed");
     let calls = fs::read_to_string(dir.path().join("argv.txt")).unwrap();
-    assert!(calls.contains("send-keys -t %2 -l -- dunkingsheep status; echo hi"),
-            "literal, after --, in one argv: {calls}");
-    assert!(calls.contains("send-keys -t %2 Enter"), "a separate Enter: {calls}");
+    assert!(
+        calls.contains("send-keys -t %2 -l -- dunkingsheep status; echo hi"),
+        "literal, after --, in one argv: {calls}"
+    );
+    assert!(
+        calls.contains("send-keys -t %2 Enter"),
+        "a separate Enter: {calls}"
+    );
 }
 
 #[test]
@@ -153,4 +185,129 @@ fn shell_join_quotes_only_what_needs_it() {
     assert_eq!("pi --continue", shell_join(&["pi", "--continue"]));
     assert_eq!("a 'b c'", shell_join(&["a", "b c"]));
     assert_eq!("'it'\\''s'", shell_join(&["it's"]));
+}
+
+// -- resize (t928): in T22's own scope, and argv-tested like everything else -----
+
+/// A fake tmux whose pane listing CHANGES after `resize-window` is called, so a test
+/// can assert that the reported geometry is the one READ BACK, not the request.
+fn fake_tmux_that_resizes(dir: &PathBuf, before: &str, after: &str) -> PathBuf {
+    let script = dir.join("tmux");
+    let log = dir.join("argv.txt");
+    let listing = dir.join("listing.txt");
+    fs::write(&listing, format!("{before}\n")).expect("write listing");
+    let body = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> {log}\n\
+         case \"$*\" in\n\
+           *resize-window*) printf '%s\\n' \"{after}\" > {listing} ;;\n\
+         esac\n\
+         case \"$*\" in\n\
+           *list-panes*) cat {listing} ;;\n\
+         esac\n\
+         exit 0\n",
+        log = log.display(),
+        listing = listing.display(),
+        after = after
+    );
+    fs::write(&script, body).expect("write fake tmux");
+    let mut permissions = fs::metadata(&script).expect("stat").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).expect("chmod");
+    script
+}
+
+#[test]
+fn resize_sends_the_python_argv_and_reports_the_size_read_back() {
+    let dir = tempdir();
+    let before = pane_line("%2", "$2", "@2", "claude", "2202");
+    let after = pane_line("%2", "$2", "@2", "claude", "2202")
+        .replace(&["120", "40"].join(SEP), &["90", "30"].join(SEP));
+    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &before, &after);
+    let mut backend = TmuxBackend::new(fake);
+
+    let resize = backend.resize("%2", 90, 30).expect("resize");
+    assert_eq!("%2", resize.pane_id);
+    assert_eq!((90, 30), (resize.requested_cols, resize.requested_rows));
+    // READ BACK, not echoed: the fake changed the listing only after resize-window.
+    assert_eq!(Some(90), resize.cols);
+    assert_eq!(Some(30), resize.rows);
+    assert_eq!(1, resize.window_pane_count);
+    assert_eq!(1, resize.resized_panes.len());
+    assert_eq!(Some(120), resize.resized_panes[0].cols_before);
+    assert_eq!(Some(40), resize.resized_panes[0].rows_before);
+    assert_eq!(0, resize.clients_attached);
+    assert!(!resize.overridable_by_client);
+
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap();
+    let resize_line = argv
+        .lines()
+        .find(|line| line.contains("resize-window"))
+        .unwrap_or_else(|| panic!("no resize-window in argv: {argv}"));
+    // The exact argv the Python sends: the pane first, then -x cols -y rows.
+    assert!(
+        resize_line.contains("resize-window -t %2 -x 90 -y 30"),
+        "unexpected argv: {resize_line}"
+    );
+}
+
+#[test]
+fn resize_refuses_out_of_bounds_before_touching_tmux() {
+    let dir = tempdir();
+    let listing = pane_line("%2", "$2", "@2", "claude", "2202");
+    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
+    let mut backend = TmuxBackend::new(fake);
+
+    for (cols, rows) in [(0, 30), (30, 0), (1001, 30), (30, 1001)] {
+        let error = backend.resize("%2", cols, rows).expect_err("must refuse");
+        assert!(
+            error.message.contains("between 1 and 1000"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.backend_unavailable,
+            "a bounds refusal is not an outage"
+        );
+    }
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap_or_default();
+    assert!(
+        !argv.contains("resize-window"),
+        "a refused size must not reach tmux at all: {argv}"
+    );
+}
+
+#[test]
+fn resize_names_a_missing_pane() {
+    let dir = tempdir();
+    let listing = pane_line("%2", "$2", "@2", "claude", "2202");
+    let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
+    let mut backend = TmuxBackend::new(fake);
+    let error = backend.resize("%99", 80, 24).expect_err("no such pane");
+    assert_eq!("no such pane %99", error.message);
+    let argv = fs::read_to_string(dir.path().join("argv.txt")).unwrap_or_default();
+    assert!(!argv.contains("resize-window"), "nothing to resize: {argv}");
+}
+
+#[test]
+fn a_refused_resize_reports_tmux_words_and_no_geometry() {
+    let dir = tempdir();
+    // The listing stays the same; resize-window fails with tmux's own words.
+    let script = dir.path().join("tmux");
+    let log = dir.path().join("argv.txt");
+    let listing = pane_line("%2", "$2", "@2", "claude", "2202");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+         case \"$*\" in\n  *resize-window*) echo 'width too large' >&2; exit 1 ;;\n\
+         esac\n\
+         case \"$*\" in\n  *list-panes*) echo '{listing}' ;;\n         esac\nexit 0\n",
+        log = log.display()
+    );
+    fs::write(&script, body).unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+    let mut backend = TmuxBackend::new(script);
+    let error = backend.resize("%2", 999, 999).expect_err("tmux refused");
+    assert_eq!("width too large", error.message);
 }

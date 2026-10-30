@@ -83,11 +83,17 @@ pub struct TerminalError {
 
 impl TerminalError {
     pub fn refused(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: false }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: false,
+        }
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: true }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: true,
+        }
     }
 }
 
@@ -95,6 +101,42 @@ impl std::fmt::Display for TerminalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
     }
+}
+
+/// The bounds the Python's `resize()` enforces before it touches tmux.
+pub const RESIZE_MIN: i64 = 1;
+pub const RESIZE_MAX: i64 = 1000;
+
+/// One pane the re-layout moved, with the size it had before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResizedPane {
+    pub pane_id: String,
+    pub cols: i64,
+    pub rows: i64,
+    pub cols_before: Option<i64>,
+    pub rows_before: Option<i64>,
+}
+
+/// What a resize actually did - the geometry READ BACK, never the request echoed.
+///
+/// tmux has no absolute per-pane size: `resize-window -x/-y` sets the WINDOW grid and
+/// every pane in it re-lays-out, so a caller that asked about one pane must be told
+/// which neighbours moved too.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resize {
+    pub pane_id: String,
+    pub requested_cols: i64,
+    pub requested_rows: i64,
+    /// The pane's size after the call, when the backend could read it back.
+    pub cols: Option<i64>,
+    pub rows: Option<i64>,
+    pub window_pane_count: usize,
+    pub resized_panes: Vec<ResizedPane>,
+    /// Attached clients. Reported rather than refused: measured 2026-10-28,
+    /// `resize-window` succeeds with a client attached, and with `window-size=latest`
+    /// that client's next resize event wins - so the caller is told, not lied to.
+    pub clients_attached: usize,
+    pub overridable_by_client: bool,
 }
 
 /// Where a new agent goes.
@@ -132,17 +174,38 @@ pub trait Terminal: std::fmt::Debug {
     /// Child pids of a pane's shell, for the process-ancestry guard.
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError>;
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>;
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>;
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>;
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError>;
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError>;
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError>;
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
-    fn rename(&mut self, kind: &str, target_id: &str, label: &str)
-        -> Result<(), TerminalError>;
+    fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError>;
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     /// Type one command line into a pane (the fake records it instead).
     fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError>;
+
+    /// Size the pane's window and report the geometry read back (t928).
+    ///
+    /// In T22's own scope (`resize-window`, TASKS.md) and used by the web desk:
+    /// `dunk_http.py` calls `backend.resize(pane_id, cols, rows)` with the Python's
+    /// own refusal bounds. A backend that cannot size panes must say so with a named
+    /// refusal rather than omitting the method - an absent method is discovered by
+    /// compiling, which is not a sentence a caller can act on.
+    fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError>;
 }
