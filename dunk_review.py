@@ -40,6 +40,11 @@ ACCOUNTING_LEDGERS = {
         "ledger": "docs/re/strict_full_c_addresses.csv",
         "base": "main",
         "docs_dir": "docs/re/",
+        # t752/t841: a PARTIAL model is never a strict full-C credit, and every
+        # strict credit carries one label in a GENERATED table. Both are read from
+        # the base branch and both refuse rather than guess.
+        "partial_table": "docs/re/partial_callee_models.csv",
+        "kind_table": "docs/re/credit_evidence_kind.csv",
     },
 }
 
@@ -508,6 +513,12 @@ class Sync:
                     out["errors"].append(f"status: {error}")
                 return out
             if not final:
+                # t852: a first accept on a two-verdict repo is HELD, not applied -
+                # the approval and the merge belong to the final accept (t662). That
+                # was correct and invisible: #1638 showed 0 reviews, no log line and
+                # a 'pending' status only, and an owner-role lane read it as a dead
+                # verdict path and filed an urgent task about it. A held verdict must
+                # say so, in the log, on the task and in the caller's result.
                 try:
                     self.github.post_status(
                         repo, head, "pending", token,
@@ -516,8 +527,31 @@ class Sync:
                     out["status"] = "pending"
                 except dunk_github.GitHubError as error:
                     out["errors"].append(f"status: {error}")
-                out["second_review"] = self._second_review(repo, number, head, by)
+                second = self._second_review(repo, number, head, by)
+                out["second_review"] = second
                 out["merged"] = False
+                out["held"] = {
+                    "reason": "not final: a second DISTINCT reviewer lane must accept",
+                    "accepts": accepts, "required": required,
+                    "second_review": second,
+                    "postponed": ["approval", "merge", "accounting"],
+                }
+                log.info("verdict HELD %s#%s @ %s: accepted by %d of %d distinct lanes "
+                         "(%s); approval, merge and accounting wait for the final accept; "
+                         "second review %s",
+                         repo, number, head[:12], len(accepts), required,
+                         ", ".join(accepts), second or "(not filed)")
+                try:
+                    self.flock.tasks.note(
+                        task["id"], event="verdict_held", actor="review-sync",
+                        meta={"reason": (f"accepted by {len(accepts)} of {required} distinct "
+                                         f"reviewer lanes ({', '.join(accepts)}); a second "
+                                         f"distinct lane must accept before the approval, the "
+                                         f"merge and the accounting row are written"),
+                              "second_review": second, "head": head})
+                except Exception as error:  # noqa: BLE001 - recording never rejects a verdict
+                    log.warning("could not record the held verdict for %s: %s",
+                                task.get("id"), error)
                 return out
             try:
                 self.github.post_status(repo, head, "success", token,
@@ -677,6 +711,58 @@ class Sync:
             return out
         ident, doc = row
         out["row"] = f"{ident},{doc}"
+        # GATE 2 (t752/t841): a partial chain is not a strict full-C credit.
+        # poolrad#1637 credited OVL_0038_0775 - a partial model stopped at +0058 -
+        # into the strict ledger. The STATUS column is the discriminator, not
+        # presence: on main 49 of the 50 `full` rows are already strict credits and
+        # both `callback` rows are, so only `partial` may be refused.
+        partial_table = config.get("partial_table")
+        if partial_table:
+            try:
+                partial_text, _blob = self.github.file_text(repo, partial_table,
+                                                            base_sha, reviewer)
+            except dunk_github.GitHubError as error:
+                out["errors"].append(f"read {partial_table}@{base}: {error}")
+                self._record_accounting(task, out)
+                return out
+            partial_ids = set()
+            for line in (partial_text or "").splitlines()[1:]:
+                fields = line.split(",")
+                name = fields[0].strip()
+                status = fields[1].strip().lower() if len(fields) > 1 else ""
+                if name and status == "partial":
+                    partial_ids.add(name)
+            if ident in partial_ids:
+                out["reason"] = (
+                    f"{ident} is listed as a PARTIAL model in {partial_table}; a strict "
+                    "full-C credit is not owed for it. Credit it in the partial ledger "
+                    "when its chain closes, or close the gap first.")
+                self._record_accounting(task, out)
+                return out
+        # GATE 3 (t752): the strict table also requires an evidence-kind label, and
+        # that table is GENERATED by tools/overlay/credit_evidence_kind.py. The
+        # automation does not run that tool and will not invent a label: it refuses
+        # and names the tool, so an accounting PR never opens with a tree that fails
+        # verify-public-tree (which is where #1637 failed).
+        kind_table = config.get("kind_table")
+        if kind_table:
+            try:
+                kind_text, _blob = self.github.file_text(repo, kind_table, base_sha,
+                                                         reviewer)
+            except dunk_github.GitHubError as error:
+                kind_text = None
+                out["errors"].append(f"read {kind_table}@{base}: {error}")
+            labelled = {line.split(",", 1)[0].strip()
+                        for line in (kind_text or "").splitlines()[1:] if line.strip()}
+            if kind_text is not None and ident not in labelled:
+                out["reason"] = (
+                    f"{ident} has no row in {kind_table}, which every strict credit "
+                    "needs; that table is generated by "
+                    "tools/overlay/credit_evidence_kind.py --write. The automation does "
+                    "not guess the label - regenerate the table in the accounting branch "
+                    "and re-run.")
+                self._record_accounting(task, out)
+                return out
         # t833: the document the row names must already be ON THE BASE BRANCH. The
         # row is committed against main, so a document that only exists on an
         # unmerged body branch produces a ledger entry that points at nothing -

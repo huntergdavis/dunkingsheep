@@ -20,6 +20,123 @@ from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
+class CancelledDependencyTests(unittest.TestCase):
+    """t878: a cancelled dependency must SURFACE, not silently brick the dependents.
+
+    Two duplicate rows were cancelled on 2026-10-30 and seven dependents became
+    permanently unclaimable: the queue satisfies an edge only on 'done', a cancelled
+    dependency can never be satisfied, and nothing said so - the rows simply never
+    came back from `task next`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _pair(self):
+        dep = self.store.add(GLOBAL, "the dependency that gets cancelled")
+        row = self.store.add(GLOBAL, "the row that depends on it")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, self.store.get(row["id"])
+
+    def test_a_cancelled_dependency_is_named_and_the_row_stays_claimable(self):
+        """t879 made cancelled SATISFIED; t878 keeps the fact visible, not blocking."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        after = self.store.get(row["id"])
+        self.assertEqual([dep["id"]], after["dead_dependencies"])
+        self.assertNotIn(dep["id"], after["blocked_by"],
+                         "a cancelled dependency is satisfied (t164), not blocking")
+        self.assertTrue(after["eligible"], "the row must be claimable after the cancel")
+
+    def test_cancel_names_the_dependents_it_strands(self):
+        dep, row = self._pair()
+        cancelled = self.store.cancel(dep["id"], reason="duplicate")
+        self.assertEqual([row["id"]], cancelled["blocked_dependents"])
+
+    def test_repointing_the_edge_replaces_the_dead_one(self):
+        """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        self.assertTrue(self.store.get(row["id"])["eligible"],
+                        "claimable already (t164); a repoint still removes the dead edge")
+        good = self.store.add(GLOBAL, "the canonical task")
+        self.store.complete(good["id"])
+        repaired = self.store.update(row["id"], depends_on=[good["id"]])
+        self.assertEqual([good["id"]], repaired["depends_on"],
+                         "the list is replaced, not appended to")
+        self.assertEqual([], repaired["dead_dependencies"])
+        self.assertTrue(repaired["eligible"], "a repointed row is claimable again")
+
+    def test_a_done_dependency_is_not_dead(self):
+        dep, row = self._pair()
+        self.store.complete(dep["id"])
+        after = self.store.get(row["id"])
+        self.assertEqual([], after["dead_dependencies"])
+        self.assertTrue(after["eligible"])
+
+
+class CancelledDependencyTests(unittest.TestCase):
+    """t878: a cancelled dependency must SURFACE, not silently brick the dependents.
+
+    Two duplicate rows were cancelled on 2026-10-30 and seven dependents became
+    permanently unclaimable: the queue satisfies an edge only on 'done', a cancelled
+    dependency can never be satisfied, and nothing said so - the rows simply never
+    came back from `task next`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _pair(self):
+        dep = self.store.add(GLOBAL, "the dependency that gets cancelled")
+        row = self.store.add(GLOBAL, "the row that depends on it")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, self.store.get(row["id"])
+
+    def test_a_cancelled_dependency_is_named_and_blocks_the_row(self):
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        after = self.store.get(row["id"])
+        self.assertEqual([dep["id"]], after["dead_dependencies"])
+        self.assertIn(dep["id"], after["blocked_by"])
+        self.assertFalse(after["eligible"], "an unsatisfiable edge keeps it out of the queue")
+
+    def test_cancel_names_the_dependents_it_strands(self):
+        dep, row = self._pair()
+        cancelled = self.store.cancel(dep["id"], reason="duplicate")
+        self.assertEqual([row["id"]], cancelled["blocked_dependents"])
+
+    def test_repointing_the_edge_frees_the_row_without_cancelling_it(self):
+        """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        self.assertFalse(self.store.get(row["id"])["eligible"])
+        good = self.store.add(GLOBAL, "the canonical task")
+        self.store.complete(good["id"])
+        repaired = self.store.update(row["id"], depends_on=[good["id"]])
+        self.assertEqual([good["id"]], repaired["depends_on"],
+                         "the list is replaced, not appended to")
+        self.assertEqual([], repaired["dead_dependencies"])
+        self.assertTrue(repaired["eligible"], "a repointed row is claimable again")
+
+    def test_a_done_dependency_is_not_dead(self):
+        dep, row = self._pair()
+        self.store.complete(dep["id"])
+        after = self.store.get(row["id"])
+        self.assertEqual([], after["dead_dependencies"])
+        self.assertTrue(after["eligible"])
+
+
 class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1118,3 +1235,124 @@ class RowFactoryDriftTests(unittest.TestCase):
                                  "the factory is re-asserted so later reads work too")
             finally:
                 tasks.close()
+
+
+class CancelledDependencyTests(unittest.TestCase):
+    """t783: a cancelled prerequisite must not block its dependents for ever.
+
+    Measured 2026-10-30: t783 (T04) declares depends_on t781; t781 was CANCELLED, and
+    t783 still reported `open, claimable True, blocked_by ['t781'], eligible False`. So
+    an owner instruction to "claim t783 specifically" could not be carried out by any
+    worker: the task was not a candidate, and a worker cannot assign itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), persist=False, restore=False,
+            state_file=os.path.join(self.tmp.name, "d.json"),
+            inbox=Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                        blob_dir=os.path.join(self.tmp.name, "b")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "t.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "r.json"),
+                        tokens_path=os.path.join(self.tmp.name, "k.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_a_cancelled_dependency_is_satisfied(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        self.flock.tasks.cancel(pre["id"], reason="superseded")
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        view = self.flock.tasks.get(after["id"])
+        self.assertEqual([], view["blocked_by"],
+                         "a cancelled prerequisite is not outstanding work")
+        self.assertTrue(view["eligible"])
+
+    def test_a_done_dependency_is_satisfied(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        self.flock.tasks.complete(pre["id"])
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        self.assertEqual([], self.flock.tasks.get(after["id"])["blocked_by"])
+
+    def test_an_open_dependency_still_blocks(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        view = self.flock.tasks.get(after["id"])
+        self.assertEqual([pre["id"]], view["blocked_by"])
+        self.assertFalse(view["eligible"])
+
+
+class TerminalStatusReleasesTheLease(unittest.TestCase):
+    """t891: a lane that FINISHES a task must stop looking busy.
+
+    Measured live by %101: five leases sat on terminal tasks and every one was still
+    live, so dispatch excluded the lanes that had just completed the work for up to
+    thirty minutes. The status is the end of the claim; the claim has to go with it.
+    """
+
+    PANE = "w2:p1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def claimed(self, title="work"):
+        task = self.flock.tasks.add(GLOBAL, title)
+        self.flock.task_next(self_pane_id=self.PANE)
+        self.assertEqual(1, len(self.flock.tasks.leases_for_pane(self.PANE)),
+                         "the fixture failed to claim")
+        return task
+
+    def test_completing_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.task_complete(task["id"], self_pane_id=self.PANE)
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE),
+                         "a completed task still holds the lane's lease")
+        self.assertEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cancelling_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.tasks.cancel(task["id"], reason="withdrawn")
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+
+    def test_blocking_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.tasks.update(task["id"], status="blocked",
+                                block_reason="needs-owner: a question")
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+
+    def test_the_lane_can_claim_again_immediately(self):
+        """The operational consequence: a busy pane is refused a second task, so a
+        stale lease makes a lane that just finished unable to take the next one."""
+        first = self.claimed("first")
+        self.flock.task_complete(first["id"], self_pane_id=self.PANE)
+        self.flock.tasks.add(GLOBAL, "second")
+        got = self.flock.task_next(self_pane_id=self.PANE)
+        self.assertTrue(got.get("task"), f"the lane could not claim again: {got.get('refused')}")
+        self.assertEqual("second", got["task"]["title"])
+
+    def test_another_panes_lease_is_untouched(self):
+        mine = self.claimed()
+        other = self.flock.tasks.add(GLOBAL, "theirs")
+        self.flock.tasks.claim_next(scope=GLOBAL, pane_id="w2:p3")
+        self.flock.task_complete(mine["id"], self_pane_id=self.PANE)
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+        self.assertEqual(1, len(self.flock.tasks.leases_for_pane("w2:p3")),
+                         "another lane's live claim was removed by my completion")

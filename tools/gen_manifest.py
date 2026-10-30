@@ -1,6 +1,20 @@
-HEADER = ("# Port manifest (generated from main @ 038d9aa, 2026-10-29)\n\n"
-          "Everything the Rust port must reproduce, generated from the tree. "
-          "Regenerate with `tools/gen_manifest.py` (TASKS.md T00) when main moves.")
+def header():
+    """The title line names the commit this document was generated FROM.
+
+    It used to be a frozen string naming 038d9aa, which made `--check` pass on a
+    document that described a tree three hours old - the "green check measuring
+    nothing" defect this task exists to catch (t766). The revision is read from the
+    tree at generation time, so a manifest generated before a merge fails its own
+    check afterwards, which is the correct answer: the document IS stale then.
+    """
+    out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True)
+    revision = out.stdout.strip() if out.returncode == 0 else "unknown"
+    stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    return (f"# Port manifest (generated from {revision}, {stamp})\n\n"
+            "Everything the Rust port must reproduce, generated from the tree. "
+            "Regenerate with `tools/gen_manifest.py` (TASKS.md T00) when main moves; "
+            "`--check` fails when this document no longer matches the tree it names.")
 
 MODULE_MAP = """## Module map
 
@@ -267,12 +281,14 @@ agent-state.db, context-ledger.db, desk.json, dialog-alerts.db, dispatch-state.j
 
 
 import argparse
+import json
 import ast
 import os
 import pathlib
 import re
 import sqlite3
 import subprocess
+import time
 import sys
 import textwrap
 
@@ -365,21 +381,56 @@ def mcp_section():
     return "\n".join(out) + "\n"
 
 
-def schema_section():
-    out = ["## Schemas (live databases, verbatim)", ""]
-    for name in DATABASES:
-        path = CONFIG / f"{name}.db"
-        if not path.exists():
-            raise SystemExit(f"missing live database {path}: the manifest copies the live "
-                             "schemas, and a fresh db created from the Python SCHEMA is not "
-                             "the same file (tasks.priority DEFAULT is 'medium' live, 'low' "
-                             "in the source). Point DUNKINGSHEEP_DIR at a real install.")
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        out.append(f"## {name}.db")
-        for (sql,) in con.execute("select sql from sqlite_master where sql is not null "
-                                  "order by name"):
-            out.append(sql + ";")
+SCHEMA_FIXTURE = ROOT / "rust" / "fixtures" / "state" / "schema.json"
+
+
+def _live_schema(name):
+    """The schema of one live database: `sqlite_master`, in name order."""
+    path = CONFIG / f"{name}.db"
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [row[0] for row in con.execute(
+            "select sql from sqlite_master where sql is not null order by name")]
+    finally:
         con.close()
+
+
+def schema_section():
+    """The seven schemas, from the FIXTURE (T00 decision (a)), live only as a fallback.
+
+    Reading the live databases at generation time made the document a property of the
+    HOST rather than of the tree: `--check` failed on 2026-10-30 because the live
+    `tasks.db` had grown allocation_workers/offers/reviews since the manifest was
+    written, and a machine with no install could not generate a manifest at all
+    (`missing live database` -> SystemExit, which is what made the generator
+    unusable in CI and in a test). The committed fixture is the snapshot of that
+    present; tools/snapshot_state_schema.py --check-drift is what keeps it honest.
+    """
+    out = ["## Schemas (live databases, verbatim)", ""]
+    fixture = {}
+    try:
+        fixture = json.loads(SCHEMA_FIXTURE.read_text())
+    except (OSError, ValueError):
+        fixture = {}
+    if fixture:
+        out[0] = (f"## Schemas (snapshot of the live databases, verbatim; "
+                  f"{SCHEMA_FIXTURE.relative_to(ROOT)} - refresh with "
+                  f"tools/snapshot_state_schema.py --write)")
+        out.append("")
+    for name in DATABASES:
+        statements = fixture.get(name)
+        if statements is None:
+            path = CONFIG / f"{name}.db"
+            if not path.exists():
+                raise SystemExit(
+                    f"no schema for {name!r}: {SCHEMA_FIXTURE} has no entry and the live "
+                    f"database {path} is absent. Snapshot one with "
+                    "tools/snapshot_state_schema.py --write, or point DUNKINGSHEEP_DIR at "
+                    "a real install (a database created from the Python SCHEMA is NOT the "
+                    "same file: tasks.priority DEFAULT is 'medium' live, 'low' in source).")
+            statements = _live_schema(name)
+        out.append(f"## {name}.db")
+        out.extend(f"{sql};" for sql in statements)
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
@@ -411,6 +462,9 @@ def join_three_lines(doc):
     return text
 
 
+CONST_VALUE_MAX = 90          # the length every long const in the committed manifest is cut to
+
+
 def signature(node):
     args = [a.arg for a in list(node.args.posonlyargs) + list(node.args.args)]
     if node.args.vararg:
@@ -431,7 +485,54 @@ def first_sentence(text):
     return flat[:match.start()] if match else flat
 
 
+def _entry_line(node, indent="", drop_self=False):
+    """`- \u0060name(args)\u0060 \u2014 first sentence` at the given indent.
+
+    A CLASS method is shown the way the committed artefact shows it: without a
+    leading `self` (they are read as you would call them on an instance). `cls`
+    stays, because the artefact keeps it - `from_state(cls, data)`, `load(cls, text)`.
+    """
+    args = signature(node)
+    if drop_self and args.split(",")[0].strip() == "self":
+        args = ", ".join(part.strip() for part in args.split(",")[1:])
+    entry = f"{indent}- `{node.name}({args})`"
+    sentence = first_sentence(ast.get_docstring(node))
+    return f"{entry} \u2014 {sentence}" if sentence else entry
+
+
+def _const_line(node, source, indent=""):
+    """`- const \u0060NAME\u0060 = \u0060value\u0060` for an ALL_CAPS module or class constant."""
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return None
+    if not isinstance(node.targets[0], ast.Name):
+        return None
+    target = node.targets[0].id
+    if not (target.isupper() or target.startswith("_") and target.upper() == target):
+        return None
+    value = " ".join((ast.get_source_segment(source, node.value) or "").split())
+    # 90 characters is the rule the committed artefact already follows (measured on
+    # docs/rust/MANIFEST.md: the longest const value is exactly 90 characters and 88
+    # of them are at that length). Long constants - SCHEMA blocks, PARAM dicts - are
+    # unreadable in full and the port only needs their identity, so the value is
+    # truncated rather than wrapped.
+    if len(value) > CONST_VALUE_MAX:
+        value = value[:CONST_VALUE_MAX]
+    return f"{indent}- const `{target}` = `{value}`"
+
+
 def inventory_section():
+    """The inventory, INCLUDING class methods (t766).
+
+    The first version walked `ast.Module.body` only, so a class emitted one line and
+    never its methods: the generated document was 2,070 lines against a committed
+    2,803, and every short section was a class-heavy module (dunk_core.py 138 vs 411,
+    dunk_tasks.py with 47 methods missing). A manifest that silently omits every
+    method of every class is a green check measuring nothing - the same defect the
+    task exists to catch.
+
+    The shape is the COMMITTED one, because the artefact is the contract (decided on
+    t766): `- class **Name**` in bold with the methods nested two spaces under it.
+    """
     out = ["## Inventory: every module, class, function, constant", ""]
     for name in module_files():
         source = (ROOT / name).read_text()
@@ -442,19 +543,22 @@ def inventory_section():
         out.append("")
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                entry = f"- `{node.name}({signature(node)})`"
-                sentence = first_sentence(ast.get_docstring(node))
-                out.append(f"{entry} \u2014 {sentence}" if sentence else entry)
+                out.append(_entry_line(node))
             elif isinstance(node, ast.ClassDef):
                 sentence = first_sentence(ast.get_docstring(node))
-                head = f"- class `{node.name}`"
+                head = f"- class **{node.name}**"
                 out.append(f"{head} \u2014 {sentence}" if sentence else head)
-            elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
-                    and isinstance(node.targets[0], ast.Name):
-                target = node.targets[0].id
-                if target.isupper() or target.startswith("_") and target.upper() == target:
-                    value = ast.get_source_segment(source, node.value) or ""
-                    out.append(f"- const `{target}` = `{' '.join(value.split())}`")
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        out.append(_entry_line(child, indent="  ", drop_self=True))
+                    else:
+                        line = _const_line(child, source, indent="  ")
+                        if line:
+                            out.append(line)
+            else:
+                line = _const_line(node, source)
+                if line:
+                    out.append(line)
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
@@ -521,10 +625,16 @@ def _tests_text():
                      for path in sorted((ROOT / "tests").rglob("*.py")))
 
 
-def build():
+def body():
+    """Everything BELOW the title block: the part that must match byte for byte.
+
+    The title names the commit the document was generated from, so it changes the
+    moment the document is committed - which made `--check` red at every commit that
+    contains the manifest, including the one that adds it (review t896). A gate that
+    always fails is a gate lanes ignore, so the check compares THIS, and the title is
+    reported as an advisory instead.
+    """
     return "\n\n".join([
-        HEADER,
-        "",
         MODULE_MAP,
         CLI_COMMANDS,
         FILES_ON_DISK,
@@ -539,6 +649,31 @@ def build():
     ]) + "\n"
 
 
+def title_revision(text):
+    """The commit named in the title block, or None."""
+    first = text.split("\n", 1)[0]
+    match = re.search(r"generated from (\S+?),", first)
+    return match.group(1) if match else None
+
+
+def body_of(text):
+    """A document's [`body`]: from the first `## ` section to the end.
+
+    The title block is the `# ` line and the prose under it; everything a reader
+    compares against the tree starts at the first section header.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            return "\n".join(lines[index:])
+    return text
+
+
+def build():
+    """The whole document: title block, a blank line, then [`body`]."""
+    return header() + "\n\n" + body()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true",
@@ -550,11 +685,21 @@ def main(argv=None):
         print(f"wrote {OUT} ({len(text.splitlines())} lines)")
         return 0
     current = OUT.read_text()
-    if current == text:
-        print("MANIFEST.md matches byte for byte")
+    # The title is ADVISORY: it names the commit the file was generated from, so it is
+    # one commit behind by construction once the file is committed. Diffing it made the
+    # gate permanently red (t896); diffing the BODY keeps the signal that matters.
+    current_body = body_of(current)
+    if current_body == body():
+        committed_stamp = title_revision(current)
+        here = title_revision(text)
+        if committed_stamp and committed_stamp != here:
+            print(f"advisory: the manifest names {committed_stamp}; this tree is {here}. "
+                  "Its CONTENT matches, so nothing is stale - regenerate when the "
+                  "inventory next changes.")
+        print("MANIFEST.md matches byte for byte (title block excluded)")
         return 0
     import difflib
-    diff = list(difflib.unified_diff(current.split("\n"), text.split("\n"),
+    diff = list(difflib.unified_diff(current_body.split("\n"), body().split("\n"),
                                      "committed", "generated", lineterm="", n=1))
     print("\n".join(diff[:80]))
     print(f"\n{len(diff)} diff lines (showing at most 80)")
