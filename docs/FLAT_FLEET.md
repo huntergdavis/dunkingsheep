@@ -407,6 +407,21 @@ the `owner` mailbox's delivery receipt on the `telegram` transport instead of
 reading a status file. The 2,439 historical rows (744 owner, 1,695 agent) are migrated so the
 latency baseline survives; attachments move to the inbox blob store.
 
+**Implemented 2026-10-29 (t591):** `inbox.db` messages carry `transport`
+(`web` | `telegram` | `report`, NULL for lane mail) and `reply_to` (the question
+a reply answers); `owner` is a reserved mailbox name, so it resolves before any
+pane exists for it; `owner_conversation` reads the mailbox as one conversation
+with `answered` computed from the rows themselves, and `owner_reply` writes one
+reply on the question's own transport and acks the question in the same call —
+one answer per question, so reply latency has one edge. Both are desk/owner
+verbs (`docs/LANES.md` 4.3). `tools/migrate_owner_mailbox.py` copies the old
+store in: read-only source, ids recorded in `migrated_from`, source timestamps
+preserved so the latency baseline is real, attachments into the blob store, and
+a second run copies nothing. **Not yet done:** `web/app.py` still opens
+`messages.sqlite3` itself; it must call `owner_conversation` / `owner_reply`
+over the socket instead, which is the step that makes a web question appear in
+`inbox.db` rather than only in the migrated copy.
+
 ### 7.3 Reporter (replaces the VP)
 
 `dunkingsheep report` is deterministic and has no model: task metrics, lanes

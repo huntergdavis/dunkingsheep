@@ -99,14 +99,25 @@ ALLOW = {
         "owner_push", "owner_take", "owner_poll", "owner_receipts",
         "state_capture", "lane_register", "recover", "turn_start", "turn_end",
         "gh_token", "review_sync", "context_add", "poolrad_sync",
+        # t594: the Telegram bridge runs as a unit (system token), so `system` is the
+        # role that ingests owner questions, drains a transport outbox and records
+        # delivery receipts. A lane may do none of the three.
+        "owner_ingest", "owner_outbox", "owner_delivered",
+        "owner_conversation", "owner_reply",
     }),
     # The owner's transport (the web desk): everything but the
     # fleet-destructive verbs, which stay on a human in a terminal.
     "web": None,
     "desk": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "inbox_fetch", "inbox_ack",
-        "owner_take", "owner_poll", "owner_receipts", "read_pane",
-        "turn_start", "turn_end",
+        "owner_take", "owner_poll", "owner_receipts", "owner_reply",
+        # The owner mailbox is the desk's whole job (FLAT_FLEET.md 7.2): read it,
+        # answer it. A lane reads its own mailbox, never a person's conversation.
+        "owner_conversation",
+        # t594: the desk answers owner questions, so it reads the transport outbox
+        # as well. It does not ingest or write receipts: that is the transport's job.
+        "owner_outbox",
+        "read_pane", "turn_start", "turn_end",
     }),
     "planner": READ_ONLY | frozenset({
         "task_add", "task_note", "inbox_read", "turn_start", "turn_end",
