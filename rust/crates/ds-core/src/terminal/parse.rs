@@ -18,9 +18,30 @@ pub const PANE_SEP: char = '\x1f';
 /// The agent kinds a start_agent request may name (herdr 0.9.5's list, which is
 /// also the set `_agent_kind` matches against).
 pub const AGENT_KINDS: [&str; 24] = [
-    "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline", "omp",
-    "mastracode", "opencode", "copilot", "kimi", "kiro", "droid", "amp", "grok",
-    "hermes", "kilo", "qodercli", "qwen", "letta", "maki", "muse",
+    "pi",
+    "claude",
+    "codex",
+    "gemini",
+    "cursor",
+    "devin",
+    "agy",
+    "cline",
+    "omp",
+    "mastracode",
+    "opencode",
+    "copilot",
+    "kimi",
+    "kiro",
+    "droid",
+    "amp",
+    "grok",
+    "hermes",
+    "kilo",
+    "qodercli",
+    "qwen",
+    "letta",
+    "maki",
+    "muse",
 ];
 
 fn int_or(value: &str, default: i64) -> i64 {
@@ -73,8 +94,7 @@ pub fn safe_name(label: &str, fallback: &str) -> String {
     let mut name = String::new();
     let mut last_dash = false;
     for character in label.trim().chars() {
-        let keep = character.is_ascii_alphanumeric()
-            || matches!(character, '_' | '@' | '+' | '-');
+        let keep = character.is_ascii_alphanumeric() || matches!(character, '_' | '@' | '+' | '-');
         if keep {
             name.push(character);
             last_dash = character == '-';
@@ -84,7 +104,11 @@ pub fn safe_name(label: &str, fallback: &str) -> String {
         }
     }
     let trimmed = name.trim_matches('-').to_string();
-    let chosen = if trimmed.is_empty() { fallback.to_string() } else { trimmed };
+    let chosen = if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed
+    };
     chosen.chars().take(60).collect()
 }
 
@@ -101,8 +125,9 @@ pub fn parse_panes(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> V
         if fields.len() < 12 {
             continue;
         }
-        let (pane_id, session_id, window_id, cwd, command, title, active) =
-            (fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]);
+        let (pane_id, session_id, window_id, cwd, command, title, active) = (
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
+        );
         let (session_name, window_name) = (fields[7], fields[8]);
         let (window_index, session_index, pane_pid) = (fields[9], fields[10], fields[11]);
         let kind = agent_kind(command, title);
@@ -110,7 +135,11 @@ pub fn parse_panes(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> V
             .filter(|name| !name.trim().is_empty())
             .or_else(|| {
                 let trimmed = title.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             })
             .unwrap_or_else(|| window_name.to_string());
         panes.push(Pane {
@@ -118,17 +147,21 @@ pub fn parse_panes(output: &str, label_of: &dyn Fn(&str) -> Option<String>) -> V
             session_id: session_id.to_string(),
             window_id: window_id.to_string(),
             cwd: cwd.to_string(),
-            command: if kind.is_empty() { command.to_string() } else { kind.clone() },
+            command: if kind.is_empty() {
+                command.to_string()
+            } else {
+                kind.clone()
+            },
             label,
             title: title.to_string(),
             active: active == "1",
             workspace: session_name.to_string(),
             tab: window_name.to_string(),
-            window_index: int_or(window_index, 0),
-            workspace_index: int_or(session_index, 0),
+            window_index: optional_int(window_index),
+            workspace_index: optional_int(session_index),
             pane_pid: optional_int(pane_pid),
-            width: fields.get(12).map(|value| int_or(value, 0)).unwrap_or(0),
-            height: fields.get(13).map(|value| int_or(value, 0)).unwrap_or(0),
+            width: fields.get(12).and_then(|value| optional_int(value)),
+            height: fields.get(13).and_then(|value| optional_int(value)),
         });
     }
     panes

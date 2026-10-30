@@ -4,8 +4,9 @@
 //! Python: a BLANK session_index (tmux leaves it empty when the session has no index
 //! set) and a 12-field line from an older capture with no geometry.
 
-use ds_core::terminal::parse::{agent_kind, parse_panes, parse_tabs, parse_workspaces,
-                                safe_name, PANE_SEP};
+use ds_core::terminal::parse::{
+    agent_kind, parse_panes, parse_tabs, parse_workspaces, safe_name, PANE_SEP,
+};
 
 fn line(fields: &[&str]) -> String {
     fields.join(&PANE_SEP.to_string())
@@ -16,10 +17,31 @@ fn no_registry(_pane: &str) -> Option<String> {
 }
 
 /// A full 14-field pane line, as tmux emits it with PANE_FORMAT.
-fn full_line(pane: &str, session: &str, window: &str, command: &str, title: &str,
-             session_index: &str, pid: &str) -> String {
-    line(&[pane, session, window, "/home/hunter/work", command, title, "1",
-           "work", "1", "2", session_index, pid, "120", "40"])
+fn full_line(
+    pane: &str,
+    session: &str,
+    window: &str,
+    command: &str,
+    title: &str,
+    session_index: &str,
+    pid: &str,
+) -> String {
+    line(&[
+        pane,
+        session,
+        window,
+        "/home/hunter/work",
+        command,
+        title,
+        "1",
+        "work",
+        "1",
+        "2",
+        session_index,
+        pid,
+        "120",
+        "40",
+    ])
 }
 
 #[test]
@@ -32,17 +54,23 @@ fn a_full_line_parses_every_field() {
     assert_eq!("$2", pane.session_id);
     assert_eq!("@2", pane.window_id);
     assert_eq!("/home/hunter/work", pane.cwd);
-    assert_eq!("claude", pane.command, "the agent kind replaces the command");
+    assert_eq!(
+        "claude", pane.command,
+        "the agent kind replaces the command"
+    );
     assert_eq!("pi - review", pane.title, "tmux's own title is kept");
-    assert_eq!("pi - review", pane.label, "no registry name, so the title is the label");
+    assert_eq!(
+        "pi - review", pane.label,
+        "no registry name, so the title is the label"
+    );
     assert!(pane.active);
     assert_eq!("work", pane.workspace);
     assert_eq!("1", pane.tab);
-    assert_eq!(2, pane.window_index);
-    assert_eq!(1, pane.workspace_index);
+    assert_eq!(Some(2), pane.window_index);
+    assert_eq!(Some(1), pane.workspace_index);
     assert_eq!(Some(2202), pane.pane_pid);
-    assert_eq!(120, pane.width);
-    assert_eq!(40, pane.height);
+    assert_eq!(Some(120), pane.width);
+    assert_eq!(Some(40), pane.height);
     assert_eq!("%2", pane.tab_id());
 }
 
@@ -52,16 +80,24 @@ fn a_blank_session_index_does_not_null_the_pane_pid() {
     // session_index raised first and pane_pid was nulled with it.
     let output = full_line("%2", "$2", "@2", "bash", "shell", "", "2202");
     let pane = &parse_panes(&output, &no_registry)[0];
-    assert_eq!(0, pane.workspace_index, "a blank index is 0, its own absence");
+    assert_eq!(
+        None, pane.workspace_index,
+        "t943: a blank index is ABSENT, not 0 - 0 is a guess"
+    );
     assert_eq!(Some(2202), pane.pane_pid, "the pid is parsed on its own");
 }
 
 #[test]
 fn a_twelve_field_line_parses_with_no_geometry() {
-    let output = line(&["%1", "$1", "@1", "/tmp", "bash", "t", "0", "work", "1",
-                        "1", "1", "1101"]);
+    let output = line(&[
+        "%1", "$1", "@1", "/tmp", "bash", "t", "0", "work", "1", "1", "1", "1101",
+    ]);
     let pane = &parse_panes(&output, &no_registry)[0];
-    assert_eq!((0, 0), (pane.width, pane.height), "no size is not size zero-by-guess");
+    assert_eq!(
+        (None, None),
+        (pane.width, pane.height),
+        "t943: no size is ABSENT, not zero-by-guess"
+    );
     assert!(!pane.active);
     assert_eq!(Some(1101), pane.pane_pid);
 }
@@ -81,9 +117,18 @@ fn an_empty_or_failed_listing_is_empty() {
 #[test]
 fn the_registry_label_wins_over_the_title() {
     let output = full_line("%2", "$2", "@2", "bash", "some title", "1", "2202");
-    let label = |pane: &str| if pane == "%2" { Some("worker-4".to_string()) } else { None };
+    let label = |pane: &str| {
+        if pane == "%2" {
+            Some("worker-4".to_string())
+        } else {
+            None
+        }
+    };
     let pane = &parse_panes(&output, &label)[0];
-    assert_eq!("worker-4", pane.label, "the recorded start_agent name is the stable label");
+    assert_eq!(
+        "worker-4", pane.label,
+        "the recorded start_agent name is the stable label"
+    );
 }
 
 #[test]
@@ -126,7 +171,8 @@ fn multiple_lines_are_parsed_independently() {
     let output = [
         full_line("%1", "$1", "@1", "bash", "one", "1", "1101"),
         full_line("%2", "$2", "@2", "claude", "two", "", ""),
-    ].join("\n");
+    ]
+    .join("\n");
     let panes = parse_panes(&output, &no_registry);
     assert_eq!(2, panes.len());
     assert_eq!(Some(1101), panes[0].pane_pid);

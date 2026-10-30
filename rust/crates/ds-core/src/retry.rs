@@ -20,7 +20,11 @@ pub struct Backoff {
 impl Backoff {
     /// `attempts` tries in total, doubling from `base`, never longer than `cap`.
     pub fn new(attempts: u32, base: Duration, cap: Duration) -> Self {
-        Backoff { attempts: attempts.max(1), base, cap }
+        Backoff {
+            attempts: attempts.max(1),
+            base,
+            cap,
+        }
     }
 
     /// The short default: three tries, 20 ms doubling, 500 ms cap.
@@ -48,7 +52,11 @@ impl Backoff {
 /// `retryable` is a parameter rather than a property of the error on purpose: the
 /// same error can be safe to repeat for a read and never for a write (the client's
 /// IDEMPOTENT_READS rule, t705).
-pub fn with_backoff<T, F, R>(backoff: Backoff, mut retryable: R, mut body: F) -> Result<T, DunkError>
+pub fn with_backoff<T, F, R>(
+    backoff: Backoff,
+    mut retryable: R,
+    mut body: F,
+) -> Result<T, DunkError>
 where
     F: FnMut(u32) -> Result<T, DunkError>,
     R: FnMut(&DunkError) -> bool,
@@ -145,10 +153,14 @@ mod tests {
         // The t705 rule: the same error is retryable for a read, never for a write.
         let backoff = Backoff::new(3, Duration::from_millis(1), Duration::from_millis(5));
         let mut write_attempts = 0;
-        let _: Result<(), DunkError> = with_backoff(backoff, |_| false, |_| -> Result<(), DunkError> {
-            write_attempts += 1;
-            Err(DunkError::Busy)
-        });
+        let _: Result<(), DunkError> = with_backoff(
+            backoff,
+            |_| false,
+            |_| -> Result<(), DunkError> {
+                write_attempts += 1;
+                Err(DunkError::Busy)
+            },
+        );
         assert_eq!(1, write_attempts);
     }
 }

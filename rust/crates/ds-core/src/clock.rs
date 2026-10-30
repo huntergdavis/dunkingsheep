@@ -7,12 +7,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Seconds since the Unix epoch as `f64`, the Python's `time.time()`.
 pub fn now_s() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Whole seconds since the epoch, for lease arithmetic.
 pub fn now_u64() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// A monotonic instant, for measuring how long something took.
