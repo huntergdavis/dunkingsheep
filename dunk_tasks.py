@@ -499,6 +499,34 @@ class Tasks:
             and not task["blocked_by"]
             and task["claimable"]
         )
+        # t903: A SATISFIED DEPENDENCY DOES NOT REOPEN A BLOCKED TASK, and nothing said
+        # so. Measured 2026-10-30: t766 reached done, t768 (T02) kept status='blocked'
+        # with blocked_by EMPTY, so 'task next' never offered it and no lane could know
+        # why; one 'task unblock t768' made it claimable and another lane claimed it 8 s
+        # later. The status is a human decision (only a person or lane sets 'blocked'),
+        # so the store must not clear it by itself - but it MUST say that the unblock is
+        # the only thing left, in the same field a reader already looks at.
+        task["unblock_needed"] = False
+        task["dependency_note"] = None
+        if task["status"] == "blocked" and task["depends_on"]:
+            # A cancelled prerequisite is the more specific case, and it is the one that
+            # used to brick a row for ever - name it first (t783 made it satisfied, so it
+            # no longer appears in blocked_by and the generic branch would swallow it).
+            cancelled = [dep for dep in task["depends_on"]
+                         if statuses.get(dep) == "cancelled"]
+            outstanding = list(task["blocked_by"])
+            if cancelled and not outstanding:
+                task["unblock_needed"] = True
+                task["dependency_note"] = (
+                    f"depends on a CANCELLED task ({', '.join(cancelled)}); a cancelled "
+                    "dependency counts as satisfied, so only the block is holding this "
+                    "task - 'task unblock' makes it claimable")
+            elif not outstanding:
+                done = ", ".join(task["depends_on"])
+                task["unblock_needed"] = True
+                task["dependency_note"] = (
+                    f"every dependency is satisfied ({done}); nothing but the block is "
+                    "holding this task - 'task unblock' makes it claimable")
         return task
 
     def _full(self, row, pane_id=None):
