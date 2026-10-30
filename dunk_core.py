@@ -3865,7 +3865,17 @@ class Flock:
             # Registration is the subscription, but only for the roles that pull
             # work. A desk/planner/owner pane is registered and must not be fed
             # tasks by a sweep.
-            if (entry or {}).get("role") not in ("worker", "reviewer"):
+            #
+            # t975: the role is the RESOLVED one, not the raw registry string. Every
+            # other role decision here goes through caller_role()/role_of(), which
+            # DEMOTES a registration whose pane_pid no longer matches the live pane
+            # (the tmux flip on 2026-10-29 demoted every registration that way). Reading
+            # `entry["role"]` directly made a REUSED pane id - including an idle plain
+            # shell - a push target: the sweep claimed a task for it and nudged it,
+            # which is the exact reverse of the role filter this path is supposed to
+            # apply. `role_of` with the live pane record is what the rest of the file
+            # trusts, so the sweep asks the same question.
+            if self.caller_role(pane_id) not in ("worker", "reviewer"):
                 continue
             targets[pane_id] = (TASK_GLOBAL, "registered")
         return targets

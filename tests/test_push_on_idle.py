@@ -62,6 +62,40 @@ class PushOnIdleTests(unittest.TestCase):
                                     repo="huntergdavis/poolrad-decomp", pr=pr,
                                     head=str(pr) * 40, created_by="review-sync")
 
+    def test_a_stale_registration_is_not_a_push_target(self):
+        """t975: the sweep must ask the RESOLVED role, not the raw registry string.
+
+        A pane id can be reused (the 2026-10-29 tmux flip demoted every registration
+        that way). Reading `entry["role"]` directly made the reused id a push target:
+        the sweep claimed a task for it and nudged a plain shell. Every other role
+        decision in the file goes through caller_role(), which demotes a registration
+        whose pane_pid no longer matches the live pane - so the sweep now asks the
+        same question.
+        """
+        # Register with a pid, then make the live pane a DIFFERENT process.
+        self.flock.roles.register(IDLE_WORKER, role="worker", pane_pid=1234,
+                                  provider="pi", by="%95")
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == IDLE_WORKER:
+                pane["pane_pid"] = 9999
+        self.assertEqual("anonymous", self.flock.caller_role(IDLE_WORKER),
+                         "the binding is stale, so the role resolves to anonymous")
+        task = self.flock.task_add("waiting work", priority="high", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("open", self.claimed_task(task["id"])["status"],
+                         "a stale registration is not a lane, so nothing is claimed for it")
+
+    def test_a_stale_reviewer_registration_is_not_handed_work(self):
+        self.flock.roles.register(IDLE_WORKER, role="reviewer", pane_pid=1234,
+                                  provider="claude", by="%95")
+        for pane in self.herdr.panes:
+            if pane["pane_id"] == IDLE_WORKER:
+                pane["pane_pid"] = 9999
+        task = self.flock.task_add("waiting work", priority="high", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("open", self.claimed_task(task["id"])["status"],
+                         "the reverse of the role filter: a stale reviewer must not get WORK")
+
     def test_a_registered_lane_is_pushed_without_ever_calling_follow(self):
         """The measured defect: registration must be enough on its own."""
         self.register(IDLE_WORKER, "worker", provider="pi")
