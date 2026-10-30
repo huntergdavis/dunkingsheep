@@ -2,7 +2,7 @@
 """Daily watch of free models on OpenRouter and OpenCode.
 
 Writes the Dunking Sheep context article subject `free-model-catalog` (class
-fact, global) and keeps first_seen / last_seen in data/free_catalog_state.json.
+fact, global) and keeps first_seen / last_seen in <desk data dir>/free_catalog_state.json.
 An arrival is only LISTED here; it counts as working after the four-body gate.
 """
 import json
@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE = ROOT / "data" / "free_catalog_state.json"
+from desk_data import data_dir  # noqa: E402  (sibling module; state never lives in the repo)
+STATE = data_dir() / "free_catalog_state.json"
 SUBJECT = "free-model-catalog"
 
 
@@ -73,7 +74,7 @@ def main():
     state.setdefault("store_began", stamp)
     state["last_checked"] = stamp
     state["errors"] = errors
-    STATE.parent.mkdir(exist_ok=True)
+    STATE.parent.mkdir(parents=True, exist_ok=True)
     STATE.write_text(json.dumps(state, indent=1, sort_keys=True))
 
     lines = [f"# Free model catalogue (watched, not verified)", "",
@@ -95,7 +96,8 @@ def main():
     lines += [f"- {m} (first seen {state['models'][m]['first_seen']})" for m in sorted(seen)]
     body = "\n".join(lines) + "\n"
 
-    tmp = ROOT / "data" / "free_catalog_article.md"
+    tmp = data_dir() / "free_catalog_article.md"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(body)
     slug = state.get("article_slug")
     if slug:

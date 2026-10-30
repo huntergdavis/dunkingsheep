@@ -1,10 +1,9 @@
 """The desk's state lives under the config dir - never in the repo, and never "".
 
-SCOPE: this covers the three files the PR names (web/app.py, bridges/ops_metrics.py,
-bridges/host_watch.py). It does NOT cover bridges/tools/{free_catalog,free_leaderboard,
-check_theme_wave}.py, which still write under the repo's data/ and are a follow-up task -
+SCOPE: web/app.py, bridges/ops_metrics.py, bridges/host_watch.py, and (t1031) the tools
+bridges/tools/{free_catalog,free_leaderboard,check_theme_wave}.py via tools/desk_data.py -
 "ignored by git" is not the same guarantee as "never created in the repo", and the 2026-10-29
-incident was a COMMIT, so the tools keep the same hazard.
+incident was a COMMIT.
 
 The 2026-10-29 incident shape: a lane imported `web.app` from a checkout with no
 VP_DATA_DIR set, the module created `data/` in the REPO, and a later `git add -A`
@@ -18,6 +17,7 @@ An EMPTY value is the case the first version of this test could not see, because
 code now uses `or` for both variables, and this test feeds it the empty string.
 """
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -45,6 +45,22 @@ def run_app_data(env_updates):
            if key not in ("VP_DATA_DIR", "DUNKINGSHEEP_DIR")}
     env.update(env_updates)
     result = subprocess.run([sys.executable, "-c", app_data_source()], capture_output=True,
+                            text=True, env=env, cwd=ROOT)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+TOOLS = os.path.join(BRIDGES, "tools")
+
+
+def run_tool(module, attribute, env_updates, env_remove=()):
+    """Import a bridges/tools module (script-style, its own dir on sys.path)."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("VP_DATA_DIR", "DUNKINGSHEEP_DIR", *env_remove)}
+    env.update(env_updates)
+    program = (f"import sys; sys.path.insert(0, {TOOLS!r}); import {module}; "
+               f"print(getattr({module}, {attribute!r}))")
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True,
                             text=True, env=env, cwd=ROOT)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -100,6 +116,42 @@ class DeskDataDirTests(unittest.TestCase):
                 bridge_state = run_bridge("host_watch", "STATE", env)
                 self.assertFalse(os.path.abspath(bridge_state).startswith(ROOT),
                                  f"{bridge_state} is inside the repo")
+
+    def test_the_desk_tools_keep_their_state_out_of_the_repo(self):
+        cases = (("free_catalog", "STATE"), ("free_leaderboard", "FREE_RUNS"),
+                 ("free_leaderboard", "BAKEOFF"))
+        home_desk = os.path.join(self.home_config, "desk")
+        for module, attribute in cases:
+            for env in ({}, {"VP_DATA_DIR": ""}, {"DUNKINGSHEEP_DIR": ""},
+                        {"VP_DATA_DIR": "", "DUNKINGSHEEP_DIR": ""}):
+                with self.subTest(module=module, attribute=attribute, env=env):
+                    resolved = run_tool(module, attribute, env,
+                                        env_remove=("VP_FREE_RUNS", "VP_BAKEOFF"))
+                    self.assertTrue(resolved.startswith(home_desk), resolved)
+                    self.assertFalse(resolved.startswith(ROOT), f"{resolved} is in the repo")
+            moved = run_tool(module, attribute, {"DUNKINGSHEEP_DIR": self.cfg},
+                             env_remove=("VP_FREE_RUNS", "VP_BAKEOFF"))
+            self.assertTrue(moved.startswith(os.path.join(self.cfg, "desk")), moved)
+            explicit = os.path.join(self.cfg, "explicit")
+            self.assertTrue(run_tool(module, attribute, {"VP_DATA_DIR": explicit},
+                                     env_remove=("VP_FREE_RUNS", "VP_BAKEOFF")
+                                     ).startswith(explicit))
+
+    def test_check_theme_wave_only_accepts_artifacts_under_the_desk_dir(self):
+        # No tool under bridges/tools may name ROOT/'data' as a write target.
+        for name in ("free_catalog.py", "free_leaderboard.py", "check_theme_wave.py"):
+            with open(os.path.join(TOOLS, name), encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertIsNone(re.search(r"""ROOT\s*/\s*["']data["']""", source),
+                              f"{name} names the repo's data/")
+        refused = subprocess.run(
+            [sys.executable, os.path.join(TOOLS, "check_theme_wave.py"), "--theme", "x",
+             "--base", "HEAD", "--artifacts", os.path.join(ROOT, "data", "out")],
+            capture_output=True, text=True, cwd=ROOT,
+            env={**{k: v for k, v in os.environ.items() if k != "VP_DATA_DIR"},
+                 "DUNKINGSHEEP_DIR": self.cfg})
+        self.assertNotEqual(0, refused.returncode)
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "data", "out")))
 
     def test_the_repo_data_dir_is_still_ignored_as_a_second_line_of_defence(self):
         # The incident was a COMMIT, so "ignored" is not the guarantee - the paths above
