@@ -153,6 +153,17 @@ class DeskBlockSourceTests(unittest.TestCase):
         self.assertIn("use B", calls[2][1]["body"])
         self.assertEqual(["%9"], out["delivered_to"])
 
+    def test_the_asks_reach_the_payload_the_desk_reads(self):
+        reading = ops_board._asks_board(FakeClient([task("t1", created_by="owner")]), NOW)
+        out = ops_board.compact({"asks": reading}, "2026-10-30T00:00:00Z")
+        asks = out["reference"]["asks"]
+        self.assertEqual("asks", asks["source"])
+        self.assertEqual(["t1"], [row["id"] for row in asks["asks"]])
+
+    def test_a_lane_whose_name_merely_contains_owner_is_not_the_owner(self):
+        board = ops_board._asks_board(FakeClient([task("t1", created_by="co-owner-bot")]), NOW)
+        self.assertEqual([], board["asks"])
+
     def test_the_block_has_css_for_both_viewports(self):
         css = self.read("ui/src/dash.css")
         self.assertIn(".ops-owner", css)

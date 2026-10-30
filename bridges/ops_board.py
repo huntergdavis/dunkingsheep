@@ -133,7 +133,7 @@ def _asks_board(client, now: datetime) -> dict:
     for task in tasks:
         created_by = str(task.get("created_by") or "")
         created_at = task.get("created_at")
-        if "owner" not in created_by or not isinstance(created_at, (int, float)):
+        if created_by.split("@", 1)[0] != "owner" or not isinstance(created_at, (int, float)):
             continue
         if created_at < cutoff:
             continue
@@ -496,7 +496,8 @@ def compact(readings: dict, generated_at: str) -> dict:
         "attention": {"generated_at": generated_at, "alarms": alarms,
                       "owner": {"source": "tasks", "state": tasks["state"],
                                 "generated_at": generated_at, "items": owner}},
-        "reference": {"tasks": tasks, "lanes": panes, "schedules": dunks},
+        "reference": {"tasks": tasks, "lanes": panes, "schedules": dunks,
+                      "asks": source("asks")},
     }
 
 
