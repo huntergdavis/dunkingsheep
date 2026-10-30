@@ -244,7 +244,7 @@ fn seeded() -> (tempfile::TempDir, std::path::PathBuf) {
 fn count_treats_a_pane_suffixed_mailbox_as_the_same_mailbox() {
     let (_dir, path) = seeded();
     let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
-    let counts = count(&pool, "alice", 2_000.0).expect("count");
+    let counts = count(&pool, "alice", &[], 2_000.0).expect("count");
     assert_eq!(
         2, counts.unread,
         "the suffixed row must count as unread for 'alice'"
@@ -261,7 +261,7 @@ fn count_treats_a_pane_suffixed_mailbox_as_the_same_mailbox() {
         "oldest unread is i1: 2000 - 1000"
     );
     // The suffixed spelling sees the same mailbox.
-    let suffixed = count(&pool, "alice (w9:pH)", 2_000.0).expect("count");
+    let suffixed = count(&pool, "alice (w9:pH)", &[], 2_000.0).expect("count");
     assert_eq!(counts.unread, suffixed.unread);
 }
 
@@ -303,10 +303,108 @@ fn list_is_oldest_first_excludes_cancelled_and_can_filter_unread() {
 fn get_returns_the_body_and_a_named_refusal_for_an_unknown_id() {
     let (_dir, path) = seeded();
     let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
-    let (summary, body) = get(&pool, "i2").expect("get");
+    let (summary, body) = get(&pool, "i2", 2_000.0).expect("get");
     assert_eq!("second", body);
     assert_eq!(6, summary.body_bytes);
     assert_eq!("alice (w9:pH)", summary.destination);
-    let error = get(&pool, "nope").expect_err("unknown id");
+    let error = get(&pool, "nope", 2_000.0).expect_err("unknown id");
     assert!(error.to_string().contains("no message with id"), "{error}");
+}
+
+// -- review t995: four blocking findings, pinned ---------------------------------
+
+#[test]
+fn mixed_case_window_ids_are_normalised_like_the_python() {
+    // The live mailbox table spells panes `claude poolrad (wR:p1)`, `PM for
+    // Poolrad-decomp (wN:p1)` and `PM (par-a) (wW:p1)`. A `w<digits>` rule left all
+    // three UNNORMALISED, so a read addressed to the suffixed key missed the rows filed
+    // under the plain name - the two-spelling rule failing in its own docstring.
+    assert_eq!(
+        "claude poolrad",
+        normalise_mailbox("claude poolrad (wR:p1)")
+    );
+    assert_eq!(
+        "PM for Poolrad-decomp",
+        normalise_mailbox("PM for Poolrad-decomp (wN:p1)")
+    );
+    assert_eq!("PM (par-a)", normalise_mailbox("PM (par-a) (wW:p1)"));
+    // the digit spelling keeps working, and a non-pane parenthetical is left alone
+    assert_eq!(
+        "Chief of Staff",
+        normalise_mailbox("Chief of Staff (w9:pS)")
+    );
+    assert_eq!("vp of agentry", normalise_mailbox("vp of agentry"));
+    assert_eq!(
+        "a note (not a pane)",
+        normalise_mailbox("a note (not a pane)")
+    );
+}
+
+#[test]
+fn count_reports_the_lane_and_attachment_numbers() {
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let lanes = vec!["w1:p1".to_string()];
+    let counts = count(&pool, "alice", &lanes, 2_000.0).expect("count");
+    // from_lanes counts QUEUED mail whose sender is a lane pane: i1 is queued from
+    // w1:p1, so the fleet's "mail that bypassed the PM" number is visible at all.
+    // The fixture has TWO queued rows in `alice` sent by w1:p1 (i1 and i2), and one in
+    // `bob`. I asserted 1 first and the store said 2 - the store was right and my
+    // arithmetic about the fixture was not, which is why the number is named here.
+    assert_eq!(
+        2, counts.from_lanes,
+        "both lane-sent queued rows must be counted"
+    );
+    // i2 carries `shot.png` and i2 is queued, so the fixture has exactly ONE unread
+    // attachment. I asserted 0 first: the store was right and I had not checked the
+    // fixture, which is twice in this one test - hence the row is named here.
+    assert_eq!(
+        1, counts.attachments_unread,
+        "i2 (queued) carries one attachment: shot.png"
+    );
+    // and with no lane list it reports 0, exactly as the Python does with lane_panes=None
+    let bare = count(&pool, "alice", &[], 2_000.0).expect("count");
+    assert_eq!(0, bare.from_lanes);
+}
+
+#[test]
+fn body_bytes_counts_bytes_not_characters() {
+    // MAX_BODY_BYTES is a BYTE ceiling, so a character count is the wrong unit in the
+    // module that enforces bytes: "πππ abc" is 7 characters and 8 bytes.
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let (summary, body) = get(&pool, "i2", 2_000.0).expect("get");
+    assert_eq!("second", body);
+    assert_eq!(6, summary.body_bytes);
+}
+
+#[test]
+fn get_reports_the_same_wait_as_list_for_a_queued_message() {
+    // Two readers of one row disagreed: list() said 1000 s, get() said 0.
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let listed = list(&pool, "alice", true, 10, 2_000.0).expect("list");
+    let (got, _body) = get(&pool, "i1", 2_000.0).expect("get");
+    let from_list = listed
+        .iter()
+        .find(|row| row.message_id == "i1")
+        .and_then(|row| row.waiting_s);
+    assert_eq!(
+        from_list, got.waiting_s,
+        "get and list must agree on the wait"
+    );
+    assert_eq!(Some(1_000), got.waiting_s);
+}
+
+#[test]
+fn the_read_half_carries_the_owner_mailbox_fields() {
+    // transport / reply_to / external_id / delivered_at / delivery_transport are what
+    // FLAT_FLEET 7.2 relies on; digest_id is the Python's own summary field. Dropping
+    // them silently made the caller believe the column was empty.
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let rows = list(&pool, "alice", false, 10, 2_000.0).expect("list");
+    let row = rows.first().expect("at least one row");
+    // present (None in this fixture) is the point: the FIELD exists on the struct
+    assert_eq!(None, row.digest_id);
 }

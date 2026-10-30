@@ -113,8 +113,14 @@ pub fn normalise_mailbox(name: &str) -> String {
     }
 }
 
-/// `_PANE_SUFFIX`: `'\s*(?:\(\s*(?:w\d+:p[\w.-]+|%\d+)\s*\))\s*$'` - a TRAILING
-/// parenthetical pane id, and nothing else.
+/// `_PANE_SUFFIX`: `\s*\(\s*(?:[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+|%\d+)\s*\)\s*$` - a
+/// TRAILING parenthetical pane id, and nothing else.
+///
+/// The window half is NOT `w<digits>`: the live mailbox table spells panes as
+/// `claude poolrad (wR:p1)`, `PM for Poolrad-decomp (wN:p1)` and `PM (par-a) (wW:p1)`,
+/// and a `w\d+` rule left every one of those unnormalised - so a read addressed to the
+/// suffixed key missed the rows filed under the plain name, which is the two-spelling
+/// rule this function exists for failing in its own docstring (review t995, measured).
 fn strip_pane_suffix(text: &str) -> Option<&str> {
     let trimmed = text.trim_end();
     if !trimmed.ends_with(')') {
@@ -133,20 +139,18 @@ fn strip_pane_suffix(text: &str) -> Option<&str> {
     Some(trimmed[..open].trim_end())
 }
 
-/// `w\d+:p[\w.-]+` - a backend pane id.
+/// `[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+` - a backend pane id, in the Python's spelling.
 fn matches_pane_id(text: &str) -> bool {
     let Some((window, pane)) = text.split_once(":p") else {
         return false;
     };
-    let Some(digits) = window.strip_prefix('w') else {
-        return false;
+    let word = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
     };
-    !digits.is_empty()
-        && digits.chars().all(|c| c.is_ascii_digit())
-        && !pane.is_empty()
-        && pane
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    word(window) && word(pane)
 }
 
 /// `mailbox_where`: SQL that matches either spelling the table may hold for one mailbox.
@@ -195,6 +199,17 @@ pub struct Summary {
     pub waiting_s: Option<i64>,
     pub body_bytes: i64,
     pub attachments: i64,
+    // (4) The read half used to DROP these, and the body never said so. `digest_id`
+    // comes from the Python's `_summary`; `transport`/`reply_to`/`external_id` are the
+    // owner-mailbox fields FLAT_FLEET 7.2 relies on, and `delivered_at` /
+    // `delivery_transport` are how a caller sees that a message actually left. A read
+    // API that silently narrows the row makes the caller believe the column is empty.
+    pub digest_id: Option<String>,
+    pub transport: Option<String>,
+    pub reply_to: Option<String>,
+    pub external_id: Option<String>,
+    pub delivered_at: Option<f64>,
+    pub delivery_transport: Option<String>,
 }
 
 /// `count()`: one mailbox's totals. `unread` is `state = 'queued'`, and cancelled
@@ -207,10 +222,21 @@ pub struct Counts {
     pub archived: i64,
     pub undeliverable: i64,
     pub oldest_unread_s: Option<i64>,
+    /// Attachments sitting on queued mail (the Python's `attachments_unread`).
+    pub attachments_unread: i64,
+    /// Queued mail sent BY a lane, i.e. mail that bypassed the PM. A documented
+    /// fleet number that should trend to zero, so a read API that omits it hides a
+    /// regression rather than reporting one.
+    pub from_lanes: i64,
 }
 
 /// `count(mailbox)`: the same arithmetic the Python's single SELECT does.
-pub fn count(pool: &ReadPool, mailbox: &str, now: f64) -> Result<Counts, DunkError> {
+pub fn count(
+    pool: &ReadPool,
+    mailbox: &str,
+    lane_panes: &[String],
+    now: f64,
+) -> Result<Counts, DunkError> {
     let (where_clause, params) = mailbox_where(mailbox, "mailbox");
     let sql = format!(
         "SELECT COUNT(*) AS total, SUM(state = 'queued') AS unread, \
@@ -232,6 +258,38 @@ pub fn count(pool: &ReadPool, mailbox: &str, now: f64) -> Result<Counts, DunkErr
             })
             .map_err(map_sqlite)?;
         let (total, unread, archived, undeliverable, oldest) = row;
+        // (4) attachments_unread: attachments on QUEUED mail, which is how a caller
+        // sees that a message is carrying a file nobody has fetched.
+        let blobs_sql = format!(
+            "SELECT COUNT(*) FROM attachments a JOIN messages m ON m.id = a.message_id \
+             WHERE m.mailbox IN (SELECT mailbox FROM messages WHERE {where_clause}) \
+             AND m.state = 'queued'"
+        );
+        let attachments_unread: i64 = {
+            let mut statement = connection.prepare(&blobs_sql).map_err(map_sqlite)?;
+            statement
+                .query_row(rusqlite::params_from_iter(params.iter()), |row| row.get(0))
+                .map_err(map_sqlite)?
+        };
+        // (4) from_lanes: queued mail whose sender is one of the lane panes. The
+        // Python takes `lane_panes=None` and reports 0 in that case; so does this.
+        let from_lanes: i64 = if lane_panes.is_empty() {
+            0
+        } else {
+            let marks = std::iter::repeat_n("?", lane_panes.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let lanes_sql = format!(
+                "SELECT COUNT(*) FROM messages WHERE {where_clause} AND state = 'queued' \
+                 AND sender IN ({marks})"
+            );
+            let mut statement = connection.prepare(&lanes_sql).map_err(map_sqlite)?;
+            let mut bound: Vec<String> = params.clone();
+            bound.extend(lane_panes.iter().cloned());
+            statement
+                .query_row(rusqlite::params_from_iter(bound.iter()), |row| row.get(0))
+                .map_err(map_sqlite)?
+        };
         Ok(Counts {
             mailbox: mailbox.to_string(),
             unread: unread.unwrap_or(0),
@@ -239,6 +297,8 @@ pub fn count(pool: &ReadPool, mailbox: &str, now: f64) -> Result<Counts, DunkErr
             archived: archived.unwrap_or(0),
             undeliverable: undeliverable.unwrap_or(0),
             oldest_unread_s: oldest.map(|at| (now - at) as i64),
+            attachments_unread,
+            from_lanes,
         })
     })
 }
@@ -258,14 +318,21 @@ pub fn list(
     }
     let sql = format!(
         "SELECT id, mailbox, mailbox_label, sender, subject, state, created_at, \
-         length(body) AS body_bytes, \
+         length(CAST(body AS BLOB)) AS body_bytes, digest_id, transport, reply_to, \
+         external_id, delivered_at, delivery_transport, \
          (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) AS attachments \
          FROM messages WHERE {where_clause} ORDER BY created_at LIMIT ?"
     );
     pool.with(|connection| {
         let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
-        let mut bound: Vec<String> = params.clone();
-        bound.push(limit.to_string());
+        let mut bound: Vec<rusqlite::types::Value> = params
+            .iter()
+            .cloned()
+            .map(rusqlite::types::Value::Text)
+            .collect();
+        // Bound as an INTEGER: the reviewer showed SQLite coerces the text form, but a
+        // coercion is not a type and `LIMIT` is where a wrong type would be silent.
+        bound.push(rusqlite::types::Value::Integer(limit as i64));
         let rows = statement
             .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                 let state: String = row.get("state")?;
@@ -286,6 +353,12 @@ pub fn list(
                     created_at,
                     body_bytes: row.get("body_bytes")?,
                     attachments: row.get("attachments")?,
+                    digest_id: row.get("digest_id")?,
+                    transport: row.get("transport")?,
+                    reply_to: row.get("reply_to")?,
+                    external_id: row.get("external_id")?,
+                    delivered_at: row.get("delivered_at")?,
+                    delivery_transport: row.get("delivery_transport")?,
                     state,
                 })
             })
@@ -299,9 +372,10 @@ pub fn list(
 }
 
 /// `get(id)`: one message with its body, or the Python's named refusal.
-pub fn get(pool: &ReadPool, message_id: &str) -> Result<(Summary, String), DunkError> {
+pub fn get(pool: &ReadPool, message_id: &str, now: f64) -> Result<(Summary, String), DunkError> {
     let sql = "SELECT id, mailbox, mailbox_label, sender, subject, state, created_at, \
-               length(body) AS body_bytes, body, \
+               length(CAST(body AS BLOB)) AS body_bytes, digest_id, transport, reply_to, \
+               external_id, delivered_at, delivery_transport, read_at, body, \
                (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) \
                AS attachments \
                FROM messages WHERE id = ?";
@@ -320,10 +394,24 @@ pub fn get(pool: &ReadPool, message_id: &str) -> Result<(Summary, String), DunkE
                     mailbox: mailbox_name,
                     sender: row.get("sender")?,
                     subject: row.get("subject")?,
-                    waiting_s: if state == UNREAD { Some(0) } else { None },
+                    // (3) `waiting_s` is how long a queued message has waited, not a
+                    // constant: the same row returned Some(10800) from list() and
+                    // Some(0) from get(), so two readers of one row disagreed about
+                    // the number the fleet uses to see a stuck queue.
+                    waiting_s: if state == UNREAD {
+                        Some((now - created_at).max(0.0) as i64)
+                    } else {
+                        None
+                    },
                     created_at,
                     body_bytes: row.get("body_bytes")?,
                     attachments: row.get("attachments")?,
+                    digest_id: row.get("digest_id")?,
+                    transport: row.get("transport")?,
+                    reply_to: row.get("reply_to")?,
+                    external_id: row.get("external_id")?,
+                    delivered_at: row.get("delivered_at")?,
+                    delivery_transport: row.get("delivery_transport")?,
                     state,
                 };
                 Ok((summary, body))
