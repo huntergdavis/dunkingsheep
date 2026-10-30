@@ -1262,3 +1262,75 @@ class CancelledDependencyTests(unittest.TestCase):
         view = self.flock.tasks.get(after["id"])
         self.assertEqual([pre["id"]], view["blocked_by"])
         self.assertFalse(view["eligible"])
+
+
+class TerminalStatusReleasesTheLease(unittest.TestCase):
+    """t891: a lane that FINISHES a task must stop looking busy.
+
+    Measured live by %101: five leases sat on terminal tasks and every one was still
+    live, so dispatch excluded the lanes that had just completed the work for up to
+    thirty minutes. The status is the end of the claim; the claim has to go with it.
+    """
+
+    PANE = "w2:p1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def claimed(self, title="work"):
+        task = self.flock.tasks.add(GLOBAL, title)
+        self.flock.task_next(self_pane_id=self.PANE)
+        self.assertEqual(1, len(self.flock.tasks.leases_for_pane(self.PANE)),
+                         "the fixture failed to claim")
+        return task
+
+    def test_completing_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.task_complete(task["id"], self_pane_id=self.PANE)
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE),
+                         "a completed task still holds the lane's lease")
+        self.assertEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cancelling_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.tasks.cancel(task["id"], reason="withdrawn")
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+
+    def test_blocking_releases_the_lease(self):
+        task = self.claimed()
+        self.flock.tasks.update(task["id"], status="blocked",
+                                block_reason="needs-owner: a question")
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+
+    def test_the_lane_can_claim_again_immediately(self):
+        """The operational consequence: a busy pane is refused a second task, so a
+        stale lease makes a lane that just finished unable to take the next one."""
+        first = self.claimed("first")
+        self.flock.task_complete(first["id"], self_pane_id=self.PANE)
+        self.flock.tasks.add(GLOBAL, "second")
+        got = self.flock.task_next(self_pane_id=self.PANE)
+        self.assertTrue(got.get("task"), f"the lane could not claim again: {got.get('refused')}")
+        self.assertEqual("second", got["task"]["title"])
+
+    def test_another_panes_lease_is_untouched(self):
+        mine = self.claimed()
+        other = self.flock.tasks.add(GLOBAL, "theirs")
+        self.flock.tasks.claim_next(scope=GLOBAL, pane_id="w2:p3")
+        self.flock.task_complete(mine["id"], self_pane_id=self.PANE)
+        self.assertEqual([], self.flock.tasks.leases_for_pane(self.PANE))
+        self.assertEqual(1, len(self.flock.tasks.leases_for_pane("w2:p3")),
+                         "another lane's live claim was removed by my completion")

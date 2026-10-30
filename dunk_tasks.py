@@ -701,6 +701,24 @@ class Tasks:
                         "read it again (t854)")
                 if "status" in sets and sets["status"] != row["status"]:
                     new_status = sets["status"]
+                    # t891: a lane that FINISHES a task must stop looking busy. The
+                    # lease row survived completion, cancellation and blocking, and
+                    # dispatch/push decide "is this pane busy?" from
+                    # leases_for_pane() - so a lane that had just completed four
+                    # reviews was still excluded from dispatch for up to 30 minutes
+                    # (measured live by %101: 5 leases on terminal tasks, all live).
+                    # The status is the end of the claim, so the claim goes with it.
+                    if new_status in TERMINAL_STATUSES + ("blocked",):
+                        removed = self.db.execute(
+                            "DELETE FROM task_leases WHERE task_id = ?",
+                            (task_id,)).rowcount
+                        if removed:
+                            self._record(task_id, "lease_released", at=now,
+                                         actor=updated_by, scope=row["scope"],
+                                         priority=sets.get("priority", row["priority"]),
+                                         status_to=new_status,
+                                         meta={"reason": f"status became {new_status}",
+                                               "leases_removed": removed})
                     if new_status == "done":
                         event = "completed"
                         duration = int((now - row["created_at"]) * 1000)
@@ -924,6 +942,20 @@ class Tasks:
                         "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
                         "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
                         (now, pane_id, now, from_task))
+                    # t891: THIS is the path that leaves the lease behind. Completion
+                    # arrives here, not through update(), so the release has to happen
+                    # here too - otherwise the lane that just finished stays "busy" in
+                    # leases_for_pane() and dispatch skips it for the rest of the
+                    # 30-minute lease (measured live: five leases on terminal tasks).
+                    released = self.db.execute(
+                        "DELETE FROM task_leases WHERE task_id = ?",
+                        (from_task,)).rowcount
+                    if released:
+                        self._record(from_task, "lease_released", at=now, actor=pane_id,
+                                     scope=row["scope"], priority=row["priority"],
+                                     status_to="done",
+                                     meta={"reason": "task completed",
+                                           "leases_removed": released})
                     self._record(from_task, "completed", at=now, actor=pane_id,
                                  scope=row["scope"], priority=row["priority"],
                                  status_from=row["status"], status_to="done",
