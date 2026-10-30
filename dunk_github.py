@@ -524,3 +524,88 @@ def repos_config():
     except (OSError, ValueError):
         pass
     return list(DEFAULT_REPOS)
+
+
+# -- who pushed a head (t723) ------------------------------------------------
+#
+# The author App is SHARED: every worker lane pushes through the same installation,
+# so a commit's GitHub identity says nothing about the lane. The one thing the
+# daemon knows at push time is which pane asked for the author token, and it kept
+# that in memory only (dunk_core.gh_token), which dies with the process - so a
+# review filed for a lane-pushed head had author=NULL and the no-self-review guard
+# never fired (2026-10-30, dunkingsheep#124: a reviewer could have accepted its own
+# rebase). These two functions persist and read that record.
+#
+# HONEST LIMIT: this is a heuristic about a recent MINT, not proof of authorship.
+# It attributes only when exactly ONE lane minted the author token inside the
+# window; two lanes in one window attribute nobody. The cost of a wrong answer is
+# that a legitimate reviewer is refused (safe: another lane reviews), and the cost
+# of no answer is the old behaviour, so the rule fails towards the guard.
+
+AUTHOR_MINT_FILE = "github-author-mints.json"
+AUTHOR_MINT_WINDOW_S = 1800        # 2x the review timer period, and no more
+AUTHOR_MINT_KEEP_S = 86400         # a day of history per pane, pruned on write
+
+
+def author_mint_path(path=None):
+    return Path(path) if path else CONFIG_DIR / AUTHOR_MINT_FILE
+
+
+def record_author_mint(pane, at=None, path=None):
+    """Remember that `pane` minted the AUTHOR App token at `at` (t723)."""
+    pane = str(pane or "").strip()
+    if not pane:
+        return None
+    path = author_mint_path(path)
+    now = float(at if at is not None else time.time())
+    data = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            data = loaded
+    except (OSError, ValueError):
+        data = {}
+    panes = data.get("panes") if isinstance(data.get("panes"), dict) else {}
+    stamps = [float(value) for value in (panes.get(pane) or [])
+              if isinstance(value, (int, float))]
+    stamps = [value for value in stamps if now - value <= AUTHOR_MINT_KEEP_S]
+    stamps.append(round(now, 3))
+    panes[pane] = stamps[-50:]
+    payload = {"panes": panes, "updated_at": round(now, 3)}
+    temporary = str(path) + ".tmp"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+        os.replace(temporary, path)
+    except OSError:                      # attribution must never break a push
+        return None
+    return path
+
+
+def author_from_mints(since, path=None, now=None):
+    """The ONE pane that minted the author token since `since`, else None (t723)."""
+    now = float(now if now is not None else time.time())
+    since = float(since if since is not None else now - AUTHOR_MINT_WINDOW_S)
+    try:
+        with open(author_mint_path(path), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    panes = data.get("panes") if isinstance(data, dict) else None
+    if not isinstance(panes, dict):
+        return None
+    recent = []
+    for pane, stamps in panes.items():
+        for value in stamps or []:
+            try:
+                stamp = float(value)
+            except (TypeError, ValueError):
+                continue
+            if since < stamp <= now:
+                recent.append(str(pane))
+                break
+    distinct = sorted(set(recent))
+    return distinct[0] if len(distinct) == 1 else None

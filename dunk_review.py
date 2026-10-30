@@ -66,6 +66,26 @@ def attribute_author(pr, lanes, mints):
     return recent[0][0] if len(recent) == 1 else None
 
 
+def author_from_tasks(repo, number, flock):
+    """The lane that worked on `repo#number`, when exactly ONE did (t723).
+
+    attribute_author() maps a branch label or a recent token mint back to a pane;
+    a head pushed through the author App carries neither, so the review task it
+    files has author=NULL and the no-self-review guard cannot fire (2026-10-30,
+    dunkingsheep#124: the rebase was pushed by a lane and the review task said
+    author unknown). The work tasks for the same repo+pr do name the lane, so the
+    timer uses them as the last resort: one name is an attribution, several names
+    are not a tie to break - the completion guard checks the whole set, so leaving
+    author unset there refuses every one of them and nobody is guessed into being
+    allowed.
+    """
+    try:
+        panes = flock.tasks.authors_of(repo, number)
+    except Exception:  # noqa: BLE001 - attribution is best effort, never fatal
+        return None
+    return panes[0] if len(panes) == 1 else None
+
+
 def _iso(value):
     if not value:
         return None
@@ -367,6 +387,15 @@ class Sync:
                                                        "delta review filed")
                     report["cancelled"].append(current["id"])
                 author = attribute_author(pr, lanes, mints)
+                if author is None:
+                    author = author_from_tasks(repo, pr["number"], self.flock)
+                if author is None:
+                    # t723, last resort: exactly one lane minted the author App token
+                    # in the window before this sweep, so that lane most likely pushed
+                    # this head. Two lanes in one window attribute nobody, and the
+                    # completion guard still refuses each of them by task identity.
+                    author = dunk_github.author_from_mints(
+                        time.time() - dunk_github.AUTHOR_MINT_WINDOW_S)
                 try:
                     detail = self.github.pull_detail(repo, pr["number"], token)
                 except dunk_github.GitHubError as error:
@@ -526,6 +555,11 @@ class Sync:
                           "review for the new head."),
                     priority="high", kind="work",
                     assignees=[task["author"]] if task.get("author") else None,
+                    # t723: the fix task is the ONLY record that this lane worked on
+                    # this head. Without repo/pr/head on it, the next review task for
+                    # the same PR cannot attribute the head and no-self-review goes
+                    # unenforced for exactly the PRs a lane authored.
+                    repo=repo, pr=number, head=head, author=task.get("author"),
                     created_by="review-sync")
                 out["followup"] = followup["id"]
             except Exception as error:  # noqa: BLE001

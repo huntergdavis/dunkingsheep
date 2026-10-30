@@ -1125,6 +1125,39 @@ class Tasks:
         tasks.sort(key=self._order_key)
         return tasks[: int(limit)]
 
+    def authors_of(self, repo, pr):
+        """Pane ids that WORKED on (repo, pr), from the work tasks (t723).
+
+        `tasks.author` cannot be relied on for a head a lane pushed through the
+        author App: the review timer sees an App identity it cannot map back, so
+        author is NULL for exactly the PRs a lane wrote, and the no-self-review
+        guard (which reads `author`) never fired (2026-10-30: a reviewer could
+        have accepted its own rebase of dunkingsheep#124). The work tasks for the
+        same repo+pr DO name the lane: their assignees, their completer, and their
+        recorded author. A rebase pushed under a fix task is covered by that task.
+
+        Review tasks are excluded on purpose: a reviewer's own earlier review of
+        the same PR is not authorship, and counting it would refuse the second
+        reviewer's legitimate verdict.
+        """
+        try:
+            number = int(pr)
+        except (TypeError, ValueError):
+            return []
+        if not repo or number <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT assignees, completed_by, author FROM tasks "
+            "WHERE repo = ? AND pr = ? AND kind != 'review'", (str(repo), number)
+        ).fetchall()
+        panes = set()
+        for row in rows:
+            panes.update(str(pane) for pane in _decode(row["assignees"]) if pane)
+            for key in ("completed_by", "author"):
+                if row[key]:
+                    panes.add(str(row[key]))
+        return sorted(panes)
+
     def next(self, scope=None, self_pane_id=None):
         """The next eligible task in the global queue and in a pane queue.
 
