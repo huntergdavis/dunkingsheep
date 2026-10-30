@@ -17,6 +17,7 @@ pub mod clock;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod inbox;
 pub mod lock;
 pub mod proc;
 pub mod retry;
