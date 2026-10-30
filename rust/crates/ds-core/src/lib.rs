@@ -1,8 +1,9 @@
 //! Dunking Sheep, in Rust: the library the daemon, the CLI and the MCP server share.
 //!
-//! This crate starts empty on purpose (docs/rust/TASKS.md T00): the workspace and
-//! the build are the deliverable of T00, and each later task adds one module from
-//! `docs/rust/MANIFEST.md` ("Inventory") together with the Python tests it ports.
+//! Ported module by module from `docs/rust/MANIFEST.md` ("Inventory"), each with
+//! the Python tests it names. T02 delivers the foundation every later task stands
+//! on: [`error`], [`config`], [`clock`], [`atomic_json`], [`lock`], [`retry`].
+//!
 //! Nothing here may be a stub that pretends a port is done - the differential
 //! harness (T01) is the judge, and a green build is not evidence of behaviour.
 //!
@@ -10,6 +11,15 @@
 //! (docs/rust/RUST_PORT.md sections 2 and 8).
 
 #![forbid(unsafe_code)]
+
+pub mod atomic_json;
+pub mod clock;
+pub mod config;
+pub mod error;
+pub mod lock;
+pub mod retry;
+
+pub use error::{DunkError, refusal};
 
 /// The port manifest this crate is written against (docs/rust/MANIFEST.md).
 ///
