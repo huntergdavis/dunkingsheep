@@ -3458,38 +3458,104 @@ class Flock:
                 log.exception("task push failed")
 
     def _push_tasks(self):
-        """Feed idle followers one task each, using the same idle signal as
-        `only_when="idle"` and the same guarded inbox nudge as everything else.
+        """Feed idle lanes one task each: followers AND every registered lane.
 
-        No model is involved: the daemon selects, claims and delivers
-        deterministically. A follower already holding a live lease is skipped.
+        t615 (measured 2026-10-29, owner): four registered lanes sat idle for ~40
+        minutes with 13 open tasks because only ONE of them had ever called
+        `task follow`; the push loop fed followers and nobody else. Registration is
+        the subscription now: a lane the owner started with `start-agent --role`
+        is a push target whether or not it asked. `task follow` still exists and
+        still scopes a pane to its own queue; it is no longer a prerequisite for
+        being given work.
+
+        The gates are the ones the task names and nothing else: role, busy-ness,
+        unread mail. Each decision is logged, because "nothing to do" and "I was
+        skipped" must never look alike.
         """
-        with self._lock:
-            followers = dict(self.task_waiters)
-        if not followers:
+        targets = self._push_targets()
+        if not targets:
             return
         try:
             panes = {p["pane_id"]: p for p in self.herdr.list_panes()}
-        except Exception:
+        except Exception:  # noqa: BLE001 - a backend hiccup must not kill the loop
+            log.info("push sweep skipped: pane list unavailable")
             return
-        for pane_id in sorted(followers):
+        for pane_id in sorted(targets):
+            scope, why = targets[pane_id]
             pane = panes.get(pane_id)
             if pane is None:
+                log.info("push skip pane=%s reason=pane_gone via=%s", pane_id, why)
                 continue
             if (pane.get("agent_status") or "unknown") in BUSY_STATUSES:
+                log.info("push skip pane=%s reason=busy_status status=%s",
+                         pane_id, pane.get("agent_status"))
                 continue
             if self.tasks.leases_for_pane(pane_id):
+                log.info("push skip pane=%s reason=holding_work", pane_id)
                 continue
+            role = self.caller_role(pane_id)
+            if role == "reviewer" and not self.roles.may_review(pane_id):
+                log.info("push skip pane=%s reason=provider_may_not_review provider=%s",
+                         pane_id, self.roles.provider_of(pane_id) or "unknown")
+                continue
+            if self._unread_mail(pane_id):
+                log.info("push skip pane=%s reason=unread_mail", pane_id)
+                continue
+            # The role->kind filter belongs here as much as in task_next (t595):
+            # without it the push path hands a worker a review it cannot complete.
+            kinds, exclude_author = self._claim_filters(pane_id)
             try:
                 claimed = self.tasks.claim_next(
-                    scope=followers[pane_id], pane_id=pane_id)
-            except Exception:
+                    scope=scope, pane_id=pane_id, kinds=kinds,
+                    exclude_author=exclude_author)
+            except Exception:  # noqa: BLE001 - one pane must not stop the sweep
                 log.exception("task claim failed for %s", pane_id)
                 continue
             task = claimed.get("task")
             if not task:
+                refused = (claimed.get("refused") or {}).get("reason") or "empty"
+                log.info("push none pane=%s scope=%s reason=%s via=%s",
+                         pane_id, scope, refused, why)
                 continue
+            log.info("push claim pane=%s task=%s kind=%s via=%s",
+                     pane_id, task["id"], task.get("kind"), why)
             self._announce_task(pane_id, task, claimed.get("lease_seconds"))
+
+    def _push_targets(self):
+        """pane_id -> (scope, why): explicit followers plus registered lanes."""
+        with self._lock:
+            targets = {pane_id: (scope, "follower")
+                       for pane_id, scope in self.task_waiters.items()}
+        try:
+            lanes = self.roles.describe().get("lanes") or {}
+        except Exception:  # noqa: BLE001 - no registry means followers only
+            log.exception("push targets: role registry unavailable")
+            return targets
+        for pane_id, entry in lanes.items():
+            if pane_id in targets:
+                continue
+            # Registration is the subscription, but only for the roles that pull
+            # work. A desk/planner/owner pane is registered and must not be fed
+            # tasks by a sweep.
+            if (entry or {}).get("role") not in ("worker", "reviewer"):
+                continue
+            targets[pane_id] = (TASK_GLOBAL, "registered")
+        return targets
+
+    def _unread_mail(self, pane_id):
+        """Does this lane have unread mail? A lane reads its mail before new work.
+
+        Resolved through `_own_mailbox`, the same pane->mailbox resolver the inbox
+        itself uses, so the gate and `inbox_send` can never disagree about where a
+        lane's mail is.
+        """
+        try:
+            return bool(self.inbox.count(self._own_mailbox(pane_id)).get("unread"))
+        except Exception:  # noqa: BLE001 - unknown mail state is not evidence of none,
+            # but refusing every push on an inbox hiccup would stop the fleet;
+            # log it and let the role/busy gates decide.
+            log.exception("push: unread mail check failed pane=%s", pane_id)
+            return False
 
     def _announce_task(self, pane_id, task, lease_seconds):
         body = [
