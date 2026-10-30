@@ -238,12 +238,24 @@ class Sync:
                     out["errors"].append(f"merge: {error}")
         else:
             evidence = self._evidence(task)
-            try:
-                self.github.post_status(repo, head, "failure", token,
-                                        f"needs-fix per {task['id']}")
-                out["status"] = "failure"
-            except dunk_github.GitHubError as error:
-                out["errors"].append(f"status: {error}")
+            standing = self._standing_accept(task)
+            if standing is not None:
+                # A failure status here would overwrite the success that branch
+                # protection reads, on a head that another review already
+                # accepted (t656). The verdict is recorded on its own task; the
+                # head's status is not this verdict's to flip.
+                out["status"] = "skipped_standing_accept"
+                out["standing_accept"] = standing
+                out["errors"].append(
+                    f"failure status not posted: {repo}#{number} @ {head[:12]} already "
+                    f"carries an accept verdict from {standing}")
+            else:
+                try:
+                    self.github.post_status(repo, head, "failure", token,
+                                            f"needs-fix per {task['id']}")
+                    out["status"] = "failure"
+                except dunk_github.GitHubError as error:
+                    out["errors"].append(f"status: {error}")
             try:
                 # The evidence goes in the review body, not a pointer to it: the
                 # body that said "see the task notes" on 2026-10-29 pointed at
@@ -268,6 +280,24 @@ class Sync:
             except Exception as error:  # noqa: BLE001
                 out["errors"].append(f"followup: {error}")
         return out
+
+    def _standing_accept(self, task):
+        """The task id of another DONE review that accepted this exact head, or None."""
+        repo, number, head = task.get("repo"), task.get("pr"), task.get("head")
+        if not (repo and number and head):
+            return None
+        try:
+            tasks = self.flock.tasks.list(scope=None, include_done=True, limit=1000,
+                                          kind="review")
+        except Exception:  # noqa: BLE001 - a store read must not stop a verdict
+            return None
+        for other in tasks:
+            if (other["id"] != task["id"] and other.get("status") == "done"
+                    and other.get("verdict") == "accept"
+                    and (other.get("repo"), other.get("pr"), other.get("head"))
+                    == (repo, number, head)):
+                return other["id"]
+        return None
 
     def _evidence(self, task):
         """The reviewer's own notes, verbatim, or a sentence saying there are none.

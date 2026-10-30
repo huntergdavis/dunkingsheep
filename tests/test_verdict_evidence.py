@@ -40,12 +40,16 @@ class FakeGitHub:
     def __init__(self):
         self.statuses = []
         self.reviews = []
+        self.merged = []
 
     def post_status(self, repo, sha, state, token, description, target_url=None):
         self.statuses.append((repo, sha, state))
 
     def review_pull(self, repo, number, event, body, token):
         self.reviews.append((number, event, body))
+
+    def merge_pull(self, repo, number, token, sha=None):
+        self.merged.append((repo, number, sha))
 
 
 class VerdictEvidenceTests(unittest.TestCase):
@@ -156,6 +160,46 @@ class VerdictEvidenceTests(unittest.TestCase):
         self.assertIn(("huntergdavis/dunkingsheep", "a" * 40, "failure"),
                       self.github.statuses,
                       "the failure status stayed pending on the live PRs")
+
+    def test_a_cancelled_review_takes_no_verdict(self):
+        """t656: a sweep may cancel a duplicate because the head was already judged."""
+        task = self.claimed_review()
+        self.call("task_note", {"id": task["id"], "reason": EVIDENCE}, pane=REVIEWER)
+        self.flock.tasks.cancel(task["id"], reason="duplicate of judged review t1")
+        with self.assertRaisesRegex(DunkError, "is cancelled"):
+            self.call("task_complete", {"id": task["id"], "verdict": "needs-fix"},
+                      pane=REVIEWER)
+        self.assertEqual("cancelled", self.flock.tasks.get(task["id"])["status"])
+
+    def test_a_done_review_refuses_a_second_verdict(self):
+        task = self.claimed_review()
+        self.call("task_note", {"id": task["id"], "reason": EVIDENCE}, pane=REVIEWER)
+        self.call("task_complete", {"id": task["id"], "verdict": "accept"}, pane=REVIEWER)
+        with self.assertRaisesRegex(DunkError, "already done with verdict 'accept'"):
+            self.call("task_complete", {"id": task["id"], "verdict": "needs-fix"},
+                      pane=REVIEWER)
+        self.assertEqual("accept", self.flock.tasks.get(task["id"])["verdict"])
+
+    def test_needs_fix_does_not_overwrite_a_standing_accept_status(self):
+        """t656: the failure status must not flip a head another review accepted."""
+        first = self.claimed_review(number=120)
+        self.call("task_note", {"id": first["id"], "reason": EVIDENCE}, pane=REVIEWER)
+        self.call("task_complete", {"id": first["id"], "verdict": "accept"}, pane=REVIEWER)
+        self.assertIn(("huntergdavis/dunkingsheep", "a" * 40, "success"), self.github.statuses)
+        # A second review for the SAME head that reaches needs-fix.
+        duplicate = self.flock.tasks.add(
+            "global", "Review PR #120 again", priority="high", kind="review",
+            repo="huntergdavis/dunkingsheep", pr=120, head="a" * 40,
+            created_by="old-timer")
+        self.call("task_next", {}, pane=REVIEWER)
+        self.call("task_note", {"id": duplicate["id"], "reason": EVIDENCE}, pane=REVIEWER)
+        done = self.call("task_complete", {"id": duplicate["id"], "verdict": "needs-fix"},
+                         pane=REVIEWER)
+        self.assertEqual("skipped_standing_accept", done["github"]["status"])
+        self.assertEqual(first["id"], done["github"]["standing_accept"])
+        self.assertNotIn(("huntergdavis/dunkingsheep", "a" * 40, "failure"),
+                         self.github.statuses,
+                         "a failure status overwrote the standing success")
 
     def test_the_owner_may_complete_a_review_without_a_note(self):
         """The gate is on the lane that judged the work, not on the owner."""

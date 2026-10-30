@@ -2499,6 +2499,21 @@ class Flock:
             # they created said "see the task notes" and there were none, so the
             # work they blocked could not be started (t621).
             self._require_review_evidence(task, self_pane_id)
+            # One verdict per head (t656). A cancelled task is not a place to put
+            # a verdict at all - a sweep may have cancelled it because the head
+            # was already judged - and a done one already carries the verdict the
+            # merge record was built on. Completing either used to succeed, which
+            # let a duplicate review flip an accepted head to needs-fix AND post a
+            # failure status over the standing success.
+            if task.get("status") == "cancelled":
+                raise DunkError(
+                    f"{task_id} is cancelled: a cancelled review takes no verdict. If the "
+                    "head still needs judging, the review timer files a review for it.")
+            if task.get("status") == "done":
+                raise DunkError(
+                    f"{task_id} is already done with verdict {task.get('verdict')!r}: a "
+                    "verdict is bound to the head it measured, so a second one is refused "
+                    "rather than overwriting the merge record")
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which

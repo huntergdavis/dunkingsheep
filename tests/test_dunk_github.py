@@ -185,6 +185,10 @@ class TimerTests(unittest.TestCase):
         self.sync.run()
         task = self.flock.tasks.list(kind="review", include_done=False)[0]
         self.call("task_next", {}, pane=REVIEWER)
+        # A verdict needs evidence, recorded after the claim (t621, #131). This
+        # test landed after that gate merged, so it was red on main until here.
+        self.call("task_note", {"id": task["id"], "reason": "reproduced; head aaaa"},
+                  pane=REVIEWER)
         self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
         self.github.merge_blocked = True       # poolrad-style: a second approval still missing
         done = self.call("task_complete", {"id": task["id"], "verdict": "accept"}, pane=REVIEWER)
