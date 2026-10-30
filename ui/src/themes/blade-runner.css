@@ -1,0 +1,160 @@
+/* Blade Runner: neon magenta and cyan on rain-dark; condensed local system sans.
+ * Token-only variant: no component selectors, overlays or network fonts.
+ * Any glow is carried by token values (shadow/selection colors), never by new rules.
+ */
+:root[data-theme="blade-runner"] {
+  color-scheme: dark;
+  --bg: #0a0f14;
+  --surface: #111a22;
+  --surface-raised: #17232e;
+  --ink: #dbe8ee;
+  --muted: #93a9b6;
+  --accent: #ff2f87;
+  --accent-contrast: #14060f;
+  --border: #60798a;
+  --border-strong: #5e7887;
+  --icon-button-border: var(--border);
+  --icon-button-panel-border: var(--border-strong);
+  --success: #4fe0b0;
+  --warning: #ffd166;
+  --danger: #ff5c7a;
+  --purple: #c77dff;
+  --orange: #ff9e64;
+  --teal: #29d3e0;
+  --radius: 2px;
+  --font-body: 'Arial Narrow', 'Roboto Condensed', 'Helvetica Neue', Arial, sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-display: 'Arial Narrow', 'Roboto Condensed', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+  --shadow-color: #000000a6;
+  --shadow: 0 20px 60px var(--shadow-color);
+}
+
+/* Blade Runner component aliases use the same rain-dark neon palette. */
+:root[data-theme="blade-runner"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --white: var(--ink);
+  --radius-3px: var(--radius);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-11px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --radius-20px: var(--radius);
+  --radius-50-: 50%;
+  --radius-999px: 999px;
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--accent);
+  --dash-root-shadow-color: #ff2f872b;
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-color: #000000a6;
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(5, 9, 13, 0.82);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--teal);
+  --primary-ink: var(--accent-contrast);
+  --topbar-surface: var(--surface);
+  --topbar-border: var(--border);
+  --icon-button-ink: var(--ink);
+  --settings-modal-ink: var(--muted);
+  --settings-modal-shadow: 0 25px 80px var(--search-modal-shadow-color);
+  --search-modal-shadow-color: #000000b3;
+  --search-modal-shadow: 0 25px 80px var(--search-modal-shadow-color);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--teal);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --delivery-ink-4: var(--orange);
+  --game-stage-surface: var(--bg);
+  --game-stage-shadow: inset 0 0 0 3px var(--accent);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--teal);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--accent);
+  --notice-surface: var(--surface-raised);
+  --notice-ink: var(--warning);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --ops-heading-ink: var(--muted);
+  --ops-section-head-ink: var(--muted);
+  --ops-panel-ink: var(--ink);
+  --ops-panel-ink-2: var(--muted);
+  --ops-panel-border: var(--border-strong);
+}
+
+/* Inherited component groups kept contrast-consistent with the rain-dark palette.
+ * Every ink token used on a light legacy surface stays light-surface-safe; dark
+ * groups get a mid-tone boundary that clears 3:1 against their own surface.
+ */
+:root[data-theme="blade-runner"] {
+  --dash-border: #7f9dac;
+  --activity-border: #6f838d;
+  --activity-toggle-border: #6f838d;
+  --game-type-border: #7f9dac;
+  --game-type-border-2: #7f9dac;
+  --game-type-border-3: #7f9dac;
+  --game-type-surface-3: #123b33;
+  --jump-banner-border: #6f838d;
+  --jump-latest-border: #6f838d;
+  --message-wrap-ink: var(--ink);
+  --message-wrap-surface: var(--surface);
+  --older-marker-ink-2: var(--muted);
+  --ops-credit-chart-border: #7f9dac;
+  --ops-executive-border: #7f9dac;
+  --ops-executive-head-border: #7f9dac;
+  --ops-kpis-border: #7f9dac;
+  --ops-lab-panel-border: #7f9dac;
+  --ops-metrics-border: #7f9dac;
+  --ops-mission-head-border: #7f9dac;
+  --ops-source-border: #7f9dac;
+  --ops-source-border-2: #7f9dac;
+  --poolrad-stat-border: #7f9dac;
+  --queue-help-border: #6f838d;
+  --queue-help-border-2: #6f838d;
+  --rune-choice-border-2: var(--accent-contrast);
+  --search-head-border-2: #6f838d;
+  --search-head-ink: #556771;
+  --search-more-border: #6f838d;
+  --sidebar-border: #7f9dac;
+  --status-badge-ink: #556771;
+  --status-badge-ink-3: #856325;
+}

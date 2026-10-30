@@ -20,3 +20,6 @@ venv/
 # untracked; an ignore rule cannot hide a file already in the Git index.
 # The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl
+.venv/
+ui/node_modules/
+ui/dist/

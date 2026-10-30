@@ -1,0 +1,128 @@
+/* Dune: deep desert night, spice amber, sand serif; local system fonts only. */
+:root[data-theme="dune"] {
+  color-scheme: dark;
+  --bg: #17120c;
+  --surface: #221a11;
+  --surface-raised: #2e2418;
+  --ink: #f2e3c4;
+  --muted: #c8b089;
+  --accent: #e8a24a;
+  --accent-contrast: #171006;
+  --border: #8a7048;
+  --border-strong: #c2a36a;
+  --icon-button-border: var(--bg);
+  --icon-button-panel-border: var(--border-strong);
+  --success: #c6d3a1;
+  --warning: #e8a24a;
+  --danger: #f0b09a;
+  --purple: #d8c3a4;
+  --orange: #e8a24a;
+  --teal: #c3d0b4;
+  --radius: 2px;
+  --font-body: 'Iowan Old Style', 'Georgia', 'Palatino Linotype', Palatino, serif;
+  --font-dashboard: var(--font-body);
+  --font-display: var(--font-body);
+  --font-mono: var(--font-body);
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* Dune component aliases use the same sand and spice palette. */
+:root[data-theme="dune"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: #e6d3ab;
+  --ops-reference-border: var(--border);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(10, 7, 3, 0.8);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* Remap inherited legacy component borders/inks onto Dune's own surfaces. */
+:root[data-theme="dune"] {
+  --activity-border: var(--border);
+  --activity-toggle-border: var(--border);
+  --composer-border: var(--border);
+  --older-marker-border: var(--border);
+  --topbar-border: var(--border);
+  --jump-banner-border: var(--border);
+  --jump-latest-border: var(--border);
+  --queue-help-border: var(--border);
+  --queue-help-border-2: var(--border);
+  --search-head-border-2: var(--border);
+  --search-more-border: var(--border);
+  --rune-choice-border-2: var(--border);
+  --sidebar-border: var(--border-strong);
+  --game-type-border: var(--border-strong);
+  --game-type-border-2: var(--border-strong);
+  --game-type-border-3: var(--ink);
+  --ops-credit-chart-border: var(--border-strong);
+  --ops-executive-border: var(--border-strong);
+  --ops-executive-head-border: var(--border-strong);
+  --ops-kpis-border: var(--border-strong);
+  --ops-lab-panel-border: var(--border-strong);
+  --ops-metrics-border: var(--border-strong);
+  --ops-mission-head-border: var(--border-strong);
+  --ops-panel-border: var(--border-strong);
+  --ops-source-border: var(--border-strong);
+  --ops-source-border-2: var(--border-strong);
+  --poolrad-stat-border: var(--border-strong);
+  --search-head-ink: #3f2f1c;
+  --status-badge-ink: #4f606c;
+  --status-badge-ink-3: #7a5c1f;
+}

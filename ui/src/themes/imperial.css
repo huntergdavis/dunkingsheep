@@ -1,0 +1,133 @@
+
+/* Imperial: grey console, blue readouts, wide local system capitals.
+ * Token-only: no component selectors, overlay or font requests. */
+:root[data-theme="imperial"] {
+  color-scheme: dark;
+  --bg: #1c2024;
+  --surface: #242a30;
+  --surface-raised: #2e353c;
+  --ink: #e8eef2;
+  --muted: #a7b6c0;
+  --accent: #6fd0ff;
+  --accent-contrast: #08131a;
+  --border: #74838e;
+  --border-strong: #8fa0ab;
+  --icon-button-border: #3f4a52;
+  --icon-button-panel-border: #9fb2bf;
+  --icon-button-ink: #1d2830;
+  --success: #8de0b0;
+  --warning: #f0cf7a;
+  --danger: #ff9a86;
+  --purple: #c3b4ea;
+  --orange: #f2b27a;
+  --teal: #7fe0d5;
+  --radius: 2px;
+  --font-body: 'Trebuchet MS', 'Verdana', system-ui, sans-serif;
+  --font-display: 'Trebuchet MS', 'Verdana', system-ui, sans-serif;
+  --font-dashboard: var(--font-body);
+  --font-mono: 'Liberation Mono', 'Courier New', monospace;
+  --scanline-strength: 0;
+  --overlay: none;
+}
+
+/* Imperial component aliases use the same console palette. */
+:root[data-theme="imperial"] {
+  --root-surface: var(--bg);
+  --root-ink: var(--ink);
+  --ops-reference-ink: var(--ink);
+  --ops-reference-border: var(--border-strong);
+  --white: var(--ink);
+  --radius-4px: var(--radius);
+  --radius-5px: var(--radius);
+  --radius-6px: var(--radius);
+  --radius-7px: var(--radius);
+  --radius-9px: var(--radius);
+  --radius-10px: var(--radius);
+  --radius-12px: var(--radius);
+  --radius-13px: var(--radius);
+  --radius-14px: var(--radius);
+  --radius-15px: var(--radius);
+  --radius-16px: var(--radius);
+  --dash-root-surface: var(--surface-raised);
+  --dash-root-surface-2: var(--surface-raised);
+  --dash-primary-link-surface: var(--ink);
+  --dash-root-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--accent);
+  --dash-error-ink: var(--danger);
+  --dash-chip-border: var(--border-strong);
+  --dash-chip-surface: var(--surface-raised);
+  --dash-chip-border-2: var(--danger);
+  --dash-chip-surface-2: var(--surface);
+  --login-card-shadow-2: 0 0 0 1px var(--border), 0 18px 60px var(--bg);
+  --modal-backdrop-surface: rgba(6, 10, 14, 0.8);
+  --primary-surface: var(--accent);
+  --primary-surface-2: var(--ink);
+  --primary-ink: var(--accent-contrast);
+  --markdown-surface: var(--bg);
+  --markdown-ink: var(--ink);
+  --markdown-ink-2: var(--accent);
+  --attachments-surface: var(--surface-raised);
+  --attachments-ink: var(--accent);
+  --file-pill-surface: var(--surface-raised);
+  --file-pill-border: var(--border);
+  --file-pill-ink: var(--ink);
+  --file-pill-ink-2: var(--muted);
+  --delivery-ink: var(--success);
+  --delivery-ink-2: var(--danger);
+  --delivery-ink-3: var(--warning);
+  --game-stage-surface: var(--bg);
+  --herdr-webui-view-surface: var(--bg);
+  --game-tools-ink: var(--ink);
+  --game-tools-ink-2: var(--muted);
+  --game-type-ink: var(--muted);
+  --game-placeholder-ink: var(--muted);
+  --game-chat-empty-ink: var(--muted);
+  --game-chat-item-ink: var(--ink);
+  --game-chat-item-ink-2: var(--accent);
+  --game-chat-role-ink: var(--muted);
+  --game-chat-actions-ink: var(--ink);
+  --wheel-help-ink: var(--muted);
+  --wheel-result-ink: var(--warning);
+  --rune-choice-surface: var(--surface-raised);
+  --rune-choice-ink: var(--ink);
+  --rune-choice-border: var(--border);
+  --rune-choice-border-2: var(--accent);
+  --form-error-ink: var(--danger);
+  --update-banner-surface: var(--surface-raised);
+  --update-banner-border: var(--border-strong);
+}
+
+/* Component role fixes for the dark console: separators on the light shell
+ * panels read as dark lines, and dashboard separators read as light lines. */
+:root[data-theme="imperial"] {
+  --topbar-border: #4a5560;
+  --composer-border: #4a5560;
+  --older-marker-border: #4a5560;
+  --activity-border: #4a5560;
+  --activity-toggle-border: #4a5560;
+  --jump-banner-border: #4a5560;
+  --jump-latest-border: #4a5560;
+  --queue-help-border: #4a5560;
+  --queue-help-border-2: #4a5560;
+  --search-head-border-2: #4a5560;
+  --search-more-border: #4a5560;
+  --search-head-ink: #3a464f;
+  --status-badge-ink: #556771;
+  --status-badge-ink-3: #7a5c1f;
+  --sidebar-border: #8fa0ab;
+  --brand-mark-surface: var(--bg);
+  --brand-mark-ink: var(--accent);
+  --game-type-border: #8fa0ab;
+  --game-type-border-2: #8fa0ab;
+  --game-type-border-3: #c8d8e0;
+  --ops-credit-chart-border: #8fa0ab;
+  --ops-executive-border: #8fa0ab;
+  --ops-executive-head-border: #8fa0ab;
+  --ops-kpis-border: #8fa0ab;
+  --ops-lab-panel-border: #8fa0ab;
+  --ops-metrics-border: #8fa0ab;
+  --ops-mission-head-border: #8fa0ab;
+  --ops-panel-border: #8fa0ab;
+  --ops-source-border: #8fa0ab;
+  --ops-source-border-2: #8fa0ab;
+  --poolrad-stat-border: #8fa0ab;
+}

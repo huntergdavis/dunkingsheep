@@ -23,12 +23,32 @@ the record says so; the reviewer != author rule then has nothing to bind to.
 
 from __future__ import annotations
 
+import bisect
 import logging
+import re
 import time
 
 import dunk_github
 
 log = logging.getLogger("dunkingsheep.review")
+
+# FLAT_FLEET.md 6.4: acceptance is a commit. In poolrad-decomp the commit is the
+# ledger row that credits a reviewed body, and it is the only write the reviewer
+# App ever makes. It touches one file.
+ACCOUNTING_LEDGERS = {
+    "huntergdavis/poolrad-decomp": {
+        "ledger": "docs/re/strict_full_c_addresses.csv",
+        "base": "main",
+        "docs_dir": "docs/re/",
+    },
+}
+
+# The poolrad row-id convention, taken from tools/overlay/check_body_doc_pairing.py
+# in that repo: `OVL_<unit>_<offset>` / `RES_<unit>_<offset>`, and a body's evidence
+# document carries the offset as an underscore token plus the unit as `u<unit>`.
+ROW_ID = re.compile(r"^(?P<kind>OVL|RES)_(?P<unit>[0-9A-F]{4})_(?P<off>[0-9A-F]{4})$")
+ROW_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:OVL|RES)_[0-9A-F]{4}_[0-9A-F]{4}(?![A-Za-z0-9_])")
 
 
 def attribute_author(pr, lanes, mints):
@@ -54,6 +74,89 @@ def _iso(value):
         return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
     except (TypeError, ValueError):
         return None
+
+
+def row_ids(text):
+    """Every full row id named in `text`, in order of first appearance, deduped."""
+    return list(dict.fromkeys(ROW_TOKEN.findall(text or "")))
+
+
+def stem_of(path):
+    return path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+
+def own_row(row, stem):
+    """True when a row id is this document's by name: the stem carries the offset as an
+    underscore token and the unit as `u<unit>` or the four-digit unit (poolrad convention:
+    U7F_STATE_FLAGS_0F7E.md <- OVL_007F_0F7E)."""
+    match = ROW_ID.match(row or "")
+    parts = stem.lower().split("_")
+    if not match or match.group("off").lower() not in parts:
+        return False
+    unit = match.group("unit").lower()
+    return "u" + (unit.lstrip("0") or "0") in parts or unit in parts
+
+
+def ledger_rows(text):
+    """(id, evidence_doc) pairs from a `id,evidence_doc` ledger, header skipped."""
+    rows = []
+    for line in (text or "").splitlines()[1:]:
+        if not line.strip() or "," not in line:
+            continue
+        ident, doc = line.split(",", 1)
+        rows.append((ident.strip(), doc.strip()))
+    return rows
+
+
+def with_row(text, ident, doc):
+    """The ledger with one row inserted in sorted position.
+
+    Line endings are kept as they are: a CRLF ledger written back as LF would turn a
+    one-line credit into a 290-line diff, which is exactly the kind of noise that
+    hides a real change in review.
+    """
+    text = text or ""
+    lines = text.splitlines()
+    if not lines:
+        raise ValueError("the ledger is empty: no header line to keep")
+    sep = "\r\n" if "\r\n" in text else "\n"
+    header, body = lines[0], lines[1:]
+    keys = [line.split(",", 1)[0] for line in body]
+    body.insert(bisect.bisect_left(keys, ident), f"{ident},{doc}")
+    return sep.join([header] + body) + (sep if text.endswith(("\n", "\r")) else "")
+
+
+def choose_row(sources, added_docs, ledger_text):
+    """(row, reason): the one ledger row an accepted body earns, or why there is none.
+
+    `sources` are the texts the verdict and the accepted PR offer, in the order the
+    reviewer is expected to have written them (verdict notes, PR title, PR body). The
+    first source that names exactly one row id wins; a source naming several is
+    ambiguous and refuses, because a row that guesses is a credit nobody reviewed.
+    """
+    ident = None
+    for label, text in sources:
+        ids = row_ids(text)
+        if len(ids) == 1:
+            ident = ids[0]
+            break
+        if len(ids) > 1:
+            return None, (f"the {label} names {len(ids)} row ids "
+                          f"({', '.join(ids)}); one ledger row is one id")
+    if ident is None:
+        return None, ("no row id (OVL_xxxx_yyyy / RES_xxxx_yyyy) is named in the verdict "
+                      "notes, the review task title or the PR body")
+    existing = dict(ledger_rows(ledger_text))
+    if ident in existing:
+        return None, f"{ident} is already credited as {existing[ident]}"
+    matched = [doc for doc in added_docs if own_row(ident, stem_of(doc))]
+    if not matched:
+        return None, (f"{ident}: no evidence document the PR adds carries its unit and "
+                      f"offset (added: {', '.join(added_docs) or 'none'})")
+    if len(matched) > 1:
+        return None, (f"{ident}: {len(matched)} added documents match it "
+                      f"({', '.join(sorted(matched))}); refusing to pick one")
+    return (ident, matched[0]), ""
 
 
 def review_body(pr, detail, author):
@@ -274,7 +377,7 @@ class Sync:
     def on_verdict(self, task, verdict, by=None):
         """Called by the daemon when a review completes: status + approval + follow-up."""
         out = {"task": task["id"], "verdict": verdict, "status": None, "review": None,
-               "followup": None, "errors": []}
+               "followup": None, "accounting": None, "errors": []}
         repo, number, head = task.get("repo"), task.get("pr"), task.get("head")
         if not (repo and number and head):
             return out
@@ -334,6 +437,12 @@ class Sync:
                 out["merged"] = False
                 if "405" not in str(error):
                     out["errors"].append(f"merge: {error}")
+            # FLAT_FLEET.md 6.4: an accepted body earns its ledger row as its own
+            # PR, opened by the reviewer App and approved by the author App.
+            try:
+                out["accounting"] = self.account(task, by=by)
+            except Exception as error:  # noqa: BLE001 - never undoes a verdict
+                out["accounting"] = {"errors": [str(error)]}
         else:
             evidence = self._evidence(task)
             standing = self._standing_accept(task)
@@ -378,6 +487,182 @@ class Sync:
             except Exception as error:  # noqa: BLE001
                 out["errors"].append(f"followup: {error}")
         return out
+
+    # -- FLAT_FLEET.md 6.4: acceptance is a commit ---------------------------
+
+    def _verdict_text(self, task):
+        """The reviewer's own words: every note on the review task, oldest first."""
+        try:
+            notes = self.flock.tasks.notes(task["id"])
+        except Exception:  # noqa: BLE001 - a store without notes is not a failure
+            return ""
+        return "\n".join(note["text"] for note in notes if note.get("text"))
+
+    def account(self, task, by=None, dry_run=False):
+        """Open, approve and queue the accounting PR for an accepted poolrad body.
+
+        Deterministic from two artefacts and nothing else: the verdict (the reviewer's
+        notes) and the accepted PR (the evidence documents it adds). The reviewed
+        content stays in the body PR; this PR only adds the ledger row that credits it.
+        Every refusal is a sentence on the review task, never a guess.
+        """
+        repo, number = task.get("repo"), task.get("pr")
+        out = {"repo": repo, "body_pr": number, "ledger": None, "row": None,
+               "accounting_pr": None, "url": None, "review": None,
+               "auto_merge": None, "state": None, "reason": None, "errors": []}
+        config = ACCOUNTING_LEDGERS.get(repo or "")
+        if not config:
+            out["reason"] = f"no accounting ledger is configured for {repo or 'this repo'}"
+            return out
+        ledger, base, docs_dir = config["ledger"], config["base"], config["docs_dir"]
+        out["ledger"] = ledger
+        try:
+            reviewer = self.tokens.get("reviewer")["token"]
+            author = self.tokens.get("author")["token"]
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"tokens: {error}")
+            return out
+        try:
+            base_sha = self.github.get_ref(repo, base, reviewer)
+            ledger_text, _blob = self.github.file_text(repo, ledger, base_sha, reviewer)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"read {ledger}@{base}: {error}")
+            return out
+        if ledger_text is None:
+            out["errors"].append(f"{repo}/{ledger} does not exist on {base}")
+            return out
+        try:
+            files = self.github.pr_files(repo, number, reviewer)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"list PR #{number} files: {error}")
+            return out
+        added = [item["filename"] for item in files
+                 if item.get("status") == "added"
+                 and item.get("filename", "").startswith(docs_dir)
+                 and item["filename"].endswith(".md")]
+        try:
+            detail = self.github.pull_detail(repo, number, reviewer)
+        except dunk_github.GitHubError:
+            detail = {}
+        row, reason = choose_row(
+            [("verdict notes", self._verdict_text(task)),
+             ("review task title", task.get("title") or ""),
+             ("PR body", detail.get("body") or "")],
+            added, ledger_text)
+        if row is None:
+            out["reason"] = reason
+            self._record_accounting(task, out)
+            return out
+        ident, doc = row
+        out["row"] = f"{ident},{doc}"
+        branch = f"accounting/pr{number}-{ident}"
+        try:
+            if self.github.ref_exists(repo, branch, reviewer):
+                open_prs = self.github.pulls_for_head(repo, branch, reviewer)
+                if open_prs:
+                    out["accounting_pr"] = open_prs[0]["number"]
+                    out["url"] = open_prs[0]["url"]
+                    out["reason"] = f"an accounting PR for {ident} is already open"
+                    self._record_accounting(task, out)
+                    return out
+                out["reason"] = (f"branch {branch} exists without an open PR; refusing to "
+                                 "overwrite a commit nobody reviewed")
+                self._record_accounting(task, out)
+                return out
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"look up {branch}: {error}")
+            return out
+        new_text = with_row(ledger_text, ident, doc)
+        message = (f"Accept {ident}: accounting row for #{number}\n\n"
+                   f"Derived from review {task['id']} (verdict accept by {by or 'reviewer'}) "
+                   f"and PR #{number} at head {(task.get('head') or '')[:12]}.\n"
+                   f"The reviewed content is PR #{number}; this commit only adds "
+                   f"{ident},{doc} to {ledger}.\n")
+        if dry_run:
+            out["reason"] = "dry run: no commit, no PR"
+            return out
+        try:
+            tree = self.github.create_tree(
+                repo, self.github.commit_tree(repo, base_sha, reviewer),
+                [{"path": ledger, "mode": "100644", "type": "blob",
+                  "content": new_text}], reviewer)
+            commit = self.github.create_commit(repo, message, tree, [base_sha], reviewer)
+            self.github.create_ref(repo, branch, commit, reviewer)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"commit the ledger row: {error}")
+            self._record_accounting(task, out)
+            return out
+        try:
+            opened = self.github.open_pull(
+                repo, f"Accept {ident}: accounting row for #{number}", branch, base,
+                self._accounting_body(task, ident, doc, ledger, number, by), reviewer)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"open the accounting PR: {error}")
+            self._record_accounting(task, out)
+            return out
+        out["accounting_pr"] = opened["number"]
+        out["url"] = opened["url"]
+        # Two distinct bot identities: the reviewer App wrote it, so only the author
+        # App can approve it. GitHub refuses an App approving its own PR.
+        try:
+            self.github.review_pull(
+                repo, opened["number"], "APPROVE",
+                f"Accounting row derived from review {task['id']} and the accepted "
+                f"content in #{number} at {(task.get('head') or '')[:12]}.", author)
+            out["review"] = "approved_by_author_app"
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"approve as the author App: {error}")
+        try:
+            self.github.enable_auto_merge(repo, opened["number"], author)
+            out["auto_merge"] = "enabled"
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"enable auto-merge: {error}")
+        try:
+            out["state"] = self.github.pull_state(repo, opened["number"], author)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"read the accounting PR state: {error}")
+        self._record_accounting(task, out)
+        return out
+
+    def _accounting_body(self, task, ident, doc, ledger, number, by):
+        return "\n".join([
+            f"Accounting row for the accepted body {ident}.",
+            "",
+            f"- body PR (the reviewed content): #{number}",
+            f"- review task: {task['id']}, verdict `accept` by {by or 'reviewer'}",
+            f"- head reviewed: {(task.get('head') or '')}",
+            f"- ledger: `{ledger}`",
+            f"- row added: `{ident},{doc}`",
+            "",
+            "Derived deterministically from the verdict notes and the files the body PR",
+            "adds: one row id, one evidence document that carries its unit and offset. No",
+            "model decided anything here. The reviewed content is the body PR; this PR only",
+            "records the credit.",
+            "",
+            "Opened by the review timer as `dunkingsheep-reviewer[bot]` and approved as",
+            "`dunkingsheep-author[bot]` so the two identities GitHub counts are distinct.",
+            "Auto-merge is enabled; branch protection decides when it lands.",
+        ])
+
+    def _record_accounting(self, task, out):
+        """Put both PR numbers on the review task, and the reason when there is no PR."""
+        try:
+            if out.get("accounting_pr"):
+                self.flock.tasks.set_accounting_pr(task["id"], out["accounting_pr"])
+            summary = (f"accounting PR #{out['accounting_pr']} for body PR "
+                       f"#{out.get('body_pr')}" if out.get("accounting_pr") else
+                       f"no accounting PR for body PR #{out.get('body_pr')}: "
+                       f"{out.get('reason') or '; '.join(out.get('errors') or [])}")
+            self.flock.tasks.note(task["id"], event="accounting", actor="review-sync",
+                                  meta={"reason": summary,
+                                        "accounting_pr": out.get("accounting_pr"),
+                                        "body_pr": out.get("body_pr"),
+                                        "row": out.get("row"),
+                                        "url": out.get("url"),
+                                        "state": out.get("state"),
+                                        "errors": out.get("errors") or []})
+        except Exception as error:  # noqa: BLE001 - recording never undoes a verdict
+            log.warning("could not record accounting for %s: %s", task.get("id"), error)
 
     def _standing_accept(self, task):
         """The task id of another DONE review that accepted this exact head, or None."""
