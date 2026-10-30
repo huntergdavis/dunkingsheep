@@ -117,6 +117,35 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(0, dunk_secrets.main(["--cwd", self.repo, "--base", "main"]))
 
 
+class AgreementWithTheCiScanner(unittest.TestCase):
+    """Two rule lists exist on purpose - the pre-push refusal here and the CI scanner
+    in tools/check_public_secrets.py (t746). They must not drift: a name one refuses
+    and the other allows is a hole with a rule in front of it."""
+
+    LEAKED = ("data/auth.json", "data/owner-credentials", "data/messages.sqlite3",
+              "web.sqlite3", "owner-credentials")
+
+    def setUp(self):
+        import importlib.util
+        path = os.path.join(ROOT, "tools", "check_public_secrets.py")
+        if not os.path.exists(path):
+            raise unittest.SkipTest("tools/check_public_secrets.py is not on this base")
+        spec = importlib.util.spec_from_file_location("check_public_secrets", path)
+        self.scanner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.scanner)
+
+    def test_every_name_the_scanner_refuses_is_refused_here_too(self):
+        for path in self.LEAKED:
+            self.assertIsNotNone(self.scanner.scan_path(path), f"the CI scanner allows {path}")
+            self.assertIsNotNone(dunk_secrets.matches(path), f"the pre-push guard allows {path}")
+
+    def test_neither_side_refuses_ordinary_source(self):
+        for path in ("tests/test_dunk_secrets.py", "docs/re/README.md",
+                     "src/recovered/overlay_u20_list_walk_11ac_cpu.c"):
+            self.assertIsNone(self.scanner.scan_path(path), f"the CI scanner refuses {path}")
+            self.assertIsNone(dunk_secrets.matches(path), f"the pre-push guard refuses {path}")
+
+
 class WiringTests(unittest.TestCase):
     """The two hook points are wired, and .gitignore carries the same names."""
 

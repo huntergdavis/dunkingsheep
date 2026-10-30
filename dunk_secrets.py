@@ -16,6 +16,16 @@ are two defences and this module is both:
 2. anything that would PUBLISH them is refused by name - `gh pr create` and the
    credential handshake `git push` performs.
 
+RELATIONSHIP to tools/check_public_secrets.py (t746, on main): that scanner runs in
+CI on every push and pull request and reads TRACKED files. This module is the layer
+BEFORE it - it refuses at the credential handshake, before the commit leaves the
+host. Both are needed and neither replaces the other, because t746's own finding was
+that a force-push does not unpublish a SHA: CI catches the exposure after
+raw.githubusercontent is already serving it, and only a local refusal prevents that.
+The rule lists are deliberately separate (a .gitignore cannot import Python, and a
+workflow cannot see an uncommitted index), and tests/test_dunk_secrets.py asserts
+they AGREE on the leaked names so they cannot drift apart silently.
+
 What this does NOT do, stated because a guard that overclaims is worse than none:
 
 * it does not rewrite history, so a commit that already leaked stays fetchable by
