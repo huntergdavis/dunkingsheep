@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod activity;
 pub mod atomic_json;
 pub mod clock;
 pub mod config;
