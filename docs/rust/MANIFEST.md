@@ -1,4 +1,4 @@
-# Port manifest (generated from 7ece4c5, 2026-10-30)
+# Port manifest (generated from b24f900, 2026-10-30)
 
 Everything the Rust port must reproduce, generated from the tree. Regenerate with `tools/gen_manifest.py` (TASKS.md T00) when main moves; `--check` fails when this document no longer matches the tree it names.
 
