@@ -104,6 +104,9 @@ class TaskModelTests(unittest.TestCase):
         self.call("task_next", {}, pane=REVIEWER)
         with self.assertRaisesRegex(DunkError, "needs --verdict"):
             self.call("task_complete", {"id": made["id"]}, pane=REVIEWER)
+        # A verdict needs evidence, recorded after the claim (t621).
+        self.call("task_note", {"id": made["id"], "reason": "reproduced; head aaaa"},
+                  pane=REVIEWER)
         done = self.call("task_complete", {"id": made["id"], "verdict": "accept"},
                          pane=REVIEWER)
         self.assertEqual("done", done["status"])

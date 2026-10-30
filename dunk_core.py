@@ -2492,6 +2492,13 @@ class Flock:
                 verdict = validate_verdict(verdict)
             except TaskError as error:
                 raise DunkError(str(error)) from None
+            # A verdict is a claim about work, and a claim needs evidence
+            # (docs/LANES.md reviewer brief; enforced here because a brief is a
+            # promise and this is the daemon). On 2026-10-29 two needs-fix
+            # verdicts were filed with no note anywhere: the follow-up fix tasks
+            # they created said "see the task notes" and there were none, so the
+            # work they blocked could not be started (t621).
+            self._require_review_evidence(task, self_pane_id)
         elif verdict is not None:
             raise DunkError("--verdict applies to review tasks only")
         # Operator evidence resolved once here (pane_info needs herdr I/O, which
@@ -3931,6 +3938,42 @@ class Flock:
         rows.sort(key=lambda r: -r["age_s"])
         return {"reviews": rows, "count": len(rows),
                 "oldest_age_s": rows[0]["age_s"] if rows else None}
+
+    def _require_review_evidence(self, task, self_pane_id):
+        """Refuse a verdict unless this pane noted its evidence after it claimed.
+
+        The window is "after the claim" on purpose: a note written before the
+        review started is a plan, not a finding. An owner or system caller with no
+        lease is exempt (it is not the lane that judged the work), and that
+        exemption is stated rather than inferred from an empty note list.
+        """
+        lease = None
+        for candidate in (self.tasks.leases_for_pane(self_pane_id)
+                          if self_pane_id else []):
+            if candidate["task_id"] == task["id"]:
+                lease = candidate
+                break
+        if lease is None:
+            role = self.caller_role(self_pane_id) if self_pane_id else "anonymous"
+            if role in ("owner", "system"):
+                return
+        claimed_at = lease["claimed_at"] if lease else task.get("created_at") or 0
+        notes = [note for note in self.tasks.notes(task["id"])
+                 if note["actor"] == self_pane_id and note["at"] >= claimed_at
+                 and note["text"].strip()]
+        if notes:
+            return
+        raise DunkError(
+            f"a verdict needs evidence: record what you ran and what you did NOT "
+            f"verify first, with `dunkingsheep task note {task['id']} --reason "
+            f"\"<commands, head sha, what is not verified>\"`. A note by another "
+            f"lane, or one written before you claimed, does not count.")
+
+    def _review_evidence(self, task):
+        """The reviewer's own note text, verbatim, for the follow-up and GitHub."""
+        notes = [note["text"].strip() for note in self.tasks.notes(task["id"])
+                 if note["text"].strip()]
+        return "\n\n".join(notes)
 
     def _after_review_verdict(self, task, verdict, by=None):
         try:
