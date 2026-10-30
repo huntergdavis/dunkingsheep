@@ -54,11 +54,12 @@ AUTH = DATA / "auth.json"
 CREDENTIALS = DATA / "owner-credentials"
 CODEWHEEL_DIR = Path(os.getenv("VP_CODEWHEEL_DIR", DATA / "codewheel")).resolve()
 DUNKING_SHEEP = Path(os.getenv("DUNKING_SHEEP_DIR", ROOT))   # one repo: the daemon is beside us
-DASHBOARD_DIR = Path(os.getenv("POOLRAD_DASHBOARD_DIR", ROOT / "integrations" / "poolrad-dashboard")).resolve()
-DASHBOARD_REPO = Path(os.getenv("POOLRAD_DASHBOARD_REPO", ROOT.parent / "poolrad-decomp-opencode-ds41flash")).resolve()
-DASHBOARD_REPORTS = {"SLOT_A_FIRST_EGA_ROW64.md", "SLOT_A_ROW6_COL38_PRINTER_PAGE.md"}
 sys.path.insert(0, str(DUNKING_SHEEP))
 sys.path.insert(0, str(ROOT / "bridges"))   # ops_board, ops_metrics, fleet_inventory
+import poolrad_paths  # noqa: E402
+DASHBOARD_DIR = Path(os.getenv("POOLRAD_DASHBOARD_DIR", ROOT / "bridges" / "integrations" / "poolrad-dashboard")).resolve()
+DASHBOARD_REPO = poolrad_paths.repo("POOLRAD_DASHBOARD_REPO", "POOLRAD_REPO").resolve()
+DASHBOARD_REPORTS = {"SLOT_A_FIRST_EGA_ROW64.md", "SLOT_A_ROW6_COL38_PRINTER_PAGE.md"}
 
 def _load_channels():
     override = os.getenv("VP_CHANNELS_FILE")
@@ -103,7 +104,7 @@ CHANNEL_INDEX = {item["id"]: item for item in CHANNELS}
 from web.roster import build_roster, discovered_id, match_pane, presence
 from web import codeword
 from web.gameplay import GameError, GameSession
-GAME = GameSession(Path(os.getenv("POOLRAD_REPO_DIR", ROOT.parent / "poolrad-decomp")).resolve(), DATA)
+GAME = GameSession(poolrad_paths.repo("POOLRAD_REPO_DIR", "POOLRAD_REPO").resolve(), DATA)
 MAX_UPLOAD = 25 * 1024 * 1024
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 DELIVERY_LOCK = threading.Lock()
@@ -275,7 +276,8 @@ def require_auth(request: Request):
 
 app.include_router(character_editor_router(
     EditorStore(DATA / 'character-editor', Path(os.getenv(
-        'POOLRAD_EDITOR_TOOL', ROOT.parent / 'poolrad-decomp/tools/character/edit_save.py'))),
+        'POOLRAD_EDITOR_TOOL',
+        poolrad_paths.repo('POOLRAD_REPO_DIR', 'POOLRAD_REPO') / 'tools/character/edit_save.py'))),
     require_auth))
 
 

@@ -69,6 +69,21 @@ stage() {
   echo "staged $SHA (no restart performed)"
 }
 
+# t1128: the desk is part of the release. Its unit runs <data>/current/bridges/run.sh, so
+# a board merge only goes live when the staged tree has its venv and ui/dist built (done
+# HERE, before the swap, so the restart is seconds not a pip/npm run) and `current` points
+# at it. No POOLRAD_* drop-in is needed: bridges/poolrad_paths.py resolves the checkout.
+web() {
+  need_sha
+  dest=$RELEASES/$SHA
+  data=$(dirname "$RELEASES")
+  run sh -c "cd '$dest' && { [ -x .venv/bin/uvicorn ] || { python3 -m venv .venv && .venv/bin/pip install -q -r bridges/requirements.txt; }; }"
+  run sh -c "cd '$dest' && { [ -f ui/dist/index.html ] || { npm install --prefix ui && npm run build --prefix ui; }; }"
+  run ln -sfn "releases/$SHA" "$data/current"
+  run systemctl --user restart dunkingsheep-web.service
+  echo "web deployed from $SHA"
+}
+
 activate() {
   need_sha
   dest=$RELEASES/$SHA
@@ -95,12 +110,15 @@ EOF
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
   trap - EXIT
+  web
   echo "activated $SHA; now run: $0 verify"
 }
 
 verify() {
   echo "## service"; systemctl --user is-active dunkingsheep.service || true
   echo "## launcher"; sed -n '3p' "$HOME/.local/bin/dunkingsheep"
+  echo "## web"; systemctl --user is-active dunkingsheep-web.service || true
+  readlink "$(dirname "$RELEASES")/current" || true
   echo "## daemon"; dunkingsheep status 2>&1 | sed -n '1,6p'
   echo "## guard"; dunkingsheep guard check 2>&1 | tail -3 || true
   echo "## allocation (empty registry = allocator disabled)"
@@ -127,6 +145,9 @@ rollback() {
   run python3 "$dest/dunkingsheep" --no-start-daemon install
   run systemctl --user daemon-reload
   run systemctl --user restart dunkingsheep.service
+  data=$(dirname "$RELEASES")
+  run ln -sfn "releases/$SHA" "$data/current"
+  run systemctl --user restart dunkingsheep-web.service
   echo "rolled back to $SHA; now run: $0 verify"
 }
 
@@ -145,7 +166,8 @@ case "$cmd" in
     ;;
   stage) stage;;
   activate) activate;;
+  web) web;;
   verify) verify;;
   rollback) rollback;;
-  *) echo "usage: $0 plan|stage|activate|verify|rollback [--sha SHA] [--apply]" >&2; exit 2;;
+  *) echo "usage: $0 plan|stage|activate|web|verify|rollback [--sha SHA] [--apply]" >&2; exit 2;;
 esac
