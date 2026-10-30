@@ -924,6 +924,7 @@ def h_task_assign(flock, args, self_pane_id):
 
 def h_task_complete(flock, args, self_pane_id):
     return flock.task_complete(args["id"], by=args.get("by"), verdict=args.get("verdict"),
+                               landed=args.get("landed"),
                                self_pane_id=self_pane_id)
 
 
@@ -2166,6 +2167,10 @@ COMMANDS = [
             "id": TASK_ID_PARAM,
             "by": {"type": "string",
                    "description": "Who completed it (defaults to caller pane)."},
+            "landed": {"type": "boolean",
+                       "description": "The work is on main. False for a stacked branch "
+                                      "whose PR has not merged (t906): the task is done, "
+                                      "its dependents stay closed until the merge."},
             "verdict": {"type": "string", "enum": ["accept", "needs-fix"],
                         "description": "Review tasks only: the reviewer's verdict, "
                                        "written by the daemon from the bound lane."},
