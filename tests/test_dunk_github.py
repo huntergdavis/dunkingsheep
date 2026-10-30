@@ -323,12 +323,29 @@ class TimerTests(unittest.TestCase):
         self.assertFalse(done["github"]["merged"])
         again = self.sync.run()
         self.assertEqual([], again["filed"], "a judged head gets no second review")
-        self.assertEqual(2, len(self.github.statuses))  # pending then success only
-        self.assertEqual("success", self.github.statuses[-1][2])
+        # Pending, success, then success re-asserted by the retry: never pending again.
+        self.assertEqual(["pending", "success"], [s[2] for s in self.github.statuses][:2])
+        self.assertNotIn("pending", [s[2] for s in self.github.statuses][1:])
         self.github.merge_blocked = False
         third = self.sync.run()
         self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
         self.assertEqual(1, len(third["merged"]))
+        self.assertEqual("success", self.github.statuses[-1][2], "retry re-asserts success")
+
+    def test_a_live_duplicate_of_a_judged_head_is_cancelled_and_the_merge_proceeds(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.call("task_next", {}, pane=REVIEWER)
+        self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
+        self.github.merge_blocked = True
+        self.call("task_note", {"id": task["id"], "reason": "ran the tests; not verified: live run"}, pane=REVIEWER)
+        self.call("task_complete", {"id": task["id"], "verdict": "accept"}, pane=REVIEWER)
+        dup = self.flock.tasks.add("global", "dup", kind="review", repo="o/r", pr=7, head="a" * 40,
+                                   created_by="old-timer")
+        self.github.merge_blocked = False
+        report = self.sync.run()
+        self.assertIn(dup["id"], report["cancelled"])
+        self.assertEqual(1, len(report["merged"]))
 
     def test_needs_fix_requests_changes_and_files_work_for_the_author(self):
         self.sync.run()

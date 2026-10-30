@@ -365,9 +365,17 @@ class Sync:
                 key = (repo, pr["number"])
                 seen.add(key)
                 current = live.get(key)
+                done = judged.get((repo, pr["number"], pr["head"]))
+                if done is not None and current and current.get("head") == pr["head"] \
+                        and not dry_run:
+                    # A judged head with a live duplicate (filed by an older tick):
+                    # the verdict stands, the duplicate goes.
+                    self.flock.tasks.cancel(current["id"],
+                                            reason=f"duplicate of judged review {done['id']}")
+                    report["cancelled"].append(current["id"])
+                    current = None
                 if current and current.get("head") == pr["head"]:
                     continue
-                done = judged.get((repo, pr["number"], pr["head"]))
                 if done is not None:
                     # Already judged at this exact head. Accepted and still open:
                     # protection may now be satisfied, so try the merge again - but
