@@ -677,6 +677,24 @@ class Sync:
             return out
         ident, doc = row
         out["row"] = f"{ident},{doc}"
+        # t833: the document the row names must already be ON THE BASE BRANCH. The
+        # row is committed against main, so a document that only exists on an
+        # unmerged body branch produces a ledger entry that points at nothing -
+        # check_evidence_docs fails and credit_evidence_kind reports a missing-doc.
+        # This check is independent of the merge gate: it catches the same defect
+        # from the artefact side, which is what the repo's own gate does.
+        try:
+            doc_text, _doc_blob = self.github.file_text(repo, doc, base_sha, reviewer)
+        except dunk_github.GitHubError as error:
+            out["errors"].append(f"read {doc}@{base}: {error}")
+            self._record_accounting(task, out)
+            return out
+        if doc_text is None:
+            out["reason"] = (f"the evidence document {doc} does not exist on {base}: the body "
+                             f"PR #{number} is not merged, so this row would credit a document "
+                             "that is not there (t833)")
+            self._record_accounting(task, out)
+            return out
         branch = f"accounting/pr{number}-{ident}"
         try:
             if self.github.ref_exists(repo, branch, reviewer):

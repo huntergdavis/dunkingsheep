@@ -109,7 +109,9 @@ class FakeGitHub:
         return self.commits[sha]["tree"]
 
     def file_text(self, repo, path, ref, token):
-        if ref not in self.texts:
+        # t833: a path can be declared absent, so the accounting preflight can be
+        # tested against a document that only exists on an unmerged body branch.
+        if path in getattr(self, "missing_paths", ()) or ref not in self.texts:
             return None, None
         return self.texts[ref], "b" * 40
 
@@ -549,6 +551,20 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual({self.github.base_sha}, set(self.github.commits),
                          "no new commit for an open accounting PR")
         self.assertEqual(811, self.flock.tasks.get(done["id"])["accounting_pr"])
+
+    def test_a_row_whose_evidence_doc_is_not_on_base_files_nothing(self):
+        """t833: check_evidence_docs' own complaint, caught before the PR opens.
+
+        #1636 credited docs/re/OVL_0038_0C4B_CPU.md while that document existed only
+        on the unmerged body branch, so the ledger row pointed at nothing.
+        """
+        self.github.missing_paths = {"docs/re/U7F_STATE_FLAGS_0F7E.md"}
+        done = self.review_task()
+        accounting = done["github"]["accounting"]
+        self.assertIsNone(accounting["accounting_pr"])
+        self.assertIn("does not exist on main", accounting["reason"])
+        self.assertIn("not merged", accounting["reason"])
+        self.assertEqual([], self.github.prs_opened)
 
     def test_an_accept_before_the_merge_files_no_accounting_pr(self):
         """t835: #1637 was filed for body #1630 while #1630 was still open, so the
