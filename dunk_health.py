@@ -159,6 +159,29 @@ def run_health(flock, repair=False, deep=False):
     except Exception as error:  # noqa: BLE001
         problems.append(f"task stats failed: {error}")
 
+    # REGISTRY vs PANE LIST (t714). A registered lane whose process is alive but which
+    # the backend pane list does not contain is unreachable: mail cannot be typed into
+    # it, and a guard that trusts the list calls it dead. Measured 22:15 on 2026-10-29
+    # for %103/%108/%109 and never reproduced, so the check reports the disagreement
+    # instead of asserting a cause. Registrations whose process is GONE are listed in
+    # the checks but are not a problem: that is a stale row, not a lost lane.
+    gap_reader = getattr(flock, "registry_pane_gap", None)
+    if callable(gap_reader):
+        try:
+            gap = gap_reader()
+        except Exception as error:  # noqa: BLE001
+            gap = []
+            problems.append(f"registry/pane-list comparison failed: {error}")
+        checks["registry_pane_gap"] = gap
+        alive_gap = [row for row in gap if row.get("alive")]
+        if alive_gap:
+            names = ", ".join(f"{row['pane']} ({row.get('label') or row.get('role')}, "
+                              f"pid {row.get('pid')})" for row in alive_gap)
+            problems.append(
+                f"backend pane list is missing {len(alive_gap)} registered lane(s) whose "
+                f"process is alive: {names} - they cannot be typed into and read as dead "
+                "to the close/dead guards (t699/t714)")
+
     return {
         "ok": not problems,
         "checked_at": started,
