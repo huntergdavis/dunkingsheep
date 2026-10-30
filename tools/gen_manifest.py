@@ -1,4 +1,6 @@
-HEADER = '# Port manifest (generated from main @ 038d9aa, 2026-10-29)\n'
+HEADER = ("# Port manifest (generated from main @ 038d9aa, 2026-10-29)\n\n"
+          "Everything the Rust port must reproduce, generated from the tree. "
+          "Regenerate with `tools/gen_manifest.py` (TASKS.md T00) when main moves.")
 
 MODULE_MAP = """## Module map
 
@@ -478,12 +480,14 @@ def web_routes_section():
 
 
 def units_section():
-    names = sorted(p.name for p in (ROOT / "packaging/systemd").glob("*"))
-    services = [n for n in names if n.endswith(".service")]
-    timers = [n for n in names if n.endswith(".timer")]
-    stems = [n[:-8] for n in services]
-    return ("## Systemd units (packaging/systemd)\n\n%s%s.\n"
-            % (", ".join(stems), " (each a .service, most with a .timer)" if timers else ""))
+    """The unit names, the daemon first, with the timer note the document carries."""
+    stems = [p.stem for p in sorted((ROOT / "packaging/systemd").glob("*.service"))]
+    if "dunkingsheep" in stems:
+        stems.remove("dunkingsheep")
+        stems.insert(0, "dunkingsheep")
+    timers = list((ROOT / "packaging/systemd").glob("*.timer"))
+    tail = " (each a .service, most with a .timer)" if len(timers) * 2 >= len(stems) else ""
+    return "## Systemd units (packaging/systemd)\n\n%s%s.\n" % (", ".join(stems), tail)
 
 
 def error_strings_section():
