@@ -73,16 +73,31 @@ class PageWatermarkTests(unittest.TestCase):
         self.saved = []
 
         bridge = self.bridge
-        rows = self.rows          # captured, not looked up through the connection
+        test = self               # the fake reads test.rows, so a test can replace it
 
         class FakeConn:
+            """Honours what the query asks for: the id floor, the LIKE and the LIMIT.
+
+            The first version of this fake returned every row past the watermark and
+            ignored the LIMIT, which is exactly why it could not see the starvation
+            the reviewer found (t678): the bug lived in the interaction between the
+            SQL window and the Python filter.
+            """
+
             def execute(self, sql, params=()):
+                rows = test.rows
                 if "COALESCE(MAX(id)" in sql:
                     newest = max([row["id"] for row in rows] or [0])
                     return types.SimpleNamespace(fetchone=lambda: {"newest": newest})
                 watermark = params[1]
-                return types.SimpleNamespace(
-                    fetchall=lambda: [row for row in rows if row["id"] > watermark])
+                needle = params[2].strip("%").upper() if len(params) > 2 else None
+                limit = 20
+                selected = [row for row in rows if row["id"] > watermark]
+                if needle is not None:
+                    selected = [row for row in selected
+                                if needle in str(row["body"]).upper()]
+                selected = sorted(selected, key=lambda row: row["id"])[:limit]
+                return types.SimpleNamespace(fetchall=lambda: list(selected))
 
             def __enter__(self):
                 return self
@@ -155,6 +170,30 @@ class PageWatermarkTests(unittest.TestCase):
         pages = self.bridge._legacy_pages(config, "cos")
         self.assertEqual(14, config["last_page_id"])
         self.assertEqual([], pages, "the first tick paged history to the phone")
+
+
+    def test_a_page_is_not_starved_by_ordinary_rows_ahead_of_it(self):
+        """t678: more non-page agent rows than the window must not hide a page."""
+        self.rows = [{"id": 100 + n, "body": f"an ordinary agent row {n}"}
+                     for n in range(25)]
+        self.rows.append({"id": 200, "body": "PAGE OWNER security: token exposed"})
+        config = {"chat_id": 1, "last_page_id": 10}
+        pages = self.bridge._legacy_pages(config, "cos")
+        self.assertEqual(["page-200"], [page["message_id"] for page in pages],
+                         "25 ordinary rows starved the page behind them")
+        self.assertEqual(10, config["last_page_id"],
+                         "reading must not move the watermark")
+
+    def test_ordinary_rows_never_move_the_watermark(self):
+        """The watermark follows PAGES; ordinary rows are simply not selected."""
+        self.rows = [{"id": 30, "body": "a report"}, {"id": 31, "body": "a web echo"},
+                     {"id": 32, "body": "PAGE OWNER outage: desk down"}]
+        config = {"chat_id": 1, "last_page_id": 10}
+        bot, client = FakeBot(), FakeClient()
+        self.bridge.send_owner_outbox(config, bot, client=client)
+        self.assertEqual(32, config["last_page_id"])
+        self.assertEqual(1, len(bot.sent))
+        self.assertEqual([], self.bridge._legacy_pages(config, "cos"))
 
 
 class CaptionedAttachmentTests(unittest.TestCase):

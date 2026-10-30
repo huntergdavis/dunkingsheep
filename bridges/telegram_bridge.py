@@ -313,10 +313,18 @@ def _legacy_pages(config: dict, channel: str):
     path - which carried reports, digests and web echoes - is gone.
     """
     watermark = _page_watermark(config, channel)
+    # The page filter is in SQL, not in Python after the LIMIT. Filtering after the
+    # LIMIT made a page invisible as soon as 20 ordinary agent rows sat past the
+    # watermark: since the watermark now moves only for a DELIVERED page (the fix
+    # for "held means dropped"), those rows never moved it, so the window filled
+    # with non-pages and every later page was starved - silently (t678). A page is
+    # the one exception the owner kept; a security page that never reaches the
+    # phone is the worst place for that. The marker is the same one is_page() uses.
     with desk._db() as conn:
         rows = conn.execute(
             "SELECT id,body FROM messages WHERE channel=? AND role='agent' AND id>? "
-            "ORDER BY id LIMIT 20", (channel, watermark)).fetchall()
+            "AND UPPER(body) LIKE ? ORDER BY id LIMIT 20",
+            (channel, watermark, f"%{telegram_transport.PAGE_MARKER.upper()}%")).fetchall()
     pages = []
     for row in rows:
         if telegram_transport.is_page(row["body"]):
