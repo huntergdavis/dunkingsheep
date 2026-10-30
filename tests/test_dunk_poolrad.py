@@ -228,12 +228,26 @@ class ClosedCandidateTests(unittest.TestCase):
         self.assertIn("DISPOSITION", closed["OVL_0068_0294"])
         self.assertIn("already on main", closed["OVL_006A_0824"])
 
-    def test_unit_tokens_match_the_file_shapes(self):
-        self.assertEqual({"006a_0824", "6a_0824"},
-                         dunk_poolrad._unit_tokens("OVL_006A_0824"))
-        self.assertEqual({"0038_0b1b", "38_0b1b"},
-                         dunk_poolrad._unit_tokens("OVL_0038_0B1B"))
+    def test_the_model_is_found_whatever_the_filename_says_in_the_middle(self):
+        """t862 (%100's measurement): the skip rule missed two of three bodies because
+        it looked for an ADJACENT 'unit_offset' token, and these filenames carry a
+        descriptive middle."""
+        for rid, model in (("OVL_0038_0CC3", "overlay_u38_0cc3_cpu.c"),
+                           ("OVL_0020_11AC", "overlay_u20_list_walk_11ac_cpu.c"),
+                           ("OVL_03B0_06FB", "overlay_u3b0_row_clear_06fb_cpu.c")):
+            self.write(f"tools/overlay/{rid.lower()}_audit.py",
+                       f"CHECKER_ROWS = ('{rid}',)\n")
+            self.write(f"src/recovered/{model}", "/* body */\n")
+            reason = dunk_poolrad.already_on_main(self.repo, rid)
+            self.assertIn("already on main", reason or "", f"{rid} ({model}) was missed")
+            self.assertIn(model, reason or "")
 
+    def test_a_same_unit_different_offset_is_not_a_match(self):
+        """Segment equality, not substring: the unit alone must not close a row."""
+        self.write("tools/overlay/ovl_0020_0001_audit.py",
+                   "CHECKER_ROWS = ('OVL_0020_0001',)\n")
+        self.write("src/recovered/overlay_u20_list_walk_11ac_cpu.c", "/* body */\n")
+        self.assertIsNone(dunk_poolrad.already_on_main(self.repo, "OVL_0020_0001"))
 
 class CreditPendingTests(unittest.TestCase):
     """t733: a body whose model is already on main is a missing LEDGER ROW.
@@ -458,6 +472,23 @@ class CreditPendingTests(unittest.TestCase):
         self.write_partial([("OVL_0020_11AC", "full")])
         self.assertEqual((True, None),
                          dunk_poolrad.credit_ready(self.repo, "OVL_0020_11AC"))
+
+    def test_a_partial_model_is_not_closed_by_its_checker(self):
+        """%100's composition warning: a partial body keeps its authoring work even
+        when a registered checker audits a file on main. Before the guard, the partial
+        case survived only because the token bug made the skip return None."""
+        self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)
+        self.write_checker("OVL_0020_11AC")
+        self.write_partial([("OVL_0020_11AC", "partial")])
+        queue = {"rows": [row("OVL_0020_11AC", 1)]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.repo,
+                                   exporter=lambda _repo: queue,
+                                   credit_path=self.pending_path).run(limit=5)
+        self.assertEqual(["OVL_0020_11AC"], [f["id"] for f in report["filed"]],
+                         "a partial model is still an authoring candidate")
+        self.assertNotIn("OVL_0020_11AC", report["skipped"]["closed"],
+                         "the checker closed a body whose model is only partial")
+        self.assertEqual({}, report["credit_pending"])
 
     def test_a_partial_body_stays_an_authoring_task(self):
         self.commit_model("overlay_u20_list_walk_11ac_cpu.c", pr=1433)

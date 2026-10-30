@@ -231,16 +231,30 @@ def registered_checker_ids(repo):
 
 
 def _unit_tokens(rid):
-    """'OVL_006A_0824' -> {'006a_0824', '6a_0824'} - the shapes files use."""
+    """'OVL_006A_0824' -> {'006a_0824', '6a_0824'} - the shapes files use.
+
+    An ADJACENT 'unit_offset' token is not enough: a descriptive middle in the
+    filename breaks it. `overlay_u20_list_walk_11ac_cpu.c` and
+    `overlay_u3b0_row_clear_06fb_cpu.c` are both models on main, and neither
+    contains '20_11ac' or '3b0_06fb', so the skip rule said "not on main" and
+    backlog-sync filed authoring work for bodies that were already written
+    (measured by %100 on the deployed build, 2026-10-30). The unit and the offset
+    are therefore also offered SEPARATELY, and the caller requires both in the
+    same filename.
+    """
     parts = str(rid or "").split("_")
     if len(parts) < 3:
         return set()
     unit, offset = parts[1].lower(), parts[2].lower()
-    tokens = {f"{unit}_{offset}"}
-    if unit.startswith("00"):
-        tokens.add(f"{unit[2:]}_{offset}")
-    elif unit.startswith("0"):
-        tokens.add(f"{unit[1:]}_{offset}")
+    shapes = {unit}
+    for trimmed in (unit[2:] if unit.startswith("00") else None,
+                    unit[1:] if unit.startswith("0") else None):
+        if trimmed:
+            shapes.add(trimmed)
+    # the house convention spells the unit `u<unit>` in the filename
+    tokens = {f"u{shape.lstrip('0') or '0'}" for shape in shapes}
+    tokens |= shapes
+    tokens.add(offset)
     return tokens
 
 
@@ -417,8 +431,17 @@ def already_on_main(repo, rid, checkers=None):
         names = [p.name.lower() for p in src.glob("*.c")]
     except OSError:
         names = []
+    parts = str(rid or "").split("_")
+    offset = parts[2].lower() if len(parts) >= 3 else ""
+    unit_shapes = {token for token in tokens if token != offset}
     for name in names:
-        if any(token in name for token in tokens):
+        # The filename must carry the OFFSET as a whole segment and ONE unit shape as
+        # a whole segment: `overlay_u20_list_walk_11ac_cpu.c` matches OVL_0020_11AC
+        # (segments u20 + 11ac) even though '20_11ac' never appears adjacently.
+        # Segment equality, not substring: 'u20' must not match 'u200', and the
+        # offset alone must not match an unrelated file.
+        segments = name.split("_")
+        if offset and offset in segments and unit_shapes & set(segments):
             return f"already on main ({checker} audits {name})"
     return None
 
@@ -483,6 +506,13 @@ class Sync:
                         # report does not claim it was skipped for the strong reason.
                         not_ready[rid] = dict(evidence, why_not=why_not)
             if rid in closed:
+                continue
+            if rid in not_ready:
+                # The model is on main but NOT credit-ready (t738: partial, or no
+                # registered checker). `already_on_main` would close it, which is the
+                # wrong answer - the authoring work is still owed. Before this guard
+                # the partial case survived only because the token bug made
+                # already_on_main return None by accident (%100 measured both).
                 continue
             reason = already_on_main(self.repo, rid, checkers=checkers)
             if reason:
