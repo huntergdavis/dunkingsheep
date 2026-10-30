@@ -1175,13 +1175,24 @@ def print_inbox_list(r):
 def _task_row(task):
     scope = "global" if task.get("is_global") else task.get("scope")
     assignees = ",".join(task.get("assignees") or []) or "-"
-    return (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
-            f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
-            f"{_clip(task['title'], 50)}")
+    row = (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
+           f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
+           f"{_clip(task['title'], 50)}")
+    # t878/#164: a cancelled dependency is SATISFIED (t879), so the row is
+    # claimable - the note stays because "my dependency was cancelled" is something
+    # a reader needs to know, not something to hide behind eligibility.
+    dead = task.get("dead_dependencies") or []
+    if dead:
+        row += f"  [depends on cancelled {', '.join(dead)}: satisfied (t164), claimable]"
+    return row
 
 
 def print_task(task):
     print(f"{task['id']} [{task['priority']}] {task['status']}  {task['title']}")
+    if task.get("blocked_dependents"):
+        print(f"warning     cancelling this leaves {len(task['blocked_dependents'])} "
+              f"unclaimable dependent(s): {', '.join(task['blocked_dependents'])} - a "
+              "cancelled dependency can never be satisfied, so repoint or cancel them")
     print(f"scope       {task['scope']}")
     if task.get("assignees"):
         print(f"assignees   {', '.join(task['assignees'])}")
@@ -1191,6 +1202,10 @@ def print_task(task):
         print(f"body pr     #{task['pr']}"
               + (f" (accounting pr #{task['accounting_pr']})"
                  if task.get("accounting_pr") else ""))
+    if task.get("dead_dependencies"):
+        print(f"cancelled deps {', '.join(task['dead_dependencies'])} "
+              "(satisfied since t164, so this row IS claimable; repoint with "
+              "`task update <id> --depends-on <good-id>` if you want a live edge)")
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
@@ -3128,6 +3143,7 @@ def run_client_command(client, args):
             if args.assign is not None:
                 payload["assignees"] = args.assign
             if args.depends_on is not None:
+                # t878: the list is REPLACED, so a repoint repairs a dead edge.
                 payload["depends_on"] = args.depends_on
             if args.multi_assignee is not None:
                 payload["multi_assignee"] = args.multi_assignee

@@ -477,6 +477,16 @@ class Tasks:
             dep for dep in task["depends_on"]
             if statuses.get(dep) not in ("done", "cancelled")
         ]
+        # t878/#164: a CANCELLED dependency IS satisfied (t879), so the row is
+        # claimable - but it is worth SAYING so. Before #164 these rows were
+        # unclaimable and invisible; the fix is in the filter, and this field keeps
+        # the fact visible instead of turning a silent brick into a silent pass.
+        task["dead_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) == "cancelled"
+        ]
+        task["missing_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) is None
+        ]
         # F2: eligibility is per-viewer. An assigned task is not claimable by
         # anyone except its named assignee, so a generic list must not advertise
         # it as eligible.
@@ -739,6 +749,14 @@ class Tasks:
                     self._record(task_id, "priority", at=now, actor=updated_by,
                                  scope=row["scope"], priority=sets["priority"],
                                  meta={"from": row["priority"], "to": sets["priority"]})
+                if "depends_on" in sets and sets["depends_on"] != row["depends_on"]:
+                    before = _decode(row["depends_on"])
+                    after = _decode(sets["depends_on"])
+                    self._record(task_id, "depends", at=now, actor=updated_by,
+                                 scope=row["scope"], priority=row["priority"],
+                                 meta={"removed": [d for d in before if d not in after],
+                                       "added": [d for d in after if d not in before],
+                                       "depends_on": after})
                 if "assignees" in sets and sets["assignees"] != row["assignees"]:
                     self._record(task_id, "assigned", at=now, actor=updated_by,
                                  scope=row["scope"], priority=row["priority"],
@@ -1069,7 +1087,22 @@ class Tasks:
         return self.update(row["id"], status="open", block_reason=None)
 
     def cancel(self, task_id, reason=None):
-        return self.update(task_id, status="cancelled", block_reason=reason)
+        """Cancel a task and SAY what it strands (t878).
+
+        A cancelled dependency can never be satisfied, so every dependent row becomes
+        permanently unclaimable - and until t878 the queue said nothing, so the rows
+        simply never came back from `task next`. The cancellation names them here so
+        the caller can report it in one line instead of a lane discovering it weeks
+        later.
+        """
+        row = self.update(task_id, status="cancelled", block_reason=reason)
+        if isinstance(row, dict):
+            rows = self.db.execute(
+                "SELECT id, status, depends_on FROM tasks WHERE status IN "
+                "('open', 'in_progress', 'blocked')").fetchall()
+            row["blocked_dependents"] = sorted(
+                r["id"] for r in rows if str(task_id) in _decode(r["depends_on"]))
+        return row
 
     def delete(self, task_id):
         # F4: the checks and the delete are one write transaction.

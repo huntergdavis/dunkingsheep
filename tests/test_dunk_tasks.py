@@ -20,13 +20,13 @@ from dunk_tasks import GLOBAL, TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 
-class TerminalStatusTests(unittest.TestCase):
-    """t854: a cancelled or done task is FINAL, whatever verb arrives late.
+class CancelledDependencyTests(unittest.TestCase):
+    """t878: a cancelled dependency must SURFACE, not silently brick the dependents.
 
-    Measured on t780: a steward's 'cancelled' was overwritten by a lane's
-    in-flight 'blocked' (last writer wins), cancelled_at was left NULL, and the
-    lease reaper then reopened the blocked duplicate and handed cancelled work
-    back to the queue.
+    Two duplicate rows were cancelled on 2026-10-30 and seven dependents became
+    permanently unclaimable: the queue satisfies an edge only on 'done', a cancelled
+    dependency can never be satisfied, and nothing said so - the rows simply never
+    came back from `task next`.
     """
 
     def setUp(self):
@@ -37,82 +37,104 @@ class TerminalStatusTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def _task(self):
-        return self.store.add(GLOBAL, "a duplicate the steward will cancel")
+    def _pair(self):
+        dep = self.store.add(GLOBAL, "the dependency that gets cancelled")
+        row = self.store.add(GLOBAL, "the row that depends on it")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, self.store.get(row["id"])
 
-    def test_cancel_then_block_leaves_it_cancelled_and_says_so(self):
-        task = self._task()
-        self.store.cancel(task["id"], reason="duplicate of the other one")
-        with self.assertRaisesRegex(TaskError, "is cancelled; a finished task is not"):
-            self.store.block(task["id"], reason="late block from a lane")
-        row = self.store.get(task["id"])
-        self.assertEqual("cancelled", row["status"])
-        self.assertIsNotNone(row["cancelled_at"], "the cancelled record survives")
+    def test_a_cancelled_dependency_is_named_and_the_row_stays_claimable(self):
+        """t879 made cancelled SATISFIED; t878 keeps the fact visible, not blocking."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        after = self.store.get(row["id"])
+        self.assertEqual([dep["id"]], after["dead_dependencies"])
+        self.assertNotIn(dep["id"], after["blocked_by"],
+                         "a cancelled dependency is satisfied (t164), not blocking")
+        self.assertTrue(after["eligible"], "the row must be claimable after the cancel")
 
-    def test_a_done_task_cannot_be_blocked_or_reopened(self):
-        task = self._task()
-        self.store.complete(task["id"])
-        for move in ({"status": "blocked"}, {"status": "open"}, {"status": "in_progress"}):
-            with self.assertRaisesRegex(TaskError, "is done; a finished task is not"):
-                self.store.update(task["id"], **move)
-        with self.assertRaisesRegex(TaskError, "is done; a finished task is not"):
-            self.store.block(task["id"], reason="late")
-        self.assertEqual("done", self.store.get(task["id"])["status"])
+    def test_cancel_names_the_dependents_it_strands(self):
+        dep, row = self._pair()
+        cancelled = self.store.cancel(dep["id"], reason="duplicate")
+        self.assertEqual([row["id"]], cancelled["blocked_dependents"])
 
-    def test_an_expired_lease_on_a_cancelled_task_requeues_nothing(self):
-        task = self._task()
-        self.store.claim_next(pane_id="%108", lease_seconds=1)
-        self.store.cancel(task["id"], reason="duplicate")
-        self.assertEqual([], self.store.reap(now=10 ** 12),
-                         "a cancelled task is not requeued by an expired lease")
-        self.assertEqual("cancelled", self.store.get(task["id"])["status"])
+    def test_repointing_the_edge_replaces_the_dead_one(self):
+        """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        self.assertTrue(self.store.get(row["id"])["eligible"],
+                        "claimable already (t164); a repoint still removes the dead edge")
+        good = self.store.add(GLOBAL, "the canonical task")
+        self.store.complete(good["id"])
+        repaired = self.store.update(row["id"], depends_on=[good["id"]])
+        self.assertEqual([good["id"]], repaired["depends_on"],
+                         "the list is replaced, not appended to")
+        self.assertEqual([], repaired["dead_dependencies"])
+        self.assertTrue(repaired["eligible"], "a repointed row is claimable again")
 
-    def test_a_cancel_that_lands_mid_edit_is_not_resurrected(self):
-        """The rowcount guard: a read-then-write check is the same race one level down."""
-        task = self._task()
-        real_require = self.store._require
-        state = {"first": True}
+    def test_a_done_dependency_is_not_dead(self):
+        dep, row = self._pair()
+        self.store.complete(dep["id"])
+        after = self.store.get(row["id"])
+        self.assertEqual([], after["dead_dependencies"])
+        self.assertTrue(after["eligible"])
 
-        def stale_require(task_id):
-            row = real_require(task_id)
-            if state["first"]:
-                state["first"] = False
-                self.store.cancel(task["id"], reason="steward cancelled it")
-                return row          # the status this writer READ, before the cancel
-            return row
 
-        self.store._require = stale_require
-        try:
-            with self.assertRaisesRegex(TaskError, "is cancelled|changed to cancelled"):
-                self.store.block(task["id"], reason="late block")
-        finally:
-            self.store._require = real_require
-        self.assertEqual("cancelled", real_require(task["id"])["status"])
+class CancelledDependencyTests(unittest.TestCase):
+    """t878: a cancelled dependency must SURFACE, not silently brick the dependents.
 
-    def test_two_threads_cancelling_and_blocking_end_cancelled(self):
-        for _ in range(6):
-            task = self._task()
-            errors = []
+    Two duplicate rows were cancelled on 2026-10-30 and seven dependents became
+    permanently unclaimable: the queue satisfies an edge only on 'done', a cancelled
+    dependency can never be satisfied, and nothing said so - the rows simply never
+    came back from `task next`.
+    """
 
-            def cancel():
-                try:
-                    self.store.cancel(task["id"], reason="steward")
-                except TaskError as error:      # a refusal is an acceptable outcome
-                    errors.append(error)
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
 
-            def block():
-                try:
-                    self.store.block(task["id"], reason="lane")
-                except TaskError as error:
-                    errors.append(error)
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
 
-            threads = [threading.Thread(target=cancel), threading.Thread(target=block)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            self.assertEqual("cancelled", self.store.get(task["id"])["status"],
-                             "cancelled must win over blocked, whichever ran first")
+    def _pair(self):
+        dep = self.store.add(GLOBAL, "the dependency that gets cancelled")
+        row = self.store.add(GLOBAL, "the row that depends on it")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, self.store.get(row["id"])
+
+    def test_a_cancelled_dependency_is_named_and_blocks_the_row(self):
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        after = self.store.get(row["id"])
+        self.assertEqual([dep["id"]], after["dead_dependencies"])
+        self.assertIn(dep["id"], after["blocked_by"])
+        self.assertFalse(after["eligible"], "an unsatisfiable edge keeps it out of the queue")
+
+    def test_cancel_names_the_dependents_it_strands(self):
+        dep, row = self._pair()
+        cancelled = self.store.cancel(dep["id"], reason="duplicate")
+        self.assertEqual([row["id"]], cancelled["blocked_dependents"])
+
+    def test_repointing_the_edge_frees_the_row_without_cancelling_it(self):
+        """The repair path %107 used on all seven rows: --depends-on REPLACES the list."""
+        dep, row = self._pair()
+        self.store.cancel(dep["id"], reason="duplicate")
+        self.assertFalse(self.store.get(row["id"])["eligible"])
+        good = self.store.add(GLOBAL, "the canonical task")
+        self.store.complete(good["id"])
+        repaired = self.store.update(row["id"], depends_on=[good["id"]])
+        self.assertEqual([good["id"]], repaired["depends_on"],
+                         "the list is replaced, not appended to")
+        self.assertEqual([], repaired["dead_dependencies"])
+        self.assertTrue(repaired["eligible"], "a repointed row is claimable again")
+
+    def test_a_done_dependency_is_not_dead(self):
+        dep, row = self._pair()
+        self.store.complete(dep["id"])
+        after = self.store.get(row["id"])
+        self.assertEqual([], after["dead_dependencies"])
+        self.assertTrue(after["eligible"])
 
 
 class TaskStoreTests(unittest.TestCase):
