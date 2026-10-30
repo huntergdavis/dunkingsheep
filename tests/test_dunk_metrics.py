@@ -212,5 +212,40 @@ class MetricsEndpointTests(unittest.TestCase):
             self.assertIn(prop["type"], ("string", "number", "integer", "boolean"))
 
 
+class VocabularyTests(unittest.TestCase):
+    """t1011: every event kind the daemon RECORDS is documented in KINDS.
+
+    The map is what a consumer reads to interpret a summary, and it had drifted to 13 of
+    the 22 literal kinds the code records (t979 found the gap by grepping). This test
+    greps the same way, so a new `record("...")` cannot land undocumented.
+    """
+
+    def recorded_kinds(self):
+        import pathlib, re
+        root = pathlib.Path(__file__).resolve().parent.parent
+        kinds = set()
+        for path in root.rglob("*.py"):
+            if "tests" in path.parts or ".venv" in path.parts:
+                continue
+            text = path.read_text(errors="ignore")
+            kinds.update(re.findall(r"""record\(\s*["']([a-z][a-z0-9_.]+)["']""", text))
+            # the desk's bridge uses self._record(...)
+            kinds.update(re.findall(r"""_record\(\s*["']([a-z][a-z0-9_.]+)["']""", text))
+        return kinds
+
+    def test_every_recorded_kind_is_documented(self):
+        recorded = self.recorded_kinds()
+        self.assertTrue(recorded, "the grep found no record() call sites at all")
+        undocumented = sorted(kind for kind in recorded if kind not in dunk_metrics.KINDS)
+        self.assertEqual([], undocumented,
+                         "these kinds are recorded but not in KINDS: "
+                         + ", ".join(undocumented))
+
+    def test_every_documented_kind_has_a_meaning(self):
+        for kind, meaning in dunk_metrics.KINDS.items():
+            self.assertTrue(meaning.strip(), f"{kind} has no description")
+        self.assertGreaterEqual(len(dunk_metrics.KINDS), 22)
+
+
 if __name__ == "__main__":
     unittest.main()

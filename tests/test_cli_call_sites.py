@@ -1,7 +1,7 @@
 """t1044: a CLI call site must not pass an argument its parser cannot produce.
 
 The bug: `dunkingsheep task complete` passed `landed=args.landed` while the `complete`
-subparser defined only `--by` and `--verdict`, so EVERY completion crashed with
+subparser defined no `landed` (main's hotfix 20530f2 restored it as `--unmerged`), so EVERY completion crashed with
 AttributeError before the request was sent - the terminal verb of every lane. Unit tests
 that call `Flock.task_complete` directly cannot see it, because they never build the
 parser.
@@ -45,9 +45,23 @@ class TaskCompleteParserTests(unittest.TestCase):
         self.assertIsNone(args.landed, "unset means 'not stated', not False")
 
     def test_the_unmerged_flag_is_reachable(self):
-        """t906's workflow: done on a stacked branch, dependents stay closed."""
-        self.assertFalse(self.parse(["task", "complete", "t1", "--no-landed"]).landed)
-        self.assertTrue(self.parse(["task", "complete", "t1", "--landed"]).landed)
+        """t906's workflow: done on a stacked branch, dependents stay closed. The flag is
+        `--unmerged` (main's hotfix 20530f2), stored as landed=False."""
+        self.assertFalse(self.parse(["task", "complete", "t1", "--unmerged"]).landed)
+
+    def test_the_handler_defaults_to_landed_and_the_registry_advertises_it(self):
+        import dunk_api
+        calls = []
+
+        class Flock:
+            def task_complete(self, task_id, **kwargs):
+                calls.append(kwargs["landed"])
+
+        dunk_api.h_task_complete(Flock(), {"id": "t1"}, None)
+        dunk_api.h_task_complete(Flock(), {"id": "t1", "landed": False}, None)
+        self.assertEqual([True, False], calls)
+        command = dunk_api.COMMANDS_BY_NAME["task_complete"]
+        self.assertEqual("boolean", command.params["landed"]["type"])
 
 
 if __name__ == "__main__":

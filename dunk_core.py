@@ -218,6 +218,8 @@ MAILBOX_CACHE_S = float(os.environ.get("DUNKINGSHEEP_MAILBOX_CACHE_S", "30"))
 # staleness is this TTL past the last invalidation. `fresh=True` bypasses it
 # for a send/ack/claim that needs certainty.
 VIEW_CACHE_S = float(os.environ.get("DUNKINGSHEEP_VIEW_CACHE_S", "5"))
+# Mail older than this no longer holds a lane back from the push sweep (t1053).
+UNREAD_MAIL_GRACE_S = float(os.environ.get("DUNKINGSHEEP_UNREAD_GRACE_S", "600"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -3826,7 +3828,7 @@ class Flock:
                 log.info("push skip pane=%s reason=no_live_agent via=%s", pane_id, why)
                 continue
             role = self.caller_role(pane_id)
-            if role == "reviewer" and not self.roles.may_review(pane_id):
+            if role == "reviewer" and not self.roles.may_review(pane_id, role=role):
                 log.info("push skip pane=%s reason=provider_may_not_review provider=%s",
                          pane_id, self.roles.provider_of(pane_id) or "unknown")
                 continue
@@ -3895,7 +3897,24 @@ class Flock:
         lane's mail is.
         """
         try:
-            return bool(self.inbox.count(self._own_mailbox(pane_id)).get("unread"))
+            mailbox = self._own_mailbox(pane_id)
+            if not self.inbox.count(mailbox).get("unread"):
+                return False
+            # Only mail a lane must ACT on holds it back (t1053). The daemon's own
+            # "TASK ..." announcements are the sweep's output, so counting them made
+            # every claim block the next one (the fleet idled twice on 2026-10-30), and
+            # mail older than the grace window stops gating: a lane that has not read
+            # it in 10 minutes is not going to, and starving it helps nobody.
+            now = time.time()
+            for message in self.inbox.read(mailbox, limit=50, peek=True):
+                subject = str(message.get("subject") or "")
+                body = str(message.get("body") or "")
+                if subject.startswith("TASK ") or body.startswith("TASK "):
+                    continue
+                if now - float(message.get("created_at") or now) > UNREAD_MAIL_GRACE_S:
+                    continue
+                return True
+            return False
         except Exception:  # noqa: BLE001 - unknown mail state is not evidence of none,
             # but refusing every push on an inbox hiccup would stop the fleet;
             # log it and let the role/busy gates decide.
@@ -4115,6 +4134,23 @@ class Flock:
         if hit and hit[0] > now:
             return hit[1]
         info = self._pane_info(pane_id)      # None when the backend knows no such pane
+        last = getattr(self, "_role_pane_last", None)
+        if last is None:
+            last = self._role_pane_last = {}
+        if info is not None:
+            last[pane_id] = (now, info)
+        else:
+            # The terminal backend answers None both for a pane that is gone AND for a
+            # listing that timed out or came back empty under load (measured 2026-10-30:
+            # every registered lane was demoted to anonymous for 40 minutes, the sweep fed
+            # nobody and the fleet idled). A lane seen within the last 3 minutes is not
+            # "gone" on one empty answer: keep its last good record. A pane that really
+            # went away stops being served after the grace window.
+            held = last.get(pane_id)
+            if held and now - held[0] < 180.0:
+                log.warning("pane lookup for %s returned nothing; using the record from "
+                            "%.0f s ago (fail open for 180 s)", pane_id, now - held[0])
+                info = held[1]
         self._role_pane_cache[pane_id] = (now + 2.0, info)
         if len(self._role_pane_cache) > 512:
             self._role_pane_cache = {k: v for k, v in self._role_pane_cache.items()

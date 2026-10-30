@@ -434,16 +434,14 @@ def build_parser():
     q.add_argument("--by")
     q.add_argument("--verdict", choices=["accept", "needs-fix"],
                    help="review tasks: the verdict (recorded from your bound lane)")
-    # t1044: the call site has always passed landed=args.landed and the parser never
-    # defined it, so every CLI `task complete` crashed with AttributeError before the
-    # request was sent - the terminal verb of every lane. The flag is REAL (t906:
-    # Flock.task_complete accepts landed=False for a stacked branch whose work is not on
-    # main), so it is defined here rather than deleted from the call site.
-    q.add_argument("--landed", dest="landed", action="store_true", default=None,
-                   help="the work is on main (default: assumed for a plain completion)")
-    q.add_argument("--no-landed", dest="landed", action="store_false",
-                   help="done on a branch that is NOT merged yet: dependents stay closed "
-                        "until the PR lands (t906 --unmerged)")
+    # The call site passes args.landed (t906), and without this argument EVERY
+    # `task complete` dies with AttributeError: 'Namespace' object has no attribute
+    # 'landed' - a live outage of the command every lane uses to finish work. The flag
+    # was in the same commit as the call site and was lost when the branch was rebased
+    # onto a main that had moved; this adds it back and the test below pins the pair.
+    q.add_argument("--unmerged", dest="landed", action="store_false", default=None,
+                   help="the work is done but its PR is NOT on main (a stacked branch): "
+                        "dependents stay closed until the merge is recorded (t906)")
 
     q = tsub.add_parser("block", help="mark a task blocked")
     q.add_argument("id")
@@ -3168,10 +3166,8 @@ def run_client_command(client, args):
             return client.call("task_assign", id=args.id, assignees=args.assignees,
                                mode=args.mode), print_task
         if sub == "complete":
-            payload = {"id": args.id, "by": args.by, "verdict": args.verdict}
-            if args.landed is not None:
-                payload["landed"] = args.landed
-            return client.call("task_complete", **payload), print_task
+            return client.call("task_complete", id=args.id, by=args.by,
+                               verdict=args.verdict, landed=args.landed), print_task
         if sub == "block":
             return client.call("task_block", id=args.id, reason=args.reason), print_task
         if sub == "unblock":

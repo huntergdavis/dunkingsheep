@@ -7,7 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{AgentSpec, Pane, Tab, Terminal, TerminalError, Workspace};
+use super::{
+    AgentSpec, Pane, Resize, ResizedPane, Tab, Terminal, TerminalError, Workspace, RESIZE_MAX,
+    RESIZE_MIN,
+};
 
 /// The canned panes, from `tests/fakes.py::PANES` (pane_id, session, cwd, command,
 /// title, workspace/tab labels, pid). Kept as data rather than a builder because the
@@ -21,6 +24,7 @@ fn canned_panes() -> Vec<Pane> {
             cwd: "/home/hunter/work".into(),
             command: "bash".into(),
             title: "π - work".into(),
+            label: "π - work".into(),
             active: true,
             workspace: "work".into(),
             tab: "1".into(),
@@ -37,6 +41,7 @@ fn canned_panes() -> Vec<Pane> {
             cwd: "/home/hunter/work".into(),
             command: "claude".into(),
             title: "π - review".into(),
+            label: "π - review".into(),
             active: true,
             workspace: "work".into(),
             tab: "2".into(),
@@ -53,6 +58,7 @@ fn canned_panes() -> Vec<Pane> {
             cwd: "/home/hunter/other".into(),
             command: "bash".into(),
             title: "π - other".into(),
+            label: "π - other".into(),
             active: true,
             workspace: "other".into(),
             tab: "1".into(),
@@ -298,6 +304,7 @@ impl Terminal for FakeTerminal {
             pane_id: pane_id.clone(),
             cwd: cwd.map(str::to_string).unwrap_or(source.cwd.clone()),
             command: source.command.clone(),
+            label: format!("{} ({direction})", source.label),
             title: format!("{} ({direction})", source.title),
             active: true,
             width: if direction == "down" {
@@ -331,6 +338,7 @@ impl Terminal for FakeTerminal {
                 .clone()
                 .unwrap_or_else(|| "/home/hunter/work".into()),
             command: spec.argv.first().cloned().unwrap_or_default(),
+            label: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
             title: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
             active: true,
             workspace: "work".into(),
@@ -395,6 +403,62 @@ impl Terminal for FakeTerminal {
         }
         self.record(&format!("focus:{kind}"), target_id);
         Ok(())
+    }
+
+    fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError> {
+        // Same refusals as the tmux backend, so a daemon test can assert the SHAPE of
+        // the failure instead of only the happy path.
+        if !(RESIZE_MIN..=RESIZE_MAX).contains(&cols) || !(RESIZE_MIN..=RESIZE_MAX).contains(&rows)
+        {
+            return Err(TerminalError::refused(format!(
+                "cols and rows must be between {RESIZE_MIN} and {RESIZE_MAX}"
+            )));
+        }
+        if self.get_pane(pane_id).is_none() {
+            return Err(TerminalError::refused(format!("no such pane {pane_id}")));
+        }
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        self.record("resize", pane_id);
+        let window_id = self
+            .get_pane(pane_id)
+            .map(|pane| pane.tab_id())
+            .unwrap_or_default();
+        let mut resized = Vec::new();
+        for pane in &mut self.panes {
+            if pane.tab_id() != window_id {
+                continue;
+            }
+            if !pane.pane_id.eq(pane_id) {
+                continue; // the fake moves the window grid the way tmux does: this pane
+            }
+            let (cols_before, rows_before) = (pane.width, pane.height);
+            pane.width = cols;
+            pane.height = rows;
+            resized.push(ResizedPane {
+                pane_id: pane.pane_id.clone(),
+                cols,
+                rows,
+                cols_before: Some(cols_before),
+                rows_before: Some(rows_before),
+            });
+        }
+        Ok(Resize {
+            pane_id: pane_id.to_string(),
+            requested_cols: cols,
+            requested_rows: rows,
+            cols: Some(cols),
+            rows: Some(rows),
+            window_pane_count: self
+                .panes
+                .iter()
+                .filter(|p| p.tab_id() == window_id)
+                .count(),
+            resized_panes: resized,
+            clients_attached: 0,
+            overridable_by_client: false,
+        })
     }
 
     fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
