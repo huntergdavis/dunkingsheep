@@ -1482,23 +1482,24 @@ class Flock:
         spec = str(spec or "").strip()
         if not spec:
             raise DunkError("a target mailbox is required")
-        panes = self.herdr.list_panes_grouped()
-        # 1. An exact pane id (or terminal id) is unambiguous and always wins.
-        for pane in panes:
-            if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
-                return self._mailbox_for_pane(pane)
-        if _PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec) or _HERDR_ID_RE.match(spec):
+        # An exact pane id needs ONE backend call, not the three a grouped listing
+        # costs (pane, tab and workspace lists): the id branches below read only
+        # ids, and a send to a lane the terminal has lost must fail in well under a
+        # second (t699: a 15 s client timeout read as "the daemon is hung").
+        if (_PANE_ID_RE.match(spec) or _TERM_ID_RE.match(spec)
+                or _HERDR_ID_RE.match(spec)):
+            panes = self.herdr.list_panes()
+            for pane in panes:
+                if pane.get("pane_id") == spec or pane.get("terminal_id") == spec:
+                    return self._mailbox_for_pane(pane)
             if not strict:
                 # READS STAY PERMISSIVE. A dead pane id is a name mail can still be
                 # filed under - that is how 78 stranded messages exist, and they
                 # have to be readable and archivable or the triage cannot run.
                 # Only a SEND refuses here (measured regression, 2026-10-24).
                 return spec, spec, None
-            raise DunkError(
-                f"no live pane {spec!r}; a dead pane id is not a mailbox, and a "
-                "pane id is not a name. If that lane still exists, address it by "
-                "mailbox name; if it does not, the send fails here instead of "
-                "queueing into nothing. reason=dead_lane.")
+            raise self._pane_refusal(spec)
+        panes = self.herdr.list_panes_grouped()
         # 1b. A DECORATED address - 'name (wR:p5)' - carries its own pane id, and
         # that id decides. Without this the whole string fell through to step 3 and
         # became a mailbox NAME with no pane: mail addressed to
@@ -1514,10 +1515,7 @@ class Flock:
                 # A decorated address is a mailbox NAME too ('PM (par-a) (wW:p1)'
                 # is exactly what the triage list shows). Reading it must work.
                 return spec, spec, None
-            raise DunkError(
-                f"target {spec!r} names pane {hinted}, which is not live. A decorated "
-                f"address must name a live pane: use a current pane id, or a bare "
-                f"mailbox name without the parenthetical. reason=dead_lane.")
+            raise self._pane_refusal(hinted, spec)
 
         # 1b-bis. RESERVED MAILBOXES. The owner mailbox is not a pane: it is a
         # person's channel with two transports (FLAT_FLEET.md 7.2). It must be
@@ -1605,8 +1603,66 @@ class Flock:
         return any(str(p.get("agent") or "").lower() == low
                    for p in self.herdr.list_panes())
 
+    def _pane_refusal(self, pane_id, spec=None):
+        """The send-time refusal for a pane id the backend does not list.
+
+        A backend pane list is evidence about a TERMINAL, never about a process.
+        On 2026-10-29 (t699) the registry listed %108, %109 and %103 as lanes
+        while `dunkingsheep panes` carried none of them; sends then said
+        'dead_lane' for panes whose pids were running, which is a wrong answer
+        that also destroys mail nobody can recover (the refusal is raised before
+        the message is stored). So the registry is asked before the word 'dead'
+        is used: a registration that still proves a live root process is not a
+        dead lane, it is a terminal gap, and it gets its own reason.
+        """
+        registered, alive, pid = self._registered_pane(pane_id)
+        target = f"target {spec!r} names pane {pane_id}" if spec else f"pane {pane_id!r}"
+        if registered and alive:
+            return DunkError(
+                f"{target}, which is REGISTERED and whose recorded process is ALIVE "
+                f"(pid {pid}), but the terminal backend does not list that pane: no "
+                "message was stored and nothing was typed. reason=backend_missing_pane. "
+                "Restore the pane (respawn / lane register) or address the lane by its "
+                "mailbox name, which keeps mail for a lane between panes.")
+        when = " (its registered root process is no longer running)" if registered and pid else ""
+        if spec:
+            return DunkError(
+                f"{target}, which is not live{when}. A decorated address must name a "
+                "live pane: use a current pane id, or a bare mailbox name without the "
+                "parenthetical. reason=dead_lane.")
+        return DunkError(
+            f"no live pane {pane_id!r}{when}; a dead pane id is not a mailbox, and a "
+            "pane id is not a name. If that lane still exists, address it by "
+            "mailbox name; if it does not, the send fails here instead of "
+            "queueing into nothing. reason=dead_lane.")
+
+    def _registered_pane(self, pane_id):
+        """(registered, process_alive, pid) from the role registry. No backend call.
+
+        'Alive' means the registration recorded a root pid AND that pid still
+        carries the recorded starttime (a reused %N is a different process).
+        """
+        entry = {}
+        try:
+            entry = self.roles.entry(pane_id) or {}
+        except Exception:                       # noqa: BLE001 - a registry must not break a refusal
+            return False, False, None
+        if not entry:
+            return False, False, None
+        pid = entry.get("pane_pid")
+        if pid in (None, "", "None"):
+            return True, False, None
+        return True, bool(process_alive(pid, entry.get("start"))), pid
+
     def _mailbox_for_pane(self, pane):
         panes = self.herdr.list_panes_grouped()
+        # Re-read the pane from the SAME listing `unique()` searches: a caller may
+        # hand us a row from the plain idle list, which carries no tab or workspace
+        # label, and then every name field would read empty and the mailbox would
+        # fall back to the pane id (measured on the id fast path, t699).
+        wanted = pane.get("pane_id") or pane.get("terminal_id")
+        pane = next((p for p in panes
+                     if wanted in (p.get("pane_id"), p.get("terminal_id"))), pane)
 
         def unique(field):
             value = pane.get(field)

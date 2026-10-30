@@ -925,6 +925,123 @@ class MailboxIdentityTests(unittest.TestCase):
         self.assertNotIn("unrouted:claude", keys)
 
 
+class PaneRegistryRefusalTests(unittest.TestCase):
+    """A pane the terminal backend has lost is not automatically a dead lane.
+
+    Measured 2026-10-29 (t699): the role registry listed %108, %109 and %103 while
+    `dunkingsheep panes` carried none of them, and a send then said 'dead_lane'
+    for panes whose recorded pids were running. The refusal is raised BEFORE the
+    message is stored, so a wrong 'dead' both lies and loses mail. The registry
+    is the evidence about the PROCESS; the backend list is evidence about the
+    TERMINAL.
+    """
+
+    def setUp(self):
+        import dunk_roles
+        self.tmp = tempfile.TemporaryDirectory()
+        self.herdr = FakeHerdr()
+        self.roles = dunk_roles.Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                                      default="anonymous")
+        self.inbox = Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                           blob_dir=os.path.join(self.tmp.name, "b"))
+        self.flock = Flock(herdr=self.herdr, persist=False, restore=False,
+                           inbox=self.inbox, roles=self.roles)
+
+    def tearDown(self):
+        self.flock.close()
+        self.inbox.close()
+        self.tmp.cleanup()
+
+    def _lose_pane(self, pane_id):
+        self.herdr.panes = [p for p in self.herdr.panes if p["pane_id"] != pane_id]
+
+    def _register(self, pane_id, pid, start=None):
+        self.roles.register(pane_id, "worker", pane_pid=pid, start=start, by="test")
+
+    def test_a_live_registered_pane_the_backend_lost_is_not_called_dead(self):
+        from dunk_callers import process_start
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", os.getpid(), process_start(os.getpid()))
+        with self.assertRaises(DunkError) as caught:
+            self.flock.resolve_mailbox("w2:p1", strict=True)
+        message = str(caught.exception)
+        self.assertIn("reason=backend_missing_pane", message)
+        self.assertNotIn("reason=dead_lane", message)
+        self.assertIn("ALIVE", message)
+        self.assertIn(str(os.getpid()), message)
+
+    def test_the_same_refusal_reaches_a_send_and_stores_nothing(self):
+        from dunk_callers import process_start
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", os.getpid(), process_start(os.getpid()))
+        with self.assertRaisesRegex(DunkError, "reason=backend_missing_pane"):
+            self.flock.inbox_send("w2:p1", "must not vanish", notify=True,
+                                  self_pane_id="w1:p1")
+        self.assertEqual(0, self.inbox.count("w2:p1")["total"])
+        self.assertEqual(0, self.inbox.count("w1:p1")["total"],
+                         "nothing is filed under the sender either")
+
+    def test_dead_lane_is_kept_for_a_registration_whose_process_is_gone(self):
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", 999999, "12345")
+        with self.assertRaises(DunkError) as caught:
+            self.flock.resolve_mailbox("w2:p1", strict=True)
+        message = str(caught.exception)
+        self.assertIn("reason=dead_lane", message)
+        self.assertNotIn("backend_missing_pane", message)
+        self.assertIn("no longer running", message)
+
+    def test_a_pane_in_no_registry_and_no_backend_is_still_dead_lane(self):
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.resolve_mailbox("%999", strict=True)
+
+    def test_a_registration_with_a_reused_pid_is_not_called_alive(self):
+        # Same pid, different starttime: a reused %N (tmux restart) is a new process.
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", os.getpid(), "1000")
+        with self.assertRaisesRegex(DunkError, "reason=dead_lane"):
+            self.flock.resolve_mailbox("w2:p1", strict=True)
+
+    def test_a_decorated_address_gets_the_same_truthful_reason(self):
+        from dunk_callers import process_start
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", os.getpid(), process_start(os.getpid()))
+        with self.assertRaises(DunkError) as caught:
+            self.flock.resolve_mailbox("codex-lane (w2:p1)", strict=True)
+        self.assertIn("reason=backend_missing_pane", str(caught.exception))
+
+    def test_a_lost_pane_costs_one_backend_call_before_refusing(self):
+        # The send path must fail fast: the id branch reads the plain pane list
+        # and must not pay for tab/workspace labels it will not use (t699: a
+        # three-call listing under load was a multi-second wait before a refusal).
+        from dunk_callers import process_start
+        self._lose_pane("w2:p1")
+        self._register("w2:p1", os.getpid(), process_start(os.getpid()))
+        calls = {"list": 0, "grouped": 0}
+        listed, grouped = self.herdr.list_panes, self.herdr.list_panes_grouped
+
+        def count_list():
+            calls["list"] += 1
+            return listed()
+
+        def count_grouped():
+            calls["grouped"] += 1
+            return grouped()
+
+        self.herdr.list_panes = count_list
+        self.herdr.list_panes_grouped = count_grouped
+        with self.assertRaisesRegex(DunkError, "backend_missing_pane"):
+            self.flock.resolve_mailbox("w2:p1", strict=True)
+        self.assertEqual(1, calls["list"])
+        self.assertEqual(0, calls["grouped"], "labels are not needed to refuse")
+
+    def test_a_live_pane_id_still_resolves_to_the_same_mailbox(self):
+        # The fast path changed which listing it reads first; the ANSWER must not
+        # change (the tab label is still the mailbox name for an unregistered pane).
+        self.assertEqual(self.flock.resolve_mailbox("Codex Site", strict=True)[0],
+                         self.flock.resolve_mailbox("w2:p1", strict=True)[0])
+
+
 class InboxErrorShapeTests(unittest.TestCase):
     """An unknown id must read like a mistake, not like a crash."""
 
