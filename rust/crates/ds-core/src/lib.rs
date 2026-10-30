@@ -18,6 +18,7 @@ pub mod config;
 pub mod error;
 pub mod lock;
 pub mod retry;
+pub mod stuck;
 
 pub use error::{DunkError, refusal};
 
