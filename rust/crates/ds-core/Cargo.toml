@@ -1,0 +1,10 @@
+[package]
+name = "ds-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dunking Sheep core: the library every Rust binary shares (docs/rust/RUST_PORT.md section 2)."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

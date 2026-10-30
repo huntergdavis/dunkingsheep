@@ -20,3 +20,6 @@ venv/
 # untracked; an ignore rule cannot hide a file already in the Git index.
 # The append-only access log is written on reads (not source).
 .dunkingsheep/access.jsonl
+
+# Rust build artefacts (T00): the workspace is built by every task.
+rust/target/
