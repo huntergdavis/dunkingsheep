@@ -23,3 +23,10 @@ venv/
 .venv/
 ui/node_modules/
 ui/dist/
+
+# The desk writes its own credentials and sqlite store here when VP_DATA_DIR is
+# unset (web/app.py: DATA = os.getenv("VP_DATA_DIR", ROOT / "data")). A test or an
+# app run inside a checkout then leaves auth.json, owner-credentials and
+# messages.sqlite3 behind, and a broad `git add -A` swept three of them onto a
+# PUBLIC branch (t726 review of #143). Never commit this directory.
+data/

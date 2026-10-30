@@ -448,10 +448,19 @@ def run():
                 time.sleep(5)
 
 
-def main():
+def main(argv=None):
+    """Entry point. `argv` is the argument list WITHOUT the program name.
+
+    It takes the list rather than reading sys.argv itself so the installed CLI can
+    hand it one command and get an EXIT CODE back: `dunkingsheep telegram-bridge
+    run` is what the systemd unit runs (t710). With the old zero-argument signature
+    the unit died with `TypeError: main() takes 0 positional arguments but 1 was
+    given` the moment the import succeeded (t713), so the bridge could not start.
+    `python bridges/telegram_bridge.py` still works: argv defaults to sys.argv[1:].
+    """
     parser = argparse.ArgumentParser(description="Private Telegram bridge for the VP desk")
     parser.add_argument("command", choices=["setup", "run", "status"])
-    args = parser.parse_args()
+    args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
     try:
         if args.command == "setup":
             setup()
@@ -461,10 +470,12 @@ def main():
             config = load_config()
             print(f"channel={_channel(config)}; brief_channel={config.get('brief_channel', 'vp')}; paired={'yes' if config.get('chat_id') is not None else 'no'}; last_brief_id={config.get('last_brief_id')}; update_offset={config.get('update_offset')}")
     except (RuntimeError, ValueError, OSError, KeyboardInterrupt) as exc:
-        if not isinstance(exc, KeyboardInterrupt):
-            print(str(exc), file=sys.stderr)
-            sys.exit(1)
+        if isinstance(exc, KeyboardInterrupt):
+            return 130
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

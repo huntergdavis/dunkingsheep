@@ -591,7 +591,11 @@ def build_parser():
 
     p = sub.add_parser("telegram-bridge",
                        help="run the Telegram transport (owner-mailbox replies + pages)")
-    p.add_argument("command", choices=["run", "status"], nargs="?", default="run",
+    # NOT named "command": argparse would put it in the same dest as the subparser
+    # itself, so `args.command` became "run"/"status" and the dispatcher below never
+    # matched "telegram-bridge" - the CLI fell through to the daemon and the unit
+    # died on a socket it did not need (t713, found by running it).
+    p.add_argument("bridge_command", choices=["run", "status"], nargs="?", default="run",
                    help="run the long-poll bridge, or print its pairing status")
 
     p = sub.add_parser("watchdog",
@@ -2399,7 +2403,10 @@ def main(argv=None):
                 "needs the web stack (fastapi); no release ships a venv with it yet "
                 "(t594). The bridge cannot run from a release tree until that is "
                 "decided: ship the dependencies, or drop the web.app import.")
-        return telegram_bridge.main([args.command]), (lambda result: None)
+        # An EXIT CODE, not the (value, printer) pair the socket commands use:
+        # main() has already printed whatever it had to say, and `_run` hands this
+        # straight to sys.exit (a tuple there prints itself and exits 1) - t713.
+        return telegram_bridge.main([args.bridge_command])
 
     if command == "watchdog":
         # Local and read-only: evaluates the stores directly and never starts

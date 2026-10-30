@@ -12,7 +12,9 @@ Three findings from the t594 review, each pinned here:
    oldest 20 agent rows and would page history to the phone.
 """
 
+import inspect
 import os
+import subprocess
 import sys
 import tempfile
 import types
@@ -59,6 +61,79 @@ class FakeClient:
 def _bridge():
     import telegram_bridge
     return telegram_bridge
+
+
+def _has_fastapi():
+    """bridges/telegram_bridge.py imports web.app, which needs fastapi.
+
+    The policy tests below need it; the subprocess test below does NOT (it accepts
+    either the bridge's own answer or the CLI's named "unavailable" error), so the
+    unit's entry point is still covered on a python without the web stack.
+    """
+    try:
+        import fastapi  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class EntryPointTests(unittest.TestCase):
+    """t713: the unit runs `dunkingsheep telegram-bridge run`, so that path must work.
+
+    Three defects found by actually running it, none of them covered by the tests
+    that only read the unit file:
+
+    1. `telegram_bridge.main()` took no arguments and the CLI passed one, so the
+       unit would have died with TypeError the moment the import succeeded;
+    2. the subparser's positional was ALSO named "command", the same dest as the
+       subparser itself, so `args.command` became "run" and the dispatcher never
+       matched "telegram-bridge" - the CLI fell through to the daemon and exited 3
+       on a socket this command does not need;
+    3. the branch returned a (value, printer) tuple, which `_run` hands to
+       sys.exit, so a status run printed the tuple and exited 1.
+    """
+
+    def test_the_cli_subcommand_never_asks_for_the_daemon(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ)
+            env["DUNKINGSHEEP_DIR"] = os.path.join(tmp, "config")   # no socket there
+            env["VP_DATA_DIR"] = os.path.join(tmp, "desk")          # empty desk store
+            env["PYTHONPATH"] = os.path.join(root, "tests")
+            rundir = os.path.join(tmp, "run")
+            os.makedirs(rundir, exist_ok=True)
+            proc = subprocess.run([sys.executable, os.path.join(root, "dunkingsheep"),
+                                   "--no-start-daemon", "telegram-bridge", "status"],
+                                  cwd=rundir, capture_output=True,
+                                  text=True, env=env, timeout=120)
+        combined = proc.stdout + proc.stderr
+        self.assertNotIn("no dunkingsheep daemon", combined,
+                         "a local command must not reach for the daemon socket")
+        # Whatever the environment, the BRIDGE was reached and answered: its own
+        # refusal, its status line, or the named import error - never silence.
+        markers = ("Run ./telegram-bridge setup first", "channel=",
+                   "telegram bridge unavailable", "Move Telegram channel",
+                   "channels.example.json")
+        self.assertTrue(any(marker in combined for marker in markers),
+                        f"the bridge was not reached; output was: {combined!r}")
+
+    @unittest.skipUnless(_has_fastapi(), "needs fastapi (web.app)")
+    def test_main_takes_an_argv_list_and_returns_an_exit_code(self):
+        bridge = _bridge()
+        parameters = list(inspect.signature(bridge.main).parameters)
+        self.assertTrue(parameters, "main() must accept an argv list (t713: TypeError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = os.environ.get("VP_DATA_DIR")
+            os.environ["VP_DATA_DIR"] = tmp
+            try:
+                code = bridge.main(["status"])
+            finally:
+                if saved is None:
+                    os.environ.pop("VP_DATA_DIR", None)
+                else:
+                    os.environ["VP_DATA_DIR"] = saved
+        self.assertIsInstance(code, int, "an exit code, not None or a tuple")
+        self.assertEqual(1, code, "no config in an empty desk store is a named refusal")
 
 
 class PageWatermarkTests(unittest.TestCase):
