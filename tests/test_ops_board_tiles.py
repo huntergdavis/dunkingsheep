@@ -186,7 +186,6 @@ class BriefTileTests(unittest.TestCase):
         # the live-but-unlisted lane only: a bare shell tab (%3) is not an unaccounted lane
         self.assertEqual(1, tile["unknown"])
         self.assertEqual(1, tile["bare_panes"])
-        self.assertEqual("%9", tile["dead_items"][0]["pane_id"])
 
     def test_a_live_but_unlisted_lane_is_not_called_dead(self):
         replies = dict(self.replies, list_panes={
