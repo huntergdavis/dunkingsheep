@@ -5,6 +5,7 @@
 //! (PR #190) and need the write convention (`db::SyncWriter`, #187), so they are
 //! not here yet.
 
+pub mod ingest;
 pub mod pure;
 pub mod recall;
 
