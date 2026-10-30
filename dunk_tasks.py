@@ -1025,6 +1025,37 @@ class Tasks:
         return {"noted": str(task_id), "event": event, "actor": actor,
                 "meta": meta or {}}
 
+    def notes(self, task_id, limit=3):
+        """The last `limit` events that carry a reason, oldest first (t605).
+
+        Evidence a lane wrote with `task note` lived only in task_events, so
+        `task read` showed a fully-reviewed task as if nobody had looked at it - the
+        reviewer's evidence was invisible to the next reader and the queue re-nudged
+        finished work. This is the read side of that record: no new storage, no
+        mutation, and a caller that asks for 0 gets none.
+        """
+        limit = int(limit or 0)
+        if limit <= 0:
+            return []
+        rows = self.db.execute(
+            "SELECT event, at, actor, meta FROM task_events WHERE task_id = ? "
+            "AND meta IS NOT NULL ORDER BY id DESC LIMIT ?",
+            (str(task_id), limit * 4)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                meta = json.loads(row["meta"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            reason = str((meta or {}).get("reason") or "").strip()
+            if not reason:
+                continue
+            out.append({"event": row["event"], "at": row["at"],
+                        "actor": row["actor"], "reason": reason})
+            if len(out) >= limit:
+                break
+        return list(reversed(out))
+
     # -- reading ------------------------------------------------------------
 
     def get(self, task_id, pane_id=None):

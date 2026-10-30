@@ -1118,6 +1118,16 @@ def print_task(task):
     if task.get("lease_expires_at"):
         print(f"lease       {time.strftime('%Y-%m-%d %H:%M:%S',
                                         time.localtime(task['lease_expires_at']))}")
+    if task.get("notes"):
+        # t605: the evidence a lane recorded, in the view the next reader actually
+        # uses. Without it a reviewed task reads as unreviewed.
+        print()
+        print(f"notes (last {len(task['notes'])}):")
+        for row in task["notes"]:
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["at"]))
+            print(f"  {when} {row.get('actor') or '-'} {row.get('event') or 'note'}")
+            for line in str(row.get("reason") or "").splitlines() or [""]:
+                print(f"    {line}")
 
 
 def print_task_list(result):
