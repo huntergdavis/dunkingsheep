@@ -1213,3 +1213,52 @@ class RowFactoryDriftTests(unittest.TestCase):
                                  "the factory is re-asserted so later reads work too")
             finally:
                 tasks.close()
+
+
+class CancelledDependencyTests(unittest.TestCase):
+    """t783: a cancelled prerequisite must not block its dependents for ever.
+
+    Measured 2026-10-30: t783 (T04) declares depends_on t781; t781 was CANCELLED, and
+    t783 still reported `open, claimable True, blocked_by ['t781'], eligible False`. So
+    an owner instruction to "claim t783 specifically" could not be carried out by any
+    worker: the task was not a candidate, and a worker cannot assign itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), persist=False, restore=False,
+            state_file=os.path.join(self.tmp.name, "d.json"),
+            inbox=Inbox(path=os.path.join(self.tmp.name, "i.db"),
+                        blob_dir=os.path.join(self.tmp.name, "b")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "t.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "r.json"),
+                        tokens_path=os.path.join(self.tmp.name, "k.json")))
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_a_cancelled_dependency_is_satisfied(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        self.flock.tasks.cancel(pre["id"], reason="superseded")
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        view = self.flock.tasks.get(after["id"])
+        self.assertEqual([], view["blocked_by"],
+                         "a cancelled prerequisite is not outstanding work")
+        self.assertTrue(view["eligible"])
+
+    def test_a_done_dependency_is_satisfied(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        self.flock.tasks.complete(pre["id"])
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        self.assertEqual([], self.flock.tasks.get(after["id"])["blocked_by"])
+
+    def test_an_open_dependency_still_blocks(self):
+        pre = self.flock.tasks.add("global", "prerequisite")
+        after = self.flock.tasks.add("global", "dependent", depends_on=[pre["id"]])
+        view = self.flock.tasks.get(after["id"])
+        self.assertEqual([pre["id"]], view["blocked_by"])
+        self.assertFalse(view["eligible"])
