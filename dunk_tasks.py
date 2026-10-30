@@ -71,6 +71,8 @@ _PANE_ID = re.compile(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$")
 # reviewer lane that is not its author; `verify` and `report` are reserved.
 KINDS = ("work", "review", "verify", "report")
 DEFAULT_KIND = "work"
+# t854: a task in one of these states is finished; no verb may move it.
+TERMINAL_STATUSES = ("done", "cancelled")
 VERDICTS = ("accept", "needs-fix")
 
 SCHEMA = """
@@ -465,8 +467,25 @@ class Tasks:
             min(lease["expires_at"] for lease in leases) if leases else None
         )
         statuses = self._statuses(task["depends_on"])
+        # t783: a CANCELLED dependency is satisfied, not outstanding. Cancelling a
+        # prerequisite is a decision that the dependent no longer waits for it; treating
+        # only "done" as satisfied made every dependent of a cancelled task permanently
+        # ineligible (measured: t783 depends on t781, which was cancelled, so t783 was
+        # open + claimable but eligible=False for ever, and an owner instruction to claim
+        # it could not be carried out by any worker).
         task["blocked_by"] = [
-            dep for dep in task["depends_on"] if statuses.get(dep) != "done"
+            dep for dep in task["depends_on"]
+            if statuses.get(dep) not in ("done", "cancelled")
+        ]
+        # t878/#164: a CANCELLED dependency IS satisfied (t879), so the row is
+        # claimable - but it is worth SAYING so. Before #164 these rows were
+        # unclaimable and invisible; the fix is in the filter, and this field keeps
+        # the fact visible instead of turning a silent brick into a silent pass.
+        task["dead_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) == "cancelled"
+        ]
+        task["missing_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) is None
         ]
         # F2: eligibility is per-viewer. An assigned task is not claimable by
         # anyone except its named assignee, so a generic list must not advertise
@@ -652,14 +671,64 @@ class Tasks:
                 if not sets:
                     self.db.commit()
                     return self.get(task_id)
+                # t854: a terminal status is FINAL. cancel() and block() are both
+                # update(status=...), so two concurrent calls used to be a
+                # last-writer-wins race: on t780 a steward's 'cancelled' was overwritten
+                # by a lane's in-flight 'blocked', the reaper then reopened the blocked
+                # task and handed the cancelled duplicate back to the queue (and
+                # cancelled_at was NULL, so the record no longer said it was cancelled).
+                #
+                # Two guards, because one is not enough:
+                #  1. if we READ a terminal status, a status change is refused here;
+                #  2. the status UPDATE is conditional on the status we read, so a
+                #     cancel that lands between our read and our write still wins - the
+                #     loser's rowcount is 0 and it raises instead of resurrecting.
+                if "status" in sets and row["status"] in TERMINAL_STATUSES \
+                        and sets["status"] != row["status"]:
+                    raise TaskError(
+                        f"task {task_id} is {row['status']}; a finished task is not "
+                        "reopened by an edit (t854)")
                 sets["updated_at"] = now
                 assignments = ", ".join(f"{key} = ?" for key in sets)
-                self.db.execute(
-                    f"UPDATE tasks SET {assignments} WHERE id = ?",
-                    (*sets.values(), task_id),
-                )
+                changes_status = ("status" in sets and sets["status"] != row["status"])
+                if changes_status:
+                    cursor = self.db.execute(
+                        f"UPDATE tasks SET {assignments} WHERE id = ? AND status = ?",
+                        (*sets.values(), task_id, row["status"]))
+                else:
+                    cursor = self.db.execute(
+                        f"UPDATE tasks SET {assignments} WHERE id = ?",
+                        (*sets.values(), task_id))
+                if changes_status and cursor.rowcount == 0:
+                    self.db.rollback()
+                    current = self._require(task_id)["status"]
+                    if current in TERMINAL_STATUSES:
+                        raise TaskError(
+                            f"task {task_id} is {current}; a finished task is not reopened "
+                            "by an edit (t854)")
+                    raise TaskError(
+                        f"task {task_id} changed to {current} while this edit was applied; "
+                        "read it again (t854)")
                 if "status" in sets and sets["status"] != row["status"]:
                     new_status = sets["status"]
+                    # t891: a lane that FINISHES a task must stop looking busy. The
+                    # lease row survived completion, cancellation and blocking, and
+                    # dispatch/push decide "is this pane busy?" from
+                    # leases_for_pane() - so a lane that had just completed four
+                    # reviews was still excluded from dispatch for up to 30 minutes
+                    # (measured live by %101: 5 leases on terminal tasks, all live).
+                    # The status is the end of the claim, so the claim goes with it.
+                    if new_status in TERMINAL_STATUSES + ("blocked",):
+                        removed = self.db.execute(
+                            "DELETE FROM task_leases WHERE task_id = ?",
+                            (task_id,)).rowcount
+                        if removed:
+                            self._record(task_id, "lease_released", at=now,
+                                         actor=updated_by, scope=row["scope"],
+                                         priority=sets.get("priority", row["priority"]),
+                                         status_to=new_status,
+                                         meta={"reason": f"status became {new_status}",
+                                               "leases_removed": removed})
                     if new_status == "done":
                         event = "completed"
                         duration = int((now - row["created_at"]) * 1000)
@@ -680,6 +749,14 @@ class Tasks:
                     self._record(task_id, "priority", at=now, actor=updated_by,
                                  scope=row["scope"], priority=sets["priority"],
                                  meta={"from": row["priority"], "to": sets["priority"]})
+                if "depends_on" in sets and sets["depends_on"] != row["depends_on"]:
+                    before = _decode(row["depends_on"])
+                    after = _decode(sets["depends_on"])
+                    self._record(task_id, "depends", at=now, actor=updated_by,
+                                 scope=row["scope"], priority=row["priority"],
+                                 meta={"removed": [d for d in before if d not in after],
+                                       "added": [d for d in after if d not in before],
+                                       "depends_on": after})
                 if "assignees" in sets and sets["assignees"] != row["assignees"]:
                     self._record(task_id, "assigned", at=now, actor=updated_by,
                                  scope=row["scope"], priority=row["priority"],
@@ -883,6 +960,20 @@ class Tasks:
                         "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
                         "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
                         (now, pane_id, now, from_task))
+                    # t891: THIS is the path that leaves the lease behind. Completion
+                    # arrives here, not through update(), so the release has to happen
+                    # here too - otherwise the lane that just finished stays "busy" in
+                    # leases_for_pane() and dispatch skips it for the rest of the
+                    # 30-minute lease (measured live: five leases on terminal tasks).
+                    released = self.db.execute(
+                        "DELETE FROM task_leases WHERE task_id = ?",
+                        (from_task,)).rowcount
+                    if released:
+                        self._record(from_task, "lease_released", at=now, actor=pane_id,
+                                     scope=row["scope"], priority=row["priority"],
+                                     status_to="done",
+                                     meta={"reason": "task completed",
+                                           "leases_removed": released})
                     self._record(from_task, "completed", at=now, actor=pane_id,
                                  scope=row["scope"], priority=row["priority"],
                                  status_from=row["status"], status_to="done",
@@ -996,7 +1087,22 @@ class Tasks:
         return self.update(row["id"], status="open", block_reason=None)
 
     def cancel(self, task_id, reason=None):
-        return self.update(task_id, status="cancelled", block_reason=reason)
+        """Cancel a task and SAY what it strands (t878).
+
+        A cancelled dependency can never be satisfied, so every dependent row becomes
+        permanently unclaimable - and until t878 the queue said nothing, so the rows
+        simply never came back from `task next`. The cancellation names them here so
+        the caller can report it in one line instead of a lane discovering it weeks
+        later.
+        """
+        row = self.update(task_id, status="cancelled", block_reason=reason)
+        if isinstance(row, dict):
+            rows = self.db.execute(
+                "SELECT id, status, depends_on FROM tasks WHERE status IN "
+                "('open', 'in_progress', 'blocked')").fetchall()
+            row["blocked_dependents"] = sorted(
+                r["id"] for r in rows if str(task_id) in _decode(r["depends_on"]))
+        return row
 
     def delete(self, task_id):
         # F4: the checks and the delete are one write transaction.

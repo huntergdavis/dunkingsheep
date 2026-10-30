@@ -904,6 +904,8 @@ def h_task_update(flock, args, self_pane_id):
     if "assignees" in args:
         fields["assignees"] = _task_values(args["assignees"])
     if "depends_on" in args:
+        # t878: this REPLACES the edge list, which is why a repoint repairs a dead
+        # edge without a removal verb (verified on the seven stranded rows).
         fields["depends_on"] = _task_values(args["depends_on"])
     if "multi_assignee" in args:
         fields["multi_assignee"] = _bool(args["multi_assignee"], False)
