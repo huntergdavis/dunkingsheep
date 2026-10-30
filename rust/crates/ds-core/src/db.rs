@@ -26,6 +26,19 @@ use serde_json::Value;
 
 use crate::error::DunkError;
 
+/// How many times opening a writer retries the WAL switch on a busy database.
+///
+/// Bounded on purpose: a genuinely locked database must still fail, and a caller must
+/// not wait for ever on an open (t1006).
+const WAL_OPEN_ATTEMPTS: u32 = 5;
+/// The first backoff for that retry, doubled per attempt (5, 10, 20, 40 ms).
+const WAL_OPEN_BACKOFF_MS: u64 = 5;
+
+/// Is this refusal the retryable busy/locked one?
+fn error_is_busy(error: &DunkError) -> bool {
+    matches!(error, DunkError::Busy)
+}
+
 /// The Python's `BUSY_TIMEOUT_MS` (`dunk_sqlite.py`).
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
@@ -79,10 +92,40 @@ pub fn open_writer_with_timeout(path: &Path, busy_ms: u64) -> Result<Connection,
         .busy_timeout(std::time::Duration::from_millis(busy_ms))
         .map_err(map_sqlite)?;
     // An in-memory database has no journal file to switch.
+    //
+    // Switching to WAL needs a lock the OTHER writer may hold at this instant, so
+    // `PRAGMA journal_mode = WAL` can answer SQLITE_BUSY even though the busy timeout
+    // is already set (the timeout covers statements, not this pragma's exclusive
+    // moment). Measured: `two_writers_serialize_their_transactions` failed 1 run in 20
+    // with `writer: Busy` here, in a place nothing in the test could influence - and
+    // two daemons (or a timer process starting while the daemon writes) hit exactly
+    // this. The retry module T02 landed exists for this sentence: a busy answer is
+    // RETRYABLE, and failing the open instead is the bug.
     if path.to_string_lossy() != ":memory:" {
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(map_sqlite)?;
+        let mut last = None;
+        for attempt in 0..WAL_OPEN_ATTEMPTS {
+            match connection.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => {
+                    last = None;
+                    break;
+                }
+                Err(error) => {
+                    let mapped = map_sqlite(error);
+                    if error_is_busy(&mapped) && attempt + 1 < WAL_OPEN_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            WAL_OPEN_BACKOFF_MS << attempt.min(4),
+                        ));
+                        last = Some(mapped);
+                        continue;
+                    }
+                    last = Some(mapped);
+                    break;
+                }
+            }
+        }
+        if let Some(error) = last {
+            return Err(error);
+        }
     }
     Ok(connection)
 }
