@@ -35,8 +35,12 @@ data/
 auth.json
 owner-credentials
 *.sqlite3
+# Credential-shaped files (t746 secret guard).
 *-credentials
 *.pem
 *token*
 .env
 *.key
+
+# Rust build artefacts (T00): the workspace is built by every task.
+rust/target/
