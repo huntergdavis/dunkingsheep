@@ -447,7 +447,14 @@ fn pane_ids_are_recognised_in_both_backends_spellings() {
 #[test]
 fn a_transport_is_none_web_telegram_or_report_and_nothing_else() {
     assert_eq!(Ok(None), validate_transport(None));
-    assert_eq!(Ok(None), validate_transport(Some("  ")));
+    assert_eq!(Ok(None), validate_transport(Some("")));
+    // Python: only None and exactly '' are a lane message; whitespace is refused.
+    for blank in ["  ", "\t"] {
+        assert_eq!(
+            Err("transport must be one of web, telegram, report; got ''".to_string()),
+            validate_transport(Some(blank))
+        );
+    }
     assert_eq!(Ok(Some("web".to_string())), validate_transport(Some("WEB")));
     assert_eq!(
         Ok(Some("telegram".to_string())),
@@ -458,13 +465,6 @@ fn a_transport_is_none_web_telegram_or_report_and_nothing_else() {
         error.contains("transport must be one of web, telegram, report"),
         "{error}"
     );
-}
-
-#[test]
-fn an_external_id_is_the_transport_and_the_id() {
-    // The dedupe key for a redelivered update: same transport + same update id = one row.
-    assert_eq!("telegram:4411", external_id("telegram", "4411"));
-    assert_eq!("telegram:4411", external_id("telegram", " 4411 "));
 }
 
 #[test]

@@ -484,11 +484,13 @@ pub fn is_pane_mailbox(value: &str) -> bool {
     is_pane_id(value)
 }
 
-/// `None` (a lane message) or one of [`TRANSPORTS`].
+/// `None` (a lane message) or one of [`TRANSPORTS`]. Only `None` and exactly `""` mean
+/// "lane message" (`transport in (None, "")`); a whitespace-only value is NOT empty, it
+/// strips to `""` and is refused with `got ''`, like the Python.
 pub fn validate_transport(transport: Option<&str>) -> Result<Option<String>, String> {
     let transport = match transport {
         None => return Ok(None),
-        Some(text) if text.trim().is_empty() => return Ok(None),
+        Some("") => return Ok(None),
         Some(text) => text.trim().to_lowercase(),
     };
     if TRANSPORTS.contains(&transport.as_str()) {
@@ -500,11 +502,6 @@ pub fn validate_transport(transport: Option<&str>) -> Result<Option<String>, Str
             transport
         ))
     }
-}
-
-/// A transport's own id for a row: the dedupe key for a redelivered update.
-pub fn external_id(transport: &str, value: &str) -> String {
-    format!("{transport}:{}", value.trim())
 }
 
 /// The purge rule: `state != 'queued' AND COALESCE(acked_at, cancelled_at, read_at,
