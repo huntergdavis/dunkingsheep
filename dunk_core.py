@@ -2257,6 +2257,72 @@ class Flock:
                 "count": len(rows), "waiting": waiting}
 
     @_as_dunk_error
+    def owner_ingest(self, body, transport, external_id=None, subject=None,
+                     attachments=(), self_pane_id=None):
+        """Record one owner question that arrived on `transport` (t594).
+
+        This is the inbound half of FLAT_FLEET.md 7.2: a bridge does not write a
+        store of its own, it puts the question in the one owner mailbox with the
+        transport it arrived on, and `owner_reply` answers it back the same way.
+        `external_id` is the transport's own id (Telegram's `telegram:<update_id>`),
+        so a redelivered update returns the row it already produced instead of a
+        second question.
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError, validate_transport
+        try:
+            transport = validate_transport(transport)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        if transport is None:
+            raise DunkError("an ingested owner question needs a transport")
+        if external_id:
+            existing = self.inbox.find_by_external_id(self.OWNER_MAILBOX,
+                                                      external_id)
+            if existing is not None:
+                return {"message": existing, "duplicate": True,
+                        "transport": transport}
+        try:
+            message = self.inbox.send(self.OWNER_MAILBOX, body, subject=subject,
+                                      sender=None, mailbox_label=self.OWNER_MAILBOX,
+                                      transport=transport, external_id=external_id,
+                                      attachments=attachments)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        self._invalidate_view()
+        return {"message": message, "duplicate": False, "transport": transport}
+
+    @_as_dunk_error
+    def owner_outbox(self, transport, limit=20, self_pane_id=None):
+        """Replies waiting for `transport` to deliver them (t594).
+
+        Only owner-mailbox replies whose own transport matches are returned, which
+        is what keeps Telegram to answers and nothing else (no briefs, no digests,
+        no web echoes).
+        """
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError
+        try:
+            rows = self.inbox.owner_outbox(transport, limit=limit)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        return {"transport": transport, "messages": rows, "count": len(rows)}
+
+    @_as_dunk_error
+    def owner_delivered(self, message_id, transport, external_id=None,
+                        self_pane_id=None):
+        """Record a transport's delivery receipt for one owner row (t594)."""
+        self._owner_role(self_pane_id)
+        from dunk_inbox import InboxError
+        try:
+            message = self.inbox.mark_delivered(message_id, transport,
+                                                external_id=external_id)
+        except InboxError as error:
+            raise DunkError(str(error)) from None
+        return {"message": message, "transport": transport,
+                "delivered_at": message.get("delivered_at")}
+
+    @_as_dunk_error
     def owner_reply(self, message_id, body, self_pane_id=None):
         """Answer one owner question: one reply row, linked, on the same transport.
 

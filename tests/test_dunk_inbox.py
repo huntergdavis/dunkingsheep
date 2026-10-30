@@ -1051,6 +1051,9 @@ class SurfaceParityTests(unittest.TestCase):
             "delivery_capability": "capability",
             "owner_poll": "poll", "allocation": "allocation",
             "owner_conversation": "conversation", "owner_reply": "reply",
+            # t594: the transport half of the owner mailbox.
+            "owner_ingest": "ingest", "owner_outbox": "outbox",
+            "owner_delivered": "delivered",
             "split_pane": "split", "start_agent": "start-agent", "rename": "rename",
             "focus": "focus", "close": "close", "herdr": "herdr",
             "herdr_help": "herdr-help", "help": "guide", "shutdown": "shutdown",
