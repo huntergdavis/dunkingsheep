@@ -36,11 +36,34 @@ class PureTests(unittest.TestCase):
                                          filed_ids={"OVL_0001_0005"}, limit=5)
         self.assertEqual(["OVL_0001_0001"], [r["id"] for r in picked])
 
-    def test_filed_ids_come_from_live_titles_only(self):
+    def test_a_filed_row_counts_in_every_status(self):
+        """t857: this test used to assert the opposite - that a DONE filing does not
+        count - which IS the defect: three merged-but-uncredited bodies were filed
+        four times each, and my own retry refiled ten rows the same way."""
         tasks = [{"title": dunk_poolrad.task_title(row("OVL_0001_0001", 1)), "status": "open"},
                  {"title": dunk_poolrad.task_title(row("OVL_0001_0002", 2)), "status": "done"},
+                 {"title": dunk_poolrad.task_title(row("OVL_0001_0003", 3)),
+                  "status": "cancelled"},
+                 {"title": dunk_poolrad.task_title(row("OVL_0001_0004", 4)), "status": "blocked"},
                  {"title": "unrelated", "status": "open"}]
-        self.assertEqual({"OVL_0001_0001"}, dunk_poolrad.filed_ids_from_tasks(tasks))
+        self.assertEqual({"OVL_0001_0001", "OVL_0001_0002", "OVL_0001_0003",
+                          "OVL_0001_0004"},
+                         dunk_poolrad.filed_ids_from_tasks(tasks))
+
+    def test_the_body_carries_a_machine_readable_filing_key(self):
+        body = dunk_poolrad.task_body(row("OVL_0001_0001", 1), "abc123", "/repo")
+        self.assertIn("filed-key: poolrad-strict:OVL_0001_0001@abc123", body)
+        found = dunk_poolrad.filed_keys_from_tasks([{"body": body, "id": "t7",
+                                                     "status": "done"}])
+        self.assertEqual({"OVL_0001_0001": ("t7", "done")}, found)
+
+    def test_the_key_wins_over_the_title_when_both_are_present(self):
+        body = ("POOLRAD STRICT FULL-C BODY OVL_0001_0001\n"
+                "filed-key: poolrad-strict:OVL_0001_0009@deadbeef\n")
+        found = dunk_poolrad.filed_keys_from_tasks(
+            [{"body": body, "id": "t8", "status": "open",
+              "title": dunk_poolrad.task_title(row("OVL_0001_0001", 1))}])
+        self.assertEqual(["OVL_0001_0009"], list(found))
 
     def test_body_carries_base_method_and_acceptance(self):
         body = dunk_poolrad.task_body(row("OVL_0001_0001", 1), "abc123", "/repo")
@@ -86,6 +109,30 @@ class SyncTests(unittest.TestCase):
         report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=boom).run()
         self.assertEqual([], report["filed"])
         self.assertIn("exporter exploded", report["errors"][0])
+
+    def test_a_completed_filing_is_not_refiled(self):
+        """t857: the 4x refile. A done task for the row must stop the next pass."""
+        sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
+        first = sync.run(limit=2)
+        self.assertEqual(2, len(first["filed"]))
+        for entry in first["filed"]:
+            self.flock.tasks.complete(entry["task"])
+        again = sync.run(limit=2)
+        self.assertEqual(["OVL_0001_0003", "OVL_0001_0004"],
+                         [f["id"] for f in again["filed"]],
+                         "a completed filing was refiled")
+        self.assertEqual(2, len(again["skipped"]["already_filed_tasks"]))
+
+    def test_a_retry_after_a_partial_failure_files_only_the_remainder(self):
+        """The EAGAIN incident: the first pass dies mid-way, the retry must not
+        refile what the first pass already did."""
+        sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
+        sync.run(limit=2)                       # a partial pass: two rows filed
+        rest = sync.run(limit=10)               # the retry
+        self.assertEqual(["OVL_0001_0003", "OVL_0001_0004", "OVL_0001_0005"],
+                         [f["id"] for f in rest["filed"]])
+        self.assertEqual(5, len(self.flock.tasks.list(kind="work", include_done=True)),
+                         "the retry created a duplicate")
 
     def test_dry_run_files_nothing(self):
         sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)

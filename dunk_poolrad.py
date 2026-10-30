@@ -134,20 +134,50 @@ def task_body(row, base, repo):
         "the accounting commit is written by the review timer from the verdict (the",
         "strict manifest row), never by the author. A claim one step wider than its",
         "evidence is the defect this fleet records most; say what was NOT verified.",
+        # t857: a machine-readable key - (source doc, row id, base head) - so a filer
+        # can ask "was this exact filing already made?" without parsing a title or
+        # trusting a timestamp. The first version had no key at all, so a retry after
+        # a partial failure re-filed everything it had already done.
+        f"filed-key: {FILED_KEY_PREFIX}{row['id']}@{base}",
         f"filed by backlog-sync at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
     ]
     return "\n".join(lines)
 
 
-def filed_ids_from_tasks(tasks):
-    out = set()
+FILED_KEY_PREFIX = "poolrad-strict:"
+FILED_KEY = re.compile(r"^filed-key: " + re.escape(FILED_KEY_PREFIX) +
+                       r"(?P<id>\S+?)@(?P<base>\S+)\s*$", re.MULTILINE)
+
+
+def filed_keys_from_tasks(tasks):
+    """{row id: (task id, status)} for every task that already filed this row.
+
+    EVERY status counts, not only the live ones (t857). The old version looked at
+    open/in_progress/blocked and the caller passed include_done=False, so a task
+    that was DONE or CANCELLED was invisible and the next pass re-filed it: %108
+    measured three merged-but-uncredited bodies filed four times each, and my own
+    T00-T14 retry refiled ten rows the same way. A row that has been filed is
+    filed; re-filing it is how a queue fills with duplicates of its own history.
+    """
+    out = {}
     for task in tasks:
-        title = task.get("title") or ""
-        if title.startswith(TITLE_PREFIX) and task.get("status") in ("open", "in_progress", "blocked"):
-            parts = title[len(TITLE_PREFIX):].split()
-            if parts:
-                out.add(parts[0])
+        status = task.get("status") or ""
+        body = task.get("body") or ""
+        match = FILED_KEY.search(body)
+        rid = match.group("id") if match else None
+        if rid is None:
+            title = task.get("title") or ""
+            if title.startswith(TITLE_PREFIX):
+                parts = title[len(TITLE_PREFIX):].split()
+                rid = parts[0] if parts else None
+        if rid and rid not in out:
+            out[rid] = (task.get("id"), status)
     return out
+
+
+def filed_ids_from_tasks(tasks):
+    """The row ids already filed, in any status (kept for callers that want ids)."""
+    return set(filed_keys_from_tasks(tasks))
 
 
 def disposition_closures(repo):
@@ -413,8 +443,13 @@ class Sync:
         base = _git(self.repo, "rev-parse", "HEAD")
         report["base"] = base
         credited = credited_ids(self.repo)
-        live = self.flock.tasks.list(scope=None, include_done=False, limit=500, kind="work")
-        filed = filed_ids_from_tasks(live)
+        # include_done=True: a DONE or CANCELLED filing still means "this row was
+        # filed" (t857). The report names the task and its status, so a skip is
+        # never silent.
+        everything = self.flock.tasks.list(scope=None, include_done=True, limit=2000,
+                                           kind="work")
+        filed_keys = filed_keys_from_tasks(everything)
+        filed = set(filed_keys)
         # t686: a candidate a reviewed disposition has closed, or whose body and
         # checker are already on main, is not an authoring task. Both are decided
         # from the tree, not from a note, so the skip is reproducible.
@@ -461,6 +496,9 @@ class Sync:
                                              if written else None)
         picked = candidates(queue, credited, filed, limit, closed=closed)
         report["skipped"] = {"credited": len(credited), "already_filed": len(filed),
+                             "already_filed_tasks": {rid: {"task": task_id, "status": status}
+                                                     for rid, (task_id, status)
+                                                     in sorted(filed_keys.items())},
                              "queue_rows": len(queue.get("rows") or []),
                              "closed": {rid: closed[rid] for rid in sorted(closed)}}
         for row in picked:
