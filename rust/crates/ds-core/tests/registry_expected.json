@@ -1,0 +1,2673 @@
+{
+ "commands": {
+  "add_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "hold_while_typing": {
+     "description": "Never type over a human: before each send the daemon reads the target's input box and, if someone is mid-way through typing there, holds the send and re-checks every minute until the box is clear. Default true. Set false only for a pane nobody types in.",
+     "type": "boolean"
+    },
+    "interval_minutes": {
+     "description": "Minutes between sends, greater than zero (fractions allowed, e.g. 0.5).",
+     "minimum": 0.01,
+     "type": "number"
+    },
+    "max_sends": {
+     "description": "Remove the dunk automatically after this many sends. 1 makes a one-shot delayed nudge. 0 (the default) repeats forever.",
+     "minimum": 0,
+     "type": "integer"
+    },
+    "name": {
+     "description": "Optional human label for the dunk.",
+     "type": "string"
+    },
+    "only_when": {
+     "description": "'idle' holds each send until the backend reports the target agent as idle (not working/blocked). 'any' (the default) sends on schedule.",
+     "enum": [
+      "idle",
+      "any"
+     ],
+     "type": "string"
+    },
+    "skip_if_unconsumed": {
+     "description": "Backpressure: skip a scheduled send (no-op, send_count unchanged) when the previous send was never picked up by the target, instead of piling duplicate prompts into an unattended pane. Default false. Recommended for self-dunks and unattended agents.",
+     "type": "boolean"
+    },
+    "start": {
+     "description": "Start right away (default true).",
+     "type": "boolean"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    },
+    "text": {
+     "description": "Text to type into the pane, followed by Enter. Placeholders {id}, {name}, {count}, {target}, {interval}, {time} and {date} are expanded at send time, so a dunk can tell its recipient which dunk it came from (e.g. '... when the backlog is done, remove dunk {id}').",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target",
+    "text",
+    "interval_minutes"
+   ],
+   "type": "object"
+  },
+  "allocation": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "type": "string"
+    },
+    "body": {
+     "type": "string"
+    },
+    "enabled": {
+     "type": "boolean"
+    },
+    "pane_id": {
+     "type": "string"
+    },
+    "pool": {
+     "type": "string"
+    },
+    "pools": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "requires": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "revision": {
+     "type": "string"
+    },
+    "roles": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "skills": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "task_id": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "cancel_message": {
+   "additionalProperties": false,
+   "properties": {
+    "message_id": {
+     "description": "Message id, e.g. 'm3' (see list_messages).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "type": "object"
+  },
+  "clear_box": {
+   "additionalProperties": false,
+   "properties": {
+    "reason": {
+     "description": "Why this draft is being destroyed (logged).",
+     "type": "string"
+    },
+    "target": {
+     "description": "Pane id, name or label.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "close": {
+   "additionalProperties": false,
+   "properties": {
+    "force": {
+     "description": "Allow closing the caller's own pane/tab/workspace. Superusers only; use with care.",
+     "type": "boolean"
+    },
+    "kind": {
+     "description": "What `target` names.",
+     "enum": [
+      "workspace",
+      "tab",
+      "pane"
+     ],
+     "type": "string"
+    },
+    "target": {
+     "description": "Id, label, unique label substring or 'self'. For panes the same rules as other pane targets apply.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "target"
+   ],
+   "type": "object"
+  },
+  "context_add": {
+   "additionalProperties": false,
+   "properties": {
+    "authority": {
+     "enum": [
+      "owner",
+      "measured",
+      "agent"
+     ],
+     "type": "string"
+    },
+    "body": {
+     "type": "string"
+    },
+    "cls": {
+     "enum": [
+      "ground-truth",
+      "fact",
+      "provisional",
+      "history"
+     ],
+     "type": "string"
+    },
+    "global_store": {
+     "type": "boolean"
+    },
+    "project_path": {
+     "type": "string"
+    },
+    "recheck_after": {
+     "type": "string"
+    },
+    "source": {
+     "type": "string"
+    },
+    "stated": {
+     "type": "string"
+    },
+    "subject": {
+     "type": "string"
+    },
+    "supersedes": {
+     "type": "string"
+    },
+    "type": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "body",
+    "cls",
+    "subject"
+   ],
+   "type": "object"
+  },
+  "context_promote": {
+   "additionalProperties": false,
+   "properties": {
+    "global_store": {
+     "type": "boolean"
+    },
+    "project_path": {
+     "type": "string"
+    },
+    "slug": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "slug"
+   ],
+   "type": "object"
+  },
+  "context_retire": {
+   "additionalProperties": false,
+   "properties": {
+    "global_store": {
+     "type": "boolean"
+    },
+    "project_path": {
+     "type": "string"
+    },
+    "reason": {
+     "type": "string"
+    },
+    "slug": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "slug"
+   ],
+   "type": "object"
+  },
+  "context_supersede": {
+   "additionalProperties": false,
+   "properties": {
+    "body": {
+     "type": "string"
+    },
+    "global_store": {
+     "type": "boolean"
+    },
+    "project_path": {
+     "type": "string"
+    },
+    "slug": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "slug",
+    "body"
+   ],
+   "type": "object"
+  },
+  "create_tab": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Optional command line to type + Enter into the new pane once it exists, e.g. 'claude' to start an agent there.",
+     "type": "string"
+    },
+    "cwd": {
+     "description": "Working directory for the new shell (default: the backend's).",
+     "type": "string"
+    },
+    "focus": {
+     "description": "Switch the human's view to it (default false: create in the background).",
+     "type": "boolean"
+    },
+    "label": {
+     "description": "Name to give it (how you will target it later).",
+     "type": "string"
+    },
+    "workspace": {
+     "description": "Workspace id ('w9'), label, unique label substring, or 'self' for the caller's own workspace (the default when omitted).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "label"
+   ],
+   "type": "object"
+  },
+  "create_workspace": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Optional command line to type + Enter into the new pane once it exists, e.g. 'claude' to start an agent there.",
+     "type": "string"
+    },
+    "cwd": {
+     "description": "Working directory for the new shell (default: the backend's).",
+     "type": "string"
+    },
+    "focus": {
+     "description": "Switch the human's view to it (default false: create in the background).",
+     "type": "boolean"
+    },
+    "label": {
+     "description": "Name to give it (how you will target it later).",
+     "type": "string"
+    },
+    "mailbox": {
+     "description": "the lane mailbox this new pane IS; recorded in the lane registry against the new pane id, so mail addressed to that lane reaches this pane after a backend change",
+     "type": "string"
+    },
+    "model": {
+     "type": "string"
+    },
+    "provider": {
+     "type": "string"
+    },
+    "role": {
+     "description": "bind this role to the new pane (registered from the launch record)",
+     "enum": [
+      "owner",
+      "desk",
+      "planner",
+      "worker",
+      "reviewer"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "delivery": {
+   "additionalProperties": false,
+   "properties": {
+    "status": {
+     "description": "The pane's reported status, if known.",
+     "type": "string"
+    },
+    "target": {
+     "description": "Pane id, name or label.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "delivery_capability": {
+   "additionalProperties": false,
+   "properties": {
+    "target": {
+     "description": "pane id (%9) or pinned lane name",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "dispatch": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "description": "add, list, remove, tick or status (default status).",
+     "type": "string"
+    },
+    "brief": {
+     "description": "One-line assignment (add).",
+     "type": "string"
+    },
+    "dry_run": {
+     "description": "Plan the tick, send nothing.",
+     "type": "boolean"
+    },
+    "id": {
+     "description": "Standby item id (remove).",
+     "type": "integer"
+    },
+    "lane": {
+     "description": "Reserve the item for one lane (add).",
+     "type": "string"
+    },
+    "lanes": {
+     "description": "Comma-separated pane ids or lane names the tick may feed. Default is dispatch_lanes.json, then DUNKINGSHEEP_DISPATCH_LANES, then NOTHING.",
+     "type": "string"
+    },
+    "task_id": {
+     "description": "Task this assignment advances (add).",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "doctor": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "fire_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "countdown_s": {
+     "description": "Seconds to count down first (default 0).",
+     "minimum": 0,
+     "type": "integer"
+    },
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    },
+    "wait": {
+     "description": "Wait for the send to finish (default true).",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "flush_box": {
+   "additionalProperties": false,
+   "properties": {
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "focus": {
+   "additionalProperties": false,
+   "properties": {
+    "kind": {
+     "description": "What `target` names.",
+     "enum": [
+      "workspace",
+      "tab",
+      "pane"
+     ],
+     "type": "string"
+    },
+    "target": {
+     "description": "Id, label, unique label substring or 'self'. For panes the same rules as other pane targets apply.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "target"
+   ],
+   "type": "object"
+  },
+  "get_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "get_message": {
+   "additionalProperties": false,
+   "properties": {
+    "message_id": {
+     "description": "Message id, e.g. 'm3' (see list_messages).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "type": "object"
+  },
+  "gh_token": {
+   "additionalProperties": false,
+   "properties": {
+    "kind": {
+     "enum": [
+      "author",
+      "reviewer"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "health": {
+   "additionalProperties": false,
+   "properties": {
+    "deep": {
+     "description": "Also run PRAGMA quick_check (slow).",
+     "type": "boolean"
+    },
+    "repair": {
+     "description": "Apply the fixed repairs (default false).",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "help": {
+   "additionalProperties": false,
+   "properties": {
+    "markdown": {
+     "description": "Render the guide as markdown (default plain text).",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "herdr": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "herdr subcommand line, e.g. 'tab focus w9:t2'.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "command"
+   ],
+   "type": "object"
+  },
+  "herdr_help": {
+   "additionalProperties": false,
+   "properties": {
+    "topic": {
+     "description": "A rollback-backend (herdr) command group, e.g. 'pane'. Omit for the overview.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "inbox_ack": {
+   "additionalProperties": false,
+   "properties": {
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    },
+    "message_ids": {
+     "description": "One inbox message id, or several comma separated.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_ids"
+   ],
+   "type": "object"
+  },
+  "inbox_archive": {
+   "additionalProperties": false,
+   "properties": {
+    "before": {
+     "description": "Only messages created before this time.",
+     "type": "string"
+    },
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    },
+    "state": {
+     "description": "queued,read,acked (default queued,acked).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "mailbox"
+   ],
+   "type": "object"
+  },
+  "inbox_cancel": {
+   "additionalProperties": false,
+   "properties": {
+    "message_ids": {
+     "description": "One inbox message id, or several comma separated.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_ids"
+   ],
+   "type": "object"
+  },
+  "inbox_count": {
+   "additionalProperties": false,
+   "properties": {
+    "fresh": {
+     "description": "Rebuild the cached view before answering.",
+     "type": "boolean"
+    },
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "inbox_delete": {
+   "additionalProperties": false,
+   "properties": {
+    "message_ids": {
+     "description": "One inbox message id, or several comma separated.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_ids"
+   ],
+   "type": "object"
+  },
+  "inbox_fetch": {
+   "additionalProperties": false,
+   "properties": {
+    "attachment_id": {
+     "description": "Attachment id, from inbox_read or inbox_list.",
+     "type": "string"
+    },
+    "dest": {
+     "description": "Directory to write into (default: the daemon's cwd).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "attachment_id"
+   ],
+   "type": "object"
+  },
+  "inbox_list": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "description": "How many to return (default 50).",
+     "maximum": 500,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    },
+    "unread_only": {
+     "description": "Only unread messages (default true).",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "inbox_read": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "description": "How many to read (default 10).",
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    },
+    "peek": {
+     "description": "Do not mark them read (default false).",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "inbox_recover": {
+   "additionalProperties": false,
+   "properties": {
+    "mailbox": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "inbox_send": {
+   "additionalProperties": false,
+   "properties": {
+    "attach": {
+     "description": "Optional local file path(s) to attach, comma separated.",
+     "type": "string"
+    },
+    "body": {
+     "description": "The message. Any length.",
+     "type": "string"
+    },
+    "notify": {
+     "description": "Nudge the recipient's pane that mail arrived (default true).",
+     "type": "boolean"
+    },
+    "subject": {
+     "description": "Optional one-line summary.",
+     "type": "string"
+    },
+    "system_sender": {
+     "description": "Non-agent sender name (\"watchdog\" only); refused from any caller that has a pane.",
+     "type": "string"
+    },
+    "to": {
+     "description": "Whose inbox: an agent name, a pane id, a unique label substring, or 'self' for your own. Agent names are preferred because they survive a pane moving or restarting. A name that matches no live pane still works, so mail can be left for an agent that is not running.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "to",
+    "body"
+   ],
+   "type": "object"
+  },
+  "inbox_stats": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "inbox_status": {
+   "additionalProperties": false,
+   "properties": {
+    "message_id": {
+     "description": "Inbox message id, e.g. 'i42', as returned by inbox_send.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "type": "object"
+  },
+  "lane_register": {
+   "additionalProperties": false,
+   "properties": {
+    "label": {
+     "type": "string"
+    },
+    "model": {
+     "type": "string"
+    },
+    "pane": {
+     "description": "pane id, or 'self'",
+     "type": "string"
+    },
+    "provider": {
+     "description": "claude/codex/pi/opencode-go",
+     "type": "string"
+    },
+    "role": {
+     "enum": [
+      "owner",
+      "desk",
+      "planner",
+      "worker",
+      "reviewer"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "role"
+   ],
+   "type": "object"
+  },
+  "lane_set": {
+   "additionalProperties": false,
+   "properties": {
+    "mailbox": {
+     "description": "the lane name",
+     "type": "string"
+    },
+    "pane": {
+     "description": "the pane id",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "lane_unregister": {
+   "additionalProperties": false,
+   "properties": {
+    "pane": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "pane"
+   ],
+   "type": "object"
+  },
+  "lanes": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "description": "list (default) or set",
+     "enum": [
+      "list",
+      "set"
+     ],
+     "type": "string"
+    },
+    "mailbox": {
+     "description": "set: the lane name this pane IS",
+     "type": "string"
+    },
+    "pane": {
+     "description": "set: the pane id",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "list_dunks": {
+   "additionalProperties": false,
+   "properties": {
+    "fresh": {
+     "description": "Rebuild the cached view before answering.",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "list_messages": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "list_panes": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "list_workspaces": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "memory_backfill": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "enum": [
+      "start",
+      "pause",
+      "resume",
+      "status"
+     ],
+     "type": "string"
+    },
+    "limit": {
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "memory_context": {
+   "additionalProperties": false,
+   "properties": {
+    "query": {
+     "description": "Memory search text.",
+     "type": "string"
+    },
+    "sessions": {
+     "description": "Sessions to return (default 5).",
+     "maximum": 20,
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "memory_ingest": {
+   "additionalProperties": false,
+   "properties": {
+    "harness": {
+     "description": "Only this harness's sessions.",
+     "enum": [
+      "claude",
+      "codex",
+      "opencode",
+      "pi",
+      "generic"
+     ],
+     "type": "string"
+    },
+    "path": {
+     "description": "Session JSONL file or sqlite DB to ingest.",
+     "type": "string"
+    },
+    "project": {
+     "description": "Only this project label.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "type": "object"
+  },
+  "memory_recall": {
+   "additionalProperties": false,
+   "properties": {
+    "harness": {
+     "description": "Only this harness's sessions.",
+     "enum": [
+      "claude",
+      "codex",
+      "opencode",
+      "pi",
+      "generic"
+     ],
+     "type": "string"
+    },
+    "limit": {
+     "description": "Maximum results (default 10).",
+     "maximum": 50,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "project": {
+     "description": "Only this project label.",
+     "type": "string"
+    },
+    "query": {
+     "description": "Memory search text.",
+     "type": "string"
+    },
+    "since": {
+     "description": "Only chunks updated at/after this unix timestamp.",
+     "type": "number"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "memory_search": {
+   "additionalProperties": false,
+   "properties": {
+    "harness": {
+     "description": "Only this harness's sessions.",
+     "enum": [
+      "claude",
+      "codex",
+      "opencode",
+      "pi",
+      "generic"
+     ],
+     "type": "string"
+    },
+    "limit": {
+     "description": "Maximum results (default 10).",
+     "maximum": 50,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "project": {
+     "description": "Only this project label.",
+     "type": "string"
+    },
+    "query": {
+     "description": "Memory search text.",
+     "type": "string"
+    },
+    "since": {
+     "description": "Only chunks updated at/after this unix timestamp.",
+     "type": "number"
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  },
+  "memory_stats": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "memory_status": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "message_state": {
+   "additionalProperties": false,
+   "properties": {
+    "message_ids": {
+     "description": "Comma-separated ids.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_ids"
+   ],
+   "type": "object"
+  },
+  "metrics": {
+   "additionalProperties": false,
+   "properties": {
+    "since": {
+     "description": "Window start as a unix timestamp (overrides window_s).",
+     "type": "number"
+    },
+    "until": {
+     "description": "Window end as a unix timestamp (default now).",
+     "type": "number"
+    },
+    "window_s": {
+     "description": "Window ending now, in seconds (default 3600).",
+     "maximum": 2592000,
+     "minimum": 1,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "owner_conversation": {
+   "additionalProperties": false,
+   "properties": {
+    "before": {
+     "description": "Only messages older than this unix time.",
+     "type": "number"
+    },
+    "limit": {
+     "description": "How many messages (default 50).",
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "owner_delivered": {
+   "additionalProperties": false,
+   "properties": {
+    "external_id": {
+     "description": "The transport's id for the sent message.",
+     "type": "string"
+    },
+    "message_id": {
+     "description": "The owner row that was delivered.",
+     "type": "string"
+    },
+    "transport": {
+     "description": "Which transport accepted it.",
+     "enum": [
+      "web",
+      "telegram",
+      "report"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id",
+    "transport"
+   ],
+   "type": "object"
+  },
+  "owner_ingest": {
+   "additionalProperties": false,
+   "properties": {
+    "attach": {
+     "description": "Local file paths to attach, comma separated.",
+     "type": "string"
+    },
+    "body": {
+     "description": "The question text.",
+     "type": "string"
+    },
+    "external_id": {
+     "description": "The transport's id for this message (dedupe key).",
+     "type": "string"
+    },
+    "subject": {
+     "description": "Optional one-line summary.",
+     "type": "string"
+    },
+    "transport": {
+     "description": "Where the question arrived.",
+     "enum": [
+      "web",
+      "telegram",
+      "report"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "body",
+    "transport"
+   ],
+   "type": "object"
+  },
+  "owner_outbox": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "description": "How many rows (default 20).",
+     "type": "integer"
+    },
+    "transport": {
+     "description": "Which transport's outbox to drain.",
+     "enum": [
+      "web",
+      "telegram",
+      "report"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "transport"
+   ],
+   "type": "object"
+  },
+  "owner_poll": {
+   "additionalProperties": false,
+   "properties": {
+    "by": {
+     "description": "who polled, e.g. pi-extension",
+     "type": "string"
+    },
+    "pane_id": {
+     "description": "the pane that polled",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "owner_push": {
+   "additionalProperties": false,
+   "properties": {
+    "body": {
+     "type": "string"
+    },
+    "subject": {
+     "type": "string"
+    },
+    "target": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "target",
+    "body"
+   ],
+   "type": "object"
+  },
+  "owner_receipts": {
+   "additionalProperties": false,
+   "properties": {
+    "push_ids": {
+     "description": "owner_push ids to report on (max 100).",
+     "items": {
+      "type": "integer"
+     },
+     "type": "array"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "owner_reply": {
+   "additionalProperties": false,
+   "properties": {
+    "body": {
+     "description": "The answer.",
+     "type": "string"
+    },
+    "message_id": {
+     "description": "The owner message being answered.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id",
+    "body"
+   ],
+   "type": "object"
+  },
+  "owner_stats": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "owner_take": {
+   "additionalProperties": false,
+   "properties": {
+    "by": {
+     "type": "string"
+    },
+    "pane_id": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "pm_digest": {
+   "additionalProperties": false,
+   "properties": {
+    "payload": {
+     "description": "JSON digest payload or plain text body.",
+     "type": "string"
+    },
+    "project": {
+     "description": "Project name, e.g. poolrad.",
+     "type": "string"
+    },
+    "to": {
+     "description": "VP pane (default from routing).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "project",
+    "payload"
+   ],
+   "type": "object"
+  },
+  "pm_routing": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "poll": {
+   "additionalProperties": false,
+   "properties": {
+    "assignee": {
+     "description": "Only tasks assigned to this pane/agent.",
+     "type": "string"
+    },
+    "check_herdr": {
+     "description": "Probe the terminal backend (default false; slow).",
+     "type": "boolean"
+    },
+    "include_done": {
+     "description": "Include completed tasks (default false).",
+     "type": "boolean"
+    },
+    "limit": {
+     "description": "Unread messages to return (default 5).",
+     "minimum": 1,
+     "type": "integer"
+    },
+    "mailbox": {
+     "description": "Mailbox to poll; defaults to the caller's.",
+     "type": "string"
+    },
+    "panes": {
+     "description": "Include the pane list (expensive; startup only).",
+     "type": "boolean"
+    },
+    "task_limit": {
+     "description": "Maximum tasks (default 50).",
+     "minimum": 1,
+     "type": "integer"
+    },
+    "task_scope": {
+     "description": "Task scope when tasks=true.",
+     "enum": [
+      "global",
+      "self"
+     ],
+     "type": "string"
+    },
+    "tasks": {
+     "description": "Include the caller's task queue.",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "poolrad_progress": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "poolrad_sync": {
+   "additionalProperties": false,
+   "properties": {
+    "dry_run": {
+     "type": "boolean"
+    },
+    "limit": {
+     "maximum": 50,
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "project_summary": {
+   "additionalProperties": false,
+   "properties": {
+    "path": {
+     "description": "Explicit project directory.",
+     "type": "string"
+    },
+    "project": {
+     "description": "Project name, or omit for global.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "read_pane": {
+   "additionalProperties": false,
+   "properties": {
+    "lines": {
+     "description": "How many recent lines (default 40).",
+     "maximum": 2000,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "recover": {
+   "additionalProperties": false,
+   "properties": {
+    "apply": {
+     "description": "Type launch commands into empty shells.",
+     "type": "boolean"
+    },
+    "record": {
+     "description": "Snapshot live agent sessions into launches.json.",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "remove_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "rename": {
+   "additionalProperties": false,
+   "properties": {
+    "kind": {
+     "description": "What `target` names.",
+     "enum": [
+      "workspace",
+      "tab",
+      "pane"
+     ],
+     "type": "string"
+    },
+    "label": {
+     "description": "The new label.",
+     "type": "string"
+    },
+    "target": {
+     "description": "Id, label, unique label substring or 'self'. For panes the same rules as other pane targets apply.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "target",
+    "label"
+   ],
+   "type": "object"
+  },
+  "reply_stats": {
+   "additionalProperties": false,
+   "properties": {
+    "mailboxes": {
+     "description": "Comma-separated mailboxes (default all).",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "report_list": {
+   "additionalProperties": false,
+   "properties": {
+    "out_dir": {
+     "description": "Directory holding the reports.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "report_run": {
+   "additionalProperties": false,
+   "properties": {
+    "out_dir": {
+     "description": "Directory for the report file.",
+     "type": "string"
+    },
+    "post": {
+     "description": "Also post to the owner mailbox (default true).",
+     "type": "boolean"
+    },
+    "prose": {
+     "description": "Optional plain-language paragraph; rejected if it names a task id or status the report does not contain.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "respawn_pane": {
+   "additionalProperties": false,
+   "properties": {
+    "argv": {
+     "description": "Replacement command argv; never a shell string.",
+     "items": {
+      "type": "string"
+     },
+     "minItems": 1,
+     "type": "array"
+    },
+    "confirm_idle": {
+     "description": "Required true; positive idle evidence is checked.",
+     "type": "boolean"
+    },
+    "expected_pid": {
+     "description": "Exact live pane pid.",
+     "type": "integer"
+    },
+    "expected_start": {
+     "description": "Exact /proc start time for expected_pid.",
+     "type": "string"
+    },
+    "pane": {
+     "description": "Existing managed pane id.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Why this pane is being replaced.",
+     "type": "string"
+    },
+    "rollback_argv": {
+     "description": "Old command argv to restore on failure.",
+     "items": {
+      "type": "string"
+     },
+     "minItems": 1,
+     "type": "array"
+    }
+   },
+   "required": [
+    "pane",
+    "expected_pid",
+    "expected_start",
+    "argv",
+    "confirm_idle"
+   ],
+   "type": "object"
+  },
+  "retire_pane": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "description": "retire (default), unretire or list.",
+     "type": "string"
+    },
+    "pane": {
+     "description": "Pane id or name.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Why it is retired, e.g. superseded-by:wW:p7.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "review_list": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "review_sync": {
+   "additionalProperties": false,
+   "properties": {
+    "dry_run": {
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "roster": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "send_keys": {
+   "additionalProperties": false,
+   "properties": {
+    "desk_token": {
+     "description": "Narrow desk credential: permits this verb on an explicitly listed pane and nothing else. Not a superuser entry.",
+     "type": "string"
+    },
+    "hold_while_typing": {
+     "description": "Queue behind a human who is typing (default true).",
+     "type": "boolean"
+    },
+    "keys": {
+     "description": "Key name, or several separated by spaces: 'Enter', 'ctrl+c'.",
+     "type": "string"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    },
+    "wait_s": {
+     "description": "Block up to this many seconds for delivery (default 3).",
+     "maximum": 3600,
+     "minimum": 0,
+     "type": "number"
+    }
+   },
+   "required": [
+    "target",
+    "keys"
+   ],
+   "type": "object"
+  },
+  "send_text": {
+   "additionalProperties": false,
+   "properties": {
+    "desk_token": {
+     "description": "Narrow desk credential: permits this verb on an explicitly listed pane and nothing else. Not a superuser entry.",
+     "type": "string"
+    },
+    "hold_while_typing": {
+     "description": "Queue the message instead of typing over a human who is composing in the target's input box (default true). The daemon delivers it, in order, once the box has been clear for a second.",
+     "type": "boolean"
+    },
+    "press_enter": {
+     "description": "Press Enter after the text (default true). false leaves it in the box unsubmitted.",
+     "type": "boolean"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    },
+    "text": {
+     "description": "Text to type, followed by Enter. Sent verbatim (no placeholders).",
+     "type": "string"
+    },
+    "wait_s": {
+     "description": "Block up to this many seconds for delivery before returning (default 3). 0 returns as soon as it is queued; use list_messages or get_message to follow up on a message still waiting.",
+     "maximum": 3600,
+     "minimum": 0,
+     "type": "number"
+    }
+   },
+   "required": [
+    "target",
+    "text"
+   ],
+   "type": "object"
+  },
+  "shutdown": {
+   "additionalProperties": false,
+   "properties": {
+    "stop_all": {
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "split_pane": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Optional command line to type + Enter into the new pane once it exists, e.g. 'claude' to start an agent there.",
+     "type": "string"
+    },
+    "cwd": {
+     "description": "Working directory for the new shell (default: the backend's).",
+     "type": "string"
+    },
+    "direction": {
+     "description": "Where the new pane goes (default right).",
+     "enum": [
+      "right",
+      "down"
+     ],
+     "type": "string"
+    },
+    "focus": {
+     "description": "Switch the human's view to it (default false: create in the background).",
+     "type": "boolean"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "target"
+   ],
+   "type": "object"
+  },
+  "start_agent": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Command line to run, shell-split, e.g. 'claude --model opus'.",
+     "type": "string"
+    },
+    "cwd": {
+     "description": "Working directory for the new shell (default: the backend's).",
+     "type": "string"
+    },
+    "focus": {
+     "description": "Switch the human's view to it (default false: create in the background).",
+     "type": "boolean"
+    },
+    "model": {
+     "type": "string"
+    },
+    "name": {
+     "description": "Agent name as the backend will show it, e.g. 'writer'.",
+     "type": "string"
+    },
+    "provider": {
+     "type": "string"
+    },
+    "role": {
+     "description": "bind this role to the new pane (registered from the launch record)",
+     "enum": [
+      "owner",
+      "desk",
+      "planner",
+      "worker",
+      "reviewer"
+     ],
+     "type": "string"
+    },
+    "split": {
+     "description": "With `tab`: split that tab's pane instead of replacing it.",
+     "enum": [
+      "right",
+      "down"
+     ],
+     "type": "string"
+    },
+    "tab": {
+     "description": "Tab id ('w9:t2'), label, unique label substring, or 'self' for the caller's tab.",
+     "type": "string"
+    },
+    "workspace": {
+     "description": "Workspace id ('w9'), label, unique label substring, or 'self' for the caller's own workspace (the default when omitted).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "command"
+   ],
+   "type": "object"
+  },
+  "start_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "state_capture": {
+   "additionalProperties": false,
+   "properties": {
+    "source": {
+     "description": "Why this capture ran (default periodic).",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "state_latest": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "type": "integer"
+    },
+    "pane_id": {
+     "type": "string"
+    },
+    "project": {
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "status": {
+   "additionalProperties": false,
+   "properties": {
+    "check_herdr": {
+     "description": "Probe the terminal backend (slow; default off).",
+     "type": "boolean"
+    },
+    "fresh": {
+     "description": "Rebuild the cached view before answering.",
+     "type": "boolean"
+    },
+    "full": {
+     "description": "Use the full status rather than the cached view.",
+     "type": "boolean"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "stop_all": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "stop_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "superuser_add": {
+   "additionalProperties": false,
+   "properties": {
+    "entry": {
+     "description": "A pane id (e.g. w9:p8) or a name matching a pane's label/tab label (e.g. 'VP of agentry').",
+     "type": "string"
+    }
+   },
+   "required": [
+    "entry"
+   ],
+   "type": "object"
+  },
+  "superuser_recover": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "description": "Name to re-assert (default 'VP of agentry').",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "superuser_remove": {
+   "additionalProperties": false,
+   "properties": {
+    "entry": {
+     "description": "A pane id (e.g. w9:p8) or a name matching a pane's label/tab label (e.g. 'VP of agentry').",
+     "type": "string"
+    }
+   },
+   "required": [
+    "entry"
+   ],
+   "type": "object"
+  },
+  "superuser_status": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "task_add": {
+   "additionalProperties": false,
+   "properties": {
+    "assignees": {
+     "description": "Pane ids or agent names. 'self' means the caller's pane.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "author": {
+     "description": "lane that produced the artefact under review",
+     "type": "string"
+    },
+    "body": {
+     "description": "Longer description or acceptance notes.",
+     "type": "string"
+    },
+    "depends_on": {
+     "description": "Task ids that must be done before this one is eligible.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "head": {
+     "description": "exact commit under review",
+     "type": "string"
+    },
+    "kind": {
+     "description": "work (default); review is filed by the review timer.",
+     "enum": [
+      "work",
+      "review",
+      "verify",
+      "report"
+     ],
+     "type": "string"
+    },
+    "multi_assignee": {
+     "description": "Allow several agents to claim this task.",
+     "type": "boolean"
+    },
+    "parent_id": {
+     "description": "Parent task id, for a subtask.",
+     "type": "string"
+    },
+    "pr": {
+     "description": "PR number, for reviews",
+     "type": "integer"
+    },
+    "priority": {
+     "description": "urgent, high, medium or low (default low).",
+     "enum": [
+      "low",
+      "medium",
+      "high",
+      "urgent"
+     ],
+     "type": "string"
+    },
+    "repo": {
+     "description": "owner/name, for reviews",
+     "type": "string"
+    },
+    "scope": {
+     "description": "'global' (default, fleet-wide), 'self' (private to the caller's pane), or a pane id.",
+     "type": "string"
+    },
+    "status": {
+     "description": "open, in_progress, blocked, done or cancelled.",
+     "enum": [
+      "open",
+      "in_progress",
+      "blocked",
+      "done",
+      "cancelled"
+     ],
+     "type": "string"
+    },
+    "title": {
+     "description": "Short task title.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "title"
+   ],
+   "type": "object"
+  },
+  "task_assign": {
+   "additionalProperties": false,
+   "properties": {
+    "assignees": {
+     "description": "Pane ids or agent names. 'self' means the caller's pane.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "mode": {
+     "description": "How to apply the assignees (default add).",
+     "enum": [
+      "add",
+      "remove",
+      "set"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "assignees"
+   ],
+   "type": "object"
+  },
+  "task_block": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Why it is blocked.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_cancel": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Why it was cancelled.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_complete": {
+   "additionalProperties": false,
+   "properties": {
+    "by": {
+     "description": "Who completed it (defaults to caller pane).",
+     "type": "string"
+    },
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "verdict": {
+     "description": "Review tasks only: the reviewer's verdict, written by the daemon from the bound lane.",
+     "enum": [
+      "accept",
+      "needs-fix"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_delete": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_follow": {
+   "additionalProperties": false,
+   "properties": {
+    "scope": {
+     "description": "'global' (default, fleet-wide), 'self' (private to the caller's pane), or a pane id.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "task_followers": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "task_heartbeat": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "lease_seconds": {
+     "description": "Lease length in seconds (default 1800).",
+     "minimum": 1,
+     "type": "number"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_list": {
+   "additionalProperties": false,
+   "properties": {
+    "assignee": {
+     "description": "Only tasks assigned to this pane/agent.",
+     "type": "string"
+    },
+    "include_done": {
+     "description": "Include done/cancelled (default true).",
+     "type": "boolean"
+    },
+    "kind": {
+     "enum": [
+      "work",
+      "review",
+      "verify",
+      "report"
+     ],
+     "type": "string"
+    },
+    "limit": {
+     "description": "Maximum tasks to return (default 200).",
+     "maximum": 500,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "needs_owner": {
+     "description": "Only tasks blocked on a 'needs-owner:' question.",
+     "type": "boolean"
+    },
+    "scope": {
+     "description": "'global' for the fleet queue, a pane id for a private queue, or 'self' for the caller's pane.",
+     "type": "string"
+    },
+    "status": {
+     "description": "open, in_progress, blocked, done or cancelled.",
+     "enum": [
+      "open",
+      "in_progress",
+      "blocked",
+      "done",
+      "cancelled"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "task_metrics": {
+   "additionalProperties": false,
+   "properties": {
+    "bucket": {
+     "description": "Throughput bucket size (default hour).",
+     "enum": [
+      "hour",
+      "day"
+     ],
+     "type": "string"
+    },
+    "scope": {
+     "description": "'global' for the fleet queue, a pane id for a private queue, or 'self' for the caller's pane.",
+     "type": "string"
+    },
+    "since": {
+     "description": "Window start epoch (overrides window_s).",
+     "type": "number"
+    },
+    "until": {
+     "description": "Window end epoch (default now).",
+     "type": "number"
+    },
+    "window_s": {
+     "description": "Window ending now, seconds (default 3600).",
+     "minimum": 1,
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "task_next": {
+   "additionalProperties": false,
+   "properties": {
+    "allow_busy": {
+     "description": "Take a second task while already holding in-progress work.",
+     "type": "boolean"
+    },
+    "lease_seconds": {
+     "description": "Lease length in seconds (default 1800).",
+     "minimum": 1,
+     "type": "number"
+    },
+    "scope": {
+     "description": "'global' (default), 'self' (own pane queue), 'auto' (pane then global), 'mine' (only tasks naming you as assignee, global or own pane), or a pane id.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "task_note": {
+   "additionalProperties": false,
+   "properties": {
+    "event": {
+     "description": "Event name (default 'note').",
+     "type": "string"
+    },
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Human rationale stored in meta.reason.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_read": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_reap": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "task_release": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_stats": {
+   "additionalProperties": false,
+   "properties": {
+    "scope": {
+     "description": "'global' for the fleet queue, a pane id for a private queue, or 'self' for the caller's pane.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "task_unblock": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "task_unfollow": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  },
+  "task_update": {
+   "additionalProperties": false,
+   "properties": {
+    "assignees": {
+     "description": "Pane ids or agent names. 'self' means the caller's pane.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "block_reason": {
+     "description": "Why it is blocked.",
+     "type": "string"
+    },
+    "body": {
+     "description": "Longer description or acceptance notes.",
+     "type": "string"
+    },
+    "depends_on": {
+     "description": "Task ids that must be done before this one is eligible.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "id": {
+     "description": "Task id, e.g. t12.",
+     "type": "string"
+    },
+    "multi_assignee": {
+     "description": "Allow multiple claimants.",
+     "type": "boolean"
+    },
+    "parent_id": {
+     "description": "Parent task id, for a subtask.",
+     "type": "string"
+    },
+    "priority": {
+     "description": "urgent, high, medium or low (default low).",
+     "enum": [
+      "low",
+      "medium",
+      "high",
+      "urgent"
+     ],
+     "type": "string"
+    },
+    "status": {
+     "description": "open, in_progress, blocked, done or cancelled.",
+     "enum": [
+      "open",
+      "in_progress",
+      "blocked",
+      "done",
+      "cancelled"
+     ],
+     "type": "string"
+    },
+    "title": {
+     "description": "Short task title.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "toggle_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "token_issue": {
+   "additionalProperties": false,
+   "properties": {
+    "label": {
+     "type": "string"
+    },
+    "role": {
+     "enum": [
+      "web",
+      "system",
+      "owner"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "role"
+   ],
+   "type": "object"
+  },
+  "token_revoke": {
+   "additionalProperties": false,
+   "properties": {
+    "label": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "label"
+   ],
+   "type": "object"
+  },
+  "turn_end": {
+   "additionalProperties": false,
+   "properties": {
+    "pane": {
+     "description": "Pane id; defaults to the caller's.",
+     "type": "string"
+    },
+    "reason": {
+     "description": "Why the turn ended.",
+     "type": "string"
+    },
+    "turn_id": {
+     "description": "Generation returned by turn_start; required to end it.",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "turn_start": {
+   "additionalProperties": false,
+   "properties": {
+    "handoff_id": {
+     "description": "Next-job id from this turn's initiating prompt.",
+     "type": "string"
+    },
+    "pane": {
+     "description": "Pane id; defaults to the caller's.",
+     "type": "string"
+    },
+    "source": {
+     "description": "Hook/extension that declared it.",
+     "type": "string"
+    },
+    "ttl_s": {
+     "description": "Override the turn TTL in seconds.",
+     "type": "number"
+    }
+   },
+   "required": [],
+   "type": "object"
+  },
+  "update_dunk": {
+   "additionalProperties": false,
+   "properties": {
+    "hold_while_typing": {
+     "description": "Never type over a human: before each send the daemon reads the target's input box and, if someone is mid-way through typing there, holds the send and re-checks every minute until the box is clear. Default true. Set false only for a pane nobody types in.",
+     "type": "boolean"
+    },
+    "id": {
+     "description": "Dunk id, e.g. 'd3' (see list_dunks).",
+     "type": "string"
+    },
+    "interval_minutes": {
+     "description": "Minutes between sends, greater than zero (fractions allowed, e.g. 0.5).",
+     "minimum": 0.01,
+     "type": "number"
+    },
+    "max_sends": {
+     "description": "Remove the dunk automatically after this many sends. 1 makes a one-shot delayed nudge. 0 (the default) repeats forever.",
+     "minimum": 0,
+     "type": "integer"
+    },
+    "name": {
+     "description": "Optional human label for the dunk.",
+     "type": "string"
+    },
+    "only_when": {
+     "description": "'idle' holds each send until the backend reports the target agent as idle (not working/blocked). 'any' (the default) sends on schedule.",
+     "enum": [
+      "idle",
+      "any"
+     ],
+     "type": "string"
+    },
+    "skip_if_unconsumed": {
+     "description": "Backpressure: skip a scheduled send (no-op, send_count unchanged) when the previous send was never picked up by the target, instead of piling duplicate prompts into an unattended pane. Default false. Recommended for self-dunks and unattended agents.",
+     "type": "boolean"
+    },
+    "target": {
+     "description": "Which terminal pane. Accepts a pane id like '%N' (tmux) or 'w8:p3' (herdr rollback), the word 'self' for the pane this agent is running in, a terminal id, or a unique case-insensitive substring of a tab label, workspace label, agent name or directory (an exact label wins over a substring). Use list_panes to see candidates.",
+     "type": "string"
+    },
+    "text": {
+     "description": "Text to type into the pane, followed by Enter. Placeholders {id}, {name}, {count}, {target}, {interval}, {time} and {date} are expanded at send time, so a dunk can tell its recipient which dunk it came from (e.g. '... when the backlog is done, remove dunk {id}').",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "whoami": {
+   "additionalProperties": false,
+   "properties": {},
+   "required": [],
+   "type": "object"
+  }
+ },
+ "groups": {
+  "dispatch": {
+   "actions": {
+    "context_add": "context_add",
+    "context_promote": "context_promote",
+    "context_retire": "context_retire",
+    "context_supersede": "context_supersede",
+    "dispatch": "dispatch",
+    "gh_token": "gh_token",
+    "lane_set": "lane_set",
+    "lanes": "lanes",
+    "poolrad_progress": "poolrad_progress",
+    "poolrad_sync": "poolrad_sync",
+    "retire": "retire_pane",
+    "retired": "retire_pane",
+    "review_list": "review_list",
+    "review_sync": "review_sync",
+    "unretire": "retire_pane"
+   },
+   "description": "Deterministic feeding, no model: the standby queue and the tick that fills idle lanes. action=add/list/remove/tick/status. A lane is fed only when it is ready AND has no unread mail; the tick reports idle lanes, dispatched this hour, and blocked lanes with reasons."
+  },
+  "dunk": {
+   "actions": {
+    "add": "add_dunk",
+    "fire": "fire_dunk",
+    "get": "get_dunk",
+    "list": "list_dunks",
+    "remove": "remove_dunk",
+    "start": "start_dunk",
+    "stop": "stop_dunk",
+    "stop_all": "stop_all",
+    "update": "update_dunk"
+   },
+   "description": "Scheduled text into a pane (a 'dunk'). action=add/list/get/update/remove/start/stop/stop_all/fire. Superuser-gated (except list/get). {id} in text expands to the dunk's own id at send time."
+  },
+  "inbox": {
+   "actions": {
+    "ack": "inbox_ack",
+    "archive": "inbox_archive",
+    "cancel": "inbox_cancel",
+    "conversation": "owner_conversation",
+    "count": "inbox_count",
+    "delete": "inbox_delete",
+    "delivered": "owner_delivered",
+    "fetch": "inbox_fetch",
+    "ingest": "owner_ingest",
+    "list": "inbox_list",
+    "outbox": "owner_outbox",
+    "read": "inbox_read",
+    "recover": "inbox_recover",
+    "reply": "owner_reply",
+    "send": "inbox_send",
+    "stats": "inbox_stats",
+    "status": "inbox_status"
+   },
+   "description": "Agent-to-agent mailbox. action=send (preferred over typing), count, list, read (also returns your tasks), recover, status, ack, cancel, delete, stats, fetch. No size limit; a send nudges the recipient with one line. The owner's mailbox (FLAT_FLEET.md 7.2) is read with action=conversation, answered with action=reply, which keeps the question's transport and links the answer to it, and fed by a bridge with action=ingest (transport + external_id), drained with action=outbox and confirmed with action=delivered (desk and owner only)."
+  },
+  "memory": {
+   "actions": {
+    "backfill": "memory_backfill",
+    "context": "memory_context",
+    "ingest": "memory_ingest",
+    "recall": "memory_recall",
+    "search": "memory_search",
+    "stats": "memory_stats",
+    "status": "memory_status"
+   },
+   "description": "Deterministic SQLite+FTS5 recall over every agent session. action=recall/context/search/stats/status are read-only and never wait on ingest; ingest/backfill (superuser) queue sources."
+  },
+  "metrics": {
+   "actions": {
+    "health": "health",
+    "report": "report_run",
+    "reports": "report_list",
+    "status": "status",
+    "summary": "metrics"
+   },
+   "description": "Operations measurement. action=summary (counts, duration distributions, coverage), status (daemon health + counts), health (deterministic self-check; repair=true fixes stale leases and a large WAL). action=report generates the deterministic fleet report and posts it to the owner mailbox on the report transport; action=reports lists the files."
+  },
+  "pane": {
+   "actions": {
+    "cancel_message": "cancel_message",
+    "capability": "delivery_capability",
+    "clear_box": "clear_box",
+    "delivery": "delivery",
+    "flush": "flush_box",
+    "get_message": "get_message",
+    "list": "list_panes",
+    "messages": "list_messages",
+    "read": "read_pane",
+    "send": "send_text",
+    "send_keys": "send_keys"
+   },
+   "description": "Inspect and address a pane. action=list/read/delivery/send/send_keys/flush/clear_box/messages/get_message/cancel_message. delivery says whether a lane can receive anything and why not (ready/working/blocked/dead). send_text (send) types plus Enter; when a human is composing it returns queued=true and is delivered later. flush submits a stranded draft; clear_box DESTROYS one (superuser only). Prefer the inbox for agents."
+  },
+  "pm": {
+   "actions": {
+    "digest": "pm_digest",
+    "routing": "pm_routing"
+   },
+   "description": "Project PMs. action=digest publishes or updates ONE digest per project under a stable id (pm-digest:<project>) with changed/blocked/owner_decisions/numbers so a PM is a digest, not a stream; routing shows the lane->PM registry and whether stray VP mail is redirected or flagged."
+  },
+  "superuser": {
+   "actions": {
+    "add": "superuser_add",
+    "recover": "superuser_recover",
+    "register": "lane_register",
+    "remove": "superuser_remove",
+    "revoke": "token_revoke",
+    "status": "superuser_status",
+    "token": "token_issue",
+    "unregister": "lane_unregister",
+    "whoami": "whoami"
+   },
+   "description": "The superuser allowlist. action=status/add/remove/recover. Destructive operations are refused unless the caller is on the list."
+  },
+  "system": {
+   "actions": {
+    "doctor": "doctor",
+    "help": "help",
+    "herdr": "herdr",
+    "herdr_help": "herdr_help",
+    "recover": "recover"
+   },
+   "description": "Discovery, recovery and the raw escape hatch. action=help (full guide + registry), herdr (rollback-backend passthrough), herdr_help (rollback), recover, doctor."
+  },
+  "task": {
+   "actions": {
+    "add": "task_add",
+    "assign": "task_assign",
+    "block": "task_block",
+    "cancel": "task_cancel",
+    "complete": "task_complete",
+    "delete": "task_delete",
+    "follow": "task_follow",
+    "followers": "task_followers",
+    "heartbeat": "task_heartbeat",
+    "list": "task_list",
+    "metrics": "task_metrics",
+    "next": "task_next",
+    "note": "task_note",
+    "read": "task_read",
+    "reap": "task_reap",
+    "release": "task_release",
+    "stats": "task_stats",
+    "unblock": "task_unblock",
+    "unfollow": "task_unfollow",
+    "update": "task_update"
+   },
+   "description": "Deterministic global task queue. action=next ATOMICALLY claims the highest-priority unblocked task (assigns you + in_progress + a lease); heartbeat extends it; complete/block/unblock finish it; add/list/read/update/assign/cancel/delete manage the queue; follow makes the daemon PUSH work when you are idle; stats/metrics report the board. scope is 'global' (fleet) or 'self' (your pane). All SQL, no model."
+  },
+  "views": {
+   "actions": {
+    "capture": "state_capture",
+    "latest": "state_latest",
+    "message_state": "message_state",
+    "poll": "owner_poll",
+    "project_summary": "project_summary",
+    "push": "owner_push",
+    "reply_stats": "reply_stats",
+    "roster": "roster",
+    "stats": "owner_stats",
+    "take": "owner_take"
+   },
+   "description": "Read-only compositions for the Command Center: roster, message_state, reply_stats, project_summary. All queries, no model, no pane writes."
+  },
+  "workspace": {
+   "actions": {
+    "close": "close",
+    "create": "create_workspace",
+    "create_tab": "create_tab",
+    "focus": "focus",
+    "list": "list_workspaces",
+    "rename": "rename",
+    "respawn_pane": "respawn_pane",
+    "split": "split_pane",
+    "start_agent": "start_agent"
+   },
+   "description": "Layout and the herd. action=list/create/create_tab/split/start_agent/rename/focus/close. Creators and close are superuser-gated; an agent started without a workspace goes to the sandbox, never the caller's tab."
+  }
+ }
+}
