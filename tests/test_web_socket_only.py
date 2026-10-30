@@ -19,11 +19,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "web", "app.py")
 BOARD = os.path.join(ROOT, "bridges", "ops_board.py")
 
-# Functions that are socket-only today: each must contain no subprocess and no
-# sqlite3. `api_fleet` is NOT in this list yet - it still opens agent-state.db and
-# inbox.db for the fleet view's last-activity and unread columns (see
-# test_api_fleet_still_has_exactly_the_two_known_database_reads).
-SOCKET_ONLY = ("_pending_by_pane", "_capability")
+# Functions that are socket-only: each must contain no subprocess and no sqlite3.
+SOCKET_ONLY = ("_pending_by_pane", "_capability", "api_fleet", "_send_to_pane",
+               "api_pane_text")
 
 
 def _tree(path):
@@ -68,7 +66,9 @@ class SocketOnlyReads(unittest.TestCase):
         tree = _tree(APP)
         expected = {"_pending_by_pane": "owner_stats",
                     "_capability": "delivery_capability",
-                    "api_fleet": "list_panes"}   # the pane roster, already socket-only
+                    "api_fleet": "list_panes",
+                    "_send_to_pane": "owner_push",
+                    "api_pane_text": "read_pane"}
         for name, command in expected.items():
             node = _function(tree, name)
             calls = {child.args[0].value
@@ -79,24 +79,32 @@ class SocketOnlyReads(unittest.TestCase):
             self.assertIn(command, calls,
                           f"{name} does not call the daemon's {command}")
 
-    def test_api_fleet_still_has_exactly_the_two_known_database_reads(self):
-        """The FF-9d remainder, pinned so it cannot grow silently.
-
-        `api_fleet` reads agent-state.db (per-pane last activity + session id) and
-        inbox.db (queued per mailbox). Both have daemon-native replacements
-        (views roster for activity/unread; roster needs a session id before the
-        third column can move), and the desk's four views have to be re-rendered
-        to prove the swap. Until that is done this number stays 2: a third read
-        fails here instead of arriving in review.
-        """
+    def test_the_fleet_view_asks_the_daemon_for_activity_and_unread(self):
+        """state_latest replaces the agent-state.db read; roster the inbox.db one."""
         node = _function(_tree(APP), "api_fleet")
-        self.assertIsNotNone(node)
-        connects = sum(1 for child in ast.walk(node)
-                       if isinstance(child, ast.Call)
-                       and isinstance(child.func, ast.Attribute)
-                       and child.func.attr == "connect")
-        self.assertEqual(2, connects,
-                         "api_fleet's database reads changed: update the FF-9d list")
+        calls = {child.args[0].value for child in ast.walk(node)
+                 if isinstance(child, ast.Call)
+                 and isinstance(child.func, ast.Attribute) and child.func.attr == "call"
+                 and child.args and isinstance(child.args[0], ast.Constant)}
+        for command in ("state_latest", "roster", "list_panes"):
+            self.assertIn(command, calls, f"api_fleet does not ask for {command}")
+
+    def test_the_only_database_the_desk_opens_is_its_own(self):
+        """One connect, to the desk's own store: sessions live there, and the
+        message tables in it are the t591 remainder (owner mailbox over the
+        socket), which needs that PR merged before it can move."""
+        tree = _tree(APP)
+        connects = [node for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "connect"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "sqlite3"]
+        self.assertEqual(1, len(connects),
+                         "the desk opens a second database; only its own is allowed")
+        text = open(APP, encoding="utf-8").read()
+        for store in ("inbox.db", "agent-state.db", "tasks.db"):
+            self.assertNotIn(store, text, f"the desk opens the daemon's {store}")
 
     def test_the_board_reads_the_daemon_for_every_fleet_source(self):
         """`conn` stays, and it is the private OPERATIONS db, not a daemon store.
