@@ -137,6 +137,68 @@ class CancelledDependencyTests(unittest.TestCase):
         self.assertTrue(after["eligible"])
 
 
+class DoneButUnmergedTests(unittest.TestCase):
+    """t906: "done" on a STACKED branch must not open the dependents.
+
+    t768 (T02) was marked done while its six Rust modules sat in PR169, stacked on
+    T00's unmerged PR168 - so t784 (T05) became claimable on a tree with no
+    Cargo.toml. The queue satisfies a dependency on status=done and knew nothing
+    about where the work actually lives.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Tasks(os.path.join(self.tmp.name, "tasks.db"))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _pair(self, repo=None, pr=None):
+        dep = self.store.add(GLOBAL, "T02: the modules live in a stacked PR",
+                             repo=repo, pr=pr)
+        row = self.store.add(GLOBAL, "T05: the dependent")
+        self.store.update(row["id"], depends_on=[dep["id"]])
+        return dep, row["id"]
+
+    def test_a_stacked_completion_does_not_open_the_dependent(self):
+        dep, row_id = self._pair()
+        self.store.complete(dep["id"], landed=False)
+        row = self.store.get(row_id)
+        self.assertIn(dep["id"], row["blocked_by"], "an unmerged dependency still blocks")
+        self.assertEqual([dep["id"]], row["unlanded_dependencies"])
+        self.assertFalse(row["eligible"], "the dependent must not be claimable yet")
+        self.assertFalse(self.store.get(dep["id"])["landed"])
+
+    def test_the_merge_opens_the_dependent_without_a_manual_edit(self):
+        dep, row_id = self._pair(repo="huntergdavis/dunkingsheep", pr=169)
+        self.store.complete(dep["id"], landed=False)
+        self.assertFalse(self.store.get(row_id)["eligible"])
+        flipped = self.store.mark_landed_for_pr("huntergdavis/dunkingsheep", 169,
+                                               by="review-sync")
+        self.assertEqual([dep["id"]], flipped)
+        row = self.store.get(row_id)
+        self.assertEqual([], row["blocked_by"])
+        self.assertEqual([], row["unlanded_dependencies"])
+        self.assertTrue(row["eligible"], "the dependent opens when the PR merges")
+
+    def test_a_plain_completion_still_satisfies_as_before(self):
+        dep, row_id = self._pair()
+        self.store.complete(dep["id"])
+        self.assertTrue(self.store.get(dep["id"])["landed"])
+        self.assertTrue(self.store.get(row_id)["eligible"])
+
+    def test_marking_landed_is_recorded(self):
+        dep, _ = self._pair()
+        self.store.complete(dep["id"], landed=False)
+        self.store.set_landed(dep["id"], landed=True, by="%109")
+        events = [row["event"] for row in self.store.db.execute(
+            "SELECT event FROM task_events WHERE task_id = ? AND event IN "
+            "('landed', 'unlanded') ORDER BY id", (dep["id"],))]
+        self.assertEqual(["unlanded", "landed"], events,
+                         "both moves are on the record, in order")
+
+
 class TaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
