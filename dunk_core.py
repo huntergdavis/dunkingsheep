@@ -218,6 +218,8 @@ MAILBOX_CACHE_S = float(os.environ.get("DUNKINGSHEEP_MAILBOX_CACHE_S", "30"))
 # staleness is this TTL past the last invalidation. `fresh=True` bypasses it
 # for a send/ack/claim that needs certainty.
 VIEW_CACHE_S = float(os.environ.get("DUNKINGSHEEP_VIEW_CACHE_S", "5"))
+# Mail older than this no longer holds a lane back from the push sweep (t1053).
+UNREAD_MAIL_GRACE_S = float(os.environ.get("DUNKINGSHEEP_UNREAD_GRACE_S", "600"))
 TASK_PUSH_S = float(os.environ.get("DUNKINGSHEEP_PUSH_S", "10"))
 # How many trailing pane lines to inspect for a still-unconsumed previous send,
 # and how much of that text to look for (whitespace-collapsed).
@@ -3895,7 +3897,24 @@ class Flock:
         lane's mail is.
         """
         try:
-            return bool(self.inbox.count(self._own_mailbox(pane_id)).get("unread"))
+            mailbox = self._own_mailbox(pane_id)
+            if not self.inbox.count(mailbox).get("unread"):
+                return False
+            # Only mail a lane must ACT on holds it back (t1053). The daemon's own
+            # "TASK ..." announcements are the sweep's output, so counting them made
+            # every claim block the next one (the fleet idled twice on 2026-10-30), and
+            # mail older than the grace window stops gating: a lane that has not read
+            # it in 10 minutes is not going to, and starving it helps nobody.
+            now = time.time()
+            for message in self.inbox.read(mailbox, limit=50, peek=True):
+                subject = str(message.get("subject") or "")
+                body = str(message.get("body") or "")
+                if subject.startswith("TASK ") or body.startswith("TASK "):
+                    continue
+                if now - float(message.get("created_at") or now) > UNREAD_MAIL_GRACE_S:
+                    continue
+                return True
+            return False
         except Exception:  # noqa: BLE001 - unknown mail state is not evidence of none,
             # but refusing every push on an inbox hiccup would stop the fleet;
             # log it and let the role/busy gates decide.
