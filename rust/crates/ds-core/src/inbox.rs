@@ -168,3 +168,172 @@ pub fn mailbox_where(mailbox: &str, column: &str) -> (String, Vec<String>) {
 #[cfg(test)]
 #[path = "inbox_tests.rs"]
 mod inbox_tests;
+
+// -- reads (the half that needs no write convention) ---------------------------
+//
+// `db::ReadPool` is on main (T05, #183): a pool of `query_only` connections that
+// never wait for a writer. These functions are the Python's read surface - `count`,
+// `list`, `get` - and they take the pool, so the store half that still waits is the
+// WRITE one (`send`/`ack`/`purge` through `db::SyncWriter`, #187).
+
+use rusqlite::Connection;
+
+use crate::db::{map_sqlite, ReadPool};
+use crate::error::DunkError;
+
+/// A message as the Python's `_summary` renders it: no body, plus the counts a
+/// board reads. Field names are the wire's, so a caller ported later keeps them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub message_id: String,
+    pub mailbox: String,
+    pub destination: String,
+    pub sender: Option<String>,
+    pub subject: Option<String>,
+    pub state: String,
+    pub created_at: f64,
+    pub waiting_s: Option<i64>,
+    pub body_bytes: i64,
+    pub attachments: i64,
+}
+
+/// `count()`: one mailbox's totals. `unread` is `state = 'queued'`, and cancelled
+/// mail is excluded from every number, exactly as the Python excludes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Counts {
+    pub mailbox: String,
+    pub unread: i64,
+    pub total: i64,
+    pub archived: i64,
+    pub undeliverable: i64,
+    pub oldest_unread_s: Option<i64>,
+}
+
+/// `count(mailbox)`: the same arithmetic the Python's single SELECT does.
+pub fn count(pool: &ReadPool, mailbox: &str, now: f64) -> Result<Counts, DunkError> {
+    let (where_clause, params) = mailbox_where(mailbox, "mailbox");
+    let sql = format!(
+        "SELECT COUNT(*) AS total, SUM(state = 'queued') AS unread, \
+         SUM(state = 'archived') AS archived, SUM(state = 'undeliverable') AS undeliverable, \
+         MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest \
+         FROM messages WHERE {where_clause} AND state != 'cancelled'"
+    );
+    pool.with(|connection| {
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+        let row = statement
+            .query_row(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok((
+                    row.get::<_, i64>("total")?,
+                    row.get::<_, Option<i64>>("unread")?,
+                    row.get::<_, Option<i64>>("archived")?,
+                    row.get::<_, Option<i64>>("undeliverable")?,
+                    row.get::<_, Option<f64>>("oldest")?,
+                ))
+            })
+            .map_err(map_sqlite)?;
+        let (total, unread, archived, undeliverable, oldest) = row;
+        Ok(Counts {
+            mailbox: mailbox.to_string(),
+            unread: unread.unwrap_or(0),
+            total,
+            archived: archived.unwrap_or(0),
+            undeliverable: undeliverable.unwrap_or(0),
+            oldest_unread_s: oldest.map(|at| (now - at) as i64),
+        })
+    })
+}
+
+/// `list(mailbox, unread_only, limit)`: summaries, oldest first, no bodies.
+pub fn list(
+    pool: &ReadPool,
+    mailbox: &str,
+    unread_only: bool,
+    limit: usize,
+    now: f64,
+) -> Result<Vec<Summary>, DunkError> {
+    let (condition, params) = mailbox_where(mailbox, "mailbox");
+    let mut where_clause = format!("{condition} AND state != 'cancelled'");
+    if unread_only {
+        where_clause.push_str(" AND state = 'queued'");
+    }
+    let sql = format!(
+        "SELECT id, mailbox, mailbox_label, sender, subject, state, created_at, \
+         length(body) AS body_bytes, \
+         (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) AS attachments \
+         FROM messages WHERE {where_clause} ORDER BY created_at LIMIT ?"
+    );
+    pool.with(|connection| {
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+        let mut bound: Vec<String> = params.clone();
+        bound.push(limit.to_string());
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
+                let state: String = row.get("state")?;
+                let created_at: f64 = row.get("created_at")?;
+                let mailbox_label: Option<String> = row.get("mailbox_label")?;
+                let mailbox_name: String = row.get("mailbox")?;
+                Ok(Summary {
+                    message_id: row.get("id")?,
+                    destination: mailbox_label.unwrap_or_else(|| mailbox_name.clone()),
+                    mailbox: mailbox_name,
+                    sender: row.get("sender")?,
+                    subject: row.get("subject")?,
+                    waiting_s: if state == UNREAD {
+                        Some((now - created_at) as i64)
+                    } else {
+                        None
+                    },
+                    created_at,
+                    body_bytes: row.get("body_bytes")?,
+                    attachments: row.get("attachments")?,
+                    state,
+                })
+            })
+            .map_err(map_sqlite)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(map_sqlite)?);
+        }
+        Ok(out)
+    })
+}
+
+/// `get(id)`: one message with its body, or the Python's named refusal.
+pub fn get(pool: &ReadPool, message_id: &str) -> Result<(Summary, String), DunkError> {
+    let sql = "SELECT id, mailbox, mailbox_label, sender, subject, state, created_at, \
+               length(body) AS body_bytes, body, \
+               (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) \
+               AS attachments \
+               FROM messages WHERE id = ?";
+    pool.with(|connection: &Connection| {
+        let mut statement = connection.prepare(sql).map_err(map_sqlite)?;
+        let mut rows = statement
+            .query_map([message_id], |row| {
+                let state: String = row.get("state")?;
+                let created_at: f64 = row.get("created_at")?;
+                let mailbox_label: Option<String> = row.get("mailbox_label")?;
+                let mailbox_name: String = row.get("mailbox")?;
+                let body: String = row.get("body")?;
+                let summary = Summary {
+                    message_id: row.get("id")?,
+                    destination: mailbox_label.unwrap_or_else(|| mailbox_name.clone()),
+                    mailbox: mailbox_name,
+                    sender: row.get("sender")?,
+                    subject: row.get("subject")?,
+                    waiting_s: if state == UNREAD { Some(0) } else { None },
+                    created_at,
+                    body_bytes: row.get("body_bytes")?,
+                    attachments: row.get("attachments")?,
+                    state,
+                };
+                Ok((summary, body))
+            })
+            .map_err(map_sqlite)?;
+        match rows.next() {
+            Some(row) => row.map_err(map_sqlite),
+            None => Err(DunkError::Refused(format!(
+                "no message with id {message_id:?}"
+            ))),
+        }
+    })
+}

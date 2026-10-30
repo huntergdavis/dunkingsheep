@@ -148,3 +148,165 @@ fn the_size_ceilings_are_the_pythons() {
         STATES.to_vec()
     );
 }
+
+// -- reads through db::ReadPool ------------------------------------------------
+
+/// A real database: the schema applied, then rows inserted directly (test setup, not
+/// the store's write API - that half waits for `db::SyncWriter`, #187).
+fn seeded() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("inbox.db");
+    let connection = crate::db::open_writer(&path).expect("writer");
+    for statement in SCHEMA {
+        connection.execute_batch(statement).expect("schema");
+    }
+    let insert = "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
+                  subject, body, state, created_at) VALUES (?,?,?,?,?,?,?,?,?)";
+    // (id, mailbox, label, pane, sender, subject, body, state, created_at)
+    let rows: [(
+        &str,
+        &str,
+        &str,
+        Option<&str>,
+        &str,
+        Option<&str>,
+        &str,
+        &str,
+        f64,
+    ); 5] = [
+        (
+            "i1",
+            "alice",
+            "alice",
+            Some("%1"),
+            "w1:p1",
+            Some("first"),
+            "hello",
+            "queued",
+            1_000.0,
+        ),
+        (
+            "i2",
+            "alice (w9:pH)",
+            "alice (w9:pH)",
+            None,
+            "w1:p1",
+            None,
+            "second",
+            "queued",
+            1_100.0,
+        ),
+        (
+            "i3", "alice", "alice", None, "w2:p2", None, "third", "read", 900.0,
+        ),
+        (
+            "i4",
+            "alice",
+            "alice",
+            None,
+            "w2:p2",
+            None,
+            "gone",
+            "cancelled",
+            800.0,
+        ),
+        (
+            "i5",
+            "bob",
+            "bob",
+            None,
+            "w1:p1",
+            None,
+            "other box",
+            "queued",
+            1_200.0,
+        ),
+    ];
+    for row in rows {
+        connection
+            .execute(
+                insert,
+                rusqlite::params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8],
+            )
+            .expect("insert");
+    }
+    connection
+        .execute(
+            "INSERT INTO attachments (id, message_id, filename, media_type, size, sha256, created_at) \
+             VALUES ('i2-1','i2','shot.png','image/png',10,'abc',1100.0)",
+            [],
+        )
+        .expect("attachment");
+    (dir, path)
+}
+
+#[test]
+fn count_treats_a_pane_suffixed_mailbox_as_the_same_mailbox() {
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let counts = count(&pool, "alice", 2_000.0).expect("count");
+    assert_eq!(
+        2, counts.unread,
+        "the suffixed row must count as unread for 'alice'"
+    );
+    assert_eq!(
+        3, counts.total,
+        "cancelled mail is excluded from every number"
+    );
+    assert_eq!(0, counts.archived);
+    assert_eq!(0, counts.undeliverable);
+    assert_eq!(
+        Some(1_000),
+        counts.oldest_unread_s,
+        "oldest unread is i1: 2000 - 1000"
+    );
+    // The suffixed spelling sees the same mailbox.
+    let suffixed = count(&pool, "alice (w9:pH)", 2_000.0).expect("count");
+    assert_eq!(counts.unread, suffixed.unread);
+}
+
+#[test]
+fn list_is_oldest_first_excludes_cancelled_and_can_filter_unread() {
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let all = list(&pool, "alice", false, 50, 2_000.0).expect("list");
+    assert_eq!(
+        vec!["i3".to_string(), "i1".to_string(), "i2".to_string()],
+        all.iter()
+            .map(|row| row.message_id.clone())
+            .collect::<Vec<_>>()
+    );
+    let unread = list(&pool, "alice", true, 50, 2_000.0).expect("list");
+    assert_eq!(2, unread.len());
+    assert_eq!(Some(1_000), unread[0].waiting_s, "i1 waited 2000 - 1000");
+    assert_eq!(None, all[0].waiting_s, "a read message is not waiting");
+    // The limit is applied by SQL, and the attachment count comes with the row.
+    let limited = list(&pool, "alice", true, 1, 2_000.0).expect("list");
+    assert_eq!(1, limited.len());
+    let with_attachment = list(&pool, "alice (w9:pH)", false, 50, 2_000.0).expect("list");
+    assert_eq!(
+        1,
+        with_attachment
+            .iter()
+            .find(|row| row.message_id == "i2")
+            .expect("i2")
+            .attachments
+    );
+    // A different mailbox is a different inbox.
+    assert_eq!(
+        1,
+        list(&pool, "bob", true, 50, 2_000.0).expect("list").len()
+    );
+}
+
+#[test]
+fn get_returns_the_body_and_a_named_refusal_for_an_unknown_id() {
+    let (_dir, path) = seeded();
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    let (summary, body) = get(&pool, "i2").expect("get");
+    assert_eq!("second", body);
+    assert_eq!(6, summary.body_bytes);
+    assert_eq!("alice (w9:pH)", summary.destination);
+    let error = get(&pool, "nope").expect_err("unknown id");
+    assert!(error.to_string().contains("no message with id"), "{error}");
+}
