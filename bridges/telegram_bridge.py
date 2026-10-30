@@ -199,19 +199,28 @@ def process_update(update: dict, config: dict, bot: Telegram):
         return
     external_id = f"telegram:{update['update_id']}"
     client = _daemon()
+    # The attachment decides the path, not the text: a photo or a file usually
+    # ARRIVES WITH A CAPTION, and `text` is that caption. Branching on the text
+    # first recorded the caption and returned, so the attachment was never
+    # downloaded and the owner was told the message had been recorded (t667,
+    # finding 2). A plain message still takes the text-only path below.
+    file_spec = _attachment(message)
     # t594: the question is a row in the ONE owner mailbox, recorded with the transport
     # it arrived on. The daemon dedupes on external_id, so a redelivered update returns
     # the row it already produced instead of asking the owner's question twice.
-    if text.strip():
-        ingested = client.call("owner_ingest", body=text, transport="telegram",
-                               external_id=external_id, subject=None)
-        message_id = ingested["message"]["message_id"]
-        again = " (already recorded)" if ingested.get("duplicate") else ""
+    if file_spec is None:
+        if text.strip():
+            ingested = client.call("owner_ingest", body=text, transport="telegram",
+                                   external_id=external_id, subject=None)
+            message_id = ingested["message"]["message_id"]
+            again = " (already recorded)" if ingested.get("duplicate") else ""
+            bot.call("sendMessage", chat_id=chat_id,
+                     text=f"{name} message #{message_id}{again}. I'll reply here when ready.")
+            return
         bot.call("sendMessage", chat_id=chat_id,
-                 text=f"{name} message #{message_id}{again}. I'll reply here when ready.")
+                 text="I can receive text, photos, and files. Other Telegram items need the web desk.")
         return
     attachments = []
-    file_spec = _attachment(message)
     if file_spec:
         file_id, filename, mime, file_size = file_spec
         if file_size is not None and file_size > DOWNLOAD_LIMIT:
@@ -277,6 +286,14 @@ def send_owner_outbox(config: dict, bot: Telegram, client=None):
         config["page_sent_at"] = ([at for at in sent_page_times
                                    if now - at < telegram_transport.PAGE_WINDOW_S]
                                   + [now])
+        # Only a page that actually reached the phone moves the watermark, so a held
+        # or failed page is selected again on the next tick (t667, finding 1). Pages
+        # are capped in id order, so the delivered ids are a prefix and max() is the
+        # right watermark.
+        for item in items:
+            if item.get("message_id") == message_id and item.get("id") is not None:
+                config["last_page_id"] = max(int(config.get("last_page_id") or 0),
+                                             int(item["id"]))
         save_config(config)
         _write_status_file(config.get("last_page_id") or 0, channel)
 
@@ -295,18 +312,48 @@ def _legacy_pages(config: dict, channel: str):
     then this keeps PAGES working (the one exception the owner kept) while the brief
     path - which carried reports, digests and web echoes - is gone.
     """
-    watermark = config.get("last_page_id") or 0
+    watermark = _page_watermark(config, channel)
     with desk._db() as conn:
         rows = conn.execute(
             "SELECT id,body FROM messages WHERE channel=? AND role='agent' AND id>? "
             "ORDER BY id LIMIT 20", (channel, watermark)).fetchall()
     pages = []
     for row in rows:
-        config["last_page_id"] = max(watermark, row["id"])
         if telegram_transport.is_page(row["body"]):
-            pages.append({"message_id": f"page-{row['id']}", "body": row["body"]})
-    save_config(config)
+            pages.append({"message_id": f"page-{row['id']}", "id": row["id"],
+                          "body": row["body"]})
+    # The watermark is NOT advanced here. It used to be set to the highest row read
+    # before delivery, so a page held by the 3/hour cap - or one whose send raised
+    # and stopped the batch - was never selected again: "held" meant "dropped", and
+    # only a stderr line said so (t667, finding 1). It now advances in
+    # mark_delivered, one delivered page at a time.
     return pages
+
+
+def _page_watermark(config: dict, channel: str) -> int:
+    """Where to start looking for pages, and never a scan of history.
+
+    `last_page_id` is this path's own marker. On the first run after the upgrade
+    there is none, so the old `last_brief_id` carries over (same table, same
+    monotonic ids). With neither - a fresh config - the watermark starts at the
+    current newest row: paging the last 20 historical rows to the owner's phone on
+    the first tick is exactly what a first tick must not do (t667, finding 3).
+    """
+    stored = config.get("last_page_id")
+    if stored is not None:
+        return int(stored)
+    carried = config.get("last_brief_id")
+    if carried is not None:
+        config["last_page_id"] = int(carried)
+        save_config(config)
+        return int(carried)
+    with desk._db() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(id),0) AS newest FROM messages "
+                           "WHERE channel=?", (channel,)).fetchone()
+    newest = int(row["newest"] or 0)
+    config["last_page_id"] = newest
+    save_config(config)
+    return newest
 
 
 def _chunks(body: str, limit: int = 3900):

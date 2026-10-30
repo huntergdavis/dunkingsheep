@@ -75,11 +75,15 @@ def outbox_items(replies, pages, sent_page_times, now,
             items.append({"message_id": row["message_id"],
                           "body": row.get("body") or "", "kind": "page",
                           "reason": f"held: {page_limit} pages per hour already sent",
+                          # Provenance: the store id this page came from, so the
+                          # caller advances its watermark only for a page that was
+                          # actually delivered (t667).
+                          "id": row.get("id"),
                           "hold": True})
             continue
         budget -= 1
         items.append({"message_id": row["message_id"], "body": row.get("body") or "",
-                      "kind": "page",
+                      "kind": "page", "id": row.get("id"),
                       "reason": f"page ({page_class(row.get('body')) or 'unclassified'})",
                       "page_class": page_class(row.get("body"))})
     return items
