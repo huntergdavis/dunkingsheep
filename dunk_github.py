@@ -250,6 +250,11 @@ def open_pulls(repo, token):
             "base": (pr.get("base") or {}).get("ref"),
             "login": ((pr.get("user") or {}).get("login") or ""),
             "created_at": pr.get("created_at"), "updated_at": pr.get("updated_at"),
+            # t704: the list endpoint often returns null while GitHub computes this,
+            # so a caller must treat None as UNKNOWN (file the review) and only an
+            # explicit "conflicting" as a reason to skip.
+            "mergeable": pr.get("mergeable"),
+            "mergeable_state": pr.get("mergeable_state"),
         })
     return out
 

@@ -166,7 +166,7 @@ class Sync:
 
     def run(self, dry_run=False):
         report = {"repos": [], "filed": [], "cancelled": [], "statuses": [],
-                  "followups": [], "errors": []}
+                  "followups": [], "conflicted": [], "errors": []}
         try:
             token = self.tokens.get("reviewer")["token"]
         except dunk_github.GitHubError as error:
@@ -189,6 +189,18 @@ class Sync:
             report["repos"].append({"repo": repo, "open": len(pulls)})
             for pr in pulls:
                 if pr["draft"] or not pr["head"]:
+                    continue
+                # t704: a CONFLICTING head cannot merge, so a reviewer turn spent on it
+                # is wasted - measured tonight on #120 (reviewed at 9781629 while
+                # conflicted) and #124 (an APPROVED head 5e2e8b3 already conflicted).
+                # Only an EXPLICIT "conflicting" skips: the list endpoint returns null
+                # while GitHub computes it, and null is UNKNOWN, not a reason to stall
+                # the whole review queue.
+                if str(pr.get("mergeable") or "").lower() == "conflicting":
+                    report.setdefault("conflicted", []).append(
+                        {"repo": repo, "pr": pr["number"], "head": pr["head"][:12]})
+                    log.info("review not filed: %s#%s is CONFLICTING at %s",
+                             repo, pr["number"], pr["head"][:12])
                     continue
                 key = (repo, pr["number"])
                 seen.add(key)

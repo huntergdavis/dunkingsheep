@@ -65,11 +65,12 @@ class FakeGitHub:
         self.merged = getattr(self, "merged", []) + [(repo, number, sha)]
 
 
-def pull(number=7, head="a" * 40, branch="pi-worker-3/t124", login="dunkingsheep-author[bot]"):
+def pull(number=7, head="a" * 40, branch="pi-worker-3/t124", login="dunkingsheep-author[bot]",
+         mergeable=None):
     return {"number": number, "title": f"PR {number}", "url": f"https://x/{number}",
             "draft": False, "head": head, "branch": branch, "base": "main",
             "login": login, "created_at": "2026-10-29T20:00:00Z",
-            "updated_at": "2026-10-29T20:00:00Z"}
+            "updated_at": "2026-10-29T20:00:00Z", "mergeable": mergeable}
 
 
 class PureTests(unittest.TestCase):
@@ -294,6 +295,11 @@ class DistinctReviewerTests(unittest.TestCase):
     def accept(self, pane):
         self.call("task_next", {}, pane=pane)
         task = [t for t in self.review_tasks() if t["status"] == "in_progress"][0]
+        # A verdict needs evidence from the lane that holds the lease (main's
+        # _require_review_evidence), so the note is part of completing a review.
+        self.call("task_note", {"id": task["id"],
+                                "reason": "reviewed at this head; nothing else verified"},
+                  pane=pane)
         return self.call("task_complete", {"id": task["id"], "verdict": "accept"},
                          pane=pane)
 
@@ -339,6 +345,9 @@ class DistinctReviewerTests(unittest.TestCase):
         self.sync.run()
         self.call("task_next", {}, pane=REVIEWER)
         task = [t for t in self.review_tasks() if t["status"] == "in_progress"][0]
+        self.call("task_note", {"id": task["id"],
+                                "reason": "two callees are hooks; not verified"},
+                  pane=REVIEWER)
         self.call("task_complete", {"id": task["id"], "verdict": "needs-fix"},
                   pane=REVIEWER)
         # A second lane accepting the SAME head must not turn it green.
@@ -349,3 +358,65 @@ class DistinctReviewerTests(unittest.TestCase):
         self.assertFalse(done["github"].get("merged"))
         self.assertEqual("failure", done["github"]["status"])
         self.assertEqual([], self.github.merged)
+
+
+class ConflictedHeadTests(unittest.TestCase):
+    """t704: a CONFLICTING head cannot merge, so no reviewer turn is spent on it.
+
+    Measured 2026-10-29: #120 was reviewed at 9781629 while conflicted, and #124's
+    APPROVED head 5e2e8b3 was already conflicted - each round cost a reviewer turn
+    and a worker turn, and the cutover gate never fired.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.roles = Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                           tokens_path=os.path.join(self.tmp.name, "tokens.json"))
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=self.roles)
+        self.roles.register(OWNER, "owner")
+        self.roles.register(WORKER, "worker", provider="pi", label="pi-worker-3")
+        self.roles.register(REVIEWER, "reviewer", provider="claude", label="rev-1")
+        self.tokens = FakeTokens()
+        self.flock._github_token_cache = self.tokens
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def sync(self, pulls):
+        github = FakeGitHub(pulls)
+        github.merged = []
+        return dunk_review.Sync(self.flock, tokens=self.tokens, github=github)
+
+    def review_tasks(self):
+        return self.flock.tasks.list(kind="review", include_done=False)
+
+    def test_a_conflicting_pr_gets_no_review_task(self):
+        report = self.sync([pull(mergeable="conflicting")]).run()
+        self.assertEqual([], report["filed"], "no reviewer turn on an unmergeable head")
+        self.assertEqual([], self.review_tasks())
+        self.assertEqual([{"repo": "o/r", "pr": 7, "head": "a" * 12}],
+                         report["conflicted"], "the report names it, so it is not silent")
+
+    def test_an_unknown_mergeable_state_still_files(self):
+        """The list endpoint returns null while GitHub computes it: UNKNOWN is not
+        a reason to stall the whole review queue."""
+        report = self.sync([pull(mergeable=None)]).run()
+        self.assertEqual(1, len(report["filed"]))
+        self.assertEqual([], report["conflicted"])
+
+    def test_a_mergeable_pr_is_filed_and_merged_as_before(self):
+        github = FakeGitHub([pull(mergeable="mergeable")])
+        github.merged = []
+        sync = dunk_review.Sync(self.flock, tokens=self.tokens, github=github)
+        report = sync.run()
+        self.assertEqual(1, len(report["filed"]))
+        self.assertEqual([], report["conflicted"])
