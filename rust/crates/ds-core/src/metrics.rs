@@ -133,8 +133,12 @@ pub struct Event {
     pub bytes: Option<i64>,
 }
 
-/// Counts by one column, most frequent first then alphabetically (the Python's
-/// `_tally` ordering, kept because the endpoint's output is compared by consumers).
+/// Counts by one column, ordered by NAME.
+///
+/// The Python's `_tally` sorts by frequency then name; this port returns a `BTreeMap`,
+/// so the COUNTS are identical and the ORDER is by key. The tie order is therefore not
+/// reproduced, which is a difference a consumer comparing serialised output would see -
+/// stated here, in the PR body, and asserted by the test (t979 defect 3).
 pub fn tally(events: &[Event], column: &str) -> BTreeMap<String, i64> {
     let mut raw: BTreeMap<String, i64> = BTreeMap::new();
     for event in events {
@@ -177,9 +181,36 @@ pub fn percentile(sorted_values: &[i64], fraction: f64) -> Option<i64> {
     if sorted_values.is_empty() {
         return None;
     }
-    let index = (fraction * sorted_values.len() as f64 + 0.5).round() as i64 - 1;
+    // Python's round() is HALF-TO-EVEN, and f64::round() is half-away-from-zero, so
+    // the two disagree exactly where a sample count makes the scaled rank land on .5 -
+    // i.e. every n divisible by 4 for the median (4, 8, 12... sample windows). t979
+    // measured p50 n=4 as 20 in Python and 30 here before this fix. The formula is the
+    // Python's own: round(fraction * n + 0.5) - 1, clamped.
+    let scaled = fraction * sorted_values.len() as f64 + 0.5;
+    let index = round_half_even(scaled) - 1;
     let index = index.clamp(0, sorted_values.len() as i64 - 1) as usize;
     Some(sorted_values[index])
+}
+
+/// `round()` as Python means it: a tie goes to the EVEN neighbour.
+///
+/// Rust's `f64::round` breaks ties away from zero, so 2.5 -> 3 where Python gives 2.
+/// Nearest-rank percentiles then select a different sample, which is a silent numeric
+/// divergence in the one aggregation this module exists to port (t979).
+fn round_half_even(value: f64) -> i64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    let rounded = if (fraction - 0.5).abs() < f64::EPSILON {
+        // A tie: pick the even neighbour.
+        if (floor as i64) % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    } else {
+        value.round()
+    };
+    rounded as i64
 }
 
 /// One duration distribution: n, p50, p90, p99, max - or `None` when the window has

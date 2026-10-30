@@ -57,7 +57,7 @@ fn the_schema_and_vocabulary_are_the_pythons() {
 }
 
 #[test]
-fn a_tally_is_ordered_by_frequency_then_name() {
+fn a_tally_counts_every_value_and_orders_by_name() {
     let events = vec![
         event("message.sent", None),
         event("message.sent", None),
@@ -66,11 +66,16 @@ fn a_tally_is_ordered_by_frequency_then_name() {
     ];
     let tally = metrics::tally(&events, "kind");
     let ordered: Vec<(&String, &i64)> = tally.iter().collect();
-    // The Python keeps the tie order ALPHABETICAL, and its dict preserves insertion
-    // order, so the JSON is stable across runs. BTreeMap cannot express "sorted by
-    // count then name" by key alone, so `tally` returns a BTreeMap ordered by NAME -
-    // the counts are what matter to a consumer; the ORDER of a tie is a presentation
-    // detail this port does not reproduce. Stated rather than papered over.
+    // The Python sorts by frequency then name; a BTreeMap cannot express that by key,
+    // so this port returns NAME order (t979 defect 3). The counts are identical; the
+    // ORDER is a real difference a consumer comparing serialised output would see, so
+    // it is asserted rather than described.
+    let names: Vec<&str> = tally.keys().map(String::as_str).collect();
+    assert_eq!(
+        vec!["dunk.sent", "inbox.read", "message.sent"],
+        names,
+        "name order, not frequency order"
+    );
     assert_eq!(2, *tally.get("message.sent").expect("sent"));
     assert_eq!(1, *tally.get("inbox.read").expect("read"));
     assert_eq!(1, *tally.get("dunk.sent").expect("dunk"));
@@ -87,6 +92,45 @@ fn a_duration_that_was_never_measured_is_none_not_zero() {
     let queue = summary.durations.queue_wait.expect("inbox.read measured");
     assert_eq!(1, queue.n);
     assert_eq!(250, queue.max);
+}
+
+#[test]
+fn percentiles_match_pythons_round_half_to_even_sample_counts() {
+    // t979 measured these against the Python's _percentile: every n divisible by 4
+    // diverged for p50 while both suites only used n=5 (the one case that agrees).
+    let values: Vec<i64> = (1..=4).collect(); // 1 2 3 4
+    assert_eq!(
+        Some(2),
+        metrics::percentile(&values, 0.50),
+        "n=4 (Python: 2, old Rust: 3)"
+    );
+    let values: Vec<i64> = (1..=8).collect();
+    assert_eq!(
+        Some(4),
+        metrics::percentile(&values, 0.50),
+        "n=8 (Python: 4, old Rust: 5)"
+    );
+    let values: Vec<i64> = (1..=12).map(|n| n * 10).collect();
+    assert_eq!(
+        Some(60),
+        metrics::percentile(&values, 0.50),
+        "n=12 (Python: 60, old: 70)"
+    );
+    let values: Vec<i64> = (1..=20).collect();
+    assert_eq!(
+        Some(18),
+        metrics::percentile(&values, 0.90),
+        "n=20 p90 (Python 18, old 19)"
+    );
+    let values: Vec<i64> = (1..=200).collect();
+    assert_eq!(
+        Some(198),
+        metrics::percentile(&values, 0.99),
+        "n=200 p99 (Python 198, old 199)"
+    );
+    // And the case both suites used, which agrees either way.
+    let values: Vec<i64> = (10..=50).step_by(10).collect();
+    assert_eq!(Some(30), metrics::percentile(&values, 0.50));
 }
 
 #[test]
