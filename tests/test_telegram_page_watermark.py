@@ -18,6 +18,20 @@ import tempfile
 import types
 import unittest
 
+# bridges/telegram_bridge.py imports web.app at module load (`desk =
+# importlib.import_module("web.app")`), and web.app needs fastapi. On a host
+# without it this module used to ERROR at import, which is 12 errors in a
+# full-suite run that are not defects and drown the real set (t722). Skipping
+# says why instead; making that import lazy in the bridge is the better fix and
+# is its own change.
+try:
+    import fastapi  # noqa: F401
+    HAVE_FASTAPI = True
+except ImportError:  # pragma: no cover - depends on the host
+    HAVE_FASTAPI = False
+NEEDS_FASTAPI = unittest.skipUnless(
+    HAVE_FASTAPI, "bridges/telegram_bridge imports web.app, which needs fastapi")
+
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "bridges"))
@@ -60,6 +74,7 @@ def _bridge():
     return telegram_bridge
 
 
+@NEEDS_FASTAPI
 class PageWatermarkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -226,6 +241,7 @@ class PageWatermarkTests(unittest.TestCase):
         self.assertEqual([], self.bridge._legacy_pages(config, "cos"))
 
 
+@NEEDS_FASTAPI
 class CaptionedAttachmentTests(unittest.TestCase):
     """Finding 2: a photo with a caption must not be recorded as text only."""
 
