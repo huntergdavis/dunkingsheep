@@ -87,11 +87,18 @@ mod tests {
 
     #[test]
     fn display_text_is_the_python_text() {
-        assert_eq!(DunkError::Busy.to_string(), "database busy; retry the request");
-        assert_eq!(DunkError::Identity("no pane".into()).to_string(),
-                   "identity refused: no pane");
-        assert_eq!(DunkError::Refused("no task with id t9".into()).to_string(),
-                   "no task with id t9");
+        assert_eq!(
+            DunkError::Busy.to_string(),
+            "database busy; retry the request"
+        );
+        assert_eq!(
+            DunkError::Identity("no pane".into()).to_string(),
+            "identity refused: no pane"
+        );
+        assert_eq!(
+            DunkError::Refused("no task with id t9".into()).to_string(),
+            "no task with id t9"
+        );
     }
 
     #[test]

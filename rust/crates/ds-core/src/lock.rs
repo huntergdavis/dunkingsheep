@@ -39,7 +39,7 @@ impl Guard {
     ///
     /// This is the Python's `fcntl.flock(..., LOCK_EX | LOCK_NB)` + the
     /// `BlockingIOError` branch that raises "already running".
-    #[allow(deprecated)]   // see the note on the import: the free function keeps the lock on our fd
+    #[allow(deprecated)] // see the note on the import: the free function keeps the lock on our fd
     pub fn try_acquire(path: &Path, mode: Mode) -> Result<Option<Guard>, DunkError> {
         let file = open(path)?;
         let arg = match mode {
@@ -49,7 +49,10 @@ impl Guard {
         match flock(file.as_raw_fd(), arg) {
             Ok(()) => Ok(Some(Guard { file, mode })),
             Err(nix::errno::Errno::EWOULDBLOCK) => Ok(None),
-            Err(error) => Err(DunkError::Refused(format!("lock {}: {error}", path.display()))),
+            Err(error) => Err(DunkError::Refused(format!(
+                "lock {}: {error}",
+                path.display()
+            ))),
         }
     }
 
@@ -89,7 +92,7 @@ fn open(path: &Path) -> Result<File, DunkError> {
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)                        // a lock file is not a public artefact
+        .mode(0o600) // a lock file is not a public artefact
         .open(path)
         .map_err(|error| DunkError::Refused(format!("open {}: {error}", path.display())))
 }
@@ -120,11 +123,19 @@ mod tests {
         let path = dir.path().join("superusers.lock");
         let first = Guard::try_acquire(&path, Mode::Exclusive).unwrap();
         assert!(first.is_some(), "the first owner gets the lock");
-        assert!(Guard::try_acquire(&path, Mode::Exclusive).unwrap().is_none(),
-                "a second exclusive owner must be refused while the first holds it");
+        assert!(
+            Guard::try_acquire(&path, Mode::Exclusive)
+                .unwrap()
+                .is_none(),
+            "a second exclusive owner must be refused while the first holds it"
+        );
         drop(first);
-        assert!(Guard::try_acquire(&path, Mode::Exclusive).unwrap().is_some(),
-                "the lock is free once the guard is dropped");
+        assert!(
+            Guard::try_acquire(&path, Mode::Exclusive)
+                .unwrap()
+                .is_some(),
+            "the lock is free once the guard is dropped"
+        );
     }
 
     #[test]
@@ -151,7 +162,11 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-        assert_eq!(1, peak.load(Ordering::SeqCst), "two owners held the lock at once");
+        assert_eq!(
+            1,
+            peak.load(Ordering::SeqCst),
+            "two owners held the lock at once"
+        );
     }
 
     #[test]
@@ -160,10 +175,16 @@ mod tests {
         let path = dir.path().join("roles.lock");
         let shared = Guard::try_acquire(&path, Mode::Shared).unwrap();
         assert!(shared.is_some());
-        assert!(Guard::try_acquire(&path, Mode::Shared).unwrap().is_some(),
-                "two readers may hold a shared lock");
-        assert!(Guard::try_acquire(&path, Mode::Exclusive).unwrap().is_none(),
-                "a writer must not enter while a reader holds it");
+        assert!(
+            Guard::try_acquire(&path, Mode::Shared).unwrap().is_some(),
+            "two readers may hold a shared lock"
+        );
+        assert!(
+            Guard::try_acquire(&path, Mode::Exclusive)
+                .unwrap()
+                .is_none(),
+            "a writer must not enter while a reader holds it"
+        );
     }
 
     #[test]
@@ -180,11 +201,14 @@ mod tests {
         let dir = tempdir();
         let path = dir.path().join("allow.lock");
         assert_eq!(7, with_exclusive(&path, || Ok(7)).unwrap());
-        let error: DunkError =
-            with_exclusive(&path, || -> Result<(), DunkError> { Err(crate::error::refusal("nope")) })
-                .unwrap_err();
+        let error: DunkError = with_exclusive(&path, || -> Result<(), DunkError> {
+            Err(crate::error::refusal("nope"))
+        })
+        .unwrap_err();
         assert_eq!("nope", error.to_string());
         // and the lock is free again after an error
-        assert!(Guard::try_acquire(&path, Mode::Exclusive).unwrap().is_some());
+        assert!(Guard::try_acquire(&path, Mode::Exclusive)
+            .unwrap()
+            .is_some());
     }
 }
