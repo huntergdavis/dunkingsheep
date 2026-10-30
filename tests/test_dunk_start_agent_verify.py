@@ -138,6 +138,42 @@ class StartAgentVerifyTests(unittest.TestCase):
             self._start("Do you trust the files in this folder?\n",
                         proc=[self._child(["claude"])])
 
+    # -- t958: the CAPTURED dialog, and the scrollback trap next to it ----------
+
+    def test_the_captured_codex_approval_dialog_is_refused(self):
+        """The gap t957's body admitted: 'no live claude first run was reproduced here'.
+
+        The captured screen was already in the repo (tests/fakes.py::
+        codex_approval_dialog, "captured from a real pane. The agent is waiting for a
+        person to choose; nothing may be typed or pressed") and NONE of the nine markers
+        matched its line, so a codex lane behind it was reported healthy.
+        """
+        from fakes import codex_approval_dialog
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*confirm or Esc"):
+            self._start(codex_approval_dialog())
+
+    def test_the_ANSWERED_dialog_in_scrollback_is_not_a_refusal(self):
+        """The other half, and the reason the match is scoped to the live tail.
+
+        The same line sits in codex_answered_dialog_in_scrollback: a prompt answered a
+        while ago, with 20 output lines and an idle box under it. Matching the whole
+        capture would refuse every lane whose transcript still shows an answered prompt -
+        the same mistake MODAL_TAIL_LINES documents ('that is how the daemon came to
+        press Escape into working agents 1042 times').
+        """
+        from fakes import codex_answered_dialog_in_scrollback
+        result = self._start(codex_answered_dialog_in_scrollback())
+        self.assertEqual("probe", result["name"], "a healthy lane must start")
+
+    def test_the_dialog_match_reads_only_the_live_tail(self):
+        """Pins the SCOPE rather than the two fixtures: the marker is present, but far
+        above the last AGENT_DIALOG_TAIL_LINES rows, so it is history."""
+        screen = ("Press Enter to confirm or Esc to cancel\n"
+                  + "\n".join(f"  output line {n}" for n in range(1, 20))
+                  + "\n❯ \n")
+        result = self._start(screen)
+        self.assertEqual("probe", result["name"])
+
     def test_a_welcome_screen_with_no_dialog_still_starts(self):
         result = self._start("✻ Welcome to Claude Code\n❯ \n")
         self.assertEqual("probe", result["name"])
