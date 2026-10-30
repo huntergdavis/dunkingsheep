@@ -199,6 +199,11 @@ class PushOnIdleTests(unittest.TestCase):
         self.register(IDLE_SHELL, "reviewer", provider="pi")
         self.flock.roles.reviewer_providers = ["claude", "codex", "pi"]
         self.flock.herdr.agent_child_pids = lambda pid: None
+        # Reproduce the demotion: a bare role_of (no live pane record) says "worker"
+        # for a pid-bound lane; only the caller-resolved role knows it is a reviewer.
+        real_role_of = self.flock.roles.role_of
+        self.flock.roles.role_of = lambda pane_id, *a, **k: (
+            "reviewer" if (a or k) else "worker")
         task = self.flock.tasks.add("global", "review me", kind="review", repo="o/r", pr=1,
                                     head="h" * 8, created_by="review-sync")
         self.flock._push_tasks()
