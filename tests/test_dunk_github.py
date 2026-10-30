@@ -230,3 +230,113 @@ class TimerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DistinctReviewerTests(unittest.TestCase):
+    """t662: GitHub sees ONE App identity, so the daemon counts distinct lanes.
+
+    Measured on poolrad #1630: two App approvals came from the same lane (%101), so
+    "two reviewers" was one reviewer and GitHub could never tell. The count lives in
+    the task store, where completed_by is the lane.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.roles = Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                           tokens_path=os.path.join(self.tmp.name, "tokens.json"))
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=self.roles)
+        self.roles.register(OWNER, "owner")
+        self.roles.register(WORKER, "worker", provider="pi", label="pi-worker-3")
+        # Two reviewer panes, both on a provider that may review.
+        self.roles.register(REVIEWER, "reviewer", provider="claude", label="rev-1")
+        self.roles.register("w2:p2", "reviewer", provider="codex", label="rev-2")
+        self.github = FakeGitHub([pull()])
+        self.github.merged = []
+        self.tokens = FakeTokens()
+        self.flock._github_token_cache = self.tokens
+        self.sync = dunk_review.Sync(self.flock, tokens=self.tokens, github=self.github)
+        self.flock._after_review_verdict = lambda t, v, by=None: self.sync.on_verdict(t, v, by=by)
+        self._real_required = dunk_github.REPO_REQUIRED_VERDICTS
+        dunk_github.REPO_REQUIRED_VERDICTS = {"o/r": 2}
+
+    def tearDown(self):
+        dunk_github.REPO_REQUIRED_VERDICTS = self._real_required
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def call(self, name, args=None, pane=None):
+        self.flock.clear_caller()
+        try:
+            return dunk_api.dispatch(self.flock, name, args or {}, self_pane_id=pane)
+        finally:
+            self.flock.clear_caller()
+
+    def review_tasks(self):
+        return [t for t in self.flock.tasks.list(kind="review", include_done=False)]
+
+    def accept(self, pane):
+        self.call("task_next", {}, pane=pane)
+        task = [t for t in self.review_tasks() if t["status"] == "in_progress"][0]
+        return self.call("task_complete", {"id": task["id"], "verdict": "accept"},
+                         pane=pane)
+
+    def test_one_of_two_does_not_approve_or_merge_and_files_the_second_review(self):
+        self.sync.run()
+        done = self.accept(REVIEWER)
+        self.assertFalse(done["github"]["merged"])
+        self.assertEqual("pending", done["github"]["status"],
+                         "1 of 2 accepted is not a final head")
+        self.assertIsNone(done["github"]["review"],
+                          "no App approval until the lane count is met")
+        self.assertEqual([], self.github.reviews)
+        self.assertEqual([], self.github.merged)
+        second = self.flock.tasks.get(done["github"]["second_review"])
+        self.assertEqual("review", second["kind"])
+        self.assertEqual(REVIEWER, second["author"],
+                         "the lane that accepted is excluded from the second review")
+        self.assertEqual("a" * 40, second["head"])
+
+    def test_the_same_lane_accepting_twice_is_one_lane(self):
+        self.sync.run()
+        self.accept(REVIEWER)
+        accepts, needs_fix = self.sync.head_verdicts("o/r", "a" * 40, 7)
+        self.assertEqual([REVIEWER], accepts)
+        self.assertEqual([], needs_fix)
+        final, accepts, _needs_fix, required = self.sync._is_final("o/r", "a" * 40, 7)
+        self.assertFalse(final)
+        self.assertEqual(2, required)
+
+    def test_two_distinct_lanes_approve_and_merge(self):
+        self.sync.run()
+        self.accept(REVIEWER)
+        done = self.accept("w2:p2")
+        self.assertEqual("success", done["github"]["status"])
+        self.assertEqual("approved", done["github"]["review"])
+        self.assertTrue(done["github"]["merged"])
+        self.assertEqual([("o/r", 7, "APPROVE", "tok-reviewer")], self.github.reviews)
+        self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
+        accepts, _ = self.sync.head_verdicts("o/r", "a" * 40, 7)
+        self.assertEqual(sorted([REVIEWER, "w2:p2"]), accepts)
+
+    def test_a_needs_fix_from_any_lane_stops_the_head(self):
+        self.sync.run()
+        self.call("task_next", {}, pane=REVIEWER)
+        task = [t for t in self.review_tasks() if t["status"] == "in_progress"][0]
+        self.call("task_complete", {"id": task["id"], "verdict": "needs-fix"},
+                  pane=REVIEWER)
+        # A second lane accepting the SAME head must not turn it green.
+        self.flock.tasks.add("global", "second opinion on the same head", kind="review",
+                             repo="o/r", pr=7, head="a" * 40, author=REVIEWER,
+                             created_by="review-sync")
+        done = self.accept("w2:p2")
+        self.assertFalse(done["github"].get("merged"))
+        self.assertEqual("failure", done["github"]["status"])
+        self.assertEqual([], self.github.merged)
