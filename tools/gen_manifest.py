@@ -625,10 +625,16 @@ def _tests_text():
                      for path in sorted((ROOT / "tests").rglob("*.py")))
 
 
-def build():
+def body():
+    """Everything BELOW the title block: the part that must match byte for byte.
+
+    The title names the commit the document was generated from, so it changes the
+    moment the document is committed - which made `--check` red at every commit that
+    contains the manifest, including the one that adds it (review t896). A gate that
+    always fails is a gate lanes ignore, so the check compares THIS, and the title is
+    reported as an advisory instead.
+    """
     return "\n\n".join([
-        header(),
-        "",
         MODULE_MAP,
         CLI_COMMANDS,
         FILES_ON_DISK,
@@ -643,6 +649,31 @@ def build():
     ]) + "\n"
 
 
+def title_revision(text):
+    """The commit named in the title block, or None."""
+    first = text.split("\n", 1)[0]
+    match = re.search(r"generated from (\S+?),", first)
+    return match.group(1) if match else None
+
+
+def body_of(text):
+    """A document's [`body`]: from the first `## ` section to the end.
+
+    The title block is the `# ` line and the prose under it; everything a reader
+    compares against the tree starts at the first section header.
+    """
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.startswith("## "):
+            return "\n".join(lines[index:])
+    return text
+
+
+def build():
+    """The whole document: title block, a blank line, then [`body`]."""
+    return header() + "\n\n" + body()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true",
@@ -654,11 +685,21 @@ def main(argv=None):
         print(f"wrote {OUT} ({len(text.splitlines())} lines)")
         return 0
     current = OUT.read_text()
-    if current == text:
-        print("MANIFEST.md matches byte for byte")
+    # The title is ADVISORY: it names the commit the file was generated from, so it is
+    # one commit behind by construction once the file is committed. Diffing it made the
+    # gate permanently red (t896); diffing the BODY keeps the signal that matters.
+    current_body = body_of(current)
+    if current_body == body():
+        committed_stamp = title_revision(current)
+        here = title_revision(text)
+        if committed_stamp and committed_stamp != here:
+            print(f"advisory: the manifest names {committed_stamp}; this tree is {here}. "
+                  "Its CONTENT matches, so nothing is stale - regenerate when the "
+                  "inventory next changes.")
+        print("MANIFEST.md matches byte for byte (title block excluded)")
         return 0
     import difflib
-    diff = list(difflib.unified_diff(current.split("\n"), text.split("\n"),
+    diff = list(difflib.unified_diff(current_body.split("\n"), body().split("\n"),
                                      "committed", "generated", lineterm="", n=1))
     print("\n".join(diff[:80]))
     print(f"\n{len(diff)} diff lines (showing at most 80)")

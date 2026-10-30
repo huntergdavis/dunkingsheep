@@ -137,16 +137,44 @@ class ManifestIsItsOwnJudgeTests(unittest.TestCase):
         self.assertNotIn("038d9aa", header, "the revision must be read, not remembered")
 
     def test_the_committed_manifest_matches_a_fresh_generation(self):
-        # The gate itself: run the generator and compare with what is committed.
+        # The gate itself, on the part that can be stable: the BODY. The title names the
+        # commit the file was generated from, so it is one commit behind by construction
+        # once the file is committed (review t896).
         gen = load_generator()
-        self.assertEqual(gen.OUT.read_text(), gen.build(),
+        self.assertEqual(gen.body_of(gen.OUT.read_text()), gen.body(),
                          "docs/rust/MANIFEST.md is stale: run tools/gen_manifest.py")
 
+    def test_a_title_naming_an_older_commit_still_passes(self):
+        # The reviewer's finding: the stamp made --check red at EVERY commit containing
+        # the manifest, including the one that adds it - a gate lanes learn to ignore.
+        gen = load_generator()
+        original = gen.OUT.read_text()
+        lines = original.split("\n")
+        lines[0] = "# Port manifest (generated from 0000000, 2020-01-01)"
+        try:
+            gen.OUT.write_text("\n".join(lines))
+            self.assertEqual(0, gen.main(["--check"]),
+                             "a stale TITLE must not fail the gate")
+        finally:
+            gen.OUT.write_text(original)
+
+    def test_a_stale_body_fails_even_when_the_title_is_current(self):
+        gen = load_generator()
+        original = gen.OUT.read_text()
+        stale = original.replace("## Module map", "## Module map (STALE)", 1)
+        try:
+            gen.OUT.write_text(stale)
+            self.assertEqual(1, gen.main(["--check"]))
+        finally:
+            gen.OUT.write_text(original)
+
     def test_check_refuses_a_stale_document(self):
+        # The stale content goes in the BODY: injecting on the first line used to work
+        # because the title was diffed, and after t896 the title is advisory.
         gen = load_generator()
         original = gen.OUT.read_text()
         try:
-            gen.OUT.write_text(original.replace("\n", "\nSTALE ", 1))
+            gen.OUT.write_text(original.replace("## Module map", "## Module map STALE", 1))
             self.assertEqual(1, gen.main(["--check"]))
         finally:
             gen.OUT.write_text(original)
