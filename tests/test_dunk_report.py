@@ -160,3 +160,82 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnmeasuredSectionTests(unittest.TestCase):
+    """t637: the reviewer of #124 proved three ways the report lied about a failure.
+
+    The rule the report exists to enforce is "a zero is a measurement; 'we did not
+    look' is not one". These three bugs broke it in the section the owner reads first
+    and in the lane list, and each one is reproduced here as it was demonstrated.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.flock = Flock(
+            herdr=FakeHerdr(), state_file=os.path.join(self.tmp.name, "dunks.json"),
+            persist=False, restore=False,
+            inbox=Inbox(path=os.path.join(self.tmp.name, "inbox.db"),
+                        blob_dir=os.path.join(self.tmp.name, "blobs")),
+            tasks=Tasks(path=os.path.join(self.tmp.name, "tasks.db")),
+            roles=Roles(path=os.path.join(self.tmp.name, "roles.json"),
+                        tokens_path=os.path.join(self.tmp.name, "tokens.json")))
+        self.now = time.time()
+
+    def tearDown(self):
+        self.flock.close()
+        self.flock.inbox.close()
+        self.flock.tasks.close()
+        self.tmp.cleanup()
+
+    def test_a_busy_daemon_does_not_kill_the_whole_report(self):
+        """Finding A: needs_owner_section was the one builder with no guard, so a
+        raising task_list made collect() raise and NO report was written."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("daemon busy")
+
+        self.flock.task_list = boom
+        report = dunk_report.collect(self.flock, now=self.now)  # must not raise
+        section = report["sections"]["needs_owner"]
+        self.assertIn("error", section)
+        self.assertIn("daemon busy", section["error"])
+        text = dunk_report.render(report)
+        self.assertIn("not measured here", text)
+        self.assertIn("daemon busy", text)
+
+    def test_an_unreadable_needs_owner_section_never_prints_none(self):
+        """Finding B: the renderer ignored the error key and printed '- none', telling
+        the owner nothing is waiting when the truth was that we could not look."""
+        report = dunk_report.collect(self.flock, now=self.now)
+        report["sections"]["needs_owner"] = {
+            "error": "needs-owner query unavailable: daemon busy"}
+        text = dunk_report.render(report)
+        head, _, tail = text.partition("## Needs the owner")
+        self.assertTrue(tail, "the section must be present")
+        self.assertNotIn("- none", tail.split("##")[0],
+                         "an unread section must not read as an empty one")
+        self.assertIn("not measured here", tail)
+
+    def test_a_failed_task_read_does_not_report_live_panes_as_idle(self):
+        """Finding C: lanes_section swallowed the failure into tasks=[], so a pane that
+        might be working was printed as idle."""
+        class BrokenTasks:
+            def __getattr__(self, name):
+                def boom(*args, **kwargs):
+                    raise RuntimeError("tasks.db is locked")
+                return boom
+
+        original = self.flock.tasks
+        self.flock.tasks = BrokenTasks()
+        try:
+            section = dunk_report.lanes_section(self.flock, now=self.now)
+        finally:
+            self.flock.tasks = original
+        self.assertIn("error", section, "the failure must be carried, not swallowed")
+        self.assertIn("tasks.db is locked", section["error"])
+        self.assertEqual([], section.get("idle") or [],
+                         "an idle list computed without the lease table is a guess")
+        report = dunk_report.collect(self.flock, now=self.now)
+        report["sections"]["lanes"] = section
+        text = dunk_report.render(report)
+        self.assertIn("tasks.db is locked", text)

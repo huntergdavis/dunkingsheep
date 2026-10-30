@@ -93,10 +93,15 @@ def lanes_section(flock, now):
         return {"error": f"pane list unavailable: {error}"}
     live = {str(pane.get("pane_id")): pane for pane in panes if pane.get("pane_id")}
     working, idle = {}, {}
+    # t637 (review of #124, finding C): a failed task read used to become
+    # `tasks = []`, so a pane that MIGHT be working was reported as IDLE - the
+    # "we did not look" printed as "nothing is working" this report exists to
+    # forbid. The failure is carried now and the renderer says it.
+    tasks, tasks_error = [], None
     try:
         tasks = flock.tasks.list(scope=None, include_done=False, limit=500)
-    except Exception:  # noqa: BLE001
-        tasks = []
+    except Exception as error:  # noqa: BLE001
+        tasks_error = f"task list unavailable: {error}"
     for task in tasks:
         for lease in task.get("leases") or []:
             working.setdefault(str(lease.get("pane_id")), []).append(task["id"])
@@ -105,25 +110,44 @@ def lanes_section(flock, now):
             continue
         idle[pane_id] = live[pane_id].get("label") or live[pane_id].get("agent") or "-"
     dead = []
+    registry, registry_error = {}, None
     try:
         registry = flock.roles.describe().get("lanes") or {}
-    except Exception:  # noqa: BLE001
-        registry = {}
+    except Exception as error:  # noqa: BLE001
+        registry_error = f"lane registry unavailable: {error}"
     for pane_id, entry in registry.items():
         if pane_id not in live:
             dead.append({"pane": pane_id, "label": entry.get("label"),
                          "role": entry.get("role")})
-    return {"working": [{"pane": p, "tasks": t} for p, t in sorted(working.items())],
-            "idle": [{"pane": p, "label": l} for p, l in sorted(idle.items())],
-            "dead": dead,
-            "live": len(live)}
+    section = {"working": [{"pane": p, "tasks": t} for p, t in sorted(working.items())],
+               "idle": [{"pane": p, "label": l} for p, l in sorted(idle.items())],
+               "dead": dead,
+               "live": len(live)}
+    errors = [message for message in (tasks_error, registry_error) if message]
+    if errors:
+        # Keep the parts that WERE measured, and say which were not: an idle list
+        # computed without the lease table is a guess, so it is dropped rather than
+        # printed beside an error as if it were evidence.
+        if tasks_error:
+            section["idle"] = []
+            section["working"] = []
+        if registry_error:
+            section["dead"] = []
+        section["error"] = "; ".join(errors)
+    return section
 
 
 def needs_owner_section(flock, now):
+    # t637 (finding A): this was the ONE section with no guard, so a busy daemon made
+    # `report run` raise and write no report at all - the report disappeared exactly
+    # when it mattered. It returns an error like every other builder now.
     try:
-        result = flock.task_list(needs_owner=True, include_done=False, limit=50)
-    except TypeError:            # older signature
-        result = flock.task_list(limit=50)
+        try:
+            result = flock.task_list(needs_owner=True, include_done=False, limit=50)
+        except TypeError:            # older signature
+            result = flock.task_list(limit=50)
+    except Exception as error:  # noqa: BLE001
+        return {"error": f"needs-owner query unavailable: {error}"}
     rows = []
     for task in (result.get("tasks") or []):
         reason = str(task.get("block_reason") or "")
@@ -238,9 +262,15 @@ def render(report):
     lanes = sections["lanes"]
     lines += ["", "## Lanes"]
     if lanes.get("error"):
+        # Say what could not be read AND keep what could: a live pane count is still
+        # measured, and the lists that depended on the failed read are omitted rather
+        # than printed empty (t637, finding C).
         lines.append(f"- {lanes['error']}")
+        if lanes.get("live") is not None:
+            lines.append(f"- live panes {lanes['live']}")
     else:
         lines.append(f"- live panes {lanes.get('live')}")
+    if not lanes.get("error") or lanes.get("live") is not None:
         for row in lanes.get("working") or []:
             lines.append(f"- working: {row['pane']} on {', '.join(row['tasks'])}")
         for row in lanes.get("idle") or []:
@@ -249,8 +279,15 @@ def render(report):
             lines.append(f"- dead: {row['pane']} ({row.get('label')}, "
                          f"{row.get('role')}) — registered, no live pane")
     lines += ["", "## Needs the owner"]
-    questions = (sections["needs_owner"] or {}).get("questions") or []
-    if not questions:
+    needs_owner = sections["needs_owner"] or {}
+    questions = needs_owner.get("questions") or []
+    if needs_owner.get("error"):
+        # t637 (finding B): without this the section printed '- none' - telling the
+        # owner nothing is waiting when the truth is that we could not look. This is
+        # the false zero the report exists to forbid, in the section he reads first.
+        lines.append(f"- not measured here: {needs_owner['error']}")
+        questions = []
+    elif not questions:
         lines.append("- none")
     for row in questions:
         lines.append(f"- {row['id']} [{row['priority']}] waiting {_age(row['age_s'])}: "
