@@ -200,6 +200,150 @@ impl Tasks {
             Ok(collected.map_err(db::map_sqlite)?)
         }).await
     }
+    /// Set a status, and END THE CLAIM when the status is terminal.
+    ///
+    /// The Python store learned this the hard way twice today (t872, PR166): `block` left
+    /// the lease behind, the reaper found a lease on a task that was not in_progress,
+    /// reopened it, and the push loop re-claimed the duplicate - three rounds. `complete`
+    /// left it too. So every terminal transition deletes the leases, in the same
+    /// transaction as the status write.
+    pub async fn set_status(
+        &self,
+        id: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let wanted = id.to_string();
+        let id = wanted.clone();
+        let status = status.to_string();
+        let reason = reason.map(|r| r.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let changed = conn.execute(
+                "UPDATE tasks SET status = ?, block_reason = ?, updated_at = ? WHERE id = ?",
+                params![status, reason, now, id],
+            ).map_err(db::map_sqlite)?;
+                if changed == 0 {
+                    return Err(DunkError::Refused(format!("no task with id {id:?}")));
+                }
+                if is_terminal(&status) {
+                    conn.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
+                        .map_err(db::map_sqlite)?;
+                }
+                Ok(())
+            })
+            .await?;
+        self.get(&wanted).await
+    }
+
+    /// `block`: a task that waits on somebody, with the reason recorded.
+    pub async fn block(&self, id: &str, reason: &str) -> Result<Task, DunkError> {
+        self.set_status(id, "blocked", Some(reason)).await
+    }
+
+    /// `unblock`: back to open, reason cleared.
+    pub async fn unblock(&self, id: &str) -> Result<Task, DunkError> {
+        self.set_status(id, "open", None).await
+    }
+
+    /// `cancel`: withdrawn, reason kept, claim ended.
+    pub async fn cancel(&self, id: &str, reason: &str) -> Result<Task, DunkError> {
+        self.set_status(id, "cancelled", Some(reason)).await
+    }
+
+    /// `complete`: done, claim ended.
+    pub async fn complete(&self, id: &str) -> Result<Task, DunkError> {
+        self.set_status(id, "done", None).await
+    }
+
+    /// Insert a lease directly (test helper: claiming is T12's job).
+    #[doc(hidden)]
+    pub async fn claim_for_test(&self, id: &str, pane: &str) {
+        let (id, pane) = (id.to_string(), pane.to_string());
+        let now = crate::clock::now_s();
+        self.writer.call(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, expires_at) VALUES (?,?,?,?,?)",
+                params![id, pane, now, now, now + 1800.0],
+            ).map_err(db::map_sqlite)?;
+            Ok(())
+        }).await.expect("insert a lease");
+    }
+
+    /// Live leases on a task (test helper).
+    #[doc(hidden)]
+    pub async fn leases(&self, id: &str) -> i64 {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_leases WHERE task_id = ?",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap_or(-1)
+    }
+
+    /// Event count for a task (test helper).
+    #[doc(hidden)]
+    pub async fn events(&self, id: &str) -> i64 {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap_or(-1)
+    }
+
+    /// Append one history event (`dunk_tasks._record` / `note`).
+    pub async fn note(
+        &self,
+        id: &str,
+        event: &str,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<(), DunkError> {
+        let (id, event, actor) = (id.to_string(), event.to_string(), actor.to_string());
+        let reason = reason.map(|r| r.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
+                    params![
+                        id,
+                        event,
+                        now,
+                        actor,
+                        reason.map(|r| format!("{{\"reason\": {}}}", serde_json_string(&r)))
+                    ],
+                )
+                .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await
+    }
+}
+
+/// A status after which the task is not being worked (`dunk_tasks` terminal set).
+fn is_terminal(status: &str) -> bool {
+    matches!(status, "done" | "cancelled" | "blocked")
+}
+
+/// A JSON string literal, for the event meta.
+fn serde_json_string(text: &str) -> String {
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -276,6 +420,62 @@ mod tests {
         let path = dir.join("tasks.db");
         let _ = std::fs::remove_file(&path);
         Tasks::open(&path).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_terminal_status_ends_the_claim() {
+        // t872/PR166 in the Python: block and complete both left the lease behind, the
+        // reaper reopened the task and the push loop re-claimed it.
+        let store = store("claim").await;
+        let task = store.add("global", "duplicate", "").await.unwrap();
+        store.claim_for_test(&task.id, "w2:p1").await;
+        assert_eq!(1, store.leases(&task.id).await);
+        store.block(&task.id, "duplicate").await.unwrap();
+        assert_eq!(
+            0,
+            store.leases(&task.id).await,
+            "a blocked task is not being worked"
+        );
+        let done = store.add("global", "finished", "").await.unwrap();
+        store.claim_for_test(&done.id, "w2:p1").await;
+        store.complete(&done.id).await.unwrap();
+        assert_eq!(0, store.leases(&done.id).await);
+    }
+
+    #[tokio::test]
+    async fn block_records_the_reason_and_unblock_clears_it() {
+        let store = store("block").await;
+        let task = store.add("global", "waiting", "").await.unwrap();
+        let blocked = store
+            .block(&task.id, "needs-owner: which path?")
+            .await
+            .unwrap();
+        assert_eq!("blocked", blocked.status);
+        assert_eq!(
+            Some("needs-owner: which path?".to_string()),
+            blocked.block_reason
+        );
+        let open = store.unblock(&task.id).await.unwrap();
+        assert_eq!("open", open.status);
+        assert_eq!(None, open.block_reason);
+    }
+
+    #[tokio::test]
+    async fn note_appends_an_event() {
+        let store = store("note").await;
+        let task = store.add("global", "evidence", "").await.unwrap();
+        store
+            .note(&task.id, "note", "w2:p1", Some("ran ctest"))
+            .await
+            .unwrap();
+        assert_eq!(1, store.events(&task.id).await);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_id_is_a_refusal_not_a_silent_no_op() {
+        let store = store("missing").await;
+        let error = store.block("t999", "x").await.unwrap_err();
+        assert!(error.to_string().contains("no task with id"));
     }
 
     #[tokio::test]

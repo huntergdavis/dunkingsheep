@@ -21,8 +21,8 @@ pub mod lock;
 pub mod proc;
 pub mod retry;
 pub mod stuck;
-pub mod terminal;
 pub mod tasks;
+pub mod terminal;
 
 pub use error::{refusal, DunkError};
 
