@@ -434,6 +434,14 @@ def build_parser():
     q.add_argument("--by")
     q.add_argument("--verdict", choices=["accept", "needs-fix"],
                    help="review tasks: the verdict (recorded from your bound lane)")
+    # The call site passes args.landed (t906), and without this argument EVERY
+    # `task complete` dies with AttributeError: 'Namespace' object has no attribute
+    # 'landed' - a live outage of the command every lane uses to finish work. The flag
+    # was in the same commit as the call site and was lost when the branch was rebased
+    # onto a main that had moved; this adds it back and the test below pins the pair.
+    q.add_argument("--unmerged", dest="landed", action="store_false", default=None,
+                   help="the work is done but its PR is NOT on main (a stacked branch): "
+                        "dependents stay closed until the merge is recorded (t906)")
 
     q = tsub.add_parser("block", help="mark a task blocked")
     q.add_argument("id")
