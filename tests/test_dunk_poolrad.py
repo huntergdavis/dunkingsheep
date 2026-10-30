@@ -143,6 +143,38 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(5, len(self.flock.tasks.list(kind="work", include_done=True)),
                          "the retry created a duplicate")
 
+    def test_the_exporter_status_skips_an_inline_in_strict_body(self):
+        """t872: the filer printed prior_translation.status into the body and ignored it.
+        A body inline in a strict-credited model has nothing to author."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "inline_in_strict"})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual([], report["filed"])
+        self.assertIn("inline_in_strict", report["skipped"]["closed"]["OVL_0001_0001"])
+
+    def test_a_main_model_body_without_a_checker_is_recorded_not_filed_as_authoring(self):
+        """55 of the 74 main_model rows have the body on main and no registered
+        checker: the work owed is the checker, so 'write the strict full-C body'
+        would be a task whose first sentence is false (OVL_03B0_06FB was filed
+        eight times that way)."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "main_model",
+                                             "main_files": ["src/recovered/x.c"]})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual([], report["filed"], "filed an authoring task for a body on main")
+        self.assertIn("OVL_0001_0001", report["body_on_main"])
+        self.assertIn("checker", report["body_on_main"]["OVL_0001_0001"]["why_not"])
+
+    def test_a_source_mention_row_is_still_filed(self):
+        """The bulk of the queue (308 rows) must keep being filed."""
+        q = {"rows": [dict(row("OVL_0001_0001", 1),
+                          prior_translation={"status": "source_mention"})]}
+        report = dunk_poolrad.Sync(self.flock, repo=self.tmp.name,
+                                   exporter=lambda _r: q).run(limit=5)
+        self.assertEqual(["OVL_0001_0001"], [f["id"] for f in report["filed"]])
+
     def test_dry_run_files_nothing(self):
         sync = dunk_poolrad.Sync(self.flock, repo=self.tmp.name, exporter=lambda repo: self.queue)
         report = sync.run(limit=3, dry_run=True)

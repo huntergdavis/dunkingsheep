@@ -144,6 +144,23 @@ def task_body(row, base, repo):
     return "\n".join(lines)
 
 
+# t872: the exporter already answers "is this body on main?" in every queue row
+# (`prior_translation.status`), and the filer used to print that field into the task
+# body and then ignore it. Live split: source_mention 308, inline_in_model 23,
+# inline_in_strict 25, main_model 74.
+#
+# `inline_in_strict` means the body is inline in a model that already carries strict
+# credit, so there is nothing to author: skipped outright.
+#
+# `main_model` is NOT skipped outright, and that is deliberate: measured on the live
+# queue, 55 of the 74 have a model file on main but NO registered checker, so the
+# work that is actually owed is the checker and its evidence document - not "write the
+# strict full-C body", which is what filing them said (OVL_03B0_06FB was filed eight
+# times for this reason). Those rows go to the `body_on_main` bucket, which names what
+# is missing instead of filing a task whose first sentence is false.
+EXPORTER_INLINE_IN_STRICT = "inline_in_strict"
+EXPORTER_MAIN_MODEL = "main_model"
+
 FILED_KEY_PREFIX = "poolrad-strict:"
 FILED_KEY = re.compile(r"^filed-key: " + re.escape(FILED_KEY_PREFIX) +
                        r"(?P<id>\S+?)@(?P<base>\S+)\s*$", re.MULTILINE)
@@ -486,7 +503,7 @@ class Sync:
         # 2026-10-29); the body goes on the OWNER's credit-pending list with the
         # commit and the PR that added the model, so credit can be reviewed against
         # that head. Decided from the tree, so the skip is reproducible.
-        credit, not_ready = {}, {}
+        credit, not_ready, body_on_main = {}, {}, {}
         for row in (queue.get("rows") or []):
             rid = row.get("id")
             if not rid:
@@ -507,6 +524,27 @@ class Sync:
                         not_ready[rid] = dict(evidence, why_not=why_not)
             if rid in closed:
                 continue
+            exporter_status = (row.get("prior_translation") or {}).get("status")
+            if exporter_status == EXPORTER_INLINE_IN_STRICT:
+                closed[rid] = (f"exporter says {exporter_status}: the body is inline in a "
+                               "model that already carries strict credit, so there is "
+                               "nothing to author")
+                continue
+            if exporter_status == EXPORTER_MAIN_MODEL:
+                # The body is on main but the credit is not ready - see the constant.
+                # `candidates()` filters on `closed`, so the row must land there to not
+                # be filed; it ALSO goes to `body_on_main`, which names the work that is
+                # really owed (the checker and its evidence document) instead of filing
+                # a task whose first sentence would be false.
+                why_not = ((not_ready.get(rid) or {}).get("why_not")
+                           or "exporter says the model is on main; no registered checker")
+                body_on_main[rid] = dict(
+                    not_ready.get(rid) or {"model": (row.get("prior_translation") or {}).get(
+                        "main_files") or []}, why_not=why_not)
+                closed[rid] = (f"exporter says {exporter_status}: the body is on main and "
+                               f"the credit is not ready ({why_not}) - the missing piece is "
+                               "the checker/evidence, not the body")
+                continue
             if rid in not_ready:
                 # The model is on main but NOT credit-ready (t738: partial, or no
                 # registered checker). `already_on_main` would close it, which is the
@@ -520,6 +558,10 @@ class Sync:
         report["credit_pending"] = credit
         # Rows whose model EXISTS but is not credit-ready: still authoring candidates.
         report["models_not_credit_ready"] = not_ready
+        # t872: bodies the exporter says are on main whose credit is not ready. Not
+        # filed as authoring tasks (their first sentence would be false) and not
+        # silently dropped: the owner's list of "the checker is what is missing".
+        report["body_on_main"] = body_on_main
         if credit and not dry_run:
             written = record_credit_pending(credit, path=self.credit_path)
             report["credit_pending_file"] = (str(credit_pending_path(self.credit_path))
