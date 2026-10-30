@@ -72,22 +72,51 @@ def scan_path(name):
     return None
 
 
-def scan_content(repo, name):
+def _is_call(text, end):
+    """True when the matched value is immediately CALLED: `x = some_name()`.
+
+    NOT a credential (review t778 on #150). `SECRET_ASSIGNMENT` matches any
+    16+ character label value, and a snake_case identifier is 16+ characters, so
+    `secret = compute_owner_credentials_path()` was flagged as a cleartext secret.
+    The remedy a lane would reach for is an allowlist entry, and that is how a
+    secret gate quietly stops gating, so the rule is narrowed here instead: a
+    value followed by '(' is a call. The check reads the text AFTER the match, so
+    the pattern itself stays simple enough to read.
+    """
+    rest = text[end:end + 8].lstrip()
+    return rest.startswith("(")
+
+
+def content_findings(repo, name):
+    """EVERY content finding in one file, each with its line number (t778).
+
+    This used to be `match = ...search(...); if match: return one finding`, so a
+    file holding two credentials reported one. The gate still failed, but the
+    human who has to decide what to rotate was told half the truth.
+    """
     path = f"{repo}/{name}"
     try:
         with open(path, "rb") as handle:
             blob = handle.read(200_000)
     except OSError:
-        return None
+        return []
     if b"\0" in blob[:4096]:                     # binary: the path rules cover it
-        return None
+        return []
     text = blob.decode("utf-8", "replace")
-    match = SECRET_ASSIGNMENT.search(text)
-    if match:
+    findings = []
+    for match in SECRET_ASSIGNMENT.finditer(text):
+        if _is_call(text, match.end()):
+            continue
         line = text[:match.start()].count("\n") + 1
-        return (f"{name}:{line}: a cleartext '{match.group(1)}:' value "
-                f"({len(match.group(2))} characters)")
-    return None
+        findings.append(f"{name}:{line}: a cleartext '{match.group(1)}:' value "
+                        f"({len(match.group(2))} characters)")
+    return findings
+
+
+def scan_content(repo, name):
+    """The first content finding in a file (kept for callers that want one)."""
+    findings = content_findings(repo, name)
+    return findings[0] if findings else None
 
 
 def scan(repo=".", allowlist=None):
@@ -100,9 +129,7 @@ def scan(repo=".", allowlist=None):
         if finding:
             findings.append(finding)
             continue
-        finding = scan_content(repo, name)
-        if finding:
-            findings.append(finding)
+        findings.extend(content_findings(repo, name))
     return findings
 
 
