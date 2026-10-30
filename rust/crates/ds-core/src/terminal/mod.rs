@@ -76,11 +76,17 @@ pub struct TerminalError {
 
 impl TerminalError {
     pub fn refused(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: false }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: false,
+        }
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        TerminalError { message: message.into(), backend_unavailable: true }
+        TerminalError {
+            message: message.into(),
+            backend_unavailable: true,
+        }
     }
 }
 
@@ -125,17 +131,67 @@ pub trait Terminal: std::fmt::Debug {
     /// Child pids of a pane's shell, for the process-ancestry guard.
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError>;
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>;
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>;
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>;
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError>;
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError>;
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError>;
     fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError>;
-    fn rename(&mut self, kind: &str, target_id: &str, label: &str)
-        -> Result<(), TerminalError>;
+    fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<(), TerminalError>;
     fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError>;
     /// Type one command line into a pane (the fake records it instead).
+    ///
+    /// NOTE: this is the Python's `run_command` (run a shell command in the pane at
+    /// dunk_terminal.py:739), NOT the delivery surface below. The two were confused
+    /// in the first version of this trait, which is what t923 caught.
     fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError>;
+
+    // -- the DELIVERY surface (t923) ---------------------------------------
+    //
+    // These are the methods a message's delivery is built on: T22 implements them
+    // against tmux, T33 builds send/delivery/outbox on them, and a fake cannot fake
+    // what the trait does not declare. They are declared here, in T20, exactly
+    // because the later tasks must IMPLEMENT this seam rather than extend it.
+
+    /// Type text into a pane's composer WITHOUT submitting it (chunked in the
+    /// Python: `send-keys -l -- <chunk>` per chunk, with a delay between chunks).
+    fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError>;
+
+    /// Type the text, let it settle, then press Enter once (`send_text_and_enter`).
+    fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError>;
+
+    /// Send KEY NAMES (not literal text): `send-keys -t <pane> <keys...>`, the
+    /// escape hatch for C-c, Up, Escape and friends.
+    fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError>;
+
+    /// The pane's screen text, newest `lines` lines, optionally with ANSI colour
+    /// (`capture-pane -p [-e] -S -<lines> -t <pane>`).
+    ///
+    /// `Ok(None)` means the pane could not be read (the Python returns None), which
+    /// the stuck-message machine treats as "unverified", NOT as an empty composer.
+    fn read_pane(
+        &self,
+        pane_id: &str,
+        lines: i64,
+        ansi: bool,
+    ) -> Result<Option<String>, TerminalError>;
+
+    /// The agent status the backend knows for a pane (`ready`/`working`/`unknown`),
+    /// or `None` when the pane is not an agent.
+    fn agent_status(&self, pane_id: &str) -> Option<String>;
 }

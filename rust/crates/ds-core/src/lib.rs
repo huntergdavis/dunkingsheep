@@ -21,7 +21,7 @@ pub mod retry;
 pub mod stuck;
 pub mod terminal;
 
-pub use error::{DunkError, refusal};
+pub use error::{refusal, DunkError};
 
 /// The port manifest this crate is written against (docs/rust/MANIFEST.md).
 ///

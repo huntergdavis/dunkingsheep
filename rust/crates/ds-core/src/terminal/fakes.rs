@@ -5,7 +5,7 @@
 //! mutation fail" switch. Layout mutations mutate the canned lists, exactly as the
 //! fake does, so a test can create a tab and then find it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{AgentSpec, Pane, Tab, Terminal, TerminalError, Workspace};
 
@@ -14,39 +14,95 @@ use super::{AgentSpec, Pane, Tab, Terminal, TerminalError, Workspace};
 /// point of the fake is that every test sees the SAME world.
 fn canned_panes() -> Vec<Pane> {
     vec![
-        Pane { pane_id: "w1:p1".into(), session_id: "s1".into(), window_id: "w1".into(),
-               cwd: "/home/hunter/work".into(), command: "bash".into(),
-               title: "π - work".into(), active: true, workspace: "work".into(),
-               tab: "1".into(), window_index: 1, workspace_index: 1,
-               pane_pid: Some(1101), width: 120, height: 40 },
-        Pane { pane_id: "w2:p2".into(), session_id: "s2".into(), window_id: "w2".into(),
-               cwd: "/home/hunter/work".into(), command: "claude".into(),
-               title: "π - review".into(), active: true, workspace: "work".into(),
-               tab: "2".into(), window_index: 2, workspace_index: 1,
-               pane_pid: Some(2202), width: 120, height: 40 },
-        Pane { pane_id: "w3:p3".into(), session_id: "s3".into(), window_id: "w3".into(),
-               cwd: "/home/hunter/other".into(), command: "bash".into(),
-               title: "π - other".into(), active: true, workspace: "other".into(),
-               tab: "1".into(), window_index: 1, workspace_index: 2,
-               pane_pid: Some(3303), width: 100, height: 30 },
+        Pane {
+            pane_id: "w1:p1".into(),
+            session_id: "s1".into(),
+            window_id: "w1".into(),
+            cwd: "/home/hunter/work".into(),
+            command: "bash".into(),
+            title: "π - work".into(),
+            active: true,
+            workspace: "work".into(),
+            tab: "1".into(),
+            window_index: 1,
+            workspace_index: 1,
+            pane_pid: Some(1101),
+            width: 120,
+            height: 40,
+        },
+        Pane {
+            pane_id: "w2:p2".into(),
+            session_id: "s2".into(),
+            window_id: "w2".into(),
+            cwd: "/home/hunter/work".into(),
+            command: "claude".into(),
+            title: "π - review".into(),
+            active: true,
+            workspace: "work".into(),
+            tab: "2".into(),
+            window_index: 2,
+            workspace_index: 1,
+            pane_pid: Some(2202),
+            width: 120,
+            height: 40,
+        },
+        Pane {
+            pane_id: "w3:p3".into(),
+            session_id: "s3".into(),
+            window_id: "w3".into(),
+            cwd: "/home/hunter/other".into(),
+            command: "bash".into(),
+            title: "π - other".into(),
+            active: true,
+            workspace: "other".into(),
+            tab: "1".into(),
+            window_index: 1,
+            workspace_index: 2,
+            pane_pid: Some(3303),
+            width: 100,
+            height: 30,
+        },
     ]
 }
 
 fn canned_tabs() -> Vec<Tab> {
     vec![
-        Tab { tab_id: "w1".into(), workspace_id: "w1".into(), label: "1".into(),
-              index: 1, active: true },
-        Tab { tab_id: "w2".into(), workspace_id: "w2".into(), label: "2".into(),
-              index: 2, active: true },
-        Tab { tab_id: "w3".into(), workspace_id: "w3".into(), label: "1".into(),
-              index: 1, active: true },
+        Tab {
+            tab_id: "w1".into(),
+            workspace_id: "w1".into(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        },
+        Tab {
+            tab_id: "w2".into(),
+            workspace_id: "w2".into(),
+            label: "2".into(),
+            index: 2,
+            active: true,
+        },
+        Tab {
+            tab_id: "w3".into(),
+            workspace_id: "w3".into(),
+            label: "1".into(),
+            index: 1,
+            active: true,
+        },
     ]
 }
 
 fn canned_workspaces() -> Vec<Workspace> {
     vec![
-        Workspace { workspace_id: "w1".into(), label: "work".into(), index: 1 },
-        Workspace { workspace_id: "w2".into(), label: "other".into(), index: 2 },
+        Workspace {
+            workspace_id: "w1".into(),
+            label: "work".into(),
+            index: 1,
+        },
+        Workspace {
+            workspace_id: "w2".into(),
+            label: "other".into(),
+            index: 2,
+        },
     ]
 }
 
@@ -65,6 +121,21 @@ pub struct FakeTerminal {
     pub fail_layout: Option<String>,
     /// Child pids served per pane, for `agent_child_pids`.
     pub children: BTreeMap<i64, Vec<i64>>,
+    /// Sentinel text per pane, served by `read_pane` (the Python's `self.screens`).
+    pub screens: BTreeMap<String, String>,
+    /// Panes whose read FAILS (the Python's `self.unreadable`): a read that returns
+    /// None is not an empty composer, and a fake must be able to say so.
+    pub unreadable: BTreeSet<String>,
+    /// The status per pane, served by `agent_status` (the Python's `self.statuses`).
+    pub statuses: BTreeMap<String, String>,
+    /// Every `(pane_id, text)` typed without Enter.
+    pub sends: Vec<(String, String)>,
+    /// Every `(pane_id, text)` typed and submitted.
+    pub submits: Vec<(String, String)>,
+    /// Every `(pane_id, keys)` sent as key names.
+    pub keys_sent: Vec<(String, Vec<String>)>,
+    /// Every `(pane_id, lines, ansi)` read.
+    pub reads: Vec<(String, i64, bool)>,
     counter: i64,
 }
 
@@ -79,6 +150,13 @@ impl Default for FakeTerminal {
             runs: Vec::new(),
             fail_layout: None,
             children: BTreeMap::new(),
+            screens: BTreeMap::new(),
+            unreadable: BTreeSet::new(),
+            statuses: BTreeMap::new(),
+            sends: Vec::new(),
+            submits: Vec::new(),
+            keys_sent: Vec::new(),
+            reads: Vec::new(),
             counter: 100,
         }
     }
@@ -90,7 +168,10 @@ impl FakeTerminal {
     }
 
     pub fn unavailable() -> Self {
-        FakeTerminal { available: false, ..Self::default() }
+        FakeTerminal {
+            available: false,
+            ..Self::default()
+        }
     }
 
     fn next_id(&mut self, prefix: &str) -> String {
@@ -126,7 +207,10 @@ impl Terminal for FakeTerminal {
     }
 
     fn get_pane(&self, pane_id: &str) -> Option<Pane> {
-        self.panes.iter().find(|pane| pane.pane_id == pane_id).cloned()
+        self.panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .cloned()
     }
 
     fn list_tabs(&self) -> Vec<Tab> {
@@ -140,7 +224,10 @@ impl Terminal for FakeTerminal {
     fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>> {
         let mut grouped: BTreeMap<String, Vec<Pane>> = BTreeMap::new();
         for pane in &self.panes {
-            grouped.entry(pane.workspace.clone()).or_default().push(pane.clone());
+            grouped
+                .entry(pane.workspace.clone())
+                .or_default()
+                .push(pane.clone());
         }
         grouped
     }
@@ -149,9 +236,12 @@ impl Terminal for FakeTerminal {
         Ok(self.children.get(&pane_pid).cloned().unwrap_or_default())
     }
 
-    fn create_workspace(&mut self, label: Option<&str>, cwd: Option<&str>, focus: bool)
-        -> Result<Workspace, TerminalError>
-    {
+    fn create_workspace(
+        &mut self,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Workspace, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -163,13 +253,17 @@ impl Terminal for FakeTerminal {
         };
         self.workspaces.push(workspace.clone());
         self.record("create_workspace", &workspace_id);
-        let _ = (cwd, focus);       // the fake records the intent, the mutation is the list
+        let _ = (cwd, focus); // the fake records the intent, the mutation is the list
         Ok(workspace)
     }
 
-    fn create_tab(&mut self, workspace_id: Option<&str>, label: Option<&str>,
-                  cwd: Option<&str>, focus: bool) -> Result<Tab, TerminalError>
-    {
+    fn create_tab(
+        &mut self,
+        workspace_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Tab, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
@@ -187,13 +281,17 @@ impl Terminal for FakeTerminal {
         Ok(tab)
     }
 
-    fn split_pane(&mut self, pane_id: &str, direction: &str, cwd: Option<&str>)
-        -> Result<Pane, TerminalError>
-    {
+    fn split_pane(
+        &mut self,
+        pane_id: &str,
+        direction: &str,
+        cwd: Option<&str>,
+    ) -> Result<Pane, TerminalError> {
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
-        let source = self.get_pane(pane_id)
+        let source = self
+            .get_pane(pane_id)
             .ok_or_else(|| TerminalError::refused(format!("no such pane {pane_id}")))?;
         let pane_id = self.next_id("w9:p");
         let pane = Pane {
@@ -202,8 +300,16 @@ impl Terminal for FakeTerminal {
             command: source.command.clone(),
             title: format!("{} ({direction})", source.title),
             active: true,
-            width: if direction == "down" { source.width } else { source.width / 2 },
-            height: if direction == "down" { source.height / 2 } else { source.height },
+            width: if direction == "down" {
+                source.width
+            } else {
+                source.width / 2
+            },
+            height: if direction == "down" {
+                source.height / 2
+            } else {
+                source.height
+            },
             ..source
         };
         self.panes.push(pane.clone());
@@ -220,7 +326,10 @@ impl Terminal for FakeTerminal {
             pane_id: pane_id.clone(),
             session_id: "s1".into(),
             window_id: "w1".into(),
-            cwd: spec.cwd.clone().unwrap_or_else(|| "/home/hunter/work".into()),
+            cwd: spec
+                .cwd
+                .clone()
+                .unwrap_or_else(|| "/home/hunter/work".into()),
             command: spec.argv.first().cloned().unwrap_or_default(),
             title: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
             active: true,
@@ -243,15 +352,21 @@ impl Terminal for FakeTerminal {
         }
         match kind {
             "tab" => {
-                let tab = self.tabs.iter_mut().find(|tab| tab.tab_id == target_id)
+                let tab = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.tab_id == target_id)
                     .ok_or_else(|| TerminalError::refused(format!("no such tab {target_id}")))?;
                 tab.label = label.to_string();
             }
             "workspace" => {
-                let workspace = self.workspaces.iter_mut()
+                let workspace = self
+                    .workspaces
+                    .iter_mut()
                     .find(|workspace| workspace.workspace_id == target_id)
-                    .ok_or_else(|| TerminalError::refused(
-                        format!("no such workspace {target_id}")))?;
+                    .ok_or_else(|| {
+                        TerminalError::refused(format!("no such workspace {target_id}"))
+                    })?;
                 workspace.label = label.to_string();
             }
             other => return Err(TerminalError::refused(format!("cannot rename a {other}"))),
@@ -288,6 +403,81 @@ impl Terminal for FakeTerminal {
         }
         self.runs.push((pane_id.to_string(), command.to_string()));
         Ok(())
+    }
+
+    fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+        if !self.available {
+            return Err(TerminalError::unavailable(self.server_error_hint()));
+        }
+        self.sends.push((pane_id.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+        self.send_text(pane_id, text)?;
+        self.submits.push((pane_id.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError> {
+        if !self.available {
+            return Err(TerminalError::unavailable(self.server_error_hint()));
+        }
+        self.keys_sent.push((
+            pane_id.to_string(),
+            keys.iter().map(|key| key.to_string()).collect(),
+        ));
+        Ok(())
+    }
+
+    fn read_pane(
+        &self,
+        pane_id: &str,
+        lines: i64,
+        ansi: bool,
+    ) -> Result<Option<String>, TerminalError> {
+        // The Python's order: an unknown pane is None, an unreadable pane is None,
+        // then the pinned screen (tail-truncated), else the echo of what we sent.
+        if self.get_pane(pane_id).is_none() {
+            return Ok(None);
+        }
+        if self.unreadable.contains(pane_id) {
+            return Ok(None);
+        }
+        if let Some(screen) = self.screens.get(pane_id) {
+            let tail: Vec<&str> = screen
+                .lines()
+                .rev()
+                .take(lines.max(0) as usize)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let text = tail.join("\n");
+            let _ = ansi; // the fake stores plain screens and says so
+            return Ok(Some(text));
+        }
+        let mine: Vec<&str> = self
+            .sends
+            .iter()
+            .filter(|(pane, _text)| pane == pane_id)
+            .map(|(_pane, text)| text.as_str())
+            .collect();
+        let tail: Vec<&str> = mine
+            .iter()
+            .rev()
+            .take(lines.max(0) as usize)
+            .rev()
+            .copied()
+            .collect();
+        Ok(Some(tail.join("\n")))
+    }
+
+    fn agent_status(&self, pane_id: &str) -> Option<String> {
+        if let Some(status) = self.statuses.get(pane_id) {
+            return Some(status.clone());
+        }
+        self.get_pane(pane_id).map(|_| "unknown".to_string())
     }
 }
 

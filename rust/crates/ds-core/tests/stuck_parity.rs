@@ -23,19 +23,30 @@ fn decide(tracker: &mut Tracker, observation: &Observation, now: f64) -> Decisio
 #[test]
 fn the_threshold_defaults_to_the_cos_bound_and_is_configurable() {
     assert_eq!(120.0, Config::default().threshold_s);
-    let raw = RawConfig { threshold_s: Some(45.0), ..RawConfig::default() };
+    let raw = RawConfig {
+        threshold_s: Some(45.0),
+        ..RawConfig::default()
+    };
     assert_eq!(45.0, Config::from_raw(&raw).unwrap().threshold_s);
 }
 
 #[test]
 fn nonsense_config_is_refused_not_coerced() {
-    let interval_gt_threshold = RawConfig { threshold_s: Some(10.0),
-                                            observation_interval_s: Some(20.0),
-                                            ..RawConfig::default() };
+    let interval_gt_threshold = RawConfig {
+        threshold_s: Some(10.0),
+        observation_interval_s: Some(20.0),
+        ..RawConfig::default()
+    };
     assert!(Config::from_raw(&interval_gt_threshold).is_err());
-    let zero_attempts = RawConfig { max_attempts: Some(0), ..RawConfig::default() };
+    let zero_attempts = RawConfig {
+        max_attempts: Some(0),
+        ..RawConfig::default()
+    };
     assert!(Config::from_raw(&zero_attempts).is_err());
-    let negative = RawConfig { threshold_s: Some(-1.0), ..RawConfig::default() };
+    let negative = RawConfig {
+        threshold_s: Some(-1.0),
+        ..RawConfig::default()
+    };
     assert!(Config::from_raw(&negative).is_err());
 }
 
@@ -47,7 +58,10 @@ fn the_composer_wrapping_is_not_content() {
 
 #[test]
 fn one_appended_word_changes_the_fingerprint() {
-    assert_ne!(stuck::fingerprint(OWNED), stuck::fingerprint(&format!("{OWNED} x")));
+    assert_ne!(
+        stuck::fingerprint(OWNED),
+        stuck::fingerprint(&format!("{OWNED} x"))
+    );
 }
 
 #[test]
@@ -78,7 +92,10 @@ fn at_the_threshold_exactly_one_attempt_is_decided() {
 fn stable_text_produces_exactly_one_recover_then_a_cooldown() {
     let mut tracker = Tracker::default();
     decide(&mut tracker, &observed(), T0);
-    assert_eq!("recover", decide(&mut tracker, &observed(), T0 + 120.0).action);
+    assert_eq!(
+        "recover",
+        decide(&mut tracker, &observed(), T0 + 120.0).action
+    );
     let cooling = decide(&mut tracker, &observed(), T0 + 130.0);
     assert_eq!("cooling", cooling.action);
     assert!(cooling.reason.contains("cooldown"));
@@ -89,7 +106,10 @@ fn the_clock_starts_at_the_first_sighting_not_at_the_message_age() {
     let mut tracker = Tracker::default();
     decide(&mut tracker, &observed(), T0);
     assert_eq!("wait", decide(&mut tracker, &observed(), T0 + 119.0).action);
-    assert_eq!("recover", decide(&mut tracker, &observed(), T0 + 120.0).action);
+    assert_eq!(
+        "recover",
+        decide(&mut tracker, &observed(), T0 + 120.0).action
+    );
 }
 
 #[test]
@@ -196,80 +216,126 @@ fn an_empty_composer_resets_instead_of_pressing() {
 fn attempts_are_bounded_and_end_in_a_named_terminal_reason() {
     let mut tracker = Tracker::default();
     decide(&mut tracker, &observed(), T0);
-    assert_eq!("recover", decide(&mut tracker, &observed(), T0 + 120.0).action);
-    assert_eq!("recover", decide(&mut tracker, &observed(), T0 + 200.0).action);
+    assert_eq!(
+        "recover",
+        decide(&mut tracker, &observed(), T0 + 120.0).action
+    );
+    assert_eq!(
+        "recover",
+        decide(&mut tracker, &observed(), T0 + 200.0).action
+    );
     let terminal = decide(&mut tracker, &observed(), T0 + 300.0);
     assert_eq!("terminal", terminal.action);
     assert!(terminal.reason.contains("did not submit the text"));
-    assert_eq!("terminal", decide(&mut tracker, &observed(), T0 + 400.0).action);
+    assert_eq!(
+        "terminal",
+        decide(&mut tracker, &observed(), T0 + 400.0).action
+    );
 }
 
 #[test]
 fn attempts_survive_a_restart_so_no_second_enter_is_pressed() {
     // Mirrors the Python: max_attempts=1, so ONE press is the whole budget, and a
     // restart must not buy the same message a second Enter.
-    let config = Config { threshold_s: 120.0, max_attempts: 1, cooldown_s: 60.0,
-                          ..Config::default() };
+    let config = Config {
+        threshold_s: 120.0,
+        max_attempts: 1,
+        cooldown_s: 60.0,
+        ..Config::default()
+    };
     let mut tracker = Tracker::default();
     tracker.decide(&observed(), &config, T0);
-    assert_eq!("recover", tracker.decide(&observed(), &config, T0 + 120.0).action);
+    assert_eq!(
+        "recover",
+        tracker.decide(&observed(), &config, T0 + 120.0).action
+    );
     // A restart restores the persisted state - records AND the spent ledger, which is
     // what Tracker.load() keeps (the Python test persists with dump()/load()).
     let mut restored = tracker.clone();
     let decision = restored.decide(&observed(), &config, T0 + 400.0);
-    assert_eq!("terminal", decision.action,
-               "a restart must not buy the same message a second Enter");
+    assert_eq!(
+        "terminal", decision.action,
+        "a restart must not buy the same message a second Enter"
+    );
     assert_eq!(1, decision.attempts);
 }
 
 #[test]
 fn a_consumed_message_does_not_regain_its_budget_when_it_reappears() {
-    let config = Config { threshold_s: 10.0, max_attempts: 1, cooldown_s: 1.0,
-                          ..Config::default() };
+    let config = Config {
+        threshold_s: 10.0,
+        max_attempts: 1,
+        cooldown_s: 1.0,
+        ..Config::default()
+    };
     let mut tracker = Tracker::default();
     tracker.decide(&observed(), &config, T0);
-    assert_eq!("recover", tracker.decide(&observed(), &config, T0 + 10.0).action);
-    tracker.forget("w1:p1");                       // consumption forgets the pane record
+    assert_eq!(
+        "recover",
+        tracker.decide(&observed(), &config, T0 + 10.0).action
+    );
+    tracker.forget("w1:p1"); // consumption forgets the pane record
     tracker.decide(&observed(), &config, T0 + 20.0);
-    assert_eq!(1, tracker.records["w1:p1"].attempts,
-               "the ledger keeps what this message already spent");
-    assert_eq!("terminal", tracker.decide(&observed(), &config, T0 + 40.0).action);
+    assert_eq!(
+        1, tracker.records["w1:p1"].attempts,
+        "the ledger keeps what this message already spent"
+    );
+    assert_eq!(
+        "terminal",
+        tracker.decide(&observed(), &config, T0 + 40.0).action
+    );
 }
 
 #[test]
 fn a_reset_does_not_refund_either() {
-    let config = Config { threshold_s: 10.0, max_attempts: 1, cooldown_s: 1.0,
-                          ..Config::default() };
+    let config = Config {
+        threshold_s: 10.0,
+        max_attempts: 1,
+        cooldown_s: 1.0,
+        ..Config::default()
+    };
     let mut tracker = Tracker::default();
     tracker.decide(&observed(), &config, T0);
-    tracker.decide(&observed(), &config, T0 + 10.0);          // reserved 1
+    tracker.decide(&observed(), &config, T0 + 10.0); // reserved 1
     let mut busy = observed();
     busy.status = "working".to_string();
     assert_eq!("reset", tracker.decide(&busy, &config, T0 + 11.0).action);
     tracker.decide(&observed(), &config, T0 + 30.0);
-    assert_eq!("terminal", tracker.decide(&observed(), &config, T0 + 60.0).action,
-               "a busy turn must not hand the same message a new attempt");
+    assert_eq!(
+        "terminal",
+        tracker.decide(&observed(), &config, T0 + 60.0).action,
+        "a busy turn must not hand the same message a new attempt"
+    );
 }
 
 #[test]
 fn the_ledger_crosses_a_restart() {
-    let config = Config { threshold_s: 10.0, max_attempts: 1, cooldown_s: 1.0,
-                          ..Config::default() };
+    let config = Config {
+        threshold_s: 10.0,
+        max_attempts: 1,
+        cooldown_s: 1.0,
+        ..Config::default()
+    };
     let mut tracker = Tracker::default();
     tracker.decide(&observed(), &config, T0);
     tracker.decide(&observed(), &config, T0 + 10.0);
     let mut restored = tracker.clone();
     restored.forget("w1:p1");
     restored.decide(&observed(), &config, T0 + 100.0);
-    assert_eq!(1, restored.records["w1:p1"].attempts,
-               "the ledger crosses the restart");
+    assert_eq!(
+        1, restored.records["w1:p1"].attempts,
+        "the ledger crosses the restart"
+    );
 }
 
 #[test]
 fn a_disabled_recovery_does_not_act_at_all() {
     let mut tracker = Tracker::default();
     decide(&mut tracker, &observed(), T0);
-    let config = Config { enabled: false, ..Config::default() };
+    let config = Config {
+        enabled: false,
+        ..Config::default()
+    };
     let decision = tracker.decide(&observed(), &config, T0 + 500.0);
     assert_eq!("reset", decision.action);
     assert!(decision.reason.contains("disabled"));

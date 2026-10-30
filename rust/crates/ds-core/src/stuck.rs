@@ -21,8 +21,15 @@
 use std::collections::BTreeMap;
 
 /// The fields one pane's record carries, in the order the Python's schema lists them.
-pub const SCHEMA_FIELDS: [&str; 7] = ["message_id", "generation", "fingerprint",
-                                      "first_seen", "last_attempt_at", "attempts", "terminal"];
+pub const SCHEMA_FIELDS: [&str; 7] = [
+    "message_id",
+    "generation",
+    "fingerprint",
+    "first_seen",
+    "last_attempt_at",
+    "attempts",
+    "terminal",
+];
 
 pub const ACTIONS: [&str; 5] = ["wait", "recover", "cooling", "reset", "terminal"];
 
@@ -102,18 +109,27 @@ impl Config {
     /// Validate a raw config. A nonsense value is REFUSED, never coerced.
     pub fn from_raw(raw: &RawConfig) -> Result<Config, String> {
         let enabled = raw.enabled.unwrap_or(true);
-        let interval = positive(raw.observation_interval_s, DEFAULT_OBSERVATION_INTERVAL_S,
-                                "observation_interval_s")?;
+        let interval = positive(
+            raw.observation_interval_s,
+            DEFAULT_OBSERVATION_INTERVAL_S,
+            "observation_interval_s",
+        )?;
         let threshold = positive(raw.threshold_s, DEFAULT_THRESHOLD_S, "threshold_s")?;
         if enabled && interval > threshold {
-            return Err("observation_interval_s must be <= threshold_s, or the bound cannot \
-                        be honoured".to_string());
+            return Err(
+                "observation_interval_s must be <= threshold_s, or the bound cannot \
+                        be honoured"
+                    .to_string(),
+            );
         }
         let attempts = match raw.max_attempts {
             None => DEFAULT_MAX_ATTEMPTS,
             Some(value) if value >= 1 => value as u32,
-            Some(_) => return Err("max_attempts must be at least 1 (0 would disable the \
-                                   action)".to_string()),
+            Some(_) => {
+                return Err("max_attempts must be at least 1 (0 would disable the \
+                                   action)"
+                    .to_string())
+            }
         };
         Ok(Config {
             enabled,
@@ -173,8 +189,15 @@ pub struct Decision {
 impl Decision {
     fn new(action: &str, reason: impl Into<String>) -> Self {
         debug_assert!(ACTIONS.contains(&action), "unknown action {action}");
-        Decision { action: action.to_string(), reason: reason.into(), attempts: 0,
-                   terminal: None, fingerprint: None, first_seen: None, stale_for: 0.0 }
+        Decision {
+            action: action.to_string(),
+            reason: reason.into(),
+            attempts: 0,
+            terminal: None,
+            fingerprint: None,
+            first_seen: None,
+            stale_for: 0.0,
+        }
     }
 
     pub fn recovers(&self) -> bool {
@@ -208,14 +231,26 @@ pub struct Tracker {
 
 /// The clock is the caller's: this machine never reads one.
 pub fn obs_now(now: Option<f64>) -> Result<f64, String> {
-    now.ok_or_else(|| "this state machine takes `now` from the caller; it never reads a \
-                        clock".to_string())
+    now.ok_or_else(|| {
+        "this state machine takes `now` from the caller; it never reads a \
+                        clock"
+            .to_string()
+    })
 }
 
-pub fn ledger_key(pane_id: &str, message_id: &str, generation: Option<&str>,
-                  fingerprint: &str) -> String {
-    format!("{}|{}|{}|{}", pane_id, message_id,
-            generation.unwrap_or("None"), fingerprint)
+pub fn ledger_key(
+    pane_id: &str,
+    message_id: &str,
+    generation: Option<&str>,
+    fingerprint: &str,
+) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        pane_id,
+        message_id,
+        generation.unwrap_or("None"),
+        fingerprint
+    )
 }
 
 /// The independent consumption check after ONE Enter.
@@ -231,7 +266,12 @@ pub fn verify(before: &Observation, after: Option<&Observation>) -> (&'static st
     let after_text = match after.text.as_deref() {
         // A read that FAILED is not an empty composer. Treating None as "" is how a
         // missing pane once reported a successful recovery.
-        None => return ("unverified", "the pane could not be read after the press".to_string()),
+        None => {
+            return (
+                "unverified",
+                "the pane could not be read after the press".to_string(),
+            )
+        }
         Some(text) => text,
     };
     if after.dialog {
@@ -245,9 +285,15 @@ pub fn verify(before: &Observation, after: Option<&Observation>) -> (&'static st
         return ("consumed", "a turn started after the press".to_string());
     }
     if fingerprint(after_text) == fingerprint(before_text) {
-        return ("unchanged", "the same text is still in the composer".to_string());
+        return (
+            "unchanged",
+            "the same text is still in the composer".to_string(),
+        );
     }
-    ("modified", "the composer now holds different text".to_string())
+    (
+        "modified",
+        "the composer now holds different text".to_string(),
+    )
 }
 
 impl Tracker {
@@ -255,9 +301,7 @@ impl Tracker {
     ///
     /// Mutating by design: `first_seen`, `attempts` and `last_attempt_at` ARE the
     /// state that makes the decision deterministic across ticks.
-    pub fn decide(&mut self, obs: &Observation, config: &Config, now: f64)
-        -> Decision
-    {
+    pub fn decide(&mut self, obs: &Observation, config: &Config, now: f64) -> Decision {
         if !config.enabled {
             // A disabled recovery is not a slower recovery: it does not act at all.
             return Decision::new("reset", "stuck recovery is disabled");
@@ -285,8 +329,10 @@ impl Tracker {
         let current = fingerprint(text);
         let existing = self.records.get(&obs.pane_id).cloned();
         if let Some(record) = &existing {
-            if record.generation.is_some() && obs.generation.is_some()
-                && record.generation != obs.generation {
+            if record.generation.is_some()
+                && obs.generation.is_some()
+                && record.generation != obs.generation
+            {
                 return self.reset(obs, "the pane was replaced");
             }
             if record.message_id.is_some() && record.message_id.as_deref() != Some(message_id) {
@@ -298,17 +344,24 @@ impl Tracker {
         }
         let record = match existing {
             None => {
-                let already = self.reserved(&obs.pane_id, message_id,
-                                            obs.generation.as_deref(), &current);
-                self.records.insert(obs.pane_id.clone(), Record {
-                    message_id: Some(message_id.to_string()),
-                    generation: obs.generation.clone(),
-                    fingerprint: Some(current.clone()),
-                    first_seen: Some(now),
-                    last_attempt_at: None,
-                    attempts: already,
-                    terminal: None,
-                });
+                let already = self.reserved(
+                    &obs.pane_id,
+                    message_id,
+                    obs.generation.as_deref(),
+                    &current,
+                );
+                self.records.insert(
+                    obs.pane_id.clone(),
+                    Record {
+                        message_id: Some(message_id.to_string()),
+                        generation: obs.generation.clone(),
+                        fingerprint: Some(current.clone()),
+                        first_seen: Some(now),
+                        last_attempt_at: None,
+                        attempts: already,
+                        terminal: None,
+                    },
+                );
                 let mut decision = Decision::new("wait", "first sighting; the clock starts now");
                 decision.fingerprint = Some(current);
                 decision.first_seen = Some(now);
@@ -330,7 +383,11 @@ impl Tracker {
         if stale_for < config.threshold_s {
             let mut decision = Decision::new(
                 "wait",
-                format!("unchanged for {stale_for:.0}s of {:.0}s", config.threshold_s));
+                format!(
+                    "unchanged for {stale_for:.0}s of {:.0}s",
+                    config.threshold_s
+                ),
+            );
             decision.attempts = record.attempts;
             decision.fingerprint = Some(current);
             decision.first_seen = record.first_seen;
@@ -338,14 +395,22 @@ impl Tracker {
             return decision;
         }
         if record.attempts >= config.max_attempts {
-            let terminal = format!("{} recovery attempt(s) did not submit the text",
-                                   record.attempts);
+            let terminal = format!(
+                "{} recovery attempt(s) did not submit the text",
+                record.attempts
+            );
             if let Some(stored) = self.records.get_mut(&obs.pane_id) {
                 stored.terminal = Some(terminal.clone());
             }
             self.spent.insert(
-                ledger_key(&obs.pane_id, message_id, obs.generation.as_deref(), &current),
-                record.attempts);
+                ledger_key(
+                    &obs.pane_id,
+                    message_id,
+                    obs.generation.as_deref(),
+                    &current,
+                ),
+                record.attempts,
+            );
             let mut decision = Decision::new("terminal", terminal.clone());
             decision.attempts = record.attempts;
             decision.terminal = Some(terminal);
@@ -358,8 +423,12 @@ impl Tracker {
             if now - last < config.cooldown_s {
                 let mut decision = Decision::new(
                     "cooling",
-                    format!("attempted {:.0}s ago; cooldown is {:.0}s", now - last,
-                            config.cooldown_s));
+                    format!(
+                        "attempted {:.0}s ago; cooldown is {:.0}s",
+                        now - last,
+                        config.cooldown_s
+                    ),
+                );
                 decision.attempts = record.attempts;
                 decision.fingerprint = Some(current);
                 decision.first_seen = record.first_seen;
@@ -375,12 +444,21 @@ impl Tracker {
         // RESERVED BEFORE THE PRESS: the caller must persist this before it sends a
         // key, so a crash between the key and the result cannot refund the attempt.
         self.spent.insert(
-            ledger_key(&obs.pane_id, message_id, obs.generation.as_deref(), &current),
-            attempts);
+            ledger_key(
+                &obs.pane_id,
+                message_id,
+                obs.generation.as_deref(),
+                &current,
+            ),
+            attempts,
+        );
         let mut decision = Decision::new(
             "recover",
-            format!("unchanged for {stale_for:.0}s and idle; attempt {attempts} of {}",
-                    config.max_attempts));
+            format!(
+                "unchanged for {stale_for:.0}s and idle; attempt {attempts} of {}",
+                config.max_attempts
+            ),
+        );
         decision.attempts = attempts;
         decision.fingerprint = Some(current);
         decision.first_seen = record.first_seen;
@@ -393,9 +471,16 @@ impl Tracker {
         Decision::new("reset", reason)
     }
 
-    pub fn reserved(&self, pane_id: &str, message_id: &str, generation: Option<&str>,
-                     fingerprint: &str) -> u32 {
-        *self.spent.get(&ledger_key(pane_id, message_id, generation, fingerprint))
+    pub fn reserved(
+        &self,
+        pane_id: &str,
+        message_id: &str,
+        generation: Option<&str>,
+        fingerprint: &str,
+    ) -> u32 {
+        *self
+            .spent
+            .get(&ledger_key(pane_id, message_id, generation, fingerprint))
             .unwrap_or(&0)
     }
 
