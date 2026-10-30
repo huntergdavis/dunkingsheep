@@ -689,11 +689,67 @@ function Budget({ data }) {
   </section>;
 }
 
+function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy }) {
+  // DESK_DESIGN 4.1 (t997): the questions the owner owes an answer to, at the top of the
+  // desk. Each row shows the LANE'S QUESTION VERBATIM (the board carries it, the desk does
+  // not paraphrase), its age and what an answer unblocks. Collapses to one line when there
+  // is nothing waiting, because an empty panel that still takes a screen is a lie about
+  // how much there is to do.
+  const [reply, setReply] = useState({});
+  const age = seconds => seconds == null ? 'unknown' : seconds < 3600
+    ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+  if (!rows.length) return <p className="ops-owner-empty" data-ops-section="needs-owner">Nothing needs your decision.</p>;
+  return <section className="ops-owner" data-ops-section="needs-owner" aria-label="Decisions you owe">
+    <h2>Decisions you owe <span className="ops-owner-count">{rows.length}</span></h2>
+    <ul>
+      {rows.map(row => <li key={row.id}>
+        <div className="ops-owner-line">
+          <code>{row.id}</code>
+          <span className="ops-owner-question">{row.needs_owner_question}</span>
+          <span className="ops-owner-age" title={`waiting ${age(row.age_s)}`}>{age(row.age_s)}</span>
+        </div>
+        {row.blocks?.length > 0 && <p className="ops-owner-blocks">
+          unblocks {row.blocks.map(id => <code key={id}>{id}</code>)}
+        </p>}
+        <div className="ops-owner-reply">
+          <input aria-label={`Answer ${row.id}`} placeholder="Answer the lane…"
+                 value={reply[row.id] || ''}
+                 onChange={event => setReply(state => ({ ...state, [row.id]: event.target.value }))} />
+          <button disabled={busy || !(reply[row.id] || '').trim()}
+                  onClick={() => { onAnswer(row.id, reply[row.id]); setReply(state => ({ ...state, [row.id]: '' })); }}>
+            Answer
+          </button>
+          <button className="ops-owner-notnow" disabled={busy} onClick={() => onNotNow(row.id)}>Not now</button>
+        </div>
+      </li>)}
+    </ul>
+    {asks?.length > 0 && <div className="ops-owner-asks">
+      <h3>What I asked for <span className="dash-meta">last 24h</span></h3>
+      <ul>{asks.map(ask => <li key={ask.id}>
+        <code>{ask.id}</code> <span className={`ops-chip ops-chip-${ask.status}`}>{ask.status}</span>
+        <span className="ops-owner-question">{ask.title}</span>
+        <span className="ops-owner-age">{age(ask.age_s)}</span>
+      </li>)}</ul>
+    </div>}
+  </section>;
+}
+
 function OpsBoard({ standalone = false }) {
   const poolrad = usePoolradProgress();
   const [board, setBoard] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [acting, setActing] = useState(false);
+  async function answer(taskId, reply) {
+    setActing(true);
+    try { await api('/ops-board/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId, reply }) }); await load(true); }
+    catch (e) { setError(e.message); } finally { setActing(false); }
+  }
+  async function notNow(taskId) {
+    setActing(true);
+    try { await api('/ops-board/not-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId }) }); await load(true); }
+    catch (e) { setError(e.message); } finally { setActing(false); }
+  }
   async function load(force = false) {
     setBusy(true);
     try {
@@ -720,6 +776,9 @@ function OpsBoard({ standalone = false }) {
       {error && <p className="dash-error" role="alert">{error}</p>}
       {board?.refresh_error && <p className="dash-error" role="alert">Refresh failed; showing the last snapshot.</p>}
       {board && <>
+        <NeedsOwner rows={(board.reference?.tasks?.items || []).filter(row => row.needs_owner_question)}
+                    asks={board.reference?.asks?.asks || []}
+                    onAnswer={answer} onNotNow={notNow} busy={acting} />
         <section className="ops-brief" data-ops-section="brief">
           <strong>{alarms.length ? `${alarms.length} alarms` : 'Alarms: none'}</strong>
           <p title={evidence(tasks)}>{number(tasks, 'open')} open tasks · {number(tasks, 'owner')} assigned to you</p>
