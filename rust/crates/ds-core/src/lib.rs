@@ -20,6 +20,7 @@ pub mod lock;
 pub mod protocol;
 pub mod registry;
 pub mod retry;
+pub mod stuck;
 
 pub use error::{DunkError, refusal};
 
