@@ -2742,6 +2742,30 @@ class Flock:
                 raise DunkError(f"a review is completed by its reviewer lane, not role {role}")
             if role == "reviewer" and task.get("author") and task["author"] == self_pane_id:
                 raise DunkError("a lane never accepts its own work (no-self-merge)")
+            if role == "reviewer" and self_pane_id:
+                # t723: `author` is NULL for a head a lane pushed through the author
+                # App, which is the NORMAL path ('fix X, push to the branch'), so the
+                # guard above never fired on exactly the PRs a lane wrote (2026-10-30:
+                # a reviewer could have accepted its own rebase of dunkingsheep#124).
+                # The work tasks for the same repo+pr name the lane, so authorship is
+                # read from them; a store that cannot answer fails CLOSED, because an
+                # unverified reviewer is the bug this guard exists to stop.
+                worked = set()
+                if task.get("repo") and task.get("pr"):
+                    try:
+                        worked = set(self.tasks.authors_of(task["repo"], task["pr"]))
+                    except Exception as error:  # noqa: BLE001
+                        raise DunkError(
+                            f"cannot verify that {self_pane_id} is not the author of "
+                            f"{task.get('repo')}#{task.get('pr')}: {error}. "
+                            "no-self-review is checked before a verdict is recorded, "
+                            "so this review is refused until the task store answers.")
+                if self_pane_id in worked:
+                    raise DunkError(
+                        f"a lane never accepts its own work (no-self-merge): "
+                        f"{self_pane_id} worked on {task.get('repo')}#{task.get('pr')} "
+                        f"(task author, assignee or completer), so it cannot review "
+                        f"this head. Another reviewer lane completes {task_id}.")
             if verdict is None:
                 raise DunkError("completing a review needs --verdict accept|needs-fix")
             try:
@@ -4180,6 +4204,14 @@ class Flock:
             if mints is None:
                 mints = self._gh_token_mints = {}
             mints[self_pane_id] = time.time()
+            # t723: remember it on disk too. A review filed for a head this lane
+            # pushes has author=NULL (the App is shared by every lane), so the
+            # no-self-review guard needs a record that outlives the process.
+            try:
+                import dunk_github
+                dunk_github.record_author_mint(self_pane_id)
+            except Exception:                       # noqa: BLE001 - never fail a token
+                pass
         return {"token": entry["token"], "kind": resolved, "role": role,
                 "slug": entry.get("slug"), "expires_at": entry.get("expires_at"),
                 "cached": entry.get("cached", False)}
