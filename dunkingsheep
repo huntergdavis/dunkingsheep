@@ -589,6 +589,11 @@ def build_parser():
                    help="also write the JSON report "
                         "(default ~/.config/dunkingsheep/health.json)")
 
+    p = sub.add_parser("telegram-bridge",
+                       help="run the Telegram transport (owner-mailbox replies + pages)")
+    p.add_argument("command", choices=["run", "status"], nargs="?", default="run",
+                   help="run the long-poll bridge, or print its pairing status")
+
     p = sub.add_parser("watchdog",
                        help="deterministic exception watchdog (no model); --dry-run sends nothing")
     p.add_argument("--config", default="~/.config/dunkingsheep/watchdog.json",
@@ -2378,6 +2383,23 @@ def main(argv=None):
                 print("\nOpen a new shell (or run: export PATH=\"%s:$PATH\") so agents "
                       "pick it up." % dunk_guard.GUARD_DIR)
         return 0 if result.get("ok", True) else 1
+
+    if command == "telegram-bridge":
+        # t710: the unit must not guess a release path. It runs the installed CLI,
+        # exactly like every other working unit, and this subcommand loads the
+        # bridge from the tree the CLI itself lives in.
+        import sys as _sys
+        here = os.path.dirname(os.path.abspath(__file__))
+        _sys.path.insert(0, os.path.join(here, "bridges"))
+        try:
+            import telegram_bridge
+        except ImportError as error:
+            raise SystemExit(
+                f"telegram bridge unavailable: {error}. It imports web.app, which "
+                "needs the web stack (fastapi); no release ships a venv with it yet "
+                "(t594). The bridge cannot run from a release tree until that is "
+                "decided: ship the dependencies, or drop the web.app import.")
+        return telegram_bridge.main([args.command]), (lambda result: None)
 
     if command == "watchdog":
         # Local and read-only: evaluates the stores directly and never starts

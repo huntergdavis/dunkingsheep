@@ -8,21 +8,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# t594: the install lays releases down as releases/<sha>/ and creates NO `current`
-# symlink and NO per-release .venv (measured 2026-10-29: `ls releases/305702a*/`
-# has no .venv, and `ls ~/.local/share/dunkingsheep/` has no `current`), so the
-# previous ExecStart could only ever fail with 203/EXEC. Point the unit at a path
-# the install really creates; %h is expanded by systemd.
-WorkingDirectory=%h/.local/share/dunkingsheep/current
-ExecStart=/usr/bin/python3 bridges/telegram_bridge.py
-# The bridge is a UNIT, so it proves the system role: that is the role that owns
-# owner_ingest / owner_outbox / owner_delivered (dunk_roles ALLOW["system"]). It
-# was pointed at web-token, which is the owner's transport, not the bridge's.
+# t710 review of #143: the previous ExecStart named ~/.local/share/dunkingsheep/
+# current/.venv/bin/python, but the install creates NEITHER a `current` symlink NOR
+# a per-release .venv, so the unit failed at chdir (200/CHDIR) before it could even
+# fail at exec. Every working unit here (watchdog, poolrad, dispatch) runs the
+# installed CLI wrapper instead - a stable path the installer writes - so this one
+# does the same and the release path stops being a guess.
+ExecStart=/home/hunter/.local/bin/dunkingsheep --no-start-daemon telegram-bridge run
 Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
-# The variable the code actually reads is DUNKINGSHEEP_DIR (dunk_inbox.py,
-# dunk_client.py, dunk_poolrad.py, dunk_views.py, dunk_superusers.py). This line
-# said DUNKING_SHEEP_DIR, which no module reads, so it was silently ignored.
-Environment=DUNKINGSHEEP_DIR=%h/.local/share/dunkingsheep/current
+# NO WorkingDirectory: no working unit sets one, and there is no `current` to point at.
+# NO DUNKINGSHEEP_DIR: that variable is the CONFIG directory, not the install
+# (dunk_core/dunk_inbox/dunk_tasks/dunk_roles build CONFIG_DIR from it, and
+# dunk_server derives SOCKET_PATH and LOG_FILE from CONFIG_DIR). Setting it to a
+# release path would send the bridge looking for the daemon socket, the role registry
+# and inbox.db under the release tree - worse than the misspelled line it replaced,
+# which was merely ignored.
 Environment=VP_DATA_DIR=%h/.config/dunkingsheep/desk
 Environment=VP_CHANNELS_FILE=%h/.config/dunkingsheep/desk/channels.json
 Restart=on-failure

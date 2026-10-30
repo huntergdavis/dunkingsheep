@@ -335,9 +335,37 @@ class TelegramUnitTests(unittest.TestCase):
         """owner_ingest/outbox/delivered are granted to `system`; the bridge is a unit."""
         self.assertTrue(self.env()["DUNKINGSHEEP_SERVICE_TOKEN_FILE"].endswith("system-token"))
 
-    def test_the_exec_start_does_not_need_a_current_symlink_or_a_venv(self):
-        exec_start = [line for line in self.text().splitlines()
-                      if line.startswith("ExecStart=")][0]
-        self.assertNotIn(".venv", exec_start,
-                         "the install creates no per-release venv")
-        self.assertIn("/usr/bin/python3", exec_start)
+    def test_the_unit_runs_the_installed_wrapper_and_names_no_invented_path(self):
+        """t710 review of #143: the unit named .../current/.venv/bin/python, which the
+        install never creates, so systemd failed at chdir (200/CHDIR) before exec.
+        Every working unit here runs the installed CLI wrapper instead."""
+        text = self.text()
+        exec_start = [line for line in text.splitlines() if line.startswith("ExecStart=")][0]
+        self.assertIn("/.local/bin/dunkingsheep", exec_start,
+                      "run the installed wrapper, like watchdog/poolrad/dispatch")
+        self.assertIn("--no-start-daemon", exec_start,
+                      "a client of ours must never spawn a daemon (owner, 2026-10-29)")
+        self.assertIn("telegram-bridge", exec_start)
+        self.assertNotIn(".venv", exec_start)
+        self.assertFalse([line for line in text.splitlines()
+                          if line.startswith("WorkingDirectory=")],
+                         "no working unit sets WorkingDirectory, and there is no 'current'")
+
+    def test_dunkingsheep_dir_is_never_pointed_at_the_install(self):
+        """DUNKINGSHEEP_DIR is the CONFIG dir (dunk_server derives SOCKET_PATH and
+        LOG_FILE from it), so a release path would send the bridge looking for the
+        daemon socket and inbox.db under the release tree."""
+        env = self.env()
+        if "DUNKINGSHEEP_DIR" in env:
+            self.assertIn(".config/dunkingsheep", env["DUNKINGSHEEP_DIR"],
+                          "DUNKINGSHEEP_DIR is the config dir, not the install")
+
+    def test_the_cli_has_the_subcommand_the_unit_calls(self):
+        """The unit is only correct if the CLI really has telegram-bridge."""
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run([sys.executable, os.path.join(root, "dunkingsheep"),
+                              "telegram-bridge", "--help"],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, out.returncode, out.stderr)
+        self.assertIn("telegram-bridge", out.stdout)
