@@ -86,8 +86,9 @@ fn every_secret_shape_gets_its_own_marker() {
     let key = "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----";
     let cleaned = redact(key);
     assert_eq!("[REDACTED:private-key]", cleaned);
-    // Order matters and is the Python's: the label pattern fires BEFORE the bearer
-    // pattern, so this exact string is what both implementations must produce.
+    // Order matters and is the Python's: the bearer pattern (8th) fires BEFORE the
+    // label pattern (9th). Label-first would leave the token behind
+    // ("Authorization=[REDACTED] abcdefghijklmnop.qrstuvwx"), so never reorder them.
     assert_eq!(
         "Authorization=[REDACTED] [REDACTED:bearer]",
         redact("Authorization: bearer abcdefghijklmnop.qrstuvwx")
@@ -135,4 +136,30 @@ fn a_snippet_windows_around_the_first_match() {
     // No match at all: the head of the text.
     let head = make_snippet("plain text", &["absent".to_string()], 5);
     assert_eq!("plain", head);
+}
+
+#[test]
+fn a_snippet_window_is_in_characters_after_a_multibyte_prefix() {
+    let tokens = vec!["needle".to_string()];
+    for prefix in ["\u{3c0}", "\u{e9}"] {
+        let text = format!("{} needle {}", prefix.repeat(300), "y".repeat(500));
+        assert!(
+            make_snippet(&text, &tokens, 240).contains("needle"),
+            "{prefix}"
+        );
+        let upper = text.replace("needle", "NEEDLE");
+        assert!(
+            make_snippet(&upper, &tokens, 240).contains("NEEDLE"),
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn chunking_strips_the_pythons_whitespace_set() {
+    // str.strip() removes U+001C..U+001F; str::trim does not.
+    assert_eq!(
+        vec!["abc".to_string()],
+        chunk_text("\u{1c}abc\u{1c}", 100, 10)
+    );
 }
