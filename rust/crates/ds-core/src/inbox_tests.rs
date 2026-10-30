@@ -408,3 +408,131 @@ fn the_read_half_carries_the_owner_mailbox_fields() {
     // present (None in this fixture) is the point: the FIELD exists on the struct
     assert_eq!(None, row.digest_id);
 }
+
+// ---- t1113: tests for the helpers added from PR #199 (ported from its inbox_pure.rs) ----
+
+const NOW: f64 = 1_700_000_000.0;
+
+#[test]
+fn pane_ids_are_recognised_in_both_backends_spellings() {
+    // The two predicates differ ON PURPOSE (the Python has two regexes): a SUFFIX may
+    // carry letters after `:p` (a tab label can be `w9:pH`), a mailbox KEY may not.
+    for good in ["w9:pH", "w1:p1", "%109", "%4"] {
+        assert!(is_pane_token(good), "{good} is a pane token");
+    }
+    for good in ["w1:p1", "%109", "%4"] {
+        assert!(is_pane_id(good), "{good} is a pane-id mailbox key");
+    }
+    assert!(
+        !is_pane_id("w9:pH"),
+        "a letter after :p is not a mailbox key"
+    );
+    assert!(
+        is_pane_token("w:p1"),
+        "the permissive suffix pattern allows it"
+    );
+    assert!(!is_pane_id("w:p1"), "but it is not a pane-id mailbox key");
+    for bad in ["", "%", "w1:p", "w1p1", "%1x", "worker-4", "vp of agentry"] {
+        assert!(!is_pane_token(bad), "{bad:?} is not a pane token");
+        assert!(!is_pane_id(bad), "{bad:?} is not a pane id");
+    }
+    assert!(is_pane_mailbox("%109"));
+    assert!(
+        !is_pane_mailbox(" %109 "),
+        "the Python's strict regex does not tolerate padding: a padded key is a caller mistake"
+    );
+    assert!(!is_pane_mailbox("worker-4"));
+}
+
+#[test]
+fn a_transport_is_none_web_telegram_or_report_and_nothing_else() {
+    assert_eq!(Ok(None), validate_transport(None));
+    assert_eq!(Ok(None), validate_transport(Some("")));
+    // Python: only None and exactly '' are a lane message; whitespace is refused.
+    for blank in ["  ", "\t"] {
+        assert_eq!(
+            Err("transport must be one of web, telegram, report; got ''".to_string()),
+            validate_transport(Some(blank))
+        );
+    }
+    assert_eq!(Ok(Some("web".to_string())), validate_transport(Some("WEB")));
+    assert_eq!(
+        Ok(Some("telegram".to_string())),
+        validate_transport(Some(" Telegram "))
+    );
+    let error = validate_transport(Some("signal")).unwrap_err();
+    assert!(
+        error.contains("transport must be one of web, telegram, report"),
+        "{error}"
+    );
+}
+
+#[test]
+fn retention_purges_by_last_action_and_never_unread_mail() {
+    let old = NOW - RETENTION_S - 1.0;
+    let day = 24.0 * 3600.0;
+    assert_eq!(NOW - RETENTION_S, retention_cutoff(NOW, RETENTION_S));
+    let expired = |state, created, read, acked, archived, cancelled| {
+        is_expired(
+            state,
+            created,
+            read,
+            acked,
+            archived,
+            cancelled,
+            NOW,
+            RETENTION_S,
+        )
+    };
+    // an unread row 8 days old is NEVER purged by age
+    assert!(!expired("queued", NOW - 8.0 * day, None, None, None, None));
+    // read 8 days ago: expired; created 8 days ago but read yesterday: not
+    assert!(expired("read", old, Some(old), None, None, None));
+    assert!(!expired(
+        "read",
+        NOW - 8.0 * day,
+        Some(NOW - day),
+        None,
+        None,
+        None
+    ));
+    // COALESCE order is acked, cancelled, read, archived, created
+    assert!(!expired(
+        "acked",
+        old,
+        Some(old),
+        Some(NOW - day),
+        None,
+        None
+    ));
+    assert!(expired("archived", old, None, None, Some(old), None));
+    assert!(expired("undeliverable", old, None, None, None, None));
+    // exactly at the cutoff is not yet expired
+    assert!(!expired("read", NOW - RETENTION_S, None, None, None, None));
+}
+
+#[test]
+fn a_size_over_a_limit_is_a_named_refusal_not_a_truncation() {
+    assert!(check_sizes(10, "a.txt", 10, 10).is_ok());
+    let body = check_sizes(MAX_BODY_BYTES + 1, "", 0, 0).unwrap_err();
+    assert_eq!(format!("body is larger than {MAX_BODY_BYTES} bytes"), body);
+    let attachment = check_sizes(0, "a.bin", MAX_ATTACHMENT_BYTES + 1, 0).unwrap_err();
+    assert_eq!(
+        format!(
+            "a.bin is {} bytes, over the {MAX_ATTACHMENT_BYTES} byte attachment limit",
+            MAX_ATTACHMENT_BYTES + 1
+        ),
+        attachment
+    );
+    let blob = check_sizes(0, "", 0, MAX_BLOB_BYTES + 1).unwrap_err();
+    assert_eq!("attachment store is full; delete some mail first", blob);
+}
+
+#[test]
+fn the_unknown_transport_text_quotes_like_the_python() {
+    let error = validate_transport(Some("signal")).unwrap_err();
+    assert_eq!(
+        "transport must be one of web, telegram, report; got 'signal'",
+        error
+    );
+}

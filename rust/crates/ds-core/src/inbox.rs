@@ -425,3 +425,129 @@ pub fn get(pool: &ReadPool, message_id: &str, now: f64) -> Result<(Summary, Stri
         }
     })
 }
+
+// ---- T15a leftovers (t1113): the pure helpers main did not have, from PR #199 ----------
+//
+// Added to this module rather than as a second `inbox.rs`: main's SCHEMA (the fixture,
+// byte for byte), `normalise_mailbox` and `mailbox_where` are the reviewed versions, and
+// `is_expired` below is the purge rule `PURGE_SELECTION` states in SQL.
+
+/// A question records where it arrived so the reply goes back the same way
+/// (FLAT_FLEET.md 7.2); `None` is a lane message.
+pub const TRANSPORTS: [&str; 3] = ["web", "telegram", "report"];
+
+/// The PERMISSIVE pane token the suffix stripper accepts:
+/// `[A-Za-z0-9_.-]+:p[A-Za-z0-9_.-]+` or `%<digits>`.
+///
+/// The Python has two different regular expressions here on purpose: `_PANE_SUFFIX`
+/// allows letters after `:p` (a tab label can be `w9:pH`), while `PANE_MAILBOX_RE`
+/// requires digits. Conflating them would either refuse to strip a real suffix or
+/// accept a non-pane as a mailbox key.
+pub fn is_pane_token(value: &str) -> bool {
+    if let Some(rest) = value.strip_prefix('%') {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    let Some((workspace, pane)) = value.split_once(":p") else {
+        return false;
+    };
+    let token_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    !workspace.is_empty()
+        && workspace.chars().all(token_char)
+        && !pane.is_empty()
+        && pane.chars().all(token_char)
+}
+
+/// `w<N>:p<N>` or `%<N>`: a mailbox KEY that is itself a pane id (the strict form).
+pub fn is_pane_id(value: &str) -> bool {
+    if let Some(rest) = value.strip_prefix('%') {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    // w<digits>:p<digits>
+    let Some((workspace, pane)) = value.split_once(":p") else {
+        return false;
+    };
+    let Some(workspace_digits) = workspace.strip_prefix('w') else {
+        return false;
+    };
+    !workspace_digits.is_empty()
+        && workspace_digits.chars().all(|c| c.is_ascii_digit())
+        && !pane.is_empty()
+        && pane.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A mailbox key that is ITSELF a pane id: older versions stored dead-pane mail this
+/// way, with `pane_id` NULL.
+pub fn is_pane_mailbox(value: &str) -> bool {
+    // The Python's PANE_MAILBOX_RE is applied to the raw value, so surrounding space makes
+    // it NOT a pane mailbox - the strict form is what a mailbox key must be, and a padded
+    // key is a caller mistake rather than a pane.
+    is_pane_id(value)
+}
+
+/// `None` (a lane message) or one of [`TRANSPORTS`]. Only `None` and exactly `""` mean
+/// "lane message" (`transport in (None, "")`); a whitespace-only value is NOT empty, it
+/// strips to `""` and is refused with `got ''`, like the Python.
+pub fn validate_transport(transport: Option<&str>) -> Result<Option<String>, String> {
+    let transport = match transport {
+        None => return Ok(None),
+        Some("") => return Ok(None),
+        Some(text) => text.trim().to_lowercase(),
+    };
+    if TRANSPORTS.contains(&transport.as_str()) {
+        Ok(Some(transport))
+    } else {
+        Err(format!(
+            "transport must be one of {}; got '{}'",
+            TRANSPORTS.join(", "),
+            transport
+        ))
+    }
+}
+
+/// The purge rule: `state != 'queued' AND COALESCE(acked_at, cancelled_at, read_at,
+/// archived_at, created_at) < cutoff`. Unread mail is NEVER purged by age, and a row's
+/// age is when it was last acted on, not when it arrived.
+#[allow(clippy::too_many_arguments)]
+pub fn is_expired(
+    state: &str,
+    created_at: f64,
+    read_at: Option<f64>,
+    acked_at: Option<f64>,
+    archived_at: Option<f64>,
+    cancelled_at: Option<f64>,
+    now: f64,
+    retention_s: f64,
+) -> bool {
+    if state == "queued" {
+        return false;
+    }
+    let age_from = acked_at
+        .or(cancelled_at)
+        .or(read_at)
+        .or(archived_at)
+        .unwrap_or(created_at);
+    age_from < retention_cutoff(now, retention_s)
+}
+
+/// The size limits, as a named refusal rather than a silent truncation. The texts are
+/// the Python's (`body is larger than ...`, the attachment line, the store-full line).
+/// `blob_total_bytes` is the store's size AFTER adding this attachment.
+pub fn check_sizes(
+    body_bytes: usize,
+    attachment_name: &str,
+    attachment_bytes: u64,
+    blob_total_bytes: u64,
+) -> Result<(), String> {
+    if body_bytes > MAX_BODY_BYTES {
+        return Err(format!("body is larger than {MAX_BODY_BYTES} bytes"));
+    }
+    if attachment_bytes > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{attachment_name} is {attachment_bytes} bytes, over the {MAX_ATTACHMENT_BYTES} byte attachment limit"
+        ));
+    }
+    if blob_total_bytes > MAX_BLOB_BYTES {
+        return Err("attachment store is full; delete some mail first".to_string());
+    }
+    Ok(())
+}
