@@ -97,6 +97,15 @@ impl OwnerPush {
     /// Open (or create) the database and install the schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DunkError> {
         let path = path.as_ref();
+        // t991 finding 2: the Python's constructor does `os.makedirs(dirname, exist_ok=True)`,
+        // so a first run with no config directory yet works. Without this the owner channel
+        // comes up dead instead of creating its file (measured: "unable to open database
+        // file" and nothing created).
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         let writer = SyncWriter::spawn(path)?;
         writer.call(|connection| {
             connection.execute_batch(SCHEMA).map_err(map_sqlite)?;
@@ -127,9 +136,9 @@ impl OwnerPush {
             ));
         }
         let pane_id = pane_id.to_string();
+        let pane_for_answer = pane_id.clone();
         let target = target.map(str::to_string);
         let subject = subject.map(str::to_string);
-        let pane_for_id = pane_id.clone();
         let id = self.writer.call(move |connection| {
             connection
                 .execute(
@@ -146,11 +155,11 @@ impl OwnerPush {
                 .map_err(map_sqlite)?;
             Ok(connection.last_insert_rowid())
         })?;
-        let stored_pane = pane_id_from(&self.writer, id)?;
-        debug_assert_eq!(pane_for_id, stored_pane);
+        // t991 note: no second round trip. The caller already knows the pane it pushed to;
+        // re-reading it cost one writer hop per owner message on the latency-critical path.
         Ok(Pushed {
             id,
-            pane_id: stored_pane,
+            pane_id: pane_for_answer,
             at: now,
         })
     }
@@ -407,8 +416,36 @@ fn percentile(values: &[f64], fraction: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    let index = ((fraction * (values.len() as f64 - 1.0)).round() as usize).min(values.len() - 1);
+    // t991 finding 1: the Python's `_pct` indexes with `int(round(q * (n-1)))`, and
+    // Python's round() is HALF-TO-EVEN. `f64::round()` is half-away-from-zero, so the two
+    // disagree whenever q*(n-1) lands on .5 - measured n=2 p50: Python 10.0, this 20.0
+    // (the median DOUBLED with two samples), n=6 p50 30/40 and p90 50/60, n=10 p50 50/60.
+    // The original stats test used exactly two samples and asserted only `max` and the
+    // empty-window p50, so it could not see it.
+    let index =
+        (round_half_even(fraction * (values.len() as f64 - 1.0)) as usize).min(values.len() - 1);
     Some(round2(values[index]))
+}
+
+/// `round()` as Python means it: a tie goes to the EVEN neighbour.
+///
+/// Python's `_pct` indexes with `int(round(q * (n-1)))`, and Python's round() is
+/// half-to-even while `f64::round()` is half-away-from-zero - so the two disagree
+/// whenever q*(n-1) lands on .5 (t991 finding 1: n=2 p50 was 10.0 in Python and 20.0
+/// here, the median doubling). Kept local because this branch predates `metrics.rs`,
+/// which carries the same helper; when both land, one of the two should go.
+fn round_half_even(value: f64) -> i64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if (fraction - 0.5).abs() < f64::EPSILON {
+        if (floor as i64) % 2 == 0 {
+            floor as i64
+        } else {
+            floor as i64 + 1
+        }
+    } else {
+        value.round() as i64
+    }
 }
 
 fn row_to_push(row: &rusqlite::Row<'_>) -> rusqlite::Result<Push> {
@@ -421,19 +458,5 @@ fn row_to_push(row: &rusqlite::Row<'_>) -> rusqlite::Result<Push> {
         created_at: row.get("created_at")?,
         taken_at: row.get("taken_at")?,
         taken_by: row.get("taken_by")?,
-    })
-}
-
-/// The pane a push was stored for (the caller already knows it; this keeps `Pushed`
-/// honest if a later version routes on `target`).
-fn pane_id_from(writer: &SyncWriter, id: i64) -> Result<String, DunkError> {
-    writer.call(move |connection| {
-        connection
-            .query_row(
-                "SELECT pane_id FROM owner_push WHERE id = ?1",
-                (id,),
-                |row| row.get(0),
-            )
-            .map_err(map_sqlite)
     })
 }

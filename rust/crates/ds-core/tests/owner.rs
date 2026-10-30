@@ -160,6 +160,48 @@ fn stats_count_pushes_and_measure_drain_latency() {
     assert_eq!(None, empty.latency_s.p50);
 }
 
+/// t991 finding 1: the Python's `_pct` is banker's-rounded, so the median with TWO
+/// samples is the lower one (10.0), not the higher (20.0 as the first version gave).
+#[test]
+fn percentiles_use_pythons_round_half_to_even() {
+    let (_directory, store) = store();
+    // Two pushes drained 10 s and 30 s after they were created -> p50 must be the lower.
+    let first = store.push("%2", "a", None, None, NOW).expect("push");
+    let second = store.push("%2", "b", None, None, NOW).expect("push");
+    store.take("%2", None, 1, NOW + 10.0).expect("take");
+    store.take("%2", None, 1, NOW + 30.0).expect("take");
+    let stats = store.stats(3600.0, NOW + 60.0).expect("stats");
+    assert_eq!(2, stats.taken);
+    assert_eq!(
+        Some(10.0),
+        stats.latency_s.p50,
+        "n=2: Python gives the LOWER sample (10.0), half-away-from-zero gives 20.0"
+    );
+    assert_eq!(Some(30.0), stats.latency_s.max);
+    let _ = (first, second);
+}
+
+/// t991 finding 2: the store creates its own directory, as the Python's constructor does.
+#[test]
+fn a_first_run_creates_the_directory_it_needs() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let nested = directory
+        .path()
+        .join("sub")
+        .join("deeper")
+        .join("owner-push.db");
+    let store = OwnerPush::open(&nested).expect("open must create the parent directories");
+    store
+        .push("%2", "first run", None, None, NOW)
+        .expect("push");
+    assert_eq!(1, store.pending(None).expect("pending").len());
+    store.close();
+    assert!(
+        nested.exists(),
+        "the database file exists after the first run"
+    );
+}
+
 #[test]
 fn the_store_reopens_with_its_rows_intact() {
     let directory = tempfile::tempdir().expect("tempdir");
