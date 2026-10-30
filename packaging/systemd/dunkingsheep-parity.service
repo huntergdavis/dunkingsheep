@@ -1,0 +1,12 @@
+[Unit]
+Description=Dunking Sheep Rust parity watcher: file 'Rust parity: <module>' tasks for unported Python changes
+After=default.target dunkingsheep.service
+
+[Service]
+# Pane-less timers prove the system role with a token (docs/FLAT_FLEET.md 4.2).
+Environment=DUNKINGSHEEP_SERVICE_TOKEN_FILE=%h/.config/dunkingsheep/system-token
+Type=oneshot
+# t1057: runs the tool directly; a `dunkingsheep parity` subcommand is a follow-up.
+WorkingDirectory=/home/hunter/workspace/dunkingsheep
+ExecStart=/usr/bin/python3 tools/rust_parity.py --file-tasks
+TimeoutStartSec=300
