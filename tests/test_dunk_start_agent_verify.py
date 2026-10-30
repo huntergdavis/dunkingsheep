@@ -87,6 +87,32 @@ class StartAgentVerifyTests(unittest.TestCase):
         with self.assertRaisesRegex(DunkError, "already gone"):
             self._start(self.herdr.screen_after_create)
 
+    def test_a_launcher_noise_line_does_not_refuse_a_live_pi_lane(self):
+        """t599, measured live: a pi lane's first screen carries its launcher's own
+        ENOENT/sed noise. The old order raised on that text BEFORE looking at the
+        process table, so the start was refused, lane_register never ran, and the
+        owner registered %99/%101 by hand. Process evidence wins over the proxy."""
+        self.herdr.screen_after_create = ("sed: can't read /home/hunter/.pi/settings.json: "
+                                          "No such file or directory\n\n\u276f ready\n")
+        self.herdr.proc_after_create = [self._child(
+            ["/home/hunter/.local/bin/pi", "--offline"], comm="pi", state="S")]
+        result = self.flock.start_agent("probe", "pi", cwd="/tmp")
+        self.assertEqual("probe", result["name"])
+        self.assertIsNotNone(result["child_pid"])
+
+    def test_the_same_line_without_a_live_process_is_still_refused(self):
+        """The guard t599 must not weaken: text plus no process is a refusal."""
+        screen = ("sed: can't read /home/hunter/.pi/settings.json: "
+                  "No such file or directory\n")
+        with self.assertRaisesRegex(DunkError, "never ran|No such file"):
+            self._start(screen, proc=[])
+
+    def test_an_exit_line_still_beats_a_pid_sighting(self):
+        """t215 REVISE P1 must survive t599: an explicit rc line is a refusal."""
+        with self.assertRaisesRegex(DunkError, "exited immediately"):
+            self._start(["$ \n", "\n[agent exited rc=127]\n"],
+                        proc=[self._child(["/usr/bin/claude"], comm="claude")])
+
     def test_a_clean_screen_with_no_process_is_refused(self):
         """Criterion (a): a bare idle shell is not a running agent where pids exist."""
         with self.assertRaisesRegex(DunkError, "never became a process"):

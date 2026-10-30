@@ -4568,21 +4568,14 @@ class Flock:
                     since_start = process_start(pane_pid)
             captured = self.herdr.read_pane(pane_id, lines=20) or ""
             lowered = captured.lower()
-            for marker in self.AGENT_FAILURE_MARKERS:
-                if marker in lowered:
-                    line = next((row for row in captured.splitlines()
-                                 if marker in row.lower()), captured.strip()[:200])
-                    raise DunkError(
-                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
-                        "The pane is up but the command never ran - check the PATH the pane "
-                        "inherits.")
-            # An agent that is drawing its own UI has started; a bare shell that has printed
-            # nothing yet is neither. Keep waiting for the rest of the window: a process
-            # sighting below is recorded, never returned early.
-            if "[agent exited rc=" in lowered:
-                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
-                raise DunkError(
-                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
+            # PROCESS EVIDENCE FIRST, TEXT SECOND (t599). A pi lane's first screen carries
+            # its launcher's own noise - ENOENT lines and sed errors from the wrapper - which
+            # matched the failure markers below and refused a start that had in fact worked.
+            # The consequence was not cosmetic: lane_register ran after this check, so a
+            # false refusal left the lane ANONYMOUS and the owner registered it by hand.
+            # A live process of the expected kind, bound to this generation, is direct
+            # evidence that the command ran; screen text is only a proxy for it, so the
+            # proxy may not overrule the evidence.
             if watch_procs:
                 entries = (self.herdr.agent_child_pids(pane_pid)
                            if pane_pid is not None else None)
@@ -4595,6 +4588,23 @@ class Flock:
                     matched = self._match_agent_process(entries, kind, since_start)
                     if matched:
                         seen = matched
+            for marker in self.AGENT_FAILURE_MARKERS:
+                if marker in lowered and not seen:
+                    line = next((row for row in captured.splitlines()
+                                 if marker in row.lower()), captured.strip()[:200])
+                    raise DunkError(
+                        f"agent {name!r} did not start in pane {pane_id}: {line.strip()!r}. "
+                        "The pane is up but the command never ran - check the PATH the pane "
+                        "inherits.")
+            # An agent that is drawing its own UI has started; a bare shell that has printed
+            # nothing yet is neither. Keep waiting for the rest of the window: a process
+            # sighting above is recorded, never returned early. An explicit exit line is NOT
+            # gated on that sighting: t215 REVISE P1 measured a blank first frame with a live
+            # pid followed by rc=127, which is a refusal, not a start.
+            if "[agent exited rc=" in lowered:
+                line = next(row for row in captured.splitlines() if "agent exited rc=" in row)
+                raise DunkError(
+                    f"agent {name!r} exited immediately in pane {pane_id}: {line.strip()!r}")
             time.sleep(0.1)
         if not watch_procs:
             return None
