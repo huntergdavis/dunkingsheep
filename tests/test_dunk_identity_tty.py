@@ -6,6 +6,7 @@ the two disagree the terminal wins and the claim is refused rather than preferre
 """
 
 import os
+import socket
 import subprocess
 import sys
 import unittest
@@ -180,3 +181,116 @@ class PaneLessVerbTests(unittest.TestCase):
         import dunk_client
         import dunk_roles
         self.assertEqual(frozenset(dunk_roles.READ_ONLY), dunk_client._READ_ONLY_COMMANDS)
+
+
+class ClientPatienceTests(unittest.TestCase):
+    """t693: the client deadline is patience, not capability - and reads retry once.
+
+    Measured on the live host at load 22 (8 cores, 15 pi lanes): `status` took
+    20.93 24.52 17.94 7.54 2.88 2.07 2.98 2.52 s (p50 ~5 s, p90 ~24.5 s). A 15 s
+    deadline failed 3 of 8 cheap reads, and a failed read is what marks a live lane
+    dead and an active review abandoned.
+    """
+
+    def test_the_default_deadline_covers_the_measured_p90(self):
+        import dunk_client
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                        self_pane_id="%1")
+        self.assertGreaterEqual(client.timeout, 30.0,
+                                "a 15 s cap fails on a box whose p90 is 24.5 s")
+        self.assertEqual(float(dunk_client.DEFAULT_TIMEOUT), client.timeout)
+
+    def test_an_explicit_deadline_still_wins(self):
+        import dunk_client
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                        self_pane_id="%1", timeout=7)
+        self.assertEqual(7.0, client.timeout)
+
+    def test_the_environment_can_override_it(self):
+        """No module reload: that replaces the exception classes and every other
+        test in the process then holds a stale IdentityRefused (seen while writing
+        this test). The rule lives in a pure function instead."""
+        import dunk_client
+        self.assertEqual(12.0, dunk_client.default_timeout(
+            {"DUNKINGSHEEP_CLIENT_TIMEOUT": "12"}))
+        self.assertEqual(45.0, dunk_client.default_timeout({}))
+        self.assertEqual(45.0, dunk_client.default_timeout(
+            {"DUNKINGSHEEP_CLIENT_TIMEOUT": "not-a-number"}))
+
+    def test_a_read_is_retried_once_and_a_write_is_not(self):
+        import dunk_client
+        calls = []
+
+        def boom(request):
+            calls.append(request["cmd"])
+            raise TimeoutError("no answer")
+
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                         self_pane_id="%1")
+        client._call_once = boom
+        with self.assertRaises(TimeoutError):
+            client.call("status")
+        self.assertEqual(["status", "status"], calls, "a read gets one retry")
+        calls.clear()
+        with self.assertRaises(TimeoutError):
+            client.call("task_next")
+        self.assertEqual(["task_next"], calls, "a write is never retried")
+
+    # -- t705: the retry decision is idempotency, not permission --------------
+
+    def _attempts(self, cmd, read_only=None):
+        """How many times `cmd` is sent when every attempt times out."""
+        import dunk_client
+        import dunk_roles
+        calls = []
+
+        def boom(request):
+            calls.append(request["cmd"])
+            raise socket.timeout("no answer")
+
+        client = dunk_client.FlockClient(socket_path="/tmp/nope.sock",
+                                         self_pane_id="%1")
+        client._call_once = boom
+        saved_client = dunk_client._READ_ONLY_COMMANDS
+        saved_roles = dunk_roles.READ_ONLY
+        try:
+            if read_only is not None:
+                # Simulate a later head whose role allowlist has grown.
+                dunk_client._READ_ONLY_COMMANDS = read_only
+                dunk_roles.READ_ONLY = read_only
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                client.call(cmd)
+        finally:
+            dunk_client._READ_ONLY_COMMANDS = saved_client
+            dunk_roles.READ_ONLY = saved_roles
+        return len(calls)
+
+    def test_a_write_added_to_the_role_allowlist_is_still_not_retried(self):
+        """The defect this fixes: PR #119 adds turn_start/turn_end to READ_ONLY.
+
+        The old predicate was `cmd in READ_ONLY` - the ROLE allowlist, i.e. what a
+        pane may CALL - so the moment #119 landed, two WRITES became retryable
+        through an import nobody reading the retry code could see. Retrying
+        turn_start after a timeout can record the same turn twice.
+        """
+        import dunk_roles
+        widened = dunk_roles.READ_ONLY | {"turn_start", "turn_end"}
+        self.assertEqual(1, self._attempts("turn_start", read_only=widened))
+        self.assertEqual(1, self._attempts("turn_end", read_only=widened))
+
+    def test_the_bootstrap_writes_in_the_allowlist_are_not_retried(self):
+        """READ_ONLY also carries two writes: the first owner may register itself."""
+        for cmd in ("lane_register", "superuser_recover", "dispatch"):
+            self.assertEqual(1, self._attempts(cmd), f"{cmd} must not be retried")
+
+    def test_a_named_read_is_retried_even_without_the_allowlist(self):
+        self.assertEqual(2, self._attempts("status", read_only=frozenset()))
+
+    def test_every_retryable_verb_exists_and_is_a_read(self):
+        import dunk_client
+        import dunk_roles
+        from dunk_api import COMMANDS_BY_NAME
+        unknown = sorted(set(dunk_client.IDEMPOTENT_READS) - set(COMMANDS_BY_NAME))
+        self.assertEqual([], unknown, "IDEMPOTENT_READS names a command that does not exist")
+        # The intent, not the mechanism: we only retry verbs the fleet treats as reads.
+        self.assertEqual(set(), set(dunk_client.IDEMPOTENT_READS) - set(dunk_roles.READ_ONLY))
