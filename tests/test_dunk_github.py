@@ -188,8 +188,9 @@ class TimerTests(unittest.TestCase):
         self.assertFalse(done["github"]["merged"])
         again = self.sync.run()
         self.assertEqual([], again["filed"], "a judged head gets no second review")
-        self.assertEqual(2, len(self.github.statuses))  # pending then success only
-        self.assertEqual("success", self.github.statuses[-1][2])
+        # Pending, success, then success re-asserted by the retry: never pending again.
+        self.assertEqual(["pending", "success"], [s[2] for s in self.github.statuses][:2])
+        self.assertNotIn("pending", [s[2] for s in self.github.statuses][1:])
         self.github.merge_blocked = False
         third = self.sync.run()
         self.assertEqual([("o/r", 7, "a" * 40)], self.github.merged)
