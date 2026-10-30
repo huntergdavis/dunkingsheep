@@ -590,9 +590,27 @@ def h_dispatch(flock, args, self_pane_id):
     # lanes the candidate filter uses, instead of asking the backend twice.
     lanes_now = flock.resolve_lanes()
     allow = _dispatch_allowlist(flock, args, lanes=lanes_now)
+    # t668 MEASURED: six registered reviewer lanes sat idle with 8 open review tasks while
+    # this tick reported 'ready: 0, working: 6, derived_available: 17' - nothing fed. The
+    # cause was the fast path below, which turned the backend's `agent_status == working`
+    # into a hard exclusion. A pi lane reports 'working' for its whole session, so it never
+    # became ready, and delivery_state's own rule ('working is INFORMATION now, not a gate',
+    # because the harness queues a message for a working agent) was never consulted. The
+    # cheap, authoritative signal is a LIVE LEASE: a lane holding one is working on
+    # something; a lane without one is not, whatever the backend says.
+    leased = set()
+    for task in (flock.task_list(include_done=False, limit=500).get("tasks") or []):
+        try:
+            leases = flock.tasks.leases_for(task["id"])
+        except Exception:                       # noqa: BLE001 - visibility is optional
+            leases = []
+        task["leases"] = leases
+        for lease in leases:
+            leased.add(str(lease.get("pane_id")))
     panes = [pane for pane in lanes_now
              if (pane.get("agent_status") not in (None, "unknown"))
              and pane["pane_id"] in allow
+             and str(pane["pane_id"]) not in leased
              and not dunk_panes.is_retired(pane["pane_id"])]
     inbox = flock.inbox
 
@@ -604,10 +622,11 @@ def h_dispatch(flock, args, self_pane_id):
     # queue ran dry twice while open tasks sat unclaimed.
     tasks = (flock.task_list(include_done=False, limit=500).get("tasks") or [])
     for task in tasks:
-        try:
-            task["leases"] = flock.tasks.leases_for(task["id"])
-        except Exception:                       # noqa: BLE001 - visibility is optional
-            task["leases"] = []
+        if "leases" not in task:
+            try:
+                task["leases"] = flock.tasks.leases_for(task["id"])
+            except Exception:                   # noqa: BLE001 - visibility is optional
+                task["leases"] = []
     recent = {entry["task_id"] for entry in (dunk_dispatch._load_state().get("history") or [])
               if entry.get("task_id") and entry.get("at", 0) >= __import__("time").time() - 6 * 3600}
     queued_ids = {str(item.get("task_id")) for item in queue.items() if item.get("task_id")}
@@ -615,13 +634,11 @@ def h_dispatch(flock, args, self_pane_id):
         tasks, dispatched_task_ids=(recent | queued_ids))
     state = dunk_dispatch.tick(
         queue, panes, derived=derived,
-        # A pane that reports working needs no screen read to be excluded: reading
-        # 35 panes at ~0.4 s each is what made a tick exceed the client timeout.
-        # Only a lane that might be fed is worth a read.
-        delivery=lambda pane: ({"state": "working", "reason": str(pane.get("agent_status"))}
-                               if str(pane.get("agent_status") or "").lower() in ("working", "busy")
-                               else flock.delivery_state(pane["pane_id"],
-                                                         pane.get("agent_status"), pane=pane)),
+        # t668: no `working` fast path. A lane that holds no lease is classified by
+        # delivery_state, which reads the screen and the turn record; the backend's
+        # status is passed through as information, exactly as delivery_state documents.
+        delivery=lambda pane: flock.delivery_state(pane["pane_id"],
+                                                   pane.get("agent_status"), pane=pane),
         unread=lambda pane: (inbox.count(pane["pane_id"]) or {}).get("unread", 0),
         send=send, dry_run=bool(args.get("dry_run")),
         # Belt and braces: the filter above already reduced `panes`, and lane_plan applies the
