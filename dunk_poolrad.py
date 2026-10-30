@@ -20,6 +20,7 @@ import csv
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -80,13 +81,19 @@ def export_queue(repo, out=QUEUE_JSON, timeout=300):
         return json.load(handle)
 
 
-def candidates(queue, credited, filed_ids, limit):
-    """Ranked candidates worth filing: composable, not credited, not filed."""
+def candidates(queue, credited, filed_ids, limit, closed=None):
+    """Ranked candidates worth filing: composable, not credited, not filed.
+
+    `closed` maps a row id to the reason a reviewed disposition or a body already on
+    main rules it out (t686). A closed row is never filed as "write the body"; the
+    reason travels with the skip so the report can say which and why.
+    """
+    closed = closed or {}
     rows = sorted(queue.get("rows") or [], key=lambda r: (r.get("rank") or 10**9))
     picked = []
     for row in rows:
         rid = row.get("id")
-        if not rid or rid in credited or rid in filed_ids:
+        if not rid or rid in credited or rid in filed_ids or rid in closed:
             continue
         readiness = row.get("callee_readiness") or {}
         if not readiness.get("composable"):
@@ -142,6 +149,93 @@ def filed_ids_from_tasks(tasks):
     return out
 
 
+def disposition_closures(repo):
+    """Row ids a reviewed DISPOSITION document on main has already closed (t686).
+
+    `docs/re/OVL_0068_0294_DISPOSITION.md` says, in the repo's own words, that the
+    body is a bounded model with no identity and no strict credit, and that the
+    strict tables "must not" list it until its gaps close. backlog-sync filed it
+    anyway (t575/t576), so a lane was asked to write exactly the claim the fleet
+    records most: a credit one step wider than its evidence. The file name is the
+    deterministic key - `<ID>_DISPOSITION.md` closes `<ID>` - so no prose parsing is
+    involved and the answer cannot drift with a rewrite of the document.
+    """
+    out = {}
+    root = Path(repo) / "docs" / "re"
+    try:
+        names = sorted(p.name for p in root.glob("*DISPOSITION*.md"))
+    except OSError:
+        return out
+    for name in names:
+        rid = name.split("DISPOSITION")[0].rstrip("_-")
+        if rid:
+            out[rid] = f"docs/re/{name}"
+    return out
+
+
+def registered_checker_ids(repo):
+    """Row ids a registered checker in tools/overlay already covers (t686).
+
+    A checker's CHECKER_ROWS is the repo's own statement that this body has a
+    model to audit; when the model, its evidence doc and that checker are all on
+    main the body is written and the only thing left is the REVIEW FLOW (two
+    accepts, then the timer writes the credit row) - never an authoring task.
+    """
+    out = {}
+    root = Path(repo) / "tools" / "overlay"
+    try:
+        paths = sorted(root.glob("*.py"))
+    except OSError:
+        return out
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "CHECKER_ROWS" not in text:
+            continue
+        for rid in re.findall(r"(OVL_[0-9A-Fa-f_]+)", text.split("CHECKER_ROWS", 1)[1][:400]):
+            out.setdefault(rid, f"tools/overlay/{path.name}")
+    return out
+
+
+def _unit_tokens(rid):
+    """'OVL_006A_0824' -> {'006a_0824', '6a_0824'} - the shapes files use."""
+    parts = str(rid or "").split("_")
+    if len(parts) < 3:
+        return set()
+    unit, offset = parts[1].lower(), parts[2].lower()
+    tokens = {f"{unit}_{offset}"}
+    if unit.startswith("00"):
+        tokens.add(f"{unit[2:]}_{offset}")
+    elif unit.startswith("0"):
+        tokens.add(f"{unit[1:]}_{offset}")
+    return tokens
+
+
+def already_on_main(repo, rid, checkers=None):
+    """The model source + a registered checker for this row are both on main (t686).
+
+    Returns the reason string, or None. The evidence document is not tested
+    separately: the repo's pairing gate refuses a checker without one, so a
+    registered CHECKER_ROWS entry already implies the pair.
+    """
+    checkers = registered_checker_ids(repo) if checkers is None else checkers
+    checker = checkers.get(rid)
+    if not checker:
+        return None
+    tokens = _unit_tokens(rid)
+    src = Path(repo) / "src" / "recovered"
+    try:
+        names = [p.name.lower() for p in src.glob("*.c")]
+    except OSError:
+        names = []
+    for name in names:
+        if any(token in name for token in tokens):
+            return f"already on main ({checker} audits {name})"
+    return None
+
+
 class Sync:
     def __init__(self, flock, repo=DEFAULT_REPO, exporter=export_queue):
         self.flock = flock
@@ -161,9 +255,24 @@ class Sync:
         credited = credited_ids(self.repo)
         live = self.flock.tasks.list(scope=None, include_done=False, limit=500, kind="work")
         filed = filed_ids_from_tasks(live)
-        picked = candidates(queue, credited, filed, limit)
+        # t686: a candidate a reviewed disposition has closed, or whose body and
+        # checker are already on main, is not an authoring task. Both are decided
+        # from the tree, not from a note, so the skip is reproducible.
+        closed = {}
+        for rid, where in disposition_closures(self.repo).items():
+            closed[rid] = f"closed by {where}"
+        checkers = registered_checker_ids(self.repo)
+        for row in (queue.get("rows") or []):
+            rid = row.get("id")
+            if not rid or rid in closed:
+                continue
+            reason = already_on_main(self.repo, rid, checkers=checkers)
+            if reason:
+                closed[rid] = reason
+        picked = candidates(queue, credited, filed, limit, closed=closed)
         report["skipped"] = {"credited": len(credited), "already_filed": len(filed),
-                             "queue_rows": len(queue.get("rows") or [])}
+                             "queue_rows": len(queue.get("rows") or []),
+                             "closed": {rid: closed[rid] for rid in sorted(closed)}}
         for row in picked:
             if dry_run:
                 report["filed"].append({"id": row["id"], "rank": row.get("rank"), "dry": True})
