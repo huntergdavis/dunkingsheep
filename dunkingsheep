@@ -1500,6 +1500,10 @@ def print_review_list(result):
 def print_whoami(result):
     print(f"pane {result.get('pane_id') or '-'}  role {result.get('role')}"
           + ("  (service token)" if result.get("via_token") else ""))
+    if result.get("identity_note"):
+        # t602: a lane with no pane is still attributed, by the terminal it came
+        # from. Silence here is what made an ssh lane look like a broken fleet.
+        print(f"  identity: {result['identity_note']}")
     if result.get("binding_note"):
         print(f"  binding: {result['binding_note']}")
     reg = result.get("registered")
@@ -3033,7 +3037,14 @@ def run_client_command(client, args):
             return client.call("review_sync", dry_run=args.dry_run), print_review_sync
         return client.call("review_list"), print_review_list
     if command == "whoami":
-        return client.call("whoami"), print_whoami
+        # The client's identity note travels with the answer: the daemon knows the
+        # pane (or its absence), the client knows WHY there is none.
+        def _whoami(result, _note=client.identity_note):
+            result = dict(result or {})
+            if _note:
+                result.setdefault("identity_note", _note)
+            return print_whoami(result)
+        return client.call("whoami"), _whoami
     if command == "token":
         sub = args.token_command
         if sub == "issue":
