@@ -1,0 +1,75 @@
+{
+ "agent-state": [
+  "CREATE TABLE agent_state (\n    at REAL NOT NULL,\n    pane_id TEXT NOT NULL,\n    project TEXT,\n    harness TEXT,\n    cwd TEXT,\n    argv TEXT,\n    session_id TEXT,\n    model TEXT,\n    model_reason TEXT,\n    thinking TEXT,\n    thinking_reason TEXT,\n    state TEXT,\n    state_source TEXT,\n    state_reason TEXT,\n    task_id TEXT,\n    source TEXT\n, session_reason TEXT)",
+  "CREATE INDEX agent_state_pane ON agent_state(pane_id, at DESC)",
+  "CREATE INDEX agent_state_time ON agent_state(at DESC)"
+ ],
+ "dispatch": [
+  "CREATE TABLE sqlite_sequence(name,seq)",
+  "CREATE TABLE standby (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_id TEXT,\n    brief TEXT NOT NULL,\n    lane TEXT,\n    created_at REAL NOT NULL,\n    taken_at REAL,\n    taken_by TEXT,\n    sent_message TEXT\n)"
+ ],
+ "inbox": [
+  "CREATE TABLE attachments (\n    id          TEXT PRIMARY KEY,\n    message_id  TEXT NOT NULL,\n    filename    TEXT,\n    media_type  TEXT,\n    size        INTEGER NOT NULL,\n    sha256      TEXT NOT NULL,\n    created_at  REAL NOT NULL\n)",
+  "CREATE INDEX attachments_by_message ON attachments (message_id)",
+  "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+  "CREATE TABLE deliveries (\n    mailbox       TEXT PRIMARY KEY,\n    message_ids   TEXT NOT NULL,\n    delivered_at  REAL NOT NULL\n)",
+  "CREATE TABLE messages (\n    id            TEXT PRIMARY KEY,\n    mailbox       TEXT NOT NULL,\n    mailbox_label TEXT,\n    pane_id       TEXT,\n    sender        TEXT,\n    subject       TEXT,\n    body          TEXT NOT NULL,\n    state         TEXT NOT NULL,\n    created_at    REAL NOT NULL,\n    read_at       REAL,\n    acked_at      REAL,\n    cancelled_at  REAL,\n    reason        TEXT,\n    notify_state  TEXT,\n    notify_reason TEXT\n, archived_at REAL, digest_id TEXT, digest_updated_at REAL, notify_at REAL, notify_transport_id TEXT, notify_attempt INTEGER, transport TEXT, reply_to TEXT, external_id TEXT, delivered_at REAL, delivery_transport TEXT)",
+  "CREATE UNIQUE INDEX messages_by_digest ON messages (digest_id) WHERE digest_id IS NOT NULL",
+  "CREATE UNIQUE INDEX messages_by_external ON messages (mailbox, external_id) WHERE external_id IS NOT NULL",
+  "CREATE INDEX messages_by_mailbox\n    ON messages (mailbox, state, created_at)",
+  "CREATE INDEX messages_by_state\n    ON messages (state, pane_id)",
+  "CREATE INDEX messages_by_transport ON messages (mailbox, transport, created_at)"
+ ],
+ "memory": [
+  "CREATE TABLE chunks (\n    id          INTEGER PRIMARY KEY,\n    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,\n    ordinal     INTEGER NOT NULL,\n    role        TEXT,\n    kind        TEXT,\n    text        TEXT NOT NULL,\n    token_count INTEGER,\n    sha256      TEXT NOT NULL,\n    created_at  REAL,\n    metadata    TEXT\n)",
+  "CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN\n    INSERT INTO chunks_fts(chunks_fts, rowid, text)\n        VALUES ('delete', old.id, old.text);\nEND",
+  "CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN\n    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);\nEND",
+  "CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN\n    INSERT INTO chunks_fts(chunks_fts, rowid, text)\n        VALUES ('delete', old.id, old.text);\n    INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);\nEND",
+  "CREATE INDEX chunks_by_session ON chunks(session_id, ordinal)",
+  "CREATE UNIQUE INDEX chunks_dedupe\n    ON chunks(sha256, session_id, ordinal)",
+  "CREATE VIRTUAL TABLE chunks_fts USING fts5(\n    text,\n    content='chunks',\n    content_rowid='id',\n    tokenize='porter unicode61',\n    prefix='2 3'\n)",
+  "CREATE TABLE 'chunks_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
+  "CREATE TABLE 'chunks_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
+  "CREATE TABLE 'chunks_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
+  "CREATE TABLE 'chunks_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
+  "CREATE TABLE ingest_queue (\n    id          INTEGER PRIMARY KEY,\n    source_id   INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,\n    state       TEXT NOT NULL DEFAULT 'queued',\n    attempts    INTEGER NOT NULL DEFAULT 0,\n    next_at     REAL,\n    lease_until REAL,\n    error       TEXT,\n    created_at  REAL NOT NULL,\n    finished_at REAL\n)",
+  "CREATE INDEX ingest_queue_ready ON ingest_queue(state, next_at)",
+  "CREATE TABLE memory_events (\n    id          INTEGER PRIMARY KEY,\n    at          REAL NOT NULL,\n    event       TEXT NOT NULL,\n    actor       TEXT,\n    latency_ms  INTEGER,\n    hits        INTEGER,\n    source      TEXT,\n    metadata    TEXT\n)",
+  "CREATE INDEX memory_events_by_time ON memory_events(at, event)",
+  "CREATE TABLE schema_meta (\n    key   TEXT PRIMARY KEY,\n    value TEXT NOT NULL\n)",
+  "CREATE TABLE sessions (\n    id          TEXT PRIMARY KEY,\n    harness     TEXT NOT NULL,\n    project     TEXT,\n    cwd         TEXT,\n    title       TEXT,\n    started_at  REAL,\n    updated_at  REAL,\n    metadata    TEXT\n)",
+  "CREATE INDEX sessions_by_harness ON sessions(harness, updated_at)",
+  "CREATE INDEX sessions_by_project ON sessions(project, updated_at)",
+  "CREATE TABLE sources (\n    id          INTEGER PRIMARY KEY,\n    harness     TEXT NOT NULL,\n    path        TEXT NOT NULL UNIQUE,\n    project     TEXT,\n    mtime       REAL NOT NULL,\n    size        INTEGER NOT NULL,\n    sha256      TEXT,\n    state       TEXT NOT NULL DEFAULT 'pending',\n    attempts    INTEGER NOT NULL DEFAULT 0,\n    next_at     REAL,\n    lease_until REAL,\n    last_ingest REAL,\n    error       TEXT,\n    metadata    TEXT\n)",
+  "CREATE INDEX sources_by_state ON sources(state, next_at)"
+ ],
+ "metrics": [
+  "CREATE TABLE events (\n    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n    at          REAL NOT NULL,\n    kind        TEXT NOT NULL,\n    pane_id     TEXT,\n    mailbox     TEXT,\n    sender      TEXT,\n    source      TEXT,\n    outcome     TEXT,\n    reason      TEXT,\n    duration_ms INTEGER,\n    attempts    INTEGER,\n    bytes       INTEGER\n)",
+  "CREATE INDEX events_by_kind ON events (kind, at)",
+  "CREATE INDEX events_by_time ON events (at)",
+  "CREATE TABLE sqlite_sequence(name,seq)"
+ ],
+ "owner-push": [
+  "CREATE TABLE owner_poll (\n    pane_id   TEXT NOT NULL,\n    at        REAL NOT NULL,\n    by        TEXT,\n    PRIMARY KEY (pane_id)\n)",
+  "CREATE TABLE owner_push (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    pane_id TEXT NOT NULL,\n    target TEXT,\n    subject TEXT,\n    body TEXT NOT NULL,\n    created_at REAL NOT NULL,\n    taken_at REAL,\n    taken_by TEXT\n)",
+  "CREATE INDEX owner_push_pane ON owner_push(pane_id, taken_at)",
+  "CREATE TABLE sqlite_sequence(name,seq)"
+ ],
+ "tasks": [
+  "CREATE TABLE allocation_offers (\n task_id TEXT PRIMARY KEY, pool TEXT NOT NULL, role TEXT NOT NULL,\n requires TEXT NOT NULL, excluded TEXT NOT NULL, owners TEXT NOT NULL,\n offered_by TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready')",
+  "CREATE TABLE allocation_reviews (\n source_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,\n revision TEXT NOT NULL, author TEXT NOT NULL)",
+  "CREATE TABLE allocation_workers (\n pane_id TEXT PRIMARY KEY, pools TEXT NOT NULL, roles TEXT NOT NULL,\n skills TEXT NOT NULL, enabled INTEGER NOT NULL, registered_by TEXT NOT NULL,\n updated_at REAL NOT NULL, last_assigned REAL NOT NULL DEFAULT 0)",
+  "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+  "CREATE INDEX leases_by_pane ON task_leases (pane_id)",
+  "CREATE TABLE sqlite_sequence(name,seq)",
+  "CREATE TABLE task_events (\n    id          INTEGER PRIMARY KEY AUTOINCREMENT,\n    task_id     TEXT NOT NULL,\n    event       TEXT NOT NULL,\n    at          REAL NOT NULL,\n    actor       TEXT,\n    scope       TEXT,\n    priority    TEXT,\n    status_from TEXT,\n    status_to   TEXT,\n    duration_ms INTEGER,\n    meta        TEXT\n)",
+  "CREATE INDEX task_events_by_event ON task_events (event, at)",
+  "CREATE INDEX task_events_by_task ON task_events (task_id, at)",
+  "CREATE INDEX task_events_by_time ON task_events (at)",
+  "CREATE TABLE task_leases (\n    task_id     TEXT NOT NULL,\n    pane_id     TEXT NOT NULL,\n    claimed_at  REAL NOT NULL,\n    heartbeat_at REAL NOT NULL,\n    expires_at  REAL NOT NULL, caller_pid INTEGER, caller_start TEXT, caller_name TEXT, assignee_added INTEGER NOT NULL DEFAULT 0,\n    PRIMARY KEY (task_id, pane_id)\n)",
+  "CREATE TABLE tasks (\n    id            TEXT PRIMARY KEY,\n    scope         TEXT NOT NULL,\n    title         TEXT NOT NULL,\n    body          TEXT NOT NULL DEFAULT '',\n    status        TEXT NOT NULL DEFAULT 'open',\n    priority      TEXT NOT NULL DEFAULT 'medium',\n    parent_id     TEXT,\n    multi_assignee INTEGER NOT NULL DEFAULT 0,\n    attempts      INTEGER NOT NULL DEFAULT 0,\n    assignees     TEXT NOT NULL DEFAULT '[]',\n    depends_on    TEXT NOT NULL DEFAULT '[]',\n    created_at    REAL NOT NULL,\n    updated_at    REAL NOT NULL,\n    created_by    TEXT,\n    completed_by  TEXT,\n    completed_at  REAL,\n    cancelled_at  REAL,\n    block_reason  TEXT\n, kind TEXT NOT NULL DEFAULT 'work', author TEXT, repo TEXT, pr INTEGER, head TEXT, verdict TEXT, accounting_pr INTEGER)",
+  "CREATE INDEX tasks_by_parent ON tasks (parent_id)",
+  "CREATE INDEX tasks_by_scope\n    ON tasks (scope, status, created_at)",
+  "CREATE UNIQUE INDEX tasks_one_review_per_head ON tasks (kind, repo, pr, head) WHERE kind = 'review' AND head IS NOT NULL AND status IN ('open', 'in_progress', 'blocked')"
+ ]
+}

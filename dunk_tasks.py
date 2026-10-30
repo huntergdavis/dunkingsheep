@@ -101,7 +101,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     pr            INTEGER,
     head          TEXT,
     verdict       TEXT,
-    accounting_pr INTEGER
+    accounting_pr INTEGER,
+    -- t906: 1 when this task's work is on main. A task completed on a STACKED
+    -- branch is done but not landed, and its dependents must not open on it.
+    landed        INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS tasks_by_scope
     ON tasks (scope, status, created_at);
@@ -321,7 +324,7 @@ class Tasks:
                           ("kind", "TEXT NOT NULL DEFAULT 'work'"),
                           ("author", "TEXT"), ("repo", "TEXT"), ("pr", "INTEGER"),
                           ("head", "TEXT"), ("verdict", "TEXT"),
-                          ("accounting_pr", "INTEGER")):
+                          ("accounting_pr", "INTEGER"), ("landed", "INTEGER NOT NULL DEFAULT 1")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # The partial unique index needs the columns above to exist first.
@@ -446,6 +449,66 @@ class Tasks:
         ).fetchall()
         return {row["id"]: row["status"] for row in rows}
 
+    def _landed(self, ids):
+        """1/0 per dependency id: is its WORK on main (t906)? Default 1."""
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.db.execute(
+            f"SELECT id, landed FROM tasks WHERE id IN ({placeholders})", ids).fetchall()
+        return {row["id"]: bool(row["landed"]) for row in rows}
+
+    def set_landed(self, task_id, landed=True, by=None, repo=None, pr=None):
+        """Say that a finished task's work is (or is not yet) on main (t906).
+
+        `landed=0` is what a lane writes when it completes a task whose PR is
+        STACKED: the row is done, the work is not on main, and its dependents must
+        not open. The daemon flips it back to 1 from the merge path
+        (dunk_review._merge), so the dependents open when the merge lands, without a
+        manual edit.
+        """
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._require(task_id)
+                value = 1 if landed else 0
+                self.db.execute(
+                    "UPDATE tasks SET landed = ?, updated_at = ? WHERE id = ?",
+                    (value, _now(), row["id"]))
+                self._record(row["id"], "landed" if value else "unlanded", at=_now(),
+                             actor=by, scope=row["scope"], priority=row["priority"],
+                             meta={"repo": repo, "pr": pr})
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+        return self.get(task_id)
+
+    def mark_landed_for_pr(self, repo, pr, by=None):
+        """Flip every finished task that names repo#pr to landed (t906), returning ids."""
+        if not repo or not pr:
+            return []
+        with self._lock:
+            if self.db.in_transaction:
+                self.db.commit()
+            rows = self.db.execute(
+                "SELECT id, status, landed FROM tasks WHERE repo = ? AND pr = ?",
+                (str(repo), int(pr))).fetchall()
+            flipped = []
+            for row in rows:
+                if row["status"] == "done" and not row["landed"]:
+                    self.db.execute(
+                        "UPDATE tasks SET landed = 1, updated_at = ? WHERE id = ?",
+                        (_now(), row["id"]))
+                    self._record(row["id"], "landed", at=_now(), actor=by,
+                                 scope=GLOBAL, meta={"repo": repo, "pr": pr,
+                                                     "reason": "the PR merged"})
+                    flipped.append(row["id"])
+            self.db.commit()
+        return flipped
+
     def _decorate(self, row, pane_id=None):
         task = dict(row)
         task["assignees"] = _decode(task.get("assignees"))
@@ -467,8 +530,35 @@ class Tasks:
             min(lease["expires_at"] for lease in leases) if leases else None
         )
         statuses = self._statuses(task["depends_on"])
+        # t783: a CANCELLED dependency is satisfied, not outstanding. Cancelling a
+        # prerequisite is a decision that the dependent no longer waits for it; treating
+        # only "done" as satisfied made every dependent of a cancelled task permanently
+        # ineligible (measured: t783 depends on t781, which was cancelled, so t783 was
+        # open + claimable but eligible=False for ever, and an owner instruction to claim
+        # it could not be carried out by any worker).
+        landed = self._landed(task["depends_on"])
         task["blocked_by"] = [
-            dep for dep in task["depends_on"] if statuses.get(dep) != "done"
+            dep for dep in task["depends_on"]
+            if statuses.get(dep) not in ("done", "cancelled")
+            or (statuses.get(dep) == "done" and not landed.get(dep, True))
+        ]
+        # t906: a dependency that is DONE but whose PR has not merged opened its
+        # dependents early - t768 (T02) was done while PR169 sat on a stacked branch,
+        # and T05 was handed to a lane on a tree with no Cargo.toml. Name it so the
+        # row reads as "waiting for a merge" instead of "why is this not claimable".
+        task["unlanded_dependencies"] = [
+            dep for dep in task["depends_on"]
+            if statuses.get(dep) == "done" and not landed.get(dep, True)
+        ]
+        # t878/#164: a CANCELLED dependency IS satisfied (t879), so the row is
+        # claimable - but it is worth SAYING so. Before #164 these rows were
+        # unclaimable and invisible; the fix is in the filter, and this field keeps
+        # the fact visible instead of turning a silent brick into a silent pass.
+        task["dead_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) == "cancelled"
+        ]
+        task["missing_dependencies"] = [
+            dep for dep in task["depends_on"] if statuses.get(dep) is None
         ]
         # F2: eligibility is per-viewer. An assigned task is not claimable by
         # anyone except its named assignee, so a generic list must not advertise
@@ -482,6 +572,34 @@ class Tasks:
             and not task["blocked_by"]
             and task["claimable"]
         )
+        # t903: A SATISFIED DEPENDENCY DOES NOT REOPEN A BLOCKED TASK, and nothing said
+        # so. Measured 2026-10-30: t766 reached done, t768 (T02) kept status='blocked'
+        # with blocked_by EMPTY, so 'task next' never offered it and no lane could know
+        # why; one 'task unblock t768' made it claimable and another lane claimed it 8 s
+        # later. The status is a human decision (only a person or lane sets 'blocked'),
+        # so the store must not clear it by itself - but it MUST say that the unblock is
+        # the only thing left, in the same field a reader already looks at.
+        task["unblock_needed"] = False
+        task["dependency_note"] = None
+        if task["status"] == "blocked" and task["depends_on"]:
+            # A cancelled prerequisite is the more specific case, and it is the one that
+            # used to brick a row for ever - name it first (t783 made it satisfied, so it
+            # no longer appears in blocked_by and the generic branch would swallow it).
+            cancelled = [dep for dep in task["depends_on"]
+                         if statuses.get(dep) == "cancelled"]
+            outstanding = list(task["blocked_by"])
+            if cancelled and not outstanding:
+                task["unblock_needed"] = True
+                task["dependency_note"] = (
+                    f"depends on a CANCELLED task ({', '.join(cancelled)}); a cancelled "
+                    "dependency counts as satisfied, so only the block is holding this "
+                    "task - 'task unblock' makes it claimable")
+            elif not outstanding:
+                done = ", ".join(task["depends_on"])
+                task["unblock_needed"] = True
+                task["dependency_note"] = (
+                    f"every dependency is satisfied ({done}); nothing but the block is "
+                    "holding this task - 'task unblock' makes it claimable")
         return task
 
     def _full(self, row, pane_id=None):
@@ -694,6 +812,24 @@ class Tasks:
                         "read it again (t854)")
                 if "status" in sets and sets["status"] != row["status"]:
                     new_status = sets["status"]
+                    # t891: a lane that FINISHES a task must stop looking busy. The
+                    # lease row survived completion, cancellation and blocking, and
+                    # dispatch/push decide "is this pane busy?" from
+                    # leases_for_pane() - so a lane that had just completed four
+                    # reviews was still excluded from dispatch for up to 30 minutes
+                    # (measured live by %101: 5 leases on terminal tasks, all live).
+                    # The status is the end of the claim, so the claim goes with it.
+                    if new_status in TERMINAL_STATUSES + ("blocked",):
+                        removed = self.db.execute(
+                            "DELETE FROM task_leases WHERE task_id = ?",
+                            (task_id,)).rowcount
+                        if removed:
+                            self._record(task_id, "lease_released", at=now,
+                                         actor=updated_by, scope=row["scope"],
+                                         priority=sets.get("priority", row["priority"]),
+                                         status_to=new_status,
+                                         meta={"reason": f"status became {new_status}",
+                                               "leases_removed": removed})
                     if new_status == "done":
                         event = "completed"
                         duration = int((now - row["created_at"]) * 1000)
@@ -714,6 +850,14 @@ class Tasks:
                     self._record(task_id, "priority", at=now, actor=updated_by,
                                  scope=row["scope"], priority=sets["priority"],
                                  meta={"from": row["priority"], "to": sets["priority"]})
+                if "depends_on" in sets and sets["depends_on"] != row["depends_on"]:
+                    before = _decode(row["depends_on"])
+                    after = _decode(sets["depends_on"])
+                    self._record(task_id, "depends", at=now, actor=updated_by,
+                                 scope=row["scope"], priority=row["priority"],
+                                 meta={"removed": [d for d in before if d not in after],
+                                       "added": [d for d in after if d not in before],
+                                       "depends_on": after})
                 if "assignees" in sets and sets["assignees"] != row["assignees"]:
                     self._record(task_id, "assigned", at=now, actor=updated_by,
                                  scope=row["scope"], priority=row["priority"],
@@ -760,14 +904,25 @@ class Tasks:
                 raise
             return self.get(row["id"])
 
-    def complete(self, task_id, by=None, verdict=None):
+    def complete(self, task_id, by=None, verdict=None, landed=True):
+        """Finish a task. `landed=False` marks a STACKED completion (t906).
+
+        Lanes complete work whose PR sits on another branch all the time (every Rust
+        port task did: T02's PR was stacked on T00's). Saying so in the same call is
+        the only moment the lane certainly knows, and it is what keeps the queue from
+        opening the dependents of work that is not on main.
+        """
         row = self._require(task_id)
         if row["status"] == "done":
             return self.get(row["id"])
         if verdict is not None:
             self.set_verdict(row["id"], verdict, by=by)
         result = self.update(row["id"], status="done", updated_by=by)
+        # t872: a terminal status ENDS the claim (block/cancel/complete each used to
+        # leave a live lease behind, and the reaper requeued the finished work).
         self._end_claim(row["id"])
+        if not landed:
+            result = self.set_landed(row["id"], landed=False, by=by)
         self._fire(row["id"], "completed", by=by, kind=row["kind"] if "kind" in row.keys() else None)
         return result
 
@@ -918,6 +1073,20 @@ class Tasks:
                         "UPDATE tasks SET status='done', completed_at=?, completed_by=?, "
                         "updated_at=?, cancelled_at=NULL, block_reason=NULL WHERE id=?",
                         (now, pane_id, now, from_task))
+                    # t891: THIS is the path that leaves the lease behind. Completion
+                    # arrives here, not through update(), so the release has to happen
+                    # here too - otherwise the lane that just finished stays "busy" in
+                    # leases_for_pane() and dispatch skips it for the rest of the
+                    # 30-minute lease (measured live: five leases on terminal tasks).
+                    released = self.db.execute(
+                        "DELETE FROM task_leases WHERE task_id = ?",
+                        (from_task,)).rowcount
+                    if released:
+                        self._record(from_task, "lease_released", at=now, actor=pane_id,
+                                     scope=row["scope"], priority=row["priority"],
+                                     status_to="done",
+                                     meta={"reason": "task completed",
+                                           "leases_removed": released})
                     self._record(from_task, "completed", at=now, actor=pane_id,
                                  scope=row["scope"], priority=row["priority"],
                                  status_from=row["status"], status_to="done",
@@ -1055,9 +1224,23 @@ class Tasks:
         return self.update(row["id"], status="open", block_reason=None)
 
     def cancel(self, task_id, reason=None):
+        """Cancel a task and SAY what it strands (t878).
+
+        A cancelled dependency can never be satisfied, so every dependent row becomes
+        permanently unclaimable - and until t878 the queue said nothing, so the rows
+        simply never came back from `task next`. The cancellation names them here so
+        the caller can report it in one line instead of a lane discovering it weeks
+        later.
+        """
         row = self.update(task_id, status="cancelled", block_reason=reason)
-        self._end_claim(row["id"])
-        return self.get(row["id"])
+        self._end_claim(row["id"])   # t872: cancelling ends the claim
+        if isinstance(row, dict):
+            rows = self.db.execute(
+                "SELECT id, status, depends_on FROM tasks WHERE status IN "
+                "('open', 'in_progress', 'blocked')").fetchall()
+            row["blocked_dependents"] = sorted(
+                r["id"] for r in rows if str(task_id) in _decode(r["depends_on"]))
+        return row
 
     def delete(self, task_id):
         # F4: the checks and the delete are one write transaction.

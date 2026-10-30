@@ -489,6 +489,16 @@ def build_parser():
     p = sub.add_parser("gh-token", help="print a one-hour App token for this lane's role (empty for the owner)")
     p.add_argument("--kind", choices=["author", "reviewer"], help="owner/system only")
     p.add_argument("--quiet", action="store_true", help="print nothing when no token applies")
+    p = sub.add_parser("secrets-check",
+                       help="refuse a push/PR that would publish the desk's own secrets",
+                       description="Exits 1, with a named refusal, when this branch ADDS a "
+                                   "path that must never leave the host (data/, *.sqlite3, "
+                                   "*-credentials, *.pem, *token*, .env). Called by the git "
+                                   "credential helper and by the gh wrapper before "
+                                   "`gh pr create` (t756).")
+    p.add_argument("--base", help="diff against this ref (default: origin/main)")
+    p.add_argument("--cwd", help="repository to check (default: cwd)")
+    p.add_argument("--quiet", action="store_true")
     p = sub.add_parser("git-credential", help="git credential helper: `git config --global credential.helper '!dunkingsheep git-credential'`")
     p.add_argument("operation", nargs="?", default="get", choices=["get", "store", "erase"])
     p = sub.add_parser("review", help="the review timer and its queue")
@@ -1165,13 +1175,24 @@ def print_inbox_list(r):
 def _task_row(task):
     scope = "global" if task.get("is_global") else task.get("scope")
     assignees = ",".join(task.get("assignees") or []) or "-"
-    return (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
-            f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
-            f"{_clip(task['title'], 50)}")
+    row = (f"{task['id']:<5} {task['status']:<11} {task['priority']:<6} "
+           f"{_clip(scope, 10):<10} {_clip(assignees, 18):<18} "
+           f"{_clip(task['title'], 50)}")
+    # t878/#164: a cancelled dependency is SATISFIED (t879), so the row is
+    # claimable - the note stays because "my dependency was cancelled" is something
+    # a reader needs to know, not something to hide behind eligibility.
+    dead = task.get("dead_dependencies") or []
+    if dead:
+        row += f"  [depends on cancelled {', '.join(dead)}: satisfied (t164), claimable]"
+    return row
 
 
 def print_task(task):
     print(f"{task['id']} [{task['priority']}] {task['status']}  {task['title']}")
+    if task.get("blocked_dependents"):
+        print(f"warning     cancelling this leaves {len(task['blocked_dependents'])} "
+              f"unclaimable dependent(s): {', '.join(task['blocked_dependents'])} - a "
+              "cancelled dependency can never be satisfied, so repoint or cancel them")
     print(f"scope       {task['scope']}")
     if task.get("assignees"):
         print(f"assignees   {', '.join(task['assignees'])}")
@@ -1181,10 +1202,18 @@ def print_task(task):
         print(f"body pr     #{task['pr']}"
               + (f" (accounting pr #{task['accounting_pr']})"
                  if task.get("accounting_pr") else ""))
+    if task.get("dead_dependencies"):
+        print(f"cancelled deps {', '.join(task['dead_dependencies'])} "
+              "(satisfied since t164, so this row IS claimable; repoint with "
+              "`task update <id> --depends-on <good-id>` if you want a live edge)")
     if task.get("depends_on"):
         blocked = task.get("blocked_by") or []
         print(f"depends on  {', '.join(task['depends_on'])}"
               + (f" (blocked by {', '.join(blocked)})" if blocked else ""))
+    if task.get("unblock_needed") and task.get("dependency_note"):
+        # t903: a blocked task whose dependencies are all satisfied is claimable the
+        # moment somebody unblocks it, and nothing used to say so.
+        print(f"unblock     {task['dependency_note']}")
     if task.get("parent_id"):
         print(f"parent      {task['parent_id']}")
     if task.get("block_reason"):
@@ -1457,6 +1486,21 @@ def _git_credential(client, operation):
         return {}
     if attrs.get("protocol") != "https" or attrs.get("host") != "github.com":
         return {}
+    # t756: the credential handshake is the last moment before a push leaves the
+    # host, so it is where the desk's own secrets are refused. LIMIT, stated
+    # rather than implied: this blocks the lane's App token, but a helper
+    # configured behind it (the owner's `gh auth git-credential` fallback) can
+    # still authenticate the push, which is why `gh pr create` is checked too and
+    # why `.gitignore` carries the same names.
+    import dunk_secrets
+    message, error = dunk_secrets.refusal()
+    if message:
+        print(message, file=sys.stderr)
+        print("REFUSED by the dunkingsheep git credential helper (t756).", file=sys.stderr)
+        return {}
+    if error:
+        print(f"secrets-check: WARNING could not fully check this push: {error}",
+              file=sys.stderr)
     try:
         result = client.call("gh_token")
     except Exception:  # noqa: BLE001 - no daemon means no token, not a broken git
@@ -1505,6 +1549,15 @@ def _github_local(args):
 GH_WRAPPER = """#!/bin/sh
 # dunkingsheep gh wrapper: lanes act as their GitHub App; the owner keeps their login.
 # Installed by `dunkingsheep github wrappers`; do not edit.
+# t756: opening a PR publishes a branch, so the desk's own secrets are refused
+# here before gh runs. This path cannot be bypassed by a credential fallback.
+case "$1 $2" in
+  "pr create")
+    if ! dunkingsheep --no-start-daemon secrets-check; then
+      echo "REFUSED by the dunkingsheep gh wrapper (t756): fix the paths above." >&2
+      exit 1
+    fi ;;
+esac
 tok=$(dunkingsheep --no-start-daemon gh-token --quiet 2>/dev/null)
 if [ -n "$tok" ]; then
   GH_TOKEN="$tok" exec __REAL_GH__ "$@"
@@ -1938,6 +1991,8 @@ def print_messages(result):
                   f"{_clip((m['text'] or '').replace(chr(10), ' '), 50)}")
             if m.get("blocked_by"):
                 print(f"{'':<5} {'':>8} blocked by {m['blocked_by']}")
+            elif m.get("unblock_needed"):
+                print(f"{'':<5} {'':>8} dependencies satisfied - UNBLOCK to claim")
     if recent:
         if queued:
             print()
@@ -2118,7 +2173,7 @@ def _be_nice():
 
 
 # Read only local files; never open a socket.
-LOCAL_ONLY_COMMANDS = ("context", "github")
+LOCAL_ONLY_COMMANDS = ("context", "github", "secrets-check")
 # Long daemon-side work: the poolrad exporter runs for minutes, a launch
 # verifies the process started, a review sync talks to GitHub. A 15 s read
 # deadline reported "no answer" for work that then completed (2026-10-29, the
@@ -2561,6 +2616,15 @@ def main(argv=None):
     # Commands that read local files must not depend on the daemon. The digest is
     # injected at session start; making it wait for a socket would mean an agent
     # gets no standing rules exactly when the daemon is down.
+    if command == "secrets-check":
+        # An exit code, not a payload: the gh wrapper and the credential helper
+        # branch on it, so returning it through the (result, printer) path would
+        # print the refusal and still let the push through (t756).
+        import dunk_secrets
+        return dunk_secrets.main([arg for arg in
+                                  (["--base", args.base] if args.base else [])
+                                  + (["--cwd", args.cwd] if args.cwd else [])
+                                  + (["--quiet"] if args.quiet else [])])
     if command == "github":
         return _github_local(args)
     if command == "context" and args.context_command in CONTEXT_DAEMON_WRITES \
@@ -3085,6 +3149,7 @@ def run_client_command(client, args):
             if args.assign is not None:
                 payload["assignees"] = args.assign
             if args.depends_on is not None:
+                # t878: the list is REPLACED, so a repoint repairs a dead edge.
                 payload["depends_on"] = args.depends_on
             if args.multi_assignee is not None:
                 payload["multi_assignee"] = args.multi_assignee
@@ -3094,7 +3159,7 @@ def run_client_command(client, args):
                                mode=args.mode), print_task
         if sub == "complete":
             return client.call("task_complete", id=args.id, by=args.by,
-                               verdict=args.verdict), print_task
+                               verdict=args.verdict, landed=args.landed), print_task
         if sub == "block":
             return client.call("task_block", id=args.id, reason=args.reason), print_task
         if sub == "unblock":

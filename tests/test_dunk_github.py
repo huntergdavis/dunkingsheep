@@ -60,6 +60,15 @@ class FakeGitHub:
         self.base_sha = "c" * 40
         self.refs = {"main": self.base_sha}
         self.texts = {self.base_sha: self.ledger}      # commit sha -> ledger text
+        self.ledger_path = "docs/re/strict_full_c_addresses.csv"
+        # Defaults for the two gates added in t841: the fixture row has a kind label
+        # (so the happy path credits) and is not listed partial.
+        self.paths = {
+            (self.base_sha, "docs/re/credit_evidence_kind.csv"):
+                "id,kind,detail\nOVL_007F_0F7E,checker,u7f_state_flags_0f7e_audit.py\n",
+            (self.base_sha, "docs/re/partial_callee_models.csv"):
+                "id,status,evidence_doc\nOVL_0038_0775,partial,docs/re/x.md\n",
+        }
         self.trees = {}
         # The base commit exists before anything is committed: the accounting commit
         # must hang off it, not off nothing.
@@ -111,7 +120,14 @@ class FakeGitHub:
     def file_text(self, repo, path, ref, token):
         # t833: a path can be declared absent, so the accounting preflight can be
         # tested against a document that only exists on an unmerged body branch.
-        if path in getattr(self, "missing_paths", ()) or ref not in self.texts:
+        if path in getattr(self, "missing_paths", ()):
+            return None, None
+        # t841: per-path fixtures, so the partial-status and evidence-kind gates can
+        # read their tables the way the ledger is read. Everything else keeps t833's
+        # permissive behaviour (a declared-absent path is the only "missing").
+        if (ref, path) in getattr(self, "paths", {}):
+            return self.paths[(ref, path)], "b" * 40
+        if ref not in self.texts:
             return None, None
         return self.texts[ref], "b" * 40
 
@@ -524,6 +540,66 @@ class AccountingTests(unittest.TestCase):
         done = self.review_task()
         accounting = done["github"]["accounting"]
         self.assertIn("already credited as docs/re/OLD.md", accounting["reason"])
+        self.assertEqual([], self.github.prs_opened)
+
+    def test_a_partial_model_is_never_credited_as_strict_full_c(self):
+        """t752/t841: OVL_0038_0775 is a partial chain stopped at +0058, and the row
+        would have been the first partial model in the strict ledger."""
+        self.github.pulls = [poolrad_pull(title="Add raw-CPU partial model of OVL_0038_0775")]
+        self.github.files = [{"filename": "docs/re/OVL_0038_0775_CPU.md", "status": "added"}]
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/credit_evidence_kind.csv")] = (
+            "id,kind,detail\nOVL_0038_0775,checker,ovl038_0775_audit.py\n")
+        done = self.review_task(note="Accept OVL_0038_0775 (partial chain, stopped at +0058)")
+        accounting = done["github"]["accounting"]
+        self.assertIsNone(accounting.get("accounting_pr"))
+        self.assertIn("PARTIAL model", accounting["reason"])
+        self.assertEqual([], self.github.prs_opened)
+
+    def test_a_full_status_row_in_the_partial_table_is_still_creditable(self):
+        """t841: the STATUS column is the discriminator, not presence. OVL_03B0_06FB is
+        listed `full` and is the one full id not yet in the strict table - refusing on
+        presence would block the credit a sibling PR carries."""
+        self.github.pulls = [poolrad_pull(title="Add raw row-clear caller OVL_03B0_06FB")]
+        self.github.files = [{"filename": "docs/re/U3B0_ROW_CLEAR_06FB_CPU.md",
+                              "status": "added"}]
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/partial_callee_models.csv")] = (
+            "id,status,evidence_doc\nOVL_03B0_06FB,full,docs/re/U3B0_ROW_CLEAR_06FB_CPU.md\n")
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/credit_evidence_kind.csv")] = (
+            "id,kind,detail\nOVL_03B0_06FB,checker,u3b0_row_clear_06fb_cpu_audit.py\n")
+        done = self.review_task(note="Accept OVL_03B0_06FB (full: 22 B / 13 ins)")
+        accounting = done["github"]["accounting"]
+        self.assertEqual("OVL_03B0_06FB,docs/re/U3B0_ROW_CLEAR_06FB_CPU.md",
+                         accounting.get("row"))
+        self.assertIsNotNone(accounting.get("accounting_pr"))
+
+    def test_a_callback_status_row_is_still_creditable(self):
+        """The 2 callback ids are ALREADY in the strict table: refusing `callback`
+        would contradict existing credits (t841)."""
+        self.github.pulls = [poolrad_pull(title="Add callback model RES_00BA_1509")]
+        self.github.files = [{"filename": "docs/re/RES_00BA_1509_CPU.md", "status": "added"}]
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/partial_callee_models.csv")] = (
+            "id,status,evidence_doc\nRES_00BA_1509,callback,docs/re/RES_00BA_1509_CPU.md\n")
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/credit_evidence_kind.csv")] = (
+            "id,kind,detail\nRES_00BA_1509,audit,res_00ba_1509_cpu_audit.py\n")
+        done = self.review_task(note="Accept RES_00BA_1509 (callback)")
+        accounting = done["github"]["accounting"]
+        self.assertIsNotNone(accounting.get("accounting_pr"))
+
+    def test_a_credit_without_an_evidence_kind_label_is_refused(self):
+        """t752: every strict credit needs one label in the generated kind table, and
+        the automation will not invent it."""
+        self.github.paths[(self.github.base_sha,
+                           "docs/re/credit_evidence_kind.csv")] = (
+            "id,kind,detail\nOVL_0001_0001,checker,x_audit.py\n")
+        done = self.review_task()
+        accounting = done["github"]["accounting"]
+        self.assertIsNone(accounting.get("accounting_pr"))
+        self.assertIn("credit_evidence_kind.py", accounting["reason"])
         self.assertEqual([], self.github.prs_opened)
 
     def test_needs_fix_opens_no_accounting_pr(self):

@@ -2731,7 +2731,8 @@ class Flock:
             task_id, self._task_assignees(assignees, self_pane_id), mode=mode)
 
     @_as_dunk_error
-    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None):
+    def task_complete(self, task_id, by=None, self_pane_id=None, verdict=None,
+                      landed=True):
         task = self._require_task_visible(self.tasks.get(task_id), self_pane_id)
         if task.get("kind") == "review":
             role = self.caller_role(self_pane_id)
@@ -2823,6 +2824,15 @@ class Flock:
                             "pane_id": self_pane_id, "pane_info": pane_info})
         self._next_job_wake.set()
         result = dict(plan["task"], next_job={k: v for k, v in plan.items() if k != "task"})
+        if not landed:
+            # t906: the work is done and NOT on main (a stacked branch). Record it in
+            # the same act, because this is the moment the lane certainly knows; the
+            # dependents stay closed until the merge path flips it back.
+            try:
+                self.tasks.set_landed(task_id, landed=False, by=self_pane_id or by)
+                result["landed"] = False
+            except TaskError as error:
+                raise DunkError(str(error)) from None
         if task.get("kind") == "review":
             result["github"] = self._after_review_verdict(dict(task), verdict,
                                                           by=self_pane_id or by)

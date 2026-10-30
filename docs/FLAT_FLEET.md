@@ -156,10 +156,19 @@ is the rollback switch for binding alone.
 | `system` | timers and bridges: `task add/assign/cancel`, `inbox send --system-sender`, `respawn_pane`, `send_keys` under the stuck/watchdog guards, `report`, `owner_*` | interactive typing |
 | `desk` | `task add` (unassigned, `kind=work` only) / `list` / `read` / `note` / `metrics`, `inbox read` (own mailbox), `owner_take`, `owner_reply`, `context digest` / `search`, `metrics summary`, `status`, `usage`, `report list/run`, `review list`, `poolrad progress`, `pane read`, `views *`, `memory recall/search` | `send_text`, `send_keys`, `inbox send`, `task next/claim/complete/heartbeat/release/update/assign`, every dunk verb, `respawn`, `start_agent`, `context add`, `gh_token` |
 | `planner` | `task add --kind work` (unassigned only), `task list/read/note`, `views *`, `memory recall`, `context digest` | everything else: no mail, no typing, no claiming, no status changes |
-| `worker` | `task next/heartbeat/complete/note/block/release/follow`, `inbox read/send`, `context add --class fact`, `memory *`, `pane send self`, `gh_token author` | `task add` with other assignees, `task complete` on a task it does not lease, anything superuser, `gh_token reviewer` |
+| `worker` | `task next/heartbeat/complete/note/block/unblock/release/follow/unfollow/update/list/read/stats/metrics/followers/add`, `inbox read/send/*`, `context add --class fact`, `memory *`, `pane send self`, `gh_token author`, `status`/`health`/`roster`/`lanes`/`panes` reads | `task cancel`, `task assign`, `task add` with other assignees, `task complete` on a task it does not lease, anything superuser, `gh_token reviewer` |
 | `reviewer` | as worker, except `task next` yields only `kind=review` with `author != self`, and `gh_token reviewer` not `author` | pushing code: the reviewer App has `contents: read` |
 | `web` | the owner's transport: everything `owner` may call except the fleet-destructive verbs (`close`, `shutdown`, `respawn_pane`, `start_agent`, every dunk verb, `superuser *`, `gh_token`). Bound by a service token, not a pane (below). | the excluded verbs |
 | `anonymous` | `views *`, `task list/read`, `metrics summary`, `memory recall` | all writes |
+
+**This table is a claim about the code, and it drifted once.** On 2026-10-30 a
+worker pane ran `task unblock` successfully while this row did not name it, so a lane
+reading the row could not know what it was allowed to do (t903). The `task_*` verbs the
+row enumerates are therefore pinned by a test (`tests/test_allowlist_doc.py`) that
+compares them with `dunk_roles.ALLOW`: a verb the table grants and the row omits fails
+the test, and so does a verb the row promises and the table denies. The rest of the row
+states policy (`pane send self`, `inbox read/send` own mailbox) and cannot be checked
+this way — the handler enforces it.
 
 **How a process with no pane proves a role.** systemd units have no TTY and no
 pane, so roles for them are bound by a service token: `~/.config/dunkingsheep/
