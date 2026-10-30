@@ -11,6 +11,8 @@ import sys
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from desk_data import data_dir  # noqa: E402
 sys.path.insert(0, str(ROOT))
 from tools import theme_contrast as contrast
 from tools.theme_wave_checks import OPEN_ICON_CHECK, ADVISORY_WIDTHS
@@ -133,13 +135,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--theme', required=True)
     parser.add_argument('--base', required=True, help='reviewed main commit, an ancestor of this checkout')
-    parser.add_argument('--artifacts', type=Path, required=True, help='new directory under ignored data/')
+    parser.add_argument('--artifacts', type=Path, required=True, help='new directory under the desk data dir (VP_DATA_DIR, default ~/.config/dunkingsheep/desk)')
     parser.add_argument('--include-1440', action='store_true')
     parser.add_argument('--completed-task', action='append', default=[])
     args = parser.parse_args(argv)
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', args.theme): parser.error('Invalid theme ID')
     output = args.artifacts.resolve()
-    if not output.is_relative_to(ROOT / 'data') or output.exists(): parser.error('Use a new directory under data/')
+    if not output.is_relative_to(data_dir().resolve()) or output.exists(): parser.error(f'Use a new directory under {data_dir()}')
     output.mkdir(parents=True)
     summary = dict(contrast_kind='STATIC', not_covered=list(NOT_COVERED), commands=[], failures=[], advisories=[], candidate=args.theme)
     original = source_hashes()

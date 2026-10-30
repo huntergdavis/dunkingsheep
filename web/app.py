@@ -35,7 +35,17 @@ from pydantic import BaseModel, Field
 from web.character_editor import EditorStore, router as character_editor_router
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = Path(os.getenv("VP_DATA_DIR", ROOT / "data")).resolve()
+# The desk's state lives OUTSIDE the repo, always (docs/FLAT_FLEET.md 9.2 rule 4): an
+# import inside a checkout or worktree used to create data/ beside the code, and two
+# lane branches then committed auth.json and the owner's messages to a public repo
+# (2026-10-29). There is no repo-root fallback.
+DESK_DIR_DEFAULT = Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"
+# `or`, NOT os.getenv's default: an EMPTY VP_DATA_DIR (Environment=VP_DATA_DIR=, a
+# supervisor that passes an unset variable as "", `env VP_DATA_DIR= ...`) would make
+# Path("") the CURRENT WORKING DIRECTORY - i.e. the repo, when a lane imports this
+# module from a checkout, which is the 2026-10-29 incident shape. The default only
+# applies to an unset variable, so the empty case has to be handled explicitly.
+DATA = Path(os.environ.get("VP_DATA_DIR") or DESK_DIR_DEFAULT).expanduser().resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
@@ -878,6 +888,50 @@ def operations_board(_: Annotated[str, Depends(require_auth)]):
         return ops_board.CACHE.snapshot()
     except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
         raise HTTPException(503, f"Operations board unavailable: {type(exc).__name__}") from exc
+
+
+@app.post("/api/ops-board/answer")
+def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """Answer a lane's needs-owner question: record the reply as an `owner_answer` task
+    note, then unblock the task.
+
+    DESK_DESIGN 4.1 (t997): the desk's reply box. It goes through the daemon over the socket with the desk's own credential - the web never
+    reads sqlite and never shells out - so the unblock is the same verb a lane would run.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    reply = str((payload or {}).get("reply") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    if not reply:
+        raise HTTPException(400, "a reply is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = ops_board.answer_question(client, task_id, reply)
+    except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
+        raise HTTPException(503, f"Could not unblock {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "unblocked": True, "task": result}
+
+
+@app.post("/api/ops-board/not-now")
+def not_now_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """'Not now': lower the task's priority so the question stops sitting at the top.
+
+    The owner's ask (4.1) is a deferral, not an answer: the task stays blocked and the
+    lane still waits, but the desk stops ranking it first. A priority change, nothing else.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = ops_board.defer_question(client, task_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, f"Could not lower {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "priority": "low", "task": result}
 
 
 @app.post("/api/ops-board/refresh")

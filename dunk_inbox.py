@@ -405,6 +405,25 @@ class Inbox:
             "from_lanes": int(from_lanes),
         }
 
+    def gate_unread(self, mailbox, window_s=600.0, since=None):
+        """Unread mail that may hold a lane back from the sweep (t1053).
+
+        Daemon announcements (empty sender) never count: a lane does not read mail until
+        prompted, so counting them deadlocked the fleet. Only mail from another lane or
+        the owner counts, newer than `since` (the lane's last turn end) and no older than
+        `window_s`; past that the sweep feeds anyway. Returns {"fresh", "expired"}.
+        """
+        where, params = mailbox_where(mailbox)
+        cutoff = _now() - float(window_s)
+        with self._lock:
+            rows = self.db.execute(
+                f"SELECT created_at FROM messages WHERE {where} AND state = 'queued' "
+                "AND sender IS NOT NULL AND sender != ''", params).fetchall()
+        times = [r["created_at"] for r in rows
+                 if since is None or r["created_at"] > float(since)]
+        fresh = sum(1 for t in times if t >= cutoff)
+        return {"fresh": fresh, "expired": len(times) - fresh}
+
     def list(self, mailbox, unread_only=True, limit=50):
         """Summaries, oldest first. No bodies."""
         condition, params = mailbox_where(mailbox)

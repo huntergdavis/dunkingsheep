@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -208,6 +209,31 @@ class PushOnIdleTests(unittest.TestCase):
                                     head="h" * 8, created_by="review-sync")
         self.flock._push_tasks()
         self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
+
+
+    def test_the_sweeps_own_announcements_never_hold_a_lane_back(self):
+        """t1053: each claim sends a 'TASK ...' mail, which made the NEXT sweep skip the lane
+        as unread_mail; the fleet idled twice on 2026-10-30."""
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: None
+        self.flock.inbox_send(IDLE_SHELL, "TASK t0 [low] earlier work", subject="TASK t0 [low] earlier work",
+                              notify=False, self_pane_id="%95")
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
+
+    def test_fresh_lane_mail_holds_a_lane_but_stale_mail_does_not(self):
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: None
+        self.flock.inbox_send(IDLE_SHELL, "please read me first", subject="note", notify=False,
+                              self_pane_id="%95")
+        task = self.flock.task_add("waiting work", self_pane_id="%95")
+        self.flock._push_tasks()
+        self.assertEqual("open", self.claimed_task(task["id"])["status"], "fresh mail holds")
+        import dunk_core
+        with mock.patch.object(dunk_core, "UNREAD_MAIL_GRACE_S", -1.0):
+            self.flock._push_tasks()
+        self.assertEqual("in_progress", self.claimed_task(task["id"])["status"], "stale mail expires")
 
     def test_a_worker_with_a_live_agent_is_fed(self):
         self.register(IDLE_SHELL, "worker", provider="pi")

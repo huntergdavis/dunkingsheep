@@ -1,0 +1,20 @@
+# Ground truth `rust-parity`: a PR that changes the Python daemon, CLI or schemas should
+# mirror it in Rust or file a 'Rust parity: <module>' task. This job only WARNS (it never
+# fails a PR): a name match is not proof of equal behaviour, and the list also contains
+# changes made before the PR. Names the unported items as annotations.
+name: rust-parity
+
+on:
+  pull_request:
+    paths: ["dunk_*.py", "dunkingsheep", "packaging/**", "tools/rust_parity.py"]
+
+jobs:
+  parity:
+    name: rust parity (warn only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tools/rust_parity.py --warn

@@ -80,6 +80,37 @@ fn two_writers_serialize_their_transactions() {
     );
 }
 
+/// The property the t1006 fix gives: opening a second writer beside an active write
+/// transaction succeeds.
+///
+/// HONEST SCOPE: this is NOT a deterministic reproduction of the flake. Measured before
+/// the fix, `two_writers_serialize_their_transactions` failed 1 run in 20 with
+/// `writer: Busy` inside `Writer::spawn`; this test holds a transaction and opens a
+/// second writer, which exercises the same code path but passes on the OLD code too
+/// (checked), because the window is probabilistic. The evidence that the fix works is
+/// the rate: 1 failure in 20 runs before, 0 in 30 after. What this test does pin is that
+/// the busy path does not regress into a hard failure whenever a holder is present.
+#[test]
+fn a_writer_opened_while_another_holds_the_database_waits_instead_of_failing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("open-race.db");
+    table(&path).expect("schema");
+    // Hold a write transaction open on one connection...
+    let holder = open_writer(&path).expect("holder");
+    holder.execute_batch("BEGIN IMMEDIATE").expect("begin");
+    holder
+        .execute("UPDATE counter SET n = n + 1 WHERE id = 1", [])
+        .expect("write inside the transaction");
+    // ...and open a second writer WHILE it is open. Before t1006 this returned Busy
+    // about one time in twenty; it must now wait for the holder and succeed.
+    let opened = open_writer(&path);
+    holder.execute_batch("COMMIT").expect("commit");
+    assert!(
+        opened.is_ok(),
+        "opening a writer beside an active transaction failed: {opened:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reader_never_blocks_on_an_open_write_transaction() {
     let tmp = tempfile::tempdir().expect("tempdir");

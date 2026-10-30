@@ -14,6 +14,8 @@
 use std::collections::BTreeMap;
 
 pub mod fakes;
+pub mod parse;
+pub mod tmux;
 
 /// One pane, as `tmux list-panes -F PANE_FORMAT` describes it.
 ///
@@ -26,6 +28,10 @@ pub struct Pane {
     pub window_id: String,
     pub cwd: String,
     pub command: String,
+    /// The stable, human-chosen label: the recorded start_agent name when there is
+    /// one, else the pane title, else the window name (the Python's `label`).
+    pub label: String,
+    /// tmux's own `#{pane_title}`, untouched (the Python's `terminal_title`).
     pub title: String,
     pub active: bool,
     pub workspace: String,
@@ -94,6 +100,42 @@ impl std::fmt::Display for TerminalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
     }
+}
+
+/// The bounds the Python's `resize()` enforces before it touches tmux.
+pub const RESIZE_MIN: i64 = 1;
+pub const RESIZE_MAX: i64 = 1000;
+
+/// One pane the re-layout moved, with the size it had before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResizedPane {
+    pub pane_id: String,
+    pub cols: i64,
+    pub rows: i64,
+    pub cols_before: Option<i64>,
+    pub rows_before: Option<i64>,
+}
+
+/// What a resize actually did - the geometry READ BACK, never the request echoed.
+///
+/// tmux has no absolute per-pane size: `resize-window -x/-y` sets the WINDOW grid and
+/// every pane in it re-lays-out, so a caller that asked about one pane must be told
+/// which neighbours moved too.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Resize {
+    pub pane_id: String,
+    pub requested_cols: i64,
+    pub requested_rows: i64,
+    /// The pane's size after the call, when the backend could read it back.
+    pub cols: Option<i64>,
+    pub rows: Option<i64>,
+    pub window_pane_count: usize,
+    pub resized_panes: Vec<ResizedPane>,
+    /// Attached clients. Reported rather than refused: measured 2026-10-28,
+    /// `resize-window` succeeds with a client attached, and with `window-size=latest`
+    /// that client's next resize event wins - so the caller is told, not lied to.
+    pub clients_attached: usize,
+    pub overridable_by_client: bool,
 }
 
 /// Where a new agent goes.
@@ -194,4 +236,13 @@ pub trait Terminal: std::fmt::Debug {
     /// The agent status the backend knows for a pane (`ready`/`working`/`unknown`),
     /// or `None` when the pane is not an agent.
     fn agent_status(&self, pane_id: &str) -> Option<String>;
+
+    /// Size the pane's window and report the geometry read back (t928).
+    ///
+    /// In T22's own scope (`resize-window`, TASKS.md) and used by the web desk:
+    /// `dunk_http.py` calls `backend.resize(pane_id, cols, rows)` with the Python's
+    /// own refusal bounds. A backend that cannot size panes must say so with a named
+    /// refusal rather than omitting the method - an absent method is discovered by
+    /// compiling, which is not a sentence a caller can act on.
+    fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError>;
 }
