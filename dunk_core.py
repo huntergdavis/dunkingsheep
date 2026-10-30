@@ -3784,47 +3784,123 @@ class Flock:
                 log.exception("task push failed")
 
     def _push_tasks(self):
-        """Feed idle followers one task each, using the same idle signal as
-        `only_when="idle"` and the same guarded inbox nudge as everything else.
+        """Feed idle lanes one task each: followers AND every registered lane.
 
-        No model is involved: the daemon selects, claims and delivers
-        deterministically. A follower already holding a live lease is skipped.
+        t615 (measured 2026-10-29, owner): four registered lanes sat idle for ~40
+        minutes with 13 open tasks because only ONE of them had ever called
+        `task follow`; the push loop fed followers and nobody else. Registration is
+        the subscription now: a lane the owner started with `start-agent --role`
+        is a push target whether or not it asked. `task follow` still exists and
+        still scopes a pane to its own queue; it is no longer a prerequisite for
+        being given work.
+
+        The gates are the ones the task names and nothing else: role, busy-ness,
+        unread mail. Each decision is logged, because "nothing to do" and "I was
+        skipped" must never look alike.
         """
-        with self._lock:
-            followers = dict(self.task_waiters)
-        if not followers:
+        targets = self._push_targets()
+        if not targets:
             return
         try:
             panes = {p["pane_id"]: p for p in self.herdr.list_panes()}
-        except Exception:
+        except Exception:  # noqa: BLE001 - a backend hiccup must not kill the loop
+            log.info("push sweep skipped: pane list unavailable")
             return
-        for pane_id in sorted(followers):
+        for pane_id in sorted(targets):
+            scope, why = targets[pane_id]
             pane = panes.get(pane_id)
             if pane is None:
+                log.info("push skip pane=%s reason=pane_gone via=%s", pane_id, why)
                 continue
             if (pane.get("agent_status") or "unknown") in BUSY_STATUSES:
+                log.info("push skip pane=%s reason=busy_status status=%s",
+                         pane_id, pane.get("agent_status"))
                 continue
             if self.tasks.leases_for_pane(pane_id):
+                log.info("push skip pane=%s reason=holding_work", pane_id)
                 continue
-            # The push path is the pull path (FLAT_FLEET.md 5): the same role ->
-            # kind rule and the same no-self-review rule, from the same function.
-            # It used to omit both, so a worker follower was pushed a review it
-            # could not complete and a reviewer could be pushed its own PR (t595,
-            # live on %100 / t568).
+            if self._lane_agent_alive(pane_id) is False:
+                # A registration outlives its agent: the lane wrapper ends in `exec sh`,
+                # which keeps the pane pid, so the role still resolves after the agent
+                # exits. Feeding that shell starves a live lane of a task (review t1010).
+                log.info("push skip pane=%s reason=no_live_agent via=%s", pane_id, why)
+                continue
+            role = self.caller_role(pane_id)
+            if role == "reviewer" and not self.roles.may_review(pane_id):
+                log.info("push skip pane=%s reason=provider_may_not_review provider=%s",
+                         pane_id, self.roles.provider_of(pane_id) or "unknown")
+                continue
+            if self._unread_mail(pane_id):
+                log.info("push skip pane=%s reason=unread_mail", pane_id)
+                continue
+            # The role->kind filter belongs here as much as in task_next (t595):
+            # without it the push path hands a worker a review it cannot complete.
             kinds, exclude_author = self._claim_filters(pane_id)
             if kinds is None and not self._may_pull_everything(pane_id):
+                log.info("push skip pane=%s reason=no_kind_for_role via=%s", pane_id, why)
                 continue
             try:
                 claimed = self.tasks.claim_next(
-                    scope=followers[pane_id], pane_id=pane_id, kinds=kinds,
+                    scope=scope, pane_id=pane_id, kinds=kinds,
                     exclude_author=exclude_author)
-            except Exception:
+            except Exception:  # noqa: BLE001 - one pane must not stop the sweep
                 log.exception("task claim failed for %s", pane_id)
                 continue
             task = claimed.get("task")
             if not task:
+                refused = (claimed.get("refused") or {}).get("reason") or "empty"
+                log.info("push none pane=%s scope=%s reason=%s via=%s",
+                         pane_id, scope, refused, why)
                 continue
+            log.info("push claim pane=%s task=%s kind=%s via=%s",
+                     pane_id, task["id"], task.get("kind"), why)
             self._announce_task(pane_id, task, claimed.get("lease_seconds"))
+
+    def _push_targets(self):
+        """pane_id -> (scope, why): explicit followers plus registered lanes."""
+        with self._lock:
+            targets = {pane_id: (scope, "follower")
+                       for pane_id, scope in self.task_waiters.items()}
+        try:
+            lanes = self.roles.describe().get("lanes") or {}
+        except Exception:  # noqa: BLE001 - no registry means followers only
+            log.exception("push targets: role registry unavailable")
+            return targets
+        for pane_id, entry in lanes.items():
+            if pane_id in targets:
+                continue
+            # Registration is the subscription, but only for the roles that pull
+            # work. A desk/planner/owner pane is registered and must not be fed
+            # tasks by a sweep.
+            #
+            # t975: the role is the RESOLVED one, not the raw registry string. Every
+            # other role decision here goes through caller_role()/role_of(), which
+            # DEMOTES a registration whose pane_pid no longer matches the live pane
+            # (the tmux flip on 2026-10-29 demoted every registration that way). Reading
+            # `entry["role"]` directly made a REUSED pane id - including an idle plain
+            # shell - a push target: the sweep claimed a task for it and nudged it,
+            # which is the exact reverse of the role filter this path is supposed to
+            # apply. `role_of` with the live pane record is what the rest of the file
+            # trusts, so the sweep asks the same question.
+            if self.caller_role(pane_id) not in ("worker", "reviewer"):
+                continue
+            targets[pane_id] = (TASK_GLOBAL, "registered")
+        return targets
+
+    def _unread_mail(self, pane_id):
+        """Does this lane have unread mail? A lane reads its mail before new work.
+
+        Resolved through `_own_mailbox`, the same pane->mailbox resolver the inbox
+        itself uses, so the gate and `inbox_send` can never disagree about where a
+        lane's mail is.
+        """
+        try:
+            return bool(self.inbox.count(self._own_mailbox(pane_id)).get("unread"))
+        except Exception:  # noqa: BLE001 - unknown mail state is not evidence of none,
+            # but refusing every push on an inbox hiccup would stop the fleet;
+            # log it and let the role/busy gates decide.
+            log.exception("push: unread mail check failed pane=%s", pane_id)
+            return False
 
     def _announce_task(self, pane_id, task, lease_seconds):
         body = [
@@ -4883,6 +4959,29 @@ class Flock:
         "permission denied",
         "cannot execute",
     )
+
+    def _lane_agent_alive(self, pane_id):
+        """True when an agent process runs in the pane, False when the process table
+        answered and there is none (a bare shell), None when it cannot say (no /proc,
+        no pid): unknown never blocks a push, only evidence of a dead lane does."""
+        try:
+            from dunk_callers import AGENT_NAMES, DEAD_STATES
+            info = self._pane_info(pane_id) or {}
+            entries = self.herdr.agent_child_pids(info.get("pane_pid"))
+        except Exception:  # noqa: BLE001 - liveness must never stop the sweep
+            return None
+        if entries is None:
+            return None
+        if any(e.get("comm") in AGENT_NAMES and e.get("state") not in DEAD_STATES
+               for e in entries):
+            return True
+        # The pane process and its DIRECT children saw no agent. An agent can sit deeper
+        # (`npx claude` -> node -> claude, `bash -lc 'exec pi'` behind a wrapper), so walk
+        # the whole descendant tree before calling the lane dead (review t1029).
+        try:
+            return bool(self._agent_evidence(info.get("pane_pid"), AGENT_NAMES))
+        except Exception:  # noqa: BLE001 - a failed walk is "cannot say", never "dead"
+            return None
 
     # t957: a FIRST-RUN dialog makes a freshly started lane look healthy and be
     # inert. Measured by the owner-role lane: `start-agent` reported 'started agent
