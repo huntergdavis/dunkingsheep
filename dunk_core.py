@@ -55,7 +55,7 @@ import time
 
 from pathlib import Path
 
-VERSION = "2.71.2"
+VERSION = "2.71.4"
 
 def code_identity(path=None):
     """Hash the flat application module tree, not just dunk_core.py.
@@ -3748,7 +3748,7 @@ class Flock:
         hit = self._role_pane_cache.get(pane_id)
         if hit and hit[0] > now:
             return hit[1]
-        info = self._pane_info(pane_id)
+        info = self._pane_info(pane_id)      # None when the backend knows no such pane
         self._role_pane_cache[pane_id] = (now + 2.0, info)
         if len(self._role_pane_cache) > 512:
             self._role_pane_cache = {k: v for k, v in self._role_pane_cache.items()
