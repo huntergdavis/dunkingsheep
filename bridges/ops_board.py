@@ -91,6 +91,59 @@ def _unavailable(error: str) -> dict:
 TASK_LIST_LIMIT = 1000
 
 
+def _owner_question(block_reason) -> str | None:
+    """The lane's question, verbatim, from a `needs-owner:` block reason (t997).
+
+    The fleet's convention is `block <id> --reason "needs-owner: <one question>"`, so the
+    text after the prefix IS the question. A blocked task whose reason does not carry the
+    prefix is not a question for the owner and returns None rather than a paraphrase.
+    """
+    text = str(block_reason or "").strip()
+    if not text.startswith("needs-owner:"):
+        return None
+    question = text[len("needs-owner:"):].strip()
+    return question or None
+
+
+def _dependents(tasks) -> dict:
+    """task id -> the ids that declare it in `depends_on` (what an answer unblocks)."""
+    out: dict[str, list] = {}
+    for task in tasks or []:
+        for dep in task.get("depends_on") or []:
+            out.setdefault(str(dep), []).append(task.get("id"))
+    return out
+
+
+def _asks_board(client, now: datetime) -> dict:
+    """'What I asked for': tasks created from the owner mailbox in the last 24h (t997).
+
+    DESK_DESIGN 4.1 asks for the owner's own recent asks with status chips. The filter is
+    the row's own provenance (`created_by` naming the owner mailbox) and its created_at, so
+    the tile is a query over the task board - not a model's memory of the conversation.
+    """
+    try:
+        listing = client.call("task_list", include_done=True, limit=TASK_LIST_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - a missing source is reported, not raised
+        return _unavailable(type(exc).__name__)
+    tasks = listing.get("tasks") if isinstance(listing, dict) else listing
+    if not isinstance(tasks, list):
+        return _unavailable("invalid task list")
+    cutoff = now.timestamp() - 24 * 3600
+    asks = []
+    for task in tasks:
+        created_by = str(task.get("created_by") or "")
+        created_at = task.get("created_at")
+        if "owner" not in created_by or not isinstance(created_at, (int, float)):
+            continue
+        if created_at < cutoff:
+            continue
+        asks.append({"id": task.get("id"), "title": task.get("title"),
+                     "status": str(task.get("status", "unknown")),
+                     "age_s": _age_seconds(now, created_at)})
+    asks.sort(key=lambda row: row["age_s"] if row["age_s"] is not None else 10**9)
+    return {"asks": asks, "count": len(asks), "window_hours": 24}
+
+
 def _task_board(client, now: datetime) -> dict:
     # The reference list is fetched with an explicit completeness contract:
     # TASK_LIST_LIMIT is well above anything the desk has ever queued, and if
@@ -133,7 +186,16 @@ def _task_board(client, now: datetime) -> dict:
             "claimable": bool(task.get("claimable")),
             "attempts": task.get("attempts"),
             "needs_owner": bool(task.get("needs_owner")) or "owner" in (task.get("assignees") or []),
+            # DESK_DESIGN 4.1 (t997): the desk shows the LANE'S QUESTION VERBATIM, not a
+            # summary of it, and which tasks are waiting on the answer. Both come from the
+            # row itself - the reason is the block_reason text after 'needs-owner:', and
+            # the dependents are the tasks that name this one in depends_on - so the board
+            # never paraphrases a question it is asking the owner to answer.
+            "needs_owner_question": _owner_question(task.get("block_reason")),
         })
+    dependents = _dependents(tasks)
+    for item in items:
+        item["blocks"] = dependents.get(item["id"], [])
     items.sort(key=lambda row: (PRIORITY_RANK.get(row["priority"], 9),
                                 -(row["age_s"] or 0), str(row["id"])))
     load: dict[str, int] = {}
@@ -451,7 +513,8 @@ def build(client, conn: sqlite3.Connection, *, now: datetime | None = None) -> d
                "panes": lambda: _pane_board(client),
                "dunks": lambda: _dunk_board(client, now),
                "health": lambda: _health_board(client),
-               "host": lambda: _host_board(conn, now)}
+               "host": lambda: _host_board(conn, now),
+               "asks": lambda: _asks_board(client, now)}
     readers["reviews"] = lambda: _review_board(client, now)
     readings = {}
     for name, read in readers.items():
