@@ -4,8 +4,9 @@
 //! `_banner_marker`, `_is_placeholder`, `_status_marker`, `_modal_open`, `_collapse`, and the
 //! marker constants they read.
 //!
-//! NOT here yet: `box_text`, `_typed_text`, `_is_our_send`, `classify_delivery`,
-//! `_federated_composer` (the composer readers, next slices).
+//! Slice 2 adds `box_text`, `_typed_text`, `_is_our_send`, `_prompt_body`, `_is_border_line`.
+//! NOT here yet: `classify_delivery`, `_federated_composer`, the native-footer and styled-boundary
+//! readers (`_composer_region_text`, `_styled_composer_boundary`, ...).
 //!
 //! The rule these keep: ONLY THE BOTTOM OF THE SCREEN IS THE LIVE INTERFACE. Scanning the
 //! whole scrollback made a pane look dead because its transcript quoted the phrase, and
@@ -267,6 +268,338 @@ pub fn modal_open(screen: &str) -> bool {
         .join("\n")
         .to_lowercase();
     MODAL_MARKERS.iter().any(|marker| low.contains(marker))
+}
+
+/// `COMPOSER_HINT_TAIL_ROWS`: rows at the bottom searched for the harness's empty-box hint.
+pub const COMPOSER_HINT_TAIL_ROWS: usize = 5;
+/// `BOX_REGION_ROWS`.
+pub const BOX_REGION_ROWS: usize = 14;
+/// Empty text with this detail is NOT empty-box evidence and must never authorise a send.
+pub const AMBIGUOUS_COMPOSER: &str = "ambiguous composer/transcript:";
+/// `MID`: the middle-dot separator that marks a status footer row.
+pub const MID: &str = " \u{b7} ";
+/// `CONSUMPTION_PREFIX_CHARS`.
+pub const CONSUMPTION_PREFIX_CHARS: usize = 80;
+/// `COLLAPSED_INPUT_MARKERS`: what an agent shows inside the box for a collapsed paste.
+pub const COLLAPSED_INPUT_MARKERS: [&str; 5] = [
+    "ctrl+o to expand",
+    "paste again to expand",
+    "pasted text",
+    "pasted content",
+    "[image",
+];
+
+fn decoration_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[\u{2500}-\u{259f}\u{2800}-\u{28ff}\s]+").expect("static regex"))
+}
+
+/// First `n` characters (Python `s[:n]`).
+fn head(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
+/// Python `repr()` of a str, for the detail sentences tests assert on.
+fn repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+fn blank(row: &str) -> bool {
+    strip_ansi(row).trim().is_empty()
+}
+
+/// `_is_border_line`: a horizontal rule at least ten box-drawing dashes long.
+pub fn is_border_line(line: &str) -> bool {
+    let stripped = strip_ansi(line);
+    let stripped = stripped.trim();
+    stripped.starts_with('\u{2500}') && stripped.matches('\u{2500}').count() >= 10
+}
+
+/// `_prompt_body`: the text after the prompt sigil on one row, or `None` if the row has no
+/// sigil. The sigil is detected from the PLAIN row and the text read from the BRIGHT part of it:
+/// codex draws its sigil dim while the draft after it is bright, so each needs the other.
+pub fn prompt_body(row: &str) -> Option<String> {
+    let plain = strip_ansi(row);
+    let plain = plain.trim_start_matches(|c| BOX_LEADING.contains(c));
+    if !plain
+        .chars()
+        .next()
+        .is_some_and(|c| INPUT_BOX_SIGILS.contains(&c))
+    {
+        return None;
+    }
+    let bright = decoration_re()
+        .replace_all(&bright_text(row), " ")
+        .into_owned();
+    let body = bright.trim_start_matches(|c| BOX_LEADING.contains(c));
+    let body = match body.chars().next() {
+        Some(c) if INPUT_BOX_SIGILS.contains(&c) => &body[c.len_utf8()..],
+        _ => body,
+    };
+    let body = collapse(body);
+    if !body.is_empty() && is_placeholder(row) {
+        // A hint drawn bright is still a hint: the box is empty.
+        return Some(String::new());
+    }
+    Some(body)
+}
+
+/// `box_text`: what is in the input box, and how we know, as `(text, detail)`.
+///
+/// ONE reader, because three components answered "is there text in the box?" from something
+/// other than the box. Empty text with a detail starting [`AMBIGUOUS_COMPOSER`] is an unknown
+/// boundary, not an empty-box assertion.
+pub fn box_text(screen: &str) -> (String, String) {
+    if screen.is_empty() {
+        return (String::new(), "the pane could not be read".to_string());
+    }
+    let all_rows = splitlines(screen);
+    let rows: Vec<&str> = all_rows.iter().copied().filter(|r| !blank(r)).collect();
+    let mut region_start = rows.len().saturating_sub(BOX_REGION_ROWS);
+    let mut region_end = rows.len();
+    let sigils: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| prompt_body(row).map(|_| (i, (*row).to_string())))
+        .collect();
+    let hint_from = rows.len().saturating_sub(COMPOSER_HINT_TAIL_ROWS);
+
+    // Footer proximity identifies the contiguous composer. BLANK ROWS MATTER HERE, and `rows`
+    // has them filtered out, so this rule reads the raw lines.
+    let raw_prompts: Vec<(usize, &str)> = all_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| prompt_body(row).is_some())
+        .map(|(i, row)| (i, *row))
+        .collect();
+    let footers: Vec<usize> = all_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| strip_ansi(row).contains(MID) && prompt_body(row).is_none())
+        .map(|(i, _)| i)
+        .collect();
+    // BORDERED COMPOSERS ARE NOT THIS RULE'S BUSINESS (claude keeps an empty prompt row at the
+    // bottom with the draft above it); codex draws no border.
+    let tail_from = all_rows.len().saturating_sub(6);
+    let bordered_tail = all_rows[tail_from..].iter().any(|row| is_border_line(row));
+    if !bordered_tail && !raw_prompts.is_empty() && !footers.is_empty() {
+        let (last_prompt_index, last_prompt_row) = *raw_prompts.last().expect("non-empty");
+        let footer_index = *footers.last().expect("non-empty");
+        if footer_index > last_prompt_index {
+            let between = last_prompt_index + 1..footer_index;
+            let blanks = between.clone().filter(|&i| blank(all_rows[i])).count();
+            if blanks >= 2 {
+                let other_content = between.clone().any(|i| !blank(all_rows[i]));
+                if is_placeholder(last_prompt_row) && !other_content {
+                    return (
+                        String::new(),
+                        format!(
+                            "the composer at row {} holds only the explicit harness hint, so the box is empty",
+                            last_prompt_index + 1
+                        ),
+                    );
+                }
+                return (
+                    String::new(),
+                    format!(
+                        "{AMBIGUOUS_COMPOSER} prompt row {} is separated from footer row {} by {blanks} blank rows; visible prompt content may be pending input or transcript, so no keys are authorised",
+                        last_prompt_index + 1,
+                        footer_index + 1
+                    ),
+                );
+            }
+            let body = prompt_body(last_prompt_row).unwrap_or_default();
+            if !body.is_empty() {
+                return (
+                    body,
+                    format!(
+                        "composer: the prompt row at {} is contiguous with the status footer ({})",
+                        last_prompt_index + 1,
+                        footer_index + 1
+                    ),
+                );
+            }
+            return (
+                String::new(),
+                format!(
+                    "the composer at row {} holds only the harness hint, so the box is empty",
+                    last_prompt_index + 1
+                ),
+            );
+        }
+    }
+    // When the live composer has borders, use those boundaries rather than the last 14 rows.
+    let borders: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| is_border_line(row))
+        .map(|(i, _)| i)
+        .collect();
+    if borders.len() >= 2 {
+        let (top, bottom) = (borders[borders.len() - 2], borders[borders.len() - 1]);
+        if bottom + 5 >= rows.len() && sigils.iter().any(|(i, _)| top < *i && *i < bottom) {
+            region_start = top + 1;
+            region_end = bottom;
+        }
+    }
+    let in_region: Vec<&(usize, String)> = sigils
+        .iter()
+        .filter(|(i, _)| region_start <= *i && *i < region_end)
+        .collect();
+    if in_region.is_empty() {
+        return (
+            String::new(),
+            format!(
+                "no input box found (no prompt sigil in the last {BOX_REGION_ROWS} rows of {})",
+                rows.len()
+            ),
+        );
+    }
+    // A PLACEHOLDER ON THE LAST PROMPT ROW MEANS THE BOX IS EMPTY.
+    let (last_index, last_row) = in_region[in_region.len() - 1];
+    if is_placeholder(last_row) {
+        return (
+            String::new(),
+            format!(
+                "the last prompt row (row {} of {}) holds only the harness hint ('{}'), so the box is empty and the earlier prompt lines are transcript",
+                last_index + 1,
+                rows.len(),
+                head(&collapse(&strip_ansi(last_row)), 40)
+            ),
+        );
+    }
+    let candidates: Vec<(usize, String)> = in_region
+        .iter()
+        .filter_map(|(i, row)| prompt_body(row).filter(|b| !b.is_empty()).map(|b| (*i, b)))
+        .collect();
+    if let Some(&(first_index, _)) = candidates.first() {
+        // A HINT UNDER THE CANDIDATE, WITH NO PROMPT BELOW IT, MEANS THE TEXT ABOVE IS TRANSCRIPT.
+        let hint_rows: Vec<usize> = (hint_from..rows.len())
+            .filter(|&i| is_placeholder(rows[i]))
+            .collect();
+        // ...and the hint is not directly under it (it lives one row below the line being typed).
+        let near_hint: Vec<usize> = hint_rows
+            .into_iter()
+            .filter(|&i| i >= first_index + 2)
+            .collect();
+        if !near_hint.is_empty() && !sigils.iter().any(|(i, _)| first_index < *i) {
+            return (
+                String::new(),
+                format!(
+                    "the composer hint on row {} of {} ('{}') sits below the text on row {} with no prompt after it, so that text is transcript, not a draft",
+                    near_hint[0] + 1,
+                    rows.len(),
+                    head(&collapse(&strip_ansi(rows[near_hint[0]])), 40),
+                    first_index + 1
+                ),
+            );
+        }
+        // The draft STARTS at the first prompt line that carries text; later ones are
+        // continuations of a multi-line draft, not a new box.
+        let (index, text) = candidates[0].clone();
+        let continuations: Vec<&String> = candidates[1..].iter().map(|(_, b)| b).collect();
+        let below = rows[index + 1..region_end.max(index + 1)]
+            .iter()
+            .filter(|row| !blank(row) && prompt_body(row).is_none())
+            .count();
+        let mut extra = Vec::new();
+        if !continuations.is_empty() {
+            extra.push(format!(
+                "+{} prompt line(s) below it ({}...)",
+                continuations.len(),
+                repr(&head(continuations[0], 40))
+            ));
+        }
+        if below > 0 {
+            extra.push(format!("+{below} indented line(s)"));
+        }
+        let tail = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", extra.join(", "))
+        };
+        return (
+            text.clone(),
+            format!(
+                "read {} prompt line(s); text starts on row {} of {}: {}{tail}",
+                in_region.len(),
+                index + 1,
+                rows.len(),
+                repr(&head(&text, 60))
+            ),
+        );
+    }
+    let (index, _) = in_region[in_region.len() - 1];
+    let hint = if in_region.iter().any(|(_, row)| is_placeholder(row)) {
+        " (only the harness's own hint was there)"
+    } else {
+        ""
+    };
+    (
+        String::new(),
+        format!(
+            "read {} prompt line(s); the last is at row {} of {} with nothing after the sigil{hint}",
+            in_region.len(),
+            index + 1,
+            rows.len()
+        ),
+    )
+}
+
+/// `_typed_text`: what a human has typed into the target's input box. `""` when the box is empty
+/// or shows only a hint; `None` when no input box can be found in the last
+/// [`BOX_REGION_ROWS`] rows.
+pub fn typed_text(screen: &str) -> Option<String> {
+    if screen.is_empty() {
+        return None;
+    }
+    let rows: Vec<&str> = splitlines(screen)
+        .into_iter()
+        .filter(|r| !blank(r))
+        .collect();
+    if !rows[rows.len().saturating_sub(BOX_REGION_ROWS)..]
+        .iter()
+        .any(|row| prompt_body(row).is_some())
+    {
+        return None;
+    }
+    Some(box_text(screen).0)
+}
+
+/// `_is_our_send`: is the text in the box our own previous send rather than a human's draft?
+pub fn is_our_send(typed: &str, last_sent_text: Option<&str>, awaiting_consumption: bool) -> bool {
+    let low = collapse(typed).to_lowercase();
+    if let Some(sent) = last_sent_text.filter(|s| !s.is_empty()) {
+        let full = collapse(sent).to_lowercase();
+        let needle = head(&full, CONSUMPTION_PREFIX_CHARS);
+        if !low.is_empty() && (full.starts_with(&low) || low.starts_with(&needle)) {
+            return true;
+        }
+    }
+    awaiting_consumption && COLLAPSED_INPUT_MARKERS.iter().any(|m| low.contains(m))
 }
 
 #[cfg(test)]
