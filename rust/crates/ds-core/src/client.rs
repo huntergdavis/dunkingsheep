@@ -692,6 +692,143 @@ impl<T: Transport> FlockClient<T> {
     }
 }
 
+// ---- start_daemon (T41 slice 4) --------------------------------------------------------------
+//
+// Ported from `dunk_client.FlockClient.start_daemon`: hand off to systemd when it supervises the
+// socket, otherwise spawn a detached `dunkingsheep serve`. The DECISION is a pure function of
+// injected facts; the spawn is one small helper.
+//
+// NOT ported, on purpose: the Python's `PR_SET_PDEATHSIG` in the child (test spawns only) needs a
+// `pre_exec` hook, which is `unsafe`, and RUST_PORT.md forbids `unsafe`. The userspace
+// `DUNKINGSHEEP_DIE_WITH_PARENT` watch (also test-only) IS passed through. The Python's
+// `start_new_session=True` (setsid) becomes `process_group(0)`: a new process group that terminal
+// signals do not reach, but not a new session.
+
+/// What `start_daemon` decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartAction {
+    /// systemd started (or already runs) the unit; nothing to spawn.
+    HandedToSystemd,
+    /// Spawn a detached daemon with this environment.
+    Spawn(SpawnSpec),
+}
+
+/// The environment the spawned daemon gets, as changes to the caller's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnSpec {
+    /// `DUNKINGSHEEP_SOCKET` for the child.
+    pub socket_path: String,
+    /// `(name, value)` pairs to set in the child.
+    pub set: Vec<(String, String)>,
+    /// Names to remove from the child's environment (`HERDR_PANE_ID`: a daemon must not inherit
+    /// the starter's pane).
+    pub remove: Vec<String>,
+}
+
+/// The facts `start_decision` reads, gathered by the caller.
+pub struct StartInputs<'a> {
+    /// The socket this client talks to.
+    pub socket_path: &'a str,
+    /// The production socket (`DEFAULT_SOCKET`): it belongs to the unit, even when a parent
+    /// service exported `DUNKINGSHEEP_SOCKET` to that same path.
+    pub default_socket: &'a str,
+    pub systemd_installed: bool,
+    pub has_systemctl: bool,
+    /// `systemctl --user start dunkingsheep.service`: Some(true) started, Some(false) failed,
+    /// None could not run.
+    pub systemctl_start: &'a dyn Fn() -> Option<bool>,
+    /// The backend the DAEMON would use ('tmux' by default), from the one place that defines it.
+    pub backend: &'a str,
+    pub env: EnvLookup<'a>,
+    /// The starter's pid, for a test spawn's die-with-parent watch.
+    pub pid: u32,
+}
+
+/// `start_daemon`'s decision. The guards apply to the SPAWN path only, and that ordering is
+/// deliberate: the historical failure was a client spawning a trial daemon with a guessed
+/// environment. A unit started by systemd carries its own environment, so requiring the tmux
+/// socket in the CALLER would refuse the handoff to a correctly configured daemon.
+pub fn start_decision(inputs: &StartInputs<'_>) -> Result<StartAction, ConnectError> {
+    let supervised = inputs.socket_path == inputs.default_socket;
+    if supervised && inputs.systemd_installed && inputs.has_systemctl {
+        if (inputs.systemctl_start)() == Some(true) {
+            return Ok(StartAction::HandedToSystemd);
+        }
+        return Err(ConnectError::Unavailable(
+            "the dunkingsheep.service unit is installed but could not be started; run \
+             `systemctl --user start dunkingsheep.service`"
+                .to_string(),
+        ));
+    }
+    check_spawn_allowed(supervised, (inputs.env)(OWNER_START_ENV).as_deref())?;
+    let tmux_socket = (inputs.env)("DUNKINGSHEEP_TMUX_SOCKET").unwrap_or_default();
+    if inputs.backend == "tmux" && tmux_socket.is_empty() {
+        return Err(ConnectError::Unavailable(
+            "refusing to auto-start a tmux daemon without DUNKINGSHEEP_TMUX_SOCKET; start it \
+             explicitly with the full backend environment"
+                .to_string(),
+        ));
+    }
+    let mut set = vec![(
+        "DUNKINGSHEEP_SOCKET".to_string(),
+        inputs.socket_path.to_string(),
+    )];
+    // A TEST-SPAWNED DAEMON MUST NOT OUTLIVE ITS PARENT (t212): the suite marks its spawns with
+    // DUNKINGSHEEP_TEST_SPAWN=1 and the daemon watches the pid in DUNKINGSHEEP_DIE_WITH_PARENT. The
+    // value is the SUITE's pid (setdefault: an exported one wins), not this call's, or the daemon
+    // would die between the CLI calls of one test. A normal auto-start is unchanged.
+    if (inputs.env)("DUNKINGSHEEP_TEST_SPAWN").as_deref() == Some("1")
+        && (inputs.env)("DUNKINGSHEEP_DIE_WITH_PARENT").is_none()
+    {
+        set.push((
+            "DUNKINGSHEEP_DIE_WITH_PARENT".to_string(),
+            inputs.pid.to_string(),
+        ));
+    }
+    Ok(StartAction::Spawn(SpawnSpec {
+        socket_path: inputs.socket_path.to_string(),
+        set,
+        remove: vec!["HERDR_PANE_ID".to_string()],
+    }))
+}
+
+/// Spawn `<exe> <args...>` detached: stdin from /dev/null, stdout and stderr appended to `log`, its
+/// own process group, the caller's environment plus `spec`. Returns once the child is started; it
+/// is NOT waited for (a lane's daemon is supposed to outlive the call that started it).
+pub fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[&str],
+    spec: &SpawnSpec,
+    log: &std::path::Path,
+    cwd: &std::path::Path,
+) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
+    let err = out.try_clone()?;
+    let mut command = Command::new(exe);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .current_dir(cwd)
+        .process_group(0);
+    for name in &spec.remove {
+        command.env_remove(name);
+    }
+    for (name, value) in &spec.set {
+        command.env(name, value);
+    }
+    command.spawn().map(|child| child.id())
+}
+
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;

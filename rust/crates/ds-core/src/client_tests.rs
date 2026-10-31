@@ -917,3 +917,265 @@ fn a_listener_that_never_answers_times_out_and_probes_busy() {
     );
     server.join().unwrap();
 }
+
+// ---- start_daemon tests (T41 slice 4) ------------------------------------------------------
+
+const PROD: &str = "/run/user/1000/dunkingsheep.sock";
+
+struct Facts {
+    socket: &'static str,
+    systemd: bool,
+    systemctl: bool,
+    started: Option<bool>,
+    backend: &'static str,
+    env: Vec<(&'static str, &'static str)>,
+}
+
+impl Default for Facts {
+    fn default() -> Self {
+        Facts {
+            socket: "/tmp/private.sock",
+            systemd: false,
+            systemctl: false,
+            started: None,
+            backend: "tmux",
+            env: vec![("DUNKINGSHEEP_TMUX_SOCKET", "/tmp/tmux-sock")],
+        }
+    }
+}
+
+fn decide(facts: &Facts) -> Result<StartAction, ConnectError> {
+    let started = facts.started;
+    let env = env_of(&facts.env);
+    start_decision(&StartInputs {
+        socket_path: facts.socket,
+        default_socket: PROD,
+        systemd_installed: facts.systemd,
+        has_systemctl: facts.systemctl,
+        systemctl_start: &move || started,
+        backend: facts.backend,
+        env: &env,
+        pid: 4242,
+    })
+}
+
+#[test]
+fn the_production_socket_hands_off_to_systemd_and_never_spawns() {
+    let facts = Facts {
+        socket: PROD,
+        systemd: true,
+        systemctl: true,
+        started: Some(true),
+        ..Facts::default()
+    };
+    assert_eq!(Ok(StartAction::HandedToSystemd), decide(&facts));
+    // even with the owner flag and a full tmux environment: the unit owns that socket
+    let owner = Facts {
+        env: vec![
+            ("DUNKINGSHEEP_OWNER_START", "1"),
+            ("DUNKINGSHEEP_TMUX_SOCKET", "/x"),
+        ],
+        ..facts
+    };
+    assert_eq!(Ok(StartAction::HandedToSystemd), decide(&owner));
+}
+
+#[test]
+fn a_unit_that_cannot_be_started_is_a_named_refusal_not_a_spawn() {
+    for started in [Some(false), None] {
+        let facts = Facts {
+            socket: PROD,
+            systemd: true,
+            systemctl: true,
+            started,
+            ..Facts::default()
+        };
+        let error = decide(&facts).unwrap_err();
+        assert_eq!(
+            "the dunkingsheep.service unit is installed but could not be started; run `systemctl --user start dunkingsheep.service`",
+            error.to_string()
+        );
+    }
+}
+
+#[test]
+fn the_production_socket_without_a_unit_needs_the_owner_flag() {
+    // t696: only the owner (DUNKINGSHEEP_OWNER_START=1) or systemd may create it
+    let error = decide(&Facts {
+        socket: PROD,
+        ..Facts::default()
+    })
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to spawn a daemon on the production socket"),
+        "{error}"
+    );
+    let allowed = Facts {
+        socket: PROD,
+        env: vec![
+            ("DUNKINGSHEEP_OWNER_START", "1"),
+            ("DUNKINGSHEEP_TMUX_SOCKET", "/x"),
+        ],
+        ..Facts::default()
+    };
+    assert!(matches!(decide(&allowed), Ok(StartAction::Spawn(_))));
+    // systemd installed but no systemctl on PATH: falls through to the same guards
+    let no_systemctl = Facts {
+        socket: PROD,
+        systemd: true,
+        systemctl: false,
+        ..Facts::default()
+    };
+    assert!(decide(&no_systemctl).is_err());
+}
+
+#[test]
+fn a_tmux_daemon_is_never_auto_started_without_its_socket_variable() {
+    let error = decide(&Facts {
+        env: vec![],
+        ..Facts::default()
+    })
+    .unwrap_err();
+    assert_eq!(
+        "refusing to auto-start a tmux daemon without DUNKINGSHEEP_TMUX_SOCKET; start it explicitly with the full backend environment",
+        error.to_string()
+    );
+    assert!(
+        decide(&Facts {
+            env: vec![("DUNKINGSHEEP_TMUX_SOCKET", "")],
+            ..Facts::default()
+        })
+        .is_err(),
+        "empty is unset"
+    );
+    // the guard is for tmux only; and the handoff above never reaches it
+    assert!(matches!(
+        decide(&Facts {
+            backend: "herdr",
+            env: vec![],
+            ..Facts::default()
+        }),
+        Ok(StartAction::Spawn(_))
+    ));
+}
+
+#[test]
+fn a_private_socket_spawns_with_its_own_socket_and_without_the_starters_pane() {
+    let Ok(StartAction::Spawn(spec)) = decide(&Facts::default()) else {
+        panic!("expected a spawn")
+    };
+    assert_eq!("/tmp/private.sock", spec.socket_path);
+    assert_eq!(
+        vec![(
+            "DUNKINGSHEEP_SOCKET".to_string(),
+            "/tmp/private.sock".to_string()
+        )],
+        spec.set
+    );
+    assert_eq!(
+        vec!["HERDR_PANE_ID".to_string()],
+        spec.remove,
+        "a daemon must not inherit the starter's pane"
+    );
+}
+
+#[test]
+fn a_test_spawn_dies_with_the_suite_not_the_cli_call() {
+    // t212: 121 stray daemons once put the host at load1 65. The watched pid is the exported one
+    // when there is one (setdefault), else the starter's.
+    let facts = Facts {
+        env: vec![
+            ("DUNKINGSHEEP_TMUX_SOCKET", "/x"),
+            ("DUNKINGSHEEP_TEST_SPAWN", "1"),
+        ],
+        ..Facts::default()
+    };
+    let Ok(StartAction::Spawn(spec)) = decide(&facts) else {
+        panic!()
+    };
+    assert!(spec.set.contains(&(
+        "DUNKINGSHEEP_DIE_WITH_PARENT".to_string(),
+        "4242".to_string()
+    )));
+    let exported = Facts {
+        env: vec![
+            ("DUNKINGSHEEP_TMUX_SOCKET", "/x"),
+            ("DUNKINGSHEEP_TEST_SPAWN", "1"),
+            ("DUNKINGSHEEP_DIE_WITH_PARENT", "999"),
+        ],
+        ..Facts::default()
+    };
+    let Ok(StartAction::Spawn(spec)) = decide(&exported) else {
+        panic!()
+    };
+    assert!(
+        !spec
+            .set
+            .iter()
+            .any(|(name, _)| name == "DUNKINGSHEEP_DIE_WITH_PARENT"),
+        "an exported watch wins"
+    );
+    let normal = Facts::default();
+    let Ok(StartAction::Spawn(spec)) = decide(&normal) else {
+        panic!()
+    };
+    assert!(
+        !spec
+            .set
+            .iter()
+            .any(|(name, _)| name == "DUNKINGSHEEP_DIE_WITH_PARENT"),
+        "a normal start is unchanged"
+    );
+}
+
+#[test]
+fn spawn_detached_returns_at_once_and_the_child_gets_the_environment_and_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("logs").join("daemon.log");
+    let spec = SpawnSpec {
+        socket_path: "/tmp/x.sock".into(),
+        set: vec![("DUNKINGSHEEP_SOCKET".into(), "/tmp/x.sock".into())],
+        remove: vec!["HERDR_PANE_ID".into()],
+    };
+    // `sh -c` instead of a script file: no file is written and exec'd by a parallel test thread.
+    let script = "sleep 0.2; echo \"sock=$DUNKINGSHEEP_SOCKET pane=${HERDR_PANE_ID-unset} cwd=$(pwd)\"; echo oops >&2";
+    std::env::set_var("HERDR_PANE_ID", "w9:pH");
+    let started = std::time::Instant::now();
+    let pid = spawn_detached(
+        std::path::Path::new("/bin/sh"),
+        &["-c", script],
+        &spec,
+        &log,
+        dir.path(),
+    )
+    .expect("spawn");
+    std::env::remove_var("HERDR_PANE_ID");
+    assert!(pid > 0);
+    assert!(
+        started.elapsed() < Duration::from_millis(150),
+        "the spawn must not wait for the child"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let text = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("oops") || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(text.contains("sock=/tmp/x.sock"), "{text}");
+    assert!(
+        text.contains("pane=unset"),
+        "the starter's HERDR_PANE_ID must not reach the daemon: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "cwd={}",
+            dir.path().canonicalize().unwrap().display()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("oops"), "stderr goes to the same log: {text}");
+}
