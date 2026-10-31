@@ -84,10 +84,7 @@ fn proof(pane: &str, grants: usize, corrupt: bool) -> Option<OperatorProof> {
 
 async fn owned_task(store: &Tasks, title: &str) -> Task {
     let t = store.add("global", title, "").await.unwrap();
-    store
-        .assign(&t.id, &[OWNER.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&t.id, &[OWNER], "set").await.unwrap();
     store.get(&t.id).await.unwrap()
 }
 
@@ -119,10 +116,7 @@ fn completion(from: &str, proof: Option<OperatorProof>) -> AdvanceOptions {
 async fn test_reassignment_before_transaction_is_refused() {
     let store = store("reassign").await;
     let task = owned_task(&store, "mine").await;
-    store
-        .assign(&task.id, &[FOREIGN.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&task.id, &[FOREIGN], "set").await.unwrap();
     let err = store
         .advance_next_job(
             OWNER,
@@ -147,10 +141,7 @@ async fn test_reassignment_before_transaction_is_refused() {
 async fn test_operator_survives_reassignment() {
     let store = store("operator").await;
     let task = owned_task(&store, "mine").await;
-    store
-        .assign(&task.id, &[FOREIGN.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&task.id, &[FOREIGN], "set").await.unwrap();
     let out = store
         .advance_next_job(
             OPERATOR,
@@ -167,10 +158,7 @@ async fn test_operator_survives_reassignment() {
 async fn test_revoked_operator_is_refused_in_transaction() {
     let store = store("revoked").await;
     let task = owned_task(&store, "mine").await;
-    store
-        .assign(&task.id, &[FOREIGN.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&task.id, &[FOREIGN], "set").await.unwrap();
     let err = store
         .advance_next_job(
             OPERATOR,
@@ -189,10 +177,7 @@ async fn test_revoked_operator_is_refused_in_transaction() {
 async fn a_corrupt_allowlist_grants_nothing() {
     let store = store("corrupt").await;
     let task = owned_task(&store, "mine").await;
-    store
-        .assign(&task.id, &[FOREIGN.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&task.id, &[FOREIGN], "set").await.unwrap();
     let err = store
         .advance_next_job(
             OPERATOR,
@@ -210,10 +195,7 @@ async fn a_corrupt_allowlist_grants_nothing() {
 async fn test_revocation_between_event_and_commit_rolls_back_everything() {
     let store = store("late").await;
     let task = owned_task(&store, "other work").await;
-    store
-        .assign(&task.id, &[FOREIGN.to_string()], "set")
-        .await
-        .unwrap();
+    store.assign(&task.id, &[FOREIGN], "set").await.unwrap();
     // An eligible next task so the completion records a handoff (else this is vacuous).
     let extra = store.add("global", "next work", "").await.unwrap();
     // Granted by the early check (call 1), revoked at the late re-read (call 2).
