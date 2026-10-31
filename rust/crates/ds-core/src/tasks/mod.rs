@@ -400,6 +400,19 @@ impl Tasks {
         }).await.expect("insert a lease");
     }
 
+    /// Insert a lease with explicit times (test helper).
+    #[doc(hidden)]
+    pub async fn insert_lease(&self, id: &str, pane: &str, claimed: f64, beat: f64, expires: f64) {
+        let (id, pane) = (id.to_string(), pane.to_string());
+        self.writer.call(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, expires_at) VALUES (?,?,?,?,?)",
+                params![id, pane, claimed, beat, expires],
+            ).map_err(db::map_sqlite)?;
+            Ok(())
+        }).await.expect("insert a lease");
+    }
+
     /// Live leases on a task (test helper).
     #[doc(hidden)]
     pub async fn leases(&self, id: &str) -> i64 {
@@ -743,53 +756,29 @@ impl Tasks {
     pub async fn dependency_state(&self, id: &str) -> Result<DependencyState, DunkError> {
         let wanted = id.trim().to_string();
         self.writer
-            .call(move |conn| {
-                let (status, raw): (String, Option<String>) = conn
-                    .query_row("SELECT status, depends_on FROM tasks WHERE id = ?", params![wanted],
-                               |row| Ok((row.get(0)?, row.get(1)?)))
-                    .optional()
-                    .map_err(db::map_sqlite)?
-                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
-                let deps = decode_list(raw.as_deref());
-                let mut state = DependencyState::default();
-                let mut cancelled = Vec::new();
-                for dep in &deps {
-                    let found: Option<(String, i64)> = conn
-                        .query_row("SELECT status, landed FROM tasks WHERE id = ?", params![dep],
-                                   |row| Ok((row.get(0)?, row.get(1)?)))
-                        .optional()
-                        .map_err(db::map_sqlite)?;
-                    match found {
-                        None => {
-                            state.missing_dependencies.push(dep.clone());
-                            state.blocked_by.push(dep.clone());
-                        }
-                        Some((dep_status, landed)) => {
-                            let landed = landed != 0;
-                            if dep_status == "cancelled" {
-                                state.dead_dependencies.push(dep.clone());
-                                cancelled.push(dep.clone());
-                            } else if dep_status == "done" && !landed {
-                                state.unlanded_dependencies.push(dep.clone());
-                                state.blocked_by.push(dep.clone());
-                            } else if dep_status != "done" {
-                                state.blocked_by.push(dep.clone());
-                            }
-                        }
-                    }
-                }
-                state.dependencies_clear =
-                    matches!(status.as_str(), "open" | "in_progress") && state.blocked_by.is_empty();
-                if status == "blocked" && !deps.is_empty() && state.blocked_by.is_empty() {
-                    state.unblock_needed = true;
-                    state.dependency_note = Some(if !cancelled.is_empty() {
-                        format!("depends on a CANCELLED task ({}); a cancelled dependency counts as satisfied, so only the block is holding this task - 'task unblock' makes it claimable", cancelled.join(", "))
-                    } else {
-                        format!("every dependency is satisfied ({}); nothing but the block is holding this task - 'task unblock' makes it claimable", deps.join(", "))
-                    });
-                }
-                Ok(state)
-            })
+            .call(move |conn| dependency_state_conn(conn, &wanted).map(|(_, state)| state))
+            .await
+    }
+
+    /// `leases_for`: live leases for a task (expired rows are ignored). T12 (t787) owns
+    /// claim/heartbeat/release; this read shares its `task_leases` schema.
+    pub async fn leases_for(&self, id: &str, now: Option<f64>) -> Result<Vec<Lease>, DunkError> {
+        let id = id.to_string();
+        let now = now.unwrap_or_else(crate::clock::now_s);
+        self.writer
+            .call(move |conn| leases_for_conn(conn, &id, now))
+            .await
+    }
+
+    /// `_decorate`: the row plus everything a reader looks at (assignees, leases,
+    /// claimable, eligible, allocation_waiting, the dependency fields). `pane_id` is the
+    /// viewer: eligibility is per-viewer (F2).
+    pub async fn decorate(&self, id: &str, pane_id: Option<&str>) -> Result<Decorated, DunkError> {
+        let wanted = id.trim().to_string();
+        let pane = pane_id.map(String::from);
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| decorate_conn(conn, &wanted, pane.as_deref(), now))
             .await
     }
 
@@ -1209,6 +1198,192 @@ pub struct DependencyState {
     /// Python's `eligible` (assignees, leases) is NOT ported yet, so this is the
     /// generic-list value: unassigned-or-multi is not checked here.
     pub dependencies_clear: bool,
+}
+
+/// One live `task_leases` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lease {
+    pub task_id: String,
+    pub pane_id: String,
+    pub claimed_at: f64,
+    pub heartbeat_at: f64,
+    pub expires_at: f64,
+}
+
+/// `_decorate` output: the row and its derived fields, same names as the Python dict.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decorated {
+    pub task: Task,
+    pub assignees: Vec<String>,
+    pub depends_on: Vec<String>,
+    /// An allocation offer is ready for exactly this assignee set.
+    pub allocation_waiting: bool,
+    pub multi_assignee: bool,
+    pub is_global: bool,
+    pub leases: Vec<Lease>,
+    pub claimed_by: Vec<String>,
+    pub lease_expires_at: Option<f64>,
+    pub deps: DependencyState,
+    pub claimable: bool,
+    pub eligible: bool,
+}
+
+fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, DunkError> {
+    let mut stmt = conn
+        .prepare("SELECT task_id, pane_id, claimed_at, heartbeat_at, expires_at FROM task_leases WHERE task_id = ?")
+        .map_err(db::map_sqlite)?;
+    let rows = stmt
+        .query_map(params![id], |row| {
+            Ok(Lease {
+                task_id: row.get(0)?,
+                pane_id: row.get(1)?,
+                claimed_at: row.get(2)?,
+                heartbeat_at: row.get(3)?,
+                expires_at: row.get(4)?,
+            })
+        })
+        .map_err(db::map_sqlite)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(db::map_sqlite)?;
+    Ok(rows
+        .into_iter()
+        .filter(|lease| lease.expires_at > now)
+        .collect())
+}
+
+/// `_claimable`: whether `pane_id` may take this task right now.
+fn claimable_for(d: &Decorated, pane_id: &str) -> bool {
+    if d.allocation_waiting {
+        return false;
+    }
+    if !pane_id.is_empty() && d.leases.iter().any(|l| l.pane_id == pane_id) {
+        return false; // already holds this one
+    }
+    if !d.leases.is_empty() {
+        return d.multi_assignee;
+    }
+    let mine = !pane_id.is_empty() && d.assignees.iter().any(|a| a == pane_id);
+    match d.task.status.as_str() {
+        // F2: a named assignee can pull its own task.
+        "open" => d.assignees.is_empty() || d.multi_assignee || mine,
+        "in_progress" => d.multi_assignee || mine,
+        _ => false,
+    }
+}
+
+fn decorate_conn(
+    conn: &Connection,
+    id: &str,
+    pane_id: Option<&str>,
+    now: f64,
+) -> Result<Decorated, DunkError> {
+    let (task, state) = dependency_state_conn(conn, id)?;
+    let multi: i64 = conn
+        .query_row(
+            "SELECT multi_assignee FROM tasks WHERE id = ?",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(db::map_sqlite)?;
+    let assignees = decode_list(Some(&task.assignees));
+    let depends_on = decode_list(Some(&task.depends_on));
+    // A missing allocation_offers table is "no offer", not an error.
+    let owners: Option<String> = match conn
+        .query_row(
+            "SELECT owners FROM allocation_offers WHERE task_id=? AND state='ready'",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()
+    {
+        Ok(found) => found,
+        Err(err) if err.to_string().contains("no such table") => None,
+        Err(err) => return Err(db::map_sqlite(err)),
+    };
+    let mut sorted = assignees.clone();
+    sorted.sort();
+    let allocation_waiting = owners.is_some_and(|raw| sorted == decode_list(Some(&raw)));
+    let leases = leases_for_conn(conn, id, now)?;
+    let mut d = Decorated {
+        is_global: task.scope == "global",
+        claimed_by: leases.iter().map(|l| l.pane_id.clone()).collect(),
+        lease_expires_at: leases.iter().map(|l| l.expires_at).reduce(f64::min),
+        multi_assignee: multi != 0,
+        allocation_waiting,
+        leases,
+        assignees,
+        depends_on,
+        deps: state,
+        claimable: false,
+        eligible: false,
+        task,
+    };
+    d.claimable = match pane_id {
+        Some(pane) if !pane.is_empty() => claimable_for(&d, pane),
+        _ => d.assignees.is_empty() || d.multi_assignee,
+    };
+    d.eligible = matches!(d.task.status.as_str(), "open" | "in_progress")
+        && d.deps.blocked_by.is_empty()
+        && d.claimable;
+    Ok(d)
+}
+
+fn dependency_state_conn(
+    conn: &Connection,
+    wanted: &str,
+) -> Result<(Task, DependencyState), DunkError> {
+    let task = conn
+        .query_row(
+            "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at FROM tasks WHERE id = ?",
+            params![wanted],
+            row_to_task,
+        )
+        .optional()
+        .map_err(db::map_sqlite)?
+        .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+    let status = task.status.clone();
+    let deps = decode_list(Some(&task.depends_on));
+    let mut state = DependencyState::default();
+    let mut cancelled = Vec::new();
+    for dep in &deps {
+        let found: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT status, landed FROM tasks WHERE id = ?",
+                params![dep],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db::map_sqlite)?;
+        match found {
+            None => {
+                state.missing_dependencies.push(dep.clone());
+                state.blocked_by.push(dep.clone());
+            }
+            Some((dep_status, landed)) => {
+                let landed = landed != 0;
+                if dep_status == "cancelled" {
+                    state.dead_dependencies.push(dep.clone());
+                    cancelled.push(dep.clone());
+                } else if dep_status == "done" && !landed {
+                    state.unlanded_dependencies.push(dep.clone());
+                    state.blocked_by.push(dep.clone());
+                } else if dep_status != "done" {
+                    state.blocked_by.push(dep.clone());
+                }
+            }
+        }
+    }
+    state.dependencies_clear =
+        matches!(status.as_str(), "open" | "in_progress") && state.blocked_by.is_empty();
+    if status == "blocked" && !deps.is_empty() && state.blocked_by.is_empty() {
+        state.unblock_needed = true;
+        state.dependency_note = Some(if !cancelled.is_empty() {
+            format!("depends on a CANCELLED task ({}); a cancelled dependency counts as satisfied, so only the block is holding this task - 'task unblock' makes it claimable", cancelled.join(", "))
+        } else {
+            format!("every dependency is satisfied ({}); nothing but the block is holding this task - 'task unblock' makes it claimable", deps.join(", "))
+        });
+    }
+    Ok((task, state))
 }
 
 /// `_order_key`: priority rank, then age, then id.
@@ -2020,6 +2195,46 @@ mod tests {
         assert!(state.unblock_needed);
         assert!(state.dependency_note.unwrap().contains("CANCELLED task"));
         assert!(tasks.dependency_state("t999").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unassigned_is_claimable_and_decorate_reads_leases() {
+        let tasks = store("decorate").await;
+        let t = tasks.add("global", "t", "").await.unwrap();
+        let d = tasks.decorate(&t.id, None).await.unwrap();
+        assert!(d.claimable && d.eligible && d.is_global && d.leases.is_empty());
+        assert_eq!(d.lease_expires_at, None);
+        let now = crate::clock::now_s();
+        tasks.insert_lease(&t.id, "%1", now, now, now + 100.0).await;
+        let d = tasks.decorate(&t.id, Some("%2")).await.unwrap();
+        assert_eq!(d.claimed_by, vec!["%1".to_string()]);
+        assert!(
+            !d.claimable,
+            "a leased single-assignee task is not claimable"
+        );
+        assert_eq!(d.lease_expires_at, Some(now + 100.0));
+        assert!(!tasks.decorate(&t.id, Some("%1")).await.unwrap().claimable);
+        // expired leases are ignored
+        tasks
+            .insert_lease(&t.id, "%1", now - 200.0, now - 200.0, now - 100.0)
+            .await;
+        assert!(tasks.decorate(&t.id, Some("%2")).await.unwrap().claimable);
+        // a named assignee can pull its own task; others cannot
+        tasks
+            .update(
+                &t.id,
+                FieldEdit {
+                    assignees: Some(vec!["%3".into()]),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(tasks.decorate(&t.id, Some("%3")).await.unwrap().claimable);
+        assert!(!tasks.decorate(&t.id, Some("%4")).await.unwrap().claimable);
+        assert!(!tasks.decorate(&t.id, None).await.unwrap().claimable);
+        assert!(tasks.decorate("t999", None).await.is_err());
     }
 
     #[tokio::test]
