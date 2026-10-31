@@ -42,6 +42,27 @@ class AgentPaneTests(unittest.TestCase):
         self.assertFalse(row["online"])
         self.assertFalse(row["can_message"])
 
+    def test_a_quiet_desk_is_messageable_when_the_daemon_has_process_evidence(self):
+        """t1150: the desk with NO status (fresh or idle past the window) looks like a shell
+        to the status heuristic; the caller's authority (daemon process evidence) decides."""
+        quiet = dict(DESK, agent_status=None)
+        heuristic = next(r for r in build_roster([COS], [quiet]) if r["id"] == "cos")
+        self.assertFalse(heuristic["can_message"], "the heuristic alone cannot tell it from a shell")
+        asked = []
+
+        def authority(pane):
+            asked.append(pane and pane["pane_id"])
+            return bool(pane) and pane["pane_id"] == "%133"
+
+        row = next(r for r in build_roster([COS], [SHELL, quiet], can_message=authority) if r["id"] == "cos")
+        self.assertTrue(row["can_message"])
+        self.assertIn("%133", asked)
+
+    def test_the_authority_can_refuse_a_pane_the_heuristic_would_allow(self):
+        row = next(r for r in build_roster([COS], [DESK], can_message=lambda pane: False) if r["id"] == "cos")
+        self.assertFalse(row["can_message"])
+        self.assertTrue(row["online"])
+
 
 if __name__ == "__main__":
     unittest.main()

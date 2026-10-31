@@ -411,7 +411,7 @@ def _target(channel: str, panes: list[dict]):
     if cfg:
         return match_pane(cfg, panes)
     for pane in panes:
-        if is_agent_pane(pane) and discovered_id(pane.get("pane_id", "")) == channel:
+        if discovered_id(pane.get("pane_id", "")) == channel and _can_message(pane):
             return pane
     if _known_channel(channel):
         return None
@@ -475,7 +475,7 @@ def channels(_: Annotated[str, Depends(require_auth)]):
         daemon = True
     except HTTPException:
         panes, daemon = [], False
-    rows = build_roster(CHANNELS, panes)
+    rows = build_roster(CHANNELS, panes, can_message=_can_message)
     return {"channels": rows, "daemon": daemon, "viewports": _viewports(),
             "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
@@ -564,6 +564,25 @@ def _capability(pane: str) -> dict:
     except Exception:  # noqa: BLE001 - an unanswered capability is {}, never a guess
         pass
     return {}
+
+
+def _can_message(pane) -> bool:
+    """May the desk send to this pane? (t1150)
+
+    The backend's `agent` string is empty for every tmux pane and `agent_status` is only set
+    while a lane has a recent turn signal, so neither can prove a QUIET lane is an agent (a
+    fresh or idle desk read as a bare shell and the 409 came back). The daemon can: its
+    capability carries `agent_alive`, from the process table. True = agent process here;
+    False = a bare shell (never type owner text into it); None = cannot say, refused.
+    """
+    if not pane or not pane.get("pane_id"):
+        return False
+    if is_agent_pane(pane):
+        return True
+    pane_id = pane["pane_id"]
+    cached = _CAP_CACHE.get(pane_id)
+    cap = cached[1] if cached and (time.time() - cached[0]) < _CAP_TTL_S else _capability(pane_id)
+    return cap.get("agent_alive") is True
 
 
 @app.get("/api/capability")
@@ -1487,7 +1506,7 @@ def _post_message(data: MessageIn, identity: str, *, direct: bool = False):
             if existing:
                 return _message(existing, conn)
     pane = _target(data.channel, _panes())
-    if not is_agent_pane(pane):
+    if not _can_message(pane):
         raise HTTPException(409, "No active agent is available in this channel")
     with _db() as conn:
         if data.external_id:
@@ -1574,7 +1593,7 @@ def send_now(message_id: int, identity: Annotated[str, Depends(require_auth)]):
                     return _message(conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone(), conn)
             raise HTTPException(409, "Message changed while sending; refresh its status")
         pane = _target(row["channel"], _panes())
-        if not is_agent_pane(pane):
+        if not _can_message(pane):
             with _db() as conn:
                 conn.execute("UPDATE messages SET delivery='uncertain',transport_id=NULL,delivery_detail='Agent pane unavailable after cancellation' WHERE id=?", (message_id,))
             raise HTTPException(409, "Agent pane unavailable; delivery is unconfirmed")
