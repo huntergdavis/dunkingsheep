@@ -27,7 +27,7 @@ use crate::db;
 use crate::error::DunkError;
 
 mod claim;
-pub use claim::{claimable, refusal, Candidate, Lease, Refusal};
+pub use claim::{claimable, refusal, Candidate, ClaimOptions, ClaimOutcome, Lease, Refusal};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
@@ -755,53 +755,7 @@ impl Tasks {
     pub async fn dependency_state(&self, id: &str) -> Result<DependencyState, DunkError> {
         let wanted = id.trim().to_string();
         self.writer
-            .call(move |conn| {
-                let (status, raw): (String, Option<String>) = conn
-                    .query_row("SELECT status, depends_on FROM tasks WHERE id = ?", params![wanted],
-                               |row| Ok((row.get(0)?, row.get(1)?)))
-                    .optional()
-                    .map_err(db::map_sqlite)?
-                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
-                let deps = decode_list(raw.as_deref());
-                let mut state = DependencyState::default();
-                let mut cancelled = Vec::new();
-                for dep in &deps {
-                    let found: Option<(String, i64)> = conn
-                        .query_row("SELECT status, landed FROM tasks WHERE id = ?", params![dep],
-                                   |row| Ok((row.get(0)?, row.get(1)?)))
-                        .optional()
-                        .map_err(db::map_sqlite)?;
-                    match found {
-                        None => {
-                            state.missing_dependencies.push(dep.clone());
-                            state.blocked_by.push(dep.clone());
-                        }
-                        Some((dep_status, landed)) => {
-                            let landed = landed != 0;
-                            if dep_status == "cancelled" {
-                                state.dead_dependencies.push(dep.clone());
-                                cancelled.push(dep.clone());
-                            } else if dep_status == "done" && !landed {
-                                state.unlanded_dependencies.push(dep.clone());
-                                state.blocked_by.push(dep.clone());
-                            } else if dep_status != "done" {
-                                state.blocked_by.push(dep.clone());
-                            }
-                        }
-                    }
-                }
-                state.dependencies_clear =
-                    matches!(status.as_str(), "open" | "in_progress") && state.blocked_by.is_empty();
-                if status == "blocked" && !deps.is_empty() && state.blocked_by.is_empty() {
-                    state.unblock_needed = true;
-                    state.dependency_note = Some(if !cancelled.is_empty() {
-                        format!("depends on a CANCELLED task ({}); a cancelled dependency counts as satisfied, so only the block is holding this task - 'task unblock' makes it claimable", cancelled.join(", "))
-                    } else {
-                        format!("every dependency is satisfied ({}); nothing but the block is holding this task - 'task unblock' makes it claimable", deps.join(", "))
-                    });
-                }
-                Ok(state)
-            })
+            .call(move |conn| dependency_state_in(conn, &wanted))
             .await
     }
 
@@ -1221,6 +1175,65 @@ pub struct DependencyState {
     /// Python's `eligible` (assignees, leases) is NOT ported yet, so this is the
     /// generic-list value: unassigned-or-multi is not checked here.
     pub dependencies_clear: bool,
+}
+
+/// `dependency_state` on a connection, so `claim_next` can resolve dependencies inside
+/// its own immediate transaction.
+pub(crate) fn dependency_state_in(
+    conn: &Connection,
+    wanted: &str,
+) -> Result<DependencyState, DunkError> {
+    let (status, raw): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, depends_on FROM tasks WHERE id = ?",
+            params![wanted],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?
+        .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+    let deps = decode_list(raw.as_deref());
+    let mut state = DependencyState::default();
+    let mut cancelled = Vec::new();
+    for dep in &deps {
+        let found: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT status, landed FROM tasks WHERE id = ?",
+                params![dep],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db::map_sqlite)?;
+        match found {
+            None => {
+                state.missing_dependencies.push(dep.clone());
+                state.blocked_by.push(dep.clone());
+            }
+            Some((dep_status, landed)) => {
+                let landed = landed != 0;
+                if dep_status == "cancelled" {
+                    state.dead_dependencies.push(dep.clone());
+                    cancelled.push(dep.clone());
+                } else if dep_status == "done" && !landed {
+                    state.unlanded_dependencies.push(dep.clone());
+                    state.blocked_by.push(dep.clone());
+                } else if dep_status != "done" {
+                    state.blocked_by.push(dep.clone());
+                }
+            }
+        }
+    }
+    state.dependencies_clear =
+        matches!(status.as_str(), "open" | "in_progress") && state.blocked_by.is_empty();
+    if status == "blocked" && !deps.is_empty() && state.blocked_by.is_empty() {
+        state.unblock_needed = true;
+        state.dependency_note = Some(if !cancelled.is_empty() {
+            format!("depends on a CANCELLED task ({}); a cancelled dependency counts as satisfied, so only the block is holding this task - 'task unblock' makes it claimable", cancelled.join(", "))
+        } else {
+            format!("every dependency is satisfied ({}); nothing but the block is holding this task - 'task unblock' makes it claimable", deps.join(", "))
+        });
+    }
+    Ok(state)
 }
 
 /// `_order_key`: priority rank, then age, then id.

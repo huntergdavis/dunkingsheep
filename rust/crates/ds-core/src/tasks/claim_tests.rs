@@ -1,6 +1,7 @@
 //! T12 slice 1 tests: the claimability rules, the refusal reasons, leases and heartbeat.
 
 use super::*;
+use crate::tasks::FieldEdit;
 
 async fn store(tag: &str) -> Tasks {
     let dir = std::env::temp_dir().join(format!("ds-claim-{tag}-{}", std::process::id()));
@@ -126,5 +127,211 @@ async fn heartbeat_extends_a_held_lease_and_refuses_a_stranger() {
             task.id
         )),
         "{refused}"
+    );
+}
+
+async fn set_kind_author(tasks: &Tasks, id: &str, kind: &'static str, author: &'static str) {
+    let id = id.to_string();
+    tasks
+        .writer
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET kind = ?, author = ? WHERE id = ?",
+                rusqlite::params![kind, author, id],
+            )
+            .map_err(crate::db::map_sqlite)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn claimed_id(outcome: &ClaimOutcome) -> String {
+    match outcome {
+        ClaimOutcome::Claimed { task, .. } => task.id.clone(),
+        ClaimOutcome::Refused { refusal, .. } => panic!("refused: {refusal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn claim_next_takes_the_highest_priority_then_oldest_and_records_the_claim() {
+    let tasks = store("claim-order").await;
+    let low = tasks.add("global", "low", "").await.unwrap();
+    let urgent = tasks.add("global", "urgent", "").await.unwrap();
+    tasks
+        .update(
+            &urgent.id,
+            FieldEdit {
+                priority: Some("urgent".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let got = tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&got), urgent.id);
+    let ClaimOutcome::Claimed { task, .. } = got else {
+        unreachable!()
+    };
+    assert_eq!(task.status, "in_progress");
+    assert_eq!(decode_list(Some(&task.assignees)), vec!["%1"]);
+    assert_eq!(tasks.leases_for(&urgent.id, None).await.unwrap().len(), 1);
+    assert_eq!(
+        tasks.events(&urgent.id).await,
+        2,
+        "the priority edit and the claim"
+    );
+    // t145: a pane holding in-progress work is refused a second task.
+    match tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => {
+            assert_eq!(refusal.reason, "busy");
+            assert_eq!(refusal.task_ids, vec![urgent.id.clone()]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let second = tasks
+        .claim_next(
+            "global",
+            "%1",
+            ClaimOptions {
+                allow_busy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&second), low.id);
+}
+
+#[tokio::test]
+async fn claim_next_skips_blocked_wrong_kind_and_own_author_and_says_why() {
+    let tasks = store("claim-filters").await;
+    let dep = tasks.add("global", "dep", "").await.unwrap();
+    let blocked = tasks.add("global", "blocked", "").await.unwrap();
+    tasks
+        .update(
+            &blocked.id,
+            FieldEdit {
+                depends_on: Some(vec![dep.id.clone()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    // `dep` is open and claimable; `blocked` waits on it.
+    let review = tasks.add("global", "review", "").await.unwrap();
+    set_kind_author(&tasks, &review.id, "review", "%9").await;
+    let none = tasks
+        .claim_next(
+            "global",
+            "%2",
+            ClaimOptions {
+                kinds: Some(vec!["work".into()]),
+                exclude_author: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&none),
+        dep.id,
+        "a worker never pulls a review; blocked is skipped"
+    );
+    let own = tasks
+        .claim_next(
+            "global",
+            "%3",
+            ClaimOptions {
+                kinds: Some(vec!["review".into()]),
+                exclude_author: Some("%9".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    match own {
+        // The reason is computed over ALL candidates, like the Python's `_refusal`: `dep` is
+        // now owned by %2, so that is what the refusal reports.
+        ClaimOutcome::Refused { refusal, .. } => assert_eq!(refusal.reason, "owned_elsewhere"),
+        other => panic!("the author never reviews its own head: {other:?}"),
+    }
+    let theirs = tasks
+        .claim_next(
+            "global",
+            "%4",
+            ClaimOptions {
+                kinds: Some(vec!["review".into()]),
+                exclude_author: Some("%5".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&theirs), review.id);
+}
+
+#[tokio::test]
+async fn claim_next_scope_mine_and_refusals_are_named() {
+    let tasks = store("claim-mine").await;
+    assert!(tasks
+        .claim_next("mine", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("requires a known caller pane"));
+    assert!(tasks
+        .claim_next("global", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("requires a caller pane id"));
+    assert!(tasks
+        .claim_next("nowhere", "%1", ClaimOptions::default())
+        .await
+        .is_err());
+    match tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => assert_eq!(refusal.reason, "empty"),
+        other => panic!("{other:?}"),
+    }
+    let theirs = tasks.add("global", "theirs", "").await.unwrap();
+    let mine = tasks.add("global", "mine", "").await.unwrap();
+    tasks.assign(&theirs.id, &["%7"], "add").await.unwrap();
+    tasks.assign(&mine.id, &["%1"], "add").await.unwrap();
+    match tasks
+        .claim_next("global", "%2", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => {
+            assert_eq!(refusal.reason, "owned_elsewhere");
+            assert_eq!(
+                refusal.owned_by,
+                Some(vec!["%1".to_string(), "%7".to_string()])
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let got = tasks
+        .claim_next("mine", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&got),
+        mine.id,
+        "'mine' takes only tasks naming this pane"
     );
 }
