@@ -29,6 +29,7 @@ use crate::db;
 use crate::error::DunkError;
 
 mod claim;
+pub mod next_job;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
