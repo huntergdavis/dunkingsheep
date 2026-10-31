@@ -1078,7 +1078,7 @@ function ChannelStandalone({ channel }) {
     setLastDelivery(null);
     const load = async () => {
       try {
-        const [roster, messages] = await Promise.all([api('/channels'), api(`/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
+        const [roster, messages] = await Promise.all([api('/channels'), api(channel === 'cos' ? '/owner-thread?limit=50' : `/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
         if (!live) return;
         setChannels(roster.channels || []);
         setItems(old => mergeMessages(old, messages.items || []));
@@ -1092,6 +1092,16 @@ function ChannelStandalone({ channel }) {
     return () => { live = false; clearInterval(timer); };
   }, [channel]);
   async function send(data) {
+    if (channel === 'cos') {
+      // The Front Desk is reached through the owner mailbox (t1151): the row is stored
+      // first, then the thread re-reads it, so what shows is the daemon's record.
+      const receipt = await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: data.body, attachment_ids: data.attachment_ids }) });
+      const thread = await api('/owner-thread?limit=50');
+      messageScroll.jump();
+      setItems(old => mergeMessages(old, thread.items || []));
+      if (receipt.notify && receipt.notify.state !== 'nudged') setError(`Stored as ${receipt.message_id}. ${receipt.notify.detail || 'The desk was not nudged.'}`);
+      return;
+    }
     const item = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: selected.pane_id, channel, text: data.body, attachment_ids: data.attachment_ids }) });
     messageScroll.jump();
     setItems(old => mergeMessages(old, [item]));

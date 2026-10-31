@@ -583,6 +583,104 @@ def api_capability(pane: str):
     return cap
 
 
+OWNER_SEND_LIMIT = 16000
+
+
+def _desk_pane():
+    """The Front Desk lane from the daemon's roster (channel `cos`), or None."""
+    # The registry may not carry a `cos` row (a fresh release has no channels.json): the
+    # front desk is then the lane in the `desk` working dir, the same match the live row uses.
+    cfg = CHANNEL_INDEX.get("cos") or {"id": "cos", "match": "desk"}
+    pane = match_pane(cfg, _panes())
+    return pane if pane and is_lane(pane) else None
+
+
+@app.post("/api/owner-send")
+async def api_owner_send(request: Request, _: Annotated[str, Depends(require_auth)]):
+    """The owner's web message: a row in the ONE owner mailbox, then a nudge to the desk.
+
+    DESK_DESIGN 4.1 / FLAT_FLEET 7.2 (t1151). `owner_ingest` records the question with
+    transport=web over the socket (role web, no sqlite, nothing typed into a pane); the
+    desk lane is then pointed at it by one inbox line, the fleet's normal nudged route.
+    The answer is the daemon's own state: 'stored' always, and the nudge outcome as the
+    daemon reported it. It never says delivered or read: that is the lane's act.
+    """
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "nothing to send")
+    if len(text) > OWNER_SEND_LIMIT:
+        raise HTTPException(400, f"keep it under {OWNER_SEND_LIMIT} characters")
+    if body.get("attachment_ids"):
+        raise HTTPException(422, "attachments are not supported on the owner mailbox yet")
+    client = _flock()
+    try:
+        ingested = client.call("owner_ingest", body=text, transport="web",
+                               external_id=str(body.get("external_id") or "") or None)
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001 - say what failed, never a traceback
+        raise HTTPException(502, f"the owner mailbox refused the message: {error}")
+    message = (ingested or {}).get("message") or {}
+    message_id = message.get("message_id")
+    if not message_id:
+        raise HTTPException(502, "the daemon recorded no message id; not guessing")
+    result = {"ok": True, "message_id": message_id, "outcome": "stored",
+              "duplicate": bool((ingested or {}).get("duplicate")),
+              "note": "Recorded in the owner mailbox. Stored is not read: the desk has not seen it until it answers."}
+    pane = None
+    try:
+        pane = _desk_pane()
+    except Exception:  # noqa: BLE001
+        pane = None
+    if pane is None:
+        result["notify"] = {"state": "desk_offline",
+                            "detail": "no live Front Desk lane to nudge; the message waits in the mailbox"}
+        return result
+    try:
+        nudge = client.call(
+            "inbox_send", to=pane["pane_id"], notify=True,
+            subject=f"owner message {message_id}",
+            body=(f"Owner message {message_id} (web) is waiting in the owner mailbox: "
+                  f"`dunkingsheep owner conversation`; answer with `owner reply {message_id}`.\n\n{text}"))
+        result["notify"] = {"state": "nudged", "pane": pane["pane_id"],
+                            "inbox_id": (nudge or {}).get("message_id"),
+                            "inbox_state": (nudge or {}).get("state")}
+    except Exception as error:  # noqa: BLE001 - the row is stored; the nudge may retry
+        result["notify"] = {"state": "nudge_failed", "pane": pane["pane_id"], "detail": str(error)[:200]}
+    return result
+
+
+def _owner_thread_item(row):
+    """One owner-mailbox row in the shape the thread already renders."""
+    reply = bool(row.get("reply_to"))
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row.get("created_at") or 0)))
+    # The thread sorts and keys by a NUMBER (mergeMessages); the mailbox id is `i<N>` from
+    # one counter, so N keeps creation order across both transports.
+    number = int(str(row["id"]).lstrip("i") or 0) if str(row["id"]).lstrip("i").isdigit() else 0
+    item = {"id": number, "message_id": row["id"], "role": "agent" if reply else "owner", "body": row.get("body") or "",
+            "created_at": stamp, "transport": row.get("transport"), "reply_to": row.get("reply_to"),
+            "attachments": []}
+    if not reply:
+        answered = bool(row.get("answered"))
+        item["delivery"] = "acked" if answered else "stored"
+        item["outcome"] = "answered" if answered else "stored in the owner mailbox · waiting for the desk"
+    return item
+
+
+@app.get("/api/owner-thread")
+def api_owner_thread(_: Annotated[str, Depends(require_auth)], limit: int = 50):
+    """The owner mailbox as the desk conversation: both transports, answered computed by the daemon."""
+    try:
+        data = _flock().call("owner_conversation", limit=max(1, min(limit, 200)))
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(502, f"the owner mailbox is unavailable: {error}")
+    return {"items": [_owner_thread_item(row) for row in data.get("messages", [])],
+            "waiting": data.get("waiting", []), "source": "owner_conversation"}
+
+
 @app.post("/api/pane-send")
 async def api_pane_send(request: Request, identity: Annotated[str, Depends(require_auth)]):
     body = await request.json()
