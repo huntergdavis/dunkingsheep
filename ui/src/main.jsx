@@ -912,7 +912,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
   }, [channel]);
   useEffect(() => {
     if (vpChannel) return;
-    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'vp') || null)).catch(() => {});
+    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'cos') || null)).catch(() => {});
   }, [vpChannel]);
   async function refreshStates() {
     try {
