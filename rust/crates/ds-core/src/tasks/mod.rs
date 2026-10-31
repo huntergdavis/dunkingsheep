@@ -898,6 +898,16 @@ impl Tasks {
             .await
     }
 
+    /// `leases_for`: live leases for a task (expired rows are ignored). T12 (t787) owns
+    /// claim/heartbeat/release; this read shares its `task_leases` schema.
+    pub async fn leases_for(&self, id: &str, now: Option<f64>) -> Result<Vec<Lease>, DunkError> {
+        let id = id.to_string();
+        let now = now.unwrap_or_else(crate::clock::now_s);
+        self.writer
+            .call(move |conn| leases_for_conn(conn, &id, now))
+            .await
+    }
+
     /// `_decorate`: the row plus everything a reader looks at (assignees, leases,
     /// claimable, eligible, allocation_waiting, the dependency fields). `pane_id` is the
     /// viewer: eligibility is per-viewer (F2).
@@ -1326,6 +1336,16 @@ pub struct DependencyState {
     /// Python's `eligible` (assignees, leases) is NOT ported yet, so this is the
     /// generic-list value: unassigned-or-multi is not checked here.
     pub dependencies_clear: bool,
+}
+
+/// One live `task_leases` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lease {
+    pub task_id: String,
+    pub pane_id: String,
+    pub claimed_at: f64,
+    pub heartbeat_at: f64,
+    pub expires_at: f64,
 }
 
 /// `_decorate` output: the row and its derived fields, same names as the Python dict.
