@@ -479,6 +479,125 @@ impl Tasks {
             })
             .await
     }
+
+    /// `set_landed` (t906): say that a finished task's work is (or is not yet) on main.
+    ///
+    /// `landed = false` is what a lane writes when it completes a task whose PR is
+    /// STACKED: the row is done, the work is not on main, and its dependents must not
+    /// open. The merge path flips it back to true (`mark_landed_for_pr`).
+    pub async fn set_landed(
+        &self,
+        id: &str,
+        landed: bool,
+        by: Option<&str>,
+        repo: Option<&str>,
+        pr: Option<i64>,
+    ) -> Result<Task, DunkError> {
+        let wanted = id.to_string();
+        let id = wanted.clone();
+        let by = by.map(|b| b.to_string());
+        let repo = repo.map(|r| r.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(db::map_sqlite)?;
+                let (scope, priority): (String, String) = tx
+                    .query_row(
+                        "SELECT scope, priority FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                tx.execute(
+                    "UPDATE tasks SET landed = ?, updated_at = ? WHERE id = ?",
+                    params![landed as i64, now, id],
+                )
+                .map_err(db::map_sqlite)?;
+                let event = if landed { "landed" } else { "unlanded" };
+                tx.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                    params![id, event, now, by, scope, priority,
+                            json!({"repo": repo, "pr": pr}).to_string()],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await?;
+        self.get(&wanted).await
+    }
+
+    /// `mark_landed_for_pr` (t906): flip every finished task that names `repo#pr` to
+    /// landed, returning the ids it flipped.
+    pub async fn mark_landed_for_pr(
+        &self,
+        repo: &str,
+        pr: i64,
+        by: Option<&str>,
+    ) -> Result<Vec<String>, DunkError> {
+        if repo.is_empty() || pr == 0 {
+            return Ok(Vec::new());
+        }
+        let repo = repo.to_string();
+        let by = by.map(|b| b.to_string());
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(db::map_sqlite)?;
+                let rows: Vec<(String, String, i64)> = {
+                    let mut stmt = tx
+                        .prepare("SELECT id, status, landed FROM tasks WHERE repo = ? AND pr = ?")
+                        .map_err(db::map_sqlite)?;
+                    let found = stmt
+                        .query_map(params![repo, pr], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })
+                        .map_err(db::map_sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(db::map_sqlite)?;
+                    found
+                };
+                let mut flipped = Vec::new();
+                for (id, status, landed) in rows {
+                    if status == "done" && landed == 0 {
+                        tx.execute(
+                            "UPDATE tasks SET landed = 1, updated_at = ? WHERE id = ?",
+                            params![now, id],
+                        )
+                        .map_err(db::map_sqlite)?;
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, meta) VALUES (?,?,?,?,?,?)",
+                            params![id, "landed", now, by, "global",
+                                    json!({"repo": repo, "pr": pr, "reason": "the PR merged"}).to_string()],
+                        )
+                        .map_err(db::map_sqlite)?;
+                        flipped.push(id);
+                    }
+                }
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(flipped)
+            })
+            .await
+    }
+
+    /// Whether a task's work is on main (`landed` column; `Task` does not carry it).
+    pub async fn landed_of(&self, id: &str) -> Result<Option<bool>, DunkError> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT landed FROM tasks WHERE id = ?",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(db::map_sqlite)
+                .map(|found| found.map(|v| v != 0))
+            })
+            .await
+    }
 }
 
 /// A status after which the task is not being worked (`dunk_tasks` terminal set).
@@ -653,6 +772,76 @@ mod tests {
         let open = store.unblock(&task.id).await.unwrap();
         assert_eq!("open", open.status);
         assert_eq!(None, open.block_reason);
+    }
+
+    #[tokio::test]
+    async fn marking_landed_is_recorded() {
+        let store = store("landed-rec").await;
+        let task = store.add("global", "stacked", "").await.unwrap();
+        store.complete(&task.id).await.unwrap();
+        store
+            .set_landed(&task.id, false, Some("%109"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(Some(false), store.landed_of(&task.id).await.unwrap());
+        store
+            .set_landed(&task.id, true, Some("%109"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(Some(true), store.landed_of(&task.id).await.unwrap());
+        assert_eq!(
+            3,
+            store.events(&task.id).await,
+            "complete + unlanded + landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_landed_on_an_unknown_id_is_a_refusal() {
+        let store = store("landed-unknown").await;
+        assert!(store
+            .set_landed("t999", true, None, None, None)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn mark_landed_for_pr_flips_only_finished_unlanded_tasks() {
+        let store = store("landed-pr").await;
+        let done = store.add("global", "done stacked", "").await.unwrap();
+        let open = store.add("global", "still open", "").await.unwrap();
+        for id in [&done.id, &open.id] {
+            store
+                .writer
+                .call({
+                    let id = id.clone();
+                    move |conn| {
+                        conn.execute(
+                            "UPDATE tasks SET repo = 'o/r', pr = 7, landed = 0 WHERE id = ?",
+                            params![id],
+                        )
+                        .map_err(db::map_sqlite)?;
+                        Ok(())
+                    }
+                })
+                .await
+                .unwrap();
+        }
+        store.complete(&done.id).await.unwrap();
+        assert!(store
+            .mark_landed_for_pr("", 7, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            vec![done.id.clone()],
+            store
+                .mark_landed_for_pr("o/r", 7, Some("daemon"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(Some(true), store.landed_of(&done.id).await.unwrap());
+        assert_eq!(Some(false), store.landed_of(&open.id).await.unwrap());
     }
 
     #[tokio::test]
