@@ -168,3 +168,15 @@ fn test_caller_state_set_current_clear_and_socket_peer() {
     flock.clear_socket_peer();
     assert_eq!(flock.socket_peer_ok(), None);
 }
+
+#[test]
+fn test_snapshot_launches_empty_pane_agent_falls_back_to_the_session_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = flock(&dir, true);
+    let panes = vec![json!({"pane_id": "%4", "agent": "",
+        "agent_session": {"agent": "codex", "value": "s9"}})];
+    flock.snapshot_launches(&panes);
+    let entry = flock.launch("%4").unwrap();
+    assert_eq!(entry["agent"], json!("codex"));
+    assert_eq!(entry["session"], json!("s9"));
+}

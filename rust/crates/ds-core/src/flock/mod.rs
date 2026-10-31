@@ -153,7 +153,11 @@ impl Flock {
             for pane in panes {
                 let session = pane.get("agent_session").cloned().unwrap_or(Value::Null);
                 let text = |v: &Value, k: &str| v.get(k).filter(|x| !x.is_null()).cloned();
-                let agent = text(pane, "agent").or_else(|| text(&session, "agent"));
+                // Python `pane.get("agent") or session.get("agent")`: an EMPTY agent (tmux panes
+                // report '') falls back to the session's.
+                let agent = text(pane, "agent")
+                    .filter(|v| v != &json!(""))
+                    .or_else(|| text(&session, "agent"));
                 let value = text(&session, "value");
                 let (Some(agent), Some(value)) = (agent, value) else {
                     continue;
