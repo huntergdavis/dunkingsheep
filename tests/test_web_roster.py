@@ -16,6 +16,9 @@ FRESH = {"pane_id": "%135", "agent": "", "agent_status": None, "tab_label": "sn-
 SHELL = {"pane_id": "%3", "agent": "", "agent_status": None, "tab_label": "bash",
          "workspace_label": "par-a", "cwd": "/home/hunter"}
 COS = {"id": "cos", "name": "Front Desk", "match": "desk", "kind": "active"}
+# Same lane under an id that is NOT an owner-mailbox channel: these tests are about the daemon
+# authority hook, which the owner-mailbox rule bypasses for `cos`.
+LANE = {"id": "desklane", "name": "Desk lane", "match": "desk", "kind": "active"}
 
 
 class AgentPaneTests(unittest.TestCase):
@@ -46,7 +49,7 @@ class AgentPaneTests(unittest.TestCase):
         """t1150: the desk with NO status (fresh or idle past the window) looks like a shell
         to the status heuristic; the caller's authority (daemon process evidence) decides."""
         quiet = dict(DESK, agent_status=None)
-        heuristic = next(r for r in build_roster([COS], [quiet]) if r["id"] == "cos")
+        heuristic = next(r for r in build_roster([LANE], [quiet]) if r["id"] == "desklane")
         self.assertFalse(heuristic["can_message"], "the heuristic alone cannot tell it from a shell")
         asked = []
 
@@ -54,14 +57,31 @@ class AgentPaneTests(unittest.TestCase):
             asked.append(pane and pane["pane_id"])
             return bool(pane) and pane["pane_id"] == "%133"
 
-        row = next(r for r in build_roster([COS], [SHELL, quiet], can_message=authority) if r["id"] == "cos")
+        row = next(r for r in build_roster([LANE], [SHELL, quiet], can_message=authority) if r["id"] == "desklane")
         self.assertTrue(row["can_message"])
         self.assertIn("%133", asked)
 
     def test_the_authority_can_refuse_a_pane_the_heuristic_would_allow(self):
-        row = next(r for r in build_roster([COS], [DESK], can_message=lambda pane: False) if r["id"] == "cos")
+        row = next(r for r in build_roster([LANE], [DESK], can_message=lambda pane: False) if r["id"] == "desklane")
         self.assertFalse(row["can_message"])
         self.assertTrue(row["online"])
+
+    def test_the_desk_channel_is_messageable_while_quiet_because_it_goes_through_the_owner_mailbox(self):
+        """t1159, measured live after the deploy: online %133, status unknown, can_message False."""
+        quiet = dict(DESK, agent_status=None)
+        row = next(r for r in build_roster([COS], [quiet], can_message=lambda pane: False) if r["id"] == "cos")
+        self.assertTrue(row["online"])
+        self.assertTrue(row["can_message"], "the composer must not read 'Agent unavailable' for a quiet desk")
+
+    def test_the_owner_mailbox_rule_does_not_make_an_absent_desk_messageable(self):
+        row = next(r for r in build_roster([COS], [SHELL]) if r["id"] == "cos")
+        self.assertFalse(row["online"])
+        self.assertFalse(row["can_message"])
+
+    def test_other_channels_still_need_an_agent(self):
+        other = {"id": "poolrad", "name": "Poolrad PM", "match": "bash", "kind": "active"}
+        row = next(r for r in build_roster([other], [SHELL]) if r["id"] == "poolrad")
+        self.assertFalse(row["can_message"], "a bare shell is never messageable")
 
 
 if __name__ == "__main__":
