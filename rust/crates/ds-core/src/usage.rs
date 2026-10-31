@@ -371,11 +371,121 @@ fn windows(reading: &Value) -> String {
     parts.join("; ")
 }
 
+/// Python's `repr(float)`: shortest round-trip digits, fixed notation for exponents in
+/// `-4 ..= 15`, otherwise `1e-07` / `1e+16` (sign and at least two exponent digits).
+pub fn py_float_repr(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".into();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-inf" } else { "inf" }.into();
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0.0"
+        } else {
+            "0.0"
+        }
+        .into();
+    }
+    let exponent = {
+        let sci = format!("{value:e}");
+        sci.split_once('e')
+            .and_then(|(_, e)| e.parse::<i32>().ok())
+            .unwrap_or(0)
+    };
+    if (-4..16).contains(&exponent) {
+        let text = format!("{value}");
+        if text.contains('.') {
+            text
+        } else {
+            format!("{text}.0")
+        }
+    } else {
+        let sci = format!("{value:e}");
+        let (mantissa, _) = sci.split_once('e').unwrap_or((&sci, "0"));
+        format!(
+            "{mantissa}e{}{:02}",
+            if exponent < 0 { '-' } else { '+' },
+            exponent.abs()
+        )
+    }
+}
+
+/// `json.dumps(value, sort_keys=True)`: ", " and ": " separators, keys sorted at every
+/// depth, non-ASCII escaped as `\uXXXX`, floats as Python prints them.
+pub fn dumps_sorted(value: &Value) -> String {
+    fn walk(value: &Value, out: &mut String) {
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+            Value::Number(n) => match n.as_f64().filter(|_| n.is_f64()) {
+                Some(f) => out.push_str(&py_float_repr(f)),
+                None => out.push_str(&n.to_string()),
+            },
+            Value::String(text) => {
+                out.push('"');
+                for c in text.chars() {
+                    match c {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        '\u{8}' => out.push_str("\\b"),
+                        '\u{c}' => out.push_str("\\f"),
+                        ' '..='\u{7f}' => out.push(c),
+                        other => {
+                            let mut units = [0u16; 2];
+                            for unit in other.encode_utf16(&mut units) {
+                                out.push_str(&format!("\\u{unit:04x}"));
+                            }
+                        }
+                    }
+                }
+                out.push('"');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    walk(item, out);
+                }
+                out.push(']');
+            }
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, key) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    walk(&Value::String((*key).clone()), out);
+                    out.push_str(": ");
+                    walk(&map[*key], out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(value, &mut out);
+    out
+}
+
+/// Python's `str()` of a JSON value as an f-string interpolates it.
 fn show(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "None".into(),
-        v => v.to_string(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(n) if n.is_f64() => n.as_f64().map(py_float_repr).unwrap_or_default(),
+        Value::Number(n) => n.to_string(),
+        other => dumps_sorted(other),
     }
 }
 
@@ -412,7 +522,7 @@ pub fn render_text(results: &[Value]) -> String {
                     .filter(|(k, _)| !skip.contains(&k.as_str()))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                take(&Value::Object(rest).to_string(), 220)
+                take(&dumps_sorted(&Value::Object(rest)), 220)
             }
         } else if status == "unknown" {
             let reason = ["reason", "error"]

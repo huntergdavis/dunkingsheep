@@ -53,37 +53,52 @@ pub fn usage_command(
     }
 }
 
-/// `json.dumps(value, indent=2, sort_keys=True)`: keys sorted at every level (a map built in
-/// sorted order, so it holds whether or not serde_json keeps insertion order), two-space
-/// indent, non-ASCII escaped as `\uXXXX`.
+/// `json.dumps(value, indent=2, sort_keys=True)`: keys sorted at every level (the runner's maps
+/// may hold insertion order), two-space indent, non-ASCII escaped as `\uXXXX`, floats the way
+/// Python prints them (`1e-07`, not `1e-7`).
 pub fn sorted_json(value: &Value) -> String {
-    let pretty = serde_json::to_string_pretty(&sorted(value)).unwrap_or_default();
-    let mut out = String::with_capacity(pretty.len());
-    for character in pretty.chars() {
-        if character.is_ascii() {
-            out.push(character);
-        } else {
-            let mut units = [0u16; 2];
-            for unit in character.encode_utf16(&mut units) {
-                out.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
+    let mut out = String::new();
+    write_value(&mut out, value, 0);
     out
 }
 
-fn sorted(value: &Value) -> Value {
+fn write_value(out: &mut String, value: &Value, depth: usize) {
     match value {
+        Value::Array(items) if items.is_empty() => out.push_str("[]"),
+        Value::Object(map) if map.is_empty() => out.push_str("{}"),
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                line(out, i, depth + 1);
+                write_value(out, item, depth + 1);
+            }
+            out.push('\n');
+            out.push_str(&"  ".repeat(depth));
+            out.push(']');
+        }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let mut out = Map::new();
-            for key in keys {
-                out.insert(key.clone(), sorted(&map[key]));
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                line(out, i, depth + 1);
+                out.push_str(&usage::dumps_sorted(&Value::String((*key).clone())));
+                out.push_str(": ");
+                write_value(out, &map[*key], depth + 1);
             }
-            Value::Object(out)
+            out.push('\n');
+            out.push_str(&"  ".repeat(depth));
+            out.push('}');
         }
-        Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
-        other => other.clone(),
+        // Scalars print exactly as the single-line dumper prints them.
+        other => out.push_str(&usage::dumps_sorted(other)),
     }
+}
+
+fn line(out: &mut String, index: usize, depth: usize) {
+    if index > 0 {
+        out.push(',');
+    }
+    out.push('\n');
+    out.push_str(&"  ".repeat(depth));
 }

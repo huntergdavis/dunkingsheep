@@ -112,3 +112,48 @@ fn sorted_json_sorts_every_level_and_escapes_astral_characters() {
         sorted_json(&value)
     );
 }
+
+/// Reviewer finding C/D (t1288): an ok provider with EMPTY windows prints its raw result the way
+/// `json.dumps` does (", " and ": "), and floats print as Python does in --json.
+#[test]
+fn empty_windows_and_tiny_floats_print_like_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        json!({"command": format!("/bin/sh {}", path.display()), "timeout_s": 5,
+               "parse": {"windows": "windows", "meaning": "meaning", "measured_at": "measured_at"}})
+    };
+    let providers = json!({
+        "empty": script("empty.sh", r#"echo '{"provider":"empty","status":"ok","meaning":"percent_used","measured_at":1,"windows":[]}'"#),
+        "tiny": script("tiny.sh", r#"echo '{"provider":"tiny","status":"ok","meaning":"percent_used","measured_at":1,"windows":[{"name":"five_hour","percent_used":1e-7,"percent_remaining":99.9999999}]}'"#),
+    });
+    let config = dir.path().join("usage.json");
+    fs::write(
+        &config,
+        json!({"schema": 1, "providers": providers}).to_string(),
+    )
+    .unwrap();
+    let config = config.display().to_string();
+
+    let empty = usage_command(&config, Some("empty"), None, false);
+    assert_eq!(
+        format!("{HEADER}empty      ok       percent_used           {{\"exit_code\": 0, \"windows\": []}}\n"),
+        empty.stdout
+    );
+    let tiny = usage_command(&config, Some("tiny"), None, true);
+    // Python: "percent_remaining": 99.9999999, "percent_used": 1e-07 (twice: top level and parsed)
+    assert_eq!(
+        2,
+        tiny.stdout.matches("\"percent_used\": 1e-07").count(),
+        "{}",
+        tiny.stdout
+    );
+    assert!(tiny.stdout.contains("\"percent_remaining\": 99.9999999,"));
+    let table = usage_command(&config, Some("tiny"), None, false);
+    assert!(
+        table.stdout.contains("five_hour: 0.0% used / 100.0% left"),
+        "{}",
+        table.stdout
+    );
+}
