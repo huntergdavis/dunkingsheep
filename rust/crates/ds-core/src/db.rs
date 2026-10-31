@@ -19,7 +19,7 @@
 //! `?`/`#` correctly and `readonly` must not be able to create a missing database.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -327,7 +327,26 @@ impl SyncWriter {
 /// WAL is why this never waits for the writer.
 pub struct ReadPool {
     path: PathBuf,
+    size: usize,
     connections: Mutex<Vec<Connection>>,
+    available: Condvar,
+}
+
+/// Puts a borrowed connection back (and wakes a waiter) even if the read panics.
+struct Borrowed<'a> {
+    pool: &'a ReadPool,
+    connection: Option<Connection>,
+}
+
+impl Drop for Borrowed<'_> {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            if let Ok(mut idle) = self.pool.connections.lock() {
+                idle.push(connection);
+                self.pool.available.notify_one();
+            }
+        }
+    }
 }
 
 impl ReadPool {
@@ -340,7 +359,9 @@ impl ReadPool {
         }
         Ok(ReadPool {
             path,
+            size,
             connections: Mutex::new(connections),
+            available: Condvar::new(),
         })
     }
 
@@ -349,7 +370,7 @@ impl ReadPool {
     }
 
     pub fn size(&self) -> usize {
-        self.connections.lock().expect("read pool lock").len()
+        self.size
     }
 
     /// Borrow one connection for a read.
@@ -357,11 +378,31 @@ impl ReadPool {
     where
         F: FnOnce(&Connection) -> Result<T, DunkError>,
     {
-        let connections = self.connections.lock().expect("read pool lock");
-        let connection = connections
-            .first()
-            .ok_or_else(|| DunkError::Unavailable("the read pool is empty".to_string()))?;
-        read(connection)
+        // t1241: the pool used to hold its mutex across the whole read and always use the
+        // first connection, so N threads ran one at a time and p95 grew with N (measured
+        // under load: 8 readers, p95 350-910 ms, max 2.1 s). A read now takes a connection
+        // OUT of the pool, releases the lock, reads, and puts it back; callers wait only
+        // when all `size` connections are in use.
+        let connection = {
+            let mut idle = self.connections.lock().expect("read pool lock");
+            loop {
+                if let Some(connection) = idle.pop() {
+                    break connection;
+                }
+                if self.size == 0 {
+                    return Err(DunkError::Unavailable("the read pool is empty".to_string()));
+                }
+                idle = self.available.wait(idle).expect("read pool lock");
+            }
+        };
+        let guard = Borrowed {
+            pool: self,
+            connection: Some(connection),
+        };
+        match guard.connection.as_ref() {
+            Some(connection) => read(connection),
+            None => Err(DunkError::Unavailable("the read pool is empty".to_string())),
+        }
     }
 }
 

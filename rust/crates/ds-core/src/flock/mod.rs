@@ -63,6 +63,8 @@ pub struct Flock {
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
     caller: Mutex<CallerState>,
+    role_panes: Mutex<panes::RolePaneCache>,
+    stores: Mutex<panes::Stores>,
 }
 
 impl Flock {
@@ -78,6 +80,8 @@ impl Flock {
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
             caller: Mutex::new(CallerState::default()),
+            role_panes: Mutex::new(panes::RolePaneCache::default()),
+            stores: Mutex::new(panes::Stores::default()),
         };
         flock.load_launches();
         flock
@@ -393,10 +397,13 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod mailbox;
+pub mod panes;
 pub mod resolve;
 
 #[cfg(test)]
 mod mailbox_tests;
+#[cfg(test)]
+mod panes_tests;
 #[cfg(test)]
 mod resolve_tests;
 #[cfg(test)]

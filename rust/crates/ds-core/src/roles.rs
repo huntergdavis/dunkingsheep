@@ -345,6 +345,12 @@ pub fn capped_result_text(result: &serde_json::Value) -> String {
     )
 }
 
+mod store;
+pub use store::{
+    hash_token, Roles, DEFAULT_REVIEWER_PROVIDERS, DEFAULT_ROLE, LANE_ROLES, ROLES, TOKEN_ROLES,
+    UNCONFIGURED_DEFAULT,
+};
+
 #[cfg(test)]
 #[path = "roles_tests.rs"]
 mod roles_tests;
