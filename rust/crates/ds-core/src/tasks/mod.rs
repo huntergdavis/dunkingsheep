@@ -332,6 +332,23 @@ impl Tasks {
         self.set_status(id, "done", None, None).await
     }
 
+    /// `Flock.task_complete` (dunk_core): complete, then record `landed = false` in the
+    /// same act when the work is done and NOT on main (t906, a stacked branch). `landed`
+    /// true is the default and writes nothing extra; the dependents of an unlanded task
+    /// stay closed until `mark_landed_for_pr` flips it back.
+    pub async fn task_complete(
+        &self,
+        id: &str,
+        by: Option<&str>,
+        landed: bool,
+    ) -> Result<Task, DunkError> {
+        let done = self.complete(id).await?;
+        if landed {
+            return Ok(done);
+        }
+        self.set_landed(id, false, by, None, None).await
+    }
+
     /// Insert a lease directly (test helper: claiming is T12's job).
     #[doc(hidden)]
     pub async fn claim_for_test(&self, id: &str, pane: &str) {
@@ -874,6 +891,17 @@ fn decode_list(raw: Option<&str>) -> Vec<String> {
     }
 }
 
+/// `dunk_api.h_task_complete`: an omitted `landed` means landed (hotfix 20530f2; the CLI's
+/// `--unmerged` is the only way to send `Some(false)`).
+pub async fn h_task_complete(
+    store: &Tasks,
+    id: &str,
+    by: Option<&str>,
+    landed: Option<bool>,
+) -> Result<Task, DunkError> {
+    store.task_complete(id, by, landed.unwrap_or(true)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,6 +972,27 @@ mod tests {
             store.events(&task.id).await,
             "complete + unlanded + landed"
         );
+    }
+
+    #[tokio::test]
+    async fn task_complete_defaults_to_landed_and_unmerged_records_unlanded() {
+        let store = store("complete-landed").await;
+        let a = store.add("global", "omitted", "").await.unwrap();
+        h_task_complete(&store, &a.id, Some("%1"), None)
+            .await
+            .unwrap();
+        assert_eq!(Some(true), store.landed_of(&a.id).await.unwrap());
+        let b = store.add("global", "explicit", "").await.unwrap();
+        h_task_complete(&store, &b.id, Some("%1"), Some(true))
+            .await
+            .unwrap();
+        assert_eq!(Some(true), store.landed_of(&b.id).await.unwrap());
+        let c = store.add("global", "unmerged", "").await.unwrap();
+        let done = h_task_complete(&store, &c.id, Some("%1"), Some(false))
+            .await
+            .unwrap();
+        assert_eq!("done", done.status);
+        assert_eq!(Some(false), store.landed_of(&c.id).await.unwrap());
     }
 
     #[tokio::test]
