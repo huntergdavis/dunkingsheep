@@ -396,6 +396,7 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub mod commands_owner_views;
 pub mod dunks;
 pub mod mailbox;
 pub mod panes;
