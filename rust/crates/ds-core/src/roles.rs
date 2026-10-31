@@ -201,6 +201,150 @@ pub fn allowed(role: &str, command: &str) -> bool {
     READ_ONLY.contains(&command) || extra.contains(&command)
 }
 
+/// `dunk_roles.DESK_RESULT_BYTES`: the most a desk result may carry.
+pub const DESK_RESULT_BYTES: usize = 4096;
+
+/// Python's `json.dumps` default (", " and ": " separators) so lengths and the `head`
+/// cut agree with the Python clamp, and `ensure_ascii` escaping (non-ASCII becomes
+/// `\uXXXX`, astral as a surrogate pair), so the output is pure ASCII and chars == bytes.
+/// NOT mirrored: object key ORDER. `Value` keeps keys sorted (no `preserve_order`, which
+/// would add the `indexmap` crate; RUST_PORT.md section 0 rule 5), so a capped `head` can
+/// list keys in a different order than Python's insertion order. Lengths are unaffected.
+struct PyFormatter;
+
+impl serde_json::ser::Formatter for PyFormatter {
+    fn write_string_fragment<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        fragment: &str,
+    ) -> std::io::Result<()> {
+        for c in fragment.chars() {
+            if c.is_ascii() {
+                w.write_all(&[c as u8])?;
+            } else {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    write!(w, "\\u{unit:04x}")?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            w.write_all(b", ")
+        }
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            w.write_all(b", ")
+        }
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        w.write_all(b": ")
+    }
+}
+
+fn py_dumps(value: &serde_json::Value) -> String {
+    use serde::Serialize;
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(&mut out, PyFormatter);
+    value
+        .serialize(&mut ser)
+        .expect("a Value always serializes");
+    String::from_utf8(out).expect("serde_json writes UTF-8")
+}
+
+/// `dunk_roles.clamp_desk_result` (t1165): truncate a result the desk could not read in
+/// time anyway. An over-cap result with a `messages` list stays inbox-shaped (the CLI
+/// printers index `messages`) and keeps the NEWEST messages that fit, plus `truncated`,
+/// `omitted`, `cap` and `note`; anything else becomes
+/// `{truncated, bytes, cap, head, note}`, which has NO `messages` key and which the
+/// printers must therefore handle.
+pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Map, Value};
+    let text = py_dumps(result);
+    if text.len() <= DESK_RESULT_BYTES {
+        return result.clone();
+    }
+    if let Some(Value::Array(messages)) = result.get("messages") {
+        if !messages.is_empty() {
+            let mut base: Map<String, Value> = result
+                .as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter(|(k, _)| *k != "messages")
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            base.insert("truncated".into(), json!(true));
+            base.insert("omitted".into(), json!(0));
+            base.insert("cap".into(), json!(DESK_RESULT_BYTES));
+            base.insert(
+                "note".into(),
+                json!("desk results are capped; the oldest messages were left out (inbox list / inbox status <id> show them)"),
+            );
+            let build = |kept: &[Value]| {
+                let mut o = base.clone();
+                o.insert("messages".into(), Value::Array(kept.to_vec()));
+                o.insert("omitted".into(), json!(messages.len() - kept.len()));
+                Value::Object(o)
+            };
+            let mut kept: Vec<Value> = Vec::new();
+            for m in messages.iter().rev() {
+                let mut trial = vec![m.clone()];
+                trial.extend(kept.iter().cloned());
+                if py_dumps(&build(&trial)).len() > DESK_RESULT_BYTES {
+                    break;
+                }
+                kept = trial;
+            }
+            if !kept.is_empty() {
+                return build(&kept);
+            }
+        }
+    }
+    json!({
+        "truncated": true,
+        "bytes": text.len(),
+        "cap": DESK_RESULT_BYTES,
+        "head": text[..DESK_RESULT_BYTES].to_string(),
+        "note": "desk results are capped; ask a narrower question (task read <id>, task metrics) or file a task",
+    })
+}
+
+/// What the CLI's `print_inbox_read` / `print_inbox_list` / `print_inbox_recover` show for
+/// a result with no `messages` key (the capped shape). Exit status stays 0.
+pub fn capped_result_text(result: &serde_json::Value) -> String {
+    // Python prints None for a missing key.
+    let get = |k: &str| {
+        result
+            .get(k)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "None".into())
+    };
+    format!(
+        "result capped by the desk role ({} bytes > {}): {}\n{}\n",
+        get("bytes"),
+        get("cap"),
+        result.get("note").and_then(|n| n.as_str()).unwrap_or(""),
+        result.get("head").and_then(|n| n.as_str()).unwrap_or(""),
+    )
+}
+
 #[cfg(test)]
 #[path = "roles_tests.rs"]
 mod roles_tests;
