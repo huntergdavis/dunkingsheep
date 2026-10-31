@@ -77,10 +77,8 @@ pub type Records = BTreeMap<String, Retired>;
 /// - in a file a human edits. So parse to raw values and convert record by record,
 /// skipping (and logging) the bad ones. A wholly unparseable file still reads as empty.
 pub fn load(path: &Path) -> Records {
-    let raw: BTreeMap<String, serde_json::Value> =
-        atomic_json::read_or_default(path).unwrap_or_default();
     let mut records = Records::new();
-    for (key, value) in raw {
+    for (key, value) in load_raw(path) {
         match serde_json::from_value::<Retired>(value) {
             Ok(record) => {
                 records.insert(key, record);
@@ -91,8 +89,15 @@ pub fn load(path: &Path) -> Records {
     records
 }
 
+/// The file as the Python sees it: every key with its raw JSON value, malformed or not.
+/// `retire`/`unretire` read-modify-write THIS, so an entry a human wrote by hand (or one this
+/// code cannot parse) round-trips untouched, exactly as the Python's dict does (t1153 review).
+fn load_raw(path: &Path) -> BTreeMap<String, serde_json::Value> {
+    atomic_json::read_or_default(path).unwrap_or_default()
+}
+
 /// `_write`: exclusive lock, then an atomic replace.
-pub fn write(path: &Path, records: &Records) -> Result<(), DunkError> {
+pub fn write<T: serde::Serialize>(path: &Path, records: &T) -> Result<(), DunkError> {
     // The Python's identity_guard gives up after 5 s with 'identity record is busy'; an
     // unbounded wait would hang the writer behind a wedged holder instead of refusing
     // (t980 finding 3).
@@ -127,7 +132,7 @@ pub fn retire(
             "a reason is required (e.g. superseded-by:wW:p7)".to_string(),
         ));
     }
-    let mut records = load(path);
+    let mut raw = load_raw(path);
     let mut names: Vec<String> = labels
         .iter()
         .map(|label| label.trim().to_string())
@@ -160,19 +165,30 @@ pub fn retire(
                 .unwrap_or(0.0)
         }),
     };
-    records.insert(pane_id.to_string(), record.clone());
-    write(path, &records)?;
+    raw.insert(pane_id.to_string(), serde_json::to_value(&record)?);
+    write(path, &raw)?;
     Ok(record)
 }
 
 /// Bring a pane back. Refuses when it was not retired, like the Python.
 pub fn unretire(pane_id: &str, path: &Path) -> Result<Retired, DunkError> {
-    let mut records = load(path);
-    let removed = records
+    let mut raw = load_raw(path);
+    let removed = raw
         .remove(pane_id)
         .ok_or_else(|| DunkError::Refused(format!("{pane_id} is not retired")))?;
-    write(path, &records)?;
-    Ok(removed)
+    write(path, &raw)?;
+    // The Python pops whatever the entry was. A malformed one is removed all the same, and the
+    // caller gets a record that says so rather than an error after the file has changed.
+    Ok(
+        serde_json::from_value::<Retired>(removed).unwrap_or_else(|_| Retired {
+            pane_id: pane_id.to_string(),
+            reason: "(malformed record removed)".to_string(),
+            by: None,
+            labels: Vec::new(),
+            mailboxes: Vec::new(),
+            retired_at: 0.0,
+        }),
+    )
 }
 
 /// Every retired record, ordered by pane id (`all_retired`).

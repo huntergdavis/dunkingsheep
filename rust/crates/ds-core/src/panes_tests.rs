@@ -367,3 +367,57 @@ fn a_wholly_unparseable_file_still_reads_as_empty() {
     std::fs::write(&path, "{not json").expect("write");
     assert!(load(&path).is_empty());
 }
+
+/// t1153 review: `load` may skip a malformed record for READS, but `retire`/`unretire` write the
+/// file back, and the Python round-trips the raw dict - so a hand-edited entry must SURVIVE.
+const HAND_EDITED: &str = r#"{"w1:p1": "hand edited note", "w2:p2": {"pane_id": "w2:p2"}}"#;
+
+fn raw_file(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json")
+}
+
+#[test]
+fn retiring_keeps_a_hand_edited_or_malformed_entry_in_the_file() {
+    let (_dir, path) = store();
+    std::fs::write(&path, HAND_EDITED).expect("write");
+    retire(
+        "w3:p3",
+        "superseded",
+        Some("%95"),
+        &[],
+        &[],
+        &path,
+        Some(5.0),
+    )
+    .expect("retire");
+    let file = raw_file(&path);
+    assert_eq!(serde_json::json!("hand edited note"), file["w1:p1"]);
+    assert_eq!(serde_json::json!({"pane_id": "w2:p2"}), file["w2:p2"]);
+    assert_eq!("superseded", file["w3:p3"]["reason"]);
+    assert_eq!(1, load(&path).len(), "reads still skip the malformed ones");
+}
+
+#[test]
+fn unretiring_one_pane_leaves_the_other_entries_untouched() {
+    let (_dir, path) = store();
+    std::fs::write(&path, HAND_EDITED).expect("write");
+    retire("w3:p3", "x", None, &[], &[], &path, Some(5.0)).expect("retire");
+    unretire("w3:p3", &path).expect("unretire");
+    let file = raw_file(&path);
+    assert!(file.get("w3:p3").is_none());
+    assert_eq!(serde_json::json!("hand edited note"), file["w1:p1"]);
+    assert_eq!(serde_json::json!({"pane_id": "w2:p2"}), file["w2:p2"]);
+}
+
+#[test]
+fn unretiring_a_malformed_entry_removes_it_like_the_python_pop() {
+    let (_dir, path) = store();
+    std::fs::write(&path, HAND_EDITED).expect("write");
+    let removed = unretire("w1:p1", &path).expect("pop");
+    assert_eq!("(malformed record removed)", removed.reason);
+    assert!(raw_file(&path).get("w1:p1").is_none());
+    assert!(
+        unretire("nope", &path).is_err(),
+        "an absent pane is still refused"
+    );
+}
