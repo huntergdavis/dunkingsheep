@@ -413,6 +413,142 @@ impl Tasks {
             })
             .await
     }
+    /// `assign` (t786 slice 4): add, remove or replace the assignees. The read-modify-write
+    /// is ONE immediate transaction, the Python's F4: a concurrent assign must not be lost
+    /// between the read and the update.
+    pub async fn assign(
+        &self,
+        id: &str,
+        assignees: &[&str],
+        mode: &str,
+    ) -> Result<Task, DunkError> {
+        let incoming: Vec<String> = assignees
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        if incoming.is_empty() {
+            return Err(DunkError::Refused(
+                "at least one assignee is required".into(),
+            ));
+        }
+        let mode = match mode.trim().to_lowercase().as_str() {
+            "" | "add" | "append" => "add",
+            "remove" | "rm" => "remove",
+            "set" | "replace" => "set",
+            _ => {
+                return Err(DunkError::Refused(
+                    "assign mode must be add, remove or set".into(),
+                ))
+            }
+        };
+        let wanted = id.trim().to_string();
+        let id = wanted.clone();
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let (scope, priority, raw): (String, String, Option<String>) = tx
+                    .query_row(
+                        "SELECT scope, priority, assignees FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                let current = decode_list(raw.as_deref());
+                let merged: Vec<String> = match mode {
+                    "add" => {
+                        let mut out = current.clone();
+                        for item in &incoming {
+                            if !out.contains(item) {
+                                out.push(item.clone());
+                            }
+                        }
+                        out
+                    }
+                    "remove" => current.into_iter().filter(|item| !incoming.contains(item)).collect(),
+                    _ => incoming.clone(),
+                };
+                tx.execute(
+                    "UPDATE tasks SET assignees = ?, updated_at = ? WHERE id = ?",
+                    params![json!(merged).to_string(), now, id],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.execute(
+                    "INSERT INTO task_events (task_id, event, at, scope, priority, meta) VALUES (?,?,?,?,?,?)",
+                    params![id, "assigned", now, scope, priority,
+                            json!({ "assignees": merged }).to_string()],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.commit().map_err(db::map_sqlite)
+            })
+            .await?;
+        self.get(&wanted).await
+    }
+
+    /// `delete` (t786 slice 4): refused while the task has children or dependents, and the
+    /// checks and the delete are one immediate transaction (the Python's F4).
+    pub async fn delete(&self, id: &str) -> Result<String, DunkError> {
+        let wanted = id.trim().to_string();
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let id = wanted.clone();
+                let (scope, priority, status): (String, String, String) = tx
+                    .query_row(
+                        "SELECT scope, priority, status FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                let children: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM tasks WHERE parent_id = ?", params![id],
+                               |row| row.get(0))
+                    .map_err(db::map_sqlite)?;
+                if children > 0 {
+                    return Err(DunkError::Refused(format!(
+                        "task {id} has {children} child task(s); delete or re-parent them first")));
+                }
+                let mut dependents = Vec::new();
+                {
+                    let mut stmt = tx
+                        .prepare("SELECT id, depends_on FROM tasks")
+                        .map_err(db::map_sqlite)?;
+                    let rows = stmt
+                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))
+                        .map_err(db::map_sqlite)?;
+                    for row in rows {
+                        let (other, raw) = row.map_err(db::map_sqlite)?;
+                        if decode_list(raw.as_deref()).contains(&id) {
+                            dependents.push(other);
+                        }
+                    }
+                }
+                if !dependents.is_empty() {
+                    return Err(DunkError::Refused(format!(
+                        "task {id} is a dependency of {}", dependents.join(", "))));
+                }
+                tx.execute(
+                    "INSERT INTO task_events (task_id, event, at, scope, priority, status_from) VALUES (?,?,?,?,?,?)",
+                    params![id, "deleted", now, scope, priority, status],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.execute("DELETE FROM tasks WHERE id = ?", params![id]).map_err(db::map_sqlite)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(id)
+            })
+            .await
+    }
+
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
     ///
     /// The verdict is bound to the task's head by the row itself, so it is written here
@@ -603,6 +739,20 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         }
     }
     Ok(())
+}
+
+/// `_decode`: a JSON list, or empty when the column is NULL, unparseable or not a list.
+fn decode_list(raw: Option<&str>) -> Vec<String> {
+    match serde_json::from_str::<serde_json::Value>(raw.unwrap_or("[]")) {
+        Ok(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|item| match item {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1035,5 +1185,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(2, value);
+    }
+
+    #[tokio::test]
+    async fn assign_adds_removes_and_replaces() {
+        let tasks = store("assign").await;
+        let task = tasks.add("global", "t", "").await.unwrap();
+        let a = tasks.assign(&task.id, &["%1", "%2"], "add").await.unwrap();
+        assert_eq!(decode_list(Some(&a.assignees)), vec!["%1", "%2"]);
+        let b = tasks
+            .assign(&task.id, &["%2", "%3"], "append")
+            .await
+            .unwrap();
+        assert_eq!(decode_list(Some(&b.assignees)), vec!["%1", "%2", "%3"]);
+        let c = tasks.assign(&task.id, &["%2"], "rm").await.unwrap();
+        assert_eq!(decode_list(Some(&c.assignees)), vec!["%1", "%3"]);
+        let d = tasks.assign(&task.id, &["%9"], "set").await.unwrap();
+        assert_eq!(decode_list(Some(&d.assignees)), vec!["%9"]);
+        assert_eq!(tasks.events(&task.id).await, 4);
+        assert!(tasks.assign(&task.id, &[" "], "add").await.is_err());
+        assert!(tasks.assign(&task.id, &["%1"], "bogus").await.is_err());
+        assert!(tasks.assign("t999", &["%1"], "add").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_dependency_and_records_the_deletion() {
+        let tasks = store("delete").await;
+        let first = tasks.add("global", "first", "").await.unwrap();
+        let second = tasks.add("global", "second", "").await.unwrap();
+        tasks
+            .writer
+            .call({
+                let (a, b) = (first.id.clone(), second.id.clone());
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET depends_on = ? WHERE id = ?",
+                        params![json!([a]).to_string(), b],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let refused = tasks.delete(&first.id).await.unwrap_err().to_string();
+        assert!(
+            refused.contains(&format!("is a dependency of {}", second.id)),
+            "{refused}"
+        );
+        assert_eq!(tasks.delete(&second.id).await.unwrap(), second.id);
+        assert!(tasks.get(&second.id).await.is_err());
+        assert_eq!(tasks.events(&second.id).await, 1);
+        assert_eq!(tasks.delete(&first.id).await.unwrap(), first.id);
     }
 }
