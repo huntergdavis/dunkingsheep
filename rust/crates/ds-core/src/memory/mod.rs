@@ -6,6 +6,7 @@
 //! not here yet.
 
 pub mod ingest;
+pub mod jsonl;
 pub mod pure;
 pub mod recall;
 
