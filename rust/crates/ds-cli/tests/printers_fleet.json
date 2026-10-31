@@ -886,5 +886,283 @@
   },
   "output": "turn end %1 (ended=True); trigger=turn.end no nudge (no work)\n",
   "printer": "print_turn_end"
+ },
+ {
+  "input": {
+   "attachment_bytes": 2048,
+   "attachments": 1,
+   "body_bytes": 100,
+   "created_at": 1790000000,
+   "destination": "w1",
+   "message_id": "m1",
+   "notify": {
+    "reason": "typed",
+    "state": "ok"
+   },
+   "pane_id": "%3",
+   "sender": "owner",
+   "state": "queued",
+   "waiting_s": 12
+  },
+  "output": "message_id        m1\nstate             queued\ndestination       w1\npane_id           %3\nsender            owner\nwaiting_s         12\nbody_bytes        100\nattachments       1\nattachment_bytes  2048\nsent              2026-09-21 10:13:20\nnotify            ok (typed)\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "acked_at": 1782000200,
+   "cancelled_at": 0,
+   "created_at": 1782000000.7,
+   "message_id": "m2",
+   "notify": {
+    "state": "failed"
+   },
+   "read_at": 1782000100,
+   "reason": "",
+   "sender": null,
+   "state": "read",
+   "waiting_s": 0
+  },
+  "output": "message_id        m2\nstate             read\nwaiting_s         0\nsent              2026-06-20 20:00:00\nread              2026-06-20 20:01:40\nacked             2026-06-20 20:03:20\nnotify            failed\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "message_id": "m3",
+   "notify": {}
+  },
+  "output": "message_id        m3\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "retired": []
+  },
+  "output": "no retired panes\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "retired": [
+    {
+     "pane_id": "%1",
+     "reason": "done",
+     "retired_at": 1790000000
+    },
+    {
+     "pane_id": "%12",
+     "reason": null,
+     "retired_at": 1782000000
+    },
+    {
+     "pane_id": "%3"
+    }
+   ]
+  },
+  "output": "PANE       RETIRED              REASON\n%1         2026-09-21 10:13     done\n%12        2026-06-20 20:00     None\n%3         1969-12-31 19:00     None\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "reason": "idle",
+   "unread_kept": 3
+  },
+  "output": "retired %1 (idle); 3 unread message(s) kept as the record\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "reason": "idle",
+   "unread_kept": null
+  },
+  "output": "retired %1 (idle)\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1"
+  },
+  "output": "unretired %1\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {},
+  "output": "0 report(s) in None\n",
+  "printer": "print_report_list"
+ },
+ {
+  "input": {
+   "count": 2,
+   "dir": "/r",
+   "reports": [
+    {
+     "at": 1790000000,
+     "path": "/r/a.md",
+     "size": 1234
+    },
+    {
+     "at": 1782000000.9,
+     "path": "/r/b.md",
+     "size": 5
+    }
+   ]
+  },
+  "output": "2 report(s) in /r\n  2026-09-21 10:13     1234 B  /r/a.md\n  2026-06-20 20:00        5 B  /r/b.md\n",
+  "printer": "print_report_list"
+ },
+ {
+  "input": {},
+  "output": "mailbox None  messages 0  waiting 0\n",
+  "printer": "print_owner_conversation"
+ },
+ {
+  "input": {
+   "count": 4,
+   "mailbox": "owner",
+   "messages": [
+    {
+     "body": "first line\nsecond",
+     "created_at": 1790000000,
+     "id": "m1",
+     "sender": "owner",
+     "state": "read",
+     "transport": "telegram"
+    },
+    {
+     "body": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+     "created_at": 1782000000,
+     "id": "m22",
+     "state": "queued"
+    },
+    {
+     "body": "answer\r\nmore",
+     "created_at": 1790000000,
+     "id": "m3",
+     "reply_to": "m1",
+     "sender": "vp-of-agentry",
+     "transport": "web-desk-long"
+    }
+   ],
+   "waiting": [
+    1,
+    2
+   ]
+  },
+  "output": "mailbox owner  messages 4  waiting 2\n       m1 09-21 10:13 telegram owner    first line\n?     m22 06-20 20:00 -        -        xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n->     m3 09-21 10:13 web-desk-long vp-of-agentry answer\n",
+  "printer": "print_owner_conversation"
+ },
+ {
+  "input": {},
+  "output": "",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {
+   "messages": []
+  },
+  "output": "",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {
+   "messages": [
+    {
+     "body": "text",
+     "created_at": 1790000000,
+     "id": "o1",
+     "subject": "hi"
+    },
+    {
+     "body": "b\nc",
+     "created_at": 1782000000.5,
+     "id": "o2"
+    }
+   ]
+  },
+  "output": "--- owner message o1 at 10:13:20\n[hi] text\n--- owner message o2 at 20:00:00\nb\nc\n",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {},
+  "now": 1790003600.0,
+  "output": "code_stale       UNKNOWN - source identity unavailable\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_hash": "abc123",
+   "code_mtime": 1790000000,
+   "code_stale": false,
+   "dunkers": 6,
+   "herdr_available": false,
+   "herdr_hint": "",
+   "message": "ok",
+   "pid": 42,
+   "queued_messages": 0,
+   "running": 3,
+   "self_pane_id": "%3",
+   "started_at": 1789999000.5,
+   "state_file": "/s",
+   "uptime_s": 12.5,
+   "version": "2.71.4"
+  },
+  "now": 1790003600.0,
+  "output": "version          2.71.4 (code abc123)\ncode_mtime       2026-09-21 10:13:20 (3600s ago)\nstarted_at       2026-09-21 09:56:40 (4599s ago)\ncode_stale       no\npid              42\ndunkers          6\nrunning          3\nqueued_messages  0\nherdr_available  False\nstate_file       /s\nuptime_s         12.5\nself_pane_id     %3\nmessage          ok\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_identity_errors": [
+    "no git",
+    "no hash"
+   ],
+   "code_stale": null,
+   "version": "2.71.4"
+  },
+  "now": 1790003600.0,
+  "output": "version          2.71.4\ncode_stale       UNKNOWN - source identity unavailable: no git, no hash\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_stale": null,
+   "version": "1"
+  },
+  "now": 1790003600.0,
+  "output": "version          1\ncode_stale       UNKNOWN - source identity unavailable\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_changed_modules": [
+    "dunk_api",
+    "dunk_core"
+   ],
+   "code_hash": "h",
+   "code_stale": true,
+   "version": "1"
+  },
+  "now": 1790003600.0,
+  "output": "version          1 (code h)\ncode_stale       YES - code on disk differs from this process; restart it (dunk_api, dunk_core)\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_stale": true
+  },
+  "now": 1790003600.0,
+  "output": "code_stale       YES - code on disk differs from this process; restart it\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_stale": 0,
+   "pid": null,
+   "running": 0
+  },
+  "now": 1790003600.0,
+  "output": "code_stale       no\nrunning          0\n",
+  "printer": "print_status"
  }
 ]

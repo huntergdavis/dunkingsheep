@@ -164,7 +164,58 @@ SAMPLES = {
         {"pane_id": "%1", "ended": True, "dispatch": {"action": "nudge", "task_id": "t4", "outcome": "typing"}},
         {"pane_id": "%1", "ended": True, "dispatch": {"action": "none", "reason": "no work"}},
     ],
+    "print_inbox_status": [
+        {"message_id": "m1", "state": "queued", "destination": "w1", "pane_id": "%3", "sender": "owner",
+         "waiting_s": 12, "body_bytes": 100, "attachments": 1, "attachment_bytes": 2048,
+         "created_at": 1790000000, "notify": {"state": "ok", "reason": "typed"}},
+        {"message_id": "m2", "state": "read", "reason": "", "sender": None, "created_at": 1782000000.7,
+         "read_at": 1782000100, "acked_at": 1782000200, "cancelled_at": 0, "waiting_s": 0,
+         "notify": {"state": "failed"}},
+        {"message_id": "m3", "notify": {}},
+    ],
+    "print_retired": [
+        {"retired": []},
+        {"retired": [{"pane_id": "%1", "retired_at": 1790000000, "reason": "done"},
+                     {"pane_id": "%12", "retired_at": 1782000000, "reason": None}, {"pane_id": "%3"}]},
+        {"pane_id": "%1", "reason": "idle", "unread_kept": 3},
+        {"pane_id": "%1", "reason": "idle", "unread_kept": None},
+        {"pane_id": "%1"},
+    ],
+    "print_report_list": [
+        {},
+        {"count": 2, "dir": "/r", "reports": [{"at": 1790000000, "size": 1234, "path": "/r/a.md"},
+                                              {"at": 1782000000.9, "size": 5, "path": "/r/b.md"}]},
+    ],
+    "print_owner_conversation": [
+        {},
+        {"mailbox": "owner", "count": 4, "waiting": [1, 2],
+         "messages": [{"id": "m1", "created_at": 1790000000, "transport": "telegram", "sender": "owner",
+                       "body": "first line\nsecond", "state": "read"},
+                      {"id": "m22", "created_at": 1782000000, "state": "queued", "body": "x" * 120},
+                      {"id": "m3", "reply_to": "m1", "transport": "web-desk-long", "sender": "vp-of-agentry",
+                       "created_at": 1790000000, "body": "answer\r\nmore"},
+                      {"id": "m4", "created_at": None, "body": None, "sender": "s"}][:3]},
+    ],
+    "print_owner_take": [
+        {}, {"messages": []},
+        {"messages": [{"id": "o1", "created_at": 1790000000, "subject": "hi", "body": "text"},
+                      {"id": "o2", "created_at": 1782000000.5, "body": "b\nc"}]},
+    ],
 }
+
+STATUS_NOW = 1790003600.0
+STATUS_SAMPLES = [
+    {},
+    {"version": "2.71.4", "code_hash": "abc123", "code_mtime": 1790000000, "started_at": 1789999000.5,
+     "code_stale": False, "pid": 42, "dunkers": 6, "running": 3, "queued_messages": 0,
+     "herdr_available": False, "herdr_hint": "", "state_file": "/s", "uptime_s": 12.5,
+     "self_pane_id": "%3", "message": "ok"},
+    {"version": "2.71.4", "code_stale": None, "code_identity_errors": ["no git", "no hash"]},
+    {"version": "1", "code_stale": None},
+    {"version": "1", "code_hash": "h", "code_stale": True, "code_changed_modules": ["dunk_api", "dunk_core"]},
+    {"code_stale": True},
+    {"code_stale": 0, "running": 0, "pid": None},
+]
 
 
 def load_cli():
@@ -176,7 +227,14 @@ def load_cli():
     return module
 
 
+TZ = "EST5EDT,M3.2.0,M11.1.0"
+
+
 def render():
+    import os
+    import time
+    os.environ["TZ"] = TZ
+    time.tzset()
     cli = load_cli()
     cases = []
     for name, payloads in SAMPLES.items():
@@ -185,6 +243,17 @@ def render():
             with contextlib.redirect_stdout(buffer):
                 getattr(cli, name)(payload)
             cases.append({"printer": name, "input": payload, "output": buffer.getvalue()})
+    real_time = time.time
+    time.time = lambda: STATUS_NOW
+    try:
+        for payload in STATUS_SAMPLES:
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                cli.print_status(payload)
+            cases.append({"printer": "print_status", "input": payload, "output": buffer.getvalue(),
+                          "now": STATUS_NOW})
+    finally:
+        time.time = real_time
     return json.dumps(cases, indent=1, sort_keys=True) + "\n"
 
 

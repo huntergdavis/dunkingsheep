@@ -780,3 +780,264 @@ pub fn render_turn_end(result: &Value) -> String {
     line.push('\n');
     line
 }
+
+// ---- slice 3c: printers that read the local clock ---------------------------------------
+//
+// `time.strftime(fmt, time.localtime(ts))` is `local(ts, fmt)`: chrono's `Local`, which
+// follows the host's TZ like Python does. Tests pin TZ explicitly. `now` is passed in so
+// "Ns ago" is deterministic.
+
+fn local(ts: &Value, fmt: &str) -> String {
+    use chrono::TimeZone;
+    let secs = ts.as_f64().unwrap_or(0.0).floor() as i64;
+    match chrono::Local.timestamp_opt(secs, 0).single() {
+        Some(t) => t.format(fmt).to_string(),
+        None => String::new(),
+    }
+}
+
+/// Python's `str.splitlines()[0]`: up to the first line boundary (`\n \r \v \f \x1c-\x1e
+/// \x85    `); an empty text has no first line, which Python raises on, so "".
+fn first_line(text: &str) -> &str {
+    let end = text
+        .find(|c: char| {
+            matches!(
+                c,
+                '\n' | '\r' | '\x0b' | '\x0c' | '\x1c'
+                    ..='\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            )
+        })
+        .unwrap_or(text.len());
+    &text[..end]
+}
+
+pub fn render_inbox_status(r: &Value) -> String {
+    let mut out = String::new();
+    for key in [
+        "message_id",
+        "state",
+        "destination",
+        "pane_id",
+        "sender",
+        "waiting_s",
+        "body_bytes",
+        "attachments",
+        "attachment_bytes",
+        "reason",
+    ] {
+        let v = get(r, key);
+        if !(v.is_null() || v.as_str() == Some("")) {
+            out.push_str(&format!("{} {}\n", ljust(key, 17), py_str(v)));
+        }
+    }
+    for (key, label) in [
+        ("created_at", "sent"),
+        ("read_at", "read"),
+        ("acked_at", "acked"),
+        ("cancelled_at", "cancelled"),
+    ] {
+        let v = get(r, key);
+        if truthy(v) {
+            out.push_str(&format!(
+                "{} {}\n",
+                ljust(label, 17),
+                local(v, "%Y-%m-%d %H:%M:%S")
+            ));
+        }
+    }
+    let notify = get(r, "notify");
+    if truthy(get(notify, "state")) {
+        let reason = if truthy(get(notify, "reason")) {
+            format!(" ({})", py_str(get(notify, "reason")))
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "{} {}{reason}\n",
+            ljust("notify", 17),
+            py_str(get(notify, "state"))
+        ));
+    }
+    out
+}
+
+pub fn render_retired(result: &Value) -> String {
+    if result.get("retired").is_some() {
+        let records = items(result, "retired");
+        if records.is_empty() {
+            return "no retired panes\n".to_string();
+        }
+        let mut out = format!("{} {} REASON\n", ljust("PANE", 10), ljust("RETIRED", 20));
+        for record in records {
+            let stamp = local(get(record, "retired_at"), "%Y-%m-%d %H:%M");
+            out.push_str(&format!(
+                "{} {} {}\n",
+                ljust(&py_str(get(record, "pane_id")), 10),
+                ljust(&stamp, 20),
+                py_str(get(record, "reason"))
+            ));
+        }
+        return out;
+    }
+    if result.get("unread_kept").is_some() {
+        let kept = if !get(result, "unread_kept").is_null() {
+            format!(
+                "; {} unread message(s) kept as the record",
+                py_str(get(result, "unread_kept"))
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            "retired {} ({}){kept}\n",
+            py_str(get(result, "pane_id")),
+            py_str(get(result, "reason"))
+        );
+    }
+    format!("unretired {}\n", py_str(get(result, "pane_id")))
+}
+
+pub fn render_report_list(result: &Value) -> String {
+    let mut out = format!(
+        "{} report(s) in {}\n",
+        py_str(&get_or(result, "count", Value::from(0))),
+        py_str(get(result, "dir"))
+    );
+    for row in items(result, "reports") {
+        out.push_str(&format!(
+            "  {} {} B  {}\n",
+            local(get(row, "at"), "%Y-%m-%d %H:%M"),
+            rjust(&py_str(get(row, "size")), 8),
+            py_str(get(row, "path"))
+        ));
+    }
+    out
+}
+
+pub fn render_owner_conversation(result: &Value) -> String {
+    let mut out = format!(
+        "mailbox {}  messages {}  waiting {}\n",
+        py_str(get(result, "mailbox")),
+        py_str(&get_or(result, "count", Value::from(0))),
+        items(result, "waiting").len()
+    );
+    for row in items(result, "messages") {
+        let mark = if truthy(get(row, "reply_to")) {
+            "->"
+        } else if get(row, "state").as_str() == Some("queued") {
+            "? "
+        } else {
+            "  "
+        };
+        let when = local(get(row, "created_at"), "%m-%d %H:%M");
+        let body = if truthy(get(row, "body")) {
+            py_str(get(row, "body"))
+        } else {
+            String::new()
+        };
+        let sender = or(get(row, "sender"), "-");
+        out.push_str(&format!(
+            "{mark} {} {when} {} {} {}\n",
+            rjust(&py_str(get(row, "id")), 6),
+            ljust(&or(get(row, "transport"), "-"), 8),
+            ljust(&sender, 8),
+            first_chars(first_line(&body), 90)
+        ));
+    }
+    out
+}
+
+pub fn render_owner_take(result: &Value) -> String {
+    let mut out = String::new();
+    for message in items(result, "messages") {
+        let subject = if truthy(get(message, "subject")) {
+            format!("[{}] ", py_str(get(message, "subject")))
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "--- owner message {} at {}\n",
+            py_str(get(message, "id")),
+            local(get(message, "created_at"), "%H:%M:%S")
+        ));
+        out.push_str(&format!("{subject}{}\n", py_str(get(message, "body"))));
+    }
+    out
+}
+
+/// `print_status`; `now` is `time.time()` for the "Ns ago" part.
+pub fn render_status(result: &Value, now: f64) -> String {
+    let mut out = String::new();
+    let (version, code) = (get(result, "version"), get(result, "code_hash"));
+    if truthy(version) && truthy(code) {
+        out.push_str(&format!(
+            "{} {} (code {})\n",
+            ljust("version", 16),
+            py_str(version),
+            py_str(code)
+        ));
+    } else if truthy(version) {
+        out.push_str(&format!("{} {}\n", ljust("version", 16), py_str(version)));
+    }
+    for key in [
+        "code_mtime",
+        "started_at",
+        "code_stale",
+        "pid",
+        "dunkers",
+        "running",
+        "queued_messages",
+        "herdr_available",
+        "herdr_hint",
+        "state_file",
+        "uptime_s",
+        "self_pane_id",
+        "message",
+    ] {
+        let value = get(result, key);
+        if (value.is_null() || value.as_str() == Some("")) && key != "code_stale" {
+            continue;
+        }
+        let shown = match key {
+            "code_mtime" | "started_at" => format!(
+                "{} ({}s ago)",
+                local(value, "%Y-%m-%d %H:%M:%S"),
+                (now - value.as_f64().unwrap_or(0.0)).trunc() as i64
+            ),
+            "code_stale" => {
+                if value.is_null() {
+                    let errors: Vec<String> = items(result, "code_identity_errors")
+                        .iter()
+                        .map(py_str)
+                        .collect();
+                    let errors = errors.join(", ");
+                    format!(
+                        "UNKNOWN - source identity unavailable{}",
+                        if errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {errors}")
+                        }
+                    )
+                } else if truthy(value) {
+                    let names: Vec<String> = items(result, "code_changed_modules")
+                        .iter()
+                        .map(py_str)
+                        .collect();
+                    let names = names.join(", ");
+                    let mut text =
+                        "YES - code on disk differs from this process; restart it".to_string();
+                    if !names.is_empty() {
+                        text.push_str(&format!(" ({names})"));
+                    }
+                    text
+                } else {
+                    "no".to_string()
+                }
+            }
+            _ => py_str(value),
+        };
+        out.push_str(&format!("{} {shown}\n", ljust(key, 16)));
+    }
+    out
+}
