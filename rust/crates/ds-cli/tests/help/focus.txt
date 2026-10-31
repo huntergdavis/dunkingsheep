@@ -1,0 +1,8 @@
+usage: dunkingsheep focus [-h] {workspace,tab,pane} target
+
+positional arguments:
+  {workspace,tab,pane}
+  target                id, label, unique substring or 'self'
+
+options:
+  -h, --help            show this help message and exit

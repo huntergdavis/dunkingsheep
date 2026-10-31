@@ -1,0 +1,4 @@
+usage: dunkingsheep messages [-h]
+
+options:
+  -h, --help  show this help message and exit

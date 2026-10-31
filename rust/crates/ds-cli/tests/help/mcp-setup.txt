@@ -1,0 +1,16 @@
+usage: dunkingsheep mcp-setup [-h] [--apply] [--scope SCOPE]
+                              [{all,claude,codex,gemini,cursor,json,toml}]
+
+Print the exact command or config block that registers Dunking Sheep as an MCP server with a harness.
+
+positional arguments:
+  {all,claude,codex,gemini,cursor,json,toml}
+
+options:
+  -h, --help            show this help message and exit
+  --apply               run the harness CLI to register (claude, codex,
+                        gemini)
+  --scope SCOPE         scope for claude/gemini (default user)
+
+harnesses: claude, codex, gemini, cursor, json, toml
+example: dunkingsheep mcp-setup codex --apply

@@ -1,0 +1,645 @@
+{
+ "cases": [
+  {
+   "args": {
+    "scopes": [
+     "global"
+    ],
+    "until": 1700003750.0,
+    "window_s": 3600.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      }
+     ],
+     "completed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      }
+     ]
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 2,
+      "in_progress": 0
+     },
+     "by_assignee": [],
+     "by_priority": {
+      "high": 1,
+      "low": 5,
+      "medium": 0,
+      "urgent": 1
+     },
+     "by_scope": {
+      "global": 7,
+      "pane": 0
+     },
+     "by_status": {
+      "blocked": 2,
+      "cancelled": 1,
+      "done": 3,
+      "in_progress": 0,
+      "open": 1
+     },
+     "leader_held": {
+      "count": 1,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": 3487.5,
+      "oldest_created_at": 1700000262.5
+     },
+     "total": 7
+    },
+    "generated_at": 1700003750.0,
+    "latency_ms": {
+     "claim": {
+      "avg": 1000000.0,
+      "count": 3,
+      "max": 1125000,
+      "p50": 1087500,
+      "p90": 1125000
+     },
+     "completion": {
+      "avg": 1075000.0,
+      "count": 3,
+      "max": 1200000,
+      "p50": 1162500,
+      "p90": 1200000
+     }
+    },
+    "schema_version": 1,
+    "scope": "all",
+    "throughput": {
+     "blocked": 3,
+     "buckets": [
+      {
+       "bucket": 1699999200,
+       "cancelled": 1,
+       "claimed": 3,
+       "completed": 3,
+       "created": 5,
+       "requeued": 0
+      }
+     ],
+     "cancelled": 1,
+     "claimed": 3,
+     "completed": 3,
+     "created": 5,
+     "requeued": 0,
+     "unblocked": 1
+    },
+    "window": {
+     "bucket": "hour",
+     "bucket_seconds": 3600,
+     "seconds": 3600,
+     "since": 1700000150.0,
+     "until": 1700003750.0
+    }
+   }
+  },
+  {
+   "args": {
+    "until": 1700003750.0,
+    "window_s": 3600.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      },
+      {
+       "actor": "w9:p9",
+       "count": 1
+      }
+     ],
+     "completed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      }
+     ]
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 2,
+      "in_progress": 1
+     },
+     "by_assignee": [
+      {
+       "assignee": "w9:p9",
+       "count": 1
+      }
+     ],
+     "by_priority": {
+      "high": 1,
+      "low": 6,
+      "medium": 0,
+      "urgent": 1
+     },
+     "by_scope": {
+      "global": 7,
+      "pane": 1
+     },
+     "by_status": {
+      "blocked": 2,
+      "cancelled": 1,
+      "done": 3,
+      "in_progress": 1,
+      "open": 1
+     },
+     "leader_held": {
+      "count": 1,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": 3487.5,
+      "oldest_created_at": 1700000262.5
+     },
+     "total": 8
+    },
+    "generated_at": 1700003750.0,
+    "latency_ms": {
+     "claim": {
+      "avg": 1040625.0,
+      "count": 4,
+      "max": 1162500,
+      "p50": 1125000,
+      "p90": 1162500
+     },
+     "completion": {
+      "avg": 1075000.0,
+      "count": 3,
+      "max": 1200000,
+      "p50": 1162500,
+      "p90": 1200000
+     }
+    },
+    "schema_version": 1,
+    "scope": "all",
+    "throughput": {
+     "blocked": 3,
+     "buckets": [
+      {
+       "bucket": 1699999200,
+       "cancelled": 1,
+       "claimed": 4,
+       "completed": 3,
+       "created": 6,
+       "requeued": 0
+      }
+     ],
+     "cancelled": 1,
+     "claimed": 4,
+     "completed": 3,
+     "created": 6,
+     "requeued": 0,
+     "unblocked": 1
+    },
+    "window": {
+     "bucket": "hour",
+     "bucket_seconds": 3600,
+     "seconds": 3600,
+     "since": 1700000150.0,
+     "until": 1700003750.0
+    }
+   }
+  },
+  {
+   "args": {
+    "bucket": "day",
+    "scope_label": "visible",
+    "until": 1700003750.0,
+    "window_s": 86400.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      },
+      {
+       "actor": "w9:p9",
+       "count": 1
+      }
+     ],
+     "completed": [
+      {
+       "actor": "w1:p1",
+       "count": 2
+      },
+      {
+       "actor": "w2:p2",
+       "count": 1
+      }
+     ]
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 2,
+      "in_progress": 1
+     },
+     "by_assignee": [
+      {
+       "assignee": "w9:p9",
+       "count": 1
+      }
+     ],
+     "by_priority": {
+      "high": 1,
+      "low": 6,
+      "medium": 0,
+      "urgent": 1
+     },
+     "by_scope": {
+      "global": 7,
+      "pane": 1
+     },
+     "by_status": {
+      "blocked": 2,
+      "cancelled": 1,
+      "done": 3,
+      "in_progress": 1,
+      "open": 1
+     },
+     "leader_held": {
+      "count": 1,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": 3487.5,
+      "oldest_created_at": 1700000262.5
+     },
+     "total": 8
+    },
+    "generated_at": 1700003750.0,
+    "latency_ms": {
+     "claim": {
+      "avg": 1040625.0,
+      "count": 4,
+      "max": 1162500,
+      "p50": 1125000,
+      "p90": 1162500
+     },
+     "completion": {
+      "avg": 1075000.0,
+      "count": 3,
+      "max": 1200000,
+      "p50": 1162500,
+      "p90": 1200000
+     }
+    },
+    "schema_version": 1,
+    "scope": "visible",
+    "throughput": {
+     "blocked": 3,
+     "buckets": [
+      {
+       "bucket": 1699920000,
+       "cancelled": 1,
+       "claimed": 4,
+       "completed": 3,
+       "created": 8,
+       "requeued": 0
+      }
+     ],
+     "cancelled": 1,
+     "claimed": 4,
+     "completed": 3,
+     "created": 8,
+     "requeued": 0,
+     "unblocked": 1
+    },
+    "window": {
+     "bucket": "day",
+     "bucket_seconds": 86400,
+     "seconds": 86400,
+     "since": 1699917350.0,
+     "until": 1700003750.0
+    }
+   }
+  },
+  {
+   "args": {
+    "until": 1700003150.0,
+    "window_s": 300.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [],
+     "completed": []
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 2,
+      "in_progress": 1
+     },
+     "by_assignee": [
+      {
+       "assignee": "w9:p9",
+       "count": 1
+      }
+     ],
+     "by_priority": {
+      "high": 1,
+      "low": 6,
+      "medium": 0,
+      "urgent": 1
+     },
+     "by_scope": {
+      "global": 7,
+      "pane": 1
+     },
+     "by_status": {
+      "blocked": 2,
+      "cancelled": 1,
+      "done": 3,
+      "in_progress": 1,
+      "open": 1
+     },
+     "leader_held": {
+      "count": 1,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": 2887.5,
+      "oldest_created_at": 1700000262.5
+     },
+     "total": 8
+    },
+    "generated_at": 1700003150.0,
+    "latency_ms": {
+     "claim": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     },
+     "completion": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     }
+    },
+    "schema_version": 1,
+    "scope": "all",
+    "throughput": {
+     "blocked": 0,
+     "buckets": [],
+     "cancelled": 0,
+     "claimed": 0,
+     "completed": 0,
+     "created": 0,
+     "requeued": 0,
+     "unblocked": 0
+    },
+    "window": {
+     "bucket": "hour",
+     "bucket_seconds": 3600,
+     "seconds": 300,
+     "since": 1700002850.0,
+     "until": 1700003150.0
+    }
+   }
+  },
+  {
+   "args": {
+    "scopes": [
+     "w9:p9"
+    ],
+    "since": 1700000100.0,
+    "until": 1700000900.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [],
+     "completed": []
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 0,
+      "in_progress": 1
+     },
+     "by_assignee": [
+      {
+       "assignee": "w9:p9",
+       "count": 1
+      }
+     ],
+     "by_priority": {
+      "high": 0,
+      "low": 1,
+      "medium": 0,
+      "urgent": 0
+     },
+     "by_scope": {
+      "global": 0,
+      "pane": 1
+     },
+     "by_status": {
+      "blocked": 0,
+      "cancelled": 0,
+      "done": 0,
+      "in_progress": 1,
+      "open": 0
+     },
+     "leader_held": {
+      "count": 0,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": null,
+      "oldest_created_at": null
+     },
+     "total": 1
+    },
+    "generated_at": 1700000900.0,
+    "latency_ms": {
+     "claim": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     },
+     "completion": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     }
+    },
+    "schema_version": 1,
+    "scope": "all",
+    "throughput": {
+     "blocked": 0,
+     "buckets": [
+      {
+       "bucket": 1699999200,
+       "cancelled": 0,
+       "claimed": 0,
+       "completed": 0,
+       "created": 1,
+       "requeued": 0
+      }
+     ],
+     "cancelled": 0,
+     "claimed": 0,
+     "completed": 0,
+     "created": 1,
+     "requeued": 0,
+     "unblocked": 0
+    },
+    "window": {
+     "bucket": "hour",
+     "bucket_seconds": 3600,
+     "seconds": 800,
+     "since": 1700000100.0,
+     "until": 1700000900.0
+    }
+   }
+  },
+  {
+   "args": {
+    "until": 1700000010.0,
+    "window_s": 3600.0
+   },
+   "expected": {
+    "by_actor": {
+     "claimed": [],
+     "completed": []
+    },
+    "coverage": {
+     "events_since": 1700000037.5,
+     "events_total": 23,
+     "events_until": 1700001725.0
+    },
+    "current": {
+     "blocked_vs_in_progress": {
+      "blocked": 2,
+      "in_progress": 1
+     },
+     "by_assignee": [
+      {
+       "assignee": "w9:p9",
+       "count": 1
+      }
+     ],
+     "by_priority": {
+      "high": 1,
+      "low": 6,
+      "medium": 0,
+      "urgent": 1
+     },
+     "by_scope": {
+      "global": 7,
+      "pane": 1
+     },
+     "by_status": {
+      "blocked": 2,
+      "cancelled": 1,
+      "done": 3,
+      "in_progress": 1,
+      "open": 1
+     },
+     "leader_held": {
+      "count": 1,
+      "definition": "global tasks with no assignee (owner #1708: unowned means leader-owned), plus tasks explicitly assigned to the leader pane",
+      "leader_pane": null,
+      "oldest_age_s": -252.5,
+      "oldest_created_at": 1700000262.5
+     },
+     "total": 8
+    },
+    "generated_at": 1700000010.0,
+    "latency_ms": {
+     "claim": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     },
+     "completion": {
+      "avg": null,
+      "count": 0,
+      "max": null,
+      "p50": null,
+      "p90": null
+     }
+    },
+    "schema_version": 1,
+    "scope": "all",
+    "throughput": {
+     "blocked": 0,
+     "buckets": [],
+     "cancelled": 0,
+     "claimed": 0,
+     "completed": 0,
+     "created": 0,
+     "requeued": 0,
+     "unblocked": 0
+    },
+    "window": {
+     "bucket": "hour",
+     "bucket_seconds": 3600,
+     "seconds": 3600,
+     "since": 1699996410.0,
+     "until": 1700000010.0
+    }
+   }
+  }
+ ]
+}

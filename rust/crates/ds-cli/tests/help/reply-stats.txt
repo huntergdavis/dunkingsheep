@@ -1,0 +1,7 @@
+usage: dunkingsheep reply-stats [-h] [mailboxes]
+
+positional arguments:
+  mailboxes   comma-separated mailboxes (default all)
+
+options:
+  -h, --help  show this help message and exit

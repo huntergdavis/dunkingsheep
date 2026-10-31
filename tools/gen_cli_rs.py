@@ -171,6 +171,9 @@ def emit_cmd(name, parser, aliases, help_text, indent):
     lines.append(pad + "    help: %s," % opt(help_text))
     # prefix_chars="\x00" (herdr): every token, flags included, is a positional.
     lines.append(pad + "    raw: %s," % str(parser.prefix_chars == "\x00").lower())
+    # RawDescriptionHelpFormatter: description/epilog keep their line breaks (render.rs).
+    lines.append(pad + "    raw_text: %s," % str(
+        issubclass(parser.formatter_class, argparse.RawDescriptionHelpFormatter)).lower())
     lines.append(pad + "    about: %s," % opt(parser.description))
     lines.append(pad + "    epilog: %s," % opt(parser.epilog))
     lines.append(pad + "    args: &[")
@@ -262,6 +265,34 @@ def namespace_cases():
     return json.dumps(cases, indent=1, sort_keys=True, default=str) + "\n"
 
 
+HELP_DIR = ROOT / "rust" / "crates" / "ds-cli" / "tests" / "help"
+
+
+def help_goldens():
+    """`{file name: format_help() at COLUMNS=80}` for every parser, canonical names only.
+
+    The Rust renderer (ds-cli/src/render.rs) must reproduce these byte for byte (t1220).
+    """
+    import os
+    os.environ["COLUMNS"] = "80"
+    parser = load_parser()
+    out = {}
+
+    def walk(p, path):
+        out["__".join(path) or "root"] = p.format_help()
+        seen = set()
+        for a in p._actions:
+            if isinstance(a, argparse._SubParsersAction):
+                for n, sp in a.choices.items():
+                    if id(sp) in seen:
+                        continue
+                    seen.add(id(sp))
+                    walk(sp, path + [n])
+
+    walk(parser, [])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     mode = ap.add_mutually_exclusive_group(required=True)
@@ -274,11 +305,21 @@ def main():
         OUT.write_text(text)
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
         FIXTURE.write_text(namespace_cases())
-        print("wrote", OUT.relative_to(ROOT), "and", FIXTURE.relative_to(ROOT))
+        HELP_DIR.mkdir(parents=True, exist_ok=True)
+        goldens = help_goldens()
+        for old in HELP_DIR.glob("*.txt"):
+            if old.stem not in goldens:
+                old.unlink()
+        for name, body in goldens.items():
+            (HELP_DIR / (name + ".txt")).write_text(body)
+        print("wrote", OUT.relative_to(ROOT), "and", FIXTURE.relative_to(ROOT),
+              "and", len(goldens), "help goldens")
         return 0
     current = OUT.read_text() if OUT.exists() else ""
     fixture = FIXTURE.read_text() if FIXTURE.exists() else ""
-    if current != text or fixture != namespace_cases():
+    goldens = help_goldens()
+    on_disk = {p.stem: p.read_text() for p in HELP_DIR.glob("*.txt")} if HELP_DIR.exists() else {}
+    if current != text or fixture != namespace_cases() or on_disk != goldens:
         print("cli_table.rs is out of date; run tools/gen_cli_rs.py --write")
         return 1
     print("cli_table.rs matches the Python parser")

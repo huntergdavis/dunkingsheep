@@ -1,0 +1,8 @@
+usage: dunkingsheep clear-box [-h] [--reason REASON] target
+
+positional arguments:
+  target
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON  why the draft is being destroyed (it is logged)

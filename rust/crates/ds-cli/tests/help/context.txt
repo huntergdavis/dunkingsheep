@@ -1,0 +1,24 @@
+usage: dunkingsheep context [-h] <subcommand> ...
+
+.dunkingsheep/ per project plus one global. Ground truths never expire; only
+the owner promotes one; supersede keeps both entries linked.
+
+positional arguments:
+  <subcommand>
+    init        create the store layout
+    add         add an entry (body from --text, stdin or a file)
+    promote     owner-only: promote an entry to ground truth
+    supersede   replace an entry, keeping both linked
+    retire      append a retirement note (history kept)
+    ledger      what the daemon wrote: adopt (owner bootstrap) or status
+    get         show an entry by subject or slug
+    search      FTS5 search over the disposable index
+    digest      bounded session digest (global truths always included)
+    snapshot    digest + per-article access counts, for the dashboard
+    check       schema, refusals and stale facts (both stores by default)
+    index       rebuild the disposable FTS index (both stores by default)
+    stats       counts, ages, reads and never-read entries (both stores by
+                default)
+
+options:
+  -h, --help    show this help message and exit

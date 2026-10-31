@@ -1,0 +1,7 @@
+usage: dunkingsheep context index [-h] [--global] [--project] [--path PATH]
+
+options:
+  -h, --help   show this help message and exit
+  --global
+  --project
+  --path PATH

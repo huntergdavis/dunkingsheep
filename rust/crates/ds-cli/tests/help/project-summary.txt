@@ -1,0 +1,8 @@
+usage: dunkingsheep project-summary [-h] [--path PATH] [project]
+
+positional arguments:
+  project      project name (default: global)
+
+options:
+  -h, --help   show this help message and exit
+  --path PATH  explicit project directory

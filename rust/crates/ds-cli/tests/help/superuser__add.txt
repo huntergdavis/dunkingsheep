@@ -1,0 +1,7 @@
+usage: dunkingsheep superuser add [-h] entry
+
+positional arguments:
+  entry       pane id (w9:p8) or name (VP of agentry)
+
+options:
+  -h, --help  show this help message and exit

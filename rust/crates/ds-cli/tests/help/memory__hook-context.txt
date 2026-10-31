@@ -1,0 +1,7 @@
+usage: dunkingsheep memory hook-context [-h] [--query QUERY]
+                                        [--sessions SESSIONS]
+
+options:
+  -h, --help           show this help message and exit
+  --query QUERY        defaults to the current directory name
+  --sessions SESSIONS

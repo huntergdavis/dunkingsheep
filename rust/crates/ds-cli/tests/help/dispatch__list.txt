@@ -1,0 +1,4 @@
+usage: dunkingsheep dispatch list [-h]
+
+options:
+  -h, --help  show this help message and exit

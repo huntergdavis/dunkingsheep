@@ -1,0 +1,8 @@
+usage: dunkingsheep delivery [-h] [--status STATUS] target
+
+positional arguments:
+  target
+
+options:
+  -h, --help       show this help message and exit
+  --status STATUS  the pane's reported status, if known

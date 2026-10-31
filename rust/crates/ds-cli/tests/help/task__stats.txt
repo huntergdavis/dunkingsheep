@@ -1,0 +1,7 @@
+usage: dunkingsheep task stats [-h] [scope]
+
+positional arguments:
+  scope
+
+options:
+  -h, --help  show this help message and exit

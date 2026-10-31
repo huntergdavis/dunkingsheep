@@ -1,0 +1,14 @@
+usage: dunkingsheep split [-h] [--down] [--label LABEL] [--cwd CWD]
+                          [--run COMMAND] [--focus]
+                          target
+
+positional arguments:
+  target
+
+options:
+  -h, --help         show this help message and exit
+  --down             new pane below (default: right)
+  --label, -l LABEL  name it (how you will target it later)
+  --cwd CWD          working directory for the new shell
+  --run, -r COMMAND  command to type + Enter into the new pane, e.g. 'claude'
+  --focus            switch the view to it

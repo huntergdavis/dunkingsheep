@@ -1,0 +1,7 @@
+usage: dunkingsheep commands [-h]
+
+Every command the socket API and MCP server accept. With --json: names,
+descriptions and JSON schemas.
+
+options:
+  -h, --help  show this help message and exit

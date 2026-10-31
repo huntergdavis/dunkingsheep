@@ -1,0 +1,8 @@
+usage: dunkingsheep inbox fetch [-h] [--dest DEST] attachment_id
+
+positional arguments:
+  attachment_id
+
+options:
+  -h, --help       show this help message and exit
+  --dest, -d DEST

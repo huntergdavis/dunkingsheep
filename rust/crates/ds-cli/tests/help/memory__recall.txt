@@ -1,0 +1,14 @@
+usage: dunkingsheep memory recall [-h] [--limit LIMIT]
+                                  [--harness {claude,codex,opencode,pi,generic}]
+                                  [--project PROJECT] [--since SINCE]
+                                  query
+
+positional arguments:
+  query
+
+options:
+  -h, --help            show this help message and exit
+  --limit, -n LIMIT
+  --harness {claude,codex,opencode,pi,generic}
+  --project PROJECT
+  --since SINCE         unix timestamp lower bound

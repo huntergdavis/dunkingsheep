@@ -1,0 +1,14 @@
+usage: dunkingsheep github protect [-h] [--approvals APPROVALS]
+                                   [--bypass-reviewer-app] [--dry-run]
+                                   repo
+
+positional arguments:
+  repo                  owner/name
+
+options:
+  -h, --help            show this help message and exit
+  --approvals APPROVALS
+  --bypass-reviewer-app
+                        let the reviewer App push the accounting commit
+                        directly (poolrad, FLAT_FLEET.md 6.4)
+  --dry-run

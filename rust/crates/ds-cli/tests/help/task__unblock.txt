@@ -1,0 +1,7 @@
+usage: dunkingsheep task unblock [-h] id
+
+positional arguments:
+  id
+
+options:
+  -h, --help  show this help message and exit

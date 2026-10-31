@@ -1,0 +1,12 @@
+usage: dunkingsheep memory ingest [-h]
+                                  [--harness {claude,codex,opencode,pi,generic}]
+                                  [--project PROJECT]
+                                  path
+
+positional arguments:
+  path
+
+options:
+  -h, --help            show this help message and exit
+  --harness {claude,codex,opencode,pi,generic}
+  --project PROJECT

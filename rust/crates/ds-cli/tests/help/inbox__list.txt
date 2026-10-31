@@ -1,0 +1,9 @@
+usage: dunkingsheep inbox list [-h] [--all] [--limit LIMIT] [mailbox]
+
+positional arguments:
+  mailbox
+
+options:
+  -h, --help         show this help message and exit
+  --all              include messages already read
+  --limit, -n LIMIT

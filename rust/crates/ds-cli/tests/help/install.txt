@@ -1,0 +1,9 @@
+usage: dunkingsheep install [-h] [--bin-dir BIN_DIR]
+
+Install a launcher so agents can run `dunkingsheep inbox read` as an ordinary
+command, instead of executing a file inside this workspace, which a sandboxed
+agent should and does refuse.
+
+options:
+  -h, --help         show this help message and exit
+  --bin-dir BIN_DIR  where to install it (default ~/.local/bin)

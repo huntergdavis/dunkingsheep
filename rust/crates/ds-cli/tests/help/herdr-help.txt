@@ -1,0 +1,7 @@
+usage: dunkingsheep herdr-help [-h] [topic]
+
+positional arguments:
+  topic       e.g. pane, tab, workspace, agent, wait
+
+options:
+  -h, --help  show this help message and exit
