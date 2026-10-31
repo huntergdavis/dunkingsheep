@@ -409,3 +409,307 @@ fn a_leftover_partial_blob_is_not_counted_as_stored() {
     .expect("partial");
     assert_eq!(0, fixture.store.blob_bytes());
 }
+
+// ---- T15c: reads, deliveries, status, stats, retention -----------------------------------
+
+fn bodies(messages: &[Message]) -> Vec<&str> {
+    messages.iter().map(|m| m.body.as_str()).collect()
+}
+
+fn unread(fixture: &Fixture, mailbox: &str) -> i64 {
+    inbox::count(&fixture.pool(), mailbox, &[], now_s())
+        .expect("count")
+        .unread
+}
+
+#[test]
+fn test_send_read_and_count_in_queue_order() {
+    let fixture = Fixture::new();
+    for n in 0..3 {
+        fixture.send("writer", &format!("message {n}"));
+    }
+    let counts = inbox::count(&fixture.pool(), "writer", &[], now_s()).expect("count");
+    assert_eq!((3, 3), (counts.unread, counts.total));
+    let first = fixture.store.read("writer", 2, false, true).expect("read");
+    assert_eq!(vec!["message 0", "message 1"], bodies(&first));
+    assert!(first
+        .iter()
+        .all(|m| m.summary.state == "read" && m.read_at.is_some()));
+    assert_eq!(1, unread(&fixture, "writer"));
+    let rest = fixture.store.read("writer", 10, false, true).expect("read");
+    assert_eq!(vec!["message 2"], bodies(&rest));
+    assert_eq!(0, unread(&fixture, "writer"));
+}
+
+#[test]
+fn test_peek_does_not_consume() {
+    let fixture = Fixture::new();
+    fixture.send("writer", "still here");
+    let peeked = fixture.store.read("writer", 10, true, true).expect("peek");
+    assert_eq!(vec!["still here"], bodies(&peeked));
+    assert_eq!("queued", peeked[0].summary.state);
+    assert_eq!(1, unread(&fixture, "writer"));
+}
+
+#[test]
+fn test_mailboxes_are_separate() {
+    let fixture = Fixture::new();
+    fixture.send("a", "for a");
+    fixture.send("b", "for b");
+    assert_eq!(
+        vec!["for a"],
+        bodies(&fixture.store.read("a", 10, false, true).unwrap())
+    );
+    assert_eq!(1, unread(&fixture, "b"));
+}
+
+#[test]
+fn mark_false_defers_the_read_until_mark_read_commits_it() {
+    let fixture = Fixture::new();
+    let id = fixture.send("writer", "render me first");
+    let shown = fixture
+        .store
+        .read("writer", 10, false, false)
+        .expect("read");
+    assert_eq!(1, shown.len());
+    assert_eq!(
+        1,
+        unread(&fixture, "writer"),
+        "nothing consumed before the commit"
+    );
+    let ids = vec![id.clone()];
+    assert_eq!(1, fixture.store.mark_read(&ids, Some(5.0)).unwrap());
+    assert_eq!(
+        0,
+        fixture.store.mark_read(&ids, Some(9.0)).unwrap(),
+        "idempotent"
+    );
+    let (summary, _) = inbox::get(&fixture.pool(), &id, now_s()).unwrap();
+    assert_eq!("read", summary.state);
+    assert_eq!(0, fixture.store.mark_read(&[], None).unwrap());
+}
+
+#[test]
+fn a_read_message_carries_its_attachment_rows() {
+    let fixture = Fixture::new();
+    let file = fixture.file("note.txt", "hello");
+    fixture
+        .store
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("with file"),
+            attachments: &[file],
+            ..Default::default()
+        })
+        .unwrap();
+    let read = fixture.store.read("writer", 10, true, true).unwrap();
+    assert_eq!(1, read[0].summary.attachments);
+    assert_eq!("note.txt", read[0].attachments[0].filename);
+    assert_eq!(5, read[0].attachments[0].size);
+}
+
+#[test]
+fn a_delivery_receipt_is_one_batch_per_mailbox_and_an_empty_batch_keeps_it() {
+    let fixture = Fixture::new();
+    let (a, b) = (fixture.send("w", "a"), fixture.send("w", "b"));
+    let store = &fixture.store;
+    assert_eq!(0, store.record_delivery("w", &[], None).unwrap());
+    assert!(inbox::pending_delivery(&fixture.pool(), "w")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        2,
+        store
+            .record_delivery("w", &[a.clone(), "  ".into(), b.clone()], Some(1.0))
+            .unwrap()
+    );
+    store.record_delivery("w", &[b.clone()], Some(2.0)).unwrap();
+    assert_eq!(0, store.record_delivery("w", &[], Some(3.0)).unwrap());
+    let receipt = inbox::pending_delivery(&fixture.pool(), "w")
+        .unwrap()
+        .expect("receipt");
+    assert_eq!(vec![b], receipt.message_ids);
+    assert_eq!(2.0, receipt.delivered_at);
+}
+
+#[test]
+fn the_receipt_column_is_json_dumps_text_like_the_python() {
+    let fixture = Fixture::new();
+    let ids = vec!["i1".to_string(), "i2".to_string()];
+    fixture.store.record_delivery("w", &ids, Some(1.0)).unwrap();
+    let raw: String = rusqlite::Connection::open(fixture.store.path())
+        .unwrap()
+        .query_row(
+            "SELECT message_ids FROM deliveries WHERE mailbox = 'w'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(r#"["i1", "i2"]"#, raw);
+}
+
+#[test]
+fn recover_replays_the_batch_whatever_its_read_state_and_none_is_empty() {
+    let fixture = Fixture::new();
+    assert!(fixture.store.recover_delivery("w").unwrap().is_empty());
+    let (a, b) = (fixture.send("w", "a"), fixture.send("w", "b"));
+    let read = fixture.store.read("w", 10, false, true).unwrap();
+    let ids: Vec<String> = read.iter().map(|m| m.summary.message_id.clone()).collect();
+    fixture.store.record_delivery("w", &ids, None).unwrap();
+    let again = fixture.store.recover_delivery("w").unwrap();
+    assert_eq!(vec!["a", "b"], bodies(&again));
+    assert!(again.iter().all(|m| m.summary.state == "read"));
+    // an explicit delete of `b` shrinks the receipt instead of haunting it
+    let writer = rusqlite::Connection::open(fixture.store.path()).unwrap();
+    writer
+        .execute("DELETE FROM messages WHERE id = ?", [&b])
+        .unwrap();
+    let shrunk = fixture.store.recover_delivery("w").unwrap();
+    assert_eq!(vec!["a"], bodies(&shrunk));
+    assert_eq!(
+        vec![a.clone()],
+        inbox::pending_delivery(&fixture.pool(), "w")
+            .unwrap()
+            .unwrap()
+            .message_ids
+    );
+    writer
+        .execute("DELETE FROM messages WHERE id = ?", [&a])
+        .unwrap();
+    assert!(fixture.store.recover_delivery("w").unwrap().is_empty());
+    assert!(
+        inbox::pending_delivery(&fixture.pool(), "w")
+            .unwrap()
+            .is_none(),
+        "dropped"
+    );
+}
+
+#[test]
+fn note_acked_keeps_only_the_ids_not_yet_acked() {
+    let fixture = Fixture::new();
+    let (a, b) = (fixture.send("w", "a"), fixture.send("w", "b"));
+    assert!(
+        fixture.store.note_acked("w").unwrap().is_empty(),
+        "no receipt"
+    );
+    fixture
+        .store
+        .record_delivery("w", &[a.clone(), b.clone()], None)
+        .unwrap();
+    let conn = rusqlite::Connection::open(fixture.store.path()).unwrap();
+    conn.execute("UPDATE messages SET state = 'acked' WHERE id = ?", [&a])
+        .unwrap();
+    assert_eq!(vec![b.clone()], fixture.store.note_acked("w").unwrap());
+    conn.execute("UPDATE messages SET state = 'acked' WHERE id = ?", [&b])
+        .unwrap();
+    assert!(fixture.store.note_acked("w").unwrap().is_empty());
+    assert!(inbox::pending_delivery(&fixture.pool(), "w")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn status_reports_state_and_sizes_and_never_the_text() {
+    let fixture = Fixture::new();
+    let file = fixture.file("a.bin", "12345");
+    let id = fixture
+        .store
+        .send(&Outgoing {
+            mailbox: "w",
+            body: Some("secret body"),
+            subject: Some("secret subject"),
+            sender: Some("pm"),
+            attachments: &[file],
+            ..Default::default()
+        })
+        .unwrap();
+    let status = inbox::status(&fixture.pool(), &id, now_s() + 30.0).unwrap();
+    assert_eq!(
+        ("queued", "w", "w"),
+        (
+            status.state.as_str(),
+            status.mailbox.as_str(),
+            status.destination.as_str()
+        )
+    );
+    assert_eq!(11, status.body_bytes);
+    assert_eq!((1, 5), (status.attachments, status.attachment_bytes));
+    assert!(status.waiting_s.expect("queued waits") >= 29);
+    assert!(format!("{status:?}").find("secret").is_none());
+    fixture.store.read("w", 10, false, true).unwrap();
+    assert_eq!(
+        None,
+        inbox::status(&fixture.pool(), &id, now_s())
+            .unwrap()
+            .waiting_s
+    );
+    let err = inbox::status(&fixture.pool(), "i999", now_s()).unwrap_err();
+    assert!(
+        err.to_string().contains("no message with id \"i999\""),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_stats_across_mailboxes() {
+    let fixture = Fixture::new();
+    fixture.send("one", "one");
+    fixture.send("two", "two");
+    fixture.send("two", "three");
+    fixture.send("done", "x");
+    fixture.store.read("done", 10, false, true).unwrap();
+    let stats = inbox::stats(&fixture.pool(), now_s()).unwrap();
+    let rows: Vec<(&str, i64, i64)> = stats
+        .iter()
+        .map(|s| (s.mailbox.as_str(), s.unread, s.total))
+        .collect();
+    assert_eq!(vec![("two", 2, 2), ("one", 1, 1), ("done", 0, 1)], rows);
+    assert!(stats[2].oldest_unread_s.is_none());
+    assert!(stats[0].oldest_unread_s.is_some());
+}
+
+#[test]
+fn test_purge_keeps_unread_mail_and_drops_old_read_mail() {
+    let fixture = Fixture::new();
+    let old = fixture.send("writer", "old news");
+    fixture.store.read("writer", 10, false, true).unwrap();
+    fixture.send("writer", "still waiting");
+    assert_eq!(1, fixture.store.purge(Some(-1.0)).unwrap());
+    assert_eq!(1, unread(&fixture, "writer"));
+    assert!(inbox::status(&fixture.pool(), &old, now_s()).is_err());
+}
+
+#[test]
+fn purge_by_the_default_retention_keeps_recent_mail_and_collects_orphan_blobs() {
+    let fixture = Fixture::new();
+    let file = fixture.file("x.txt", "payload");
+    fixture
+        .store
+        .send(&Outgoing {
+            mailbox: "w",
+            body: Some("b"),
+            attachments: &[file],
+            ..Default::default()
+        })
+        .unwrap();
+    fixture.store.read("w", 10, false, true).unwrap();
+    assert_eq!(
+        0,
+        fixture.store.purge(None).unwrap(),
+        "read a moment ago is inside 7 days"
+    );
+    assert_eq!(
+        1,
+        std::fs::read_dir(fixture.dir.path().join("blobs"))
+            .unwrap()
+            .count()
+    );
+    assert_eq!(1, fixture.store.purge(Some(-1.0)).unwrap());
+    assert_eq!(
+        0,
+        std::fs::read_dir(fixture.dir.path().join("blobs"))
+            .unwrap()
+            .count()
+    );
+}
