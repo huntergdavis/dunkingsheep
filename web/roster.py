@@ -44,6 +44,13 @@ def presence(raw_status: str | None) -> str:
     return {"working": "working", "idle": "idle", "blocked": "waiting"}.get(raw_status, "unknown")
 
 
+# Channels whose messages go to the OWNER MAILBOX (`/owner-send`), not into a pane's input box.
+# The mailbox stores the message whether or not the desk lane is mid-turn, so a quiet, running
+# desk is messageable; gating the composer on a turn signal left it on "Agent unavailable" even
+# after the deploy of #234-#237 (measured live 2026-10-31: online %133, can_message False).
+OWNER_MAILBOX_CHANNELS = frozenset({"cos"})
+
+
 def build_roster(configured: list[dict], panes: list[dict], *, include_terminals: bool = False,
                  can_message=None) -> list[dict]:
     """`can_message(pane) -> bool` is the caller's authority for CONFIGURED channels (the web
@@ -75,6 +82,6 @@ def build_roster(configured: list[dict], panes: list[dict], *, include_terminals
             "workspace": pane.get("workspace_label") if pane else None,
             "tab_label": pane.get("tab_label") if pane else None,
             "agent": pane.get("agent") if pane else None,
-            "can_message": bool(pane) and bool(can_message(pane)),
+            "can_message": pane is not None and (config["id"] in OWNER_MAILBOX_CHANNELS or bool(can_message(pane))),
         })
     return output
