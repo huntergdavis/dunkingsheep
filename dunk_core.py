@@ -1928,6 +1928,11 @@ class Flock:
             "declared": declared,
             "agent": agent or None,
             "alive": True,
+            # PROCESS evidence, not the backend's `agent` string (empty for every tmux
+            # pane): True an agent process runs here, False the process table says a bare
+            # shell, None cannot say (t1150: the web desk must not type owner text into a
+            # shell, and must not refuse a quiet lane the registry knows is running).
+            "agent_alive": self._lane_agent_alive(pane_id),
             "drains": observed,
             "drain_evidence": evidence,
             # push only when a drain has ACTUALLY been seen recently; otherwise the

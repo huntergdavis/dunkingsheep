@@ -44,7 +44,11 @@ def presence(raw_status: str | None) -> str:
     return {"working": "working", "idle": "idle", "blocked": "waiting"}.get(raw_status, "unknown")
 
 
-def build_roster(configured: list[dict], panes: list[dict], *, include_terminals: bool = False) -> list[dict]:
+def build_roster(configured: list[dict], panes: list[dict], *, include_terminals: bool = False,
+                 can_message=None) -> list[dict]:
+    """`can_message(pane) -> bool` is the caller's authority for CONFIGURED channels (the web
+    app asks the daemon for process evidence); without it the status heuristic is used."""
+    can_message = can_message or is_lane
     rows = []
     used = set()
     for config in configured:
@@ -66,11 +70,11 @@ def build_roster(configured: list[dict], panes: list[dict], *, include_terminals
             "id": config["id"], "name": config["name"], "kind": config["kind"],
             "dashboard": config.get("dashboard", False),
             "online": pane is not None, "status": status,
-            "activity_group": "active" if is_lane(pane) and status in {"working", "waiting"} else "standby",
+            "activity_group": "active" if can_message(pane) and status in {"working", "waiting"} else "standby",
             "pane_id": pane.get("pane_id") if pane else None,
             "workspace": pane.get("workspace_label") if pane else None,
             "tab_label": pane.get("tab_label") if pane else None,
             "agent": pane.get("agent") if pane else None,
-            "can_message": is_lane(pane),
+            "can_message": bool(pane) and bool(can_message(pane)),
         })
     return output

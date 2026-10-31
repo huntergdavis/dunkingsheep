@@ -244,6 +244,20 @@ class PushOnIdleTests(unittest.TestCase):
         self.flock._push_tasks()
         self.assertEqual("in_progress", self.claimed_task(task["id"])["status"])
 
+    def test_capability_reports_process_evidence_not_the_backend_agent_string(self):
+        """t1150: tmux reports agent "" for every pane, so the desk needs the daemon's
+        process-table answer: True for an agent process, False for a bare shell, None unknown."""
+        self.register(IDLE_SHELL, "worker", provider="pi")
+        self.flock.herdr.agent_child_pids = lambda pid: [
+            {"pid": 2, "comm": "pi", "state": "S", "start": 2, "argv": ["pi"]}]
+        self.assertIs(True, self.flock.delivery_capability(IDLE_SHELL)["agent_alive"])
+        self.flock.herdr.agent_child_pids = lambda pid: [
+            {"pid": 1, "comm": "bash", "state": "S", "start": 1, "argv": ["bash"]}]
+        self.flock._agent_evidence = lambda pid, names: False
+        self.assertIs(False, self.flock.delivery_capability(IDLE_SHELL)["agent_alive"])
+        self.flock.herdr.agent_child_pids = lambda pid: None
+        self.assertIsNone(self.flock.delivery_capability(IDLE_SHELL)["agent_alive"])
+
     def test_an_unknown_process_table_never_blocks_a_push(self):
         self.register(IDLE_SHELL, "worker", provider="pi")
         self.flock.herdr.agent_child_pids = lambda pid: None
