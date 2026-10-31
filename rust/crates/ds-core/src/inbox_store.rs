@@ -115,7 +115,12 @@ impl Store {
         for path in outgoing.attachments {
             stored.push(self.store_blob(path)?);
         }
-        let label = outgoing.mailbox_label.unwrap_or(&mailbox).to_string();
+        // Python: `mailbox_label or mailbox`, so an EMPTY label falls back too.
+        let label = outgoing
+            .mailbox_label
+            .filter(|label| !label.is_empty())
+            .unwrap_or(&mailbox)
+            .to_string();
         let own = |value: Option<&str>| value.map(str::to_string);
         let (pane_id, sender, subject) = (
             own(outgoing.pane_id),
@@ -248,7 +253,10 @@ impl Store {
         fs::read_dir(&self.blob_dir)
             .map(|entries| {
                 entries
-                    .filter_map(|entry| entry.ok()?.metadata().ok())
+                    .filter_map(|entry| entry.ok())
+                    // a leftover `.<sha>.partial` is not a stored blob
+                    .filter(|entry| !entry.file_name().to_string_lossy().ends_with(".partial"))
+                    .filter_map(|entry| entry.metadata().ok())
                     .map(|meta| meta.len())
                     .sum()
             })
@@ -272,9 +280,20 @@ fn expand_user(path: &Path) -> PathBuf {
 }
 
 /// `mimetypes.guess_type` for the extensions mail actually carries; anything else is the
-/// Python's fallback, `application/octet-stream`. (The Python consults the platform's
-/// mime tables, so an exotic extension can differ: named, not hidden.)
+/// Python's fallback, `application/octet-stream`. Every entry was checked against Python 3
+/// `mimetypes.guess_type` (`.log` and bare `.gz` are octet-stream there, so they are NOT
+/// listed). The Python also reads the platform's mime tables (/etc/mime.types), so an
+/// extension this table omits can differ on a host that maps it: named, not hidden.
 pub fn media_type(path: &Path) -> String {
+    // `.gz` alone is (None, 'gzip') in Python, i.e. octet-stream, but `.tar.gz`/`.tgz`
+    // guess the TAR type: the compression is the encoding, not the type.
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        return "application/x-tar".to_string();
+    }
     let extension = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -285,7 +304,7 @@ pub fn media_type(path: &Path) -> String {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "svg" => "image/svg+xml",
-        "txt" | "log" => "text/plain",
+        "txt" => "text/plain",
         "md" => "text/markdown",
         "csv" => "text/csv",
         "html" | "htm" => "text/html",
@@ -293,7 +312,6 @@ pub fn media_type(path: &Path) -> String {
         "pdf" => "application/pdf",
         "zip" => "application/zip",
         "tar" => "application/x-tar",
-        "gz" => "application/gzip",
         _ => "application/octet-stream",
     }
     .to_string()

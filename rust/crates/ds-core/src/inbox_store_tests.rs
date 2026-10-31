@@ -348,3 +348,64 @@ fn the_body_ceiling_is_a_named_refusal() {
         "{error}"
     );
 }
+
+#[test]
+fn an_empty_mailbox_label_falls_back_to_the_mailbox_like_the_python() {
+    let fixture = Fixture::new();
+    let label = |label: Option<&str>| -> String {
+        let id = fixture
+            .store
+            .send(&Outgoing {
+                mailbox: "w",
+                body: Some("x"),
+                mailbox_label: label,
+                ..Default::default()
+            })
+            .expect("send");
+        fixture
+            .pool()
+            .with(|c| {
+                c.query_row(
+                    "SELECT mailbox_label FROM messages WHERE id = ?",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .map_err(map_sqlite)
+            })
+            .expect("label")
+    };
+    assert_eq!("w", label(Some("")), "Python: mailbox_label or mailbox");
+    assert_eq!("w", label(None));
+    assert_eq!("desk", label(Some("desk")));
+}
+
+#[test]
+fn media_types_match_python_mimetypes_for_the_common_attachments() {
+    // Each expected value is what Python 3 `mimetypes.guess_type` returns for a.<ext>
+    // (checked 2026-10-30): `.log` and bare `.gz` are None -> octet-stream, `.tar.gz` is tar.
+    for (name, expected) in [
+        ("a.png", "image/png"),
+        ("a.txt", "text/plain"),
+        ("a.md", "text/markdown"),
+        ("a.json", "application/json"),
+        ("a.tar", "application/x-tar"),
+        ("a.tar.gz", "application/x-tar"),
+        ("a.tgz", "application/x-tar"),
+        ("a.log", "application/octet-stream"),
+        ("a.gz", "application/octet-stream"),
+        ("noextension", "application/octet-stream"),
+    ] {
+        assert_eq!(expected, media_type(Path::new(name)), "{name}");
+    }
+}
+
+#[test]
+fn a_leftover_partial_blob_is_not_counted_as_stored() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.dir.path().join("blobs").join(".abc.partial"),
+        "12345",
+    )
+    .expect("partial");
+    assert_eq!(0, fixture.store.blob_bytes());
+}
