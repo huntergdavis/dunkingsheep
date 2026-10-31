@@ -237,3 +237,49 @@ async fn every_reader_in_the_pool_is_usable() {
     }
     assert_eq!(0, seen.load(Ordering::SeqCst));
 }
+
+/// t1241: the pool used to hold its lock across the read and use only the first
+/// connection, so two readers could never be inside `with` at once. Each reader announces
+/// itself and waits (bounded) for the other to arrive INSIDE the closure: on the old code the
+/// second never arrives and the test FAILS after a second instead of hanging.
+#[test]
+fn two_reads_run_at_the_same_time() {
+    use std::sync::atomic::AtomicUsize;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("pool.db");
+    {
+        let writer = open_writer(&path).expect("writer");
+        writer
+            .execute_batch("CREATE TABLE t (x INTEGER)")
+            .expect("schema");
+    }
+    let pool = ReadPool::open(&path, 2).expect("pool");
+    let inside = AtomicUsize::new(0);
+    let overlapped: Vec<bool> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    pool.with(|_| {
+                        inside.fetch_add(1, Ordering::SeqCst);
+                        let until = Instant::now() + Duration::from_secs(1);
+                        while inside.load(Ordering::SeqCst) < 2 && Instant::now() < until {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Ok(inside.load(Ordering::SeqCst) == 2)
+                    })
+                    .expect("read")
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("reader"))
+            .collect()
+    });
+    assert_eq!(
+        vec![true, true],
+        overlapped,
+        "two reads never overlapped: the pool is serialised"
+    );
+    assert_eq!(2, pool.size());
+}
