@@ -24,6 +24,7 @@ pub mod memory;
 pub mod proc;
 pub mod push;
 pub mod retry;
+pub mod review;
 pub mod stuck;
 pub mod tasks;
 pub mod terminal;
