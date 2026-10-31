@@ -19,6 +19,9 @@ use crate::terminal::{AgentSpec, Terminal};
 pub const MAX_AGENTS_PER_PROJECT: usize = 4;
 /// Max projects live at once.
 pub const MAX_LIVE_PROJECTS: usize = 5;
+/// Max names waiting for the owner at once: an unapproved name is a registry entry too, and
+/// an unbounded desk could fill the registry with them.
+pub const MAX_AWAITING_APPROVAL: usize = 5;
 /// Five-hour Claude usage at or above this refuses a spawn (the Rust-gate headroom number).
 pub const USAGE_REFUSE_PCT: f64 = 70.0;
 
@@ -76,16 +79,24 @@ impl Project {
     }
 }
 
-/// What the desk sends.
+/// What the desk sends: the contract's `project_spawn(name, brief, template, soft_cap)` and
+/// nothing else. Whether the owner approved, and which command starts the research agent,
+/// are NOT the caller's to say - see [`Authority`].
 #[derive(Debug, Clone)]
 pub struct Request {
     pub name: String,
     pub brief: String,
     pub template: String,
     pub soft_cap: Option<f64>,
-    /// The owner's one word has been given.
+}
+
+/// What the DAEMON knows and the desk must never supply: the owner's one word, and the
+/// command that starts the research agent (the daemon picks the model). A desk-controlled
+/// `research_argv` would be an arbitrary command run with daemon authority.
+#[derive(Debug, Clone)]
+pub struct Authority {
+    /// The owner's one word has been given (read from the owner's mailbox, daemon-side).
     pub approved: bool,
-    /// The command that starts the research agent (the caller picked the model).
     pub research_argv: Vec<String>,
 }
 
@@ -138,6 +149,13 @@ impl Projects {
         self.projects.iter().find(|p| p.name == name)
     }
 
+    fn awaiting_count(&self) -> usize {
+        self.projects
+            .iter()
+            .filter(|p| p.state == State::AwaitingApproval)
+            .count()
+    }
+
     fn live_count(&self) -> usize {
         self.projects
             .iter()
@@ -152,9 +170,17 @@ impl Projects {
         terminal: &mut dyn Terminal,
         root: &Path,
         request: &Request,
+        authority: &Authority,
         usage: &Usage,
     ) -> Result<Project, DunkError> {
         let name = validate_name(&request.name)?;
+        if let Some(cap) = request.soft_cap {
+            if !cap.is_finite() || cap <= 0.0 {
+                return Err(DunkError::Refused(format!(
+                    "soft_cap must be a positive number; got {cap}"
+                )));
+            }
+        }
         if request.template != "standard" {
             return Err(DunkError::Refused(format!(
                 "unknown project template {:?}; only 'standard' exists",
@@ -169,6 +195,21 @@ impl Projects {
             if self.live_count() >= MAX_LIVE_PROJECTS {
                 return Err(DunkError::Refused(format!(
                     "{MAX_LIVE_PROJECTS} projects are already live (MAX_LIVE_PROJECTS); stop one first"
+                )));
+            }
+            if self.awaiting_count() >= MAX_AWAITING_APPROVAL {
+                return Err(DunkError::Refused(format!(
+                    "{MAX_AWAITING_APPROVAL} projects already wait for the owner (MAX_AWAITING_APPROVAL); wait for an answer first"
+                )));
+            }
+            // The registry is in memory, so it cannot tell a directory that is ours from one
+            // that is not: a name already on disk (a shared checkout such as 'dunkingsheep',
+            // or a project from before a restart) is refused, never overwritten.
+            let dir = root.join(&name);
+            if dir.exists() {
+                return Err(DunkError::Refused(format!(
+                    "{} already exists and is not a project this daemon started; pick another name",
+                    dir.display()
                 )));
             }
             usage_gate(usage)?;
@@ -188,7 +229,7 @@ impl Projects {
             .iter()
             .position(|p| p.name == name)
             .unwrap_or(0);
-        if !request.approved {
+        if !authority.approved {
             self.projects[index].state = State::AwaitingApproval;
             return Ok(self.projects[index].clone());
         }
@@ -196,7 +237,7 @@ impl Projects {
         usage_gate(usage)?;
         let project = &mut self.projects[index];
         project.state = State::Partial;
-        let result = run_steps(project, terminal, request);
+        let result = run_steps(project, terminal, request, authority);
         if result.is_ok() {
             project.state = State::Live;
         }
@@ -224,6 +265,7 @@ fn run_steps(
     project: &mut Project,
     terminal: &mut dyn Terminal,
     request: &Request,
+    authority: &Authority,
 ) -> Result<(), DunkError> {
     if !project.done("validated") {
         log(
@@ -262,7 +304,7 @@ fn run_steps(
                 format!("{MAX_AGENTS_PER_PROJECT} agents already (MAX_AGENTS_PER_PROJECT)"),
             );
         }
-        if request.research_argv.is_empty() {
+        if authority.research_argv.is_empty() {
             return fail(
                 project,
                 "research_agent",
@@ -271,7 +313,7 @@ fn run_steps(
         }
         let spec = AgentSpec {
             name: format!("{}-research", project.name),
-            argv: request.research_argv.clone(),
+            argv: authority.research_argv.clone(),
             workspace_id: project.workspace_id.clone(),
             cwd: Some(project.dir.display().to_string()),
             label: Some(format!("{}-research", project.name)),
@@ -288,14 +330,23 @@ fn run_steps(
         }
     }
     if !project.done("reported") {
-        // The owner-mailbox report needs the inbox store (a later slice); the event records
-        // what the report will carry so the step order is already the contract's.
+        // NOTHING IS SENT: the owner-mailbox report needs the inbox store (a later slice). The
+        // step is logged as NOT ok, with what the report will carry, so a Live project never
+        // claims a report it did not make.
         let panes: Vec<String> = project
             .agents
             .iter()
             .map(|(r, p)| format!("{r}={p}"))
             .collect();
-        log(project, "reported", true, panes.join(","));
+        log(
+            project,
+            "reported",
+            false,
+            format!(
+                "pending: not sent (owner mailbox not wired); would carry {}",
+                panes.join(",")
+            ),
+        );
     }
     Ok(())
 }
@@ -304,8 +355,12 @@ fn run_steps(
 fn scaffold(dir: &Path, brief: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir.join("dunkingsheep"))
         .map_err(|e| format!("create {}: {e}", dir.display()))?;
-    std::fs::write(dir.join("BRIEF.md"), format!("{}\n", brief.trim_end()))
-        .map_err(|e| format!("write BRIEF.md: {e}"))?;
+    // Only if absent: a resumed scaffold, or a hand-edited brief, is never overwritten.
+    let brief_path = dir.join("BRIEF.md");
+    if !brief_path.exists() {
+        std::fs::write(&brief_path, format!("{}\n", brief.trim_end()))
+            .map_err(|e| format!("write BRIEF.md: {e}"))?;
+    }
     if !dir.join(".git").exists() {
         let out = Command::new("git")
             .arg("init")
@@ -328,12 +383,17 @@ mod tests {
     use super::*;
     use crate::terminal::fakes::FakeTerminal;
 
-    fn request(name: &str, approved: bool) -> Request {
+    fn request(name: &str) -> Request {
         Request {
             name: name.into(),
             brief: "build a thing".into(),
             template: "standard".into(),
             soft_cap: None,
+        }
+    }
+
+    fn authority(approved: bool) -> Authority {
+        Authority {
             approved,
             research_argv: vec!["claude".into()],
         }
@@ -375,7 +435,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", false),
+                &request("app"),
+                &authority(false),
                 &Usage::Percent(10.0),
             )
             .unwrap();
@@ -388,7 +449,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", true),
+                &request("app"),
+                &authority(true),
                 &Usage::Percent(10.0),
             )
             .unwrap();
@@ -410,7 +472,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", true),
+                &request("app"),
+                &authority(true),
                 &Usage::Percent(10.0),
             )
             .unwrap();
@@ -419,7 +482,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", true),
+                &request("app"),
+                &authority(true),
                 &Usage::Percent(99.0),
             )
             .unwrap();
@@ -442,7 +506,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", true),
+                &request("app"),
+                &authority(true),
                 &Usage::Percent(10.0),
             )
             .unwrap_err();
@@ -454,7 +519,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("app", true),
+                &request("app"),
+                &authority(true),
                 &Usage::Percent(10.0),
             )
             .unwrap();
@@ -477,7 +543,8 @@ mod tests {
                 .spawn(
                     &mut term,
                     &root,
-                    &request(&format!("p{index}x"), true),
+                    &request(&format!("p{index}x")),
+                    &authority(true),
                     &Usage::Percent(1.0),
                 )
                 .unwrap();
@@ -486,7 +553,8 @@ mod tests {
             .spawn(
                 &mut term,
                 &root,
-                &request("extra", true),
+                &request("extra"),
+                &authority(true),
                 &Usage::Percent(1.0),
             )
             .unwrap_err();
@@ -495,7 +563,8 @@ mod tests {
         let hot = Projects::new().spawn(
             &mut FakeTerminal::new(),
             &root,
-            &request("zz", true),
+            &request("zz"),
+            &authority(true),
             &Usage::Percent(90.0),
         );
         assert!(hot
@@ -504,12 +573,187 @@ mod tests {
             .contains("five-hour usage is 90%"));
         let template = Request {
             template: "huge".into(),
-            ..request("tt", true)
+            ..request("tt")
         };
         assert!(projects
-            .spawn(&mut term, &root, &template, &Usage::Percent(1.0))
+            .spawn(
+                &mut term,
+                &root,
+                &template,
+                &authority(true),
+                &Usage::Percent(1.0)
+            )
             .unwrap_err()
             .to_string()
             .contains("only 'standard'"));
+    }
+
+    #[test]
+    fn a_name_already_on_disk_is_refused_and_its_files_are_untouched() {
+        // Finding 1: BRIEF.md of an existing directory (a shared checkout, or a project from
+        // before a restart) was overwritten and a research agent started in it.
+        let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root("exists"));
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::write(root.join("app/BRIEF.md"), "PRECIOUS").unwrap();
+        let refused = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("already exists and is not a project this daemon started"),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("app/BRIEF.md")).unwrap(),
+            "PRECIOUS"
+        );
+        assert!(term.layout_calls.is_empty(), "no workspace, no agent");
+        assert!(projects.get("app").is_none(), "and no registry entry");
+    }
+
+    #[test]
+    fn a_resumed_scaffold_never_overwrites_the_brief() {
+        let (mut term, mut projects, root) =
+            (FakeTerminal::new(), Projects::new(), root("keepbrief"));
+        term.fail_layout = Some("no server".into());
+        let _ = projects.spawn(
+            &mut term,
+            &root,
+            &request("app"),
+            &authority(true),
+            &Usage::Percent(10.0),
+        );
+        std::fs::write(root.join("app/BRIEF.md"), "edited by hand").unwrap();
+        term.fail_layout = None;
+        projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("app/BRIEF.md")).unwrap(),
+            "edited by hand"
+        );
+    }
+
+    #[test]
+    fn the_desk_cannot_supply_approval_or_the_launch_command() {
+        // Finding 2: approval and the research command are the DAEMON's (Authority); the
+        // desk's Request has neither field, so the types enforce what a review cannot.
+        let (mut term, mut projects, root) =
+            (FakeTerminal::new(), Projects::new(), root("authority"));
+        let nobody = Authority {
+            approved: true,
+            research_argv: vec![],
+        };
+        let err = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &nobody,
+                &Usage::Percent(10.0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no launch command for the research agent"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_report_step_says_it_was_not_sent() {
+        // Finding 3: a Live project must not claim a report nothing made.
+        let (mut term, mut projects, root) =
+            (FakeTerminal::new(), Projects::new(), root("reported"));
+        let live = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        let reported = live.events.iter().find(|e| e.step == "reported").unwrap();
+        assert!(!reported.ok);
+        assert!(
+            reported.detail.contains("pending: not sent"),
+            "{}",
+            reported.detail
+        );
+    }
+
+    #[test]
+    fn unapproved_names_are_bounded_and_a_bad_soft_cap_is_refused() {
+        // Finding 4.
+        let (mut term, mut projects, root) =
+            (FakeTerminal::new(), Projects::new(), root("bounded"));
+        for index in 0..MAX_AWAITING_APPROVAL {
+            projects
+                .spawn(
+                    &mut term,
+                    &root,
+                    &request(&format!("w{index}x")),
+                    &authority(false),
+                    &Usage::Percent(1.0),
+                )
+                .unwrap();
+        }
+        let refused = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("onemore"),
+                &authority(false),
+                &Usage::Percent(1.0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("MAX_AWAITING_APPROVAL"), "{refused}");
+        for bad in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            let capped = Request {
+                soft_cap: Some(bad),
+                ..request("capped")
+            };
+            assert!(
+                projects
+                    .spawn(
+                        &mut term,
+                        &root,
+                        &capped,
+                        &authority(true),
+                        &Usage::Percent(1.0)
+                    )
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        // A sane cap is accepted (on a fresh registry: this one is full of waiting names).
+        let fine = Request {
+            soft_cap: Some(25.0),
+            ..request("fine")
+        };
+        let waiting = Projects::new()
+            .spawn(
+                &mut term,
+                &root,
+                &fine,
+                &authority(false),
+                &Usage::Percent(1.0),
+            )
+            .unwrap();
+        assert_eq!(waiting.soft_cap, Some(25.0));
     }
 }
