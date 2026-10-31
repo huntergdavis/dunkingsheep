@@ -28,6 +28,7 @@ pub mod metrics;
 use crate::db;
 use crate::error::DunkError;
 
+pub mod advance;
 mod claim;
 pub mod next_job;
 pub use claim::{
