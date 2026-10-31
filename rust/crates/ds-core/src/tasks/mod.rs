@@ -592,11 +592,11 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
-                let (scope, old_priority, old_deps): (String, String, Option<String>) = tx
+                let (scope, old_priority, old_deps, old_assignees): (String, String, Option<String>, Option<String>) = tx
                     .query_row(
-                        "SELECT scope, priority, depends_on FROM tasks WHERE id = ?",
+                        "SELECT scope, priority, depends_on, assignees FROM tasks WHERE id = ?",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
@@ -619,6 +619,44 @@ impl Tasks {
                     deps_after = Some(deps);
                 }
                 let mut changed = false;
+                if let Some(parent) = &edit_for_call.parent_id {
+                    let parent = parent.as_deref().map(str::trim).filter(|p| !p.is_empty());
+                    if let Some(parent) = parent {
+                        if parent == id {
+                            return Err(DunkError::Refused("a task cannot be its own parent".into()));
+                        }
+                        let found: Option<String> = tx
+                            .query_row("SELECT id FROM tasks WHERE id = ?", params![parent], |row| row.get(0))
+                            .optional()
+                            .map_err(db::map_sqlite)?;
+                        if found.is_none() {
+                            return Err(DunkError::Refused(format!("no task with id {parent:?}")));
+                        }
+                    }
+                    tx.execute("UPDATE tasks SET parent_id = ? WHERE id = ?", params![parent, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(flag) = edit_for_call.multi_assignee {
+                    tx.execute("UPDATE tasks SET multi_assignee = ? WHERE id = ?", params![flag as i64, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(reason) = &edit_for_call.block_reason {
+                    tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(list) = &edit_for_call.assignees {
+                    let after: Vec<String> = list.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+                    let before = decode_list(old_assignees.as_deref());
+                    tx.execute("UPDATE tasks SET assignees = ? WHERE id = ?", params![json!(after).to_string(), id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                    if before != after {
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                            params![id, "assigned", now, actor, scope, old_priority,
+                                    json!({ "assignees": after }).to_string()],
+                        ).map_err(db::map_sqlite)?;
+                    }
+                }
                 if let Some(title) = &edit_for_call.title {
                     tx.execute("UPDATE tasks SET title = ? WHERE id = ?", params![title.trim(), id]).map_err(db::map_sqlite)?;
                     changed = true;
@@ -1039,6 +1077,27 @@ pub struct FieldEdit {
     pub body: Option<String>,
     pub priority: Option<String>,
     pub depends_on: Option<Vec<String>>,
+    /// `Some(None)` clears the parent; `None` leaves it alone (the Python's Ellipsis).
+    pub parent_id: Option<Option<String>>,
+    pub assignees: Option<Vec<String>>,
+    pub multi_assignee: Option<bool>,
+    /// `Some(None)` clears the reason; `None` leaves it alone.
+    pub block_reason: Option<Option<String>>,
+}
+
+/// `validate_scope`: `global`, or a pane id such as `w8:p3` or `%4`.
+pub fn validate_scope(scope: &str) -> Result<String, DunkError> {
+    static PANE_ID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pane = PANE_ID.get_or_init(|| {
+        regex::Regex::new(r"^(?:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+|%\d+)$").expect("static pattern")
+    });
+    let scope = scope.trim();
+    if scope == "global" || pane.is_match(scope) {
+        return Ok(scope.to_string());
+    }
+    Err(DunkError::Refused(format!(
+        "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {scope:?})"
+    )))
 }
 
 /// `_decode`: a JSON list, or empty when the column is NULL, unparseable or not a list.
@@ -1672,6 +1731,7 @@ mod tests {
             body: Some("new".into()),
             priority: Some("urgent".into()),
             depends_on: Some(vec![a.id.clone()]),
+            ..Default::default()
         };
         let got = tasks.update(&b.id, edit, Some("%1")).await.unwrap();
         assert_eq!(
@@ -1705,5 +1765,66 @@ mod tests {
             2,
             "a refused edit writes nothing"
         );
+    }
+
+    #[test]
+    fn validate_scope_takes_global_or_a_pane_id() {
+        for ok in ["global", " %4 ", "w8:p3"] {
+            assert!(validate_scope(ok).is_ok(), "{ok}");
+        }
+        assert_eq!(validate_scope(" %4 ").unwrap(), "%4");
+        let refused = validate_scope("nowhere").unwrap_err().to_string();
+        assert!(
+            refused.contains(
+                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got \"nowhere\")"
+            ),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_handles_parent_assignees_flag_and_block_reason() {
+        let tasks = store("update2").await;
+        let a = tasks.add("global", "a", "").await.unwrap();
+        let b = tasks.add("global", "b", "").await.unwrap();
+        let edit = FieldEdit {
+            parent_id: Some(Some(a.id.clone())),
+            assignees: Some(vec!["%1".into(), " ".into()]),
+            multi_assignee: Some(true),
+            block_reason: Some(Some("waiting".into())),
+            ..Default::default()
+        };
+        let got = tasks.update(&b.id, edit, None).await.unwrap();
+        assert_eq!(decode_list(Some(&got.assignees)), vec!["%1"]);
+        assert_eq!(got.block_reason.as_deref(), Some("waiting"));
+        assert_eq!(
+            tasks.events(&b.id).await,
+            1,
+            "assignment is the only event-worthy change"
+        );
+        let own = FieldEdit {
+            parent_id: Some(Some(b.id.clone())),
+            ..Default::default()
+        };
+        assert!(tasks
+            .update(&b.id, own, None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("its own parent"));
+        assert!(tasks
+            .delete(&a.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("child task"));
+        let clear = FieldEdit {
+            parent_id: Some(None),
+            block_reason: Some(None),
+            ..Default::default()
+        };
+        let cleared = tasks.update(&b.id, clear, None).await.unwrap();
+        assert_eq!(cleared.block_reason, None);
+        assert_eq!(tasks.delete(&a.id).await.unwrap(), a.id);
     }
 }
