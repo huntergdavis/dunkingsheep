@@ -431,4 +431,56 @@ mod registry {
             "{refused}"
         );
     }
+
+    #[test]
+    fn a_non_utf8_roles_file_is_refused_not_read_as_empty() {
+        // Python: UnicodeDecodeError is a ValueError -> "not valid JSON". An empty registry here
+        // would demote every lane AND let the next register() overwrite the corrupt file.
+        let dir = std::env::temp_dir().join(format!("ds-roles-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roles.json");
+        std::fs::write(&path, b"{\"lanes\":\xff\xfe}").unwrap();
+        let refused = Roles::new(
+            &Env::default(),
+            Some(path.clone()),
+            Some(dir.join("t.json")),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("is not valid JSON; fix it or remove it"),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{\"lanes\":\xff\xfe}",
+            "the corrupt file is untouched"
+        );
+        // A missing file is still just empty.
+        let missing = Roles::new(
+            &Env::default(),
+            Some(dir.join("absent.json")),
+            Some(dir.join("t2.json")),
+            None,
+        );
+        assert!(missing.is_ok());
+    }
+
+    #[test]
+    fn an_empty_default_override_is_not_an_override() {
+        let dir = std::env::temp_dir().join(format!("ds-roles-emptydef-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let roles = Roles::new(
+            &Env::default(),
+            Some(dir.join("none.json")),
+            Some(dir.join("t.json")),
+            Some(""),
+        )
+        .unwrap();
+        assert_eq!(
+            roles.default, "worker",
+            "Python: `default or DEFAULT_ROLE`, '' is falsy, bootstrap applies"
+        );
+    }
 }

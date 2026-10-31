@@ -72,16 +72,23 @@ fn token_urlsafe() -> Result<String, DunkError> {
 /// `_read_json`: a missing or unreadable file is `{}`; invalid JSON is a named refusal; a
 /// non-object is `{}`.
 fn read_json(path: &Path) -> Result<Map<String, Value>, DunkError> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // Python maps only OSError to `{}`; bytes that are not UTF-8 raise UnicodeDecodeError (a
+    // ValueError), which is the "not valid JSON" refusal - NOT an empty registry, because the
+    // next register() would overwrite the corrupt file and destroy the registrations.
+    let invalid = || {
+        role_error(format!(
+            "{} is not valid JSON; fix it or remove it",
+            path.display()
+        ))
+    };
+    let Ok(bytes) = std::fs::read(path) else {
         return Ok(Map::new());
     };
+    let text = String::from_utf8(bytes).map_err(|_| invalid())?;
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(map)) => Ok(map),
         Ok(_) => Ok(Map::new()),
-        Err(_) => Err(role_error(format!(
-            "{} is not valid JSON; fix it or remove it",
-            path.display()
-        ))),
+        Err(_) => Err(invalid()),
     }
 }
 
@@ -142,13 +149,16 @@ impl Roles {
         let mut roles = Roles {
             path,
             tokens_path,
-            default_override: default.map(String::from),
+            default_override: default.filter(|d| !d.is_empty()).map(String::from),
             lanes: BTreeMap::new(),
             reviewer_providers: DEFAULT_REVIEWER_PROVIDERS
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            default: default.unwrap_or(DEFAULT_ROLE).to_string(),
+            default: default
+                .filter(|d| !d.is_empty())
+                .unwrap_or(DEFAULT_ROLE)
+                .to_string(),
             tokens: BTreeMap::new(),
             stamp: None,
             tokens_stamp: None,
