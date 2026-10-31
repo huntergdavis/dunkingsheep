@@ -41,7 +41,10 @@ pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkErro
         .parent()
         .ok_or_else(|| DunkError::Refused(format!("{} has no parent directory", path.display())))?;
     fs::create_dir_all(directory)?;
-    let text = serde_json::to_string_pretty(value)? + "\n";
+    // State files are written with sorted keys (the Python's `sort_keys=True`). serde_json now
+    // keeps insertion order (`preserve_order`), so sort explicitly instead of leaning on a
+    // BTreeMap: the file bytes and the order a reader sees stay what they were.
+    let text = serde_json::to_string_pretty(&sorted_keys(serde_json::to_value(value)?))? + "\n";
     let temporary = temporary_path(path);
     {
         let mut file = OpenOptions::new()
@@ -61,6 +64,25 @@ pub fn write<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), DunkErro
         DunkError::Refused(format!("rename {}: {error}", path.display()))
     })?;
     Ok(())
+}
+
+/// Every object's keys in sorted order, at every depth.
+pub fn sorted_keys(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, sorted_keys(v)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted_keys).collect()),
+        other => other,
+    }
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
