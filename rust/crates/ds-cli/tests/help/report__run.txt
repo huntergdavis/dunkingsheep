@@ -1,0 +1,10 @@
+usage: dunkingsheep report run [-h] [--no-post] [--prose PROSE]
+                               [--prose-file PROSE_FILE] [--out-dir OUT_DIR]
+
+options:
+  -h, --help            show this help message and exit
+  --no-post             write the file only; do not post to the owner mailbox
+  --prose PROSE         plain-language paragraph (rejected if it names a task
+                        id or status the report does not contain)
+  --prose-file PROSE_FILE
+  --out-dir OUT_DIR

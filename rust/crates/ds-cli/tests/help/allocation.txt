@@ -1,0 +1,22 @@
+usage: dunkingsheep allocation [-h] [--pane-id PANE_ID] [--pool POOL]
+                               [--pools POOLS] [--roles {worker,reviewer}]
+                               [--skills SKILLS] [--requires REQUIRES]
+                               [--task-id TASK_ID] [--revision REVISION]
+                               [--body BODY] [--disable]
+                               {status,register,offer,review}
+
+positional arguments:
+  {status,register,offer,review}
+
+options:
+  -h, --help            show this help message and exit
+  --pane-id PANE_ID
+  --pool POOL
+  --pools POOLS
+  --roles {worker,reviewer}
+  --skills SKILLS
+  --requires REQUIRES
+  --task-id TASK_ID
+  --revision REVISION
+  --body BODY
+  --disable

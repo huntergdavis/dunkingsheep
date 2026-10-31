@@ -10,6 +10,7 @@ inbox.db
 # large local source recording (demo mp4 is committed instead)
 *.log
 metrics.db
+!rust/fixtures/tasks/metrics.db
 *.pyc
 __pycache__/
 *.pyo
@@ -39,6 +40,8 @@ owner-credentials
 *-credentials
 *.pem
 *token*
+# help goldens for the token commands are plain help text, not secrets (t1243)
+!rust/crates/ds-cli/tests/help/*token*
 .env
 *.key
 

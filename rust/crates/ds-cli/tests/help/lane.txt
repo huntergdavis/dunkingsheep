@@ -1,0 +1,14 @@
+usage: dunkingsheep lane [-h] <action> ...
+
+positional arguments:
+  <action>
+    list        every lane row: pane, name, declared?, alive?
+    register    bind a role to a pane's root process (owner only; the first
+                owner may self-register)
+    unregister  remove a pane's role binding (owner only)
+    set         declare who a pane IS (superuser); overrides any title
+
+options:
+  -h, --help    show this help message and exit
+
+examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'

@@ -1,0 +1,6 @@
+usage: dunkingsheep token issue [-h] --role {web,system,owner} [--label LABEL]
+
+options:
+  -h, --help            show this help message and exit
+  --role {web,system,owner}
+  --label LABEL

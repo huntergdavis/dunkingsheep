@@ -1,0 +1,9 @@
+usage: dunkingsheep owner push [-h] [--subject SUBJECT] target body [body ...]
+
+positional arguments:
+  target
+  body
+
+options:
+  -h, --help            show this help message and exit
+  --subject, -s SUBJECT

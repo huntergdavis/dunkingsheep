@@ -1,0 +1,7 @@
+usage: dunkingsheep inbox count [-h] [mailbox]
+
+positional arguments:
+  mailbox     agent name, pane id or 'self' (default self)
+
+options:
+  -h, --help  show this help message and exit

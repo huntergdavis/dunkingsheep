@@ -1,0 +1,7 @@
+usage: dunkingsheep list [-h]
+
+List every dunk: id, running, live status, target, interval, sends (done/max),
+idle gate, text.
+
+options:
+  -h, --help  show this help message and exit

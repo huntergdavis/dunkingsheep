@@ -1,0 +1,8 @@
+usage: dunkingsheep turn end [-h] [--pane PANE] [--reason REASON]
+                             [--turn-id TURN_ID]
+
+options:
+  -h, --help         show this help message and exit
+  --pane PANE        pane id (default: the caller's)
+  --reason REASON
+  --turn-id TURN_ID  generation returned by --json turn start

@@ -1,0 +1,15 @@
+usage: dunkingsheep guard [-h] [--no-shadow]
+                          [{status,install,install-tmux,uninstall,check,shadow,unshadow}]
+
+Agents that call the terminal CLI directly bypass every protection in the daemon. On the herdr rollback backend the guard is a herdr wrapper, first on PATH, that routes exactly the four typing commands through the daemon instead. Every other herdr command is untouched.
+
+positional arguments:
+  {status,install,install-tmux,uninstall,check,shadow,unshadow}
+
+options:
+  -h, --help            show this help message and exit
+  --no-shadow           install the PATH wrapper only; do not take herdr's own
+                        place (agents the herdr server starts itself will not
+                        be covered)
+
+new shells pick it up; existing panes need a fresh shell

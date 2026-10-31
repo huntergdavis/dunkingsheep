@@ -1,0 +1,7 @@
+usage: dunkingsheep message-state [-h] ids
+
+positional arguments:
+  ids         comma-separated message ids
+
+options:
+  -h, --help  show this help message and exit

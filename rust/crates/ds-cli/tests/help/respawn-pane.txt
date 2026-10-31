@@ -1,0 +1,23 @@
+usage: dunkingsheep respawn-pane [-h] --expected-pid EXPECTED_PID
+                                 --expected-start EXPECTED_START
+                                 [--confirm-idle] [--reason REASON]
+                                 --command-json COMMAND_JSON
+                                 [--rollback-json ROLLBACK_JSON]
+                                 pane
+
+positional arguments:
+  pane
+
+options:
+  -h, --help            show this help message and exit
+  --expected-pid EXPECTED_PID
+                        exact live pane pid
+  --expected-start EXPECTED_START
+                        exact /proc start time for --expected-pid
+  --confirm-idle        required; checked against
+                        turns/leases/mail/outbox/screen
+  --reason REASON       why this pane is being replaced
+  --command-json COMMAND_JSON
+                        replacement argv as a JSON array of strings
+  --rollback-json ROLLBACK_JSON
+                        argv JSON to restore if the replacement fails

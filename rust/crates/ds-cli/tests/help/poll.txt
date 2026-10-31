@@ -1,0 +1,16 @@
+usage: dunkingsheep poll [-h] [--mailbox MAILBOX] [--limit LIMIT] [--panes]
+                         [--tasks] [--task-scope {global,self}]
+                         [--include-done] [--check-herdr]
+
+Read-only batch used by the sidebar poller. It does not mark mail read;
+panes/tasks are opt-in.
+
+options:
+  -h, --help            show this help message and exit
+  --mailbox MAILBOX     mailbox to poll (default: the caller's)
+  --limit LIMIT         unread messages to return (default 5)
+  --panes               include the pane list (slow; startup only)
+  --tasks               include the caller's task queue
+  --task-scope {global,self}
+  --include-done
+  --check-herdr         probe the terminal backend (slow; default off)

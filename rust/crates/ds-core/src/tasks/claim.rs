@@ -13,20 +13,11 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
 use super::{
-    decode_list, default_lease_s, dependency_state_in, order_key, validate_scope, Task, Tasks,
+    decode_list, default_lease_s, dependency_state_conn, order_key, validate_scope, Lease, Task,
+    Tasks,
 };
 use crate::db;
 use crate::error::DunkError;
-
-/// One live lease row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Lease {
-    pub task_id: String,
-    pub pane_id: String,
-    pub claimed_at: f64,
-    pub heartbeat_at: f64,
-    pub expires_at: f64,
-}
 
 /// What `_claimable` and `_refusal` read from a decorated task.
 #[derive(Debug, Clone, Default)]
@@ -136,21 +127,6 @@ fn lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lease> {
 const LEASE_COLUMNS: &str = "task_id, pane_id, claimed_at, heartbeat_at, expires_at";
 
 impl Tasks {
-    /// Live leases for a task: expired rows are ignored.
-    pub async fn leases_for(&self, id: &str, now: Option<f64>) -> Result<Vec<Lease>, DunkError> {
-        let id = id.to_string();
-        let now = now.unwrap_or_else(crate::clock::now_s);
-        self.writer
-            .call(move |conn| {
-                let mut stmt = conn
-                    .prepare(&format!("SELECT {LEASE_COLUMNS} FROM task_leases WHERE task_id = ? AND expires_at > ?"))
-                    .map_err(db::map_sqlite)?;
-                let rows = stmt.query_map(params![id, now], lease_from_row).map_err(db::map_sqlite)?;
-                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
-            })
-            .await
-    }
-
     /// Live leases held by a pane.
     pub async fn leases_for_pane(
         &self,
@@ -356,7 +332,7 @@ impl Tasks {
                         .map_err(db::map_sqlite)?
                         .collect::<Result<_, _>>()
                         .map_err(db::map_sqlite)?;
-                    row.candidate.blocked_by = dependency_state_in(&tx, &id)?.blocked_by;
+                    row.candidate.blocked_by = dependency_state_conn(&tx, &id)?.1.blocked_by;
                     // The allocation table may not exist yet (the Python tolerates that).
                     let offer: Option<String> = match tx
                         .query_row("SELECT owners FROM allocation_offers WHERE task_id = ? AND state = 'ready'",
@@ -396,7 +372,10 @@ impl Tasks {
                 }
                 let chosen = rows.iter().find(|row| {
                     row.candidate.blocked_by.is_empty()
-                        && options.kinds.as_ref().is_none_or(|kinds| kinds.contains(&row.kind))
+                        && options
+                            .kinds
+                            .as_ref()
+                            .is_none_or(|kinds| kinds.is_empty() || kinds.contains(&row.kind))
                         && !options.exclude_author.as_ref().is_some_and(|who| row.author.as_ref() == Some(who))
                         && claimable(&row.candidate, Some(&pane))
                 });

@@ -1,0 +1,18 @@
+usage: dunkingsheep task list [-h]
+                              [--status {open,in_progress,blocked,done,cancelled}]
+                              [--assignee PANE] [--all] [--limit LIMIT]
+                              [--kind {work,review,verify,report}]
+                              [--needs-owner]
+                              [scope]
+
+positional arguments:
+  scope                 'global', 'self' or a pane id
+
+options:
+  -h, --help            show this help message and exit
+  --status {open,in_progress,blocked,done,cancelled}
+  --assignee PANE
+  --all                 include done/cancelled
+  --limit, -n LIMIT
+  --kind {work,review,verify,report}
+  --needs-owner         only tasks blocked on a 'needs-owner:' question

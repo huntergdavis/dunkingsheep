@@ -1,0 +1,13 @@
+usage: dunkingsheep task metrics [-h] [--window SECONDS] [--since EPOCH]
+                                 [--until EPOCH] [--bucket {hour,day}]
+                                 [scope]
+
+positional arguments:
+  scope                'all' (default), 'global', 'self' or a pane id
+
+options:
+  -h, --help           show this help message and exit
+  --window SECONDS     window ending now (default 3600)
+  --since EPOCH
+  --until EPOCH
+  --bucket {hour,day}

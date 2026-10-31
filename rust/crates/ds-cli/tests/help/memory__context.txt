@@ -1,0 +1,8 @@
+usage: dunkingsheep memory context [-h] [--sessions SESSIONS] query
+
+positional arguments:
+  query
+
+options:
+  -h, --help           show this help message and exit
+  --sessions SESSIONS

@@ -1,0 +1,20 @@
+usage: dunkingsheep owner ingest [-h] [--body-file BODY_FILE]
+                                 [--external-id EXTERNAL_ID]
+                                 [--subject SUBJECT] [--attach ATTACH]
+                                 {web,telegram,report} [body ...]
+
+positional arguments:
+  {web,telegram,report}
+  body
+
+options:
+  -h, --help            show this help message and exit
+  --body-file BODY_FILE
+  --external-id EXTERNAL_ID
+  --subject, -s SUBJECT
+  --attach ATTACH       local file paths, comma separated
+
+A bridge does not keep its own store: the question lands in the one owner
+mailbox with its transport, and 'owner reply' answers it back the same way.
+--external-id is the transport's own id (telegram:<update_id>), so a
+redelivered update returns the row it already produced.

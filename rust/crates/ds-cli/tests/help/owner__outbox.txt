@@ -1,0 +1,11 @@
+usage: dunkingsheep owner outbox [-h] [--limit LIMIT] {web,telegram,report}
+
+positional arguments:
+  {web,telegram,report}
+
+options:
+  -h, --help            show this help message and exit
+  --limit LIMIT
+
+Only replies whose own transport matches are returned, so Telegram carries
+answers and nothing else: no briefs, no digests, no web echoes.

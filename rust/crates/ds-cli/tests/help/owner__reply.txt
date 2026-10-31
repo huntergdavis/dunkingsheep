@@ -1,0 +1,13 @@
+usage: dunkingsheep owner reply [-h] [--body-file BODY_FILE]
+                                message_id [body ...]
+
+positional arguments:
+  message_id
+  body
+
+options:
+  -h, --help            show this help message and exit
+  --body-file BODY_FILE
+
+The reply goes back on the transport the question arrived on, and answering
+acks the question, so 'answered' is one fact. One answer per question.

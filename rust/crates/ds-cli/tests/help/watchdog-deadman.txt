@@ -1,0 +1,31 @@
+usage: dunkingsheep watchdog-deadman [-h] [--heartbeat HEARTBEAT]
+                                     --cadence-minutes CADENCE_MINUTES
+                                     [--multiplier MULTIPLIER] --to TO
+                                     [--state STATE] [--error-file ERROR_FILE]
+                                     [--status STATUS] [--inbox INBOX]
+                                     [--socket DAEMON_PATH]
+                                     [--expected-socket-dir EXPECTED_DIR]
+                                     --cooldown-minutes COOLDOWN_MINUTES
+                                     [--dry-run] [--now NOW]
+
+options:
+  -h, --help            show this help message and exit
+  --heartbeat HEARTBEAT
+  --cadence-minutes CADENCE_MINUTES
+  --multiplier MULTIPLIER
+  --to TO               VP mailbox
+  --state STATE
+  --error-file ERROR_FILE
+                        raw watchdog config refusal to include in the alert
+  --status STATUS       last-resort record when the socket send AND the direct
+                        inbox write fail
+  --inbox INBOX         inbox store for the direct-write fallback when the
+                        daemon is unreachable
+  --socket DAEMON_PATH  daemon socket (default: $DUNKINGSHEEP_SOCKET or
+                        ~/.config/dunkingsheep/dunkingsheep.sock)
+  --expected-socket-dir EXPECTED_DIR
+                        the socket must live here; anything else is a CONFIG
+                        refusal, not 'daemon down'
+  --cooldown-minutes COOLDOWN_MINUTES
+  --dry-run
+  --now NOW

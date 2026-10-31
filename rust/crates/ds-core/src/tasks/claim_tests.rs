@@ -489,3 +489,25 @@ async fn two_claimers_on_one_file_cannot_both_win_the_same_exclusive_task() {
         "the loser sees the winner's commit"
     );
 }
+
+#[tokio::test]
+async fn an_empty_kinds_list_applies_no_filter_like_the_pythons_falsy_set() {
+    let tasks = store("empty-kinds").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let got = tasks
+        .claim_next(
+            "global",
+            "%1",
+            ClaimOptions {
+                kinds: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&got),
+        task.id,
+        "Python: `set(kinds) if kinds else None`"
+    );
+}

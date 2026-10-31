@@ -1,0 +1,7 @@
+usage: dunkingsheep cancel-message [-h] message_id
+
+positional arguments:
+  message_id
+
+options:
+  -h, --help  show this help message and exit
