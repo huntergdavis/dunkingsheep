@@ -981,6 +981,131 @@ impl Tasks {
 }
 
 /// A status after which the task is not being worked (`dunk_tasks` terminal set).
+/// One live lease row (`leases_for`; T12 t787 owns claim/heartbeat/release, this is the read side).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lease {
+    /// The pane holding it.
+    pub pane_id: String,
+    /// Unix seconds.
+    pub claimed_at: f64,
+    /// Unix seconds.
+    pub heartbeat_at: f64,
+    /// Unix seconds.
+    pub expires_at: f64,
+}
+
+/// A task row with the fields `dunk_tasks._decorate` adds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decorated {
+    /// The stored row.
+    pub task: Task,
+    /// Decoded `assignees`.
+    pub assignees: Vec<String>,
+    /// Decoded `depends_on`.
+    pub depends_on: Vec<String>,
+    /// `multi_assignee` column.
+    pub multi_assignee: bool,
+    /// `scope == "global"`.
+    pub is_global: bool,
+    /// Live (unexpired) leases.
+    pub leases: Vec<Lease>,
+    /// Pane ids of the leases.
+    pub claimed_by: Vec<String>,
+    /// Earliest lease expiry.
+    pub lease_expires_at: Option<f64>,
+    /// Dependencies whose status is not `done`.
+    pub blocked_by: Vec<String>,
+    /// Per-viewer: may `pane_id` take it (F2).
+    pub claimable: bool,
+    /// open/in_progress, unblocked and claimable.
+    pub eligible: bool,
+}
+
+/// `Tasks._claimable`: whether `pane_id` may take this task right now.
+pub fn claimable(
+    status: &str,
+    assignees: &[String],
+    multi: bool,
+    leases: &[Lease],
+    pane_id: Option<&str>,
+) -> bool {
+    let pane = pane_id.filter(|p| !p.is_empty());
+    if let Some(p) = pane {
+        if leases.iter().any(|l| l.pane_id == p) {
+            return false; // already holds this one
+        }
+    }
+    if !leases.is_empty() {
+        return multi;
+    }
+    let mine = pane.is_some_and(|p| assignees.iter().any(|a| a == p));
+    match status {
+        // F2: a named assignee can pull its own task.
+        "open" => assignees.is_empty() || multi || mine,
+        "in_progress" => multi || mine,
+        _ => false,
+    }
+}
+
+impl Tasks {
+    /// `Tasks._decorate` for one task id, as seen by `pane_id` (None = generic list view).
+    pub async fn decorated(&self, id: &str, pane_id: Option<&str>) -> Result<Decorated, DunkError> {
+        let wanted = id.to_string();
+        let pane = pane_id.map(str::to_string);
+        let now = crate::clock::now_s();
+        let found = self.writer.call(move |conn| {
+            let row = conn.query_row(
+                "SELECT id, scope, title, body, status, priority, kind, assignees, depends_on, block_reason, created_at, updated_at, multi_assignee FROM tasks WHERE id = ?",
+                params![wanted],
+                |r| Ok((row_to_task(r)?, r.get::<_, i64>(12)? != 0)),
+            ).optional().map_err(db::map_sqlite)?;
+            let Some((task, multi)) = row else { return Ok(None) };
+            let mut stmt = conn.prepare(
+                "SELECT pane_id, claimed_at, heartbeat_at, expires_at FROM task_leases WHERE task_id = ?",
+            ).map_err(db::map_sqlite)?;
+            let leases: Vec<Lease> = stmt.query_map(params![task.id], |r| Ok(Lease {
+                pane_id: r.get(0)?, claimed_at: r.get(1)?, heartbeat_at: r.get(2)?, expires_at: r.get(3)?,
+            })).map_err(db::map_sqlite)?
+                .collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)?
+                .into_iter().filter(|l| l.expires_at > now).collect();
+            let depends_on = decode_list(Some(&task.depends_on));
+            let mut blocked_by = Vec::new();
+            for dep in &depends_on {
+                let status: Option<String> = conn.query_row(
+                    "SELECT status FROM tasks WHERE id = ?", params![dep], |r| r.get(0),
+                ).optional().map_err(db::map_sqlite)?;
+                if status.as_deref() != Some("done") {
+                    blocked_by.push(dep.clone());
+                }
+            }
+            Ok(Some((task, multi, leases, depends_on, blocked_by)))
+        }).await?;
+        let (task, multi, leases, depends_on, blocked_by) =
+            found.ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+        let assignees = decode_list(Some(&task.assignees));
+        let can_claim = match pane.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => claimable(&task.status, &assignees, multi, &leases, Some(p)),
+            None => assignees.is_empty() || multi,
+        };
+        let eligible = matches!(task.status.as_str(), "open" | "in_progress")
+            && blocked_by.is_empty()
+            && can_claim;
+        Ok(Decorated {
+            is_global: task.scope == "global",
+            claimed_by: leases.iter().map(|l| l.pane_id.clone()).collect(),
+            lease_expires_at: leases.iter().map(|l| l.expires_at).reduce(f64::min),
+            task,
+            assignees,
+            depends_on,
+            multi_assignee: multi,
+            leases,
+            blocked_by,
+            claimable: can_claim,
+            eligible,
+        })
+    }
+}
+
 fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "cancelled")
 }
@@ -2050,5 +2175,47 @@ mod tests {
             ],
             "created once, completed once: completing a done task fires nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unleased_task_assigned_to_another_pane_is_not_claimable() {
+        let s = store("decorate-assigned").await;
+        let t = s.add("global", "owned elsewhere", "").await.unwrap();
+        s.assign(&t.id, &["w9:p9"], "add").await.unwrap();
+        assert!(!s.decorated(&t.id, Some("w2:p1")).await.unwrap().claimable);
+        let mine = s.decorated(&t.id, Some("w9:p9")).await.unwrap();
+        assert!(mine.claimable && mine.eligible);
+        // generic view: an assigned task is not advertised as claimable
+        assert!(!s.decorated(&t.id, None).await.unwrap().claimable);
+    }
+
+    #[tokio::test]
+    async fn leases_claimed_by_and_blocked_by_are_decorated() {
+        let s = store("decorate-leases").await;
+        let dep = s.add("global", "dep", "").await.unwrap();
+        let t = s.add("global", "work", "").await.unwrap();
+        s.claim_for_test(&t.id, "w1:p1").await;
+        let d = s.decorated(&t.id, Some("w1:p1")).await.unwrap();
+        assert_eq!(d.claimed_by, vec!["w1:p1".to_string()]);
+        assert!(d.lease_expires_at.is_some());
+        assert!(!d.claimable, "already holds this one");
+        assert!(d.is_global);
+        assert!(!s.decorated(&t.id, Some("w2:p2")).await.unwrap().claimable);
+        assert_eq!(
+            s.decorated(&dep.id, None).await.unwrap().lease_expires_at,
+            None
+        );
+    }
+
+    #[test]
+    fn claimable_follows_the_f2_rules() {
+        let none: Vec<String> = vec![];
+        let me = vec!["a".to_string()];
+        assert!(claimable("open", &none, false, &[], Some("a")));
+        assert!(claimable("open", &me, false, &[], Some("a")));
+        assert!(!claimable("open", &me, false, &[], Some("b")));
+        assert!(claimable("in_progress", &me, false, &[], Some("a")));
+        assert!(!claimable("in_progress", &none, false, &[], Some("a")));
+        assert!(!claimable("done", &none, true, &[], Some("a")));
     }
 }
