@@ -81,6 +81,14 @@ read-only tooling, **P3** TUI and web.
 | T55 | allocator.rs, fallback.rs, recovery.rs, native_session.rs, http.rs | T35 | those | the named modules | their test files | |
 | T56 | Phase-2 cutover of the timer units | T46 T50-T55 | packaging edits | - | - | every `dunkingsheep-*.service` ExecStart runs the Rust binary; one week of timers with no diff vs the Python outputs recorded in parallel |
 
+## Parity carry-over for T39 (api.rs)
+
+`api.rs` does not exist yet (T39 depends on T31-T38), so these Python changes since the manifest (70876c2) have no Rust counterpart to edit today. T39 must port them, by name, with the tests named here:
+
+- `dunk_api.py::_gate_unread` (t1053, 289306c): sweep unread gate counts only fresh lane/owner mail, `since` = the lane's last turn `ended_at`, 600 s window, appends to `expired` when mail is expired and none fresh. Test: `tests/test_dunk_gate_unread.py`. Needs `inbox.gate_unread` in `inbox.rs` first.
+- `dunk_api.py::h_dispatch`: add/remove/tick require the owner or system role; status and list stay open (message text asserted by tests).
+- `dunk_api.py::h_task_complete`: forwards `landed` (default true, via `_bool`) to `task_complete` (126ee15).
+
 ## Phase 3: TUI and web
 
 | id | title | depends | creates | ports | tests | acceptance |
