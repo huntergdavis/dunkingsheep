@@ -7,3 +7,4 @@ pub mod local;
 pub mod render;
 pub mod render_fleet;
 pub mod spec;
+pub mod usage_cmd;
