@@ -24,6 +24,7 @@ pub mod inbox_store;
 pub mod lock;
 pub mod memory;
 pub mod metrics;
+pub mod owner;
 pub mod pane_record;
 pub mod panes;
 pub mod proc;
