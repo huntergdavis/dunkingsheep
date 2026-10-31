@@ -1123,7 +1123,16 @@ class PushAndReleaseTests(unittest.TestCase):
         self.flock._push_tasks()
         self.assertEqual([], self.flock.tasks.leases_for_pane(self.WORKER),
                          "a worker was pushed a review it cannot complete")
-        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+        # t972: this used to assert the task stayed 'open', which was the rule
+        # BEFORE #127: 'registration is the subscription', so the sweep now feeds the
+        # REGISTERED reviewer lane in the same fixture and the task is in_progress.
+        # The property this test is named for - a worker is never handed a review it
+        # cannot complete - is the assertion above, and it still holds. Asserting
+        # yesterday's status made every later rebase of this branch look like a
+        # regression, so the assertion now names whoever holds the lease instead.
+        holders = [lease["pane_id"] for lease in self.flock.tasks.leases_for(task["id"])]
+        self.assertEqual([self.REVIEWER], holders,
+                         "the lease went to the registered REVIEWER, never the worker")
 
     def test_a_reviewer_follower_is_not_pushed_a_review_it_authored(self):
         own = self.review(author=self.REVIEWER, number=1632)

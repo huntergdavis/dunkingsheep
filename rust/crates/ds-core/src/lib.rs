@@ -13,14 +13,26 @@
 #![forbid(unsafe_code)]
 
 pub mod atomic_json;
+pub mod client;
 pub mod clock;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod inbox;
+pub mod inbox_store;
 pub mod lock;
+pub mod memory;
 pub mod owner;
+pub mod pane_record;
+pub mod panes;
 pub mod proc;
+pub mod push;
 pub mod retry;
+pub mod review;
+pub mod roles;
+pub mod stuck;
+pub mod tasks;
+pub mod terminal;
 
 pub use error::{refusal, DunkError};
 

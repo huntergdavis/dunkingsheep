@@ -66,6 +66,16 @@ function useDashRoute() {
   return { standalone: path === '/dash' || path.startsWith('/dash/'), view, known: view in DASH_ROUTES };
 }
 
+// How the desk was told about an owner message (t1166): 'sent' (typed straight in) and 'nudged'
+// (inbox line) are fine and need no note; 'queued' and 'unconfirmed' are the daemon's own words.
+function notifyNote(notify) {
+  const state = notify?.state;
+  if (state === 'sent' || state === 'nudged') return '';
+  if (state === 'queued') return ' · held by the typing guard; it arrives when the desk box is clear';
+  if (state === 'unconfirmed') return ' · sent, not confirmed; the desk may already have it';
+  return ` · ${notify?.detail || 'desk not reached'}`;
+}
+
 function DashHeader({ side, view, standalone }) {
   if (!side && (!view || standalone)) return null;
   return <header className="dash-header">
@@ -257,7 +267,7 @@ function MessageCard({ item, highlight, onSendNow, onInspect }) {
       <Message.CustomContent><div className="markdown"><ReactMarkdown>{item.body}</ReactMarkdown></div>
         {item.attachments?.length > 0 && <div className="attachments">{item.attachments.map(a => <div key={a.id} className="attachment-card">{['image/png','image/jpeg','image/gif','image/webp'].includes(a.mime) && <a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer"><img src={`/api/uploads/${a.id}?preview=true`} loading="lazy" alt={a.filename} /></a>}<a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer">📎 {a.filename}</a></div>)}</div>}</Message.CustomContent>
     </Message>
-    {owner && item.delivery === 'queued' && <div className={`queue-help ${heldForDraft && waitingMinutes >= 2 ? 'long-wait' : ''}`} role={heldForDraft && waitingMinutes >= 2 ? 'alert' : undefined}><span>{heldForDraft && waitingMinutes >= 2 ? 'Action needed: VP input box has an unfinished draft' : heldForDraft ? 'Waiting for the VP input box to clear' : (item.delivery_detail || 'Waiting for guarded delivery')} · {waitingMinutes < 1 ? 'under 1 min' : `${waitingMinutes} min`}</span>{heldForDraft && <button onClick={() => onSendNow(item)}>Send now</button>}</div>}
+    {owner && item.delivery === 'queued' && <div className={`queue-help ${heldForDraft && waitingMinutes >= 2 ? 'long-wait' : ''}`} role={heldForDraft && waitingMinutes >= 2 ? 'alert' : undefined}><span>{heldForDraft && waitingMinutes >= 2 ? 'Action needed: the lane input box has an unfinished draft' : heldForDraft ? 'Waiting for the lane input box to clear' : (item.delivery_detail || 'Waiting for guarded delivery')} · {waitingMinutes < 1 ? 'under 1 min' : `${waitingMinutes} min`}</span>{heldForDraft && <button onClick={() => onSendNow(item)}>Send now</button>}</div>}
     {owner && item.delivery === 'inbox' && waitingSeconds >= 30 && <div className={`queue-help ${waitingMinutes >= 2 ? 'long-wait' : ''}`} role={waitingMinutes >= 2 ? 'alert' : undefined}><span>{item.delivery_detail || 'Stored in agent inbox'}; waiting for agent pickup · {waitingMinutes < 1 ? `${waitingSeconds} sec` : `${waitingMinutes} min`}</span></div>}
     {owner && item.delivery === 'failed' && <div className="queue-help"><span>{item.delivery_detail || 'Delivery failed; retrying when transport recovers'}</span></div>}
     {owner && item.delivery === 'uncertain' && <div className="queue-help"><span>Delivery uncertain. Check agent activity before resending.</span><button onClick={onInspect}>Live signal</button></div>}
@@ -267,7 +277,7 @@ function MessageCard({ item, highlight, onSendNow, onInspect }) {
 function ForceSendDialog({ item, busy, onClose, onConfirm }) {
   return <div className="modal-backdrop" onMouseDown={onClose}><div className="settings-modal" onMouseDown={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Send queued message now">
     <div className="settings-head"><div><div className="eyebrow">DELIVERY OVERRIDE</div><h2>Send this message now?</h2></div><button className="icon-button" onClick={onClose} aria-label="Close">×</button></div>
-    <p className="override-copy">The VP pane appears to contain an unfinished draft. Sending now may combine your message with that draft. The queued copy will be cancelled first to prevent a duplicate.</p>
+    <p className="override-copy">The lane's pane appears to contain an unfinished draft. Sending now may combine your message with that draft. The queued copy will be cancelled first to prevent a duplicate.</p>
     <div className="override-actions"><button onClick={onClose} disabled={busy}>Keep waiting</button><button className="primary" onClick={() => onConfirm(item)} disabled={busy}>{busy ? 'Sending…' : 'Send now'}</button></div>
   </div></div>;
 }
@@ -689,11 +699,67 @@ function Budget({ data }) {
   </section>;
 }
 
+function NeedsOwner({ rows, asks, onAnswer, onNotNow, busy }) {
+  // DESK_DESIGN 4.1 (t997): the questions the owner owes an answer to, at the top of the
+  // desk. Each row shows the LANE'S QUESTION VERBATIM (the board carries it, the desk does
+  // not paraphrase), its age and what an answer unblocks. Collapses to one line when there
+  // is nothing waiting, because an empty panel that still takes a screen is a lie about
+  // how much there is to do.
+  const [reply, setReply] = useState({});
+  const age = seconds => seconds == null ? 'unknown' : seconds < 3600
+    ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+  if (!rows.length) return <p className="ops-owner-empty" data-ops-section="needs-owner">Nothing needs your decision.</p>;
+  return <section className="ops-owner" data-ops-section="needs-owner" aria-label="Decisions you owe">
+    <h2>Decisions you owe <span className="ops-owner-count">{rows.length}</span></h2>
+    <ul>
+      {rows.map(row => <li key={row.id}>
+        <div className="ops-owner-line">
+          <code>{row.id}</code>
+          <span className="ops-owner-question">{row.needs_owner_question}</span>
+          <span className="ops-owner-age" title={`waiting ${age(row.age_s)}`}>{age(row.age_s)}</span>
+        </div>
+        {row.blocks?.length > 0 && <p className="ops-owner-blocks">
+          unblocks {row.blocks.map(id => <code key={id}>{id}</code>)}
+        </p>}
+        <div className="ops-owner-reply">
+          <input aria-label={`Answer ${row.id}`} placeholder="Answer the lane…"
+                 value={reply[row.id] || ''}
+                 onChange={event => setReply(state => ({ ...state, [row.id]: event.target.value }))} />
+          <button disabled={busy || !(reply[row.id] || '').trim()}
+                  onClick={() => { onAnswer(row.id, reply[row.id]); setReply(state => ({ ...state, [row.id]: '' })); }}>
+            Answer
+          </button>
+          <button className="ops-owner-notnow" disabled={busy} onClick={() => onNotNow(row.id)}>Not now</button>
+        </div>
+      </li>)}
+    </ul>
+    {asks?.length > 0 && <div className="ops-owner-asks">
+      <h3>What I asked for <span className="dash-meta">last 24h</span></h3>
+      <ul>{asks.map(ask => <li key={ask.id}>
+        <code>{ask.id}</code> <span className={`ops-chip ops-chip-${ask.status}`}>{ask.status}</span>
+        <span className="ops-owner-question">{ask.title}</span>
+        <span className="ops-owner-age">{age(ask.age_s)}</span>
+      </li>)}</ul>
+    </div>}
+  </section>;
+}
+
 function OpsBoard({ standalone = false }) {
   const poolrad = usePoolradProgress();
   const [board, setBoard] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [acting, setActing] = useState(false);
+  async function answer(taskId, reply) {
+    setActing(true);
+    try { await api('/ops-board/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId, reply }) }); await load(true); }
+    catch (e) { setError(e.message); } finally { setActing(false); }
+  }
+  async function notNow(taskId) {
+    setActing(true);
+    try { await api('/ops-board/not-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task_id: taskId }) }); await load(true); }
+    catch (e) { setError(e.message); } finally { setActing(false); }
+  }
   async function load(force = false) {
     setBusy(true);
     try {
@@ -720,6 +786,9 @@ function OpsBoard({ standalone = false }) {
       {error && <p className="dash-error" role="alert">{error}</p>}
       {board?.refresh_error && <p className="dash-error" role="alert">Refresh failed; showing the last snapshot.</p>}
       {board && <>
+        <NeedsOwner rows={(board.reference?.tasks?.items || []).filter(row => row.needs_owner_question)}
+                    asks={board.reference?.asks?.asks || []}
+                    onAnswer={answer} onNotNow={notNow} busy={acting} />
         <section className="ops-brief" data-ops-section="brief">
           <strong>{alarms.length ? `${alarms.length} alarms` : 'Alarms: none'}</strong>
           <p title={evidence(tasks)}>{number(tasks, 'open')} open tasks · {number(tasks, 'owner')} assigned to you</p>
@@ -740,7 +809,21 @@ function OpsBoard({ standalone = false }) {
           {owner?.state !== 'ok' && <p>Owner task assignments unavailable.</p>}
           {owner?.state === 'ok' && !owner.items.length && <p className="dash-muted">No tasks explicitly assigned to you.</p>}
         </section>
+        {board.poolrad_progress && <section className="ops-poolrad-tile" data-ops-section="poolrad" title={evidence(board.poolrad_progress)}>
+          <h2>Poolrad progress</h2>
+          {board.poolrad_progress.state === 'ok'
+            ? <p>{board.poolrad_progress.credited ?? 'unknown'} credited / {board.poolrad_progress.identities ?? 'unknown'} identities · CEILING {board.poolrad_progress.ceiling ?? 'unknown'} <small>{board.poolrad_progress.ceiling_note}</small></p>
+            : <p>{board.poolrad_progress.error || 'Unavailable'}</p>}
+        </section>}
         {board.budget && <Budget data={board.budget} />}
+        {board.reports && <section className="ops-reports" data-ops-section="reports" title={evidence(board.reports)}>
+          <h2>Reports</h2>
+          {board.reports.state !== 'ok' ? <p>{board.reports.error || 'Unavailable'}</p>
+            : board.reports.items.map(r => <details key={r.name} open={r.open}>
+              <summary>{r.name} <small>{new Date(r.at * 1000).toLocaleString()}</small></summary>
+              <p className="dash-muted">{r.size} bytes · body is not served over the daemon socket yet</p>
+            </details>)}
+        </section>}
         <section className="ops-reference" data-ops-section="reference">
           <h2>Reference</h2>
           <PoolradReference data={poolrad.data} error={poolrad.error} />
@@ -831,7 +914,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
   useEffect(() => {
     if (!channel) return;
     let live = true;
-    const load = () => api(`/messages?channel=${encodeURIComponent(channel.id)}&limit=15`)
+    const load = () => api(channel.id === 'cos' ? '/owner-thread?limit=15' : `/messages?channel=${encodeURIComponent(channel.id)}&limit=15`)
       .then(data => { if (live) setChat(old => mergeMessages(old, data.items || [])); })
       .catch(e => { if (live) setChatError(e.message); });
     load(); const timer = setInterval(load, 4000);
@@ -839,7 +922,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
   }, [channel]);
   useEffect(() => {
     if (vpChannel) return;
-    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'vp') || null)).catch(() => {});
+    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'cos') || null)).catch(() => {});
   }, [vpChannel]);
   async function refreshStates() {
     try {
@@ -880,10 +963,14 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
     if (!body || !channel) return;
     setChatBusy(true); setChatError('');
     try {
-      const receipt = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: channel.pane_id, channel: channel.id, text: body }) });
-      setChatOutcome(receipt.outcome || receipt.delivery);
+      // The desk dock is the owner mailbox (t1151/t1156): the same route as the desk page.
+      const owner = channel.id === 'cos';
+      const receipt = owner
+        ? await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: body }) })
+        : await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: channel.pane_id, channel: channel.id, text: body }) });
+      setChatOutcome(owner ? `${receipt.outcome} as ${receipt.message_id}${notifyNote(receipt.notify)}` : (receipt.outcome || receipt.delivery));
       setDraft('');
-      const data = await api(`/messages?channel=${encodeURIComponent(channel.id)}&limit=15`);
+      const data = await api(owner ? '/owner-thread?limit=15' : `/messages?channel=${encodeURIComponent(channel.id)}&limit=15`);
       chatScroll.jump();
       setChat(old => mergeMessages(old, data.items || []));
     } catch (e) { setChatError(e.message); } finally { setChatBusy(false); }
@@ -953,19 +1040,19 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
     </div>
     {status?.state_archive?.status === 'verified' && status.state_archive.verified_count > 0 && <div className="game-footer" role="note">States from earlier sessions are archived. We cannot verify which build wrote them.</div>}
     <CodewheelPicker screenRef={screenRef} inputRevision={inputRevision} running={Boolean(status?.running)} runKey={status?.run_name} busy={busy} onSend={sendWord} onAuto={autoCodeWord} />
-    <div className="game-chat" aria-label="Direct line to the VP">
-      <div className="game-chat-head"><strong>Direct line to the VP</strong></div>
+    <div className="game-chat" aria-label="Message the desk">
+      <div className="game-chat-head"><strong>Message the desk</strong></div>
       <div className="game-chat-log" ref={chatScroll.ref} onScroll={chatScroll.onScroll}>
-        {chat.length === 0 && <div className="game-chat-empty">{channel ? 'No messages yet.' : 'VP channel unavailable.'}</div>}
-        {chat.map(m => <div key={m.id} className={`game-chat-item ${m.role === 'owner' ? 'owner' : 'agent'}`}><span className="game-chat-role">{m.role === 'owner' ? 'You' : 'VP'}</span><span className="game-chat-body">{m.body}</span></div>)}
+        {chat.length === 0 && <div className="game-chat-empty">{channel ? 'No messages yet.' : 'Desk channel unavailable.'}</div>}
+        {chat.map(m => <div key={m.id} className={`game-chat-item ${m.role === 'owner' ? 'owner' : 'agent'}`}><span className="game-chat-role">{m.role === 'owner' ? 'You' : 'Desk'}</span><span className="game-chat-body">{m.body}</span></div>)}
       </div>
       {chatScroll.hasNew && <button className="chat-new-messages" onClick={chatScroll.jump}>New messages · Jump to latest</button>}
       {chatOutcome && <p role="status">{chatOutcome}</p>}
         {chatError && <div className="game-error" role="alert">{chatError}</div>}
       <div className="game-chat-input">
-        <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder="e.g. I am on Sokal Keep first floor, quicksave" rows={2} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }} aria-label="Message the VP" />
+        <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder="e.g. I am on Sokal Keep first floor, quicksave" rows={2} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } }} aria-label="Message the desk" />
         <div className="game-chat-actions">
-          <button className="primary send" onClick={() => sendChat()} disabled={chatBusy || !draft.trim() || !channel}>{chatBusy ? 'Sending…' : 'Send to VP'}</button>
+          <button className="primary send" onClick={() => sendChat()} disabled={chatBusy || !draft.trim() || !channel}>{chatBusy ? 'Sending…' : 'Send'}</button>
         </div>
       </div>
     </div>
@@ -1005,7 +1092,7 @@ function ChannelStandalone({ channel }) {
     setLastDelivery(null);
     const load = async () => {
       try {
-        const [roster, messages] = await Promise.all([api('/channels'), api(`/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
+        const [roster, messages] = await Promise.all([api('/channels'), api(channel === 'cos' ? '/owner-thread?limit=50' : `/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
         if (!live) return;
         setChannels(roster.channels || []);
         setItems(old => mergeMessages(old, messages.items || []));
@@ -1019,6 +1106,16 @@ function ChannelStandalone({ channel }) {
     return () => { live = false; clearInterval(timer); };
   }, [channel]);
   async function send(data) {
+    if (channel === 'cos') {
+      // The Front Desk is reached through the owner mailbox (t1151): the row is stored
+      // first, then the thread re-reads it, so what shows is the daemon's record.
+      const receipt = await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: data.body, attachment_ids: data.attachment_ids }) });
+      const thread = await api('/owner-thread?limit=50');
+      messageScroll.jump();
+      setItems(old => mergeMessages(old, thread.items || []));
+      { const note = notifyNote(receipt.notify); if (note) setError(`Stored as ${receipt.message_id}.${note}`); }
+      return;
+    }
     const item = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: selected.pane_id, channel, text: data.body, attachment_ids: data.attachment_ids }) });
     messageScroll.jump();
     setItems(old => mergeMessages(old, [item]));
@@ -1079,7 +1176,7 @@ function App() {
     const timer = setInterval(check, 15000); window.addEventListener('focus', check);
     return () => { clearInterval(timer); window.removeEventListener('focus', check); };
   }, []);
-  if (authorized === null) return <div className="splash">VP OF AGENTRY</div>;
+  if (authorized === null) return <div className="splash">DUNKING SHEEP</div>;
   // Keep the owner on the conversations and boards in this desk.
   const content = authorized
     ? <StandaloneDesk view={route.standalone ? route.view : 'cos'} known={route.standalone ? route.known : true} />
