@@ -164,7 +164,9 @@ name = "ds-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ds-core",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
