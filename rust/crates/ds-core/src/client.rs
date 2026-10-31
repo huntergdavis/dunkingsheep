@@ -12,6 +12,7 @@
 //! means the daemon is saturated, not absent. Starting a `serve` from a worktree CLI
 //! then only deepens the accept-queue pressure (six strays at once were measured).
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::DunkError;
@@ -376,6 +377,319 @@ pub fn identity_refusal_for(
          labelled, revocable token on a pane that has one: dunkingsheep token issue --role owner \
          --label <why>  (then set DUNKINGSHEEP_SERVICE_TOKEN to it)."
     ))
+}
+
+// ---- the request path (T41 slice 3): FlockClient -------------------------------------------
+//
+// Ported from `dunk_client.FlockClient`: `service_token`, `call`, `_call_once`, `probe`. One JSON
+// request line out, one JSON response line back, over the daemon's Unix socket. The socket is a
+// `Transport`, so every rule below is tested with a fake and one real round trip.
+
+use serde_json::{json, Map, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+
+/// A read may be retried ONCE on timeout (idempotent). A write never is: the command may already
+/// have run.
+pub const READ_RETRIES: usize = 1;
+
+/// The verbs safe to resend after a timeout (t693/t705): the retry decision is IDEMPOTENCY, never
+/// the role allowlist. Deliberately absent though `roles::READ_ONLY` lists them: `lane_register`
+/// and `superuser_recover` (bootstrap WRITES: the first owner may register itself) and `dispatch`
+/// (a dry run is a read, a real tick files tasks); `turn_start`/`turn_end` are writes (retrying
+/// one can record the same turn twice).
+pub const IDEMPOTENT_READS: [&str; 41] = [
+    "status",
+    "poll",
+    "health",
+    "help",
+    "doctor",
+    "whoami",
+    "roster",
+    "message_state",
+    "reply_stats",
+    "project_summary",
+    "state_latest",
+    "task_list",
+    "task_read",
+    "task_stats",
+    "task_metrics",
+    "task_followers",
+    "metrics",
+    "inbox_count",
+    "inbox_stats",
+    "inbox_status",
+    "list_panes",
+    "list_workspaces",
+    "list_dunks",
+    "get_dunk",
+    "delivery",
+    "delivery_capability",
+    "lanes",
+    "memory_recall",
+    "memory_search",
+    "memory_context",
+    "memory_stats",
+    "memory_status",
+    "owner_stats",
+    "superuser_status",
+    "pm_digest",
+    "pm_routing",
+    "list_messages",
+    "get_message",
+    "review_list",
+    "poolrad_progress",
+    "owner_receipts",
+];
+
+/// Errnos that mean "nothing is listening" rather than "listening but stuck"
+/// (`ABSENT_ERRNOS`): ENOENT, ECONNREFUSED, ENOTSOCK, EADDRNOTAVAIL.
+fn absent_errno(code: i32) -> bool {
+    use nix::errno::Errno;
+    [
+        Errno::ENOENT,
+        Errno::ECONNREFUSED,
+        Errno::ENOTSOCK,
+        Errno::EADDRNOTAVAIL,
+    ]
+    .iter()
+    .any(|errno| *errno as i32 == code)
+}
+
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// What can go wrong on one call. `Dunk` is the daemon (or the identity rule) answering NO: it
+/// proves the daemon is alive. The rest are transport failures.
+#[derive(Debug)]
+pub enum ClientError {
+    Dunk(DunkError),
+    /// `DaemonUnavailable`: the daemon closed the connection without replying.
+    Unavailable(String),
+    Io(std::io::Error),
+    /// The reply was not JSON (the Python's `ValueError`).
+    Protocol(String),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientError::Dunk(error) => write!(formatter, "{error}"),
+            ClientError::Unavailable(text) | ClientError::Protocol(text) => {
+                write!(formatter, "{text}")
+            }
+            ClientError::Io(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<ClientError> for DunkError {
+    fn from(error: ClientError) -> Self {
+        match error {
+            ClientError::Dunk(inner) => inner,
+            ClientError::Unavailable(text) => DunkError::Unavailable(text),
+            ClientError::Io(inner) => DunkError::from(inner),
+            ClientError::Protocol(text) => DunkError::Refused(text),
+        }
+    }
+}
+
+/// One request line out, one reply line back. `Ok(None)` is "the daemon closed the connection
+/// without replying".
+pub trait Transport {
+    fn exchange(&self, line: &str, timeout: Duration) -> Result<Option<String>, std::io::Error>;
+}
+
+/// The real transport: a Unix stream socket. Only the CONNECT is retried (a 20-agent burst can
+/// overflow a short listen backlog): three attempts, `50 ms * n` apart. Once connected nothing is
+/// retried here, because the command may have run.
+pub struct UnixTransport {
+    pub path: PathBuf,
+}
+
+impl Transport for UnixTransport {
+    fn exchange(&self, line: &str, timeout: Duration) -> Result<Option<String>, std::io::Error> {
+        let mut stream = None;
+        for attempt in 0..3u32 {
+            match UnixStream::connect(&self.path) {
+                Ok(connected) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Err(error) => {
+                    let retryable = is_timeout(&error)
+                        || matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::ConnectionReset
+                        );
+                    if attempt == 2 || !retryable {
+                        return Err(error);
+                    }
+                    std::thread::sleep(Duration::from_millis(50 * u64::from(attempt + 1)));
+                }
+            }
+        }
+        let stream = stream.expect("connected or returned");
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        let mut writer = &stream;
+        writer.write_all(format!("{line}\n").as_bytes())?;
+        let mut reply = String::new();
+        let read = BufReader::new(&stream).read_line(&mut reply)?;
+        Ok((read > 0).then_some(reply))
+    }
+}
+
+/// `service_token`: a token for a pane-less process (web desk, timers), from
+/// `DUNKINGSHEEP_SERVICE_TOKEN` or the 0600 file `DUNKINGSHEEP_SERVICE_TOKEN_FILE`. An unreadable
+/// or empty file is no token, never an error.
+pub fn service_token(
+    env: EnvLookup<'_>,
+    read_file: &dyn Fn(&str) -> std::io::Result<String>,
+) -> Option<String> {
+    let direct = env("DUNKINGSHEEP_SERVICE_TOKEN")
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    if !direct.is_empty() {
+        return Some(direct);
+    }
+    let path = env("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .map(|p| p.trim().to_string())
+        .unwrap_or_default();
+    if path.is_empty() {
+        return None;
+    }
+    read_file(&path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// The client: who is calling, how patient, and the wire.
+pub struct FlockClient<T: Transport> {
+    transport: T,
+    pub self_pane_id: Option<String>,
+    pub identity_note: String,
+    pub timeout: Duration,
+    token: Option<String>,
+    next_id: u64,
+}
+
+impl<T: Transport> FlockClient<T> {
+    pub fn new(
+        transport: T,
+        self_pane_id: Option<String>,
+        identity_note: String,
+        timeout: Duration,
+        token: Option<String>,
+    ) -> Self {
+        FlockClient {
+            transport,
+            self_pane_id,
+            identity_note,
+            timeout,
+            token,
+            next_id: 1,
+        }
+    }
+
+    /// `call`: one command, its result or the reason it failed. No pane and no token is enough for
+    /// a READ and not for a write (t602); a SYSTEM SENDER carries no pane by definition (attaching
+    /// one made the daemon refuse the claim and the watchdog went silent).
+    pub fn call(&mut self, cmd: &str, args: Map<String, Value>) -> Result<Value, ClientError> {
+        if let Some(refusal) = identity_refusal_for(
+            cmd,
+            self.self_pane_id.as_deref(),
+            self.token.is_some(),
+            Some(&self.identity_note),
+        ) {
+            return Err(ClientError::Dunk(DunkError::Refused(refusal)));
+        }
+        let system_sender = args.get("system_sender").is_some_and(|value| match value {
+            Value::Bool(flag) => *flag,
+            Value::Null => false,
+            other => other != &json!(0) && other != &json!(""),
+        });
+        let pane = if system_sender {
+            None
+        } else {
+            self.self_pane_id.clone()
+        };
+        let mut request = json!({
+            "id": self.next_id,
+            "cmd": cmd,
+            "args": args,
+            "self_pane_id": pane,
+        });
+        if let Some(token) = &self.token {
+            request["service_token"] = json!(token);
+        }
+        self.next_id += 1;
+        let line = request.to_string();
+        let attempts = 1 + if IDEMPOTENT_READS.contains(&cmd) {
+            READ_RETRIES
+        } else {
+            0
+        };
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.call_once(&line) {
+                Err(ClientError::Io(error)) if is_timeout(&error) && attempt < attempts => continue,
+                other => return other,
+            }
+        }
+    }
+
+    fn call_once(&self, line: &str) -> Result<Value, ClientError> {
+        let raw = self
+            .transport
+            .exchange(line, self.timeout)
+            .map_err(ClientError::Io)?;
+        let Some(raw) = raw else {
+            return Err(ClientError::Unavailable(
+                "daemon closed the connection without replying".to_string(),
+            ));
+        };
+        let response: Value = serde_json::from_str(raw.trim_end())
+            .map_err(|error| ClientError::Protocol(format!("invalid daemon reply: {error}")))?;
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            let text = response
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .unwrap_or("unknown error");
+            return Err(ClientError::Dunk(DunkError::Refused(text.to_string())));
+        }
+        Ok(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// `probe`: classify the daemon WITHOUT side effects. A refused command still proves the
+    /// daemon answered, so a `Dunk` error counts as running; nothing listening (ENOENT,
+    /// ECONNREFUSED...) is absent; a listener with no reply (full accept queue, reset, timeout, a
+    /// reply that is not JSON) is BUSY: alive, and starting another one is wrong.
+    pub fn probe(&mut self) -> Probe {
+        match self.call("status", Map::new()) {
+            Ok(_) | Err(ClientError::Dunk(_)) => Probe::Running,
+            Err(ClientError::Unavailable(_)) | Err(ClientError::Protocol(_)) => Probe::Busy,
+            Err(ClientError::Io(error)) => {
+                if error.raw_os_error().is_some_and(absent_errno) {
+                    Probe::Absent
+                } else {
+                    Probe::Busy
+                }
+            }
+        }
+    }
+
+    pub fn is_running(&mut self) -> bool {
+        self.probe() == Probe::Running
+    }
 }
 
 #[cfg(test)]

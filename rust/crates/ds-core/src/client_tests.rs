@@ -511,3 +511,409 @@ fn the_client_rule_is_the_daemons_own_read_only_list() {
         );
     }
 }
+
+// ---- FlockClient tests (T41 slice 3) -------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
+use std::rc::Rc;
+
+type Reply = Result<Option<String>, std::io::Error>;
+
+#[derive(Clone, Default)]
+struct Fake {
+    sent: Rc<RefCell<Vec<String>>>,
+    script: Rc<RefCell<VecDeque<Reply>>>,
+}
+
+impl Fake {
+    fn replying(replies: Vec<Reply>) -> Self {
+        Fake {
+            sent: Rc::default(),
+            script: Rc::new(RefCell::new(replies.into())),
+        }
+    }
+    fn always_timing_out() -> Self {
+        Fake::replying((0..8).map(|_| Err(timeout())).collect())
+    }
+    fn cmds(&self) -> Vec<String> {
+        self.sent
+            .borrow()
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["cmd"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+impl Transport for Fake {
+    fn exchange(&self, line: &str, _timeout: Duration) -> Reply {
+        self.sent.borrow_mut().push(line.to_string());
+        self.script.borrow_mut().pop_front().unwrap_or(Ok(None))
+    }
+}
+
+fn timeout() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer")
+}
+
+fn ok(result: Value) -> Reply {
+    Ok(Some(
+        json!({"ok": true, "result": result}).to_string() + "\n",
+    ))
+}
+
+fn lane(fake: &Fake) -> FlockClient<Fake> {
+    FlockClient::new(
+        fake.clone(),
+        Some("%1".into()),
+        "explicit".into(),
+        Duration::from_secs(1),
+        None,
+    )
+}
+
+#[test]
+fn a_read_is_retried_once_and_a_write_is_not() {
+    let fake = Fake::always_timing_out();
+    let mut client = lane(&fake);
+    assert!(matches!(client.call("status", Map::new()), Err(ClientError::Io(e)) if is_timeout(&e)));
+    assert_eq!(
+        vec!["status", "status"],
+        fake.cmds(),
+        "a read gets one retry"
+    );
+    let fake = Fake::always_timing_out();
+    let mut client = lane(&fake);
+    assert!(client.call("task_next", Map::new()).is_err());
+    assert_eq!(vec!["task_next"], fake.cmds(), "a write is never retried");
+}
+
+#[test]
+fn the_retry_decision_is_idempotency_not_the_role_allowlist() {
+    // t705: turn_start/turn_end are in READ_ONLY (a pane may CALL them) but are WRITES, and
+    // lane_register / superuser_recover / dispatch are bootstrap writes. None may be resent.
+    for verb in [
+        "turn_start",
+        "turn_end",
+        "lane_register",
+        "superuser_recover",
+        "dispatch",
+    ] {
+        assert!(
+            !IDEMPOTENT_READS.contains(&verb),
+            "{verb} must not be retryable"
+        );
+        let fake = Fake::always_timing_out();
+        let _ = lane(&fake).call(verb, Map::new());
+        assert_eq!(1, fake.cmds().len(), "{verb} was sent more than once");
+    }
+    let fake = Fake::always_timing_out();
+    let _ = lane(&fake).call("status", Map::new());
+    assert_eq!(2, fake.cmds().len());
+}
+
+#[test]
+fn every_retryable_verb_is_a_read_the_daemon_also_allows_without_a_lane() {
+    let mut seen = std::collections::HashSet::new();
+    for verb in IDEMPOTENT_READS {
+        assert!(seen.insert(verb), "{verb} is listed twice");
+        assert!(
+            crate::roles::READ_ONLY.contains(&verb),
+            "{verb} is retried but not read-only"
+        );
+    }
+}
+
+#[test]
+fn a_read_that_times_out_then_answers_succeeds_on_the_retry() {
+    let fake = Fake::replying(vec![Err(timeout()), ok(json!({"lanes": 3}))]);
+    let value = lane(&fake).call("list_panes", Map::new()).expect("retried");
+    assert_eq!(json!({"lanes": 3}), value);
+    assert_eq!(2, fake.cmds().len());
+}
+
+#[test]
+fn the_request_carries_an_id_the_pane_and_the_token_only_when_there_is_one() {
+    let fake = Fake::replying(vec![ok(json!(null)), ok(json!(null))]);
+    let mut client = lane(&fake);
+    let mut args = Map::new();
+    args.insert("id".into(), json!("t7"));
+    client.call("task_read", args).unwrap();
+    client.call("status", Map::new()).unwrap();
+    let first: Value = serde_json::from_str(&fake.sent.borrow()[0]).unwrap();
+    let second: Value = serde_json::from_str(&fake.sent.borrow()[1]).unwrap();
+    assert_eq!(
+        (1, "task_read", "%1"),
+        (
+            first["id"].as_u64().unwrap(),
+            first["cmd"].as_str().unwrap(),
+            first["self_pane_id"].as_str().unwrap()
+        )
+    );
+    assert_eq!(json!({"id": "t7"}), first["args"]);
+    assert_eq!(2, second["id"], "the id increments per call");
+    assert!(first.get("service_token").is_none(), "no token, no field");
+    let fake = Fake::replying(vec![ok(json!(null))]);
+    let mut with_token = FlockClient::new(
+        fake.clone(),
+        None,
+        "anonymous".into(),
+        Duration::from_secs(1),
+        Some("tok-1".into()),
+    );
+    with_token.call("task_next", Map::new()).unwrap();
+    let sent: Value = serde_json::from_str(&fake.sent.borrow()[0]).unwrap();
+    assert_eq!(json!("tok-1"), sent["service_token"]);
+    assert_eq!(Value::Null, sent["self_pane_id"]);
+}
+
+#[test]
+fn a_system_sender_never_carries_a_pane() {
+    let fake = Fake::replying(vec![ok(json!(null))]);
+    let mut args = Map::new();
+    args.insert("system_sender".into(), json!(true));
+    lane(&fake).call("status", args).unwrap();
+    let sent: Value = serde_json::from_str(&fake.sent.borrow()[0]).unwrap();
+    assert_eq!(
+        Value::Null,
+        sent["self_pane_id"],
+        "the daemon refuses a system sender that claims a pane"
+    );
+}
+
+#[test]
+fn a_write_with_no_pane_and_no_token_is_refused_before_anything_is_sent() {
+    let fake = Fake::default();
+    let mut client = FlockClient::new(
+        fake.clone(),
+        None,
+        "anonymous: no pane".into(),
+        Duration::from_secs(1),
+        None,
+    );
+    let error = client.call("task_next", Map::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("identity refused: task_next needs a lane"),
+        "{error}"
+    );
+    assert!(
+        fake.sent.borrow().is_empty(),
+        "nothing may reach the daemon"
+    );
+    assert!(FlockClient::new(
+        Fake::replying(vec![ok(json!(1))]),
+        None,
+        "anonymous".into(),
+        Duration::from_secs(1),
+        None
+    )
+    .call("status", Map::new())
+    .is_ok());
+}
+
+#[test]
+fn the_daemons_answer_is_decoded_exactly() {
+    let refused = Fake::replying(vec![Ok(Some(
+        json!({"ok": false, "error": "no such task"}).to_string(),
+    ))]);
+    assert_eq!(
+        "no such task",
+        lane(&refused)
+            .call("task_read", Map::new())
+            .unwrap_err()
+            .to_string()
+    );
+    let silent = Fake::replying(vec![Ok(Some(json!({"ok": false}).to_string()))]);
+    assert_eq!(
+        "unknown error",
+        lane(&silent)
+            .call("task_read", Map::new())
+            .unwrap_err()
+            .to_string()
+    );
+    let closed = Fake::replying(vec![Ok(None)]);
+    let error = lane(&closed).call("task_read", Map::new()).unwrap_err();
+    assert!(
+        matches!(&error, ClientError::Unavailable(t) if t == "daemon closed the connection without replying")
+    );
+    let garbage = Fake::replying(vec![Ok(Some("not json\n".into()))]);
+    assert!(matches!(
+        lane(&garbage).call("task_read", Map::new()),
+        Err(ClientError::Protocol(_))
+    ));
+    let empty_result = Fake::replying(vec![Ok(Some(json!({"ok": true}).to_string()))]);
+    assert_eq!(
+        Value::Null,
+        lane(&empty_result).call("task_read", Map::new()).unwrap()
+    );
+}
+
+#[test]
+fn the_probe_classifies_running_busy_and_absent() {
+    let probe = |reply: Reply| lane(&Fake::replying(vec![reply])).probe();
+    assert_eq!(Probe::Running, probe(ok(json!({}))));
+    // a REFUSED command still proves the daemon answered
+    assert_eq!(
+        Probe::Running,
+        probe(Ok(Some(json!({"ok": false, "error": "no"}).to_string())))
+    );
+    assert_eq!(
+        Probe::Busy,
+        probe(Ok(None)),
+        "closed without a reply: alive but silent"
+    );
+    assert_eq!(Probe::Busy, probe(Ok(Some("garbage".into()))));
+    for code in [2, 111, 88, 99] {
+        assert_eq!(
+            Probe::Absent,
+            probe(Err(std::io::Error::from_raw_os_error(code))),
+            "errno {code} is nothing listening"
+        );
+    }
+    assert_eq!(
+        Probe::Busy,
+        probe(Err(std::io::Error::from_raw_os_error(104))),
+        "ECONNRESET is stuck, not absent"
+    );
+    let both = Fake::always_timing_out();
+    assert_eq!(Probe::Busy, lane(&both).probe(), "a timeout is busy");
+}
+
+#[test]
+fn the_service_token_comes_from_the_environment_then_the_file() {
+    let no_file = |_: &str| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    assert_eq!(
+        Some("direct".to_string()),
+        service_token(
+            &env_of(&[("DUNKINGSHEEP_SERVICE_TOKEN", " direct ")]),
+            &no_file
+        )
+    );
+    let file = |path: &str| {
+        assert_eq!("/tok", path);
+        Ok("  from-file\n".to_string())
+    };
+    assert_eq!(
+        Some("from-file".to_string()),
+        service_token(
+            &env_of(&[("DUNKINGSHEEP_SERVICE_TOKEN_FILE", "/tok")]),
+            &file
+        )
+    );
+    assert_eq!(
+        None,
+        service_token(
+            &env_of(&[("DUNKINGSHEEP_SERVICE_TOKEN_FILE", "/tok")]),
+            &no_file
+        ),
+        "unreadable is no token"
+    );
+    let blank = |_: &str| Ok("\n".to_string());
+    assert_eq!(
+        None,
+        service_token(
+            &env_of(&[("DUNKINGSHEEP_SERVICE_TOKEN_FILE", "/tok")]),
+            &blank
+        )
+    );
+    assert_eq!(None, service_token(&env_of(&[]), &file));
+    assert_eq!(
+        Some("direct".to_string()),
+        service_token(
+            &env_of(&[
+                ("DUNKINGSHEEP_SERVICE_TOKEN", "direct"),
+                ("DUNKINGSHEEP_SERVICE_TOKEN_FILE", "/tok")
+            ]),
+            &file
+        ),
+        "the variable wins"
+    );
+}
+
+// A real socket: the line protocol, a missing socket, a silent close and a silent hang.
+
+fn serve_once(
+    path: &std::path::Path,
+    behaviour: fn(&mut std::os::unix::net::UnixStream, String),
+) -> std::thread::JoinHandle<()> {
+    let listener = UnixListener::bind(path).expect("bind");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        behaviour(&mut stream, line);
+    })
+}
+
+fn real_client(path: &std::path::Path, timeout_ms: u64) -> FlockClient<UnixTransport> {
+    FlockClient::new(
+        UnixTransport {
+            path: path.to_path_buf(),
+        },
+        Some("%1".into()),
+        "explicit".into(),
+        Duration::from_millis(timeout_ms),
+        None,
+    )
+}
+
+#[test]
+fn a_real_round_trip_over_a_unix_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.sock");
+    let server = serve_once(&path, |stream, line| {
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!("task_read", request["cmd"]);
+        assert_eq!("%1", request["self_pane_id"]);
+        let reply = json!({"ok": true, "result": {"echo": request["args"]["id"]}});
+        stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+    });
+    let mut args = Map::new();
+    args.insert("id".into(), json!("t42"));
+    let value = real_client(&path, 2000)
+        .call("task_read", args)
+        .expect("round trip");
+    server.join().unwrap();
+    assert_eq!(json!({"echo": "t42"}), value);
+}
+
+#[test]
+fn a_missing_socket_probes_absent_and_a_silent_close_probes_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        Probe::Absent,
+        real_client(&dir.path().join("none.sock"), 500).probe()
+    );
+    let path = dir.path().join("closer.sock");
+    let server = serve_once(&path, |_stream, _line| { /* accept, read, drop: no reply */
+    });
+    assert_eq!(Probe::Busy, real_client(&path, 2000).probe());
+    server.join().unwrap();
+}
+
+#[test]
+fn a_listener_that_never_answers_times_out_and_probes_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hang.sock");
+    let server = serve_once(&path, |_stream, _line| {
+        std::thread::sleep(Duration::from_millis(600))
+    });
+    let started = std::time::Instant::now();
+    let mut client = real_client(&path, 150);
+    assert_eq!(Probe::Busy, client.probe());
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the deadline must bound the wait"
+    );
+    server.join().unwrap();
+}
