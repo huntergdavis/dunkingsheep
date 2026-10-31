@@ -29,7 +29,9 @@ use crate::db;
 use crate::error::DunkError;
 
 mod claim;
-pub use claim::{claimable, refusal, Candidate, Lease, Refusal};
+pub use claim::{
+    claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
+};
 
 /// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
 /// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.

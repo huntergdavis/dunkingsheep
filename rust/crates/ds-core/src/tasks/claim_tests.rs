@@ -1,6 +1,7 @@
 //! T12 slice 1 tests: the claimability rules, the refusal reasons, leases and heartbeat.
 
 use super::*;
+use crate::tasks::FieldEdit;
 
 async fn store(tag: &str) -> Tasks {
     let dir = std::env::temp_dir().join(format!("ds-claim-{tag}-{}", std::process::id()));
@@ -126,5 +127,387 @@ async fn heartbeat_extends_a_held_lease_and_refuses_a_stranger() {
             task.id
         )),
         "{refused}"
+    );
+}
+
+async fn set_kind_author(tasks: &Tasks, id: &str, kind: &'static str, author: &'static str) {
+    let id = id.to_string();
+    tasks
+        .writer
+        .call(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET kind = ?, author = ? WHERE id = ?",
+                rusqlite::params![kind, author, id],
+            )
+            .map_err(crate::db::map_sqlite)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn claimed_id(outcome: &ClaimOutcome) -> String {
+    match outcome {
+        ClaimOutcome::Claimed { task, .. } => task.id.clone(),
+        ClaimOutcome::Refused { refusal, .. } => panic!("refused: {refusal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn claim_next_takes_the_highest_priority_then_oldest_and_records_the_claim() {
+    let tasks = store("claim-order").await;
+    let low = tasks.add("global", "low", "").await.unwrap();
+    let urgent = tasks.add("global", "urgent", "").await.unwrap();
+    tasks
+        .update(
+            &urgent.id,
+            FieldEdit {
+                priority: Some("urgent".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let got = tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&got), urgent.id);
+    let ClaimOutcome::Claimed { task, .. } = got else {
+        unreachable!()
+    };
+    assert_eq!(task.status, "in_progress");
+    assert_eq!(decode_list(Some(&task.assignees)), vec!["%1"]);
+    assert_eq!(tasks.leases_for(&urgent.id, None).await.unwrap().len(), 1);
+    assert_eq!(
+        tasks.events(&urgent.id).await,
+        2,
+        "the priority edit and the claim"
+    );
+    // t145: a pane holding in-progress work is refused a second task.
+    match tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => {
+            assert_eq!(refusal.reason, "busy");
+            assert_eq!(refusal.task_ids, vec![urgent.id.clone()]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let second = tasks
+        .claim_next(
+            "global",
+            "%1",
+            ClaimOptions {
+                allow_busy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&second), low.id);
+}
+
+#[tokio::test]
+async fn claim_next_skips_blocked_wrong_kind_and_own_author_and_says_why() {
+    let tasks = store("claim-filters").await;
+    let dep = tasks.add("global", "dep", "").await.unwrap();
+    let blocked = tasks.add("global", "blocked", "").await.unwrap();
+    tasks
+        .update(
+            &blocked.id,
+            FieldEdit {
+                depends_on: Some(vec![dep.id.clone()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    // `dep` is open and claimable; `blocked` waits on it.
+    let review = tasks.add("global", "review", "").await.unwrap();
+    set_kind_author(&tasks, &review.id, "review", "%9").await;
+    let none = tasks
+        .claim_next(
+            "global",
+            "%2",
+            ClaimOptions {
+                kinds: Some(vec!["work".into()]),
+                exclude_author: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&none),
+        dep.id,
+        "a worker never pulls a review; blocked is skipped"
+    );
+    let own = tasks
+        .claim_next(
+            "global",
+            "%3",
+            ClaimOptions {
+                kinds: Some(vec!["review".into()]),
+                exclude_author: Some("%9".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    match own {
+        // The reason is computed over ALL candidates, like the Python's `_refusal`: `dep` is
+        // now owned by %2, so that is what the refusal reports.
+        ClaimOutcome::Refused { refusal, .. } => assert_eq!(refusal.reason, "owned_elsewhere"),
+        other => panic!("the author never reviews its own head: {other:?}"),
+    }
+    let theirs = tasks
+        .claim_next(
+            "global",
+            "%4",
+            ClaimOptions {
+                kinds: Some(vec!["review".into()]),
+                exclude_author: Some("%5".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&theirs), review.id);
+}
+
+#[tokio::test]
+async fn claim_next_scope_mine_and_refusals_are_named() {
+    let tasks = store("claim-mine").await;
+    assert!(tasks
+        .claim_next("mine", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("requires a known caller pane"));
+    assert!(tasks
+        .claim_next("global", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("requires a caller pane id"));
+    assert!(tasks
+        .claim_next("nowhere", "%1", ClaimOptions::default())
+        .await
+        .is_err());
+    match tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => assert_eq!(refusal.reason, "empty"),
+        other => panic!("{other:?}"),
+    }
+    let theirs = tasks.add("global", "theirs", "").await.unwrap();
+    let mine = tasks.add("global", "mine", "").await.unwrap();
+    tasks.assign(&theirs.id, &["%7"], "add").await.unwrap();
+    tasks.assign(&mine.id, &["%1"], "add").await.unwrap();
+    match tasks
+        .claim_next("global", "%2", ClaimOptions::default())
+        .await
+        .unwrap()
+    {
+        ClaimOutcome::Refused { refusal, .. } => {
+            assert_eq!(refusal.reason, "owned_elsewhere");
+            assert_eq!(
+                refusal.owned_by,
+                Some(vec!["%1".to_string(), "%7".to_string()])
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    let got = tasks
+        .claim_next("mine", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&got),
+        mine.id,
+        "'mine' takes only tasks naming this pane"
+    );
+}
+
+fn assignees_of(task: &Task) -> Vec<String> {
+    decode_list(Some(&task.assignees))
+}
+
+#[tokio::test]
+async fn release_undoes_only_the_assignee_the_claim_added() {
+    let tasks = store("release").await;
+    let plain = tasks.add("global", "plain", "").await.unwrap();
+    let got = tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&got), plain.id);
+    let back = tasks.release(&plain.id, "%1").await.unwrap();
+    assert_eq!(back.status, "open");
+    assert!(
+        assignees_of(&back).is_empty(),
+        "t595: the claim's own assignee goes with it"
+    );
+    assert!(tasks.leases_for(&plain.id, None).await.unwrap().is_empty());
+    // An assignment the owner made BEFORE the claim survives a release.
+    let owned = tasks.add("global", "owned", "").await.unwrap();
+    tasks.assign(&owned.id, &["%2"], "add").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "%2",
+            ClaimOptions {
+                allow_busy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let back = tasks.release(&owned.id, "%2").await.unwrap();
+    assert_eq!(assignees_of(&back), vec!["%2"]);
+    assert_eq!(back.status, "open");
+    assert!(tasks.release("t999", "%2").await.is_err());
+}
+
+#[tokio::test]
+async fn reap_requeues_an_expired_claim_keeps_its_owner_and_records_why() {
+    let tasks = store("reap").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    let before = tasks.events(&task.id).await;
+    // Not expired yet, and no caller identity: nothing is reaped.
+    assert!(tasks.reap(None, None, None, None).await.unwrap().is_empty());
+    let later = crate::clock::now_s() + 4000.0;
+    let gone = tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(
+        gone,
+        vec![Requeued {
+            task_id: task.id.clone(),
+            pane_id: "%1".into(),
+            reason: "expired"
+        }]
+    );
+    let back = tasks.get(&task.id).await.unwrap();
+    assert_eq!(back.status, "open");
+    assert_eq!(
+        assignees_of(&back),
+        vec!["%1"],
+        "t145: the OWNER is kept, the claim ends"
+    );
+    assert_eq!(tasks.events(&task.id).await, before + 1);
+}
+
+#[tokio::test]
+async fn reap_needs_a_live_pane_list_and_a_vanished_pane_alone_is_not_death() {
+    let tasks = store("reap-live").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    let fixture = tasks
+        .reap(Some(vec![]), None, None, Some("fixture"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(fixture.contains("alive_source='live'"), "{fixture}");
+    assert!(tasks.reap(Some(vec![]), None, None, None).await.is_err());
+    // The pane is missing from a LIVE list, but the lease is neither expired nor has a dead caller.
+    assert!(tasks
+        .reap(Some(vec!["%9".into()]), None, None, Some("live"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "in_progress");
+}
+
+#[tokio::test]
+async fn reap_a_dead_caller_requeues_and_another_live_lease_keeps_the_task_in_progress() {
+    let tasks = store("reap-caller").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let opts = ClaimOptions {
+        caller: Some((4242, Some("s".into()), Some("pi".into()))),
+        ..Default::default()
+    };
+    tasks.claim_next("global", "%1", opts).await.unwrap();
+    tasks.claim_for_test(&task.id, "%2").await;
+    let dead: CallerAlive = Box::new(|pid, _| pid != 4242);
+    let none = tasks.reap(None, Some(dead), None, None).await.unwrap();
+    assert!(
+        none.is_empty(),
+        "%2 still holds a live lease: released, not requeued"
+    );
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "in_progress");
+    assert_eq!(tasks.leases_for(&task.id, None).await.unwrap().len(), 1);
+    // The last lease goes: now it is a real requeue, with the reason.
+    let later = crate::clock::now_s() + 4000.0;
+    let gone = tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].reason, "expired");
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
+}
+
+#[tokio::test]
+async fn two_claimers_on_one_file_cannot_both_win_the_same_exclusive_task() {
+    let first = store("race").await;
+    let second = Tasks::open(first.path()).await.unwrap();
+    let task = first.add("global", "only one", "").await.unwrap();
+    let (a, b) = tokio::join!(
+        first.claim_next("global", "%1", ClaimOptions::default()),
+        second.claim_next("global", "%2", ClaimOptions::default()),
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    let winners: Vec<&ClaimOutcome> = outcomes
+        .iter()
+        .filter(|o| matches!(o, ClaimOutcome::Claimed { .. }))
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "BEGIN IMMEDIATE: exactly one claimer wins: {outcomes:?}"
+    );
+    assert_eq!(first.leases_for(&task.id, None).await.unwrap().len(), 1);
+    let loser = outcomes
+        .iter()
+        .find(|o| matches!(o, ClaimOutcome::Refused { .. }))
+        .unwrap();
+    let ClaimOutcome::Refused { refusal, .. } = loser else {
+        unreachable!()
+    };
+    assert_eq!(
+        refusal.reason, "owned_elsewhere",
+        "the loser sees the winner's commit"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_kinds_list_applies_no_filter_like_the_pythons_falsy_set() {
+    let tasks = store("empty-kinds").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let got = tasks
+        .claim_next(
+            "global",
+            "%1",
+            ClaimOptions {
+                kinds: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claimed_id(&got),
+        task.id,
+        "Python: `set(kinds) if kinds else None`"
     );
 }
