@@ -829,6 +829,205 @@ pub fn spawn_detached(
     command.spawn().map(|child| child.id())
 }
 
+// ---- the real wiring (T41 slice 5) -------------------------------------------------------------
+//
+// The rules above take their facts as arguments; this section supplies the real ones: the process
+// environment, /proc, `tmux`, `systemctl --user`, and the daemon's own binary. Nothing here
+// decides anything.
+
+use crate::config;
+
+/// Run `command` and collect its output, killing it after `seconds` (the Python's `timeout=`).
+fn run_with_timeout(
+    mut command: std::process::Command,
+    seconds: u64,
+) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `tmux list-panes -a -F '#{pane_id} #{pane_tty}'`, with the Python's two failure texts.
+pub fn tmux_list_panes() -> Result<String, String> {
+    let mut command = std::process::Command::new("tmux");
+    command.args(["list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"]);
+    match run_with_timeout(command, 5) {
+        Err(error) => Err(format!("could not ask tmux for panes: {error}")),
+        Ok(output) if !output.status.success() => Err(format!(
+            "tmux refused: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Ok(output) => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+    }
+}
+
+/// `controlling_tty()` for THIS process, reading the real `/proc`.
+pub fn system_controlling_tty() -> Option<String> {
+    controlling_tty(std::process::id(), 12, &|pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+    })
+}
+
+/// `resolve_identity` with the real environment, /proc and tmux. The backend `detect` hook
+/// (herdr's `pane current`) is retired under tmux, so it is `None`.
+pub fn resolve_system_identity(
+    explicit: Option<&str>,
+    allow_unresolved: bool,
+) -> Result<(Option<String>, String), DunkError> {
+    let env = |name: &str| std::env::var(name).ok();
+    let tty_lookup = || pane_for_tty(system_controlling_tty().as_deref(), &tmux_list_panes);
+    resolve_identity(explicit, &env, &tty_lookup, &|| None, allow_unresolved)
+}
+
+/// `systemctl --user <args>`, supplying XDG_RUNTIME_DIR when the caller's shell has none (agents
+/// often do not). `Some(true)` exit 0, `Some(false)` non-zero, `None` could not run or timed out.
+pub fn systemctl_user(args: &[&str]) -> Option<bool> {
+    let mut command = std::process::Command::new("systemctl");
+    command.arg("--user").args(args);
+    if std::env::var("XDG_RUNTIME_DIR").map_or(true, |value| value.is_empty()) {
+        // Only the CHILD's environment is changed. The uid is the owner of /proc/self (no extra
+        // nix feature, no unsafe).
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self")
+            .map(|m| m.uid())
+            .unwrap_or(0);
+        let runtime = format!("/run/user/{uid}");
+        if std::path::Path::new(&runtime).is_dir() {
+            command.env("XDG_RUNTIME_DIR", runtime);
+        }
+    }
+    run_with_timeout(command, 30)
+        .ok()
+        .map(|output| output.status.success())
+}
+
+/// The systemd user unit's name, and where the unit file lives.
+pub const SYSTEMD_UNIT: &str = "dunkingsheep.service";
+
+fn systemd_installed(env: &config::Env) -> bool {
+    env.get("HOME")
+        .map(|home| {
+            std::path::Path::new(home)
+                .join(".config/systemd/user")
+                .join(SYSTEMD_UNIT)
+                .exists()
+        })
+        .unwrap_or(false)
+}
+
+fn which(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+        .unwrap_or(false)
+}
+
+/// `connect_or_start` for real: a client whose daemon answers, starting one only when it is truly
+/// absent (never a BUSY one: t696). `socket_path` defaults to `DUNKINGSHEEP_SOCKET` or the
+/// production socket under the config directory. `exe` is the binary that runs `serve`.
+pub fn connect_or_start_system(
+    socket_path: Option<&std::path::Path>,
+    self_pane_id: Option<&str>,
+    start: bool,
+    start_timeout: Duration,
+    exe: &std::path::Path,
+) -> Result<FlockClient<UnixTransport>, DunkError> {
+    let env = config::Env::from_process();
+    let default_socket = config::socket_path(&env)?;
+    let chosen = match socket_path {
+        Some(path) => path.to_path_buf(),
+        None => env
+            .get("DUNKINGSHEEP_SOCKET")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_socket.clone()),
+    };
+    let (pane, note) = match self_pane_id {
+        Some(explicit) => (Some(explicit.to_string()), "explicit".to_string()),
+        None => resolve_system_identity(None, true)?,
+    };
+    let process_env = |name: &str| std::env::var(name).ok();
+    let token = service_token(&process_env, &|path| std::fs::read_to_string(path));
+    let timeout = default_timeout(&process_env);
+    let mut client = FlockClient::new(
+        UnixTransport {
+            path: chosen.clone(),
+        },
+        pane,
+        note,
+        timeout,
+        token,
+    );
+    let socket_text = chosen.to_string_lossy().into_owned();
+    let default_text = default_socket.to_string_lossy().into_owned();
+    let log = config::log_path(&env)?;
+    let log_text = log.to_string_lossy().into_owned();
+    let is_default = socket_text == default_text;
+    // `dunk_terminal.backend_name()`: the env override, trimmed and lowercased, else the default.
+    // A whitespace-only value counts as unset, or this would name a backend that is not what runs.
+    let backend = env
+        .get("DUNKINGSHEEP_TERMINAL_BACKEND")
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "tmux".to_string());
+    let installed = systemd_installed(&env);
+    let attempts = (start_timeout.as_secs_f64() / 0.1).ceil() as usize;
+    let mut sleeper = |delay: Duration| std::thread::sleep(delay);
+    // The probe and the start both need the client, so share it through a cell.
+    let cell = std::cell::RefCell::new(&mut client);
+    connect_or_start(
+        &socket_text,
+        || cell.borrow_mut().probe(),
+        || {
+            service_owns_socket(is_default, chosen.exists(), || {
+                systemctl_user(&["is-active", "--quiet", SYSTEMD_UNIT]) == Some(true)
+            })
+        },
+        &mut sleeper,
+        start,
+        || {
+            let get = |name: &str| std::env::var(name).ok();
+            let action = start_decision(&StartInputs {
+                socket_path: &socket_text,
+                default_socket: &default_text,
+                systemd_installed: installed,
+                has_systemctl: which("systemctl"),
+                systemctl_start: &|| systemctl_user(&["start", SYSTEMD_UNIT]),
+                backend: &backend,
+                env: &get,
+                pid: std::process::id(),
+            })?;
+            if let StartAction::Spawn(spec) = action {
+                let cwd = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
+                spawn_detached(exe, &["serve"], &spec, &log, cwd).map_err(|error| {
+                    ConnectError::Unavailable(format!("could not start the daemon: {error}"))
+                })?;
+            }
+            Ok(())
+        },
+        attempts.max(1),
+        &log_text,
+    )?;
+    Ok(client)
+}
+
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;

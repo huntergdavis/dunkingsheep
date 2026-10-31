@@ -1179,3 +1179,122 @@ fn spawn_detached_returns_at_once_and_the_child_gets_the_environment_and_the_log
     );
     assert!(text.contains("oops"), "stderr goes to the same log: {text}");
 }
+
+// ---- the real wiring (T41 slice 5) ---------------------------------------------------------
+
+fn fake_daemon(path: &std::path::Path, connections: usize) -> std::thread::JoinHandle<()> {
+    let listener = UnixListener::bind(path).expect("bind");
+    std::thread::spawn(move || {
+        for _ in 0..connections {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            stream
+                .write_all(b"{\"ok\": true, \"result\": {\"daemon\": \"fake\"}}\n")
+                .unwrap();
+        }
+    })
+}
+
+#[test]
+fn a_running_daemon_is_connected_without_starting_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.sock");
+    let server = fake_daemon(&path, 2);
+    let mut client = connect_or_start_system(
+        Some(&path),
+        Some("%1"),
+        true,
+        Duration::from_millis(300),
+        std::path::Path::new("/definitely/not/a/binary"),
+    )
+    .expect("connect");
+    assert_eq!(
+        json!({"daemon": "fake"}),
+        client.call("status", Map::new()).unwrap()
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn an_absent_daemon_with_start_false_is_a_named_refusal_and_nothing_is_spawned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("none.sock");
+    // if anything WERE spawned it would be this binary, and it would then exist
+    let exe = dir.path().join("never-run");
+    let error = connect_or_start_system(
+        Some(&path),
+        Some("%1"),
+        false,
+        Duration::from_millis(200),
+        &exe,
+    )
+    .err()
+    .expect("must refuse");
+    assert_eq!(
+        format!(
+            "daemon unavailable: no dunkingsheep daemon on {}",
+            path.display()
+        ),
+        error.to_string()
+    );
+    assert!(!exe.exists(), "nothing may have been created or spawned");
+}
+
+#[test]
+fn a_private_tmux_daemon_is_not_auto_started_without_its_socket_variable() {
+    // The test process has no DUNKINGSHEEP_TMUX_SOCKET and the default backend is tmux, so the
+    // spawn guard fires on the REAL environment: the starter is refused, not guessed at.
+    if std::env::var("DUNKINGSHEEP_TMUX_SOCKET").is_ok() {
+        return; // a developer shell with the variable set would legitimately spawn
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("none.sock");
+    let error = connect_or_start_system(
+        Some(&path),
+        Some("%1"),
+        true,
+        Duration::from_millis(200),
+        std::path::Path::new("/bin/sh"),
+    )
+    .err()
+    .expect("must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to auto-start a tmux daemon without DUNKINGSHEEP_TMUX_SOCKET"),
+        "{error}"
+    );
+}
+
+#[test]
+fn the_system_lookups_do_not_panic_outside_a_terminal() {
+    // Whatever this process's terminal is, the answer is a value, never a panic: a refusal or an
+    // anonymous identity. (No assertion on WHICH: it depends on where the tests run.)
+    let _ = system_controlling_tty();
+    let _ = resolve_system_identity(None, true);
+    let _ = tmux_list_panes();
+    let _ = systemctl_user(&["--version"]);
+}
+
+#[test]
+fn an_explicit_pane_skips_the_terminal_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.sock");
+    let server = fake_daemon(&path, 1);
+    let client = connect_or_start_system(
+        Some(&path),
+        Some("%77"),
+        false,
+        Duration::from_millis(300),
+        std::path::Path::new("/bin/sh"),
+    )
+    .unwrap();
+    assert_eq!(
+        (Some("%77".to_string()), "explicit".to_string()),
+        (client.self_pane_id.clone(), client.identity_note.clone())
+    );
+    server.join().unwrap();
+}
