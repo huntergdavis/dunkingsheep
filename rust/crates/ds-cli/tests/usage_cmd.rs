@@ -157,3 +157,43 @@ fn empty_windows_and_tiny_floats_print_like_python() {
         table.stdout
     );
 }
+
+/// Reviewer finding B (t1288): providers come out in CONFIG-FILE order, as the Python lists them.
+/// Needs serde_json `preserve_order` (PR #291): the three providers here are NOT alphabetical.
+#[test]
+fn providers_keep_the_config_file_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut text = String::from(r#"{"schema": 1, "providers": {"#);
+    for (i, name) in ["multi", "uni", "err", "slow"].iter().enumerate() {
+        let path = dir.path().join(format!("{name}.sh"));
+        let reading = format!(
+            r#"echo '{{"provider":"{name}","status":"ok","meaning":"percent_used","measured_at":1,"windows":[{{"name":"w","percent_used":1.0,"percent_remaining":99.0}}]}}'"#
+        );
+        fs::write(&path, format!("#!/bin/sh\n{reading}\n")).unwrap();
+        if i > 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&format!(
+            r#""{name}": {{"command": "/bin/sh {}", "timeout_s": 5, "parse": {{"windows": "windows", "meaning": "meaning", "measured_at": "measured_at"}}}}"#,
+            path.display()
+        ));
+    }
+    text.push_str("}}");
+    let config = dir.path().join("usage.json");
+    fs::write(&config, text).unwrap();
+    let config = config.display().to_string();
+
+    let out = usage_command(&config, None, None, false);
+    let names: Vec<&str> = out
+        .stdout
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(vec!["multi", "uni", "err", "slow"], names, "{}", out.stdout);
+    let unknown = usage_command(&config, Some("zz"), None, false);
+    assert_eq!(
+        "usage: unknown provider 'zz'; known: multi, uni, err, slow\n",
+        unknown.stderr
+    );
+}
