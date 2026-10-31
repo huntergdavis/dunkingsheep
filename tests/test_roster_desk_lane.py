@@ -1,6 +1,8 @@
 """t1147: the Front Desk lane must be messageable even though its `agent` field is empty."""
+import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -11,6 +13,7 @@ DESK = {"pane_id": "%133", "workspace_label": "bootstrap", "tab_label": "sn-desk
         "agent": "", "agent_status": "working", "cwd": "/home/hunter/workspace/desk"}
 SHELL = {"pane_id": "%3", "workspace_label": "par-a", "tab_label": "bash",
          "agent": "", "agent_status": None, "cwd": "/home/hunter/workspace"}
+os.environ.setdefault("VP_DATA_DIR", tempfile.mkdtemp(prefix="desk-test-"))
 CONFIG = [{"id": "cos", "name": "Front Desk", "match": "desk", "kind": "active"}]
 
 
@@ -53,8 +56,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-import importlib.util  # noqa: E402
-import tempfile  # noqa: E402
 
 
 @unittest.skipUnless(importlib.util.find_spec("fastapi"), "web.app needs fastapi")
@@ -62,8 +63,7 @@ class SendThroughTheApi(unittest.TestCase):
     """POST the real route with a fake daemon: the desk lane is accepted and typed to."""
 
     def test_a_message_to_the_front_desk_reaches_the_daemon_with_its_own_outcome(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ["VP_DATA_DIR"] = tmp
+        if True:
             from fastapi.testclient import TestClient
             from web import app as desk
 
