@@ -1,0 +1,2229 @@
+[
+ {
+  "input": [],
+  "output": "no dunks\n",
+  "printer": "print_dunks"
+ },
+ {
+  "input": [
+   {
+    "id": "d1",
+    "interval_minutes": 15,
+    "max_sends": 10,
+    "name": "beat",
+    "only_when": "idle",
+    "running": true,
+    "send_count": 3,
+    "skip_count": 2,
+    "skip_if_unconsumed": true,
+    "status": "armed",
+    "target_label": "steward",
+    "text": "check mail\nthen work"
+   },
+   {
+    "id": "d22222",
+    "interval_minutes": 0.5,
+    "running": false,
+    "status": "ssssssssssssssssssssssssssssss",
+    "target_label": "tttttttttttttttttttttttttttttttttttttttt",
+    "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   {
+    "id": "d3",
+    "interval_minutes": 90,
+    "skip_if_unconsumed": true
+   },
+   {
+    "id": "d4",
+    "interval_minutes": 0,
+    "only_when": "busy",
+    "text": null
+   }
+  ],
+  "output": "ID    RUN  STATUS               TARGET                        EVERY   SENT SKIP GATE      TEXT\nd1    yes  armed                steward                         15m   3/10    2 idle+skip check mail then work (beat)\nd222\u2026 no   sssssssssssssssssss\u2026 ttttttttttttttttttttttttttt\u2026    30s      0    0 -         xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\u2026\nd3    no                                                        90m      0    0 skip      \nd4    no                                                         0m      0    0 -         \n",
+  "printer": "print_dunks"
+ },
+ {
+  "input": {
+   "awaiting_consumption": true,
+   "hold_count": 1,
+   "hold_while_typing": true,
+   "id": "d1",
+   "interval_minutes": 15,
+   "last_error": "boom",
+   "max_sends": 10,
+   "name": "beat",
+   "next_send_in_s": 42,
+   "only_when": "idle",
+   "running": true,
+   "send_count": 3,
+   "skip_count": 2,
+   "skip_if_unconsumed": true,
+   "status": "armed",
+   "target_label": "steward",
+   "target_pane_id": "%3",
+   "text": "it's \"quoted\"\nline2"
+  },
+  "output": "id               d1\nname             beat\nrunning          True\nstatus           armed\ntarget_label     steward\ntarget_pane_id   %3\ninterval_minutes 15\nonly_when        idle\nmax_sends        10\nskip_if_unconsumed True\nhold_while_typing True\nsend_count       3\nskip_count       2\nhold_count       1\nawaiting_consumption True\nnext_send_in_s   42\nlast_error       boom\ntext             'it\\'s \"quoted\"\\nline2'\n",
+  "printer": "print_dunk"
+ },
+ {
+  "input": {
+   "hold_while_typing": false,
+   "id": "d2",
+   "running": false,
+   "send_count": 0,
+   "skip_if_unconsumed": false,
+   "status": "",
+   "text": "plain"
+  },
+  "output": "id               d2\nskip_if_unconsumed False\nhold_while_typing False\ntext             'plain'\n",
+  "printer": "print_dunk"
+ },
+ {
+  "input": {
+   "hold_while_typing": false,
+   "id": "d3",
+   "skip_if_unconsumed": false,
+   "text": "a'b"
+  },
+  "output": "id               d3\nskip_if_unconsumed False\nhold_while_typing False\ntext             \"a'b\"\n",
+  "printer": "print_dunk"
+ },
+ {
+  "input": {
+   "hold_while_typing": false,
+   "id": "d4",
+   "skip_if_unconsumed": true,
+   "text": "both ' and \""
+  },
+  "output": "id               d4\nskip_if_unconsumed True\nhold_while_typing False\ntext             'both \\' and \"'\n",
+  "printer": "print_dunk"
+ },
+ {
+  "input": {},
+  "output": "no panes (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)\n",
+  "printer": "print_panes"
+ },
+ {
+  "input": {
+   "panes": []
+  },
+  "output": "no panes (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)\n",
+  "printer": "print_panes"
+ },
+ {
+  "input": {
+   "panes": [
+    {
+     "agent": "claude",
+     "agent_status": "working",
+     "cwd": "/home/hunter/workspace",
+     "is_self": true,
+     "pane_id": "%1",
+     "tab_label": "work",
+     "workspace_label": "main"
+    },
+    {
+     "agent": "averylongagent",
+     "agent_status": "blocked-long",
+     "cwd": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "pane_id": "%22222222",
+     "tab_label": "tttttttttttttttttttttttttttttt",
+     "workspace_label": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+    },
+    {
+     "pane_id": "%3"
+    }
+   ],
+   "self_pane_id": "%1"
+  },
+  "output": "PANE     WORKSPACE            TAB                      AGENT    STATUS   DIRECTORY\n*%1      main                 work                     claude   working  /home/hunter/workspace\n %22222\u2026 wwwwwwwwwwwwwwwwwww\u2026 ttttttttttttttttttttttt\u2026 averylo\u2026 blocked\u2026 ccccccccccccccccccccccccccccccccccccccccccccccccc\u2026\n %3                                                    -        -        \n* = this pane (%1)\n",
+  "printer": "print_panes"
+ },
+ {
+  "input": {
+   "panes": [
+    {
+     "pane_id": "%1"
+    }
+   ],
+   "registry_gap": [
+    {
+     "alive": true,
+     "label": "lane-seven",
+     "pane": "%7",
+     "pid": 4242,
+     "role": "worker"
+    },
+    {
+     "label": null,
+     "pane": "%8",
+     "pid": null,
+     "role": null
+    },
+    {
+     "label": "llllllllllllllllllllllllllllll",
+     "pane": "%9",
+     "pid": 7,
+     "role": "rrrrrrrrrrrr"
+    }
+   ]
+  },
+  "output": "PANE     WORKSPACE            TAB                      AGENT    STATUS   DIRECTORY\n %1                                                    -        -        \n\n3 registered lane(s) the backend pane list does not contain:\n  %7       lane-seven               worker    process ALIVE (pid 4242)\n  %8       -                        -         process gone (pid not recorded)\n  %9       lllllllllllllllllllllll\u2026 rrrrrrrr\u2026 process gone (pid 7)\n  an ALIVE lane that is not in the list cannot be typed into: mail to it fails with reason=backend_missing_pane (restore the pane, or address the lane by mailbox name).\n",
+  "printer": "print_panes"
+ },
+ {
+  "input": {
+   "panes": [
+    {
+     "pane_id": "%1"
+    }
+   ],
+   "registry_gap": [
+    {
+     "label": "gone",
+     "pane": "%8",
+     "role": "web"
+    }
+   ]
+  },
+  "output": "PANE     WORKSPACE            TAB                      AGENT    STATUS   DIRECTORY\n %1                                                    -        -        \n\n1 registered lane(s) the backend pane list does not contain:\n  %8       gone                     web       process gone (pid not recorded)\n",
+  "printer": "print_panes"
+ },
+ {
+  "input": {
+   "archived": 3,
+   "mailbox": "pi-worker",
+   "states": [
+    "read",
+    "acked"
+   ]
+  },
+  "output": "archived 3 message(s) in pi-worker (states read,acked)\n",
+  "printer": "print_inbox_archive"
+ },
+ {
+  "input": {
+   "archived": 0,
+   "before": "2026-10-01",
+   "mailbox": "m",
+   "states": [
+    "acked"
+   ]
+  },
+  "output": "archived 0 message(s) in m (states acked before 2026-10-01)\n",
+  "printer": "print_inbox_archive"
+ },
+ {
+  "input": {},
+  "output": "window Nones | host load1 None | attributed None cores | unattributed None cores\nno registered callers with pid+starttime (nothing is assumed)\n",
+  "printer": "print_load"
+ },
+ {
+  "input": {
+   "attributed_cores": 1.2,
+   "elapsed_s": 60,
+   "host_load1": 3.5,
+   "unattributed_cores": 2.3
+  },
+  "output": "window 60s | host load1 3.5 | attributed 1.2 cores | unattributed 2.3 cores\nno registered callers with pid+starttime (nothing is assumed)\n",
+  "printer": "print_load"
+ },
+ {
+  "input": {
+   "attributed_cores": 1.2,
+   "callers": [
+    {
+     "cpu_pct": 12.5,
+     "gpu_pct": {
+      "value": 33
+     },
+     "name": "pi-worker-9",
+     "peak_cpu_pct": 80,
+     "process_count": 4,
+     "rss_mb": 512
+    },
+    {
+     "cpu_pct": null,
+     "gpu_pct": {
+      "reason": "no gpu",
+      "value": null
+     },
+     "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+     "peak_cpu_pct": null,
+     "process_count": 1,
+     "rss_mb": 1
+    },
+    {
+     "cpu_pct": 0,
+     "name": "bare",
+     "peak_cpu_pct": 0,
+     "process_count": 0,
+     "rss_mb": 0
+    }
+   ],
+   "elapsed_s": 60,
+   "host_load1": 3.5,
+   "skipped": [
+    {
+     "name": "stale",
+     "reason": "pid reused"
+    }
+   ],
+   "unattributed_cores": 2.3,
+   "would_kill": [
+    {
+     "kill": true,
+     "line": "kill pid 9 (hog)"
+    },
+    {
+     "kill": false,
+     "line": "warn pid 10"
+    }
+   ]
+  },
+  "output": "window 60s | host load1 3.5 | attributed 1.2 cores | unattributed 2.3 cores\n  pi-worker-9                12.5%  peak 80%  rss 512MB  procs 4  gpu 33%\n  nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn   None%  peak None%  rss 1MB  procs 1  gpu null (no gpu)\n  bare                          0%  peak 0%  rss 0MB  procs 0  gpu null (None)\n  kill pid 9 (hog)\n  warn pid 10 [alert-only]\n  stale                    skipped: pid reused\n",
+  "printer": "print_load"
+ },
+ {
+  "input": {
+   "body_bytes": 812,
+   "destination": "pm-poolrad",
+   "digest_id": "dg1",
+   "state": "queued"
+  },
+  "output": "updated dg1 -> pm-poolrad (queued, 812 bytes)\n",
+  "printer": "print_pm_digest"
+ },
+ {
+  "input": {
+   "action": "created",
+   "body_bytes": 0,
+   "destination": "pm",
+   "digest_id": "dg2",
+   "state": "sent"
+  },
+  "output": "created dg2 -> pm (sent, 0 bytes)\n",
+  "printer": "print_pm_digest"
+ },
+ {
+  "input": {
+   "action": null
+  },
+  "output": "None None -> None (None, None bytes)\n",
+  "printer": "print_pm_digest"
+ },
+ {
+  "input": {
+   "registry": "/r/pm.json"
+  },
+  "output": "no PM routing configured at /r/pm.json\n",
+  "printer": "print_pm_routing"
+ },
+ {
+  "input": {
+   "registry": "/r/pm.json",
+   "routing": {}
+  },
+  "output": "no PM routing configured at /r/pm.json\n",
+  "printer": "print_pm_routing"
+ },
+ {
+  "input": {
+   "routing": {
+    "alpha": {
+     "members": [],
+     "mode": "direct",
+     "pm": "w1:p3"
+    },
+    "poolrad": {
+     "members": [
+      "%1",
+      "%2"
+     ],
+     "mode": "digest",
+     "pm": "w1:p2"
+    },
+    "zeta": {
+     "mode": "digest",
+     "pm": "w9:pA"
+    }
+   }
+  },
+  "output": "alpha: pm w1:p3  mode direct  lanes -\npoolrad: pm w1:p2  mode digest  lanes %1, %2\nzeta: pm w9:pA  mode digest  lanes -\n",
+  "printer": "print_pm_routing"
+ },
+ {
+  "input": {
+   "mailbox": "pi-worker",
+   "total": 4,
+   "unread": 0
+  },
+  "output": "pi-worker: 0 unread of 4\n",
+  "printer": "print_inbox_count"
+ },
+ {
+  "input": {
+   "archived": 3,
+   "attachments_unread": 1,
+   "from_lanes": 2,
+   "mailbox": "m",
+   "oldest_unread_s": 125,
+   "total": 9,
+   "undeliverable": 1,
+   "unread": 2
+  },
+  "output": "m: 2 unread of 9, oldest waiting 2.08333m, 3 archived, 1 undeliverable, 2 from lanes (bypassed a PM), 1 attachment(s)\n",
+  "printer": "print_inbox_count"
+ },
+ {
+  "input": {
+   "mailbox": "m",
+   "oldest_unread_s": 30,
+   "total": 1,
+   "unread": 1
+  },
+  "output": "m: 1 unread of 1, oldest waiting 30s\n",
+  "printer": "print_inbox_count"
+ },
+ {
+  "input": {
+   "archived": 0,
+   "mailbox": "m",
+   "oldest_unread_s": 7200,
+   "total": 1,
+   "unread": 1
+  },
+  "output": "m: 1 unread of 1, oldest waiting 120m\n",
+  "printer": "print_inbox_count"
+ },
+ {
+  "input": {
+   "destination": "pi-worker",
+   "message_id": "i1",
+   "notified": true
+  },
+  "output": "i1 -> pi-worker; recipient nudged\n",
+  "printer": "print_inbox_sent"
+ },
+ {
+  "input": {
+   "attachments": [
+    {
+     "id": "a"
+    },
+    {
+     "id": "b"
+    }
+   ],
+   "destination": "m",
+   "message_id": "i2"
+  },
+  "output": "i2 -> m with 2 attachment(s); no nudge\n",
+  "printer": "print_inbox_sent"
+ },
+ {
+  "input": {
+   "attachments": [],
+   "destination": "m",
+   "message_id": "i3",
+   "notified": false
+  },
+  "output": "i3 -> m; no nudge\n",
+  "printer": "print_inbox_sent"
+ },
+ {
+  "input": {
+   "bytes": 9999,
+   "cap": 4096,
+   "head": "HEAD",
+   "note": "n",
+   "truncated": true
+  },
+  "output": "result capped by the desk role (9999 bytes > 4096): n\nHEAD\n",
+  "printer": "print_inbox_list"
+ },
+ {
+  "input": {
+   "truncated": true
+  },
+  "output": "result capped by the desk role (None bytes > None): \n\n",
+  "printer": "print_inbox_list"
+ },
+ {
+  "input": {
+   "mailbox": "%133",
+   "messages": []
+  },
+  "output": "mailbox %133\nno messages\n",
+  "printer": "print_inbox_list"
+ },
+ {
+  "input": {
+   "mailbox": "%133",
+   "messages": [
+    {
+     "body_bytes": 300,
+     "message_id": "i1",
+     "sender": "%126",
+     "state": "unread",
+     "subject": "TASK t1: hello",
+     "waiting_s": 12
+    },
+    {
+     "attachments": [
+      {
+       "id": "a"
+      }
+     ],
+     "body_bytes": 12345678,
+     "message_id": "i22222",
+     "sender": null,
+     "state": "delivered",
+     "subject": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+     "waiting_s": null
+    },
+    {
+     "attachments": [
+      {
+       "id": "a"
+      },
+      {
+       "id": "b"
+      }
+     ],
+     "body_bytes": 0,
+     "message_id": "i3",
+     "sender": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+     "state": "read",
+     "waiting_s": 0
+    }
+   ]
+  },
+  "output": "mailbox %133\nID     STATE     FROM                    WAITING   BYTES SUBJECT\ni1     unread    %126                        12s     300 TASK t1: hello\ni22222 delivered -                             - 12345678 sssssssssssssssssssssssssssssssssssssssssss\u2026\ni3     read      zzzzzzzzzzzzzzzzzzzzz\u2026       0s       0   [2 attachment(s)]\n",
+  "printer": "print_inbox_list"
+ },
+ {
+  "input": {
+   "id": "t1",
+   "priority": "high",
+   "scope": "global",
+   "status": "open",
+   "title": "Minimal"
+  },
+  "output": "t1 [high] open  Minimal\nscope       global\n",
+  "printer": "print_task"
+ },
+ {
+  "input": {
+   "accounting_pr": 280,
+   "assignees": [
+    "%5",
+    "%6"
+   ],
+   "block_reason": "needs-owner: which?",
+   "blocked_by": [
+    "t8"
+   ],
+   "blocked_dependents": [
+    "t3",
+    "t4"
+   ],
+   "body": "line1\nline2",
+   "children": [
+    {
+     "assignees": [],
+     "id": "t5",
+     "priority": "low",
+     "scope": "%5",
+     "status": "open",
+     "title": "child"
+    },
+    {
+     "assignees": [
+      "%1",
+      "%2",
+      "%3",
+      "%4",
+      "%5",
+      "%6",
+      "%7"
+     ],
+     "dead_dependencies": [
+      "t7"
+     ],
+     "id": "t6",
+     "is_global": true,
+     "priority": "high",
+     "status": "done",
+     "title": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+    }
+   ],
+   "claimed_by": [
+    "%5"
+   ],
+   "dead_dependencies": [
+    "t9"
+   ],
+   "dependency_note": "all satisfied",
+   "depends_on": [
+    "t8",
+    "t9"
+   ],
+   "id": "t2",
+   "lease_expires_at": 1798765432.9,
+   "notes": [
+    {
+     "actor": "%5",
+     "at": 1798700000,
+     "event": "note",
+     "reason": "a\nb"
+    },
+    {
+     "actor": null,
+     "at": 1798700100.5,
+     "event": null,
+     "reason": null
+    },
+    {
+     "at": 1798700200,
+     "reason": ""
+    }
+   ],
+   "parent_id": "t0",
+   "pr": 272,
+   "priority": "urgent",
+   "scope": "%5",
+   "status": "in_progress",
+   "title": "Everything",
+   "unblock_needed": true
+  },
+  "output": "t2 [urgent] in_progress  Everything\nwarning     cancelling this leaves 2 unclaimable dependent(s): t3, t4 - a cancelled dependency can never be satisfied, so repoint or cancel them\nscope       %5\nassignees   %5, %6\nclaimed by  %5\nbody pr     #272 (accounting pr #280)\ncancelled deps t9 (satisfied since t164, so this row IS claimable; repoint with `task update <id> --depends-on <good-id>` if you want a live edge)\ndepends on  t8, t9 (blocked by t8)\nunblock     all satisfied\nparent      t0\nblocked     needs-owner: which?\n\nline1\nline2\n\nsubtasks:\n  t5    open        low    %5         -                  child\n  t6    done        high   global     %1,%2,%3,%4,%5,%6\u2026 ttttttttttttttttttttttttttttttttttttttttttttttttt\u2026  [depends on cancelled t7: satisfied (t164), claimable]\nlease       2027-01-01 01:03:52\n\nnotes (last 3):\n  2026-12-31 06:53:20 %5 note\n    a\n    b\n  2026-12-31 06:55:00 - note\n    \n  2026-12-31 06:56:40 - note\n    \n",
+  "printer": "print_task"
+ },
+ {
+  "input": {
+   "depends_on": [
+    "t1"
+   ],
+   "id": "t3",
+   "pr": 9,
+   "priority": "low",
+   "scope": "global",
+   "status": "blocked",
+   "title": "T",
+   "unblock_needed": true
+  },
+  "output": "t3 [low] blocked  T\nscope       global\nbody pr     #9\ndepends on  t1\n",
+  "printer": "print_task"
+ },
+ {
+  "input": {
+   "blocked_by": [],
+   "blocked_dependents": [
+    "t5"
+   ],
+   "depends_on": [
+    "t1"
+   ],
+   "id": "t4",
+   "priority": "low",
+   "scope": "global",
+   "status": "open",
+   "title": "T"
+  },
+  "output": "t4 [low] open  T\nwarning     cancelling this leaves 1 unclaimable dependent(s): t5 - a cancelled dependency can never be satisfied, so repoint or cancel them\nscope       global\ndepends on  t1\n",
+  "printer": "print_task"
+ },
+ {
+  "input": {
+   "scope": "global"
+  },
+  "output": "scope global (pane -)\nno tasks\n",
+  "printer": "print_task_list"
+ },
+ {
+  "input": {
+   "pane_id": "%3",
+   "scope": "global",
+   "tasks": []
+  },
+  "output": "scope global (pane %3)\nno tasks\n",
+  "printer": "print_task_list"
+ },
+ {
+  "input": {
+   "pane_id": "%3",
+   "scope": "self",
+   "tasks": [
+    {
+     "assignees": [
+      "%1"
+     ],
+     "id": "t1",
+     "is_global": true,
+     "priority": "high",
+     "status": "open",
+     "title": "one"
+    },
+    {
+     "assignees": [
+      "%1",
+      "%2",
+      "%3",
+      "%4",
+      "%5",
+      "%6"
+     ],
+     "dead_dependencies": [
+      "t7",
+      "t8"
+     ],
+     "id": "t22222",
+     "priority": "urgent",
+     "scope": "%3%3%3%3%3",
+     "status": "in_progress",
+     "title": "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"
+    }
+   ]
+  },
+  "output": "scope self (pane %3)\nID    STATUS      PRIORITY SCOPE      ASSIGNEES          TITLE\nt1    open        high   global     %1                 one\nt22222 in_progress urgent %3%3%3%3%3 %1,%2,%3,%4,%5,%6  TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT\u2026  [depends on cancelled t7, t8: satisfied (t164), claimable]\n",
+  "printer": "print_task_list"
+ },
+ {
+  "input": {},
+  "output": "no eligible task\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "refused": {
+    "reason": "busy",
+    "task_ids": [
+     "t1",
+     "t2"
+    ]
+   },
+   "task": null
+  },
+  "output": "refused (busy): this pane already holds t1, t2; pass --allow-busy to take parallel work\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "refused": {
+    "reason": "busy"
+   },
+   "task": null
+  },
+  "output": "refused (busy): this pane already holds in-progress work; pass --allow-busy to take parallel work\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "following": true,
+   "refused": {
+    "reason": "empty"
+   },
+   "task": null
+  },
+  "output": "no eligible task: the queue is empty for this scope\nfollowing the queue: the daemon will push the next task when this pane is idle\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "refused": {
+    "owned_by": [
+     "%2",
+     "%3"
+    ],
+    "reason": "owned_elsewhere",
+    "task_ids": [
+     "t5"
+    ]
+   },
+   "task": null
+  },
+  "output": "no eligible task: refused (owned_elsewhere) (t5) owned by %2, %3\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "refused": {
+    "owned_by": [
+     "%2"
+    ],
+    "reason": "blocked"
+   },
+   "task": null
+  },
+  "output": "no eligible task: refused (blocked) owned by %2\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "refused": {
+    "reason": "leased"
+   },
+   "task": null
+  },
+  "output": "no eligible task: refused (leased)\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "lease_seconds": 1800.0,
+   "task": {
+    "id": "t9",
+    "priority": "high",
+    "scope": "global",
+    "status": "in_progress",
+    "title": "T"
+   }
+  },
+  "output": "claimed t9 (lease 1800s)\nt9 [high] in_progress  T\nscope       global\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {
+   "task": {
+    "id": "t9",
+    "priority": "high",
+    "scope": "global",
+    "status": "in_progress",
+    "title": "T"
+   }
+  },
+  "output": "claimed t9 (lease 0s)\nt9 [high] in_progress  T\nscope       global\n",
+  "printer": "print_task_next"
+ },
+ {
+  "input": {},
+  "output": "no followers\n",
+  "printer": "print_task_followers"
+ },
+ {
+  "input": {
+   "followers": []
+  },
+  "output": "no followers\n",
+  "printer": "print_task_followers"
+ },
+ {
+  "input": {
+   "followers": [
+    {
+     "pane_id": "%1",
+     "scope": "global"
+    },
+    {
+     "pane_id": "pi-worker-long",
+     "scope": "self"
+    }
+   ]
+  },
+  "output": "%1           global\npi-worker-long self\n",
+  "printer": "print_task_followers"
+ },
+ {
+  "input": {},
+  "output": "\n",
+  "printer": "print_task_stats"
+ },
+ {
+  "input": {
+   "totals": {
+    "open": 3
+   }
+  },
+  "output": "open=3\n",
+  "printer": "print_task_stats"
+ },
+ {
+  "input": {
+   "by_scope": {
+    "global": {
+     "done": 0,
+     "open": 3
+    }
+   },
+   "totals": {
+    "open": 3
+   }
+  },
+  "output": "open=3\n  global: open=3\n",
+  "printer": "print_task_stats"
+ },
+ {
+  "input": {
+   "by_scope": {
+    "%1": {
+     "open": 1
+    },
+    "global": {
+     "blocked": 1,
+     "open": 2
+    }
+   },
+   "totals": {
+    "blocked": 1,
+    "open": 3
+   }
+  },
+  "output": "blocked=1 open=3\n  %1: open=1\n  global: blocked=1 open=2\n",
+  "printer": "print_task_stats"
+ },
+ {
+  "input": [],
+  "output": "no matches\n",
+  "printer": "print_memory"
+ },
+ {
+  "input": [
+   {
+    "harness": "claude",
+    "project": "dunkingsheep",
+    "role": "user",
+    "score": 12.3456,
+    "session_id": 42,
+    "snippet": "line one\nline two"
+   },
+   {
+    "harness": null,
+    "project": null,
+    "role": null,
+    "score": 0.5,
+    "session_id": "s7",
+    "snippet": null
+   },
+   {
+    "harness": "codex",
+    "project": "p",
+    "role": "assistant",
+    "score": 1,
+    "session_id": 1,
+    "snippet": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+   }
+  ],
+  "output": "12.346 claude   dunkingsheep         #42 [user]\n  line one line two\n0.500 -        -                    #s7 [-]\n  \n1.000 codex    p                    #1 [assistant]\n  yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\n",
+  "printer": "print_memory"
+ },
+ {
+  "input": {
+   "counts": {
+    "sessions": 0,
+    "snippets": 0
+   },
+   "query": "unblock"
+  },
+  "output": "query 'unblock'  sessions 0  snippets 0\n",
+  "printer": "print_memory_context"
+ },
+ {
+  "input": {
+   "counts": {
+    "sessions": 2,
+    "snippets": 3
+   },
+   "query": "it's",
+   "sessions": [
+    {
+     "harness": "claude",
+     "project": "dunkingsheep",
+     "score": 4.25,
+     "session_id": 1,
+     "snippets": [
+      {
+       "snippet": "a\nb"
+      },
+      {
+       "snippet": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      {
+       "snippet": null
+      }
+     ],
+     "title": "T"
+    },
+    {
+     "harness": "pi",
+     "project": null,
+     "score": 1,
+     "session_id": 2
+    }
+   ]
+  },
+  "output": "query \"it's\"  sessions 2  snippets 3\n- claude dunkingsheep #1 T (score 4.250)\n    a b\n    zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n    \n- pi - #2  (score 1.000)\n",
+  "printer": "print_memory_context"
+ },
+ {
+  "input": {},
+  "output": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"\"}}\n",
+  "printer": "print_memory_hook_context"
+ },
+ {
+  "input": {
+   "text": ""
+  },
+  "output": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"\"}}\n",
+  "printer": "print_memory_hook_context"
+ },
+ {
+  "input": {
+   "text": "   "
+  },
+  "output": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"   \"}}\n",
+  "printer": "print_memory_hook_context"
+ },
+ {
+  "input": {
+   "text": "digest line\nwith \"quotes\" and unicode \u2014 \u00e9"
+  },
+  "output": "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Dunking Sheep memory - relevant past sessions for this workspace:\\n\\ndigest line\\nwith \\\"quotes\\\" and unicode \\u2014 \\u00e9\"}}\n",
+  "printer": "print_memory_hook_context"
+ },
+ {
+  "input": {
+   "discovered": 10,
+   "enqueued": 3,
+   "paused": false,
+   "status": {
+    "ingestor": {
+     "throttle_s": 0.5
+    },
+    "ok": true
+   }
+  },
+  "output": "queued 3 of 10 source(s); paused False; throttle 0.5\npath None  schema None  ok True\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\ningestor {'throttle_s': 0.5}\n",
+  "printer": "print_memory_backfill"
+ },
+ {
+  "input": {
+   "discovered": 0,
+   "enqueued": 0
+  },
+  "output": "queued 0 of 0 source(s); paused None; throttle None\npath None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\n",
+  "printer": "print_memory_backfill"
+ },
+ {
+  "input": {
+   "paused": true
+  },
+  "output": "backfill paused True\npath None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\n",
+  "printer": "print_memory_backfill"
+ },
+ {
+  "input": {
+   "ok": true,
+   "path": "/m.db"
+  },
+  "output": "path /m.db  schema None  ok True\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\n",
+  "printer": "print_memory_backfill"
+ },
+ {
+  "input": {},
+  "output": "",
+  "printer": "print_memory_backfill"
+ },
+ {
+  "input": {},
+  "output": "path None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\n",
+  "printer": "print_memory_stats"
+ },
+ {
+  "input": {
+   "chunks": 100,
+   "db_bytes": 4096,
+   "harness": [
+    {
+     "chunks": 60,
+     "harness": "claude",
+     "sessions": 2
+    },
+    {
+     "chunks": 40,
+     "harness": "pi",
+     "sessions": 2
+    }
+   ],
+   "ingestor": {
+    "running": true
+   },
+   "ok": true,
+   "path": "/m.db",
+   "queries": {
+    "count": 9,
+    "errors": 0,
+    "p50": 1,
+    "p95": 5,
+    "p99": 9
+   },
+   "queue": {
+    "pending": 2
+   },
+   "queue_depth": 2,
+   "schema_version": 3,
+   "sessions": 4,
+   "sources": 5
+  },
+  "output": "path /m.db  schema 3  ok True\nsources 5  sessions 4  chunks 100\nqueue depth 2  {'pending': 2}\ndb bytes 4096\nqueries n=9 p50=1 p95=5 p99=9 errors=0\ningestor {'running': True}\n  claude: 60 chunks / 2 sessions\n  pi: 40 chunks / 2 sessions\n",
+  "printer": "print_memory_stats"
+ },
+ {
+  "input": {
+   "harness": []
+  },
+  "output": "path None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\n",
+  "printer": "print_memory_stats"
+ },
+ {
+  "input": {},
+  "output": "health DEGRADED  duration None ms\n  memory ok=None sources=None sessions=None chunks=None queue=None\n  integrity=None stale=None wal=None disk_free=None tasks=None\n",
+  "printer": "print_health"
+ },
+ {
+  "input": {
+   "checks": {
+    "disk_free_bytes": 100,
+    "integrity": "ok",
+    "memory": {
+     "chunks": 3,
+     "ok": true,
+     "queue_depth": 0,
+     "sessions": 2,
+     "sources": 1
+    },
+    "stale_leases": 0,
+    "tasks": 5,
+    "wal_bytes": 0
+   },
+   "duration_ms": 12,
+   "ok": true
+  },
+  "output": "health ok  duration 12 ms\n  memory ok=True sources=1 sessions=2 chunks=3 queue=0\n  integrity=ok stale=0 wal=0 disk_free=100 tasks=5\n",
+  "printer": "print_health"
+ },
+ {
+  "input": {
+   "checks": {
+    "dispatch": {
+     "age_s": 125.5,
+     "dry_run": true,
+     "status": "ok"
+    }
+   },
+   "duration_ms": 99,
+   "ok": false,
+   "problems": [
+    "db locked",
+    "disk low"
+   ],
+   "repairs": [
+    "vacuumed"
+   ]
+  },
+  "output": "health DEGRADED  duration 99 ms\n  problem: db locked\n  problem: disk low\n  repaired: vacuumed\n  memory ok=None sources=None sessions=None chunks=None queue=None\n  integrity=None stale=None wal=None disk_free=None tasks=None\n  dispatcher=ok last_tick=2.1m ago (125.5s) (dry run)\n",
+  "printer": "print_health"
+ },
+ {
+  "input": {
+   "checks": {
+    "dispatch": {
+     "age_s": null,
+     "status": "dead"
+    }
+   }
+  },
+  "output": "health DEGRADED  duration None ms\n  memory ok=None sources=None sessions=None chunks=None queue=None\n  integrity=None stale=None wal=None disk_free=None tasks=None\n  dispatcher=dead last_tick=never\n",
+  "printer": "print_health"
+ },
+ {
+  "input": {
+   "checks": {
+    "dispatch": {
+     "age_s": 30,
+     "status": "ok"
+    }
+   }
+  },
+  "output": "health DEGRADED  duration None ms\n  memory ok=None sources=None sessions=None chunks=None queue=None\n  integrity=None stale=None wal=None disk_free=None tasks=None\n  dispatcher=ok last_tick=30s ago\n",
+  "printer": "print_health"
+ },
+ {
+  "input": {},
+  "output": "doctor WARN  backend None  launches None\n  panes None (agents None, sessions None)\n",
+  "printer": "print_doctor"
+ },
+ {
+  "input": {
+   "herdr_version": "0.9",
+   "launches": 4,
+   "ok": true,
+   "panes": {
+    "total": 12,
+    "with_agent": 5,
+    "with_session": 3
+   }
+  },
+  "output": "doctor ok  backend 0.9  launches 4\n  panes 12 (agents 5, sessions 3)\n",
+  "printer": "print_doctor"
+ },
+ {
+  "input": {
+   "herdr_version": "x",
+   "launches": 0,
+   "ok": false,
+   "panes": {},
+   "surfaces": {
+    "guard": {
+     "active_in_this_shell": true,
+     "installed": true,
+     "shadowing_herdr": false
+    }
+   },
+   "warnings": [
+    {
+     "detail": "d1",
+     "kind": "stale"
+    },
+    {
+     "kind": "k"
+    }
+   ]
+  },
+  "output": "doctor WARN  backend x  launches 0\n  panes None (agents None, sessions None)\n  guard installed=True shadowing=False active_in_this_shell=True\n  warning stale: d1\n  warning k: None\n",
+  "printer": "print_doctor"
+ },
+ {
+  "input": {
+   "surfaces": {
+    "guard": "not-a-dict"
+   }
+  },
+  "output": "doctor WARN  backend None  launches None\n  panes None (agents None, sessions None)\n  guard not-a-dict\n",
+  "printer": "print_doctor"
+ },
+ {
+  "input": {
+   "surfaces": {
+    "web": "ok"
+   }
+  },
+  "output": "doctor WARN  backend None  launches None\n  panes None (agents None, sessions None)\n  web ok\n",
+  "printer": "print_doctor"
+ },
+ {
+  "input": {},
+  "output": "recover dry-run  backend None  ok None  launches None\n",
+  "printer": "print_recover"
+ },
+ {
+  "input": {
+   "apply": true,
+   "herdr": "0.9",
+   "launches": 2,
+   "ok": true,
+   "plan": [
+    {
+     "action": "relaunch",
+     "agent": "claude",
+     "applied": true,
+     "apply_reason": "started",
+     "command": "claude --resume",
+     "pane_id": "%1"
+    },
+    {
+     "action": "skip",
+     "applied": false,
+     "apply_detail": "d",
+     "pane_id": "%22222222",
+     "reason": "no session"
+    },
+    {
+     "action": "noop",
+     "applied": false,
+     "pane_id": "%3"
+    }
+   ],
+   "warnings": [
+    {
+     "detail": "d",
+     "kind": "k"
+    }
+   ]
+  },
+  "output": "recover apply  backend 0.9  ok True  launches 2\n  %1       relaunch        claude   claude --resume\n           applied=True started\n  %22222222 skip            -        no session\n           applied=False d\n  %3       noop            -        \n           applied=False \n  warning k: d\n",
+  "printer": "print_recover"
+ },
+ {
+  "input": {
+   "herdr": "x",
+   "launches": 0,
+   "ok": false,
+   "plan": [
+    {
+     "action": "a",
+     "pane_id": "%4"
+    }
+   ]
+  },
+  "output": "recover dry-run  backend x  ok False  launches 0\n  %4       a               -        \n",
+  "printer": "print_recover"
+ },
+ {
+  "input": {},
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nleader-held tasks: unavailable (payload predates the metric)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "by_actor": {
+    "claimed": [
+     {
+      "actor": "%3",
+      "count": 4
+     }
+    ],
+    "completed": [
+     {
+      "actor": "%1",
+      "count": 2
+     },
+     {
+      "actor": "%2",
+      "count": 1
+     }
+    ]
+   },
+   "current": {
+    "by_assignee": [
+     {
+      "assignee": "%1",
+      "count": 2
+     },
+     {
+      "assignee": "%2",
+      "count": 1
+     }
+    ],
+    "by_priority": {
+     "high": 2,
+     "low": 6
+    },
+    "by_scope": {
+     "global": 7,
+     "pane": 1
+    },
+    "by_status": {
+     "done": 5,
+     "open": 3
+    },
+    "leader_held": {
+     "count": 3,
+     "oldest_age_s": 200000
+    }
+   },
+   "latency_ms": {
+    "claim": {
+     "count": 0
+    },
+    "completion": {
+     "avg": 1500,
+     "count": 2,
+     "max": 2000,
+     "p50": 1400,
+     "p90": 1900
+    }
+   },
+   "scope": "global",
+   "throughput": {
+    "buckets": [
+     {
+      "bucket": 1798700000,
+      "completed": 1,
+      "created": 2
+     },
+     {
+      "bucket": 1798703600,
+      "completed": 0,
+      "created": 1,
+      "requeued": 2
+     }
+    ],
+    "cancelled": 1,
+    "claimed": 3,
+    "completed": 2,
+    "created": 4,
+    "requeued": 1
+   },
+   "window": {
+    "bucket": "hour",
+    "seconds": 86400
+   }
+  },
+  "output": "scope global  window 86400s (hour buckets)\nstatus:   done=5 open=3\npriority: high=2 low=6\nscope:    global=7 pane=1\nthroughput: created=4 claimed=3 completed=2 cancelled=1 requeued=1\n  2026-12-31 06:00 created=2 completed=1\n  2026-12-31 07:00 created=1 completed=0 requeued=2\ncompletion latency: n=2 avg=1500ms p50=1400 p90=1900 max=2000\nby actor (completed): %1=2, %2=1\nby actor (claimed): %3=4\nopen by assignee: %1=2, %2=1\nleader-held tasks: 3 (oldest 2.3d)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": {
+     "count": 0
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nleader-held tasks: 0\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": {
+     "count": 2,
+     "oldest_age_s": 7200
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nleader-held tasks: 2 (oldest 2.0h)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": {
+     "count": 1,
+     "oldest_age_s": null
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nleader-held tasks: 1 (oldest unknown)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": {
+     "count": 1,
+     "oldest_age_s": 86400
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nleader-held tasks: 1 (oldest 1.0d)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": "bogus"
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "current": {
+    "leader_held": {
+     "count": "x"
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "latency_ms": {
+    "claim": {
+     "avg": 5,
+     "count": 1,
+     "max": 10,
+     "p50": 4,
+     "p90": 9
+    }
+   }
+  },
+  "output": "scope None  window Nones (None buckets)\nstatus:   \npriority: \nscope:    global=0 pane=0\nthroughput: created=0 claimed=0 completed=0 cancelled=0 requeued=0\nclaim latency: n=1 avg=5ms p50=4 p90=9 max=10\nleader-held tasks: unavailable (payload predates the metric)\n",
+  "printer": "print_task_metrics"
+ },
+ {
+  "input": {
+   "bytes": 5000,
+   "cap": 4096,
+   "head": "H",
+   "note": "capped",
+   "truncated": true
+  },
+  "output": "result capped by the desk role (5000 bytes > 4096): capped\nH\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": []
+  },
+  "output": "mailbox %1: no unread messages\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": [],
+   "tasks": {
+    "global": [
+     {
+      "assignees": [],
+      "id": "t1",
+      "is_global": true,
+      "priority": "high",
+      "status": "open",
+      "title": "T"
+     }
+    ],
+    "next": {
+     "pick": {
+      "id": "t1",
+      "priority": "high",
+      "title": "T"
+     }
+    },
+    "pane": [
+     {
+      "assignees": [
+       "%1"
+      ],
+      "id": "t2",
+      "priority": "low",
+      "scope": "%1",
+      "status": "in_progress",
+      "title": "P"
+     }
+    ]
+   }
+  },
+  "output": "mailbox %1: no unread messages\n--- tasks ---\n  t2    in_progress low    %1         %1                 P\n  t1    open        high   global     -                  T\nnext: t1 [high] T\n\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": [
+    {
+     "attachments": [
+      {
+       "filename": "f.txt",
+       "id": "a1",
+       "media_type": "text/plain",
+       "size": 12
+      }
+     ],
+     "body": "hello\nworld",
+     "message_id": "i1",
+     "sender": "%2",
+     "subject": "S"
+    },
+    {
+     "body": "no subject",
+     "message_id": "i2",
+     "sender": null
+    }
+   ],
+   "note": "older left out",
+   "omitted": 3,
+   "truncated": true
+  },
+  "output": "--- i1 from %2 | S\n    attachment a1  f.txt  12 bytes  text/plain\nhello\nworld\n\n--- i2 from unknown\nno subject\n\n[capped: 3 older message(s) left out - older left out]\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": [
+    {
+     "body": "b",
+     "message_id": "i3"
+    }
+   ],
+   "tasks": {
+    "global": [],
+    "next": {
+     "pick": {
+      "id": "t9",
+      "priority": "low",
+      "title": "x"
+     }
+    },
+    "pane": []
+   }
+  },
+  "output": "--- i3 from unknown\nb\n\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": [
+    {
+     "body": "b",
+     "message_id": "i3"
+    }
+   ],
+   "tasks": {
+    "pane": [
+     {
+      "assignees": [],
+      "id": "t2",
+      "priority": "low",
+      "scope": "%1",
+      "status": "open",
+      "title": "P"
+     }
+    ]
+   }
+  },
+  "output": "--- i3 from unknown\nb\n\n--- tasks ---\n  t2    open        low    %1         -                  P\n\n",
+  "printer": "print_inbox_read"
+ },
+ {
+  "input": {
+   "head": "H",
+   "truncated": true
+  },
+  "output": "result capped by the desk role (None bytes > None): \nH\n",
+  "printer": "print_inbox_recover"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": []
+  },
+  "output": "mailbox %1: no unread messages\n",
+  "printer": "print_inbox_recover"
+ },
+ {
+  "input": {
+   "mailbox": "%1",
+   "messages": [
+    {
+     "body": "again",
+     "message_id": "i1",
+     "sender": "%2"
+    }
+   ]
+  },
+  "output": "mailbox %1: recovered 1 delivered message(s) - display them, then inbox ack\n--- i1 from %2\nagain\n\n",
+  "printer": "print_inbox_recover"
+ },
+ {
+  "input": {},
+  "output": "",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "acked_at": 1798700200,
+   "attachment_bytes": 99,
+   "attachments": 2,
+   "body_bytes": 300,
+   "cancelled_at": 1798700300,
+   "created_at": 1798700000,
+   "destination": "pi-worker",
+   "message_id": "i1",
+   "notify": {
+    "reason": "held",
+    "state": "sent"
+   },
+   "pane_id": "%4",
+   "read_at": 1798700100.7,
+   "reason": "r",
+   "sender": "%126",
+   "state": "read",
+   "waiting_s": 0
+  },
+  "output": "message_id        i1\nstate             read\ndestination       pi-worker\npane_id           %4\nsender            %126\nwaiting_s         0\nbody_bytes        300\nattachments       2\nattachment_bytes  99\nreason            r\nsent              2026-12-31 06:53:20\nread              2026-12-31 06:55:00\nacked             2026-12-31 06:56:40\ncancelled         2026-12-31 06:58:20\nnotify            sent (held)\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "message_id": "i2",
+   "notify": {
+    "state": "queued"
+   },
+   "reason": null,
+   "sender": "",
+   "state": "unread",
+   "waiting_s": null
+  },
+  "output": "message_id        i2\nstate             unread\nnotify            queued\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "message_id": "i3",
+   "notify": {}
+  },
+  "output": "message_id        i3\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "created_at": 0,
+   "message_id": "i4",
+   "notify": {
+    "state": ""
+   }
+  },
+  "output": "message_id        i4\n",
+  "printer": "print_inbox_status"
+ },
+ {
+  "input": {
+   "retired": []
+  },
+  "output": "no retired panes\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "retired": [
+    {
+     "pane_id": "%1",
+     "reason": "superseded",
+     "retired_at": 1798700000
+    },
+    {
+     "pane_id": "%22222",
+     "reason": null
+    },
+    {
+     "pane_id": "%3",
+     "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+     "retired_at": 0
+    }
+   ]
+  },
+  "output": "PANE       RETIRED              REASON\n%1         2026-12-31 06:53     superseded\n%22222     1970-01-01 00:00     None\n%3         1970-01-01 00:00     rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "reason": "done",
+   "unread_kept": 3
+  },
+  "output": "retired %1 (done); 3 unread message(s) kept as the record\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "reason": "done",
+   "unread_kept": 0
+  },
+  "output": "retired %1 (done); 0 unread message(s) kept as the record\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "reason": "done",
+   "unread_kept": null
+  },
+  "output": "retired %1 (done)\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {
+   "pane_id": "%7"
+  },
+  "output": "unretired %7\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {},
+  "output": "unretired None\n",
+  "printer": "print_retired"
+ },
+ {
+  "input": {},
+  "output": "0 report(s) in None\n",
+  "printer": "print_report_list"
+ },
+ {
+  "input": {
+   "count": 0,
+   "dir": "/r"
+  },
+  "output": "0 report(s) in /r\n",
+  "printer": "print_report_list"
+ },
+ {
+  "input": {
+   "count": 2,
+   "dir": "/r",
+   "reports": [
+    {
+     "at": 1798700000,
+     "path": "/r/a.md",
+     "size": 1234
+    },
+    {
+     "at": 1798786400.5,
+     "path": "/r/b.md",
+     "size": 123456789
+    }
+   ]
+  },
+  "output": "2 report(s) in /r\n  2026-12-31 06:53     1234 B  /r/a.md\n  2027-01-01 06:53 123456789 B  /r/b.md\n",
+  "printer": "print_report_list"
+ },
+ {
+  "input": {},
+  "output": "mailbox None  messages 0  waiting 0\n",
+  "printer": "print_owner_conversation"
+ },
+ {
+  "input": {
+   "count": 0,
+   "mailbox": "owner",
+   "waiting": []
+  },
+  "output": "mailbox owner  messages 0  waiting 0\n",
+  "printer": "print_owner_conversation"
+ },
+ {
+  "input": {
+   "count": 4,
+   "mailbox": "owner",
+   "messages": [
+    {
+     "body": "first line\nsecond",
+     "created_at": 1798700000,
+     "id": "m1",
+     "reply_to": null,
+     "sender": "owner",
+     "state": "queued",
+     "transport": "web"
+    },
+    {
+     "body": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "created_at": 1798700100,
+     "id": "m22222",
+     "reply_to": "m1",
+     "sender": "desk",
+     "state": "sent"
+    },
+    {
+     "body": "x",
+     "created_at": null,
+     "id": "m3",
+     "sender": null,
+     "state": "queued",
+     "transport": "telegram-long"
+    },
+    {
+     "body": "y",
+     "created_at": 1798700300,
+     "id": "m4",
+     "state": "sent"
+    }
+   ],
+   "waiting": [
+    "m1",
+    "m2"
+   ]
+  },
+  "output": "mailbox owner  messages 4  waiting 2\n?      m1 12-31 06:53 web      owner    first line\n-> m22222 12-31 06:55 -        desk     bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n?      m3 01-01 00:00 telegram-long -        x\n       m4 12-31 06:58 -        -        y\n",
+  "printer": "print_owner_conversation"
+ },
+ {
+  "input": {},
+  "output": "",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {
+   "messages": []
+  },
+  "output": "",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {
+   "messages": [
+    {
+     "body": "hello",
+     "created_at": 1798700000,
+     "id": "o1",
+     "subject": "S"
+    },
+    {
+     "body": "two\nlines",
+     "created_at": 1798700100.9,
+     "id": "o2",
+     "subject": ""
+    }
+   ]
+  },
+  "output": "--- owner message o1 at 06:53:20\n[S] hello\n--- owner message o2 at 06:55:00\ntwo\nlines\n",
+  "printer": "print_owner_take"
+ },
+ {
+  "input": {},
+  "now": 1798800000.0,
+  "output": "code_stale       UNKNOWN - source identity unavailable\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "version": "2.71.4"
+  },
+  "now": 1798800000.0,
+  "output": "version          2.71.4\ncode_stale       UNKNOWN - source identity unavailable\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_hash": "abc123",
+   "code_mtime": 1798790000,
+   "code_stale": false,
+   "dunkers": 6,
+   "herdr_available": true,
+   "herdr_hint": "h",
+   "message": "ok",
+   "pid": 4242,
+   "queued_messages": 0,
+   "running": 3,
+   "self_pane_id": "%3",
+   "started_at": 1798700000.5,
+   "state_file": "/s.json",
+   "uptime_s": 3600,
+   "version": "2.71.4"
+  },
+  "now": 1798800000.0,
+  "output": "version          2.71.4 (code abc123)\ncode_mtime       2027-01-01 07:53:20 (10000s ago)\nstarted_at       2026-12-31 06:53:20 (99999s ago)\ncode_stale       no\npid              4242\ndunkers          6\nrunning          3\nqueued_messages  0\nherdr_available  True\nherdr_hint       h\nstate_file       /s.json\nuptime_s         3600\nself_pane_id     %3\nmessage          ok\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_identity_errors": [
+    "e1",
+    "e2"
+   ],
+   "code_stale": null
+  },
+  "now": 1798800000.0,
+  "output": "code_stale       UNKNOWN - source identity unavailable: e1, e2\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_stale": null
+  },
+  "now": 1798800000.0,
+  "output": "code_stale       UNKNOWN - source identity unavailable\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_changed_modules": [
+    "dunk_core",
+    "dunk_api"
+   ],
+   "code_stale": true
+  },
+  "now": 1798800000.0,
+  "output": "code_stale       YES - code on disk differs from this process; restart it (dunk_core, dunk_api)\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "code_stale": true
+  },
+  "now": 1798800000.0,
+  "output": "code_stale       YES - code on disk differs from this process; restart it\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "herdr_available": false,
+   "pid": 0,
+   "queued_messages": 0,
+   "running": 0
+  },
+  "now": 1798800000.0,
+  "output": "code_stale       UNKNOWN - source identity unavailable\npid              0\nrunning          0\nqueued_messages  0\nherdr_available  False\n",
+  "printer": "print_status"
+ },
+ {
+  "input": {
+   "pending": 4,
+   "summary": "tick: 2 dispatched"
+  },
+  "output": "tick: 2 dispatched\nstandby queue: 4 pending\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "items": []
+  },
+  "output": "standby queue is empty\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "items": [
+    {
+     "brief": "do the thing",
+     "id": "s1",
+     "lane": "pi",
+     "task_id": "t5"
+    },
+    {
+     "brief": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "id": "s22222"
+    },
+    {
+     "brief": "x",
+     "id": "s3",
+     "lane": null,
+     "task_id": null
+    }
+   ]
+  },
+  "output": "ID    TASK    LANE       BRIEF\ns1    t5      pi         do the thing\ns22222 -       any        bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u2026\ns3    -       any        x\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "removed": "s1"
+  },
+  "output": "removed standby item s1\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "brief": "b",
+   "id": "s1"
+  },
+  "output": "added standby item s1\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "brief": "b",
+   "id": "s2",
+   "task_id": "t7"
+  },
+  "output": "added standby item s2 for t7\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "brief": "b",
+   "id": "s3",
+   "lane": "pi"
+  },
+  "output": "added standby item s3 (reserved for pi)\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "brief": "b",
+   "id": "s4",
+   "lane": "pi",
+   "task_id": "t7"
+  },
+  "output": "added standby item s4 for t7 (reserved for pi)\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "dispatched": [
+    {
+     "pane_id": "%1",
+     "sent": true,
+     "text": "go"
+    },
+    {
+     "pane_id": "%2",
+     "text": "dry"
+    },
+    {
+     "error": "no pane",
+     "pane_id": "%3",
+     "text": "bad"
+    }
+   ],
+   "dry_run": true,
+   "sent": 1
+  },
+  "output": "idle lanes: 0\ndispatched this hour: None\nblocked lanes: 0\n  sent %1: go\n  DRY RUN %2: dry\n  FAILED %3: bad [no pane]\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {
+   "dispatched": []
+  },
+  "output": "idle lanes: 0\ndispatched this hour: None\nblocked lanes: 0\n",
+  "printer": "print_dispatch"
+ },
+ {
+  "input": {},
+  "output": "",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "error": "boom"
+  },
+  "output": "",
+  "printer": "print_herdr",
+  "stderr": "herdr error: boom\n"
+ },
+ {
+  "input": {
+   "result": [
+    1,
+    2.5,
+    null,
+    true,
+    "s"
+   ]
+  },
+  "output": "[\n  1,\n  2.5,\n  null,\n  true,\n  \"s\"\n]\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "result": {
+    "a": 1
+   }
+  },
+  "output": "{\n  \"a\": 1\n}\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "result": {
+    "a": {
+     "b": [
+      1,
+      {
+       "c": "x"
+      }
+     ],
+     "d": []
+    },
+    "e": {}
+   }
+  },
+  "output": "{\n  \"a\": {\n    \"b\": [\n      1,\n      {\n        \"c\": \"x\"\n      }\n    ],\n    \"d\": []\n  },\n  \"e\": {}\n}\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "result": "caf\u00e9 \u2014 \ud83d\ude00"
+  },
+  "output": "\"caf\\u00e9 \\u2014 \\ud83d\\ude00\"\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "result": null,
+   "text": "plain text"
+  },
+  "output": "plain text\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "text": "already newline\n"
+  },
+  "output": "already newline\n",
+  "printer": "print_herdr"
+ },
+ {
+  "input": {
+   "error": "e",
+   "text": ""
+  },
+  "output": "",
+  "printer": "print_herdr",
+  "stderr": "herdr error: e\n"
+ },
+ {
+  "input": {
+   "error": "e",
+   "result": 0
+  },
+  "output": "0\n",
+  "printer": "print_herdr",
+  "stderr": "herdr error: e\n"
+ },
+ {
+  "input": {},
+  "output": "{}\n",
+  "printer": "print_owner_stats"
+ },
+ {
+  "input": {
+   "a": 1
+  },
+  "output": "{\n  \"a\": 1\n}\n",
+  "printer": "print_owner_stats"
+ },
+ {
+  "input": {
+   "a": [
+    1,
+    2,
+    {
+     "b": null
+    }
+   ],
+   "c": "x",
+   "d": {},
+   "e": [],
+   "f": 1.5,
+   "g": true
+  },
+  "output": "{\n  \"a\": [\n    1,\n    2,\n    {\n      \"b\": null\n    }\n  ],\n  \"c\": \"x\",\n  \"d\": {},\n  \"e\": [],\n  \"f\": 1.5,\n  \"g\": true\n}\n",
+  "printer": "print_owner_stats"
+ },
+ {
+  "input": {
+   "name": "caf\u00e9 \u2014 \ud83d\ude00 \u0007 \"q\" \\ /"
+  },
+  "output": "{\n  \"name\": \"caf\\u00e9 \\u2014 \\ud83d\\ude00 \\u0007 \\\"q\\\" \\\\ /\"\n}\n",
+  "printer": "print_owner_stats"
+ },
+ {
+  "input": {},
+  "output": "{}\n",
+  "printer": "print_view"
+ },
+ {
+  "input": [],
+  "output": "[]\n",
+  "printer": "print_view"
+ },
+ {
+  "input": {
+   "rows": [
+    {
+     "id": 1,
+     "ok": false
+    },
+    {
+     "id": 2,
+     "ok": null
+    }
+   ],
+   "total": 2
+  },
+  "output": "{\n  \"rows\": [\n    {\n      \"id\": 1,\n      \"ok\": false\n    },\n    {\n      \"id\": 2,\n      \"ok\": null\n    }\n  ],\n  \"total\": 2\n}\n",
+  "printer": "print_view"
+ }
+]

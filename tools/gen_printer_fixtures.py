@@ -13,11 +13,21 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import sys
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 OUT = ROOT / "rust/crates/ds-cli/tests/printers_fleet.json"
+OUT_PRINT = ROOT / "rust/crates/ds-cli/tests/printers_print.json"
+
+# The clock printers call time.localtime; pin the zone so the recording is reproducible
+# and the Rust test formats the same epochs in UTC.
+os.environ["TZ"] = "UTC"
+if hasattr(time, "tzset"):
+    time.tzset()
 
 SAMPLES = {
     "print_poolrad_sync": [
@@ -167,6 +177,9 @@ SAMPLES = {
 }
 
 
+from printers_print_samples import NOW_PRINTERS, SAMPLES_PRINT  # noqa: E402
+
+
 def load_cli():
     sys.path.insert(0, str(ROOT))
     loader = importlib.machinery.SourceFileLoader("ds_cli_src", str(ROOT / "dunkingsheep"))
@@ -176,15 +189,26 @@ def load_cli():
     return module
 
 
-def render():
+def render(samples=None):
     cli = load_cli()
     cases = []
-    for name, payloads in SAMPLES.items():
+    for name, payloads in (SAMPLES if samples is None else samples).items():
         for payload in payloads:
-            buffer = io.StringIO()
-            with contextlib.redirect_stdout(buffer):
-                getattr(cli, name)(payload)
-            cases.append({"printer": name, "input": payload, "output": buffer.getvalue()})
+            buffer, errors = io.StringIO(), io.StringIO()
+            real_time = time.time
+            if name in NOW_PRINTERS:
+                time.time = lambda: NOW_PRINTERS[name]
+            try:
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(errors):
+                    getattr(cli, name)(payload)
+            finally:
+                time.time = real_time
+            case = {"printer": name, "input": payload, "output": buffer.getvalue()}
+            if errors.getvalue():
+                case["stderr"] = errors.getvalue()
+            if name in NOW_PRINTERS:
+                case["now"] = NOW_PRINTERS[name]
+            cases.append(case)
     return json.dumps(cases, indent=1, sort_keys=True) + "\n"
 
 
@@ -194,15 +218,17 @@ def main():
     mode.add_argument("--write", action="store_true")
     mode.add_argument("--check", action="store_true")
     ns = ap.parse_args()
-    text = render()
+    outputs = ((OUT, render()), (OUT_PRINT, render(SAMPLES_PRINT)))
     if ns.write:
-        OUT.write_text(text)
-        print("wrote", OUT.relative_to(ROOT))
+        for path, text in outputs:
+            path.write_text(text)
+            print("wrote", path.relative_to(ROOT))
         return 0
-    if not OUT.exists() or OUT.read_text() != text:
-        print("printers_fleet.json is out of date")
+    stale = [path for path, text in outputs if not path.exists() or path.read_text() != text]
+    if stale:
+        print("out of date:", ", ".join(p.name for p in stale))
         return 1
-    print("printers_fleet.json matches the Python printers")
+    print("printer fixtures match the Python printers")
     return 0
 
 

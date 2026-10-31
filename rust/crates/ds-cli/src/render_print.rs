@@ -22,13 +22,15 @@ fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
     v.get(key).unwrap_or(&Value::Null)
 }
 
-/// `str(value)`: strings raw, None/True/False as Python spells them.
+/// `str(value)`: strings raw, None/True/False as Python spells them, and a list or dict as
+/// its `repr` (`{'a': 1}`), not as JSON (t1283: `print_memory_stats` printed `queue` as JSON).
 pub fn py_str(v: &Value) -> String {
     match v {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::String(s) => s.clone(),
+        Value::Array(_) | Value::Object(_) => py_repr_value(v),
         other => other.to_string(),
     }
 }
