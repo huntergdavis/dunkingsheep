@@ -17,6 +17,7 @@ pub mod atomic_json;
 pub mod client;
 pub mod clock;
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod error;
 pub mod inbox;
