@@ -57,27 +57,24 @@ pub struct TerminalEnv<'a> {
     pub registered: &'a dyn Fn(&str) -> (bool, bool, Option<String>),
 }
 
-impl TerminalEnv<'_> {
-    fn one(&self, pane: &Pane) -> Value {
-        pane_to_json(pane, self.terminal.agent_status(&pane.pane_id).as_deref())
-    }
-}
-
 impl PaneInfoEnv for TerminalEnv<'_> {
     fn list_panes_grouped(&self) -> Vec<Value> {
         MailboxEnv::list_panes_grouped(self)
     }
     fn get_pane(&self, pane_id: &str) -> Option<Value> {
-        self.terminal.get_pane(pane_id).map(|p| self.one(&p))
+        self.terminal
+            .get_pane_with_status(pane_id)
+            .map(|(pane, status)| pane_to_json(&pane, status.as_deref()))
     }
 }
 
 impl MailboxEnv for TerminalEnv<'_> {
     fn list_panes(&self) -> Vec<Value> {
+        // One listing with the statuses (t1296): not an `agent_status` call per pane.
         self.terminal
-            .list_panes()
+            .list_panes_with_status()
             .iter()
-            .map(|p| self.one(p))
+            .map(|(pane, status)| pane_to_json(pane, status.as_deref()))
             .collect()
     }
     fn list_panes_grouped(&self) -> Vec<Value> {
@@ -110,7 +107,7 @@ impl Flock {
     pub fn set_turn(&self, pane_id: &str, turn: Turn) {
         self.turns
             .lock()
-            .expect("turns lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(pane_id.to_string(), turn);
     }
 
@@ -130,7 +127,12 @@ impl Flock {
             return json!({"state": Value::Null, "source": "none",
                           "reason": "no activity source: pane identity missing", "inferred": true});
         };
-        let turn = self.turns.lock().expect("turns lock").get(pane_id).cloned();
+        let turn = self
+            .turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(pane_id)
+            .cloned();
         let harness = pane["agent"]
             .as_str()
             .filter(|s| !s.is_empty())
