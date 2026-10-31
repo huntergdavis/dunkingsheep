@@ -60,34 +60,33 @@ fn template_re() -> &'static Regex {
     })
 }
 
-/// Python's `format(x, "g")`: six significant digits, no trailing zeros.
+/// Python's `format(x, "g")`: six significant digits, no trailing zeros. As in C, the
+/// exponent that picks fixed or scientific is the one AFTER rounding to six digits
+/// (999999.5 -> `1e+06`), and scientific is used below 1e-4 (`5e-05`).
 fn fmt_g(value: f64) -> String {
     if value == 0.0 {
         return "0".into();
     }
-    let exp = value.abs().log10().floor() as i32;
-    if !(-5..6).contains(&exp) {
-        let text = format!("{value:.5e}");
-        let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
-        let mantissa = if mantissa.contains('.') {
-            mantissa.trim_end_matches('0').trim_end_matches('.')
+    let sci = format!("{value:.5e}");
+    let (mantissa, exponent) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i32 = exponent.parse().unwrap_or(0);
+    let trim = |text: &str| -> String {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
         } else {
-            mantissa
-        };
-        let exponent: i32 = exponent.parse().unwrap_or(0);
+            text.to_string()
+        }
+    };
+    if !(-4..6).contains(&exp) {
         return format!(
-            "{mantissa}e{}{:02}",
-            if exponent < 0 { '-' } else { '+' },
-            exponent.abs()
+            "{}e{}{:02}",
+            trim(mantissa),
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
         );
     }
     let decimals = (5 - exp).max(0) as usize;
-    let text = format!("{value:.decimals$}");
-    if text.contains('.') {
-        text.trim_end_matches('0').trim_end_matches('.').to_string()
-    } else {
-        text
-    }
+    trim(&format!("{value:.decimals$}"))
 }
 
 /// `format_interval`: `10`, `1.5`, or `30s` under a minute; round-trips `parse_interval`.
@@ -110,7 +109,12 @@ pub fn parse_interval(value: &str) -> Result<f64, DunkError> {
             .expect("static regex")
     });
     let text = value.trim().to_lowercase();
-    let bad = || DunkError::Refused(format!("bad interval {value:?} (try 10, 90s, 1.5h)"));
+    let bad = || {
+        DunkError::Refused(format!(
+            "bad interval {} (try 10, 90s, 1.5h)",
+            crate::context::store::py_repr(value)
+        ))
+    };
     let caps = re.captures(&text).ok_or_else(bad)?;
     let number: f64 = caps[1].parse().map_err(|_| bad())?;
     let unit = &caps[2];
@@ -351,7 +355,7 @@ impl Dunker {
         data.insert("target_label".into(), json!(self.target_label()));
         let in_s = match (self.running, self.next_send_at) {
             (true, Some(next)) if next != 0.0 => {
-                json!(((next - clock::now_s()).round() as i64).max(0))
+                json!(((next - clock::now_s()).round_ties_even() as i64).max(0))
             }
             _ => Value::Null,
         };
@@ -488,5 +492,41 @@ mod tests {
         let again = Dunker::from_dict(&d.to_dict()).unwrap();
         assert_eq!(d.persisted(), again.persisted());
         assert!(d.to_dict()["next_send_in_s"].is_null(), "not running");
+    }
+
+    #[test]
+    fn a_bad_interval_is_quoted_like_python_repr() {
+        let error = parse_interval("abc").unwrap_err().to_string();
+        assert!(
+            error.contains("bad interval 'abc' (try 10, 90s, 1.5h)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn fmt_g_matches_python_g() {
+        assert_eq!("5e-05", fmt_g(5e-05));
+        assert_eq!("0.0001", fmt_g(1e-4));
+        assert_eq!("1e+06", fmt_g(999999.5));
+        assert_eq!("999999", fmt_g(999999.0));
+        assert_eq!("1.5", fmt_g(1.5));
+        assert_eq!("0.833333", fmt_g(5.0 / 6.0));
+        assert_eq!("1.23457e+08", fmt_g(123456789.0));
+        // through the public path: 3e-3 s is 0.00005 minutes
+        assert_eq!("0.003s", format_interval(0.00005));
+    }
+
+    #[test]
+    fn next_send_in_s_rounds_half_to_even_like_python() {
+        let mut d = Dunker::new("d1");
+        d.running = true;
+        let now = clock::now_s();
+        // 0.5 s and 2.5 s ahead are ties: Python round() gives 0 and 2
+        d.next_send_at = Some(now + 2.5);
+        let two = d.to_dict()["next_send_in_s"].as_i64().unwrap();
+        assert!(two == 2 || two == 3, "clock moved between reads: {two}");
+        assert_eq!(0.0_f64.round_ties_even(), 0.5_f64.round_ties_even());
+        assert_eq!(2.0, 2.5_f64.round_ties_even());
+        assert_eq!(4.0, 3.5_f64.round_ties_even());
     }
 }
