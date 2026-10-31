@@ -571,7 +571,7 @@ fn live(panes: &[&str]) -> Option<Vec<String>> {
 async fn test_dependencies_gate_next_until_done() {
     let tasks = store("py-deps-gate").await;
     let first = add_with(&tasks, "first", Some("low"), &[], &[], false).await;
-    let second = add_with(&tasks, "second", Some("urgent"), &[&first.id], &[], false).await;
+    let second = add_with(&tasks, "second", Some("urgent"), &[], &[&first.id], false).await;
     let claimed = tasks
         .claim_next("global", "w1:p1", lease(60.0))
         .await
