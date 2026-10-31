@@ -337,6 +337,11 @@ impl Tasks {
                     conn.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
                         .map_err(db::map_sqlite)?;
                 }
+                // t1218 A: the event path. Completing a task unblocks what it blocks, in
+                // the same writer call as the completion, so no lane runs `task unblock`.
+                if status == "done" && current != "done" {
+                    auto_unblock(conn, now, Some(&id))?;
+                }
                 Ok(())
             })
             .await?;
@@ -346,6 +351,92 @@ impl Tasks {
     /// `block`: a task that waits on somebody, with the reason recorded.
     pub async fn block(&self, id: &str, reason: &str) -> Result<Task, DunkError> {
         self.set_status(id, "blocked", Some(reason), None).await
+    }
+
+    /// `task block <id> --by <tN>` (t1218 B): blocked with reason `blocked-by:<tN>` and
+    /// the dependency recorded, so completing `tN` unblocks it (event path A). A free-text
+    /// `block` stays manual.
+    pub async fn block_by(&self, id: &str, by: &str) -> Result<Task, DunkError> {
+        let (id, by) = (id.trim().to_string(), by.trim().to_string());
+        if id == by {
+            return Err(DunkError::Refused("a task cannot depend on itself".into()));
+        }
+        let wanted = id.clone();
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let exists = |t: &str| -> Result<Option<(String, Option<String>)>, DunkError> {
+                    conn.query_row(
+                        "SELECT status, depends_on FROM tasks WHERE id = ?",
+                        params![t],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)
+                };
+                let (current, raw) = exists(&id)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                exists(&by)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {by:?}")))?;
+                if is_terminal(current.as_str()) {
+                    return Err(DunkError::Refused(format!(
+                        "task {id} is {current}; a finished task is not blocked (t854)")));
+                }
+                let mut deps = decode_list(raw.as_deref());
+                if !deps.contains(&by) {
+                    deps.push(by.clone());
+                }
+                let reason = format!("blocked-by:{by}");
+                conn.execute(
+                    "UPDATE tasks SET status = 'blocked', block_reason = ?, depends_on = ?, updated_at = ? WHERE id = ?",
+                    params![reason, json!(deps).to_string(), now, id],
+                )
+                .map_err(db::map_sqlite)?;
+                conn.execute(
+                    "INSERT INTO task_events (task_id, event, at, status_from, status_to, meta) VALUES (?,?,?,?,?,?)",
+                    params![id, "blocked", now, current, "blocked",
+                            json!({"reason": reason}).to_string()],
+                )
+                .map_err(db::map_sqlite)?;
+                // Same rule as `set_status`: a block ends the claim.
+                conn.execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
+                    .map_err(db::map_sqlite)?;
+                Ok(())
+            })
+            .await?;
+        self.get(&wanted).await
+    }
+
+    /// Ids the `unblocked` event rows say were opened by `completed_id`'s completion.
+    async fn unblocked_by(&self, completed_id: &str) -> Result<Vec<String>, DunkError> {
+        let needle = format!("auto: {completed_id} completed");
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT task_id, meta FROM task_events WHERE event = 'unblocked' AND actor = 'system' ORDER BY id DESC LIMIT 200")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+                    .map_err(db::map_sqlite)?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    let (task, meta) = row.map_err(db::map_sqlite)?;
+                    let reason = meta
+                        .and_then(|m| serde_json::from_str::<serde_json::Value>(&m).ok())
+                        .and_then(|v| v["reason"].as_str().map(str::to_string));
+                    if reason.as_deref() == Some(needle.as_str()) {
+                        ids.push(task);
+                    }
+                }
+                Ok(ids)
+            })
+            .await
+    }
+
+    fn fire_unblocked(&self, ids: &[String]) {
+        for id in ids {
+            self.fire(id, "unblocked", Some("system"), None);
+        }
     }
 
     /// `unblock`: back to open, reason cleared.
@@ -365,6 +456,10 @@ impl Tasks {
         // The Python returns early on an already-done task, so it fires nothing.
         if before.status != "done" {
             self.fire(&done.id, "completed", None, Some(&before.kind));
+            // t1218 A: tell the assignee of each task this completion opened, through the
+            // observer (the daemon turns it into a guarded inbox nudge).
+            let opened = self.unblocked_by(&done.id).await?;
+            self.fire_unblocked(&opened);
         }
         Ok(done)
     }
@@ -379,11 +474,21 @@ impl Tasks {
         by: Option<&str>,
         landed: bool,
     ) -> Result<Task, DunkError> {
-        let done = self.complete(id).await?;
         if landed {
-            return Ok(done);
+            return self.complete(id).await;
         }
-        self.set_landed(id, false, by, None, None).await
+        // t1218: record the work as NOT on main BEFORE completing, because completion
+        // opens the tasks that depend on this one (auto-unblock) and they must see
+        // `landed = 0`; the Python order (complete, then set_landed) would open them first.
+        self.set_landed(id, false, by, None, None).await?;
+        match self.complete(id).await {
+            Ok(done) => Ok(done),
+            Err(error) => {
+                // A failed completion must not leave a stray unlanded flag.
+                let _ = self.set_landed(id, true, by, None, None).await;
+                Err(error)
+            }
+        }
     }
 
     /// Insert a lease directly (test helper: claiming is T12's job).
@@ -1224,6 +1329,83 @@ pub fn order_key(priority: &str, created_at: f64, id: &str) -> (u8, u64, String)
 }
 
 /// `_decode`: a JSON list, or empty when the column is NULL, unparseable or not a list.
+/// t1218: open every blocked task whose block is a DEPENDENCY block and whose dependencies
+/// are all satisfied, inside the caller's writer call.
+///
+/// A dependency block is an empty reason or `blocked-by:*`; `needs-owner:`, `DEFERRED`,
+/// headroom and any other free-text reason belong to the owner and are never touched.
+/// Satisfied means every dependency exists, is `done` and is landed. A CANCELLED dependency
+/// is NOT satisfied here (owner's t1218 test), unlike `dependency_state`'s note, which
+/// treats cancelled as satisfied for a manual `task unblock`; the task stays blocked for a
+/// human to decide. `completed` limits the event path to tasks that depend on it (reason
+/// `auto: <id> completed`); `None` is the sweep (t1218 C, not wired yet: it needs the
+/// daemon tick).
+fn auto_unblock(
+    conn: &Connection,
+    now: f64,
+    completed: Option<&str>,
+) -> Result<Vec<String>, DunkError> {
+    let candidates: Vec<(String, Option<String>, Option<String>)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, depends_on, block_reason FROM tasks WHERE status = 'blocked' ORDER BY created_at, id")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    let mut opened = Vec::new();
+    for (id, raw, reason) in candidates {
+        let reason_text = reason.as_deref().unwrap_or("").trim();
+        if !(reason_text.is_empty() || reason_text.starts_with("blocked-by:")) {
+            continue;
+        }
+        let deps = decode_list(raw.as_deref());
+        if deps.is_empty() || completed.is_some_and(|c| !deps.iter().any(|d| d == c)) {
+            continue;
+        }
+        let mut satisfied = true;
+        for dep in &deps {
+            let found: Option<(String, i64)> = conn
+                .query_row(
+                    "SELECT status, landed FROM tasks WHERE id = ?",
+                    params![dep],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(db::map_sqlite)?;
+            if !matches!(found, Some((ref s, l)) if s == "done" && l != 0) {
+                satisfied = false;
+                break;
+            }
+        }
+        if !satisfied {
+            continue;
+        }
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET status = 'open', block_reason = NULL, updated_at = ? WHERE id = ? AND status = 'blocked'",
+                params![now, id],
+            )
+            .map_err(db::map_sqlite)?;
+        if changed == 0 {
+            continue;
+        }
+        let why = match completed {
+            Some(c) => format!("auto: {c} completed"),
+            None => "auto: dependencies satisfied (sweep)".to_string(),
+        };
+        conn.execute(
+            "INSERT INTO task_events (task_id, event, at, actor, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?)",
+            params![id, "unblocked", now, "system", "blocked", "open",
+                    json!({"reason": why}).to_string()],
+        )
+        .map_err(db::map_sqlite)?;
+        opened.push(id);
+    }
+    Ok(opened)
+}
+
 fn decode_list(raw: Option<&str>) -> Vec<String> {
     match serde_json::from_str::<serde_json::Value>(raw.unwrap_or("[]")) {
         Ok(serde_json::Value::Array(items)) => items
@@ -1341,6 +1523,143 @@ mod tests {
         assert_eq!(Some(false), store.landed_of(&c.id).await.unwrap());
     }
 
+    // ---- t1218: deterministic auto-unblock ----
+
+    async fn blocked_on(store: &Tasks, title: &str, deps: &[&Task], reason: Option<&str>) -> Task {
+        let task = store.add("global", title, "").await.unwrap();
+        store
+            .update(
+                &task.id,
+                FieldEdit {
+                    depends_on: Some(deps.iter().map(|d| d.id.clone()).collect()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match reason {
+            Some(r) => store.block(&task.id, r).await.unwrap(),
+            None => store
+                .set_status(&task.id, "blocked", None, None)
+                .await
+                .unwrap(),
+        }
+    }
+
+    async fn unblocked_events(store: &Tasks, id: &str) -> Vec<String> {
+        let id = id.to_string();
+        store
+            .writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT actor || '|' || COALESCE(meta,'') FROM task_events WHERE task_id = ? AND event = 'unblocked'")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0)).map_err(db::map_sqlite)?;
+                Ok(rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)?)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn completing_a_task_unblocks_what_it_blocks_and_only_that() {
+        let store = store("auto-unblock-a").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        let c = store.add("global", "c", "").await.unwrap();
+        let only_a = blocked_on(&store, "only a", &[&a], Some("blocked-by:t0")).await;
+        let a_and_c = blocked_on(&store, "a and c", &[&a, &c], None).await;
+        store.complete(&a.id).await.unwrap();
+        let opened = store.get(&only_a.id).await.unwrap();
+        assert_eq!("open", opened.status);
+        assert_eq!(None, opened.block_reason);
+        assert_eq!("blocked", store.get(&a_and_c.id).await.unwrap().status);
+        let events = unblocked_events(&store, &only_a.id).await;
+        assert_eq!(1, events.len());
+        assert!(
+            events[0].starts_with("system|")
+                && events[0].contains(&format!("auto: {} completed", a.id))
+        );
+        store.complete(&c.id).await.unwrap();
+        assert_eq!("open", store.get(&a_and_c.id).await.unwrap().status);
+    }
+
+    #[tokio::test]
+    async fn the_unblocked_observer_fires_for_each_opened_task() {
+        let store = store("auto-unblock-obs").await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        store.on_event(Box::new(move |id, event, by, _| {
+            if event == "unblocked" {
+                sink.lock()
+                    .unwrap()
+                    .push((id.to_string(), by.map(str::to_string)));
+            }
+        }));
+        let a = store.add("global", "a", "").await.unwrap();
+        let b = blocked_on(&store, "b", &[&a], None).await;
+        store.complete(&a.id).await.unwrap();
+        assert_eq!(
+            vec![(b.id.clone(), Some("system".to_string()))],
+            *seen.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_dependency_does_not_unblock() {
+        let store = store("auto-unblock-cancel").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        let dead = store.add("global", "dead", "").await.unwrap();
+        let b = blocked_on(&store, "b", &[&a, &dead], None).await;
+        store.cancel(&dead.id, "no").await.unwrap();
+        store.complete(&a.id).await.unwrap();
+        assert_eq!("blocked", store.get(&b.id).await.unwrap().status);
+    }
+
+    #[tokio::test]
+    async fn owner_and_free_text_blocks_are_never_touched() {
+        let store = store("auto-unblock-manual").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        let mut held = Vec::new();
+        for reason in [
+            "needs-owner: which path?",
+            "DEFERRED until Q1",
+            "headroom: load 30",
+        ] {
+            held.push(blocked_on(&store, reason, &[&a], Some(reason)).await);
+        }
+        store.complete(&a.id).await.unwrap();
+        for task in held {
+            let got = store.get(&task.id).await.unwrap();
+            assert_eq!("blocked", got.status, "{:?}", got.block_reason);
+            assert_eq!(task.block_reason, got.block_reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unlanded_dependency_keeps_the_task_blocked() {
+        let store = store("auto-unblock-unlanded").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        let b = blocked_on(&store, "b", &[&a], None).await;
+        store.task_complete(&a.id, Some("%1"), false).await.unwrap();
+        assert_eq!("blocked", store.get(&b.id).await.unwrap().status);
+    }
+
+    #[tokio::test]
+    async fn block_by_records_the_dependency_and_completion_clears_it() {
+        let store = store("block-by").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        let b = store.add("global", "b", "").await.unwrap();
+        let blocked = store.block_by(&b.id, &a.id).await.unwrap();
+        assert_eq!("blocked", blocked.status);
+        assert_eq!(Some(format!("blocked-by:{}", a.id)), blocked.block_reason);
+        assert_eq!(vec![a.id.clone()], decode_list(Some(&blocked.depends_on)));
+        assert!(store.block_by(&b.id, &b.id).await.is_err());
+        assert!(store.block_by(&b.id, "t999").await.is_err());
+        store.complete(&a.id).await.unwrap();
+        assert_eq!("open", store.get(&b.id).await.unwrap().status);
+    }
+
     #[tokio::test]
     async fn set_landed_on_an_unknown_id_is_a_refusal() {
         let store = store("landed-unknown").await;
@@ -1446,7 +1765,7 @@ mod tests {
         let store = Tasks::open(&copy).await.unwrap();
         let rows = store.list("global").await.unwrap_or_default();
         // the same copy, read directly: the store must agree with its own source
-        let conn = rusqlite::Connection::open(&copy).unwrap();
+        let conn = Connection::open(&copy).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM tasks WHERE scope = 'global'",
@@ -1514,7 +1833,7 @@ mod tests {
         let path = dir.join("old.db");
         let _ = std::fs::remove_file(&path);
         {
-            let conn = rusqlite::Connection::open(&path).unwrap();
+            let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE tasks (id TEXT PRIMARY KEY, scope TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open');").unwrap();
         }
