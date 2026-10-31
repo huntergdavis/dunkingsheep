@@ -1314,6 +1314,16 @@ pub fn render_json_indent2(result: &Value) -> String {
     format!("{}\n", py_json_indent2(result))
 }
 
+/// `print_owner_stats`.
+pub fn render_owner_stats(result: &Value) -> String {
+    render_json_indent2(result)
+}
+
+/// `print_view`: the Command Center views on a terminal are JSON.
+pub fn render_view(result: &Value) -> String {
+    render_json_indent2(result)
+}
+
 /// `_print_inbox_tasks`.
 pub fn render_inbox_tasks(r: &Value) -> String {
     let tasks = get(r, "tasks");
