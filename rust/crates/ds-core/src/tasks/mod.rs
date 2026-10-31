@@ -133,7 +133,12 @@ pub struct Task {
 pub struct Tasks {
     writer: db::Writer,
     path: PathBuf,
+    observers: std::sync::Mutex<Vec<Observer>>,
 }
+
+/// An `on_event` callback: (task id, event, completed-by, kind). Cheap, and it must not
+/// write the task store; a panicking callback is contained, never raised (`_fire`).
+pub type Observer = Box<dyn Fn(&str, &str, Option<&str>, Option<&str>) + Send + Sync>;
 
 impl Tasks {
     /// Open (or create) the store and bring its schema up to date.
@@ -146,7 +151,32 @@ impl Tasks {
                 migrate(conn)
             })
             .await?;
-        Ok(Tasks { writer, path })
+        Ok(Tasks {
+            writer,
+            path,
+            observers: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Register an `on_event` observer (`Tasks.on_event`).
+    pub fn on_event(&self, observer: Observer) {
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.push(observer);
+        }
+    }
+
+    /// `_fire`: run the observers AFTER the commit; one that panics is logged and skipped,
+    /// so an observer can never break the store.
+    fn fire(&self, id: &str, event: &str, by: Option<&str>, kind: Option<&str>) {
+        let Ok(observers) = self.observers.lock() else {
+            return;
+        };
+        for observer in observers.iter() {
+            let call = std::panic::AssertUnwindSafe(|| observer(id, event, by, kind));
+            if std::panic::catch_unwind(call).is_err() {
+                eprintln!("task on_event callback failed task={id} event={event}");
+            }
+        }
     }
 
     /// The file this store owns.
@@ -183,6 +213,7 @@ impl Tasks {
             ).map_err(db::map_sqlite)?;
             Ok(id)
         }).await?;
+        self.fire(&id, "created", None, None);
         self.get(&id).await
     }
 
@@ -329,7 +360,13 @@ impl Tasks {
 
     /// `complete`: done, claim ended.
     pub async fn complete(&self, id: &str) -> Result<Task, DunkError> {
-        self.set_status(id, "done", None, None).await
+        let before = self.get(id).await?;
+        let done = self.set_status(id, "done", None, None).await?;
+        // The Python returns early on an already-done task, so it fires nothing.
+        if before.status != "done" {
+            self.fire(&done.id, "completed", None, Some(&before.kind));
+        }
+        Ok(done)
     }
 
     /// `Flock.task_complete` (dunk_core): complete, then record `landed = false` in the
@@ -1983,5 +2020,35 @@ mod tests {
         assert!(state.unblock_needed);
         assert!(state.dependency_note.unwrap().contains("CANCELLED task"));
         assert!(tasks.dependency_state("t999").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn observers_fire_after_commit_and_a_failing_one_is_contained() {
+        use std::sync::{Arc, Mutex};
+        let tasks = store("fire").await;
+        let seen: Arc<Mutex<Vec<(String, String, Option<String>)>>> = Arc::default();
+        tasks.on_event(Box::new(|_, _, _, _| panic!("a broken observer")));
+        let sink = seen.clone();
+        tasks.on_event(Box::new(move |id, event, _, kind| {
+            sink.lock()
+                .unwrap()
+                .push((id.into(), event.into(), kind.map(String::from)));
+        }));
+        let task = tasks.add("global", "t", "").await.unwrap();
+        tasks.complete(&task.id).await.unwrap();
+        tasks.complete(&task.id).await.unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                (task.id.clone(), "created".to_string(), None),
+                (
+                    task.id.clone(),
+                    "completed".to_string(),
+                    Some("work".to_string())
+                ),
+            ],
+            "created once, completed once: completing a done task fires nothing"
+        );
     }
 }
