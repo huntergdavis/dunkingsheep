@@ -153,3 +153,32 @@ fn refresh_rereads_a_file_edited_under_us() {
     assert!(store.refresh().unwrap());
     assert!(store.is_superuser("%3", None));
 }
+
+#[test]
+fn a_falsy_entry_in_the_flat_list_is_dropped_not_turned_into_a_name() {
+    // t1303: Python's str(entry or "") makes null/false/0/"" the empty string. Rust used
+    // str(entry), so a stray null became the name "None": a pane labelled "None" would
+    // have been a superuser (fail-open). The reviewer's reproducer, verbatim.
+    let (panes, names) = parse_allowlist(&json!({"superusers":
+        ["w9:p8", "VP of agentry", " a ", null, 1, "", "x:", false, 0, [], {}]}))
+    .unwrap();
+    assert_eq!(
+        BTreeSet::from(["w9:p8".to_string(), "x:".to_string()]),
+        panes
+    );
+    assert_eq!(
+        BTreeSet::from([
+            "1".to_string(),
+            "VP of agentry".to_string(),
+            "a".to_string()
+        ]),
+        names
+    );
+    // And the practical consequence: nothing labelled "None" is a superuser.
+    assert!(!match_allowlist(
+        &panes,
+        &names,
+        "%7",
+        Some(&json!({"label": "None"}))
+    ));
+}

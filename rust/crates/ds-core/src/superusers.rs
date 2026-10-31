@@ -111,7 +111,18 @@ pub fn parse_allowlist(data: &Value) -> Result<Sets, DunkError> {
     let (mut panes, mut names) = (list("panes"), list("names"));
     if let Some(Value::Array(entries)) = object.get("superusers") {
         for entry in entries {
-            let (kind, value) = classify(&py_text(entry));
+            // Python: `_classify(entry)` does `str(entry or "")`, so a falsy entry
+            // (null, false, 0, "", [], {}) is the empty string and is dropped, NOT the name
+            // "None"/"0"/"False" (review t1303: that was a fail-open for a pane labelled "None").
+            let falsy = match entry {
+                Value::Null => true,
+                Value::Bool(b) => !b,
+                Value::Number(n) => n.as_f64() == Some(0.0),
+                Value::String(t) => t.is_empty(),
+                Value::Array(a) => a.is_empty(),
+                Value::Object(o) => o.is_empty(),
+            };
+            let (kind, value) = classify(&if falsy { String::new() } else { py_text(entry) });
             if kind == "pane" {
                 panes.push(value);
             } else {
