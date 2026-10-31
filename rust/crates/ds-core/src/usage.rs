@@ -261,7 +261,7 @@ pub fn run_provider(name: &str, spec: &Value, max_age: Option<f64>) -> Value {
     let stdout = out_t.join().unwrap_or_default();
     let stderr = err_t.join().unwrap_or_default();
     let (stdout, stderr) = (stdout.trim(), stderr.trim());
-    let code = status.code().unwrap_or(-1);
+    let code = crate::usage_providers::return_code(&status);
     let parsed: Option<Map<String, Value>> =
         serde_json::from_str::<Value>(stdout).ok().and_then(|v| {
             if let Value::Object(m) = v {

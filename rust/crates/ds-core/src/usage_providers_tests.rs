@@ -98,3 +98,109 @@ fn claude_is_a_named_error_not_a_guess() {
     assert_eq!(r["status"], "error");
     assert!(r["error"].as_str().unwrap().contains("not ported"));
 }
+
+// ---- t1235: fixes from the t1213 review ----
+
+#[test]
+fn a_hung_opencode_times_out_instead_of_blocking_the_caller() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("opencode");
+    fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let started = Instant::now();
+    let r = opencode_with(script.to_str().unwrap(), 0.3, 5.0);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "returned at the deadline"
+    );
+    assert_eq!(r["status"], "error");
+    let text = r["error"].as_str().unwrap();
+    assert!(
+        text.starts_with("opencode stats failed: Command '["),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("'stats', '--days', '1']' timed out after 0.3 seconds"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_missing_opencode_and_a_nonzero_exit_are_named_errors() {
+    let missing = opencode_with("/nonexistent/opencode-xyz", 5.0, 1.0);
+    assert!(missing["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("opencode stats failed: "));
+    let failed = opencode_with("false", 5.0, 1.0);
+    assert_eq!(failed["error"], "opencode stats exited 1: ");
+}
+
+#[test]
+fn a_signal_exit_is_minus_the_signal_like_python() {
+    let status = Command::new("sh")
+        .args(["-c", "kill -9 $$"])
+        .status()
+        .unwrap();
+    assert_eq!(return_code(&status), -9);
+}
+
+#[test]
+fn codex_window_names_follow_python() {
+    assert_eq!(window_name(&json!(10080)), "weekly");
+    assert_eq!(
+        window_name(&json!(10080.0)),
+        "weekly",
+        "numeric equality, as Python =="
+    );
+    assert_eq!(window_name(&Value::Null), "Nonemin");
+    assert_eq!(window_name(&json!(300)), "300min");
+    assert_eq!(window_name(&json!(300.5)), "300.5min");
+    assert_eq!(window_name(&json!(300.0)), "300.0min");
+}
+
+#[test]
+fn hidden_files_and_directories_are_not_searched() {
+    let h = tempfile::tempdir().unwrap();
+    write(h.path(), "s/visible.jsonl", "{}");
+    write(h.path(), "s/.hidden.jsonl", "{}");
+    write(h.path(), "s/.cache/inner.jsonl", "{}");
+    let names: Vec<String> = newest_jsonl(h.path(), 10)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["visible.jsonl".to_string()]);
+}
+
+#[test]
+fn epoch_handles_offsets_naive_times_and_zero() {
+    assert_eq!(epoch(&json!("2026-10-31T00:00:00Z")), Some(1_793_404_800.0));
+    assert_eq!(
+        epoch(&json!("2026-10-31T01:00:00+01:00")),
+        Some(1_793_404_800.0)
+    );
+    assert_eq!(
+        epoch(&json!("2026-10-31 00:00:00+00:00")),
+        Some(1_793_404_800.0)
+    );
+    // naive: local zone, so only assert it parses and is within a day of the UTC reading
+    let naive = epoch(&json!("2026-10-31T00:00:00")).expect("naive parses");
+    assert!((naive - 1_793_404_800.0).abs() <= 14.0 * 3600.0);
+    assert_eq!(epoch(&json!("not a date")), None);
+    assert_eq!(epoch(&json!(null)), None);
+}
+
+#[test]
+fn a_zero_codex_timestamp_falls_back_to_the_file_mtime_like_python_or() {
+    let h = tempfile::tempdir().unwrap();
+    write(
+        h.path(),
+        ".codex/sessions/a.jsonl",
+        r#"{"timestamp":0,"payload":{"rate_limits":{"primary":{"used_percent":1.0,"window_minutes":10080}}}}"#,
+    );
+    let now = mtime(&h.path().join(".codex/sessions/a.jsonl")) + 10.0;
+    let r = codex(h.path(), 3600.0, now);
+    assert_eq!(r["status"], "ok", "{r}");
+    assert!((r["snapshot_age_s"].as_f64().unwrap() - 10.0).abs() < 1.0);
+}

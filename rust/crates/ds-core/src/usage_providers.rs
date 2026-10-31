@@ -8,9 +8,11 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
+use std::io::Read;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use regex::Regex;
 use serde_json::{json, Value};
@@ -20,15 +22,50 @@ fn err(provider: &str, message: &str, now: f64) -> Value {
            "meaning": "unknown", "error": message})
 }
 
-/// Epoch seconds from a number or an ISO-8601 string.
+/// Epoch seconds from a number or an ISO-8601 string (Python `_epoch`).
+///
+/// `datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()`: an offset is
+/// honoured, and a NAIVE timestamp is read in the machine's local zone, as Python does.
+/// Date-only and space-separated forms parse too (Python 3.11+). Anything else is `None`.
 pub fn epoch(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|d| d.timestamp_millis() as f64 / 1000.0),
+        Value::String(s) => parse_iso(s),
         _ => None,
     }
+}
+
+fn parse_iso(text: &str) -> Option<f64> {
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
+    let text = text.trim().replace('Z', "+00:00");
+    if let Ok(d) = chrono::DateTime::parse_from_rfc3339(&text) {
+        return Some(d.timestamp_micros() as f64 / 1e6);
+    }
+    // `2026-10-31 12:00:00+00:00` (space) and `...T...` with an offset but no `:` colon etc.
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+    ] {
+        if let Ok(d) = chrono::DateTime::parse_from_str(&text, fmt) {
+            return Some(d.timestamp_micros() as f64 / 1e6);
+        }
+    }
+    let naive = [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ]
+    .iter()
+    .find_map(|fmt| NaiveDateTime::parse_from_str(&text, fmt).ok())
+    .or_else(|| {
+        NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+    })?;
+    let local = Local.from_local_datetime(&naive).earliest()?;
+    Some(local.timestamp_micros() as f64 / 1e6)
 }
 
 /// First `rate_limits` object found anywhere in the event.
@@ -59,6 +96,10 @@ pub fn newest_jsonl(dir: &Path, n: usize) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         for e in rd.flatten() {
+            // Python's glob `**` and `*` never match a dot-file or dot-directory.
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let p = e.path();
             if p.is_dir() {
                 walk(&p, out);
@@ -115,7 +156,10 @@ pub fn codex(home: &Path, max_age_s: f64, now: f64) -> Value {
         if !primary["used_percent"].is_number() {
             continue;
         }
-        let measured = epoch(&event["timestamp"]).unwrap_or_else(|| mtime(&path));
+        // Python: `_epoch(...) or getmtime(path)`: a zero timestamp is as missing as None.
+        let measured = epoch(&event["timestamp"])
+            .filter(|t| *t != 0.0)
+            .unwrap_or_else(|| mtime(&path));
         if best.as_ref().is_none_or(|b| measured > b.0) {
             best = Some((measured, limits, primary, path));
         }
@@ -130,14 +174,7 @@ pub fn codex(home: &Path, max_age_s: f64, now: f64) -> Value {
     let age = now - measured;
     let used = primary["used_percent"].as_f64().unwrap_or(0.0);
     let window = primary["window_minutes"].clone();
-    let name = if window == json!(10080) {
-        "weekly".to_string()
-    } else {
-        format!(
-            "{}min",
-            window.as_i64().map_or("null".into(), |w| w.to_string())
-        )
-    };
+    let name = window_name(&window);
     let credits = limits["credits"]["balance"].clone();
     if age > max_age_s {
         return json!({"provider": "codex", "status": "unknown", "meaning": "percent_used",
@@ -154,6 +191,23 @@ pub fn codex(home: &Path, max_age_s: f64, now: f64) -> Value {
             "percent_remaining": round1(100.0 - used), "resets_at": primary["resets_at"],
             "window_minutes": window}],
         "credits": credits, "plan_type": limits["plan_type"]})
+}
+
+/// `"weekly" if window == 10080 else f"{window}min"`: Python compares numerically (a float
+/// 10080.0 is weekly) and formats `None` as `None`, a float with its `repr`.
+fn window_name(window: &Value) -> String {
+    if window.as_f64() == Some(10080.0) {
+        return "weekly".to_string();
+    }
+    let shown = match window {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::String(s) => s.clone(),
+        Value::Number(n) if n.is_f64() => format!("{:?}", n.as_f64().unwrap_or(0.0)),
+        other => other.to_string(),
+    };
+    format!("{shown}min")
 }
 
 fn walk_usage<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
@@ -255,27 +309,84 @@ pub fn opencode_from_stats(stdout: &str, now: f64) -> Value {
             "cache_write_tokens": s("Cache Write")}})
 }
 
-/// Run `opencode stats --days 1`; a missing binary or non-zero exit is a named error.
+/// Python `returncode`: the exit code, or minus the signal that killed the child.
+pub(crate) fn return_code(status: &std::process::ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|s| -s))
+        .unwrap_or(-1)
+}
+
+/// `subprocess.run(argv, capture_output=True, text=True, timeout=...)`: stdin closed, both
+/// pipes drained on threads, the DIRECT child killed at the deadline (as Python does).
+fn run_captured(
+    program: &str,
+    args: &[&str],
+    timeout_s: f64,
+) -> Result<(i32, String, String), String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
+    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout_s);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let quoted: Vec<String> = std::iter::once(program)
+                    .chain(args.iter().copied())
+                    .map(|a| format!("'{a}'"))
+                    .collect();
+                return Err(format!(
+                    "Command '[{}]' timed out after {timeout_s} seconds",
+                    quoted.join(", ")
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    Ok((
+        return_code(&status),
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    ))
+}
+
+/// Run `opencode stats --days 1` (30 s timeout, as Python); a missing binary, a timeout or a
+/// non-zero exit is a named error.
 pub fn opencode(now: f64) -> Value {
-    match Command::new("opencode")
-        .args(["stats", "--days", "1"])
-        .output()
-    {
+    opencode_with("opencode", 30.0, now)
+}
+
+fn opencode_with(program: &str, timeout_s: f64, now: f64) -> Value {
+    match run_captured(program, &["stats", "--days", "1"], timeout_s) {
         Err(e) => err("opencode", &format!("opencode stats failed: {e}"), now),
-        Ok(o) if !o.status.success() => err(
+        Ok((code, _, stderr)) if code != 0 => err(
             "opencode",
             &format!(
-                "opencode stats exited {}: {}",
-                o.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&o.stderr)
-                    .trim()
-                    .chars()
-                    .take(300)
-                    .collect::<String>()
+                "opencode stats exited {code}: {}",
+                stderr.trim().chars().take(300).collect::<String>()
             ),
             now,
         ),
-        Ok(o) => opencode_from_stats(&String::from_utf8_lossy(&o.stdout), now),
+        Ok((_, stdout, _)) => opencode_from_stats(&stdout, now),
     }
 }
 
