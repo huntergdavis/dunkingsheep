@@ -80,7 +80,15 @@ fn no_turn_at_all_names_the_absent_source() {
 
 #[test]
 fn a_pi_lane_with_no_turn_map_is_unknown() {
-    let answer = activity::activity("%2", "pi", ClaudeProbe::NoClient, None, NOW, IDLE_CLAIM_S);
+    let answer = activity::activity(
+        "%2",
+        "pi",
+        ClaudeProbe::NoClient,
+        None,
+        None,
+        NOW,
+        IDLE_CLAIM_S,
+    );
     assert_eq!("unknown", answer.state);
     assert_eq!("pi turn events", answer.source);
     assert!(answer.reason.unwrap().contains("no turn state available"));
@@ -101,6 +109,7 @@ fn a_pi_lane_reads_its_own_turn() {
         "%2",
         "pi",
         ClaudeProbe::NoClient,
+        None,
         Some(&turns),
         NOW,
         IDLE_CLAIM_S,
@@ -153,6 +162,7 @@ fn codex_and_opencode_are_marked_inferred() {
         "%3",
         "codex",
         ClaudeProbe::NoClient,
+        None,
         Some(&turns),
         NOW,
         IDLE_CLAIM_S,
@@ -164,7 +174,15 @@ fn codex_and_opencode_are_marked_inferred() {
 
 #[test]
 fn an_unknown_harness_says_so_rather_than_guessing() {
-    let answer = activity::activity("%9", "vim", ClaudeProbe::NoClient, None, NOW, IDLE_CLAIM_S);
+    let answer = activity::activity(
+        "%9",
+        "vim",
+        ClaudeProbe::NoClient,
+        None,
+        None,
+        NOW,
+        IDLE_CLAIM_S,
+    );
     assert_eq!("unknown", answer.state);
     assert_eq!("vim", answer.source);
     assert!(answer
@@ -173,7 +191,16 @@ fn an_unknown_harness_says_so_rather_than_guessing() {
         .contains("no activity source for harness"));
     assert_eq!(
         "none",
-        activity::activity("%9", "", ClaudeProbe::NoClient, None, NOW, IDLE_CLAIM_S).source
+        activity::activity(
+            "%9",
+            "",
+            ClaudeProbe::NoClient,
+            None,
+            None,
+            NOW,
+            IDLE_CLAIM_S
+        )
+        .source
     );
 }
 
@@ -206,6 +233,7 @@ fn a_line_for_a_log_names_the_reason_when_unknown() {
         "%2",
         "pi",
         ClaudeProbe::NoClient,
+        None,
         Some(&turns),
         NOW,
         IDLE_CLAIM_S,
@@ -297,7 +325,15 @@ fn the_idle_claim_window_comes_from_the_environment() {
 /// `record["reason"]` must not KeyError on a real answer.
 #[test]
 fn a_serialised_answer_always_carries_since_and_reason() {
-    let answer = activity::activity("%2", "pi", ClaudeProbe::NoClient, None, NOW, IDLE_CLAIM_S);
+    let answer = activity::activity(
+        "%2",
+        "pi",
+        ClaudeProbe::NoClient,
+        None,
+        None,
+        NOW,
+        IDLE_CLAIM_S,
+    );
     let value = serde_json::to_value(&answer).expect("serialises");
     let object = value.as_object().expect("an object");
     assert!(
@@ -309,4 +345,83 @@ fn a_serialised_answer_always_carries_since_and_reason() {
         "reason must be present, even when null"
     );
     assert!(object.contains_key("state") && object.contains_key("source"));
+}
+
+// t1182 (review of #189 @ b0b2dcd): the three findings, each pinned.
+
+#[test]
+fn expired_without_end_reason_matches_the_python_byte_for_byte() {
+    let turn = Turn {
+        started_at: Some(1.0),
+        expires_at: Some(2.0),
+        ended_at: None,
+    };
+    let (state, _, reason) = activity::turn_state(Some(&turn), NOW, IDLE_CLAIM_S, "pi");
+    assert_eq!(state, None);
+    assert_eq!(
+        reason.as_deref(),
+        Some("the last turn expired without an end: the agent declared work and never reported finishing")
+    );
+}
+
+#[test]
+fn activity_carries_waiting_for_through_the_claude_path() {
+    let answer = activity::activity(
+        "%2",
+        "claude",
+        ClaudeProbe::Session(Some("waiting")),
+        Some("permission"),
+        None,
+        NOW,
+        IDLE_CLAIM_S,
+    );
+    assert_eq!(answer.state, "waiting");
+    assert_eq!(answer.waiting_for.as_deref(), Some("permission"));
+}
+
+#[test]
+fn codex_honours_the_callers_idle_claim() {
+    let mut turns = BTreeMap::new();
+    turns.insert(
+        "%3".to_string(),
+        Turn {
+            started_at: Some(NOW - 200.0),
+            expires_at: Some(NOW - 150.0),
+            ended_at: Some(NOW - 100.0),
+        },
+    );
+    let short = activity::activity(
+        "%3",
+        "codex",
+        ClaudeProbe::NoClient,
+        None,
+        Some(&turns),
+        NOW,
+        50.0,
+    );
+    assert_eq!(short.state, "unknown");
+    let long = activity::activity(
+        "%3",
+        "codex",
+        ClaudeProbe::NoClient,
+        None,
+        Some(&turns),
+        NOW,
+        500.0,
+    );
+    assert_eq!(long.state, "idle");
+}
+
+#[test]
+fn ended_at_zero_is_no_end_like_the_pythons_falsy_zero() {
+    let turn = Turn {
+        started_at: Some(1.0),
+        expires_at: Some(2.0),
+        ended_at: Some(0.0),
+    };
+    let (state, _, reason) = activity::turn_state(Some(&turn), NOW, IDLE_CLAIM_S, "pi");
+    assert_eq!(state, None);
+    assert!(reason
+        .unwrap()
+        .starts_with("the last turn expired without an end"));
 }

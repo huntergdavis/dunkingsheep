@@ -93,7 +93,8 @@ pub fn turn_state(
     if state.expires_at.unwrap_or(0.0) > now {
         return (Some("working"), state.started_at, None);
     }
-    if let Some(ended) = state.ended_at {
+    // `if ended:` in the Python: an ended_at of 0 is falsy there, so it is no end at all.
+    if let Some(ended) = state.ended_at.filter(|ended| *ended != 0.0) {
         if now - ended <= idle_claim_s {
             return (Some("idle"), Some(ended), None);
         }
@@ -104,7 +105,7 @@ pub fn turn_state(
     // it finished. The TTL exists so a crashed agent cannot hold mail for ever - not so that
     // we can call it idle.
     (None, state.expires_at, Some(
-        "the last turn expired without an end: the agent declared work and never reported          finishing".to_string()))
+        "the last turn expired without an end: the agent declared work and never reported finishing".to_string()))
 }
 
 /// The best available answer about one lane, with its source.
@@ -112,13 +113,14 @@ pub fn activity(
     pane_id: &str,
     harness: &str,
     probe: ClaudeProbe<'_>,
+    waiting_for: Option<&str>,
     turns: Option<&BTreeMap<String, Turn>>,
     now: f64,
     idle_claim_s: f64,
 ) -> Activity {
     let lowered = harness.to_lowercase();
     match lowered.as_str() {
-        "claude" => claude_activity(probe, None),
+        "claude" => claude_activity(probe, waiting_for),
         "pi" => match turns {
             None => Activity {
                 state: "unknown".into(),
@@ -143,7 +145,7 @@ pub fn activity(
             let (state, since, reason) = turn_state(
                 turns.and_then(|turns| turns.get(pane_id)),
                 now,
-                IDLE_CLAIM_S,
+                idle_claim_s,
                 &lowered,
             );
             Activity {
