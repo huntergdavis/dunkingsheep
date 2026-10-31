@@ -124,3 +124,36 @@ fn web_may_do_everything_but_the_fleet_shaping_verbs() {
         assert!(allowed("owner", verb), "owner may call {verb}");
     }
 }
+
+fn inbox_result(n: usize, size: usize) -> serde_json::Value {
+    let messages: Vec<_> = (0..n)
+        .map(|i| serde_json::json!({"message_id": format!("i{i}"), "sender": "x", "subject": format!("s{i}"), "body": "b".repeat(size)}))
+        .collect();
+    serde_json::json!({"mailbox": "%133", "messages": messages})
+}
+
+#[test]
+fn over_cap_inbox_keeps_newest_messages_and_the_messages_key() {
+    let out = clamp_desk_result(&inbox_result(10, 900));
+    assert_eq!(Some(true), out["truncated"].as_bool());
+    let msgs = out["messages"].as_array().expect("messages key kept");
+    assert_eq!("i9", msgs.last().unwrap()["message_id"]);
+    assert_eq!((10 - msgs.len()) as u64, out["omitted"].as_u64().unwrap());
+    assert!(py_dumps(&out).chars().count() <= DESK_RESULT_BYTES);
+}
+
+#[test]
+fn under_cap_result_is_untouched() {
+    let r = inbox_result(2, 10);
+    assert_eq!(r, clamp_desk_result(&r));
+}
+
+#[test]
+fn over_cap_result_without_messages_is_the_capped_shape_and_prints_its_head() {
+    let big = serde_json::json!({"rows": "r".repeat(9000)});
+    let out = clamp_desk_result(&big);
+    assert!(out.get("messages").is_none());
+    assert_eq!(DESK_RESULT_BYTES as u64, out["cap"].as_u64().unwrap());
+    let text = capped_result_text(&out);
+    assert!(text.contains("result capped by the desk role") && text.contains("rrrr"));
+}
