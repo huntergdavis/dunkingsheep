@@ -32,6 +32,7 @@ pub mod stuck;
 pub mod tasks;
 pub mod terminal;
 pub mod usage;
+pub mod usage_providers;
 
 pub use error::{refusal, DunkError};
 
