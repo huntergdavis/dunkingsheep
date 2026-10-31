@@ -176,7 +176,9 @@ impl Flock {
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
-        tasks.block(task_id, reason.unwrap_or("")).await
+        // Python passes reason=None through, which stores NULL; `Tasks::block` takes a &str and
+        // would write '' (t1314). `set_status` takes the Option, as `Tasks.update` does.
+        tasks.set_status(task_id, "blocked", reason, None).await
     }
 
     /// `task_unblock`.
@@ -199,7 +201,8 @@ impl Flock {
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
-        tasks.cancel(task_id, reason.unwrap_or("")).await
+        // As `task_block`: None stays NULL (t1314), not ''.
+        tasks.set_status(task_id, "cancelled", reason, None).await
     }
 
     /// `task_delete`: `{"deleted": id}` in the Python, the id here.
@@ -229,7 +232,8 @@ impl Flock {
     }
 
     /// `task_note`: append an explanatory event. Unlike the others it does NOT require the
-    /// task visible (the Python does not), and a missing actor is recorded as empty.
+    /// task visible (the Python does not), and a missing actor is recorded as empty. The event
+    /// defaults to `note` only when omitted: Python's `event="note"` keeps an explicit empty one.
     pub async fn task_note(
         &self,
         task_id: &str,
@@ -238,7 +242,7 @@ impl Flock {
         self_pane_id: Option<&str>,
     ) -> Result<(), DunkError> {
         let tasks = self.task_store()?;
-        let event = event.filter(|e| !e.is_empty()).unwrap_or("note");
+        let event = event.unwrap_or("note");
         tasks
             .note(
                 task_id,

@@ -344,3 +344,43 @@ async fn a_missing_store_is_a_named_refusal() {
         .to_string();
     assert!(error.contains("task store is not attached"), "{error}");
 }
+
+#[tokio::test]
+async fn a_reasonless_block_or_cancel_stores_null_not_an_empty_string() {
+    // t1314: `task block <id>` with no --reason is the common call; Python stores NULL.
+    let (flock, tasks) = flock_with_store("null-reason").await;
+    let blocked = tasks.add("global", "b", "").await.unwrap();
+    let got = flock
+        .task_block(&blocked.id, None, Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!("blocked", got.status);
+    assert_eq!(None, got.block_reason, "NULL, not Some(\"\")");
+    let cancelled = tasks.add("global", "c", "").await.unwrap();
+    let got = flock
+        .task_cancel(&cancelled.id, None, Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!("cancelled", got.status);
+    assert_eq!(None, got.block_reason);
+    // A given reason is still kept verbatim.
+    let kept = tasks.add("global", "k", "").await.unwrap();
+    let got = flock
+        .task_block(&kept.id, Some("why"), Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!(Some("why".to_string()), got.block_reason);
+}
+
+#[tokio::test]
+async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults() {
+    let (flock, tasks) = flock_with_store("note-event").await;
+    let task = tasks.add("global", "n", "").await.unwrap();
+    flock.task_note(&task.id, None, None, None).await.unwrap();
+    flock
+        .task_note(&task.id, Some(""), None, None)
+        .await
+        .unwrap();
+    let events = tasks.events_named(&task.id).await;
+    assert_eq!(vec!["note".to_string(), "".to_string()], events);
+}

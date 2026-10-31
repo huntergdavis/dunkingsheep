@@ -570,6 +570,24 @@ impl Tasks {
             .unwrap_or(-1)
     }
 
+    /// The event names recorded for a task, oldest first (test helper).
+    #[doc(hidden)]
+    pub async fn events_named(&self, id: &str) -> Vec<String> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT event FROM task_events WHERE task_id = ? ORDER BY id")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id], |row| row.get::<_, String>(0))
+                    .map_err(db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap_or_default()
+    }
+
     /// Event count for a task (test helper).
     #[doc(hidden)]
     pub async fn events(&self, id: &str) -> i64 {
