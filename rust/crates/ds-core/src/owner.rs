@@ -173,27 +173,38 @@ impl OwnerPush {
         now: f64,
     ) -> Result<Vec<Push>, DunkError> {
         let pane = pane_id.to_string();
-        let taken_by = by.unwrap_or(pane_id).to_string();
+        // Python `by or pane_id`: an EMPTY by is the pane id too.
+        let taken_by = by
+            .filter(|name| !name.is_empty())
+            .unwrap_or(pane_id)
+            .to_string();
         let rows = self.writer.call(move |connection| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT * FROM owner_push WHERE pane_id = ?1 AND taken_at IS NULL \
-                          ORDER BY id LIMIT ?2",
-                )
-                .map_err(map_sqlite)?;
-            let rows: Vec<Push> = statement
-                .query_map((pane.as_str(), limit), row_to_push)
-                .map_err(map_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(map_sqlite)?;
+            // ONE transaction, like the Python's single commit: a failure part-way must not leave a
+            // prefix of the batch marked taken that the caller never receives (t1180 review).
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let rows: Vec<Push> = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT * FROM owner_push WHERE pane_id = ?1 AND taken_at IS NULL \
+                              ORDER BY id LIMIT ?2",
+                    )
+                    .map_err(map_sqlite)?;
+                let found = statement
+                    .query_map((pane.as_str(), limit), row_to_push)
+                    .map_err(map_sqlite)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(map_sqlite)?;
+                found
+            };
             for row in &rows {
-                connection
+                transaction
                     .execute(
                         "UPDATE owner_push SET taken_at = ?1, taken_by = ?2 WHERE id = ?3",
                         (now, taken_by.as_str(), row.id),
                     )
                     .map_err(map_sqlite)?;
             }
+            transaction.commit().map_err(map_sqlite)?;
             Ok(rows
                 .into_iter()
                 .map(|row| Push {
@@ -288,6 +299,8 @@ impl OwnerPush {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(map_sqlite(other)),
                 })
+                // Python `row["at"] if row and row["at"] else None`: a 0 is absent, not a poll.
+                .map(|value| value.filter(|at| *at != 0.0))
         })
     }
 
@@ -306,7 +319,8 @@ impl OwnerPush {
                     |row| row.get(0),
                 )
                 .map_err(map_sqlite)?;
-            Ok(value.flatten())
+            // a falsy (0) taken_at is absent in the Python too
+            Ok(value.flatten().filter(|at| *at != 0.0))
         })
     }
 
@@ -358,12 +372,19 @@ impl OwnerPush {
                 .map_err(map_sqlite)?;
             let mut latencies: Vec<f64> = rows
                 .iter()
-                .filter_map(|(created, taken)| taken.map(|taken| (taken - created).max(0.0)))
+                .filter_map(|(created, taken)| {
+                    taken
+                        .filter(|at| *at != 0.0)
+                        .map(|taken| (taken - created).max(0.0))
+                })
                 .collect();
             latencies.sort_by(|left, right| {
                 left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
             });
-            let pending = rows.iter().filter(|(_, taken)| taken.is_none()).count();
+            let pending = rows
+                .iter()
+                .filter(|(_, taken)| taken.map_or(true, |at| at == 0.0))
+                .count();
             Ok(Stats {
                 pushed: rows.len() as i64,
                 taken: latencies.len() as i64,
@@ -408,8 +429,12 @@ pub struct Latency {
     pub max: Option<f64>,
 }
 
+/// Python's `round(value, 2)`: the EXACT binary value rounded half-to-even. Formatting to two places
+/// is exact in Rust too, so format-then-parse matches; `(v * 100).round() / 100` multiplies in
+/// floating point first and rounds half AWAY from zero (round2(0.125) was 0.13, Python 0.12; the
+/// t1180 review).
 fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
+    format!("{value:.2}").parse().unwrap_or(value)
 }
 
 fn percentile(values: &[f64], fraction: f64) -> Option<f64> {

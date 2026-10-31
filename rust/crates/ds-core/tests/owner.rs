@@ -217,3 +217,83 @@ fn the_store_reopens_with_its_rows_intact() {
     assert_eq!("survives", pending[0].body);
     reopened.close();
 }
+
+// ---- the t1180 review findings -------------------------------------------------------------
+
+/// Python `round(x, 2)` rounds the EXACT binary value half-to-even: round(0.125, 2) == 0.12 and
+/// round(0.375, 2) == 0.38. The old `(v*100).round()/100` gave 0.13 for the first. The last case
+/// is a DIFFERENCE of floats, as production latencies are: (1000000.0 + 1.005) - 1000000.0 is
+/// 1.0050000000046566, which Python rounds to 1.01 (checked by running it).
+#[test]
+fn latency_values_round_like_pythons_round_on_exact_binary_ties() {
+    for (latency, expected) in [
+        (0.125, 0.12),
+        (0.375, 0.38),
+        (0.625, 0.62),
+        (0.875, 0.88),
+        (1.005, 1.01),
+    ] {
+        let (_directory, store) = store();
+        store.push("%2", "x", None, None, NOW).expect("push");
+        store.take("%2", None, 20, NOW + latency).expect("take");
+        let stats = store.stats(86_400.0, NOW + 10.0).expect("stats");
+        assert_eq!(Some(expected), stats.latency_s.max, "max for {latency}");
+        assert_eq!(Some(expected), stats.latency_s.p50, "p50 for {latency}");
+    }
+}
+
+/// Python: `by or pane_id` - an EMPTY `by` is the pane id too.
+#[test]
+fn an_empty_taker_name_falls_back_to_the_pane_like_the_python() {
+    let (_directory, store) = store();
+    store.push("%2", "x", None, None, NOW).expect("push");
+    let taken = store.take("%2", Some(""), 20, NOW + 1.0).expect("take");
+    assert_eq!(Some("%2"), taken[0].taken_by.as_deref());
+}
+
+/// Python treats a falsy timestamp (0) as ABSENT in last_poll, last_take and stats.
+#[test]
+fn a_zero_timestamp_is_absent_not_a_drain() {
+    let (_directory, store) = store();
+    store.poll("%2", None, 0.0).expect("poll at 0");
+    assert_eq!(
+        None,
+        store.last_poll("%2").expect("last_poll"),
+        "a poll at 0 is not a poll"
+    );
+    store.push("%2", "x", None, None, 0.0).expect("push");
+    store.take("%2", None, 20, 0.0).expect("take at 0");
+    assert_eq!(
+        None,
+        store.last_take("%2").expect("last_take"),
+        "a take at 0 is not a take"
+    );
+    let stats = store.stats(86_400.0, 10.0).expect("stats");
+    assert_eq!(
+        (1, 0, 1),
+        (stats.pushed, stats.taken, stats.pending),
+        "a take at 0 counts as pending"
+    );
+}
+
+/// Python commits once: after a take, every row of the batch is taken and returned together.
+#[test]
+fn a_take_marks_the_whole_batch_in_one_step() {
+    let (_directory, store) = store();
+    for n in 0..5 {
+        store
+            .push("%2", &format!("m{n}"), None, None, NOW + f64::from(n))
+            .expect("push");
+    }
+    let taken = store.take("%2", Some("ext"), 3, NOW + 10.0).expect("take");
+    assert_eq!(
+        vec!["m0", "m1", "m2"],
+        taken.iter().map(|p| p.body.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        2,
+        store.pending(Some("%2")).expect("pending").len(),
+        "only the two untaken remain"
+    );
+    assert!(taken.iter().all(|p| p.taken_at == Some(NOW + 10.0)));
+}

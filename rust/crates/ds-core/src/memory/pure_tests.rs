@@ -163,3 +163,43 @@ fn chunking_strips_the_pythons_whitespace_set() {
         chunk_text("\u{1c}abc\u{1c}", 100, 10)
     );
 }
+
+/// Pairs produced by running Python's `round(v, 2)` and `round(v, 4)` (2026-10-31).
+#[test]
+fn round_places_matches_pythons_exact_rounding() {
+    let two = [
+        (11.085, 11.09),
+        (2.675, 2.67),
+        (0.125, 0.12),
+        (0.375, 0.38),
+        (1.005, 1.0),
+        (8.345, 8.35),
+        (0.0016, 0.0),
+        (3.04150912, 3.04),
+        (2.5, 2.5),
+        (-1.005, -1.0),
+        (-0.125, -0.12),
+        (100.0, 100.0),
+        (5e-05, 0.0),
+        (0.00015, 0.0),
+        (12345.67895, 12345.68),
+        (0.99995, 1.0),
+        (1e-09, 0.0),
+    ];
+    for (value, expected) in two {
+        assert_eq!(expected, round_places(value, 2), "round({value}, 2)");
+    }
+    let four = [
+        (3.04150912, 3.0415),
+        (5e-05, 0.0001),
+        (0.00015, 0.0001),
+        (12345.67895, 12345.6789),
+        (0.99995, 1.0),
+        (0.0016, 0.0016),
+        (1e-09, 0.0),
+        (0.125, 0.125),
+    ];
+    for (value, expected) in four {
+        assert_eq!(expected, round_places(value, 4), "round({value}, 4)");
+    }
+}
