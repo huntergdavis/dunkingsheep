@@ -308,5 +308,583 @@
   },
   "output": "roles /p\n  owner: no (pane -, role None)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  removed: 0 (None)\n",
   "printer": "print_superuser"
+ },
+ {
+  "input": {
+   "message_id": "m3",
+   "pane_id": "%4",
+   "queued": true,
+   "target_label": "w1"
+  },
+  "output": "m3 queued for w1 (%4): someone is typing\n",
+  "printer": "print_message"
+ },
+ {
+  "input": {
+   "ok": true,
+   "pane_id": "%4",
+   "target_label": "w1"
+  },
+  "output": "sent to w1 (%4)\n",
+  "printer": "print_message"
+ },
+ {
+  "input": {
+   "message": "no such pane",
+   "ok": false,
+   "pane_id": "%4",
+   "target_label": "w1"
+  },
+  "output": "FAILED for w1 (%4): no such pane\n",
+  "printer": "print_message"
+ },
+ {
+  "input": {
+   "pane_id": "%1",
+   "target_label": "x"
+  },
+  "output": "FAILED for x (%1): None\n",
+  "printer": "print_message"
+ },
+ {
+  "input": {
+   "agent": "pi",
+   "declared": true,
+   "drain_evidence": "turn events",
+   "drains": true,
+   "expect": "mail arrives next turn",
+   "mailbox": "pi-worker",
+   "pane_id": "%2",
+   "send": "push queue"
+  },
+  "output": "%2  mailbox='pi-worker'  declared=yes  agent=pi\n  drains=yes  send=push queue  evidence=turn events\n  mail arrives next turn\n",
+  "printer": "print_capability"
+ },
+ {
+  "input": {
+   "agent": null,
+   "declared": false,
+   "desk_can_type": false,
+   "desk_credential": true,
+   "drains": false,
+   "expect": "typed",
+   "mailbox": "it's",
+   "pane_id": "%3",
+   "send": "guarded"
+  },
+  "output": "%3  mailbox=\"it's\"  declared=-  agent=-\n  drains=no  send=guarded  evidence=-\n  typed\n  desk: credential=yes  may type here=no\n",
+  "printer": "print_capability"
+ },
+ {
+  "input": {
+   "agent": "",
+   "declared": 0,
+   "desk_can_type": true,
+   "desk_credential": false,
+   "drains": 0,
+   "expect": "e",
+   "mailbox": null,
+   "pane_id": "%3",
+   "send": "s"
+  },
+  "output": "%3  mailbox=None  declared=-  agent=-\n  drains=no  send=s  evidence=-\n  e\n  desk: credential=no  may type here=yes\n",
+  "printer": "print_capability"
+ },
+ {
+  "input": {},
+  "output": "the lane registry is empty\n",
+  "printer": "print_lanes"
+ },
+ {
+  "input": {
+   "lanes": []
+  },
+  "output": "the lane registry is empty\n",
+  "printer": "print_lanes"
+ },
+ {
+  "input": {
+   "lanes": [
+    {
+     "alive": true,
+     "declared": true,
+     "mailbox": "owner",
+     "pane_id": "%1"
+    },
+    {
+     "alive": false,
+     "mailbox": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+     "pane_id": "%22"
+    },
+    {
+     "alive": null,
+     "declared": 0,
+     "pane_id": "%3"
+    }
+   ]
+  },
+  "output": "PANE     MAILBOX                                    DECLARED  ALIVE\n%1       owner                                      yes       yes\n%22      mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm -         NO\n%3       -                                          -         -\n",
+  "printer": "print_lanes"
+ },
+ {
+  "input": {
+   "mailbox": "vp",
+   "pane_id": "%1"
+  },
+  "output": "%1 is 'vp' (declared)\n",
+  "printer": "print_lane"
+ },
+ {
+  "input": {
+   "mailbox": "a'b",
+   "pane_id": "%2"
+  },
+  "output": "%2 is \"a'b\" (declared)\n",
+  "printer": "print_lane"
+ },
+ {
+  "input": {
+   "mailboxes": []
+  },
+  "output": "no mailboxes\n",
+  "printer": "print_inbox_stats"
+ },
+ {
+  "input": {
+   "mailboxes": [
+    {
+     "archived": 10,
+     "destination": "pi-worker-9",
+     "oldest_unread_s": 120,
+     "total": 50,
+     "undeliverable": 1,
+     "unread": 3
+    },
+    {
+     "destination": "dddddddddddddddddddddddddddddddddddddddd",
+     "oldest_unread_s": 0,
+     "total": 2,
+     "unread": 0
+    },
+    {
+     "destination": null,
+     "total": 12345678,
+     "unread": 1000
+    }
+   ]
+  },
+  "output": "MAILBOX                         UNREAD   ARCH  UNDELIV   TOTAL OLDEST\npi-worker-9                          3     10        1      50 120s\nddddddddddddddddddddddddddddd\u2026       0      0        0       2 -\n                                  1000      0        0 12345678 -\n",
+  "printer": "print_inbox_stats"
+ },
+ {
+  "input": {
+   "id": "o7",
+   "pane_id": "%1"
+  },
+  "output": "pushed owner message o7 for %1 (no inbox row, nothing typed)\n",
+  "printer": "print_owner_push"
+ },
+ {
+  "input": {
+   "generated_at": "2026-10-31T00:00:00Z",
+   "path": "/r/1.md",
+   "posted": {
+    "message_id": "m9",
+    "transport": "telegram"
+   },
+   "prose_rejected": [
+    "too long",
+    "bad"
+   ]
+  },
+  "output": "report /r/1.md  (generated 2026-10-31T00:00:00Z)\nposted to the owner mailbox as m9 (transport telegram)\nprose rejected: too long\nprose rejected: bad\n",
+  "printer": "print_report_run"
+ },
+ {
+  "input": {
+   "generated_at": 1,
+   "path": "p",
+   "posted": {
+    "message_id": "m1"
+   }
+  },
+  "output": "report p  (generated 1)\nposted to the owner mailbox as m1 (transport none)\n",
+  "printer": "print_report_run"
+ },
+ {
+  "input": {
+   "path": "p",
+   "posted": {
+    "error": "no mailbox"
+   }
+  },
+  "output": "report p  (generated None)\nNOT posted: no mailbox\n",
+  "printer": "print_report_run"
+ },
+ {
+  "input": {
+   "path": "p"
+  },
+  "output": "report p  (generated None)\n",
+  "printer": "print_report_run"
+ },
+ {
+  "input": {
+   "acked": "m1",
+   "question": "m1",
+   "reply": {
+    "message_id": "m2"
+   },
+   "transport": "web"
+  },
+  "output": "answered m1 with m2 on web (question m1 acked)\n",
+  "printer": "print_owner_reply"
+ },
+ {
+  "input": {
+   "acked": 1,
+   "question": "m1",
+   "transport": null
+  },
+  "output": "answered m1 with None on no transport (question 1 acked)\n",
+  "printer": "print_owner_reply"
+ },
+ {
+  "input": {
+   "after": {
+    "state": "empty"
+   },
+   "before": {
+    "state": "draft"
+   },
+   "flushed": true,
+   "pane_id": "%4",
+   "reason": "stuck",
+   "target_label": "w1"
+  },
+  "output": "cleared w1 (%4): draft -> empty [stuck]\n",
+  "printer": "print_clear"
+ },
+ {
+  "input": {
+   "after": {
+    "state": "empty"
+   },
+   "before": {
+    "state": "draft"
+   },
+   "flushed": true,
+   "pane_id": "%4"
+  },
+  "output": "cleared %4 (%4): draft -> empty\n",
+  "printer": "print_clear"
+ },
+ {
+  "input": {
+   "pane_id": "%4",
+   "reason": "box already empty",
+   "target_label": "w1"
+  },
+  "output": "nothing cleared on w1 (%4): box already empty\n",
+  "printer": "print_clear"
+ },
+ {
+  "input": {
+   "flushed": false,
+   "pane_id": "%9"
+  },
+  "output": "nothing cleared on %9 (%9): None\n",
+  "printer": "print_clear"
+ },
+ {
+  "input": {},
+  "output": "no messages\n",
+  "printer": "print_messages"
+ },
+ {
+  "input": {
+   "queued": [],
+   "recent": []
+  },
+  "output": "no messages\n",
+  "printer": "print_messages"
+ },
+ {
+  "input": {
+   "queued": [
+    {
+     "message_id": "m1",
+     "source": "owner",
+     "target_label": "worker-one",
+     "text": "hello\nworld hello\nworld hello\nworld hello\nworld hello\nworld hello\nworld hello\nworld hello\nworld ",
+     "waiting_s": 12
+    },
+    {
+     "blocked_by": "t5",
+     "message_id": "m22",
+     "source": "ssssssssssssss",
+     "target_label": "tttttttttttttttttttttttttttttttttttttttt",
+     "text": null,
+     "waiting_s": 3
+    },
+    {
+     "message_id": "m3",
+     "source": "y",
+     "target_label": "x",
+     "text": "z",
+     "unblock_needed": true,
+     "waiting_s": 0
+    }
+   ],
+   "recent": [
+    {
+     "message_id": "m0",
+     "source": "b",
+     "status": "sent",
+     "target_label": "a",
+     "text": "c"
+    }
+   ]
+  },
+  "output": "ID     WAITING TARGET                       FROM       TEXT\nm1         12s worker-one                   owner      hello world hello world hello world hello world h\u2026\nm22         3s ttttttttttttttttttttttttttt\u2026 sssssssss\u2026 \n               blocked by t5\nm3          0s x                            y          z\n               dependencies satisfied - UNBLOCK to claim\n\nID    STATUS     TARGET                       FROM       TEXT\nm0    sent       a                            b          c\n",
+  "printer": "print_messages"
+ },
+ {
+  "input": {
+   "recent": [
+    {
+     "message_id": "m0",
+     "source": "b",
+     "status": "failed",
+     "target_label": "a",
+     "text": "multi\nline"
+    }
+   ]
+  },
+  "output": "ID    STATUS     TARGET                       FROM       TEXT\nm0    failed     a                            b          multi line\n",
+  "printer": "print_messages"
+ },
+ {
+  "input": {},
+  "output": "no workspaces (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)\n",
+  "printer": "print_workspaces"
+ },
+ {
+  "input": {
+   "workspaces": []
+  },
+  "output": "no workspaces (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)\n",
+  "printer": "print_workspaces"
+ },
+ {
+  "input": {
+   "self": {
+    "tab_id": "w1:t2",
+    "workspace_id": "w1"
+   },
+   "workspaces": [
+    {
+     "agent_status": "idle",
+     "label": "main",
+     "tab_count": 2,
+     "tabs": [
+      {
+       "agent_status": "busy",
+       "label": "work",
+       "pane_count": 3,
+       "tab_id": "w1:t1"
+      },
+      {
+       "label": "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL",
+       "tab_id": "w1:t2"
+      }
+     ],
+     "workspace_id": "w1"
+    },
+    {
+     "label": null,
+     "tabs": [
+      {
+       "tab_id": "w2:t1"
+      }
+     ],
+     "workspace_id": "w2"
+    }
+   ]
+  },
+  "output": "*w1     main                             2 tabs  idle\n    w1:t1    work                             3 panes busy\n   *w1:t2    LLLLLLLLLLLLLLLLLLLLLLLLLLLLL\u2026   0 panes -\n w2                                      1 tabs  -\n    w2:t1                                     0 panes -\n* = this pane's workspace/tab\n",
+  "printer": "print_workspaces"
+ },
+ {
+  "input": {
+   "workspaces": [
+    {
+     "label": "q",
+     "tabs": [],
+     "workspace_id": "w9"
+    }
+   ]
+  },
+  "output": " w9     q                                0 tabs  -\n",
+  "printer": "print_workspaces"
+ },
+ {
+  "input": {
+   "pane": {
+    "pane_id": "%12"
+   },
+   "ran": "claude",
+   "tab": {
+    "label": "t",
+    "tab_id": "w3:t1"
+   },
+   "workspace": {
+    "label": "ops",
+    "workspace_id": "w3"
+   }
+  },
+  "output": "created workspace w3 'ops', tab w3:t1 't', pane %12; running 'claude'\n",
+  "printer": "print_created"
+ },
+ {
+  "input": {
+   "pane": {
+    "pane_id": "%13"
+   }
+  },
+  "output": "created pane %13\n",
+  "printer": "print_created"
+ },
+ {
+  "input": {
+   "pane": {
+    "pane_id": "%14"
+   },
+   "ran": "",
+   "tab": {
+    "label": "it's",
+    "tab_id": "w3:t2"
+   }
+  },
+  "output": "created tab w3:t2 \"it's\", pane %14\n",
+  "printer": "print_created"
+ },
+ {
+  "input": {},
+  "output": "self ?  vNone  dunks 0/0 running  inbox 0 unread / 0\n",
+  "printer": "print_poll"
+ },
+ {
+  "input": {
+   "dunks": {
+    "dunks": [
+     {
+      "id": "d1",
+      "interval_minutes": 15.0,
+      "running": true,
+      "target_label": "steward"
+     },
+     {
+      "id": "d2",
+      "interval_minutes": 5,
+      "target_pane_id": "%9"
+     }
+    ],
+    "messages": [
+     {
+      "message_id": "m1",
+      "sender": "owner",
+      "subject": "hi"
+     },
+     {
+      "message_id": "m2",
+      "sender": null
+     },
+     {
+      "message_id": "m3",
+      "sender": "s"
+     },
+     {
+      "message_id": "m4",
+      "sender": "s"
+     },
+     {
+      "message_id": "m5",
+      "sender": "s"
+     },
+     {
+      "message_id": "m6",
+      "sender": "s"
+     },
+     {
+      "message_id": "m7",
+      "sender": "s"
+     },
+     {
+      "message_id": "m8",
+      "sender": "s"
+     }
+    ]
+   },
+   "error": "stale",
+   "inbox_count": {
+    "total": 40,
+    "unread": 2
+   },
+   "status": {
+    "dunkers": 6,
+    "running": 3,
+    "self_pane_id": "%3",
+    "version": "2.71.4"
+   }
+  },
+  "output": "self %3  v2.71.4  dunks 3/6 running  inbox 2 unread / 40\n  note: stale\n  #m1 owner: hi\n  #m2 None: (no subject)\n  #m3 s: (no subject)\n  #m4 s: (no subject)\n  #m5 s: (no subject)\n  d1 running every 15.0m -> steward\n  d2 stopped every 5m -> %9\n",
+  "printer": "print_poll"
+ },
+ {
+  "input": {
+   "ended": true,
+   "pane_id": "%1"
+  },
+  "output": "turn end %1 (ended=True)\n",
+  "printer": "print_turn_end"
+ },
+ {
+  "input": {
+   "dispatch": {
+    "action": "nudge",
+    "delivered": true,
+    "task_id": "t4"
+   },
+   "ended": false,
+   "pane_id": "%1"
+  },
+  "output": "turn end %1 (ended=False); trigger=turn.end nudged t4: delivered\n",
+  "printer": "print_turn_end"
+ },
+ {
+  "input": {
+   "dispatch": {
+    "action": "nudge",
+    "outcome": "typing",
+    "task_id": "t4"
+   },
+   "ended": true,
+   "pane_id": "%1"
+  },
+  "output": "turn end %1 (ended=True); trigger=turn.end nudged t4: HELD, not delivered (typing)\n",
+  "printer": "print_turn_end"
+ },
+ {
+  "input": {
+   "dispatch": {
+    "action": "none",
+    "reason": "no work"
+   },
+   "ended": true,
+   "pane_id": "%1"
+  },
+  "output": "turn end %1 (ended=True); trigger=turn.end no nudge (no work)\n",
+  "printer": "print_turn_end"
  }
 ]

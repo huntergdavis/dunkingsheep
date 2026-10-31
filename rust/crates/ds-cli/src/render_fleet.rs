@@ -351,3 +351,432 @@ pub fn render_superuser(result: &Value) -> String {
     }
     out
 }
+
+// ---- slice 3b: printers with no clock, no json.dumps and no task-row dependency -----------
+
+/// `_clip(text, width)`: `…` replaces the tail when longer (Python lines 1009-1011).
+pub fn clip(v: &Value, width: usize) -> String {
+    let text = if v.is_null() {
+        String::new()
+    } else {
+        py_str(v)
+    };
+    if text.chars().count() <= width {
+        text
+    } else {
+        format!("{}…", first_chars(&text, width - 1))
+    }
+}
+
+fn rjust(s: &str, width: usize) -> String {
+    let n = s.chars().count();
+    format!("{}{s}", " ".repeat(width.saturating_sub(n)))
+}
+
+/// `d.get(key, default)`: the default only when the key is ABSENT (a present null stays None).
+fn get_or(v: &Value, key: &str, default: Value) -> Value {
+    v.get(key).cloned().unwrap_or(default)
+}
+
+fn yes_no(b: bool, yes: &str, no: &str) -> String {
+    (if b { yes } else { no }).to_string()
+}
+
+pub fn render_message(result: &Value) -> String {
+    let (label, pane) = (
+        py_str(get(result, "target_label")),
+        py_str(get(result, "pane_id")),
+    );
+    if truthy(get(result, "queued")) {
+        format!(
+            "{} queued for {label} ({pane}): someone is typing\n",
+            py_str(get(result, "message_id"))
+        )
+    } else if truthy(get(result, "ok")) {
+        format!("sent to {label} ({pane})\n")
+    } else {
+        format!(
+            "FAILED for {label} ({pane}): {}\n",
+            py_str(get(result, "message"))
+        )
+    }
+}
+
+pub fn render_capability(result: &Value) -> String {
+    let mut out = format!(
+        "{}  mailbox={}  declared={}  agent={}\n",
+        py_str(get(result, "pane_id")),
+        py_repr(get(result, "mailbox")),
+        yes_no(truthy(get(result, "declared")), "yes", "-"),
+        or(get(result, "agent"), "-")
+    );
+    out.push_str(&format!(
+        "  drains={}  send={}  evidence={}\n",
+        yes_no(truthy(get(result, "drains")), "yes", "no"),
+        py_str(get(result, "send")),
+        or(get(result, "drain_evidence"), "-")
+    ));
+    out.push_str(&format!("  {}\n", py_str(get(result, "expect"))));
+    if !get(result, "desk_credential").is_null() {
+        out.push_str(&format!(
+            "  desk: credential={}  may type here={}\n",
+            yes_no(truthy(get(result, "desk_credential")), "yes", "no"),
+            yes_no(truthy(get(result, "desk_can_type")), "yes", "no")
+        ));
+    }
+    out
+}
+
+pub fn render_lanes(result: &Value) -> String {
+    let rows = items(result, "lanes");
+    if rows.is_empty() {
+        return "the lane registry is empty\n".to_string();
+    }
+    let mut out = format!(
+        "{} {} {} ALIVE\n",
+        ljust("PANE", 8),
+        ljust("MAILBOX", 42),
+        ljust("DECLARED", 9)
+    );
+    for row in rows {
+        let declared = if truthy(get(row, "declared")) {
+            "yes"
+        } else {
+            "-"
+        };
+        let alive = match get(row, "alive") {
+            Value::Bool(true) => "yes",
+            Value::Bool(false) => "NO",
+            _ => "-",
+        };
+        let name = first_chars(&or(get(row, "mailbox"), "-"), 42);
+        out.push_str(&format!(
+            "{} {} {} {alive}\n",
+            ljust(&py_str(get(row, "pane_id")), 8),
+            ljust(&name, 42),
+            ljust(declared, 9)
+        ));
+    }
+    out
+}
+
+pub fn render_lane(result: &Value) -> String {
+    format!(
+        "{} is {} (declared)\n",
+        py_str(get(result, "pane_id")),
+        py_repr(get(result, "mailbox"))
+    )
+}
+
+pub fn render_inbox_stats(r: &Value) -> String {
+    let boxes = items(r, "mailboxes");
+    if boxes.is_empty() {
+        return "no mailboxes\n".to_string();
+    }
+    let mut out = format!(
+        "{} {} {} {} {} OLDEST\n",
+        ljust("MAILBOX", 30),
+        rjust("UNREAD", 7),
+        rjust("ARCH", 6),
+        rjust("UNDELIV", 8),
+        rjust("TOTAL", 7)
+    );
+    for b in boxes {
+        let oldest = if truthy(get(b, "oldest_unread_s")) {
+            format!("{}s", py_str(get(b, "oldest_unread_s")))
+        } else {
+            "-".to_string()
+        };
+        out.push_str(&format!(
+            "{} {} {} {} {} {oldest}\n",
+            ljust(&clip(get(b, "destination"), 30), 30),
+            rjust(&py_str(get(b, "unread")), 7),
+            rjust(&py_str(&get_or(b, "archived", Value::from(0))), 6),
+            rjust(&py_str(&get_or(b, "undeliverable", Value::from(0))), 8),
+            rjust(&py_str(get(b, "total")), 7)
+        ));
+    }
+    out
+}
+
+pub fn render_owner_push(result: &Value) -> String {
+    format!(
+        "pushed owner message {} for {} (no inbox row, nothing typed)\n",
+        py_str(get(result, "id")),
+        py_str(get(result, "pane_id"))
+    )
+}
+
+pub fn render_report_run(result: &Value) -> String {
+    let mut out = format!(
+        "report {}  (generated {})\n",
+        py_str(get(result, "path")),
+        py_str(get(result, "generated_at"))
+    );
+    let posted = get(result, "posted");
+    if truthy(get(posted, "message_id")) {
+        out.push_str(&format!(
+            "posted to the owner mailbox as {} (transport {})\n",
+            py_str(get(posted, "message_id")),
+            or(get(posted, "transport"), "none")
+        ));
+    } else if truthy(get(posted, "error")) {
+        out.push_str(&format!("NOT posted: {}\n", py_str(get(posted, "error"))));
+    }
+    for problem in items(result, "prose_rejected") {
+        out.push_str(&format!("prose rejected: {}\n", py_str(problem)));
+    }
+    out
+}
+
+pub fn render_owner_reply(result: &Value) -> String {
+    let reply = get(result, "reply");
+    format!(
+        "answered {} with {} on {} (question {} acked)\n",
+        py_str(get(result, "question")),
+        py_str(get(reply, "message_id")),
+        or(get(result, "transport"), "no transport"),
+        py_str(get(result, "acked"))
+    )
+}
+
+pub fn render_clear(result: &Value) -> String {
+    let label = if truthy(get(result, "target_label")) {
+        py_str(get(result, "target_label"))
+    } else {
+        py_str(get(result, "pane_id"))
+    };
+    let pane = py_str(get(result, "pane_id"));
+    if truthy(get(result, "flushed")) {
+        let before = py_str(get(get(result, "before"), "state"));
+        let after = py_str(get(get(result, "after"), "state"));
+        let reason = if truthy(get(result, "reason")) {
+            format!(" [{}]", py_str(get(result, "reason")))
+        } else {
+            String::new()
+        };
+        format!("cleared {label} ({pane}): {before} -> {after}{reason}\n")
+    } else {
+        format!(
+            "nothing cleared on {label} ({pane}): {}\n",
+            py_str(get(result, "reason"))
+        )
+    }
+}
+
+fn one_line(v: &Value) -> Value {
+    let text = if truthy(v) { py_str(v) } else { String::new() };
+    Value::String(text.replace('\n', " "))
+}
+
+pub fn render_messages(result: &Value) -> String {
+    let queued = items(result, "queued");
+    let recent = items(result, "recent");
+    if queued.is_empty() && recent.is_empty() {
+        return "no messages\n".to_string();
+    }
+    let mut out = String::new();
+    if !queued.is_empty() {
+        out.push_str(&format!(
+            "{} {} {} {} TEXT\n",
+            ljust("ID", 5),
+            rjust("WAITING", 8),
+            ljust("TARGET", 28),
+            ljust("FROM", 10)
+        ));
+        for m in queued {
+            out.push_str(&format!(
+                "{} {} {} {} {}\n",
+                ljust(&py_str(get(m, "message_id")), 5),
+                rjust(&format!("{}s", py_str(get(m, "waiting_s"))), 8),
+                ljust(&clip(get(m, "target_label"), 28), 28),
+                ljust(&clip(get(m, "source"), 10), 10),
+                clip(&one_line(get(m, "text")), 50)
+            ));
+            if truthy(get(m, "blocked_by")) {
+                out.push_str(&format!(
+                    "{:<5} {:>8} blocked by {}\n",
+                    "",
+                    "",
+                    py_str(get(m, "blocked_by"))
+                ));
+            } else if truthy(get(m, "unblock_needed")) {
+                out.push_str(&format!(
+                    "{:<5} {:>8} dependencies satisfied - UNBLOCK to claim\n",
+                    "", ""
+                ));
+            }
+        }
+    }
+    if !recent.is_empty() {
+        if !queued.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{} {} {} {} TEXT\n",
+            ljust("ID", 5),
+            ljust("STATUS", 10),
+            ljust("TARGET", 28),
+            ljust("FROM", 10)
+        ));
+        for m in recent {
+            out.push_str(&format!(
+                "{} {} {} {} {}\n",
+                ljust(&py_str(get(m, "message_id")), 5),
+                ljust(&py_str(get(m, "status")), 10),
+                ljust(&clip(get(m, "target_label"), 28), 28),
+                ljust(&clip(get(m, "source"), 10), 10),
+                clip(&one_line(get(m, "text")), 50)
+            ));
+        }
+    }
+    out
+}
+
+pub fn render_workspaces(result: &Value) -> String {
+    let workspaces = items(result, "workspaces");
+    if workspaces.is_empty() {
+        return "no workspaces (is the terminal backend reachable? on the herdr rollback: is the herdr server running?)\n"
+            .to_string();
+    }
+    let own = get(result, "self");
+    let mut out = String::new();
+    for ws in workspaces {
+        let mark = if get(ws, "workspace_id") == get(own, "workspace_id") {
+            "*"
+        } else {
+            " "
+        };
+        let tabs = items(ws, "tabs");
+        let tab_count = get_or(ws, "tab_count", Value::from(tabs.len() as i64));
+        out.push_str(&format!(
+            "{mark}{} {} {} tabs  {}\n",
+            ljust(&py_str(get(ws, "workspace_id")), 6),
+            ljust(&clip(get(ws, "label"), 30), 30),
+            rjust(&py_str(&tab_count), 3),
+            or(get(ws, "agent_status"), "-")
+        ));
+        for tab in tabs {
+            let mark = if get(tab, "tab_id") == get(own, "tab_id") {
+                "*"
+            } else {
+                " "
+            };
+            out.push_str(&format!(
+                "   {mark}{} {} {} panes {}\n",
+                ljust(&py_str(get(tab, "tab_id")), 8),
+                ljust(&clip(get(tab, "label"), 30), 30),
+                rjust(&py_str(&get_or(tab, "pane_count", Value::from(0))), 3),
+                or(get(tab, "agent_status"), "-")
+            ));
+        }
+    }
+    if truthy(own) {
+        out.push_str("* = this pane's workspace/tab\n");
+    }
+    out
+}
+
+/// stdout half of `print_created` (its `error` goes to stderr, see `created_error`).
+pub fn render_created(result: &Value) -> String {
+    let (ws, tab) = (get(result, "workspace"), get(result, "tab"));
+    let pane = get(result, "pane");
+    let mut parts: Vec<String> = Vec::new();
+    if truthy(ws) {
+        parts.push(format!(
+            "workspace {} {}",
+            py_str(get(ws, "workspace_id")),
+            py_repr(get(ws, "label"))
+        ));
+    }
+    if truthy(tab) {
+        parts.push(format!(
+            "tab {} {}",
+            py_str(get(tab, "tab_id")),
+            py_repr(get(tab, "label"))
+        ));
+    }
+    parts.push(format!("pane {}", py_str(get(pane, "pane_id"))));
+    let mut line = format!("created {}", parts.join(", "));
+    if truthy(get(result, "ran")) {
+        line.push_str(&format!("; running {}", py_repr(get(result, "ran"))));
+    }
+    line.push('\n');
+    line
+}
+
+/// The stderr line `print_created` adds when the result carries an error.
+pub fn created_error(result: &Value) -> Option<String> {
+    truthy(get(result, "error")).then(|| format!("{}\n", py_str(get(result, "error"))))
+}
+
+pub fn render_poll(result: &Value) -> String {
+    let status = get(result, "status");
+    let count = get(result, "inbox_count");
+    let mut out = format!(
+        "self {}  v{}  dunks {}/{} running  inbox {} unread / {}\n",
+        or(get(status, "self_pane_id"), "?"),
+        py_str(get(status, "version")),
+        py_str(&get_or(status, "running", Value::from(0))),
+        py_str(&get_or(status, "dunkers", Value::from(0))),
+        py_str(&get_or(count, "unread", Value::from(0))),
+        py_str(&get_or(count, "total", Value::from(0)))
+    );
+    if truthy(get(result, "error")) {
+        out.push_str(&format!("  note: {}\n", py_str(get(result, "error"))));
+    }
+    let dunks = get(result, "dunks");
+    for message in items(dunks, "messages").iter().take(5) {
+        out.push_str(&format!(
+            "  #{} {}: {}\n",
+            py_str(get(message, "message_id")),
+            py_str(get(message, "sender")),
+            or(get(message, "subject"), "(no subject)")
+        ));
+    }
+    for dunk in items(dunks, "dunks").iter().take(10) {
+        let state = if truthy(get(dunk, "running")) {
+            "running"
+        } else {
+            "stopped"
+        };
+        let target = if truthy(get(dunk, "target_label")) {
+            py_str(get(dunk, "target_label"))
+        } else {
+            py_str(get(dunk, "target_pane_id"))
+        };
+        out.push_str(&format!(
+            "  {} {state} every {}m -> {target}\n",
+            py_str(get(dunk, "id")),
+            py_str(get(dunk, "interval_minutes"))
+        ));
+    }
+    out
+}
+
+pub fn render_turn_end(result: &Value) -> String {
+    let mut line = format!(
+        "turn end {} (ended={})",
+        py_str(get(result, "pane_id")),
+        py_str(get(result, "ended"))
+    );
+    let dispatch = get(result, "dispatch");
+    if get(dispatch, "action").as_str() == Some("nudge") {
+        let outcome = if truthy(get(dispatch, "delivered")) {
+            "delivered".to_string()
+        } else {
+            format!("HELD, not delivered ({})", py_str(get(dispatch, "outcome")))
+        };
+        line.push_str(&format!(
+            "; trigger=turn.end nudged {}: {outcome}",
+            py_str(get(dispatch, "task_id"))
+        ));
+    } else if truthy(dispatch) {
+        line.push_str(&format!(
+            "; trigger=turn.end no nudge ({})",
+            py_str(get(dispatch, "reason"))
+        ));
+    }
+    line.push('\n');
+    line
+}
