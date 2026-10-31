@@ -362,3 +362,85 @@ impl Store {
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod store_tests;
+
+// -- access log (slice 2) ---------------------------------------------------------------
+
+/// Python `json.dumps(str)` (ensure_ascii): the quoted string with non-ASCII as `\uXXXX`.
+fn py_json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut buffer = [0u16; 2];
+                for unit in c.encode_utf16(&mut buffer) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+impl Store {
+    pub fn access_path(&self) -> PathBuf {
+        self.root.join("access.jsonl")
+    }
+
+    /// `log_access`: kind `read` when someone opened an article, `injected` when it was
+    /// delivered. Delivery and reading are different facts and a store that conflates them
+    /// cannot say whether it is unused or merely unread. The line is the Python's
+    /// `json.dumps` of {slug, at, kind, by}, byte for byte (", " and ": " separators).
+    pub fn log_access(&self, slug: &str, by: Option<&str>, kind: &str) {
+        use std::io::Write;
+        if slug.is_empty() {
+            return;
+        }
+        let by = by
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::var("DUNKINGSHEEP_SELF")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let line = format!(
+            "{{\"slug\": {}, \"at\": {:?}, \"kind\": {}, \"by\": {}}}\n",
+            py_json_string(slug),
+            // `{:?}` keeps the ".0" Python's float repr prints for a whole number
+            crate::clock::now_s(),
+            py_json_string(kind),
+            py_json_string(&by)
+        );
+        if let Ok(mut handle) = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.access_path())
+        {
+            let _ = handle.write_all(line.as_bytes());
+        }
+    }
+
+    /// `reads`: every access line; an unreadable or corrupt file is an empty list.
+    pub fn reads(&self) -> Vec<serde_json::Value> {
+        let Ok(text) = fs::read_to_string(self.access_path()) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str(line) {
+                Ok(value) => out.push(value),
+                Err(_) => return Vec::new(),
+            }
+        }
+        out
+    }
+}
