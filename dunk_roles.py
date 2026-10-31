@@ -426,6 +426,22 @@ def clamp_desk_result(result):
         return result
     if len(text) <= DESK_RESULT_BYTES:
         return result
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if isinstance(messages, list) and messages:
+        # t1165: keep the result shaped like an inbox result (the CLI indexes
+        # r["messages"]) and keep the NEWEST messages that fit, not a blind byte cut.
+        base = {k: v for k, v in result.items() if k != "messages"}
+        base.update(truncated=True, omitted=0, cap=DESK_RESULT_BYTES,
+                    note="desk results are capped; the oldest messages were left out "
+                         "(inbox list / inbox status <id> show them)")
+        kept = []
+        for m in reversed(messages):
+            trial = dict(base, messages=[m] + kept, omitted=len(messages) - len(kept) - 1)
+            if len(json.dumps(trial)) > DESK_RESULT_BYTES:
+                break
+            kept.insert(0, m)
+        if kept:
+            return dict(base, messages=kept, omitted=len(messages) - len(kept))
     return {"truncated": True, "bytes": len(text), "cap": DESK_RESULT_BYTES,
             "head": text[:DESK_RESULT_BYTES],
             "note": "desk results are capped; ask a narrower question "
