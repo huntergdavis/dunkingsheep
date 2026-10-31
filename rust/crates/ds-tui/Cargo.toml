@@ -1,0 +1,8 @@
+[package]
+name = "ds-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dunking Sheep terminal UI (T61). Slice 1: the text editor buffer (text_editor.py)."
+
+[dependencies]
