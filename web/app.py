@@ -101,7 +101,7 @@ def _load_channels():
 
 CHANNELS = _load_channels()
 CHANNEL_INDEX = {item["id"]: item for item in CHANNELS}
-from web.roster import build_roster, discovered_id, is_agent_pane, match_pane, presence
+from web.roster import build_roster, discovered_id, is_lane, match_pane, presence
 from web import codeword
 from web.gameplay import GameError, GameSession
 GAME = GameSession(poolrad_paths.repo("POOLRAD_REPO_DIR", "POOLRAD_REPO").resolve(), DATA)
@@ -411,7 +411,7 @@ def _target(channel: str, panes: list[dict]):
     if cfg:
         return match_pane(cfg, panes)
     for pane in panes:
-        if discovered_id(pane.get("pane_id", "")) == channel and _can_message(pane):
+        if is_lane(pane) and discovered_id(pane.get("pane_id", "")) == channel:
             return pane
     if _known_channel(channel):
         return None
@@ -1506,7 +1506,7 @@ def _post_message(data: MessageIn, identity: str, *, direct: bool = False):
             if existing:
                 return _message(existing, conn)
     pane = _target(data.channel, _panes())
-    if not _can_message(pane):
+    if not is_lane(pane):
         raise HTTPException(409, "No active agent is available in this channel")
     with _db() as conn:
         if data.external_id:
@@ -1593,7 +1593,7 @@ def send_now(message_id: int, identity: Annotated[str, Depends(require_auth)]):
                     return _message(conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone(), conn)
             raise HTTPException(409, "Message changed while sending; refresh its status")
         pane = _target(row["channel"], _panes())
-        if not _can_message(pane):
+        if not is_lane(pane):
             with _db() as conn:
                 conn.execute("UPDATE messages SET delivery='uncertain',transport_id=NULL,delivery_detail='Agent pane unavailable after cancellation' WHERE id=?", (message_id,))
             raise HTTPException(409, "Agent pane unavailable; delivery is unconfirmed")
