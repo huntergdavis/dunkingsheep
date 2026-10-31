@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 
+pub mod metrics;
+
 use crate::db;
 use crate::error::DunkError;
 
