@@ -18,6 +18,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUT = ROOT / "rust/crates/ds-cli/src/cli_table.rs"
 FIXTURE = ROOT / "rust/crates/ds-cli/tests/cli_namespaces.json"
+HELP_FIXTURE = ROOT / "rust/crates/ds-cli/tests/cli_help.json"
 
 
 def load_parser():
@@ -132,10 +133,12 @@ def emit_cmd(name, parser, aliases, help_text, indent):
     subs = []
     sub_dest = sub_metavar = None
     sub_required = False
+    sub_at = None
     for a in parser._actions:
         if isinstance(a, argparse._HelpAction):
             continue
         if isinstance(a, argparse._SubParsersAction):
+            sub_at = len(args)
             sub_dest, sub_metavar, sub_required = a.dest, a.metavar, bool(a.required)
             by_parser = {}
             order = []
@@ -171,6 +174,9 @@ def emit_cmd(name, parser, aliases, help_text, indent):
     lines.append(pad + "    help: %s," % opt(help_text))
     # prefix_chars="\x00" (herdr): every token, flags included, is a positional.
     lines.append(pad + "    raw: %s," % str(parser.prefix_chars == "\x00").lower())
+    lines.append(pad + "    raw_desc: %s," % str(
+        issubclass(parser.formatter_class, argparse.RawDescriptionHelpFormatter)).lower())
+    lines.append(pad + "    sub_at: %s," % ("None" if sub_at is None else "Some(%d)" % sub_at))
     lines.append(pad + "    about: %s," % opt(parser.description))
     lines.append(pad + "    epilog: %s," % opt(parser.epilog))
     lines.append(pad + "    args: &[")
@@ -262,6 +268,30 @@ def namespace_cases():
     return json.dumps(cases, indent=1, sort_keys=True, default=str) + "\n"
 
 
+def help_cases():
+    """Every command path -> the Python's `--help` text at COLUMNS=80 (no colour)."""
+    import os
+    os.environ["COLUMNS"] = "80"
+    os.environ["NO_COLOR"] = "1"
+    os.environ.pop("FORCE_COLOR", None)
+    parser = load_parser()
+    cases = []
+
+    def walk(p, path):
+        cases.append({"path": path, "help": p.format_help()})
+        for a in p._actions:
+            if isinstance(a, argparse._SubParsersAction):
+                seen = set()
+                for name, sp in a.choices.items():
+                    if id(sp) in seen:
+                        continue
+                    seen.add(id(sp))
+                    walk(sp, path + [name])
+
+    walk(parser, [])
+    return json.dumps(cases, indent=1, sort_keys=True) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     mode = ap.add_mutually_exclusive_group(required=True)
@@ -274,11 +304,13 @@ def main():
         OUT.write_text(text)
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
         FIXTURE.write_text(namespace_cases())
-        print("wrote", OUT.relative_to(ROOT), "and", FIXTURE.relative_to(ROOT))
+        HELP_FIXTURE.write_text(help_cases())
+        print("wrote", OUT.relative_to(ROOT), "and both fixtures")
         return 0
     current = OUT.read_text() if OUT.exists() else ""
     fixture = FIXTURE.read_text() if FIXTURE.exists() else ""
-    if current != text or fixture != namespace_cases():
+    helps = HELP_FIXTURE.read_text() if HELP_FIXTURE.exists() else ""
+    if current != text or fixture != namespace_cases() or helps != help_cases():
         print("cli_table.rs is out of date; run tools/gen_cli_rs.py --write")
         return 1
     print("cli_table.rs matches the Python parser")

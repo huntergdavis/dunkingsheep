@@ -61,6 +61,10 @@ pub struct Cmd {
     pub help: Option<&'static str>,
     /// `prefix_chars="\0"`: no flags at all, every token is a positional (herdr).
     pub raw: bool,
+    /// `RawDescriptionHelpFormatter`: the description and epilog keep their line breaks.
+    pub raw_desc: bool,
+    /// Index into `args` where the subparsers action sits (argparse order).
+    pub sub_at: Option<usize>,
     pub about: Option<&'static str>,
     pub epilog: Option<&'static str>,
     pub args: &'static [Arg],

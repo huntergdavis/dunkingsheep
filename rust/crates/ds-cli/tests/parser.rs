@@ -173,3 +173,54 @@ fn every_recorded_argv_parses_to_the_pythons_namespace() {
         bad.iter().take(15).cloned().collect::<Vec<_>>().join("\n")
     );
 }
+
+const HELPS: &str = include_str!("cli_help.json");
+
+/// t1220: `--help` for every command equals argparse's text byte for byte (COLUMNS=80).
+#[test]
+fn every_help_text_equals_argparses() {
+    let cases: Vec<serde_json::Value> = serde_json::from_str(HELPS).expect("fixture");
+    assert!(cases.len() > 100, "fixture too small: {}", cases.len());
+    let mut bad = Vec::new();
+    for case in &cases {
+        let path: Vec<&str> = case["path"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let want = case["help"].as_str().unwrap();
+        match ds_cli::render::help(&path, 80) {
+            Some(got) if got == want => {}
+            Some(got) => {
+                let line = got.lines().zip(want.lines()).position(|(a, b)| a != b);
+                bad.push(format!(
+                    "{path:?}: first differing line {line:?}\n  got:  {:?}\n  want: {:?}",
+                    line.and_then(|i| got.lines().nth(i)),
+                    line.and_then(|i| want.lines().nth(i))
+                ));
+            }
+            None => bad.push(format!("{path:?}: no such command")),
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {} differ, first 6:\n{}",
+        bad.len(),
+        cases.len(),
+        bad.iter().take(6).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[test]
+fn dash_h_prints_argparses_text_even_with_required_args_missing() {
+    // exit 0 and the argparse text, not clap's: `task add` has a required positional.
+    let err = try_parse(["dunkingsheep", "task", "add", "-h"]).expect_err("help is an Err");
+    assert_eq!(err.exit_code(), 0);
+    let want = ds_cli::render::help(&["task", "add"], 80).unwrap();
+    assert!(
+        err.to_string().starts_with("usage: dunkingsheep task add"),
+        "{err}"
+    );
+    assert!(want.starts_with("usage: dunkingsheep task add"));
+}

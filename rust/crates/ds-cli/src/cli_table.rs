@@ -10,6 +10,8 @@ pub static ROOT: Cmd = Cmd {
     name: "dunkingsheep", aliases: &[],
     help: None,
     raw: false,
+    raw_desc: true,
+    sub_at: Some(5),
     about: Some("Send text into terminal panes on a schedule; control it from the keyboard, this CLI, a unix socket, or MCP."),
     epilog: Some("Dunking Sheep types text (plus Enter) into terminal panes on a schedule.\nEach schedule is a \"dunk\": a target pane, a text, an interval, and a running\nflag. Dunks live in a background daemon, so the TUI, this CLI, the unix\nsocket and the MCP server all see and control the same dunks.\n\nquick start\n  dunkingsheep panes                              # what can I target?\n  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\\n      -t \"Check the backlog. If done: dunkingsheep remove {id}. Else keep going.\"\n  dunkingsheep list                               # live status, ids, countdowns\n  dunkingsheep remove d2\n  dunkingsheep tui                                # the curses view of the same dunks\n\nlearn more\n  dunkingsheep guide          full guide (concepts, MCP, socket protocol, recipes)\n  dunkingsheep commands       every command the socket/MCP expose (--json: schemas)\n  dunkingsheep <command> -h   per-command flags and examples\n"),
     args: &[
@@ -26,6 +28,8 @@ pub static ROOT: Cmd = Cmd {
             name: "allocation", aliases: &[],
             help: Some("registered-worker automatic backlog/review allocation"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -51,6 +55,8 @@ pub static ROOT: Cmd = Cmd {
             name: "status", aliases: &[],
             help: Some("daemon health and counts"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -66,6 +72,8 @@ pub static ROOT: Cmd = Cmd {
             name: "turn", aliases: &[],
             help: Some("declare a busy turn (pi/claude hooks)"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -78,6 +86,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "start", aliases: &[],
                     help: Some("mark the pane busy until turn end"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -96,6 +106,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "end", aliases: &[],
                     help: Some("end the busy turn and release the hold"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -115,6 +127,8 @@ pub static ROOT: Cmd = Cmd {
             name: "poll", aliases: &[],
             help: Some("one batched read for sidebars: status + inbox + dunks"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Read-only batch used by the sidebar poller. It does not mark mail read; panes/tasks are opt-in."),
             epilog: None,
             args: &[
@@ -136,6 +150,8 @@ pub static ROOT: Cmd = Cmd {
             name: "list", aliases: &["ls"],
             help: Some("list all dunks"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("List every dunk: id, running, live status, target, interval, sends (done/max), idle gate, text."),
             epilog: None,
             args: &[
@@ -150,6 +166,8 @@ pub static ROOT: Cmd = Cmd {
             name: "get", aliases: &[],
             help: Some("show one dunk"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -165,6 +183,8 @@ pub static ROOT: Cmd = Cmd {
             name: "add", aliases: &[],
             help: Some("create a dunk (starts immediately)"),
             raw: false,
+            raw_desc: true,
+            sub_at: None,
             about: Some("Create a dunk that types TEXT + Enter into TARGET every EVERY minutes."),
             epilog: Some("examples:\n  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n  dunkingsheep add -T w8:p3 -e 1.5h -t \"status report please\" -n hourly\n  dunkingsheep add -T self -e 30 --max-sends 1 -t \"check CI now\"\n  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\\n      -t \"If the backlog is done: dunkingsheep remove {id}. Else continue.\"\nplaceholders in TEXT: {id} {name} {count} {target} {interval} {time} {date}"),
             args: &[
@@ -188,6 +208,8 @@ pub static ROOT: Cmd = Cmd {
             name: "update", aliases: &["set"],
             help: Some("change a dunk's settings"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -214,6 +236,8 @@ pub static ROOT: Cmd = Cmd {
             name: "remove", aliases: &["rm", "delete"],
             help: Some("delete a dunk"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -229,6 +253,8 @@ pub static ROOT: Cmd = Cmd {
             name: "start", aliases: &[],
             help: Some("start a dunk"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -244,6 +270,8 @@ pub static ROOT: Cmd = Cmd {
             name: "stop", aliases: &[],
             help: Some("stop a dunk"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -259,6 +287,8 @@ pub static ROOT: Cmd = Cmd {
             name: "toggle", aliases: &[],
             help: Some("start if stopped, stop if running"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -274,6 +304,8 @@ pub static ROOT: Cmd = Cmd {
             name: "stop-all", aliases: &[],
             help: Some("stop every running dunk"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -288,6 +320,8 @@ pub static ROOT: Cmd = Cmd {
             name: "fire", aliases: &["test"],
             help: Some("send a dunk's text now"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -304,6 +338,8 @@ pub static ROOT: Cmd = Cmd {
             name: "send", aliases: &[],
             help: Some("type text + Enter into a pane once (queued if someone is typing)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep send \"Claude Proj\" please summarize your progress"),
             args: &[
@@ -324,6 +360,8 @@ pub static ROOT: Cmd = Cmd {
             name: "send-keys", aliases: &[],
             help: Some("press keys in a pane (queued if someone is typing)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep send-keys \"Codex Site\" Enter"),
             args: &[
@@ -343,6 +381,8 @@ pub static ROOT: Cmd = Cmd {
             name: "install", aliases: &[],
             help: Some("put `dunkingsheep` on PATH as a plain command"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Install a launcher so agents can run `dunkingsheep inbox read` as an ordinary command, instead of executing a file inside this workspace, which a sandboxed agent should and does refuse."),
             epilog: None,
             args: &[
@@ -358,6 +398,8 @@ pub static ROOT: Cmd = Cmd {
             name: "guard", aliases: &[],
             help: Some("install the herdr guard (rollback backend) so agents cannot type over you"),
             raw: false,
+            raw_desc: true,
+            sub_at: None,
             about: Some("Agents that call the terminal CLI directly bypass every protection in the daemon. On the herdr rollback backend the guard is a herdr wrapper, first on PATH, that routes exactly the four typing commands through the daemon instead. Every other herdr command is untouched."),
             epilog: Some("new shells pick it up; existing panes need a fresh shell"),
             args: &[
@@ -374,6 +416,8 @@ pub static ROOT: Cmd = Cmd {
             name: "inbox", aliases: &[],
             help: Some("per-agent inboxes: messaging that never types"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("Machine-to-machine messaging. A message is stored for the recipient agent to read, so it cannot collide with a human typing, cannot stick half-sent, and has no size limit."),
             epilog: None,
             args: &[
@@ -386,6 +430,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "count", aliases: &[],
                     help: Some("how many messages are waiting"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -401,6 +447,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "send", aliases: &[],
                     help: Some("put a message in an agent's inbox"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'"),
                     args: &[
@@ -422,6 +470,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("summaries of waiting messages"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -439,6 +489,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "read", aliases: &[],
                     help: Some("read waiting messages and mark them read"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -456,6 +508,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "recover", aliases: &[],
                     help: Some("replay the latest delivered batch after a lost read response"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -471,6 +525,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "archive", aliases: &[],
                     help: Some("archive a mailbox in bulk (no deletion)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -488,6 +544,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "status", aliases: &[],
                     help: Some("state of one message by id"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -503,6 +561,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "ack", aliases: &[],
                     help: Some("mark messages handled"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -519,6 +579,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "cancel", aliases: &[],
                     help: Some("withdraw unread messages you sent"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -534,6 +596,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "delete", aliases: &[],
                     help: Some("delete messages and their attachments"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -549,6 +613,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "stats", aliases: &[],
                     help: Some("unread counts for every mailbox"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -563,6 +629,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "fetch", aliases: &[],
                     help: Some("write an attachment to a local directory"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -581,6 +649,8 @@ pub static ROOT: Cmd = Cmd {
             name: "context", aliases: &[],
             help: Some("declarative context store: files are truth, index is a cache"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some(".dunkingsheep/ per project plus one global. Ground truths never expire; only the owner promotes one; supersede keeps both entries linked."),
             epilog: None,
             args: &[
@@ -593,6 +663,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "init", aliases: &[],
                     help: Some("create the store layout"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -609,6 +681,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "add", aliases: &[],
                     help: Some("add an entry (body from --text, stdin or a file)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -635,6 +709,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "promote", aliases: &[],
                     help: Some("owner-only: promote an entry to ground truth"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -652,6 +728,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "supersede", aliases: &[],
                     help: Some("replace an entry, keeping both linked"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -670,6 +748,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "retire", aliases: &[],
                     help: Some("append a retirement note (history kept)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -688,6 +768,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "ledger", aliases: &[],
                     help: Some("what the daemon wrote: adopt (owner bootstrap) or status"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -705,6 +787,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "get", aliases: &[],
                     help: Some("show an entry by subject or slug"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -721,6 +805,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "search", aliases: &[],
                     help: Some("FTS5 search over the disposable index"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -739,6 +825,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "digest", aliases: &[],
                     help: Some("bounded session digest (global truths always included)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -758,6 +846,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "snapshot", aliases: &[],
                     help: Some("digest + per-article access counts, for the dashboard"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -775,6 +865,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "check", aliases: &[],
                     help: Some("schema, refusals and stale facts (both stores by default)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -792,6 +884,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "index", aliases: &[],
                     help: Some("rebuild the disposable FTS index (both stores by default)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -809,6 +903,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "stats", aliases: &[],
                     help: Some("counts, ages, reads and never-read entries (both stores by default)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -828,6 +924,8 @@ pub static ROOT: Cmd = Cmd {
             name: "load", aliases: &[],
             help: Some("per-caller CPU from /proc (pid+starttime guarded, process tree)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Sample registered callers' CPU from /proc. Identity is pid+starttime; a reused pid produces no sample. GPU is null with a reason on this hardware."),
             epilog: None,
             args: &[
@@ -843,6 +941,8 @@ pub static ROOT: Cmd = Cmd {
             name: "pm", aliases: &[],
             help: Some("project PMs: lane routing and the one-per-project digest"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("A PM publishes ONE digest per project per window under a stable id, and lanes report to their PM instead of the VP."),
             epilog: None,
             args: &[
@@ -855,6 +955,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "digest", aliases: &[],
                     help: Some("publish/update one project digest"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("example: echo '{\"changed\":[\"t6 240/286\"],\"numbers\":[]}' | dunkingsheep pm digest poolrad"),
                     args: &[
@@ -872,6 +974,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "routing", aliases: &[],
                     help: Some("show the lane->PM routing registry"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -888,6 +992,8 @@ pub static ROOT: Cmd = Cmd {
             name: "task", aliases: &[],
             help: Some("global and per-pane tasks: the coordination queue"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("Tasks are global (fleet-wide) by default, or scoped to one pane. `task next` claims atomically; `task follow` asks the daemon to push work to you when idle."),
             epilog: None,
             args: &[
@@ -900,6 +1006,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "add", aliases: &[],
                     help: Some("create a task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -928,6 +1036,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &["ls"],
                     help: Some("list visible tasks"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -949,6 +1059,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "read", aliases: &[],
                     help: Some("read one task in full"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -964,6 +1076,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "update", aliases: &[],
                     help: Some("change a task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -989,6 +1103,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "assign", aliases: &[],
                     help: Some("assign a task (use 'self' for yourself)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1006,6 +1122,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "complete", aliases: &[],
                     help: Some("complete a task for everyone"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1024,6 +1142,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "block", aliases: &[],
                     help: Some("mark a task blocked"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1040,6 +1160,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "unblock", aliases: &[],
                     help: Some("return a blocked task to the queue"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1055,6 +1177,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "cancel", aliases: &[],
                     help: Some("cancel a task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1071,6 +1195,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "delete", aliases: &[],
                     help: Some("delete a task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1086,6 +1212,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "note", aliases: &[],
                     help: Some("append an event to a task's history"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1103,6 +1231,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "next", aliases: &[],
                     help: Some("atomically claim the next task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1120,6 +1250,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "heartbeat", aliases: &[],
                     help: Some("extend the lease on a claimed task"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1136,6 +1268,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "release", aliases: &[],
                     help: Some("give a claimed task back"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1151,6 +1285,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "follow", aliases: &[],
                     help: Some("receive pushed tasks when idle"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1166,6 +1302,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "unfollow", aliases: &[],
                     help: Some("stop receiving pushed tasks"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1180,6 +1318,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "followers", aliases: &[],
                     help: Some("list panes receiving pushed tasks"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1194,6 +1334,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "stats", aliases: &[],
                     help: Some("task counts by status"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1209,6 +1351,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "metrics", aliases: &[],
                     help: Some("task throughput, depth and latency (JSON)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1228,6 +1372,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "reap", aliases: &[],
                     help: Some("requeue expired/dead leases now"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1244,6 +1390,8 @@ pub static ROOT: Cmd = Cmd {
             name: "gh-token", aliases: &[],
             help: Some("print a one-hour App token for this lane's role (empty for the owner)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1260,6 +1408,8 @@ pub static ROOT: Cmd = Cmd {
             name: "secrets-check", aliases: &[],
             help: Some("refuse a push/PR that would publish the desk's own secrets"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Exits 1, with a named refusal, when this branch ADDS a path that must never leave the host (data/, *.sqlite3, *-credentials, *.pem, *token*, .env). Called by the git credential helper and by the gh wrapper before `gh pr create` (t756)."),
             epilog: None,
             args: &[
@@ -1277,6 +1427,8 @@ pub static ROOT: Cmd = Cmd {
             name: "git-credential", aliases: &[],
             help: Some("git credential helper: `git config --global credential.helper '!dunkingsheep git-credential'`"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1292,6 +1444,8 @@ pub static ROOT: Cmd = Cmd {
             name: "review", aliases: &[],
             help: Some("the review timer and its queue"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -1304,6 +1458,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "sync", aliases: &[],
                     help: Some("open PRs -> review tasks; statuses follow verdicts (system/owner)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1319,6 +1475,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("live review tasks with PR, head, author, reviewer, age"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1335,6 +1493,8 @@ pub static ROOT: Cmd = Cmd {
             name: "poolrad", aliases: &[],
             help: Some("the Poolrad backlog: backlog-sync fills it, progress reads it"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -1347,6 +1507,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "backlog-sync", aliases: &[],
                     help: Some("file the next N composable uncredited bodies as work (system/owner)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1363,6 +1525,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "progress", aliases: &[],
                     help: Some("credited / identities / CEILING / queue summary"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1379,6 +1543,8 @@ pub static ROOT: Cmd = Cmd {
             name: "github", aliases: &[],
             help: Some("one-shot GitHub setup with the owner's own login"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -1391,6 +1557,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "protect", aliases: &[],
                     help: Some("branch protection on main: required review(s), the dunkingsheep/review check, auto-merge"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1409,6 +1577,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "wrappers", aliases: &[],
                     help: Some("install the gh wrapper and git credential helper for lanes"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1426,6 +1596,8 @@ pub static ROOT: Cmd = Cmd {
             name: "whoami", aliases: &[],
             help: Some("this caller's role and how it was bound"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1440,6 +1612,8 @@ pub static ROOT: Cmd = Cmd {
             name: "token", aliases: &[],
             help: Some("service tokens for pane-less processes (web desk, timers)"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -1452,6 +1626,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "issue", aliases: &[],
                     help: Some("mint a token (owner only; printed once)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1468,6 +1644,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "revoke", aliases: &[],
                     help: Some("revoke every token with this label"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1483,6 +1661,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("labels and roles of issued tokens"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1499,6 +1679,8 @@ pub static ROOT: Cmd = Cmd {
             name: "superuser", aliases: &[],
             help: Some("who may close panes/tabs/workspaces, stop the daemon or manage dunks"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("Superusers may perform destructive or affecting-others operations. Everyone else uses the inbox and task queue."),
             epilog: None,
             args: &[
@@ -1511,6 +1693,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "status", aliases: &[],
                     help: Some("show the allowlist and whether this pane is on it"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1525,6 +1709,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "add", aliases: &[],
                     help: Some("add a pane id or name"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1540,6 +1726,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "remove", aliases: &[],
                     help: Some("remove a pane id or name"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1555,6 +1743,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "recover", aliases: &[],
                     help: Some("bootstrap: register this pane as the first owner"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1572,6 +1762,8 @@ pub static ROOT: Cmd = Cmd {
             name: "memory", aliases: &[],
             help: Some("memory/recall over past agent sessions"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("Ranked recall over Claude/Codex/opencode/pi sessions, backed by SQLite + FTS5. Queries never reindex or wait for ingest."),
             epilog: None,
             args: &[
@@ -1584,6 +1776,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "recall", aliases: &[],
                     help: Some("ranked snippets"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1603,6 +1797,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "search", aliases: &[],
                     help: Some("filtered search (same engine)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1622,6 +1818,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "context", aliases: &[],
                     help: Some("compact session-start digest"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1638,6 +1836,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "hook-context", aliases: &[],
                     help: Some("Claude SessionStart hook JSON (memory context)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1654,6 +1854,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "stats", aliases: &[],
                     help: Some("counts, DB bytes, queue depth, latency"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1668,6 +1870,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "status", aliases: &[],
                     help: Some("health, schema, ingest worker"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1682,6 +1886,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "ingest", aliases: &[],
                     help: Some("queue a session log/sqlite for async ingest"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1699,6 +1905,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "backfill", aliases: &[],
                     help: Some("discover + enqueue every session source"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1719,6 +1927,8 @@ pub static ROOT: Cmd = Cmd {
             name: "health", aliases: &[],
             help: Some("deterministic self-check; --repair fixes leases/WAL"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1736,6 +1946,8 @@ pub static ROOT: Cmd = Cmd {
             name: "watchdog", aliases: &[],
             help: Some("deterministic exception watchdog (no model); --dry-run sends nothing"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1758,6 +1970,8 @@ pub static ROOT: Cmd = Cmd {
             name: "watchdog-deadman", aliases: &[],
             help: Some("alert the VP if the watchdog heartbeat is stale (independent check)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1785,6 +1999,8 @@ pub static ROOT: Cmd = Cmd {
             name: "usage", aliases: &[],
             help: Some("real provider usage from configurable commands"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1802,6 +2018,8 @@ pub static ROOT: Cmd = Cmd {
             name: "recover", aliases: &[],
             help: Some("post-upgrade recovery plan; --apply types into bare shells"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1818,6 +2036,8 @@ pub static ROOT: Cmd = Cmd {
             name: "doctor", aliases: &[],
             help: Some("post-upgrade doctor: backend surfaces + dunk target metadata"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -1832,6 +2052,8 @@ pub static ROOT: Cmd = Cmd {
             name: "owner", aliases: &[],
             help: Some("owner -> agent delivery: pushed, never typed"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -1844,6 +2066,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "push", aliases: &[],
                     help: Some("push an owner message to a pane (no inbox row, no typing)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1861,6 +2085,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "poll", aliases: &[],
                     help: Some("drain heartbeat: this lane polls, even when the queue is empty"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1877,6 +2103,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "take", aliases: &[],
                     help: Some("drain what is waiting for a pane (the extension calls this)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1893,6 +2121,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "conversation", aliases: &[],
                     help: Some("the owner mailbox as one conversation (desk/web only)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("Telegram and the web are two transports for one mailbox: this is the complete record, with the transport each message arrived on and the question each reply answers."),
                     args: &[
@@ -1909,6 +2139,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "reply", aliases: &[],
                     help: Some("answer one owner question (desk/web only)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("The reply goes back on the transport the question arrived on, and answering acks the question, so 'answered' is one fact. One answer per question."),
                     args: &[
@@ -1926,6 +2158,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "ingest", aliases: &[],
                     help: Some("record one owner question that arrived on a transport (t594)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("A bridge does not keep its own store: the question lands in the one owner mailbox with its transport, and 'owner reply' answers it back the same way. --external-id is the transport's own id (telegram:<update_id>), so a redelivered update returns the row it already produced."),
                     args: &[
@@ -1946,6 +2180,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "outbox", aliases: &[],
                     help: Some("owner-mailbox replies waiting for a transport (t594)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("Only replies whose own transport matches are returned, so Telegram carries answers and nothing else: no briefs, no digests, no web echoes."),
                     args: &[
@@ -1962,6 +2198,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "delivered", aliases: &[],
                     help: Some("record a transport's delivery receipt for one owner row (t594)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: Some("This receipt replaces telegram-status.json: a page is confirmed by the owner mailbox, not by a file read beside the bridge's credentials."),
                     args: &[
@@ -1979,6 +2217,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "stats", aliases: &[],
                     help: Some("owner-push counts and latency"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -1995,6 +2235,8 @@ pub static ROOT: Cmd = Cmd {
             name: "report", aliases: &[],
             help: Some("the deterministic fleet report (no model)"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: Some("Task metrics, lanes, needs-owner, review queue, poolrad progress, budget and watchdog, measured at generation time. Writes ~/.config/dunkingsheep/reports/<ts>.md and posts it to the owner mailbox on the report transport when that mailbox exists (FLAT_FLEET.md 7.3)."),
             epilog: None,
             args: &[
@@ -2007,6 +2249,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "run", aliases: &[],
                     help: Some("generate one report"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2025,6 +2269,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("the report files produced so far, newest first"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2042,6 +2288,8 @@ pub static ROOT: Cmd = Cmd {
             name: "state", aliases: &[],
             help: Some("continuous agent-state capture (the restartable-lane record)"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -2054,6 +2302,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "capture", aliases: &[],
                     help: Some("record one row per agent lane now"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2069,6 +2319,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "latest", aliases: &[],
                     help: Some("the most recent captured rows"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2088,6 +2340,8 @@ pub static ROOT: Cmd = Cmd {
             name: "roster", aliases: &[],
             help: Some("one row per agent lane (name, harness, state, task, inbox, cpu)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2102,6 +2356,8 @@ pub static ROOT: Cmd = Cmd {
             name: "message-state", aliases: &[],
             help: Some("sent / delivered / seen for message ids"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2117,6 +2373,8 @@ pub static ROOT: Cmd = Cmd {
             name: "reply-stats", aliases: &[],
             help: Some("last and median time for a lane to read its mail"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2132,6 +2390,8 @@ pub static ROOT: Cmd = Cmd {
             name: "project-summary", aliases: &[],
             help: Some("ground truths, articles, tasks in flight, agents, timeline"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2148,6 +2408,8 @@ pub static ROOT: Cmd = Cmd {
             name: "api", aliases: &[],
             help: Some("read-only HTTP surface for the Command Center (roster, message state, project summary)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2164,6 +2426,8 @@ pub static ROOT: Cmd = Cmd {
             name: "capability", aliases: &["capabilities"],
             help: Some("how a target can receive: push queue (pi) or immediate guarded send"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep capability '%9'"),
             args: &[
@@ -2179,6 +2443,8 @@ pub static ROOT: Cmd = Cmd {
             name: "lane", aliases: &["lanes"],
             help: Some("the lane registry: who each pane IS, declared or inferred"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: Some("examples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'"),
             args: &[
@@ -2191,6 +2457,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("every lane row: pane, name, declared?, alive?"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2205,6 +2473,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "register", aliases: &[],
                     help: Some("bind a role to a pane's root process (owner only; the first owner may self-register)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2224,6 +2494,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "unregister", aliases: &[],
                     help: Some("remove a pane's role binding (owner only)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2239,6 +2511,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "set", aliases: &[],
                     help: Some("declare who a pane IS (superuser); overrides any title"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2257,6 +2531,8 @@ pub static ROOT: Cmd = Cmd {
             name: "retired", aliases: &[],
             help: Some("retired panes: kept as the record, excluded from alerts and feeding"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: None,
             args: &[
@@ -2269,6 +2545,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "retire", aliases: &[],
                     help: Some("stop paging about a pane and stop feeding it (superuser)"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2285,6 +2563,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "unretire", aliases: &[],
                     help: Some("bring a pane back"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2300,6 +2580,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("the retired panes"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2316,6 +2598,8 @@ pub static ROOT: Cmd = Cmd {
             name: "dispatch", aliases: &[],
             help: Some("standby queue + a deterministic tick that fills idle lanes"),
             raw: false,
+            raw_desc: false,
+            sub_at: Some(1),
             about: None,
             epilog: Some("examples: dispatch add t6 'advance strict C to 250' / dispatch tick"),
             args: &[
@@ -2328,6 +2612,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "add", aliases: &[],
                     help: Some("queue a one-line assignment"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2345,6 +2631,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "list", aliases: &[],
                     help: Some("the standby queue, in order"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2359,6 +2647,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "remove", aliases: &[],
                     help: Some("drop an item"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2374,6 +2664,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "tick", aliases: &[],
                     help: Some("fill every ALLOWLISTED ready lane that has no mail"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2390,6 +2682,8 @@ pub static ROOT: Cmd = Cmd {
                     name: "status", aliases: &[],
                     help: Some("the last tick's numbers"),
                     raw: false,
+                    raw_desc: false,
+                    sub_at: None,
                     about: None,
                     epilog: None,
                     args: &[
@@ -2406,6 +2700,8 @@ pub static ROOT: Cmd = Cmd {
             name: "clear-box", aliases: &[],
             help: Some("DESTRUCTIVE, superuser: clear an unsubmitted draft (Ctrl-U)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2422,6 +2718,8 @@ pub static ROOT: Cmd = Cmd {
             name: "delivery", aliases: &[],
             help: Some("can this lane receive a message, and if not why"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2438,6 +2736,8 @@ pub static ROOT: Cmd = Cmd {
             name: "flush", aliases: &[],
             help: Some("submit text left sitting in a pane's input box"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2453,6 +2753,8 @@ pub static ROOT: Cmd = Cmd {
             name: "messages", aliases: &["queue"],
             help: Some("direct messages queued and recently sent"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2467,6 +2769,8 @@ pub static ROOT: Cmd = Cmd {
             name: "cancel-message", aliases: &["cancel"],
             help: Some("drop a queued message"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2482,6 +2786,8 @@ pub static ROOT: Cmd = Cmd {
             name: "metrics", aliases: &[],
             help: Some("read-only operations metrics as JSON"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Counts, duration distributions and coverage for a time window. Identifiers and numbers only; never message text."),
             epilog: None,
             args: &[
@@ -2499,6 +2805,8 @@ pub static ROOT: Cmd = Cmd {
             name: "panes", aliases: &[],
             help: Some("list terminal panes (possible targets)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2513,6 +2821,8 @@ pub static ROOT: Cmd = Cmd {
             name: "workspaces", aliases: &["tabs"],
             help: Some("list workspaces and their tabs"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2527,6 +2837,8 @@ pub static ROOT: Cmd = Cmd {
             name: "new-workspace", aliases: &["workspace"],
             help: Some("create a named workspace (first tab + shell pane)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude"),
             args: &[
@@ -2549,6 +2861,8 @@ pub static ROOT: Cmd = Cmd {
             name: "new-tab", aliases: &["tab"],
             help: Some("create a named tab in a workspace"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep new-tab -w Site -l writer -r 'codex'"),
             args: &[
@@ -2568,6 +2882,8 @@ pub static ROOT: Cmd = Cmd {
             name: "split", aliases: &[],
             help: Some("split a pane right or down into a new shell pane"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2588,6 +2904,8 @@ pub static ROOT: Cmd = Cmd {
             name: "start-agent", aliases: &["agent"],
             help: Some("launch an agent in a new pane, registered by name (tracked on the herdr rollback)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep start-agent writer -w Site -- claude --model opus"),
             args: &[
@@ -2612,6 +2930,8 @@ pub static ROOT: Cmd = Cmd {
             name: "respawn-pane", aliases: &["respawn"],
             help: Some("guardedly replace an existing managed pane's process in place"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2633,6 +2953,8 @@ pub static ROOT: Cmd = Cmd {
             name: "rename", aliases: &[],
             help: Some("rename a workspace, tab or pane"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2650,6 +2972,8 @@ pub static ROOT: Cmd = Cmd {
             name: "focus", aliases: &[],
             help: Some("bring a workspace, tab or pane to the front"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2666,6 +2990,8 @@ pub static ROOT: Cmd = Cmd {
             name: "close", aliases: &[],
             help: Some("close a workspace, tab or pane (kills what runs inside)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2683,6 +3009,8 @@ pub static ROOT: Cmd = Cmd {
             name: "herdr", aliases: &[],
             help: Some("run any herdr subcommand through the daemon (rollback backend only; refused under tmux)"),
             raw: true,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: Some("example: dunkingsheep herdr pane zoom w9:p2 --on"),
             args: &[
@@ -2698,6 +3026,8 @@ pub static ROOT: Cmd = Cmd {
             name: "herdr-help", aliases: &[],
             help: Some("the rollback backend's own usage: command groups, or one group's subcommands (refused under tmux)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2713,6 +3043,8 @@ pub static ROOT: Cmd = Cmd {
             name: "read", aliases: &[],
             help: Some("read recent output of a pane"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2729,6 +3061,8 @@ pub static ROOT: Cmd = Cmd {
             name: "shutdown", aliases: &[],
             help: Some("stop the daemon (superusers only; dunks resume on next start)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2744,6 +3078,8 @@ pub static ROOT: Cmd = Cmd {
             name: "serve", aliases: &[],
             help: Some("run the daemon in the foreground"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2760,6 +3096,8 @@ pub static ROOT: Cmd = Cmd {
             name: "tui", aliases: &[],
             help: Some("open the curses UI"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2774,6 +3112,8 @@ pub static ROOT: Cmd = Cmd {
             name: "mcp", aliases: &[],
             help: Some("run the MCP server on stdio (for agent harnesses)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2788,6 +3128,8 @@ pub static ROOT: Cmd = Cmd {
             name: "mcp-setup", aliases: &[],
             help: Some("show or apply MCP registration for agent harnesses"),
             raw: false,
+            raw_desc: true,
+            sub_at: None,
             about: Some("Print the exact command or config block that registers Dunking Sheep as an MCP server with a harness."),
             epilog: Some("harnesses: claude, codex, gemini, cursor, json, toml\nexample: dunkingsheep mcp-setup codex --apply"),
             args: &[
@@ -2805,6 +3147,8 @@ pub static ROOT: Cmd = Cmd {
             name: "guide", aliases: &["help", "docs"],
             help: Some("print the full guide (concepts, surfaces, protocol, recipes)"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: None,
             epilog: None,
             args: &[
@@ -2820,6 +3164,8 @@ pub static ROOT: Cmd = Cmd {
             name: "commands", aliases: &[],
             help: Some("list the socket/MCP command registry"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("Every command the socket API and MCP server accept. With --json: names, descriptions and JSON schemas."),
             epilog: None,
             args: &[
@@ -2834,6 +3180,8 @@ pub static ROOT: Cmd = Cmd {
             name: "mcp-map", aliases: &[],
             help: Some("OLD flat MCP tool -> NEW grouped tool/action mapping"),
             raw: false,
+            raw_desc: false,
+            sub_at: None,
             about: Some("The t8 audit: the declared MCP surface is now one namespaced tool per domain with an action argument. Every old tool is listed with its new home, and each old name remains callable."),
             epilog: None,
             args: &[

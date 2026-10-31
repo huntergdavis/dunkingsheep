@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 use crate::cli_table::ROOT;
 use crate::spec::{Arg, Cmd, Kind, Nargs, Ty};
 
-fn build_arg(arg: &'static Arg) -> clap::Arg {
+fn build_arg(arg: &'static Arg, lenient: bool) -> clap::Arg {
     let mut a = clap::Arg::new(arg.id);
     if let Some(help) = arg.help {
         a = a.help(help);
@@ -26,7 +26,7 @@ fn build_arg(arg: &'static Arg) -> clap::Arg {
         a = a.value_name(metavar);
     }
     if arg.positional {
-        a = a.required(matches!(arg.nargs, Nargs::One | Nargs::Plus));
+        a = a.required(!lenient && matches!(arg.nargs, Nargs::One | Nargs::Plus));
     } else {
         let mut long_seen = false;
         for flag in arg.flags {
@@ -41,7 +41,7 @@ fn build_arg(arg: &'static Arg) -> clap::Arg {
                 a = a.short(short);
             }
         }
-        a = a.required(arg.required);
+        a = a.required(!lenient && arg.required);
     }
     match arg.kind {
         Kind::StoreTrue => return a.action(ArgAction::SetTrue),
@@ -70,7 +70,7 @@ fn build_arg(arg: &'static Arg) -> clap::Arg {
     a
 }
 
-fn build_cmd(cmd: &'static Cmd, root: bool) -> Command {
+fn build_cmd(cmd: &'static Cmd, root: bool, lenient: bool) -> Command {
     let mut command = Command::new(cmd.name)
         .infer_long_args(true)
         .disable_help_subcommand(true)
@@ -84,8 +84,18 @@ fn build_cmd(cmd: &'static Cmd, root: bool) -> Command {
     if let Some(epilog) = cmd.epilog {
         command = command.after_help(epilog);
     }
-    if cmd.raw {
-        command = command.disable_help_flag(true);
+    // argparse's own `--help` text is rendered by `render` (byte for byte), so clap's help
+    // flag is off; `-h/--help` is an exclusive flag whose presence we turn into that text.
+    command = command.disable_help_flag(true);
+    if !cmd.raw {
+        command = command.arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .action(ArgAction::SetTrue)
+                .exclusive(true)
+                .hide(true),
+        );
     }
     for arg in cmd.args {
         if cmd.raw && arg.dest == "json" {
@@ -100,7 +110,7 @@ fn build_cmd(cmd: &'static Cmd, root: bool) -> Command {
             }
             continue;
         }
-        let built = build_arg(arg);
+        let built = build_arg(arg, lenient);
         command = command.arg(if cmd.raw {
             built.allow_hyphen_values(true).trailing_var_arg(true)
         } else {
@@ -113,16 +123,16 @@ fn build_cmd(cmd: &'static Cmd, root: bool) -> Command {
             ArgGroup::new(&*Box::leak(format!("_exclusive{index}").into_boxed_str()))
                 .args(group.members.iter().copied())
                 .multiple(false)
-                .required(group.required),
+                .required(!lenient && group.required),
         );
     }
     if !cmd.subs.is_empty() {
-        command = command.subcommand_required(cmd.sub_required);
+        command = command.subcommand_required(!lenient && cmd.sub_required);
         if let Some(metavar) = cmd.sub_metavar {
             command = command.subcommand_value_name(metavar.trim_matches('<').trim_matches('>'));
         }
         for sub in cmd.subs {
-            command = command.subcommand(build_cmd(sub, false));
+            command = command.subcommand(build_cmd(sub, false, lenient));
         }
     }
     command
@@ -131,7 +141,7 @@ fn build_cmd(cmd: &'static Cmd, root: bool) -> Command {
 /// The whole `dunkingsheep` command tree (built once per process, then cloned).
 pub fn build() -> Command {
     static TREE: std::sync::OnceLock<Command> = std::sync::OnceLock::new();
-    TREE.get_or_init(|| build_cmd(&ROOT, true)).clone()
+    TREE.get_or_init(|| build_cmd(&ROOT, true, false)).clone()
 }
 
 fn value_of(arg: &Arg, matches: &ArgMatches) -> Value {
@@ -205,14 +215,105 @@ fn fill(cmd: &'static Cmd, matches: &ArgMatches, ns: &mut Map<String, Value>, de
     }
 }
 
+/// A parse that did not produce a namespace: argparse's help text (exit 0), or a clap usage
+/// error (exit 2) / clap's version text (exit 0).
+#[derive(Debug)]
+pub enum ParseError {
+    /// `-h/--help`: argparse's text for the command, to stdout, exit 0.
+    Help(String),
+    Clap(clap::Error),
+}
+
+impl ParseError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            ParseError::Help(_) => 0,
+            ParseError::Clap(e) => e.exit_code(),
+        }
+    }
+
+    /// Print exactly what the process should and exit.
+    pub fn exit(self) -> ! {
+        match self {
+            ParseError::Help(text) => {
+                print!("{text}");
+                std::process::exit(0)
+            }
+            ParseError::Clap(e) => e.exit(),
+        }
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::Help(text) => write!(f, "{text}"),
+            ParseError::Clap(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<clap::Error> for ParseError {
+    fn from(e: clap::Error) -> Self {
+        ParseError::Clap(e)
+    }
+}
+
+/// The command path whose `-h/--help` was given (argparse acts on the first one it meets).
+fn help_path(
+    cmd: &'static Cmd,
+    matches: &ArgMatches,
+    path: &mut Vec<&'static str>,
+) -> Option<Vec<&'static str>> {
+    if !cmd.raw && matches.try_get_one::<bool>("help").ok().flatten() == Some(&true) {
+        return Some(path.clone());
+    }
+    let (name, sub_matches) = matches.subcommand()?;
+    let sub = cmd.subs.iter().find(|s| s.name == name)?;
+    path.push(sub.name);
+    help_path(sub, sub_matches, path)
+}
+
+/// `shutil.get_terminal_size().columns`: `$COLUMNS`, else 80. LIMIT: Python also asks the
+/// tty (`os.get_terminal_size`) before falling back; that ioctl is not ported.
+fn terminal_columns() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|c| *c > 0)
+        .unwrap_or(80)
+}
+
 /// `parser.parse_args(argv)` as a dictionary; `Err` carries clap's own exit code and text
 /// (0 for `--help` / `--version`, 2 for a usage error, as argparse).
-pub fn try_parse<I, T>(argv: I) -> Result<Map<String, Value>, clap::Error>
+pub fn try_parse<I, T>(argv: I) -> Result<Map<String, Value>, ParseError>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    let matches = build().try_get_matches_from(argv)?;
+    let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+    let matches = match build().try_get_matches_from(&argv) {
+        Ok(matches) => matches,
+        Err(error) => {
+            // argparse acts on `-h` the moment it meets it, before it checks that a
+            // subcommand or a required argument is present; re-read with nothing required.
+            static LENIENT: std::sync::OnceLock<Command> = std::sync::OnceLock::new();
+            let lenient = LENIENT.get_or_init(|| build_cmd(&ROOT, true, true)).clone();
+            return match lenient.try_get_matches_from(&argv) {
+                Ok(m) => match help_path(&ROOT, &m, &mut Vec::new()) {
+                    Some(path) => Err(ParseError::Help(
+                        crate::render::help(&path, terminal_columns()).unwrap_or_default(),
+                    )),
+                    None => Err(ParseError::Clap(error)),
+                },
+                Err(_) => Err(ParseError::Clap(error)),
+            };
+        }
+    };
+    if let Some(path) = help_path(&ROOT, &matches, &mut Vec::new()) {
+        let text = crate::render::help(&path, terminal_columns()).unwrap_or_default();
+        return Err(ParseError::Help(text));
+    }
     let mut ns = Map::new();
     fill(&ROOT, &matches, &mut ns, 0);
     Ok(ns)

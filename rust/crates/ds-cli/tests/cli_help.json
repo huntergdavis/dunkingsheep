@@ -1,0 +1,1139 @@
+[
+ {
+  "help": "usage: dunkingsheep [-h] [--version] [--json] [--socket SOCKET]\n                    [--self-pane SELF_PANE] [--no-start-daemon]\n                    <command> ...\n\nSend text into terminal panes on a schedule; control it from the keyboard, this CLI, a unix socket, or MCP.\n\npositional arguments:\n  <command>\n    allocation          registered-worker automatic backlog/review allocation\n    status              daemon health and counts\n    turn                declare a busy turn (pi/claude hooks)\n    poll                one batched read for sidebars: status + inbox + dunks\n    list (ls)           list all dunks\n    get                 show one dunk\n    add                 create a dunk (starts immediately)\n    update (set)        change a dunk's settings\n    remove (rm, delete)\n                        delete a dunk\n    start               start a dunk\n    stop                stop a dunk\n    toggle              start if stopped, stop if running\n    stop-all            stop every running dunk\n    fire (test)         send a dunk's text now\n    send                type text + Enter into a pane once (queued if someone\n                        is typing)\n    send-keys           press keys in a pane (queued if someone is typing)\n    install             put `dunkingsheep` on PATH as a plain command\n    guard               install the herdr guard (rollback backend) so agents\n                        cannot type over you\n    inbox               per-agent inboxes: messaging that never types\n    context             declarative context store: files are truth, index is a\n                        cache\n    load                per-caller CPU from /proc (pid+starttime guarded,\n                        process tree)\n    pm                  project PMs: lane routing and the one-per-project\n                        digest\n    task                global and per-pane tasks: the coordination queue\n    gh-token            print a one-hour App token for this lane's role (empty\n                        for the owner)\n    secrets-check       refuse a push/PR that would publish the desk's own\n                        secrets\n    git-credential      git credential helper: `git config --global\n                        credential.helper '!dunkingsheep git-credential'`\n    review              the review timer and its queue\n    poolrad             the Poolrad backlog: backlog-sync fills it, progress\n                        reads it\n    github              one-shot GitHub setup with the owner's own login\n    whoami              this caller's role and how it was bound\n    token               service tokens for pane-less processes (web desk,\n                        timers)\n    superuser           who may close panes/tabs/workspaces, stop the daemon\n                        or manage dunks\n    memory              memory/recall over past agent sessions\n    health              deterministic self-check; --repair fixes leases/WAL\n    watchdog            deterministic exception watchdog (no model); --dry-run\n                        sends nothing\n    watchdog-deadman    alert the VP if the watchdog heartbeat is stale\n                        (independent check)\n    usage               real provider usage from configurable commands\n    recover             post-upgrade recovery plan; --apply types into bare\n                        shells\n    doctor              post-upgrade doctor: backend surfaces + dunk target\n                        metadata\n    owner               owner -> agent delivery: pushed, never typed\n    report              the deterministic fleet report (no model)\n    state               continuous agent-state capture (the restartable-lane\n                        record)\n    roster              one row per agent lane (name, harness, state, task,\n                        inbox, cpu)\n    message-state       sent / delivered / seen for message ids\n    reply-stats         last and median time for a lane to read its mail\n    project-summary     ground truths, articles, tasks in flight, agents,\n                        timeline\n    api                 read-only HTTP surface for the Command Center (roster,\n                        message state, project summary)\n    capability (capabilities)\n                        how a target can receive: push queue (pi) or immediate\n                        guarded send\n    lane (lanes)        the lane registry: who each pane IS, declared or\n                        inferred\n    retired             retired panes: kept as the record, excluded from\n                        alerts and feeding\n    dispatch            standby queue + a deterministic tick that fills idle\n                        lanes\n    clear-box           DESTRUCTIVE, superuser: clear an unsubmitted draft\n                        (Ctrl-U)\n    delivery            can this lane receive a message, and if not why\n    flush               submit text left sitting in a pane's input box\n    messages (queue)    direct messages queued and recently sent\n    cancel-message (cancel)\n                        drop a queued message\n    metrics             read-only operations metrics as JSON\n    panes               list terminal panes (possible targets)\n    workspaces (tabs)   list workspaces and their tabs\n    new-workspace (workspace)\n                        create a named workspace (first tab + shell pane)\n    new-tab (tab)       create a named tab in a workspace\n    split               split a pane right or down into a new shell pane\n    start-agent (agent)\n                        launch an agent in a new pane, registered by name\n                        (tracked on the herdr rollback)\n    respawn-pane (respawn)\n                        guardedly replace an existing managed pane's process\n                        in place\n    rename              rename a workspace, tab or pane\n    focus               bring a workspace, tab or pane to the front\n    close               close a workspace, tab or pane (kills what runs\n                        inside)\n    herdr               run any herdr subcommand through the daemon (rollback\n                        backend only; refused under tmux)\n    herdr-help          the rollback backend's own usage: command groups, or\n                        one group's subcommands (refused under tmux)\n    read                read recent output of a pane\n    shutdown            stop the daemon (superusers only; dunks resume on next\n                        start)\n    serve               run the daemon in the foreground\n    tui                 open the curses UI\n    mcp                 run the MCP server on stdio (for agent harnesses)\n    mcp-setup           show or apply MCP registration for agent harnesses\n    guide (help, docs)  print the full guide (concepts, surfaces, protocol,\n                        recipes)\n    commands            list the socket/MCP command registry\n    mcp-map             OLD flat MCP tool -> NEW grouped tool/action mapping\n\noptions:\n  -h, --help            show this help message and exit\n  --version             show program's version number and exit\n  --json                print raw JSON results\n  --socket SOCKET       daemon socket path (default: $DUNKINGSHEEP_SOCKET or\n                        ~/.config/dunkingsheep/dunkingsheep.sock)\n  --self-pane SELF_PANE\n                        pane id to use for target 'self' (default: $TMUX_PANE,\n                        or $HERDR_PANE_ID on the rollback)\n  --no-start-daemon     fail instead of auto-starting the daemon\n\nDunking Sheep types text (plus Enter) into terminal panes on a schedule.\nEach schedule is a \"dunk\": a target pane, a text, an interval, and a running\nflag. Dunks live in a background daemon, so the TUI, this CLI, the unix\nsocket and the MCP server all see and control the same dunks.\n\nquick start\n  dunkingsheep panes                              # what can I target?\n  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\\n      -t \"Check the backlog. If done: dunkingsheep remove {id}. Else keep going.\"\n  dunkingsheep list                               # live status, ids, countdowns\n  dunkingsheep remove d2\n  dunkingsheep tui                                # the curses view of the same dunks\n\nlearn more\n  dunkingsheep guide          full guide (concepts, MCP, socket protocol, recipes)\n  dunkingsheep commands       every command the socket/MCP expose (--json: schemas)\n  dunkingsheep <command> -h   per-command flags and examples\n",
+  "path": []
+ },
+ {
+  "help": "usage: dunkingsheep allocation [-h] [--pane-id PANE_ID] [--pool POOL]\n                               [--pools POOLS] [--roles {worker,reviewer}]\n                               [--skills SKILLS] [--requires REQUIRES]\n                               [--task-id TASK_ID] [--revision REVISION]\n                               [--body BODY] [--disable]\n                               {status,register,offer,review}\n\npositional arguments:\n  {status,register,offer,review}\n\noptions:\n  -h, --help            show this help message and exit\n  --pane-id PANE_ID\n  --pool POOL\n  --pools POOLS\n  --roles {worker,reviewer}\n  --skills SKILLS\n  --requires REQUIRES\n  --task-id TASK_ID\n  --revision REVISION\n  --body BODY\n  --disable\n",
+  "path": [
+   "allocation"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep status [-h] [--check-herdr]\n\noptions:\n  -h, --help     show this help message and exit\n  --check-herdr  probe the terminal backend (slow; default off)\n",
+  "path": [
+   "status"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep turn [-h] <start|end> ...\n\npositional arguments:\n  <start|end>\n    start      mark the pane busy until turn end\n    end        end the busy turn and release the hold\n\noptions:\n  -h, --help   show this help message and exit\n",
+  "path": [
+   "turn"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep turn start [-h] [--pane PANE] [--ttl-s TTL_S]\n                               [--source SOURCE] [--handoff-id HANDOFF_ID]\n\noptions:\n  -h, --help            show this help message and exit\n  --pane PANE           pane id (default: the caller's)\n  --ttl-s TTL_S\n  --source SOURCE\n  --handoff-id HANDOFF_ID\n                        next-job id from the initiating prompt\n",
+  "path": [
+   "turn",
+   "start"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep turn end [-h] [--pane PANE] [--reason REASON]\n                             [--turn-id TURN_ID]\n\noptions:\n  -h, --help         show this help message and exit\n  --pane PANE        pane id (default: the caller's)\n  --reason REASON\n  --turn-id TURN_ID  generation returned by --json turn start\n",
+  "path": [
+   "turn",
+   "end"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep poll [-h] [--mailbox MAILBOX] [--limit LIMIT] [--panes]\n                         [--tasks] [--task-scope {global,self}]\n                         [--include-done] [--check-herdr]\n\nRead-only batch used by the sidebar poller. It does not mark mail read;\npanes/tasks are opt-in.\n\noptions:\n  -h, --help            show this help message and exit\n  --mailbox MAILBOX     mailbox to poll (default: the caller's)\n  --limit LIMIT         unread messages to return (default 5)\n  --panes               include the pane list (slow; startup only)\n  --tasks               include the caller's task queue\n  --task-scope {global,self}\n  --include-done\n  --check-herdr         probe the terminal backend (slow; default off)\n",
+  "path": [
+   "poll"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep list [-h]\n\nList every dunk: id, running, live status, target, interval, sends (done/max),\nidle gate, text.\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep get [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "get"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep add [-h] [--target TARGET] [--text TEXT] [--every EVERY]\n                        [--name NAME] [--only-idle] [--max-sends MAX_SENDS]\n                        [--skip-if-unconsumed] [--ignore-typing] [--no-start]\n\nCreate a dunk that types TEXT + Enter into TARGET every EVERY minutes.\n\noptions:\n  -h, --help            show this help message and exit\n  --target, -T TARGET   pane id, 'self', or a unique label substring\n  --text, -t TEXT       text to send (default 'continue'); {id} etc. are\n                        expanded\n  --every, -e, --interval EVERY\n                        interval: minutes, or e.g. 90s / 1.5h (default 10)\n  --name, -n NAME       label for the dunk\n  --only-idle           hold each send until the target agent is idle\n  --max-sends MAX_SENDS\n                        remove the dunk after N sends\n  --skip-if-unconsumed  backpressure: skip a send if the previous one was\n                        never picked up\n  --ignore-typing       send even while someone is typing in the target's\n                        input box (default: hold and re-check every minute)\n  --no-start            create it stopped\n\nexamples:\n  dunkingsheep add -T \"Codex Site\" -e 15 -t continue\n  dunkingsheep add -T w8:p3 -e 1.5h -t \"status report please\" -n hourly\n  dunkingsheep add -T self -e 30 --max-sends 1 -t \"check CI now\"\n  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \\\n      -t \"If the backlog is done: dunkingsheep remove {id}. Else continue.\"\nplaceholders in TEXT: {id} {name} {count} {target} {interval} {time} {date}\n",
+  "path": [
+   "add"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep update [-h] [--target TARGET] [--text TEXT]\n                           [--every EVERY] [--name NAME] [--only-idle |\n                           --any-time] [--max-sends MAX_SENDS]\n                           [--skip-if-unconsumed | --always-send]\n                           [--hold-while-typing | --ignore-typing]\n                           id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --target, -T TARGET\n  --text, -t TEXT\n  --every, -e, --interval EVERY\n  --name, -n NAME\n  --only-idle\n  --any-time            clear only-idle gating\n  --max-sends MAX_SENDS\n                        0 clears the limit\n  --skip-if-unconsumed  backpressure: skip a send if the previous one was\n                        never picked up\n  --always-send         clear skip-if-unconsumed\n  --hold-while-typing   hold a send while someone is typing in the target\n                        (default)\n  --ignore-typing       send even while someone is typing in the target\n",
+  "path": [
+   "update"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep remove [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "remove"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep start [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "start"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep stop [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "stop"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep toggle [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "toggle"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep stop-all [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "stop-all"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep fire [-h] [--countdown COUNTDOWN] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --countdown COUNTDOWN\n                        seconds to count down first\n",
+  "path": [
+   "fire"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep send [-h] [--wait S] [--ignore-typing] [--no-enter]\n                         target text [text ...]\n\npositional arguments:\n  target\n  text\n\noptions:\n  -h, --help       show this help message and exit\n  --wait S         block up to S seconds for delivery before returning\n                   (default 10)\n  --ignore-typing  send even while someone is typing (default: queue it)\n  --no-enter       leave the text in the box without pressing Enter\n\nexample: dunkingsheep send \"Claude Proj\" please summarize your progress\n",
+  "path": [
+   "send"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep send-keys [-h] [--wait S] [--ignore-typing]\n                              target keys [keys ...]\n\npositional arguments:\n  target\n  keys\n\noptions:\n  -h, --help       show this help message and exit\n  --wait S         block up to S seconds for delivery before returning\n                   (default 10)\n  --ignore-typing  press them even while someone is typing (default: queue)\n\nexample: dunkingsheep send-keys \"Codex Site\" Enter\n",
+  "path": [
+   "send-keys"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep install [-h] [--bin-dir BIN_DIR]\n\nInstall a launcher so agents can run `dunkingsheep inbox read` as an ordinary\ncommand, instead of executing a file inside this workspace, which a sandboxed\nagent should and does refuse.\n\noptions:\n  -h, --help         show this help message and exit\n  --bin-dir BIN_DIR  where to install it (default ~/.local/bin)\n",
+  "path": [
+   "install"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep guard [-h] [--no-shadow]\n                          [{status,install,install-tmux,uninstall,check,shadow,unshadow}]\n\nAgents that call the terminal CLI directly bypass every protection in the daemon. On the herdr rollback backend the guard is a herdr wrapper, first on PATH, that routes exactly the four typing commands through the daemon instead. Every other herdr command is untouched.\n\npositional arguments:\n  {status,install,install-tmux,uninstall,check,shadow,unshadow}\n\noptions:\n  -h, --help            show this help message and exit\n  --no-shadow           install the PATH wrapper only; do not take herdr's own\n                        place (agents the herdr server starts itself will not\n                        be covered)\n\nnew shells pick it up; existing panes need a fresh shell\n",
+  "path": [
+   "guard"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox [-h] <subcommand> ...\n\nMachine-to-machine messaging. A message is stored for the recipient agent to\nread, so it cannot collide with a human typing, cannot stick half-sent, and\nhas no size limit.\n\npositional arguments:\n  <subcommand>\n    count       how many messages are waiting\n    send        put a message in an agent's inbox\n    list        summaries of waiting messages\n    read        read waiting messages and mark them read\n    recover     replay the latest delivered batch after a lost read response\n    archive     archive a mailbox in bulk (no deletion)\n    status      state of one message by id\n    ack         mark messages handled\n    cancel      withdraw unread messages you sent\n    delete      delete messages and their attachments\n    stats       unread counts for every mailbox\n    fetch       write an attachment to a local directory\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "inbox"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox count [-h] [mailbox]\n\npositional arguments:\n  mailbox     agent name, pane id or 'self' (default self)\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "inbox",
+   "count"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox send [-h] [--subject SUBJECT] [--attach PATH]\n                               [--no-notify] [--literal] [--body-file PATH]\n                               to [body ...]\n\npositional arguments:\n  to\n  body\n\noptions:\n  -h, --help            show this help message and exit\n  --subject, -s SUBJECT\n  --attach, -a PATH     attach a local file (repeatable)\n  --no-notify           do not nudge the recipient's pane\n  --literal             send body text that contains shell-substitution syntax\n                        ($( ${ or a backtick)\n  --body-file PATH      read the body from a file ('-' for stdin): immune to\n                        shell substitution\n\nexample: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'\n",
+  "path": [
+   "inbox",
+   "send"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox list [-h] [--all] [--limit LIMIT] [mailbox]\n\npositional arguments:\n  mailbox\n\noptions:\n  -h, --help         show this help message and exit\n  --all              include messages already read\n  --limit, -n LIMIT\n",
+  "path": [
+   "inbox",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox read [-h] [--limit LIMIT] [--peek] [mailbox]\n\npositional arguments:\n  mailbox\n\noptions:\n  -h, --help         show this help message and exit\n  --limit, -n LIMIT\n  --peek             do not mark them read\n",
+  "path": [
+   "inbox",
+   "read"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox recover [-h] [mailbox]\n\npositional arguments:\n  mailbox     agent name, pane id or 'self' (default self)\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "inbox",
+   "recover"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox archive [-h] [--before BEFORE] [--state STATE]\n                                  mailbox\n\npositional arguments:\n  mailbox\n\noptions:\n  -h, --help       show this help message and exit\n  --before BEFORE  only messages created before this ISO date/time or epoch\n  --state STATE    comma-separated states to archive (default queued,acked)\n",
+  "path": [
+   "inbox",
+   "archive"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox status [-h] message_id\n\npositional arguments:\n  message_id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "inbox",
+   "status"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox ack [-h] [--mailbox MAILBOX]\n                              message_ids [message_ids ...]\n\npositional arguments:\n  message_ids\n\noptions:\n  -h, --help         show this help message and exit\n  --mailbox MAILBOX  only ack this mailbox (default: your own)\n",
+  "path": [
+   "inbox",
+   "ack"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox cancel [-h] message_ids [message_ids ...]\n\npositional arguments:\n  message_ids\n\noptions:\n  -h, --help   show this help message and exit\n",
+  "path": [
+   "inbox",
+   "cancel"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox delete [-h] message_ids [message_ids ...]\n\npositional arguments:\n  message_ids\n\noptions:\n  -h, --help   show this help message and exit\n",
+  "path": [
+   "inbox",
+   "delete"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox stats [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "inbox",
+   "stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep inbox fetch [-h] [--dest DEST] attachment_id\n\npositional arguments:\n  attachment_id\n\noptions:\n  -h, --help       show this help message and exit\n  --dest, -d DEST\n",
+  "path": [
+   "inbox",
+   "fetch"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context [-h] <subcommand> ...\n\n.dunkingsheep/ per project plus one global. Ground truths never expire; only\nthe owner promotes one; supersede keeps both entries linked.\n\npositional arguments:\n  <subcommand>\n    init        create the store layout\n    add         add an entry (body from --text, stdin or a file)\n    promote     owner-only: promote an entry to ground truth\n    supersede   replace an entry, keeping both linked\n    retire      append a retirement note (history kept)\n    ledger      what the daemon wrote: adopt (owner bootstrap) or status\n    get         show an entry by subject or slug\n    search      FTS5 search over the disposable index\n    digest      bounded session digest (global truths always included)\n    snapshot    digest + per-article access counts, for the dashboard\n    check       schema, refusals and stale facts (both stores by default)\n    index       rebuild the disposable FTS index (both stores by default)\n    stats       counts, ages, reads and never-read entries (both stores by\n                default)\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "context"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context init [-h] [--global] [--path PATH]\n\noptions:\n  -h, --help   show this help message and exit\n  --global\n  --path PATH\n",
+  "path": [
+   "context",
+   "init"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context add [-h] [--text TEXT] --class CLS\n                                --subject SUBJECT [--type TYPE_]\n                                [--authority AUTHORITY] [--source SOURCE]\n                                [--stated STATED]\n                                [--recheck-after RECHECK_AFTER]\n                                [--supersedes SUPERSEDES] [--global]\n                                [file]\n\npositional arguments:\n  file\n\noptions:\n  -h, --help            show this help message and exit\n  --text TEXT           the body inline (otherwise stdin or the file argument)\n  --class CLS\n  --subject SUBJECT\n  --type TYPE_\n  --authority AUTHORITY\n  --source SOURCE\n  --stated STATED\n  --recheck-after RECHECK_AFTER\n  --supersedes SUPERSEDES\n  --global\n",
+  "path": [
+   "context",
+   "add"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context promote [-h] [--global] slug\n\npositional arguments:\n  slug\n\noptions:\n  -h, --help  show this help message and exit\n  --global\n",
+  "path": [
+   "context",
+   "promote"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context supersede [-h] [--global] slug [file]\n\npositional arguments:\n  slug\n  file\n\noptions:\n  -h, --help  show this help message and exit\n  --global\n",
+  "path": [
+   "context",
+   "supersede"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context retire [-h] [--reason REASON] [--global] slug\n\npositional arguments:\n  slug\n\noptions:\n  -h, --help       show this help message and exit\n  --reason REASON\n  --global\n",
+  "path": [
+   "context",
+   "retire"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context ledger [-h] [--global] [--path PATH]\n                                   {adopt,status}\n\npositional arguments:\n  {adopt,status}\n\noptions:\n  -h, --help      show this help message and exit\n  --global\n  --path PATH\n",
+  "path": [
+   "context",
+   "ledger"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context get [-h] [--global] key\n\npositional arguments:\n  key\n\noptions:\n  -h, --help  show this help message and exit\n  --global\n",
+  "path": [
+   "context",
+   "get"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context search [-h] [--class CLS] [--scope SCOPE]\n                                   [--global]\n                                   query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help     show this help message and exit\n  --class CLS\n  --scope SCOPE\n  --global\n",
+  "path": [
+   "context",
+   "search"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context digest [-h] [--subject SUBJECT]\n                                   [--max-bytes MAX_BYTES] [--global]\n                                   [--project] [--path PATH]\n\noptions:\n  -h, --help            show this help message and exit\n  --subject SUBJECT\n  --max-bytes MAX_BYTES\n  --global\n  --project\n  --path PATH\n",
+  "path": [
+   "context",
+   "digest"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context snapshot [-h] [--global] [--project] [--path PATH]\n\noptions:\n  -h, --help   show this help message and exit\n  --global\n  --project\n  --path PATH\n",
+  "path": [
+   "context",
+   "snapshot"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context check [-h] [--global] [--project] [--path PATH]\n\noptions:\n  -h, --help   show this help message and exit\n  --global\n  --project\n  --path PATH\n",
+  "path": [
+   "context",
+   "check"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context index [-h] [--global] [--project] [--path PATH]\n\noptions:\n  -h, --help   show this help message and exit\n  --global\n  --project\n  --path PATH\n",
+  "path": [
+   "context",
+   "index"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep context stats [-h] [--global] [--project] [--path PATH]\n\noptions:\n  -h, --help   show this help message and exit\n  --global\n  --project\n  --path PATH\n",
+  "path": [
+   "context",
+   "stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep load [-h] [--policies PATH]\n\nSample registered callers' CPU from /proc. Identity is pid+starttime; a reused\npid produces no sample. GPU is null with a reason on this hardware.\n\noptions:\n  -h, --help       show this help message and exit\n  --policies PATH  JSON {agent: policy}; adds dry-run would-kill lines\n                   (default: load-policies.json)\n",
+  "path": [
+   "load"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep pm [-h] <subcommand> ...\n\nA PM publishes ONE digest per project per window under a stable id, and lanes\nreport to their PM instead of the VP.\n\npositional arguments:\n  <subcommand>\n    digest      publish/update one project digest\n    routing     show the lane->PM routing registry\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "pm"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep pm digest [-h] [--to TO] [--demo] project\n\npositional arguments:\n  project\n\noptions:\n  -h, --help  show this help message and exit\n  --to TO     VP pane (default from routing / DUNKINGSHEEP_VP_PANE)\n  --demo      label the subject DEMO (a shape demo carries live numbers, not\n              template ones)\n\nexample: echo '{\"changed\":[\"t6 240/286\"],\"numbers\":[]}' | dunkingsheep pm\ndigest poolrad\n",
+  "path": [
+   "pm",
+   "digest"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep pm routing [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "pm",
+   "routing"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task [-h] <subcommand> ...\n\nTasks are global (fleet-wide) by default, or scoped to one pane. `task next`\nclaims atomically; `task follow` asks the daemon to push work to you when\nidle.\n\npositional arguments:\n  <subcommand>\n    add         create a task\n    list (ls)   list visible tasks\n    read        read one task in full\n    update      change a task\n    assign      assign a task (use 'self' for yourself)\n    complete    complete a task for everyone\n    block       mark a task blocked\n    unblock     return a blocked task to the queue\n    cancel      cancel a task\n    delete      delete a task\n    note        append an event to a task's history\n    next        atomically claim the next task\n    heartbeat   extend the lease on a claimed task\n    release     give a claimed task back\n    follow      receive pushed tasks when idle\n    unfollow    stop receiving pushed tasks\n    followers   list panes receiving pushed tasks\n    stats       task counts by status\n    metrics     task throughput, depth and latency (JSON)\n    reap        requeue expired/dead leases now\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "task"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task add [-h] [--scope SCOPE] [--body BODY]\n                             [--status {open,in_progress,blocked,done,cancelled}]\n                             [--priority {low,medium,high,urgent}]\n                             [--assign PANE] [--depends-on ID] [--parent ID]\n                             [--multi] [--kind {work,review,verify,report}]\n                             [--author AUTHOR] [--repo REPO] [--pr PR]\n                             [--head HEAD]\n                             title\n\npositional arguments:\n  title\n\noptions:\n  -h, --help            show this help message and exit\n  --scope SCOPE         'global' (default), 'self' or a pane id\n  --body, -b BODY\n  --status {open,in_progress,blocked,done,cancelled}\n  --priority, -p {low,medium,high,urgent}\n  --assign, -a PANE     assignee pane id/agent name (repeatable; 'self' =\n                        caller)\n  --depends-on, -d ID   task id that must be done first (repeatable)\n  --parent ID           parent task id (subtask)\n  --multi               allow several agents to claim this task\n  --kind {work,review,verify,report}\n  --author AUTHOR       lane that produced the artefact under review\n  --repo REPO           owner/name (reviews)\n  --pr PR               PR number (reviews)\n  --head HEAD           exact commit under review (reviews)\n",
+  "path": [
+   "task",
+   "add"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task list [-h]\n                              [--status {open,in_progress,blocked,done,cancelled}]\n                              [--assignee PANE] [--all] [--limit LIMIT]\n                              [--kind {work,review,verify,report}]\n                              [--needs-owner]\n                              [scope]\n\npositional arguments:\n  scope                 'global', 'self' or a pane id\n\noptions:\n  -h, --help            show this help message and exit\n  --status {open,in_progress,blocked,done,cancelled}\n  --assignee PANE\n  --all                 include done/cancelled\n  --limit, -n LIMIT\n  --kind {work,review,verify,report}\n  --needs-owner         only tasks blocked on a 'needs-owner:' question\n",
+  "path": [
+   "task",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task read [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "read"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task update [-h] [--title TITLE] [--body BODY]\n                                [--status {open,in_progress,blocked,done,cancelled}]\n                                [--priority {low,medium,high,urgent}]\n                                [--assign PANE] [--depends-on ID]\n                                [--parent ID] [--block-reason TEXT] [--multi]\n                                [--no-multi]\n                                id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --title TITLE\n  --body, -b BODY\n  --status {open,in_progress,blocked,done,cancelled}\n  --priority, -p {low,medium,high,urgent}\n  --assign, -a PANE\n  --depends-on, -d ID\n  --parent ID\n  --block-reason TEXT\n  --multi\n  --no-multi\n",
+  "path": [
+   "task",
+   "update"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task assign [-h] [--mode {add,remove,set}]\n                                id assignees [assignees ...]\n\npositional arguments:\n  id\n  assignees\n\noptions:\n  -h, --help            show this help message and exit\n  --mode {add,remove,set}\n",
+  "path": [
+   "task",
+   "assign"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task complete [-h] [--by BY]\n                                  [--verdict {accept,needs-fix}] [--unmerged]\n                                  id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help            show this help message and exit\n  --by BY\n  --verdict {accept,needs-fix}\n                        review tasks: the verdict (recorded from your bound\n                        lane)\n  --unmerged            the work is done but its PR is NOT on main (a stacked\n                        branch): dependents stay closed until the merge is\n                        recorded (t906)\n",
+  "path": [
+   "task",
+   "complete"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task block [-h] [--reason REASON] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help       show this help message and exit\n  --reason REASON\n",
+  "path": [
+   "task",
+   "block"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task unblock [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "unblock"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task cancel [-h] [--reason REASON] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help       show this help message and exit\n  --reason REASON\n",
+  "path": [
+   "task",
+   "cancel"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task delete [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "delete"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task note [-h] [--event EVENT] [--reason REASON] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help       show this help message and exit\n  --event EVENT\n  --reason REASON\n",
+  "path": [
+   "task",
+   "note"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task next [-h] [--lease SECONDS] [--allow-busy] [scope]\n\npositional arguments:\n  scope            'global' (default), 'self', 'auto', 'mine' (only work\n                   assigned to you), or a pane id\n\noptions:\n  -h, --help       show this help message and exit\n  --lease SECONDS\n  --allow-busy     take a second task while already holding in-progress work\n",
+  "path": [
+   "task",
+   "next"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task heartbeat [-h] [--lease SECONDS] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help       show this help message and exit\n  --lease SECONDS\n",
+  "path": [
+   "task",
+   "heartbeat"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task release [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "release"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task follow [-h] [scope]\n\npositional arguments:\n  scope       'global' (default) or 'self'\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "follow"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task unfollow [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "unfollow"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task followers [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "followers"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task stats [-h] [scope]\n\npositional arguments:\n  scope\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task metrics [-h] [--window SECONDS] [--since EPOCH]\n                                 [--until EPOCH] [--bucket {hour,day}]\n                                 [scope]\n\npositional arguments:\n  scope                'all' (default), 'global', 'self' or a pane id\n\noptions:\n  -h, --help           show this help message and exit\n  --window SECONDS     window ending now (default 3600)\n  --since EPOCH\n  --until EPOCH\n  --bucket {hour,day}\n",
+  "path": [
+   "task",
+   "metrics"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep task reap [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "task",
+   "reap"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep gh-token [-h] [--kind {author,reviewer}] [--quiet]\n\noptions:\n  -h, --help            show this help message and exit\n  --kind {author,reviewer}\n                        owner/system only\n  --quiet               print nothing when no token applies\n",
+  "path": [
+   "gh-token"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep secrets-check [-h] [--base BASE] [--cwd CWD] [--quiet]\n\nExits 1, with a named refusal, when this branch ADDS a path that must never\nleave the host (data/, *.sqlite3, *-credentials, *.pem, *token*, .env). Called\nby the git credential helper and by the gh wrapper before `gh pr create`\n(t756).\n\noptions:\n  -h, --help   show this help message and exit\n  --base BASE  diff against this ref (default: origin/main)\n  --cwd CWD    repository to check (default: cwd)\n  --quiet\n",
+  "path": [
+   "secrets-check"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep git-credential [-h] [{get,store,erase}]\n\npositional arguments:\n  {get,store,erase}\n\noptions:\n  -h, --help         show this help message and exit\n",
+  "path": [
+   "git-credential"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep review [-h] <subcommand> ...\n\npositional arguments:\n  <subcommand>\n    sync        open PRs -> review tasks; statuses follow verdicts\n                (system/owner)\n    list        live review tasks with PR, head, author, reviewer, age\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "review"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep review sync [-h] [--dry-run]\n\noptions:\n  -h, --help  show this help message and exit\n  --dry-run\n",
+  "path": [
+   "review",
+   "sync"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep review list [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "review",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep poolrad [-h] <subcommand> ...\n\npositional arguments:\n  <subcommand>\n    backlog-sync  file the next N composable uncredited bodies as work\n                  (system/owner)\n    progress      credited / identities / CEILING / queue summary\n\noptions:\n  -h, --help      show this help message and exit\n",
+  "path": [
+   "poolrad"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep poolrad backlog-sync [-h] [--limit LIMIT] [--dry-run]\n\noptions:\n  -h, --help         show this help message and exit\n  --limit, -n LIMIT\n  --dry-run\n",
+  "path": [
+   "poolrad",
+   "backlog-sync"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep poolrad progress [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "poolrad",
+   "progress"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep github [-h] <subcommand> ...\n\npositional arguments:\n  <subcommand>\n    protect     branch protection on main: required review(s), the\n                dunkingsheep/review check, auto-merge\n    wrappers    install the gh wrapper and git credential helper for lanes\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "github"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep github protect [-h] [--approvals APPROVALS]\n                                   [--bypass-reviewer-app] [--dry-run]\n                                   repo\n\npositional arguments:\n  repo                  owner/name\n\noptions:\n  -h, --help            show this help message and exit\n  --approvals APPROVALS\n  --bypass-reviewer-app\n                        let the reviewer App push the accounting commit\n                        directly (poolrad, FLAT_FLEET.md 6.4)\n  --dry-run\n",
+  "path": [
+   "github",
+   "protect"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep github wrappers [-h] [--bin-dir BIN_DIR]\n\noptions:\n  -h, --help         show this help message and exit\n  --bin-dir BIN_DIR\n",
+  "path": [
+   "github",
+   "wrappers"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep whoami [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "whoami"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep token [-h] <subcommand> ...\n\npositional arguments:\n  <subcommand>\n    issue       mint a token (owner only; printed once)\n    revoke      revoke every token with this label\n    list        labels and roles of issued tokens\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "token"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep token issue [-h] --role {web,system,owner} [--label LABEL]\n\noptions:\n  -h, --help            show this help message and exit\n  --role {web,system,owner}\n  --label LABEL\n",
+  "path": [
+   "token",
+   "issue"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep token revoke [-h] label\n\npositional arguments:\n  label\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "token",
+   "revoke"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep token list [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "token",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep superuser [-h] <subcommand> ...\n\nSuperusers may perform destructive or affecting-others operations. Everyone\nelse uses the inbox and task queue.\n\npositional arguments:\n  <subcommand>\n    status      show the allowlist and whether this pane is on it\n    add         add a pane id or name\n    remove      remove a pane id or name\n    recover     bootstrap: register this pane as the first owner\n\noptions:\n  -h, --help    show this help message and exit\n",
+  "path": [
+   "superuser"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep superuser status [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "superuser",
+   "status"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep superuser add [-h] entry\n\npositional arguments:\n  entry       pane id (w9:p8) or name (VP of agentry)\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "superuser",
+   "add"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep superuser remove [-h] entry\n\npositional arguments:\n  entry\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "superuser",
+   "remove"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep superuser recover [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "superuser",
+   "recover"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory [-h] <subcommand> ...\n\nRanked recall over Claude/Codex/opencode/pi sessions, backed by SQLite + FTS5.\nQueries never reindex or wait for ingest.\n\npositional arguments:\n  <subcommand>\n    recall        ranked snippets\n    search        filtered search (same engine)\n    context       compact session-start digest\n    hook-context  Claude SessionStart hook JSON (memory context)\n    stats         counts, DB bytes, queue depth, latency\n    status        health, schema, ingest worker\n    ingest        queue a session log/sqlite for async ingest\n    backfill      discover + enqueue every session source\n\noptions:\n  -h, --help      show this help message and exit\n",
+  "path": [
+   "memory"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory recall [-h] [--limit LIMIT]\n                                  [--harness {claude,codex,opencode,pi,generic}]\n                                  [--project PROJECT] [--since SINCE]\n                                  query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help            show this help message and exit\n  --limit, -n LIMIT\n  --harness {claude,codex,opencode,pi,generic}\n  --project PROJECT\n  --since SINCE         unix timestamp lower bound\n",
+  "path": [
+   "memory",
+   "recall"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory search [-h] [--limit LIMIT]\n                                  [--harness {claude,codex,opencode,pi,generic}]\n                                  [--project PROJECT] [--since SINCE]\n                                  query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help            show this help message and exit\n  --limit, -n LIMIT\n  --harness {claude,codex,opencode,pi,generic}\n  --project PROJECT\n  --since SINCE         unix timestamp lower bound\n",
+  "path": [
+   "memory",
+   "search"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory context [-h] [--sessions SESSIONS] query\n\npositional arguments:\n  query\n\noptions:\n  -h, --help           show this help message and exit\n  --sessions SESSIONS\n",
+  "path": [
+   "memory",
+   "context"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory hook-context [-h] [--query QUERY]\n                                        [--sessions SESSIONS]\n\noptions:\n  -h, --help           show this help message and exit\n  --query QUERY        defaults to the current directory name\n  --sessions SESSIONS\n",
+  "path": [
+   "memory",
+   "hook-context"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory stats [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "memory",
+   "stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory status [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "memory",
+   "status"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory ingest [-h]\n                                  [--harness {claude,codex,opencode,pi,generic}]\n                                  [--project PROJECT]\n                                  path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --harness {claude,codex,opencode,pi,generic}\n  --project PROJECT\n",
+  "path": [
+   "memory",
+   "ingest"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep memory backfill [-h] [--limit LIMIT] [--pause] [--resume]\n                                    [--status]\n\noptions:\n  -h, --help     show this help message and exit\n  --limit LIMIT  cap the number of sources enqueued\n  --pause\n  --resume\n  --status\n",
+  "path": [
+   "memory",
+   "backfill"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep health [-h] [--repair] [--deep] [--write [PATH]]\n\noptions:\n  -h, --help      show this help message and exit\n  --repair        apply the fixed repairs (stale leases, large WAL)\n  --deep          also run PRAGMA quick_check (slow on a large DB)\n  --write [PATH]  also write the JSON report (default\n                  ~/.config/dunkingsheep/health.json)\n",
+  "path": [
+   "health"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep watchdog [-h] [--config CONFIG] [--dry-run] [--now NOW]\n                             [--error-file ERROR_FILE] [--replay]\n                             [--from REPLAY_FROM] [--to REPLAY_TO]\n                             [--step REPLAY_STEP]\n\noptions:\n  -h, --help            show this help message and exit\n  --config CONFIG       watchdog config (JSON); missing or invalid config\n                        refuses to start\n  --dry-run             report what would fire; send nothing, write no state\n                        or heartbeat\n  --now NOW             evaluate as of this UNIX time (reproducible runs)\n  --error-file ERROR_FILE\n                        where a config refusal is written for the dead-man to\n                        carry to the VP\n  --replay              re-evaluate the history-backed rules from --from to\n                        --to; reads only\n  --from REPLAY_FROM    replay start (UNIX time)\n  --to REPLAY_TO        replay end (UNIX time, default now)\n  --step REPLAY_STEP    replay step in minutes\n",
+  "path": [
+   "watchdog"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep watchdog-deadman [-h] [--heartbeat HEARTBEAT]\n                                     --cadence-minutes CADENCE_MINUTES\n                                     [--multiplier MULTIPLIER] --to TO\n                                     [--state STATE] [--error-file ERROR_FILE]\n                                     [--status STATUS] [--inbox INBOX]\n                                     [--socket DAEMON_PATH]\n                                     [--expected-socket-dir EXPECTED_DIR]\n                                     --cooldown-minutes COOLDOWN_MINUTES\n                                     [--dry-run] [--now NOW]\n\noptions:\n  -h, --help            show this help message and exit\n  --heartbeat HEARTBEAT\n  --cadence-minutes CADENCE_MINUTES\n  --multiplier MULTIPLIER\n  --to TO               VP mailbox\n  --state STATE\n  --error-file ERROR_FILE\n                        raw watchdog config refusal to include in the alert\n  --status STATUS       last-resort record when the socket send AND the direct\n                        inbox write fail\n  --inbox INBOX         inbox store for the direct-write fallback when the\n                        daemon is unreachable\n  --socket DAEMON_PATH  daemon socket (default: $DUNKINGSHEEP_SOCKET or\n                        ~/.config/dunkingsheep/dunkingsheep.sock)\n  --expected-socket-dir EXPECTED_DIR\n                        the socket must live here; anything else is a CONFIG\n                        refusal, not 'daemon down'\n  --cooldown-minutes COOLDOWN_MINUTES\n  --dry-run\n  --now NOW\n",
+  "path": [
+   "watchdog-deadman"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep usage [-h] [--config CONFIG] [--max-age MAX_AGE]\n                          [provider]\n\npositional arguments:\n  provider\n\noptions:\n  -h, --help         show this help message and exit\n  --config CONFIG    usage config mapping providers to commands\n  --max-age MAX_AGE  provider snapshot max age in seconds\n",
+  "path": [
+   "usage"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep recover [-h] [--apply] [--record]\n\noptions:\n  -h, --help  show this help message and exit\n  --apply     type the launch commands into panes that are still empty shells\n  --record    snapshot live agent sessions into launches.json first\n",
+  "path": [
+   "recover"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep doctor [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "doctor"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner [-h] <action> ...\n\npositional arguments:\n  <action>\n    push          push an owner message to a pane (no inbox row, no typing)\n    poll          drain heartbeat: this lane polls, even when the queue is\n                  empty\n    take          drain what is waiting for a pane (the extension calls this)\n    conversation  the owner mailbox as one conversation (desk/web only)\n    reply         answer one owner question (desk/web only)\n    ingest        record one owner question that arrived on a transport (t594)\n    outbox        owner-mailbox replies waiting for a transport (t594)\n    delivered     record a transport's delivery receipt for one owner row\n                  (t594)\n    stats         owner-push counts and latency\n\noptions:\n  -h, --help      show this help message and exit\n",
+  "path": [
+   "owner"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner push [-h] [--subject SUBJECT] target body [body ...]\n\npositional arguments:\n  target\n  body\n\noptions:\n  -h, --help            show this help message and exit\n  --subject, -s SUBJECT\n",
+  "path": [
+   "owner",
+   "push"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner poll [-h] [--by BY] pane_id\n\npositional arguments:\n  pane_id\n\noptions:\n  -h, --help  show this help message and exit\n  --by BY\n",
+  "path": [
+   "owner",
+   "poll"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner take [-h] [--by BY] pane_id\n\npositional arguments:\n  pane_id\n\noptions:\n  -h, --help  show this help message and exit\n  --by BY\n",
+  "path": [
+   "owner",
+   "take"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner conversation [-h] [--limit LIMIT] [--before BEFORE]\n\noptions:\n  -h, --help       show this help message and exit\n  --limit LIMIT\n  --before BEFORE  only messages older than this unix time\n\nTelegram and the web are two transports for one mailbox: this is the complete\nrecord, with the transport each message arrived on and the question each reply\nanswers.\n",
+  "path": [
+   "owner",
+   "conversation"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner reply [-h] [--body-file BODY_FILE]\n                                message_id [body ...]\n\npositional arguments:\n  message_id\n  body\n\noptions:\n  -h, --help            show this help message and exit\n  --body-file BODY_FILE\n\nThe reply goes back on the transport the question arrived on, and answering\nacks the question, so 'answered' is one fact. One answer per question.\n",
+  "path": [
+   "owner",
+   "reply"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner ingest [-h] [--body-file BODY_FILE]\n                                 [--external-id EXTERNAL_ID]\n                                 [--subject SUBJECT] [--attach ATTACH]\n                                 {web,telegram,report} [body ...]\n\npositional arguments:\n  {web,telegram,report}\n  body\n\noptions:\n  -h, --help            show this help message and exit\n  --body-file BODY_FILE\n  --external-id EXTERNAL_ID\n  --subject, -s SUBJECT\n  --attach ATTACH       local file paths, comma separated\n\nA bridge does not keep its own store: the question lands in the one owner\nmailbox with its transport, and 'owner reply' answers it back the same way.\n--external-id is the transport's own id (telegram:<update_id>), so a\nredelivered update returns the row it already produced.\n",
+  "path": [
+   "owner",
+   "ingest"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner outbox [-h] [--limit LIMIT] {web,telegram,report}\n\npositional arguments:\n  {web,telegram,report}\n\noptions:\n  -h, --help            show this help message and exit\n  --limit LIMIT\n\nOnly replies whose own transport matches are returned, so Telegram carries\nanswers and nothing else: no briefs, no digests, no web echoes.\n",
+  "path": [
+   "owner",
+   "outbox"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner delivered [-h] [--external-id EXTERNAL_ID]\n                                    message_id {web,telegram,report}\n\npositional arguments:\n  message_id\n  {web,telegram,report}\n\noptions:\n  -h, --help            show this help message and exit\n  --external-id EXTERNAL_ID\n\nThis receipt replaces telegram-status.json: a page is confirmed by the owner\nmailbox, not by a file read beside the bridge's credentials.\n",
+  "path": [
+   "owner",
+   "delivered"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep owner stats [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "owner",
+   "stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep report [-h] <action> ...\n\nTask metrics, lanes, needs-owner, review queue, poolrad progress, budget and\nwatchdog, measured at generation time. Writes\n~/.config/dunkingsheep/reports/<ts>.md and posts it to the owner mailbox on\nthe report transport when that mailbox exists (FLAT_FLEET.md 7.3).\n\npositional arguments:\n  <action>\n    run       generate one report\n    list      the report files produced so far, newest first\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "report"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep report run [-h] [--no-post] [--prose PROSE]\n                               [--prose-file PROSE_FILE] [--out-dir OUT_DIR]\n\noptions:\n  -h, --help            show this help message and exit\n  --no-post             write the file only; do not post to the owner mailbox\n  --prose PROSE         plain-language paragraph (rejected if it names a task\n                        id or status the report does not contain)\n  --prose-file PROSE_FILE\n  --out-dir OUT_DIR\n",
+  "path": [
+   "report",
+   "run"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep report list [-h] [--out-dir OUT_DIR]\n\noptions:\n  -h, --help         show this help message and exit\n  --out-dir OUT_DIR\n",
+  "path": [
+   "report",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep state [-h] <action> ...\n\npositional arguments:\n  <action>\n    capture   record one row per agent lane now\n    latest    the most recent captured rows\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "state"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep state capture [-h] [--source SOURCE]\n\noptions:\n  -h, --help       show this help message and exit\n  --source SOURCE  why this capture ran\n",
+  "path": [
+   "state",
+   "capture"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep state latest [-h] [--project PROJECT] [--limit LIMIT]\n                                 [pane]\n\npositional arguments:\n  pane\n\noptions:\n  -h, --help         show this help message and exit\n  --project PROJECT\n  --limit LIMIT\n",
+  "path": [
+   "state",
+   "latest"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep roster [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "roster"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep message-state [-h] ids\n\npositional arguments:\n  ids         comma-separated message ids\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "message-state"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep reply-stats [-h] [mailboxes]\n\npositional arguments:\n  mailboxes   comma-separated mailboxes (default all)\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "reply-stats"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep project-summary [-h] [--path PATH] [project]\n\npositional arguments:\n  project      project name (default: global)\n\noptions:\n  -h, --help   show this help message and exit\n  --path PATH  explicit project directory\n",
+  "path": [
+   "project-summary"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep api [-h] [--host HOST] [--port PORT]\n\noptions:\n  -h, --help   show this help message and exit\n  --host HOST\n  --port PORT\n",
+  "path": [
+   "api"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep capability [-h] target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help  show this help message and exit\n\nexample: dunkingsheep capability '%9'\n",
+  "path": [
+   "capability"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep lane [-h] <action> ...\n\npositional arguments:\n  <action>\n    list        every lane row: pane, name, declared?, alive?\n    register    bind a role to a pane's root process (owner only; the first\n                owner may self-register)\n    unregister  remove a pane's role binding (owner only)\n    set         declare who a pane IS (superuser); overrides any title\n\noptions:\n  -h, --help    show this help message and exit\n\nexamples: dunkingsheep lane / dunkingsheep lane set %9 'PM (par-a)'\n",
+  "path": [
+   "lane"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep lane list [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "lane",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep lane register [-h]\n                                  --role {owner,desk,planner,worker,reviewer}\n                                  [--pane PANE] [--provider PROVIDER]\n                                  [--model MODEL] [--label LABEL]\n\noptions:\n  -h, --help            show this help message and exit\n  --role {owner,desk,planner,worker,reviewer}\n  --pane PANE           pane id (default: this pane)\n  --provider PROVIDER   claude, codex, pi, opencode-go (reviewers must be\n                        claude/codex)\n  --model MODEL\n  --label LABEL\n",
+  "path": [
+   "lane",
+   "register"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep lane unregister [-h] pane\n\npositional arguments:\n  pane\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "lane",
+   "unregister"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep lane set [-h] pane mailbox\n\npositional arguments:\n  pane\n  mailbox\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "lane",
+   "set"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep retired [-h] <action> ...\n\npositional arguments:\n  <action>\n    retire    stop paging about a pane and stop feeding it (superuser)\n    unretire  bring a pane back\n    list      the retired panes\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "retired"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep retired retire [-h] --reason REASON pane\n\npositional arguments:\n  pane\n\noptions:\n  -h, --help       show this help message and exit\n  --reason REASON  why, e.g. superseded-by:wW:p7\n",
+  "path": [
+   "retired",
+   "retire"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep retired unretire [-h] pane\n\npositional arguments:\n  pane\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "retired",
+   "unretire"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep retired list [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "retired",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch [-h] <action> ...\n\npositional arguments:\n  <action>\n    add       queue a one-line assignment\n    list      the standby queue, in order\n    remove    drop an item\n    tick      fill every ALLOWLISTED ready lane that has no mail\n    status    the last tick's numbers\n\noptions:\n  -h, --help  show this help message and exit\n\nexamples: dispatch add t6 'advance strict C to 250' / dispatch tick\n",
+  "path": [
+   "dispatch"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch add [-h] [--task-id TASK_ID] [--lane LANE]\n                                 brief [brief ...]\n\npositional arguments:\n  brief\n\noptions:\n  -h, --help            show this help message and exit\n  --task-id, -t TASK_ID\n                        the task this assignment advances\n  --lane LANE           reserve it for one lane (pane id or name)\n",
+  "path": [
+   "dispatch",
+   "add"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch list [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "dispatch",
+   "list"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch remove [-h] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "dispatch",
+   "remove"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch tick [-h] [--dry-run] [--lanes LANES]\n\noptions:\n  -h, --help     show this help message and exit\n  --dry-run\n  --lanes LANES  comma-separated pane ids or lane names to allow for this tick\n                 (default: dispatch_lanes.json, else\n                 DUNKINGSHEEP_DISPATCH_LANES, else nothing is fed)\n",
+  "path": [
+   "dispatch",
+   "tick"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep dispatch status [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "dispatch",
+   "status"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep clear-box [-h] [--reason REASON] target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help       show this help message and exit\n  --reason REASON  why the draft is being destroyed (it is logged)\n",
+  "path": [
+   "clear-box"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep delivery [-h] [--status STATUS] target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help       show this help message and exit\n  --status STATUS  the pane's reported status, if known\n",
+  "path": [
+   "delivery"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep flush [-h] target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "flush"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep messages [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "messages"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep cancel-message [-h] message_id\n\npositional arguments:\n  message_id\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "cancel-message"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep metrics [-h] [--window SECONDS] [--since SINCE]\n                            [--until UNTIL]\n\nCounts, duration distributions and coverage for a time window. Identifiers and\nnumbers only; never message text.\n\noptions:\n  -h, --help            show this help message and exit\n  --window, -w SECONDS  window ending now, in seconds (default 3600)\n  --since SINCE         window start as a unix timestamp\n  --until UNTIL         window end as a unix timestamp\n",
+  "path": [
+   "metrics"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep panes [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "panes"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep workspaces [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "workspaces"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep new-workspace [-h] [--as MAILBOX] [--label LABEL]\n                                  [--cwd CWD] [--run COMMAND] [--focus]\n                                  [--role {owner,desk,planner,worker,reviewer}]\n                                  [--provider PROVIDER] [--model MODEL]\n\noptions:\n  -h, --help            show this help message and exit\n  --as MAILBOX          the lane this new pane IS: recorded in the lane\n                        registry, so mail for that lane reaches this pane\n                        after a backend change\n  --label, -l LABEL     name it (how you will target it later)\n  --cwd CWD             working directory for the new shell\n  --run, -r COMMAND     command to type + Enter into the new pane, e.g.\n                        'claude'\n  --focus               switch the view to it\n  --role {owner,desk,planner,worker,reviewer}\n                        bind this role to the new pane from the launch record\n  --provider PROVIDER\n  --model MODEL\n\nexample: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude\n",
+  "path": [
+   "new-workspace"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep new-tab [-h] [--workspace WORKSPACE] [--label LABEL]\n                            [--cwd CWD] [--run COMMAND] [--focus]\n\noptions:\n  -h, --help            show this help message and exit\n  --workspace, -w WORKSPACE\n                        id, label, substring or 'self' (default: own\n                        workspace)\n  --label, -l LABEL     name it (how you will target it later)\n  --cwd CWD             working directory for the new shell\n  --run, -r COMMAND     command to type + Enter into the new pane, e.g.\n                        'claude'\n  --focus               switch the view to it\n\nexample: dunkingsheep new-tab -w Site -l writer -r 'codex'\n",
+  "path": [
+   "new-tab"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep split [-h] [--down] [--label LABEL] [--cwd CWD]\n                          [--run COMMAND] [--focus]\n                          target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help         show this help message and exit\n  --down             new pane below (default: right)\n  --label, -l LABEL  name it (how you will target it later)\n  --cwd CWD          working directory for the new shell\n  --run, -r COMMAND  command to type + Enter into the new pane, e.g. 'claude'\n  --focus            switch the view to it\n",
+  "path": [
+   "split"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep start-agent [-h] [--workspace WORKSPACE] [--tab TAB]\n                                [--split {right,down}] [--cwd CWD] [--focus]\n                                [--role {owner,desk,planner,worker,reviewer}]\n                                [--provider PROVIDER] [--model MODEL]\n                                name COMMAND [COMMAND ...]\n\npositional arguments:\n  name\n  COMMAND               the agent command line\n\noptions:\n  -h, --help            show this help message and exit\n  --workspace, -w WORKSPACE\n                        new tab in this workspace (id, label or 'self')\n  --tab TAB             into this tab (id, label or 'self')\n  --split {right,down}  with --tab: split its pane\n  --cwd CWD\n  --focus\n  --role {owner,desk,planner,worker,reviewer}\n                        bind this role to the new pane from the launch record\n  --provider PROVIDER   claude, codex, pi, opencode-go (reviewers must be\n                        claude/codex)\n  --model MODEL\n\nexample: dunkingsheep start-agent writer -w Site -- claude --model opus\n",
+  "path": [
+   "start-agent"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep respawn-pane [-h] --expected-pid EXPECTED_PID\n                                 --expected-start EXPECTED_START\n                                 [--confirm-idle] [--reason REASON]\n                                 --command-json COMMAND_JSON\n                                 [--rollback-json ROLLBACK_JSON]\n                                 pane\n\npositional arguments:\n  pane\n\noptions:\n  -h, --help            show this help message and exit\n  --expected-pid EXPECTED_PID\n                        exact live pane pid\n  --expected-start EXPECTED_START\n                        exact /proc start time for --expected-pid\n  --confirm-idle        required; checked against\n                        turns/leases/mail/outbox/screen\n  --reason REASON       why this pane is being replaced\n  --command-json COMMAND_JSON\n                        replacement argv as a JSON array of strings\n  --rollback-json ROLLBACK_JSON\n                        argv JSON to restore if the replacement fails\n",
+  "path": [
+   "respawn-pane"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep rename [-h] {workspace,tab,pane} target label\n\npositional arguments:\n  {workspace,tab,pane}\n  target                id, label, unique substring or 'self'\n  label\n\noptions:\n  -h, --help            show this help message and exit\n",
+  "path": [
+   "rename"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep focus [-h] {workspace,tab,pane} target\n\npositional arguments:\n  {workspace,tab,pane}\n  target                id, label, unique substring or 'self'\n\noptions:\n  -h, --help            show this help message and exit\n",
+  "path": [
+   "focus"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep close [-h] [--force] {workspace,tab,pane} target\n\npositional arguments:\n  {workspace,tab,pane}\n  target                id, label, unique substring or 'self'\n\noptions:\n  -h, --help            show this help message and exit\n  --force               allow closing the caller's own pane/tab/workspace\n",
+  "path": [
+   "close"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep herdr [\u0000h] ARGS [ARGS ...]\n\npositional arguments:\n  ARGS        herdr subcommand and arguments (rollback backend only)\n\noptions:\n  \u0000h, \u0000\u0000help  show this help message and exit\n\nexample: dunkingsheep herdr pane zoom w9:p2 --on\n",
+  "path": [
+   "herdr"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep herdr-help [-h] [topic]\n\npositional arguments:\n  topic       e.g. pane, tab, workspace, agent, wait\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "herdr-help"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep read [-h] [--lines LINES] target\n\npositional arguments:\n  target\n\noptions:\n  -h, --help         show this help message and exit\n  --lines, -l LINES\n",
+  "path": [
+   "read"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep shutdown [-h] [--stop-all]\n\noptions:\n  -h, --help  show this help message and exit\n  --stop-all  also stop every dunk first\n",
+  "path": [
+   "shutdown"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep serve [-h] [--state-file STATE_FILE] [--no-log-file]\n\noptions:\n  -h, --help            show this help message and exit\n  --state-file STATE_FILE\n                        override the dunks.json path\n  --no-log-file\n",
+  "path": [
+   "serve"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep tui [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "tui"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep mcp [-h]\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "mcp"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep mcp-setup [-h] [--apply] [--scope SCOPE]\n                              [{all,claude,codex,gemini,cursor,json,toml}]\n\nPrint the exact command or config block that registers Dunking Sheep as an MCP server with a harness.\n\npositional arguments:\n  {all,claude,codex,gemini,cursor,json,toml}\n\noptions:\n  -h, --help            show this help message and exit\n  --apply               run the harness CLI to register (claude, codex,\n                        gemini)\n  --scope SCOPE         scope for claude/gemini (default user)\n\nharnesses: claude, codex, gemini, cursor, json, toml\nexample: dunkingsheep mcp-setup codex --apply\n",
+  "path": [
+   "mcp-setup"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep guide [-h] [--markdown]\n\noptions:\n  -h, --help  show this help message and exit\n  --markdown  render as markdown\n",
+  "path": [
+   "guide"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep commands [-h]\n\nEvery command the socket API and MCP server accept. With --json: names,\ndescriptions and JSON schemas.\n\noptions:\n  -h, --help  show this help message and exit\n",
+  "path": [
+   "commands"
+  ]
+ },
+ {
+  "help": "usage: dunkingsheep mcp-map [-h] [--markdown]\n\nThe t8 audit: the declared MCP surface is now one namespaced tool per domain\nwith an action argument. Every old tool is listed with its new home, and each\nold name remains callable.\n\noptions:\n  -h, --help  show this help message and exit\n  --markdown  render as markdown\n",
+  "path": [
+   "mcp-map"
+  ]
+ }
+]
