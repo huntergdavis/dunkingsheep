@@ -20,6 +20,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod error;
+pub mod flock;
 pub mod inbox;
 pub mod inbox_store;
 pub mod lock;
