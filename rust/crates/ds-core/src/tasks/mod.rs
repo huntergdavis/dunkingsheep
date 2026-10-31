@@ -26,6 +26,18 @@ use serde_json::json;
 use crate::db;
 use crate::error::DunkError;
 
+mod claim;
+pub use claim::{claimable, refusal, Candidate, Lease, Refusal};
+
+/// `DEFAULT_LEASE_S`: how long a claim stays valid without a heartbeat. The Python reads
+/// `DUNKINGSHEEP_LEASE_S` once at import; this reads it per call.
+pub fn default_lease_s() -> f64 {
+    std::env::var("DUNKINGSHEEP_LEASE_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800.0)
+}
+
 /// The Python store's schema, verbatim for the three tables this module owns.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
