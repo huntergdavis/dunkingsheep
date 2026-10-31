@@ -659,6 +659,20 @@ async def api_owner_send(request: Request, _: Annotated[str, Depends(require_aut
         result["notify"] = {"state": "desk_offline",
                             "detail": "no live Front Desk lane to nudge; the message waits in the mailbox"}
         return result
+    # DIRECT: the message is typed into the desk's input box now (the daemon's guarded send,
+    # decided by delivery_capability), so the desk answers at once instead of on its next poll.
+    # The owner-mailbox row above stays the record and the reply thread; this is the delivery.
+    # If the direct send cannot go, fall back to the inbox nudge so the desk still hears of it.
+    prompt = (f"Owner message {message_id} (web): {text}\n"
+              f"Answer it now: dunkingsheep owner reply {message_id} \"<your answer>\"")
+    try:
+        import asyncio
+        sent = await asyncio.to_thread(_send_to_pane, pane["pane_id"], prompt)
+        result["notify"] = {"state": "sent", "route": sent.get("route"), "pane": pane["pane_id"],
+                            "outcome": sent.get("outcome"), "detail": sent.get("detail", "")}
+        return result
+    except Exception as direct_error:  # noqa: BLE001 - fall back, never lose the message
+        direct_detail = str(getattr(direct_error, "detail", direct_error))[:200]
     try:
         nudge = client.call(
             "inbox_send", to=pane["pane_id"], notify=True,
@@ -667,9 +681,11 @@ async def api_owner_send(request: Request, _: Annotated[str, Depends(require_aut
                   f"`dunkingsheep owner conversation`; answer with `owner reply {message_id}`.\n\n{text}"))
         result["notify"] = {"state": "nudged", "pane": pane["pane_id"],
                             "inbox_id": (nudge or {}).get("message_id"),
-                            "inbox_state": (nudge or {}).get("state")}
+                            "inbox_state": (nudge or {}).get("state"),
+                            "direct_failed": direct_detail}
     except Exception as error:  # noqa: BLE001 - the row is stored; the nudge may retry
-        result["notify"] = {"state": "nudge_failed", "pane": pane["pane_id"], "detail": str(error)[:200]}
+        result["notify"] = {"state": "nudge_failed", "pane": pane["pane_id"],
+                            "detail": str(error)[:200], "direct_failed": direct_detail}
     return result
 
 

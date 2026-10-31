@@ -15,8 +15,9 @@ DESK = {"pane_id": "%133", "workspace_label": "bootstrap", "tab_label": "sn-desk
 
 
 class Fake:
-    def __init__(self, panes=(DESK,), fail_nudge=False, conversation=None):
+    def __init__(self, panes=(DESK,), fail_nudge=False, conversation=None, fail_direct=False):
         self.calls, self.panes, self.fail_nudge = [], list(panes), fail_nudge
+        self.fail_direct = fail_direct
         self.conversation = conversation or []
 
     def call(self, verb, **args):
@@ -25,6 +26,12 @@ class Fake:
             return {"panes": self.panes}
         if verb == "owner_ingest":
             return {"message": {"message_id": "i7"}, "duplicate": False, "transport": "web"}
+        if verb == "delivery_capability":
+            return {"alive": True, "send": "guarded", "pane_id": args.get("target")}
+        if verb == "send_text":
+            if self.fail_direct:
+                raise RuntimeError("terminal busy")
+            return {"ok": True, "outcome": "ok", "message_id": "m9", "message": "sent (confirmed)"}
         if verb == "inbox_send":
             if self.fail_nudge:
                 raise RuntimeError("inbox down")
@@ -52,21 +59,23 @@ class OwnerSend(unittest.TestCase):
             desk.CHANNEL_INDEX.update(index)
             desk.app.dependency_overrides.clear()
 
-    def test_a_web_message_lands_in_the_owner_mailbox_and_nudges_the_desk(self):
+    def test_a_web_message_lands_in_the_owner_mailbox_and_is_typed_straight_to_the_desk(self):
         fake = Fake()
         reply = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hello desk"}))
         self.assertEqual(200, reply.status_code, reply.text)
         data = reply.json()
         self.assertEqual(("stored", "i7"), (data["outcome"], data["message_id"]))
-        self.assertEqual("nudged", data["notify"]["state"])
+        self.assertEqual("sent", data["notify"]["state"], "DIRECT, not an inbox nudge")
+        self.assertEqual("guarded", data["notify"]["route"])
         verbs = [v for v, _ in fake.calls]
-        self.assertNotIn("send_text", verbs, "nothing is typed into the pane")
+        self.assertNotIn("inbox_send", verbs, "no inbox line when the direct send worked")
         ingest = next(a for v, a in fake.calls if v == "owner_ingest")
         self.assertEqual(("hello desk", "web"), (ingest["body"], ingest["transport"]))
-        nudge = next(a for v, a in fake.calls if v == "inbox_send")
-        self.assertEqual("%133", nudge["to"])
-        self.assertIn("owner message i7", nudge["subject"])
-        self.assertLess(verbs.index("owner_ingest"), verbs.index("inbox_send"))
+        typed = next(a for v, a in fake.calls if v == "send_text")
+        self.assertEqual("%133", typed["target"])
+        self.assertIn("hello desk", typed["text"])
+        self.assertIn("owner reply i7", typed["text"], "the desk is told how to answer")
+        self.assertLess(verbs.index("owner_ingest"), verbs.index("send_text"))
 
     def test_the_outcome_never_claims_delivery(self):
         data = self.run_with(Fake(), lambda c: c.post("/api/owner-send", json={"text": "x"})).json()
@@ -85,14 +94,23 @@ class OwnerSend(unittest.TestCase):
         quiet = dict(DESK, agent_status=None)
         fake = Fake(panes=[quiet])
         data = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
+        self.assertEqual("sent", data["notify"]["state"])
+        self.assertEqual("%133", next(a for v, a in fake.calls if v == "send_text")["target"])
+
+    def test_a_failed_direct_send_falls_back_to_the_inbox_nudge(self):
+        fake = Fake(fail_direct=True)
+        data = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
+        self.assertEqual("stored", data["outcome"])
         self.assertEqual("nudged", data["notify"]["state"])
+        self.assertIn("terminal busy", data["notify"]["direct_failed"])
         self.assertEqual("%133", next(a for v, a in fake.calls if v == "inbox_send")["to"])
 
-    def test_a_failed_nudge_is_reported_not_hidden(self):
-        data = self.run_with(Fake(fail_nudge=True),
+    def test_both_routes_failing_is_reported_not_hidden(self):
+        data = self.run_with(Fake(fail_direct=True, fail_nudge=True),
                              lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
         self.assertEqual("stored", data["outcome"])
         self.assertEqual("nudge_failed", data["notify"]["state"])
+        self.assertIn("direct_failed", data["notify"])
 
     def test_empty_oversize_and_attachments_are_refused_before_the_daemon(self):
         fake = Fake()
