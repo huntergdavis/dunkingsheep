@@ -702,6 +702,60 @@ impl Tasks {
         self.get(id.trim()).await
     }
 
+    /// Resolve one task's dependencies (the dependency half of `_decorate`).
+    pub async fn dependency_state(&self, id: &str) -> Result<DependencyState, DunkError> {
+        let wanted = id.trim().to_string();
+        self.writer
+            .call(move |conn| {
+                let (status, raw): (String, Option<String>) = conn
+                    .query_row("SELECT status, depends_on FROM tasks WHERE id = ?", params![wanted],
+                               |row| Ok((row.get(0)?, row.get(1)?)))
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                let deps = decode_list(raw.as_deref());
+                let mut state = DependencyState::default();
+                let mut cancelled = Vec::new();
+                for dep in &deps {
+                    let found: Option<(String, i64)> = conn
+                        .query_row("SELECT status, landed FROM tasks WHERE id = ?", params![dep],
+                                   |row| Ok((row.get(0)?, row.get(1)?)))
+                        .optional()
+                        .map_err(db::map_sqlite)?;
+                    match found {
+                        None => {
+                            state.missing_dependencies.push(dep.clone());
+                            state.blocked_by.push(dep.clone());
+                        }
+                        Some((dep_status, landed)) => {
+                            let landed = landed != 0;
+                            if dep_status == "cancelled" {
+                                state.dead_dependencies.push(dep.clone());
+                                cancelled.push(dep.clone());
+                            } else if dep_status == "done" && !landed {
+                                state.unlanded_dependencies.push(dep.clone());
+                                state.blocked_by.push(dep.clone());
+                            } else if dep_status != "done" {
+                                state.blocked_by.push(dep.clone());
+                            }
+                        }
+                    }
+                }
+                state.dependencies_clear =
+                    matches!(status.as_str(), "open" | "in_progress") && state.blocked_by.is_empty();
+                if status == "blocked" && !deps.is_empty() && state.blocked_by.is_empty() {
+                    state.unblock_needed = true;
+                    state.dependency_note = Some(if !cancelled.is_empty() {
+                        format!("depends on a CANCELLED task ({}); a cancelled dependency counts as satisfied, so only the block is holding this task - 'task unblock' makes it claimable", cancelled.join(", "))
+                    } else {
+                        format!("every dependency is satisfied ({}); nothing but the block is holding this task - 'task unblock' makes it claimable", deps.join(", "))
+                    });
+                }
+                Ok(state)
+            })
+            .await
+    }
+
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
     ///
     /// The verdict is bound to the task's head by the row itself, so it is written here
@@ -1098,6 +1152,38 @@ pub fn validate_scope(scope: &str) -> Result<String, DunkError> {
     Err(DunkError::Refused(format!(
         "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {scope:?})"
     )))
+}
+
+/// The dependency half of the Python's `_decorate` (t786 slice 7): what a task is waiting
+/// on, and the t783/t878/t903/t906 distinctions the row must state out loud.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DependencyState {
+    /// Dependencies still outstanding: not done/cancelled, or done but not landed (t906).
+    pub blocked_by: Vec<String>,
+    /// Done, but their PR is not on main (t906).
+    pub unlanded_dependencies: Vec<String>,
+    /// Cancelled dependencies: SATISFIED (t783), reported so the pass is not silent.
+    pub dead_dependencies: Vec<String>,
+    pub missing_dependencies: Vec<String>,
+    /// A blocked task whose dependencies are all satisfied: only `unblock` is left (t903).
+    pub unblock_needed: bool,
+    pub dependency_note: Option<String>,
+    /// open/in_progress and nothing outstanding. The per-viewer `claimable` half of the
+    /// Python's `eligible` (assignees, leases) is NOT ported yet, so this is the
+    /// generic-list value: unassigned-or-multi is not checked here.
+    pub dependencies_clear: bool,
+}
+
+/// `_order_key`: priority rank, then age, then id.
+pub fn order_key(priority: &str, created_at: f64, id: &str) -> (u8, u64, String) {
+    let rank = match priority {
+        "urgent" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 99,
+    };
+    (rank, created_at.max(0.0).to_bits(), id.to_string())
 }
 
 /// `_decode`: a JSON list, or empty when the column is NULL, unparseable or not a list.
@@ -1826,5 +1912,76 @@ mod tests {
         let cleared = tasks.update(&b.id, clear, None).await.unwrap();
         assert_eq!(cleared.block_reason, None);
         assert_eq!(tasks.delete(&a.id).await.unwrap(), a.id);
+    }
+
+    #[test]
+    fn order_key_sorts_by_priority_then_age_then_id() {
+        let mut rows = vec![
+            ("low", 1.0, "t1"),
+            ("urgent", 9.0, "t3"),
+            ("urgent", 2.0, "t2"),
+            ("weird", 0.5, "t4"),
+        ];
+        rows.sort_by_key(|(p, c, i)| order_key(p, *c, i));
+        let ids: Vec<&str> = rows.iter().map(|r| r.2).collect();
+        assert_eq!(ids, vec!["t2", "t3", "t1", "t4"]);
+    }
+
+    #[tokio::test]
+    async fn dependency_state_names_what_a_task_waits_for() {
+        let tasks = store("depstate").await;
+        let (done, open, dead, stacked) = (
+            tasks.add("global", "done", "").await.unwrap(),
+            tasks.add("global", "open", "").await.unwrap(),
+            tasks.add("global", "dead", "").await.unwrap(),
+            tasks.add("global", "stacked", "").await.unwrap(),
+        );
+        tasks
+            .set_status(&done.id, "done", None, None)
+            .await
+            .unwrap();
+        tasks
+            .set_status(&dead.id, "cancelled", Some("dup"), None)
+            .await
+            .unwrap();
+        tasks
+            .set_status(&stacked.id, "done", None, None)
+            .await
+            .unwrap();
+        tasks
+            .set_landed(&stacked.id, false, None, None, None)
+            .await
+            .unwrap();
+        let child = tasks.add("global", "child", "").await.unwrap();
+        let edit = FieldEdit {
+            depends_on: Some(vec![
+                done.id.clone(),
+                open.id.clone(),
+                dead.id.clone(),
+                stacked.id.clone(),
+            ]),
+            ..Default::default()
+        };
+        tasks.update(&child.id, edit, None).await.unwrap();
+        let state = tasks.dependency_state(&child.id).await.unwrap();
+        assert_eq!(state.blocked_by, vec![open.id.clone(), stacked.id.clone()]);
+        assert_eq!(state.unlanded_dependencies, vec![stacked.id.clone()]);
+        assert_eq!(state.dead_dependencies, vec![dead.id.clone()]);
+        assert!(!state.dependencies_clear);
+        // t903: a blocked task with every dependency satisfied says only the block is left.
+        let solo = tasks.add("global", "solo", "").await.unwrap();
+        let edit = FieldEdit {
+            depends_on: Some(vec![done.id.clone(), dead.id.clone()]),
+            ..Default::default()
+        };
+        tasks.update(&solo.id, edit, None).await.unwrap();
+        tasks
+            .set_status(&solo.id, "blocked", Some("hold"), None)
+            .await
+            .unwrap();
+        let state = tasks.dependency_state(&solo.id).await.unwrap();
+        assert!(state.unblock_needed);
+        assert!(state.dependency_note.unwrap().contains("CANCELLED task"));
+        assert!(tasks.dependency_state("t999").await.is_err());
     }
 }
