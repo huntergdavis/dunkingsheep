@@ -9,19 +9,6 @@ def discovered_id(pane_id: str) -> str:
     return "pane-" + re.sub(r"[^a-z0-9]+", "-", pane_id.casefold()).strip("-")
 
 
-def is_agent_pane(pane: dict | None) -> bool:
-    """True when the pane runs an agent.
-
-    The tmux backend reports `agent: ""` for EVERY pane (claude, codex and plain shells alike),
-    so testing the string made every channel read "no active agent": the roster said
-    `can_message: false` and a send was refused with 409 while the daemon itself reported the
-    pane alive with a guarded send route (measured 2026-10-30, sn-desk %133). An agent pane is
-    one the backend names an agent for, or reports a status for; a plain shell reports neither.
-    The daemon's `delivery_capability` still decides whether the send can go.
-    """
-    return bool(pane and (pane.get("agent") or pane.get("agent_status")))
-
-
 def match_pane(config: dict, panes: list[dict]) -> dict | None:
     # A declared handoff target must win over labels and shared working dirs.
     # If it is gone, stay offline rather than silently selecting another agent.
@@ -61,7 +48,7 @@ def build_roster(configured: list[dict], panes: list[dict], *, include_terminals
                  can_message=None) -> list[dict]:
     """`can_message(pane) -> bool` is the caller's authority for CONFIGURED channels (the web
     app asks the daemon for process evidence); without it the status heuristic is used."""
-    can_message = can_message or is_agent_pane
+    can_message = can_message or is_lane
     rows = []
     used = set()
     for config in configured:
@@ -83,11 +70,11 @@ def build_roster(configured: list[dict], panes: list[dict], *, include_terminals
             "id": config["id"], "name": config["name"], "kind": config["kind"],
             "dashboard": config.get("dashboard", False),
             "online": pane is not None, "status": status,
-            "activity_group": "active" if is_lane(pane) and status in {"working", "waiting"} else "standby",
+            "activity_group": "active" if can_message(pane) and status in {"working", "waiting"} else "standby",
             "pane_id": pane.get("pane_id") if pane else None,
             "workspace": pane.get("workspace_label") if pane else None,
             "tab_label": pane.get("tab_label") if pane else None,
             "agent": pane.get("agent") if pane else None,
-            "can_message": is_lane(pane),
+            "can_message": bool(pane) and bool(can_message(pane)),
         })
     return output

@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from web.roster import build_roster, is_agent_pane, match_pane  # noqa: E402
+from web.roster import build_roster, is_lane, match_pane  # noqa: E402
 
 # Shapes measured from the live daemon (2026-10-30): the backend reports agent "" for every pane.
 DESK = {"pane_id": "%133", "agent": "", "agent_status": "working", "tab_label": "sn-desk",
@@ -20,12 +20,12 @@ COS = {"id": "cos", "name": "Front Desk", "match": "desk", "kind": "active"}
 
 class AgentPaneTests(unittest.TestCase):
     def test_a_pane_with_an_empty_agent_string_but_a_status_is_an_agent(self):
-        self.assertTrue(is_agent_pane(DESK))
-        self.assertTrue(is_agent_pane({"agent": "claude", "agent_status": None}))
+        self.assertTrue(is_lane(DESK))
+        self.assertTrue(is_lane({"agent": "claude", "agent_status": None}))
 
     def test_a_plain_shell_and_no_pane_are_not_agents(self):
-        self.assertFalse(is_agent_pane(SHELL))
-        self.assertFalse(is_agent_pane(None))
+        self.assertFalse(is_lane(SHELL))
+        self.assertFalse(is_lane(None))
 
     def test_the_desk_channel_can_message_the_live_desk_pane(self):
         row = next(r for r in build_roster([COS], [SHELL, DESK]) if r["id"] == "cos")
