@@ -269,3 +269,290 @@ async fn completing_an_already_done_task_skips_without_a_second_event() {
     assert_eq!(Some(&json!("already_completed")), out.plan.get("reason"));
     assert_eq!(1, count(&store, &task.id, "completed").await);
 }
+
+// ---- t1273: tests/test_dunk_cancelled_handoff.py, the advance_next_job half, by NAME -------
+//
+// These pin what the STORE does around the planner: it must offer the planner
+// `pending_delivery = true` for any non-cancelled handoff naming an owned open task (and for
+// a held lease), `false` for a cancelled one (exact string only), and it must execute the
+// planner's `claim`. The plan's `reason` strings ("pending_delivery", "no_assigned_work")
+// belong to `dunk_dispatch.next_job_plan`, which is NOT ported; `stand_in_plan` below
+// reproduces only the three rules these tests rely on, so a pass proves the store half, not
+// the real planner.
+
+use crate::tasks::next_job::NON_BLOCKING_HANDOFF_STATES;
+use crate::tasks::{ClaimOptions, FieldEdit};
+
+const PANE: &str = "%28";
+
+fn stand_in_plan() -> Arc<Planner> {
+    Arc::new(|input| {
+        let mut plan = Plan::new();
+        let rank = |p: &str| match p {
+            "urgent" => 0,
+            "high" => 1,
+            "medium" => 2,
+            _ => 3,
+        };
+        if input.pending_delivery {
+            plan.insert("action".into(), json!("skip"));
+            plan.insert("reason".into(), json!("pending_delivery"));
+            return plan;
+        }
+        let mut owned: Vec<&Decorated> = input
+            .tasks
+            .iter()
+            .filter(|t| t.eligible && t.assignees.iter().any(|a| a == input.pane_id))
+            .collect();
+        owned.sort_by(|a, b| {
+            rank(&a.task.priority)
+                .cmp(&rank(&b.task.priority))
+                .then(a.task.created_at.partial_cmp(&b.task.created_at).unwrap())
+        });
+        match owned.first() {
+            Some(t) => {
+                plan.insert("action".into(), json!("claim"));
+                plan.insert("task_id".into(), json!(t.task.id));
+            }
+            None => {
+                plan.insert("action".into(), json!("skip"));
+                plan.insert("reason".into(), json!("no_assigned_work"));
+            }
+        }
+        plan
+    })
+}
+
+async fn mine(store: &Tasks, title: &str, priority: &str) -> Task {
+    let t = store.add("global", title, "acceptance").await.unwrap();
+    store
+        .update(
+            &t.id,
+            FieldEdit {
+                priority: Some(priority.into()),
+                assignees: Some(vec![PANE.into()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap()
+}
+
+async fn record(store: &Tasks, task_id: &str, state: &str, message_id: &str) {
+    let mut details = Map::new();
+    details.insert("state".into(), json!(state));
+    store
+        .record_next_job_handoff(
+            task_id,
+            PANE,
+            Some("t0"),
+            Some(message_id),
+            1,
+            Some(state),
+            None,
+            Some(details),
+        )
+        .await
+        .unwrap();
+}
+
+fn caller() -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("pid".into(), json!(4321));
+    m.insert("start".into(), json!("1.0"));
+    m.insert("name".into(), json!("t461"));
+    m
+}
+
+async fn advance_from(store: &Tasks, finished: &Task) -> Plan {
+    let options = AdvanceOptions {
+        from_task: Some(finished.id.clone()),
+        caller: caller(),
+        ..Default::default()
+    };
+    store
+        .advance_next_job(PANE, "completion", options, stand_in_plan())
+        .await
+        .unwrap()
+        .plan
+}
+
+fn text<'a>(plan: &'a Plan, key: &str) -> &'a str {
+    plan.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// The shared body of the "still blocks" cases: finished A, waiting B, a historical intent
+/// H in `state`; the planner must see pending_delivery and skip.
+async fn blocked_by_state(tag: &str, state: &str) {
+    let store = store(tag).await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    mine(&store, "B next job", "high").await;
+    let old = mine(&store, "H historical intent", "low").await;
+    record(&store, &old.id, state, "m-hist").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("skip", text(&plan, "action"), "{plan:?}");
+    assert_eq!("pending_delivery", text(&plan, "reason"), "state {state:?}");
+}
+
+#[tokio::test]
+async fn test_cancelled_historical_intent_does_not_block_the_next_job() {
+    let store = store("py-cancelled-ok").await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let waiting = mine(&store, "B next job", "high").await;
+    let old = mine(&store, "H historical intent", "low").await;
+    record(&store, &old.id, "cancelled", "m-hist").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("claim", text(&plan, "action"), "{plan:?}");
+    assert_eq!(waiting.id, text(&plan, "task_id"));
+    assert_eq!("in_progress", store.get(&waiting.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_cancelled_intent_on_the_completed_task_does_not_block() {
+    let store = store("py-cancelled-on-completed").await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let waiting = mine(&store, "B next job", "high").await;
+    record(&store, &finished.id, "cancelled", "m-hist").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("claim", text(&plan, "action"), "{plan:?}");
+    assert_eq!(waiting.id, text(&plan, "task_id"));
+}
+
+#[tokio::test]
+async fn test_control_without_any_historical_intent_also_claims() {
+    let store = store("py-control").await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let waiting = mine(&store, "B next job", "high").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("claim", text(&plan, "action"), "{plan:?}");
+    assert_eq!(waiting.id, text(&plan, "task_id"));
+}
+
+#[tokio::test]
+async fn test_pending_intent_still_blocks() {
+    blocked_by_state("py-pending", "pending").await;
+}
+
+#[tokio::test]
+async fn test_sent_intent_still_blocks() {
+    blocked_by_state("py-sent", "sent").await;
+}
+
+#[tokio::test]
+async fn test_started_intent_still_blocks() {
+    blocked_by_state("py-started", "started").await;
+}
+
+#[tokio::test]
+async fn test_failed_intent_still_blocks() {
+    blocked_by_state("py-failed", "failed").await;
+}
+
+#[tokio::test]
+async fn test_uncertain_intent_still_blocks() {
+    blocked_by_state("py-uncertain", "uncertain").await;
+}
+
+#[tokio::test]
+async fn test_case_variant_of_cancelled_still_blocks() {
+    blocked_by_state("py-case-variant", "CANCELLED").await;
+}
+
+#[tokio::test]
+async fn test_whitespace_padded_cancelled_still_blocks() {
+    blocked_by_state("py-padded", " cancelled ").await;
+}
+
+#[tokio::test]
+async fn test_mixed_case_cancelled_still_blocks() {
+    blocked_by_state("py-mixed", "Cancelled").await;
+}
+
+#[tokio::test]
+async fn test_empty_state_still_blocks() {
+    blocked_by_state("py-empty", "").await;
+}
+
+#[tokio::test]
+async fn test_unknown_state_blocks_because_it_is_not_proven_terminal() {
+    blocked_by_state("py-unknown", "delivered-to-a-place-we-do-not-know").await;
+}
+
+#[test]
+fn test_active_handoffs_matches_the_delivery_workers_skip_set() {
+    // The Python reads dunk_next_job's source for ("started", "undeliverable", "cancelled")
+    // and asserts the non-blocking set is {"cancelled"}. Rust has no worker source to read
+    // (NextJobs is unported); the second half is the part that is portable.
+    assert_eq!(vec!["cancelled"], NON_BLOCKING_HANDOFF_STATES.to_vec());
+}
+
+#[tokio::test]
+async fn test_held_lease_still_blocks() {
+    let store = store("py-held-lease").await;
+    let held = mine(&store, "B held by me", "high").await;
+    store
+        .claim_next(
+            "global",
+            PANE,
+            ClaimOptions {
+                caller: Some((4321, Some("1.0".into()), Some("t461".into()))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!("in_progress", store.get(&held.id).await.unwrap().status);
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("skip", text(&plan, "action"), "{plan:?}");
+    assert_eq!("in_progress", store.get(&held.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_no_assigned_work_is_still_an_honest_skip() {
+    let store = store("py-no-work").await;
+    let finished = mine(&store, "A finish me", "urgent").await;
+    let plan = advance_from(&store, &finished).await;
+    assert_eq!("skip", text(&plan, "action"), "{plan:?}");
+    assert!(
+        ["no_assigned_work", "no_work"].contains(&text(&plan, "reason")),
+        "{plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_active_handoffs_excludes_only_cancelled() {
+    let store = store("py-active-excludes").await;
+    let keep = mine(&store, "keep", "high").await;
+    let drop = mine(&store, "drop", "high").await;
+    record(&store, &keep.id, "sent", "m-keep").await;
+    record(&store, &drop.id, "cancelled", "m-drop").await;
+    let owned = vec![keep.id.clone(), drop.id.clone()];
+    let active = store.active_handoffs(PANE, &owned).await.unwrap();
+    let ids: Vec<&str> = active
+        .iter()
+        .filter_map(|h| h.get("message_id").and_then(Value::as_str))
+        .collect();
+    assert_eq!(vec!["m-keep"], ids);
+}
+
+#[tokio::test]
+async fn test_active_handoffs_ignores_tasks_the_pane_does_not_own() {
+    let store = store("py-active-ignores").await;
+    let other = store.add("global", "not mine", "x").await.unwrap();
+    store
+        .update(
+            &other.id,
+            FieldEdit {
+                priority: Some("high".into()),
+                assignees: Some(vec!["%99".into()]),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    record(&store, &other.id, "sent", "m-other").await;
+    assert!(store.active_handoffs(PANE, &[]).await.unwrap().is_empty());
+}
