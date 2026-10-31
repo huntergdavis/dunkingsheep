@@ -1,0 +1,16 @@
+usage: dunkingsheep task complete [-h] [--by BY]
+                                  [--verdict {accept,needs-fix}] [--unmerged]
+                                  id
+
+positional arguments:
+  id
+
+options:
+  -h, --help            show this help message and exit
+  --by BY
+  --verdict {accept,needs-fix}
+                        review tasks: the verdict (recorded from your bound
+                        lane)
+  --unmerged            the work is done but its PR is NOT on main (a stacked
+                        branch): dependents stay closed until the merge is
+                        recorded (t906)

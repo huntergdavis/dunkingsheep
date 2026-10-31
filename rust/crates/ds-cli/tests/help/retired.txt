@@ -1,0 +1,10 @@
+usage: dunkingsheep retired [-h] <action> ...
+
+positional arguments:
+  <action>
+    retire    stop paging about a pane and stop feeding it (superuser)
+    unretire  bring a pane back
+    list      the retired panes
+
+options:
+  -h, --help  show this help message and exit

@@ -1,0 +1,19 @@
+usage: dunkingsheep inbox send [-h] [--subject SUBJECT] [--attach PATH]
+                               [--no-notify] [--literal] [--body-file PATH]
+                               to [body ...]
+
+positional arguments:
+  to
+  body
+
+options:
+  -h, --help            show this help message and exit
+  --subject, -s SUBJECT
+  --attach, -a PATH     attach a local file (repeatable)
+  --no-notify           do not nudge the recipient's pane
+  --literal             send body text that contains shell-substitution syntax
+                        ($( ${ or a backtick)
+  --body-file PATH      read the body from a file ('-' for stdin): immune to
+                        shell substitution
+
+example: dunkingsheep inbox send reviewer 'PR 12 is ready' -s 'review'

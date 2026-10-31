@@ -226,6 +226,43 @@ where
 {
     match try_parse(argv) {
         Ok(ns) => ns,
-        Err(error) => error.exit(),
+        Err(error) => {
+            // `--help` prints argparse's text, not clap's (t1220). clap names the command
+            // in its usage line ("Usage: dunkingsheep inbox send ..."), which is how the
+            // path is recovered without re-implementing clap's argv walk.
+            if error.kind() == clap::error::ErrorKind::DisplayHelp {
+                if let Some(text) = argparse_help(&error.to_string()) {
+                    print!("{text}");
+                    std::process::exit(0);
+                }
+            }
+            error.exit()
+        }
     }
+}
+
+/// argparse's help for the command whose clap help text is `clap_help`, or `None` when the
+/// path cannot be recovered (the caller then falls back to clap's text).
+pub fn argparse_help(clap_help: &str) -> Option<String> {
+    let usage = clap_help.lines().find_map(|l| l.strip_prefix("Usage: "))?;
+    let mut words = usage.split_whitespace();
+    if words.next()? != ROOT.name {
+        return None;
+    }
+    let mut cmd: &'static Cmd = &ROOT;
+    let mut path: Vec<&str> = Vec::new();
+    for word in words {
+        match cmd
+            .subs
+            .iter()
+            .find(|s| s.name == word || s.aliases.contains(&word))
+        {
+            Some(sub) => {
+                cmd = sub;
+                path.push(sub.name);
+            }
+            None => break,
+        }
+    }
+    crate::render::help_for(&ROOT, &path, crate::render::columns())
 }

@@ -1,0 +1,8 @@
+usage: dunkingsheep context get [-h] [--global] key
+
+positional arguments:
+  key
+
+options:
+  -h, --help  show this help message and exit
+  --global

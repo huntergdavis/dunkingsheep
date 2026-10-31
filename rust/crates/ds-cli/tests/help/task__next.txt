@@ -1,0 +1,10 @@
+usage: dunkingsheep task next [-h] [--lease SECONDS] [--allow-busy] [scope]
+
+positional arguments:
+  scope            'global' (default), 'self', 'auto', 'mine' (only work
+                   assigned to you), or a pane id
+
+options:
+  -h, --help       show this help message and exit
+  --lease SECONDS
+  --allow-busy     take a second task while already holding in-progress work

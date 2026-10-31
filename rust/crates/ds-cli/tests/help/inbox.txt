@@ -1,0 +1,23 @@
+usage: dunkingsheep inbox [-h] <subcommand> ...
+
+Machine-to-machine messaging. A message is stored for the recipient agent to
+read, so it cannot collide with a human typing, cannot stick half-sent, and
+has no size limit.
+
+positional arguments:
+  <subcommand>
+    count       how many messages are waiting
+    send        put a message in an agent's inbox
+    list        summaries of waiting messages
+    read        read waiting messages and mark them read
+    recover     replay the latest delivered batch after a lost read response
+    archive     archive a mailbox in bulk (no deletion)
+    status      state of one message by id
+    ack         mark messages handled
+    cancel      withdraw unread messages you sent
+    delete      delete messages and their attachments
+    stats       unread counts for every mailbox
+    fetch       write an attachment to a local directory
+
+options:
+  -h, --help    show this help message and exit

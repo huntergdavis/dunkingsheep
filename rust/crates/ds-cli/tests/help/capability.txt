@@ -1,0 +1,9 @@
+usage: dunkingsheep capability [-h] target
+
+positional arguments:
+  target
+
+options:
+  -h, --help  show this help message and exit
+
+example: dunkingsheep capability '%9'

@@ -1,0 +1,30 @@
+usage: dunkingsheep add [-h] [--target TARGET] [--text TEXT] [--every EVERY]
+                        [--name NAME] [--only-idle] [--max-sends MAX_SENDS]
+                        [--skip-if-unconsumed] [--ignore-typing] [--no-start]
+
+Create a dunk that types TEXT + Enter into TARGET every EVERY minutes.
+
+options:
+  -h, --help            show this help message and exit
+  --target, -T TARGET   pane id, 'self', or a unique label substring
+  --text, -t TEXT       text to send (default 'continue'); {id} etc. are
+                        expanded
+  --every, -e, --interval EVERY
+                        interval: minutes, or e.g. 90s / 1.5h (default 10)
+  --name, -n NAME       label for the dunk
+  --only-idle           hold each send until the target agent is idle
+  --max-sends MAX_SENDS
+                        remove the dunk after N sends
+  --skip-if-unconsumed  backpressure: skip a send if the previous one was
+                        never picked up
+  --ignore-typing       send even while someone is typing in the target's
+                        input box (default: hold and re-check every minute)
+  --no-start            create it stopped
+
+examples:
+  dunkingsheep add -T "Codex Site" -e 15 -t continue
+  dunkingsheep add -T w8:p3 -e 1.5h -t "status report please" -n hourly
+  dunkingsheep add -T self -e 30 --max-sends 1 -t "check CI now"
+  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \
+      -t "If the backlog is done: dunkingsheep remove {id}. Else continue."
+placeholders in TEXT: {id} {name} {count} {target} {interval} {time} {date}

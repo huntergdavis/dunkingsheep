@@ -1,0 +1,9 @@
+usage: dunkingsheep turn [-h] <start|end> ...
+
+positional arguments:
+  <start|end>
+    start      mark the pane busy until turn end
+    end        end the busy turn and release the hold
+
+options:
+  -h, --help   show this help message and exit

@@ -1,0 +1,15 @@
+usage: dunkingsheep new-tab [-h] [--workspace WORKSPACE] [--label LABEL]
+                            [--cwd CWD] [--run COMMAND] [--focus]
+
+options:
+  -h, --help            show this help message and exit
+  --workspace, -w WORKSPACE
+                        id, label, substring or 'self' (default: own
+                        workspace)
+  --label, -l LABEL     name it (how you will target it later)
+  --cwd CWD             working directory for the new shell
+  --run, -r COMMAND     command to type + Enter into the new pane, e.g.
+                        'claude'
+  --focus               switch the view to it
+
+example: dunkingsheep new-tab -w Site -l writer -r 'codex'

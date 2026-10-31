@@ -1,0 +1,9 @@
+usage: dunkingsheep context retire [-h] [--reason REASON] [--global] slug
+
+positional arguments:
+  slug
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON
+  --global

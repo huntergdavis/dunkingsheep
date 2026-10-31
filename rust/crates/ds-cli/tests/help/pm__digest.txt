@@ -1,0 +1,13 @@
+usage: dunkingsheep pm digest [-h] [--to TO] [--demo] project
+
+positional arguments:
+  project
+
+options:
+  -h, --help  show this help message and exit
+  --to TO     VP pane (default from routing / DUNKINGSHEEP_VP_PANE)
+  --demo      label the subject DEMO (a shape demo carries live numbers, not
+              template ones)
+
+example: echo '{"changed":["t6 240/286"],"numbers":[]}' | dunkingsheep pm
+digest poolrad

@@ -1,0 +1,11 @@
+usage: dunkingsheep dispatch add [-h] [--task-id TASK_ID] [--lane LANE]
+                                 brief [brief ...]
+
+positional arguments:
+  brief
+
+options:
+  -h, --help            show this help message and exit
+  --task-id, -t TASK_ID
+                        the task this assignment advances
+  --lane LANE           reserve it for one lane (pane id or name)

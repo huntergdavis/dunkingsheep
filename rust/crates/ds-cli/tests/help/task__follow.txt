@@ -1,0 +1,7 @@
+usage: dunkingsheep task follow [-h] [scope]
+
+positional arguments:
+  scope       'global' (default) or 'self'
+
+options:
+  -h, --help  show this help message and exit

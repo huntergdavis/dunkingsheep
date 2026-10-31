@@ -1,0 +1,10 @@
+usage: dunkingsheep github [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    protect     branch protection on main: required review(s), the
+                dunkingsheep/review check, auto-merge
+    wrappers    install the gh wrapper and git credential helper for lanes
+
+options:
+  -h, --help    show this help message and exit

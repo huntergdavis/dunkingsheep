@@ -1,0 +1,9 @@
+usage: dunkingsheep rename [-h] {workspace,tab,pane} target label
+
+positional arguments:
+  {workspace,tab,pane}
+  target                id, label, unique substring or 'self'
+  label
+
+options:
+  -h, --help            show this help message and exit

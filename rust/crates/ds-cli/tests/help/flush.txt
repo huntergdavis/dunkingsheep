@@ -1,0 +1,7 @@
+usage: dunkingsheep flush [-h] target
+
+positional arguments:
+  target
+
+options:
+  -h, --help  show this help message and exit
