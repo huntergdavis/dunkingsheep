@@ -47,7 +47,7 @@ pub fn fetch_limit(limit: usize) -> usize {
 pub fn rank_score(bm25: f64, updated_at: f64, now: f64) -> f64 {
     let age_days = ((now - updated_at) / 86_400.0).max(0.0);
     let score = -bm25 * 100.0 + 0.25 * (-age_days / 30.0).exp();
-    (score * 10_000.0).round() / 10_000.0
+    super::pure::round_places(score, 4)
 }
 
 /// One recall row, with the fields the fixture pins.

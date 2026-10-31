@@ -90,6 +90,14 @@ fn py_strip(text: &str) -> &str {
 pub const DEFAULT_CHUNK_CHARS: usize = 2_000;
 pub const DEFAULT_OVERLAP_CHARS: usize = 200;
 
+/// Python's `round(value, places)`: the EXACT binary value rounded half-to-even. Formatting to a
+/// fixed number of places is exact in Rust too, so format-then-parse matches, where
+/// `(v * 10^n).round() / 10^n` does not (it multiplies in floating point first and rounds half
+/// away from zero: 11.085 -> 11.08 here but 11.09 in Python; t1142 review).
+pub fn round_places(value: f64, places: usize) -> f64 {
+    format!("{value:.places$}").parse().unwrap_or(value)
+}
+
 /// `chunk_text`: split into overlapping chunks at whitespace boundaries.
 ///
 /// Character offsets, not bytes: the Python indexes `str`, and a multi-byte
