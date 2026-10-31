@@ -39,6 +39,8 @@ owner-credentials
 *-credentials
 *.pem
 *token*
+# help goldens for the token commands are plain help text, not secrets (t1243)
+!rust/crates/ds-cli/tests/help/*token*
 .env
 *.key
 

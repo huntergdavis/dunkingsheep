@@ -1,0 +1,10 @@
+usage: dunkingsheep token [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    issue       mint a token (owner only; printed once)
+    revoke      revoke every token with this label
+    list        labels and roles of issued tokens
+
+options:
+  -h, --help    show this help message and exit
