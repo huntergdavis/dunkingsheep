@@ -3,7 +3,7 @@
 //! `handle_key`, `handle_task_key`, `quit_and_shutdown`).
 //!
 //! NOT ported here: `connect` (needs the daemon client wiring), the modals' drawing,
-//! the dunk key `c` (`pick_target`), and every `draw*`. The task-view keys that open a modal (`b e a`) go through [`LineModal`].
+//! and every `draw*` (the target modal's drawing included). The task-view keys that open a modal (`b e a`) go through [`LineModal`].
 
 use serde_json::{json, Map, Value};
 
@@ -29,6 +29,8 @@ pub trait LineModal {
     fn line_modal(&mut self, label: &str, default: &str) -> Option<String>;
     /// `text_modal(initial_text)`: the multiline editor; `None` means cancelled.
     fn text_modal(&mut self, initial_text: &str) -> Option<String>;
+    /// `target_modal(panes)`: the chosen pane record, `None` when cancelled.
+    fn target_modal(&mut self, panes: &[Value]) -> Option<Value>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +253,7 @@ impl<B: Backend> Model<B> {
                     self.rpc("toggle_dunk", args(&[("id", json!(id))]), now);
                 }
             }
+            Key::Char('c') => self.pick_target(modal, now),
             Key::Char('i') => self.edit_interval(modal, now),
             Key::Char('e') => self.edit_text(modal, now),
             Key::Char('n') => self.edit_name(modal, now),
@@ -288,6 +291,32 @@ impl<B: Backend> Model<B> {
         call.insert("id".into(), id.clone());
         call.insert(field.into(), value);
         self.rpc("update_dunk", call, now);
+    }
+
+    /// Choose a terminal pane to target (`pick_target`).
+    pub fn pick_target(&mut self, modal: &mut dyn LineModal, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let panes: Vec<Value> = self
+            .rpc("list_panes", Map::new(), now)
+            .and_then(|r| r.get("panes").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        if panes.is_empty() {
+            let status = self.rpc("status", Map::new(), now);
+            let hint = status
+                .as_ref()
+                .and_then(|s| s.get("herdr_hint"))
+                .filter(|h| truthy(h))
+                .map(plain)
+                .unwrap_or_else(|| "No panes (is the backend reachable?)".to_string());
+            self.flash(&hint, 4.0, now);
+            return;
+        }
+        if let Some(chosen) = modal.target_modal(&panes) {
+            let pane = chosen.get("pane_id").cloned().unwrap_or(Value::Null);
+            self.update_dunk(&dunk["id"], "target", pane, now);
+        }
     }
 
     pub fn edit_interval(&mut self, modal: &mut dyn LineModal, now: f64) {
@@ -587,6 +616,9 @@ mod tests {
         fn text_modal(&mut self, _: &str) -> Option<String> {
             self.0.clone()
         }
+        fn target_modal(&mut self, panes: &[Value]) -> Option<Value> {
+            self.0.as_ref().and_then(|_| panes.first().cloned())
+        }
     }
 
     fn model(replies: Vec<Result<Value, RpcError>>) -> Model<Fake> {
@@ -747,6 +779,24 @@ mod tests {
         m.handle_key(Key::Char('m'), &mut Says(Some("x1".into())), 0.0);
         assert_eq!(m.backend.calls.len(), calls);
         assert_eq!(m.message, "Max sends must be a whole number");
+    }
+
+    #[test]
+    fn pick_target_updates_the_target_or_flashes_the_hint_when_no_panes() {
+        let mut m = with_dunk(json!({"id": "a"}));
+        m.backend.replies = vec![Ok(json!({"panes": [{"pane_id": "%7"}]}))];
+        m.handle_key(Key::Char('c'), &mut Says(Some("x".into())), 0.0);
+        let (cmd, a) = m.backend.calls.last().unwrap();
+        assert_eq!((cmd.as_str(), &a["target"]), ("update_dunk", &json!("%7")));
+        m.backend.replies = vec![
+            Ok(json!({"panes": []})),
+            Ok(json!({"herdr_hint": "start herdr"})),
+        ];
+        m.handle_key(Key::Char('c'), &mut Says(Some("x".into())), 0.0);
+        assert_eq!(m.message, "start herdr");
+        m.backend.replies = vec![Ok(json!({})), Ok(json!({}))];
+        m.handle_key(Key::Char('c'), &mut Says(None), 0.0);
+        assert_eq!(m.message, "No panes (is the backend reachable?)");
     }
 
     #[test]
