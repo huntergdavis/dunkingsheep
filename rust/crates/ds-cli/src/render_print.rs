@@ -400,10 +400,11 @@ pub fn render_load(r: &Value) -> String {
 
 /// `print_pm_digest`.
 pub fn render_pm_digest(r: &Value) -> String {
-    let action = if truthy(get(r, "action")) {
-        py_str(get(r, "action"))
-    } else {
-        "updated".into()
+    // `r.get('action', 'updated')`: the default applies only when the key is ABSENT; a
+    // present null prints "None" and a present "" prints "" (review t1279).
+    let action = match r.get("action") {
+        Some(v) => py_str(v),
+        None => "updated".into(),
     };
     format!(
         "{action} {} -> {} ({}, {} bytes)\n",
@@ -1885,6 +1886,26 @@ pub fn print_dunks(dunks: &[Value]) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pm_digest_action_defaults_only_when_the_key_is_absent() {
+        // Python: r.get('action', 'updated') -> absent: updated; null: None; "": empty.
+        let base = |action: Option<Value>| {
+            let mut v =
+                json!({"digest_id": "d1", "destination": "pm", "state": "queued", "body_bytes": 5});
+            if let Some(a) = action {
+                v["action"] = a;
+            }
+            render_pm_digest(&v)
+        };
+        assert_eq!(base(None), "updated d1 -> pm (queued, 5 bytes)\n");
+        assert_eq!(base(Some(Value::Null)), "None d1 -> pm (queued, 5 bytes)\n");
+        assert_eq!(base(Some(json!(""))), " d1 -> pm (queued, 5 bytes)\n");
+        assert_eq!(
+            base(Some(json!("created"))),
+            "created d1 -> pm (queued, 5 bytes)\n"
+        );
+    }
 
     #[test]
     fn clip_cuts_with_an_ellipsis() {
