@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use super::ingest::SCHEMA_VERSION;
+use super::pure::round_places;
 use super::recall::{recall, Filters, Hit};
 use crate::db::{map_sqlite, ReadPool};
 use crate::error::DunkError;
@@ -207,10 +208,10 @@ impl QueryStats {
             // Python: min(len-1, int(round(fraction * (len-1)))), round-half-even.
             let position = fraction * (values.len() - 1) as f64;
             let index = (position.round_ties_even() as usize).min(values.len() - 1);
-            (values[index] * 100.0).round_ties_even() / 100.0
+            round_places(values[index], 2)
         };
         json!({"count": inner.count, "p50": pick(0.5), "p95": pick(0.95), "p99": pick(0.99),
-               "max": (values[values.len() - 1] * 100.0).round_ties_even() / 100.0,
+               "max": round_places(values[values.len() - 1], 2),
                "errors": inner.errors, "cache_hits": inner.cache_hits})
     }
 }
