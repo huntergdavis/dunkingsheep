@@ -456,3 +456,36 @@ async fn reap_a_dead_caller_requeues_and_another_live_lease_keeps_the_task_in_pr
     assert_eq!(gone[0].reason, "expired");
     assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
 }
+
+#[tokio::test]
+async fn two_claimers_on_one_file_cannot_both_win_the_same_exclusive_task() {
+    let first = store("race").await;
+    let second = Tasks::open(first.path()).await.unwrap();
+    let task = first.add("global", "only one", "").await.unwrap();
+    let (a, b) = tokio::join!(
+        first.claim_next("global", "%1", ClaimOptions::default()),
+        second.claim_next("global", "%2", ClaimOptions::default()),
+    );
+    let outcomes = [a.unwrap(), b.unwrap()];
+    let winners: Vec<&ClaimOutcome> = outcomes
+        .iter()
+        .filter(|o| matches!(o, ClaimOutcome::Claimed { .. }))
+        .collect();
+    assert_eq!(
+        winners.len(),
+        1,
+        "BEGIN IMMEDIATE: exactly one claimer wins: {outcomes:?}"
+    );
+    assert_eq!(first.leases_for(&task.id, None).await.unwrap().len(), 1);
+    let loser = outcomes
+        .iter()
+        .find(|o| matches!(o, ClaimOutcome::Refused { .. }))
+        .unwrap();
+    let ClaimOutcome::Refused { refusal, .. } = loser else {
+        unreachable!()
+    };
+    assert_eq!(
+        refusal.reason, "owned_elsewhere",
+        "the loser sees the winner's commit"
+    );
+}
