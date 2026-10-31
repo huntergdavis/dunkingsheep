@@ -91,6 +91,81 @@ def _unavailable(error: str) -> dict:
 TASK_LIST_LIMIT = 1000
 
 
+def _owner_question(block_reason) -> str | None:
+    """The lane's question, verbatim, from a `needs-owner:` block reason (t997).
+
+    The fleet's convention is `block <id> --reason "needs-owner: <one question>"`, so the
+    text after the prefix IS the question. A blocked task whose reason does not carry the
+    prefix is not a question for the owner and returns None rather than a paraphrase.
+    """
+    text = str(block_reason or "").strip()
+    if not text.startswith("needs-owner:"):
+        return None
+    question = text[len("needs-owner:"):].strip()
+    return question or None
+
+
+def _dependents(tasks) -> dict:
+    """task id -> the ids that declare it in `depends_on` (what an answer unblocks)."""
+    out: dict[str, list] = {}
+    for task in tasks or []:
+        for dep in task.get("depends_on") or []:
+            out.setdefault(str(dep), []).append(task.get("id"))
+    return out
+
+
+def _is_owner_mailbox(created_by: str) -> bool:
+    """`owner`, or `owner@<transport>`: the owner mailbox and nothing that merely contains
+    the word (a worktree lane `owner-wt-x`, a `co-owner`)."""
+    return created_by == "owner" or created_by.startswith("owner@")
+
+
+def answer_question(client, task_id: str, reply: str):
+    """Record the owner's reply on the task, then unblock it (t997).
+
+    `task_unblock` takes no note, so the answer is written first as an `owner_answer`
+    event (`task_note`), where the lane reads it; if the unblock then fails the reply is
+    still on the record and the task is still blocked, never the reverse.
+    """
+    client.call("task_note", id=task_id, event="owner_answer", reason=reply)
+    return client.call("task_unblock", id=task_id)
+
+
+def defer_question(client, task_id: str):
+    """'Not now': lower the priority, nothing else (the lane still waits)."""
+    return client.call("task_update", id=task_id, priority="low")
+
+
+def _asks_board(client, now: datetime) -> dict:
+    """'What I asked for': tasks created from the owner mailbox in the last 24h (t997).
+
+    DESK_DESIGN 4.1 asks for the owner's own recent asks with status chips. The filter is
+    the row's own provenance (`created_by` naming the owner mailbox) and its created_at, so
+    the tile is a query over the task board - not a model's memory of the conversation.
+    """
+    try:
+        listing = client.call("task_list", include_done=True, limit=TASK_LIST_LIMIT)
+    except Exception as exc:  # noqa: BLE001 - a missing source is reported, not raised
+        return _unavailable(type(exc).__name__)
+    tasks = listing.get("tasks") if isinstance(listing, dict) else listing
+    if not isinstance(tasks, list):
+        return _unavailable("invalid task list")
+    cutoff = now.timestamp() - 24 * 3600
+    asks = []
+    for task in tasks:
+        created_by = str(task.get("created_by") or "")
+        created_at = task.get("created_at")
+        if not _is_owner_mailbox(created_by) or not isinstance(created_at, (int, float)):
+            continue
+        if created_at < cutoff:
+            continue
+        asks.append({"id": task.get("id"), "title": task.get("title"),
+                     "status": str(task.get("status", "unknown")),
+                     "age_s": _age_seconds(now, created_at)})
+    asks.sort(key=lambda row: row["age_s"] if row["age_s"] is not None else 10**9)
+    return {"asks": asks, "count": len(asks), "window_hours": 24}
+
+
 def _task_board(client, now: datetime) -> dict:
     # The reference list is fetched with an explicit completeness contract:
     # TASK_LIST_LIMIT is well above anything the desk has ever queued, and if
@@ -102,6 +177,13 @@ def _task_board(client, now: datetime) -> dict:
         listing = client.call("task_list", include_done=False, limit=TASK_LIST_LIMIT)
     except Exception as exc:  # noqa: BLE001 - a missing source is reported, not raised
         return _unavailable(type(exc).__name__)
+    # t996: throughput comes from the daemon's own buckets (task_metrics), and a
+    # failure there must not take the backlog tile with it.
+    try:
+        throughput = _throughput(client.call("task_metrics", window_s=86400), now)
+    except Exception as exc:  # noqa: BLE001
+        throughput = {"completed_current_bucket": None, "completed_last_24h": None,
+                      "error": type(exc).__name__}
     tasks = listing.get("tasks") if isinstance(listing, dict) else listing
     if not isinstance(tasks, list):
         return _unavailable("invalid task list")
@@ -126,41 +208,48 @@ def _task_board(client, now: datetime) -> dict:
             "claimable": bool(task.get("claimable")),
             "attempts": task.get("attempts"),
             "needs_owner": bool(task.get("needs_owner")) or "owner" in (task.get("assignees") or []),
+            # DESK_DESIGN 4.1 (t997): the desk shows the LANE'S QUESTION VERBATIM, not a
+            # summary of it, and which tasks are waiting on the answer. Both come from the
+            # row itself - the reason is the block_reason text after 'needs-owner:', and
+            # the dependents are the tasks that name this one in depends_on - so the board
+            # never paraphrases a question it is asking the owner to answer.
+            "needs_owner_question": _owner_question(task.get("block_reason")),
         })
+    dependents = _dependents(tasks)
+    for item in items:
+        item["blocks"] = dependents.get(item["id"], [])
     items.sort(key=lambda row: (PRIORITY_RANK.get(row["priority"], 9),
                                 -(row["age_s"] or 0), str(row["id"])))
     load: dict[str, int] = {}
     for task in items:
         for assignee in task["assignees"]:
             load[assignee] = load.get(assignee, 0) + 1
-    # Owner #1708: unowned means leader-owned. Active global tasks with no
-    # assignee are the leader's carried work (t407 F1), and so is a task
-    # explicitly assigned to the leader pane; the worker lanes' assigned
-    # tasks are not.
-    # Same leader resolution as the corrected DS66 counterpart (t408 F2):
-    # the configured VP pane, falling back to the product default so the two
-    # halves of the metric cannot disagree when the env is absent.
-    from dunk_pm import DEFAULT_VP_PANE as _product_default_vp_pane
-    leader_pane = os.environ.get("DUNKINGSHEEP_VP_PANE", _product_default_vp_pane)
-    held = [row for row in items
-            if row["status"] in ACTIVE_STATUSES and row["scope"] == "global"
-            and (not row["assignees"]
-                 or (leader_pane and leader_pane in row["assignees"]))]
-    if len(items) >= TASK_LIST_LIMIT:
-        # t408 F3: a truncated reference list must not back a definitive
-        # leader count; the daemon aggregate is the honest source here.
-        leader_held = {"count": None, "oldest_age_s": None, "ages_unknown": None,
-                       "complete": False}
-    else:
-        # t408 F2: an unknown created_at must not read as a known zero age;
-        # zero is only valid for a known age of zero. t118 F1: when any held
-        # timestamp is unknown, the max known age is a lower bound, so the
-        # payload exposes the coverage instead of implying a definitive oldest.
-        known_ages = [row["age_s"] for row in held if row["age_s"] is not None]
-        unknown = len(held) - len(known_ages)
-        leader_held = {"count": len(held), "oldest_age_s": max(known_ages)
-                                                        if known_ages else None,
-                       "ages_unknown": unknown, "complete": True}
+    # t996: the VP-era "leader held" tile is gone. It counted the unassigned
+    # queue as a person's carried work - there is no leader any more (flat
+    # fleet), so the tile reported a role that does not exist and the number it
+    # showed was just "open, global" under another name. What replaces it is
+    # measured: the backlog by priority with the OLDEST age, because that is the
+    # question an operator actually asks ("is anything rotting?").
+    #
+    # A truncated list must not back a definitive number (t408 F3), so coverage
+    # travels with it exactly as it did before.
+    complete = len(items) < TASK_LIST_LIMIT
+    backlog = {"by_priority": {}, "open": 0, "oldest_age_s": None,
+               "ages_unknown": 0, "complete": complete}
+    for status in ACTIVE_STATUSES:
+        backlog["by_priority"][status] = {}
+    for row in items:
+        if row["status"] not in ACTIVE_STATUSES:
+            continue
+        bucket = backlog["by_priority"].setdefault(row["status"], {})
+        bucket[row["priority"] or "unknown"] = bucket.get(row["priority"] or "unknown", 0) + 1
+        backlog["open"] += 1
+    active_ages = [row["age_s"] for row in items
+                   if row["status"] in ACTIVE_STATUSES and row["age_s"] is not None]
+    backlog["ages_unknown"] = backlog["open"] - len(active_ages)
+    # Zero is only a valid age when the age is known (t408 F2); an unknown
+    # timestamp makes the max a lower bound, and `ages_unknown` says by how much.
+    backlog["oldest_age_s"] = max(active_ages) if active_ages else None
     depth = sum(counts.get(status, 0) for status in ACTIVE_STATUSES)
     return {
         "state": "ok",
@@ -169,8 +258,76 @@ def _task_board(client, now: datetime) -> dict:
         "items": items,
         "by_assignee": [{"assignee": name, "count": count}
                          for name, count in sorted(load.items(), key=lambda row: (-row[1], row[0]))],
-        "leader_held": leader_held,
+        "backlog": backlog,
+        "throughput": throughput,
     }
+
+
+def _throughput(metrics: dict, now: datetime | None = None) -> dict:
+    """Completed last hour / last 24 h from `task_metrics` (t996).
+
+    The daemon's payload is `{throughput: {completed: N, buckets: [{bucket, completed}]}}`
+    where `bucket` is a unix second. Read from there rather than counted here: the desk
+    must not re-derive what the daemon already measures, or the two numbers will
+    disagree and nobody will know which is the measurement.
+
+    The buckets are hourly, so there is no trailing hour here: the tile reports the
+    CURRENT (partial) bucket under that name, with its start time, never as "the last
+    hour" (reviewer finding on #198: it read 0 twenty minutes into an hour with 12).
+    """
+    throughput = (metrics or {}).get("throughput") or {}
+    buckets = throughput.get("buckets") or []
+    if not isinstance(buckets, list) or not buckets:
+        return {"completed_current_bucket": None, "completed_last_24h": None,
+                "note": "no buckets in the metrics payload"}
+    now_s = (now or _now()).timestamp()
+    rows = [row for row in buckets
+            if isinstance(row, dict) and row.get("bucket") is not None]
+    day = [row for row in rows if now_s - float(row["bucket"]) <= 86400]
+    total = lambda rows: sum(int(row.get("completed") or 0) for row in rows)
+    # The daemon's buckets are HOURLY, so no trailing hour can be built from them:
+    # the newest bucket is the current, partial hour and is reported as exactly that.
+    newest = max(rows, key=lambda row: float(row["bucket"]), default=None)
+    current = newest if newest and now_s - float(newest["bucket"]) < 3600 else None
+    return {"completed_current_bucket": int(current.get("completed") or 0) if current else 0,
+            "bucket_started_at": float(newest["bucket"]) if newest else None,
+            "completed_last_24h": total(day),
+            "completed_in_window": throughput.get("completed"),
+            "note": "current (partial) hourly bucket; last_24h sums buckets started in 86400 s"}
+
+
+def _review_board(client, now: datetime) -> dict:
+    """PRs awaiting review, with the age of the oldest (t996).
+
+    This is the number that proves "all code reviewed" is working: a review queue
+    that has stopped moving looks exactly like a clean board otherwise.
+
+    The AGE comes from the daemon (`age_s`, measured against the daemon's clock)
+    rather than being re-derived here from a timestamp - my first version looked for
+    `created_at`, which review rows do not carry, and would have shipped a tile that
+    always said "unknown" while looking measurable.
+    """
+    try:
+        listing = client.call("review_list")
+    except Exception as exc:  # noqa: BLE001 - a missing source is reported, not raised
+        return _unavailable(type(exc).__name__)
+    rows = listing.get("reviews") if isinstance(listing, dict) else listing
+    if not isinstance(rows, list):
+        return _unavailable("invalid review list")
+    ages, unknown = [], 0
+    for row in rows:
+        age = row.get("age_s")
+        if age is None:
+            age = _age_seconds(now, row.get("created_at"))
+        if age is None:
+            unknown += 1
+        else:
+            ages.append(int(age))
+    return {"state": "ok", "review": {
+        "awaiting": len(rows),
+        "oldest_age_s": max(ages) if ages else None,
+        "ages_unknown": unknown,
+    }}
 
 
 def _dunk_board(client, now: datetime) -> dict:
@@ -212,7 +369,17 @@ def _dunk_board(client, now: datetime) -> dict:
     }
 
 
-def _pane_board(client) -> dict:
+def _pane_board(client, now: datetime | None = None) -> dict:
+    """Lanes: working / idle / dead, from the daemon's panes AND its lane registry.
+
+    t996: my first pass counted only panes whose `agent` field was set, and on the
+    live host that field is empty for every pi lane - the tile read "0 working, 0
+    idle, 0 dead" while twenty panes were doing real work. The activity is
+    `agent_status` (declared turns), and a lane the terminal backend no longer lists
+    is DEAD (`registry_gap`, t714) - not "unknown", which is what a lane with no
+    declared turn yet is. Those are three different questions and the tile must not
+    collapse them.
+    """
     try:
         panes = client.call("list_panes")
     except Exception as exc:  # noqa: BLE001
@@ -222,7 +389,7 @@ def _pane_board(client) -> dict:
         return _unavailable("invalid pane list")
     items = [{
         "pane_id": pane.get("pane_id"),
-        "agent": pane.get("agent"),
+        "agent": pane.get("agent") or "",
         "agent_status": pane.get("agent_status"),
         "agent_status_source": pane.get("agent_status_source"),
         "agent_status_reason": pane.get("agent_status_reason"),
@@ -230,11 +397,25 @@ def _pane_board(client) -> dict:
         "workspace_label": pane.get("workspace_label"),
         "tab_label": pane.get("tab_label"),
         "is_self": bool(pane.get("is_self")),
-    } for pane in rows if pane.get("agent")]
-    working = sum(1 for pane in items if (pane.get("agent_status") or "") == "working")
-    return {"state": "ok", "total": len(items), "working": working,
-            "idle": sum(p.get("agent_status") == "idle" for p in items),
-            "unknown": sum(p.get("agent_status") not in ("working", "idle") for p in items),
+    } for pane in rows]
+    working = sum(1 for pane in items if pane.get("agent_status") == "working")
+    idle = sum(1 for pane in items if pane.get("agent_status") == "idle")
+    gap = (panes or {}).get("registry_gap") or []
+    dead = [dict(row, pane_id=row.get("pane_id") or row.get("pane"))
+            for row in gap if row.get("alive") is False]
+    # A lane is a pane with a declared turn or an agent; a bare shell tab is not an
+    # unaccounted lane and is counted on its own (reviewer finding 2 on #198).
+    is_lane = lambda pane: bool(pane.get("agent")) or pane.get("agent_status") in ("working", "idle")
+    bare = sum(1 for pane in items if not is_lane(pane))
+    return {"state": "ok", "total": len(items), "working": working, "idle": idle,
+            "bare_panes": bare,
+            "dead": len(dead), "dead_items": dead,
+            # A pane the backend lists with no declared turn is unknown; a lane the
+            # registry knows and the backend does NOT list, with its process alive, is
+            # the t714 case: unreachable, and also not dead.
+            "unknown": sum(1 for pane in items if is_lane(pane)
+                           and pane.get("agent_status") not in ("working", "idle"))
+                       + sum(1 for row in gap if row.get("alive") is True),
             "items": items}
 
 
@@ -262,6 +443,38 @@ def _health_board(client) -> dict:
     }
 
 
+def _report_board(client, now: datetime) -> dict:
+    try:
+        listing = client.call("report_list")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(type(exc).__name__)
+    rows = listing.get("reports") if isinstance(listing, dict) else None
+    if not isinstance(rows, list):
+        return _unavailable("invalid report list")
+    items = [{"name": row.get("name"), "size": row.get("size"), "at": row.get("at"),
+              "age_s": _age_seconds(now, row.get("at"))} for row in rows[:5]]
+    for index, item in enumerate(items):
+        item["open"] = index == 0
+    return {"state": "ok", "count": listing.get("count", len(rows)), "items": items}
+
+
+def _poolrad_board(client) -> dict:
+    try:
+        progress = client.call("poolrad_progress")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(type(exc).__name__)
+    if not isinstance(progress, dict):
+        return _unavailable("invalid poolrad progress")
+    return {"state": "ok", "credited": progress.get("credited"),
+            "identities": progress.get("identities"),
+            "ceiling": progress.get("ceiling"),
+            "ceiling_note": progress.get("ceiling_note")
+            or "CEILING: an upper bound, not a verified denominator",
+            "credit_pending": progress.get("credit_pending"),
+            "main": progress.get("main"),
+            "queue_exported_at": progress.get("queue_exported_at")}
+
+
 # -- operations database ------------------------------------------------------
 
 
@@ -279,6 +492,7 @@ def compact(readings: dict, generated_at: str) -> dict:
         return {"source": name, "generated_at": generated_at,
                 **readings.get(name, _unavailable("missing source"))}
     tasks, panes, dunks, health, host = map(source, ("tasks", "panes", "dunks", "health", "host"))
+    reviews = readings.get("reviews") or _unavailable("missing source")
     owner = [row for row in tasks.get("items", []) if row.get("needs_owner")]
     alarms = []
     for reading in (tasks, panes, dunks, health, host):
@@ -302,21 +516,44 @@ def compact(readings: dict, generated_at: str) -> dict:
         return {"source": reading["source"], "state": reading["state"],
                 "generated_at": generated_at,
                 **{key: value if reading["state"] == "ok" else None for key, value in values.items()}}
+    # t996: the header strip, four tiles, each carrying its SOURCE and the time it
+    # was read - the same contract every other number on this board keeps, and the
+    # reason the old "56 held by the leader" could not be traced to anything.
+    withheld = (tasks.get("backlog") or {})
+    throughput = tasks.get("throughput") or {}
+    review = reviews.get("review") if isinstance(reviews, dict) else None
     return {
         "generated_at": generated_at, "interval_s": REFRESH_INTERVAL_S, "no_model": True,
         "brief": {
-            "tasks": count(tasks, open=(tasks.get("counts") or {}).get("open", 0),
-                           owner=len(owner),
-                           leader_held=(tasks.get("leader_held") or {}).get("count"),
-                           leader_held_oldest_age_s=(tasks.get("leader_held") or {}).get("oldest_age_s"),
-                           leader_held_ages_unknown=(tasks.get("leader_held") or {}).get("ages_unknown")),
+            # The throughput tile keeps its NOTE: a null with no explanation is the
+            # thing this board exists to stop showing (t996) - "no buckets" is a
+            # measurement failure, and it must be visible as one.
+            "throughput": {"source": "tasks", "generated_at": generated_at,
+                           "state": tasks["state"],
+                           **{key: value for key, value in throughput.items()
+                              if key != "error"},
+                           "error": throughput.get("error")},
+            "backlog": count(tasks, open=withheld.get("open"),
+                             by_priority=withheld.get("by_priority") or {},
+                             oldest_age_s=withheld.get("oldest_age_s"),
+                             ages_unknown=withheld.get("ages_unknown"),
+                             complete=withheld.get("complete")),
+            "review": {"source": "review_list", "generated_at": generated_at,
+                       "state": (reviews or {}).get("state", "unavailable"),
+                       "awaiting": (review or {}).get("awaiting"),
+                       "oldest_age_s": (review or {}).get("oldest_age_s"),
+                       "ages_unknown": (review or {}).get("ages_unknown")},
             "lanes": count(panes, working=panes.get("working"), idle=panes.get("idle"),
-                           unknown=panes.get("unknown")),
+                           dead=panes.get("dead"), unknown=panes.get("unknown"),
+                           bare_panes=panes.get("bare_panes")),
         },
         "attention": {"generated_at": generated_at, "alarms": alarms,
                       "owner": {"source": "tasks", "state": tasks["state"],
                                 "generated_at": generated_at, "items": owner}},
-        "reference": {"tasks": tasks, "lanes": panes, "schedules": dunks},
+        "reference": {"tasks": tasks, "lanes": panes, "schedules": dunks,
+                      "asks": readings.get("asks") or _unavailable("missing source")},
+        "reports": source("reports"),
+        "poolrad_progress": source("poolrad"),
     }
 
 
@@ -333,7 +570,11 @@ def build(client, conn: sqlite3.Connection, *, now: datetime | None = None) -> d
                "panes": lambda: _pane_board(client),
                "dunks": lambda: _dunk_board(client, now),
                "health": lambda: _health_board(client),
-               "host": lambda: _host_board(conn, now)}
+               "host": lambda: _host_board(conn, now),
+               "asks": lambda: _asks_board(client, now),
+               "reports": lambda: _report_board(client, now),
+               "poolrad": lambda: _poolrad_board(client)}
+    readers["reviews"] = lambda: _review_board(client, now)
     readings = {}
     for name, read in readers.items():
         try:

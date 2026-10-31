@@ -51,10 +51,10 @@ export default function EmergencyDock({ request }) {
     finally { sending.current = false; setBusy(false); }
   }
   return <>
-    <button className="dock-trigger" onClick={show} aria-label="Message CoS / VP" title="Message CoS / VP"><span className="nav-action-label">Message CoS / VP</span><span className="nav-action-icon" aria-hidden="true">✉</span> <kbd>Ctrl+/</kbd></button>
+    <button className="dock-trigger" onClick={show} aria-label="Message the desk" title="Message the desk"><span className="nav-action-label">Message the desk</span><span className="nav-action-icon" aria-hidden="true">✉</span> <kbd>Ctrl+/</kbd></button>
     <dialog className="message-dock" ref={dialog} aria-labelledby="dock-title"
       onCancel={event => { event.preventDefault(); setOpen(false); }} onClose={() => setOpen(false)}>
-      <header><h2 id="dock-title">Message CoS or VP</h2><button onClick={() => setOpen(false)} aria-label="Close message dock">Close</button></header>
+      <header><h2 id="dock-title">Message the desk</h2><button onClick={() => setOpen(false)} aria-label="Close message dock">Close</button></header>
       <form onSubmit={send}>
         <label>Recipient<select value={target} disabled={busy} onChange={event => { setTarget(event.target.value); setReceipt(null); setError(''); }}>
           <option value="cos">Front Desk</option>

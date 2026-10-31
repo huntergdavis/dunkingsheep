@@ -35,7 +35,17 @@ from pydantic import BaseModel, Field
 from web.character_editor import EditorStore, router as character_editor_router
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = Path(os.getenv("VP_DATA_DIR", ROOT / "data")).resolve()
+# The desk's state lives OUTSIDE the repo, always (docs/FLAT_FLEET.md 9.2 rule 4): an
+# import inside a checkout or worktree used to create data/ beside the code, and two
+# lane branches then committed auth.json and the owner's messages to a public repo
+# (2026-10-29). There is no repo-root fallback.
+DESK_DIR_DEFAULT = Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"
+# `or`, NOT os.getenv's default: an EMPTY VP_DATA_DIR (Environment=VP_DATA_DIR=, a
+# supervisor that passes an unset variable as "", `env VP_DATA_DIR= ...`) would make
+# Path("") the CURRENT WORKING DIRECTORY - i.e. the repo, when a lane imports this
+# module from a checkout, which is the 2026-10-29 incident shape. The default only
+# applies to an unset variable, so the empty case has to be handled explicitly.
+DATA = Path(os.environ.get("VP_DATA_DIR") or DESK_DIR_DEFAULT).expanduser().resolve()
 DATA.mkdir(parents=True, exist_ok=True)
 UPLOADS = DATA / "uploads"
 UPLOADS.mkdir(exist_ok=True)
@@ -44,11 +54,12 @@ AUTH = DATA / "auth.json"
 CREDENTIALS = DATA / "owner-credentials"
 CODEWHEEL_DIR = Path(os.getenv("VP_CODEWHEEL_DIR", DATA / "codewheel")).resolve()
 DUNKING_SHEEP = Path(os.getenv("DUNKING_SHEEP_DIR", ROOT))   # one repo: the daemon is beside us
-DASHBOARD_DIR = Path(os.getenv("POOLRAD_DASHBOARD_DIR", ROOT / "integrations" / "poolrad-dashboard")).resolve()
-DASHBOARD_REPO = Path(os.getenv("POOLRAD_DASHBOARD_REPO", ROOT.parent / "poolrad-decomp-opencode-ds41flash")).resolve()
-DASHBOARD_REPORTS = {"SLOT_A_FIRST_EGA_ROW64.md", "SLOT_A_ROW6_COL38_PRINTER_PAGE.md"}
 sys.path.insert(0, str(DUNKING_SHEEP))
 sys.path.insert(0, str(ROOT / "bridges"))   # ops_board, ops_metrics, fleet_inventory
+import poolrad_paths  # noqa: E402
+DASHBOARD_DIR = Path(os.getenv("POOLRAD_DASHBOARD_DIR", ROOT / "bridges" / "integrations" / "poolrad-dashboard")).resolve()
+DASHBOARD_REPO = poolrad_paths.repo("POOLRAD_DASHBOARD_REPO", "POOLRAD_REPO").resolve()
+DASHBOARD_REPORTS = {"SLOT_A_FIRST_EGA_ROW64.md", "SLOT_A_ROW6_COL38_PRINTER_PAGE.md"}
 
 def _load_channels():
     override = os.getenv("VP_CHANNELS_FILE")
@@ -90,10 +101,10 @@ def _load_channels():
 
 CHANNELS = _load_channels()
 CHANNEL_INDEX = {item["id"]: item for item in CHANNELS}
-from web.roster import build_roster, discovered_id, match_pane, presence
+from web.roster import build_roster, discovered_id, is_lane, match_pane, presence
 from web import codeword
 from web.gameplay import GameError, GameSession
-GAME = GameSession(Path(os.getenv("POOLRAD_REPO_DIR", ROOT.parent / "poolrad-decomp")).resolve(), DATA)
+GAME = GameSession(poolrad_paths.repo("POOLRAD_REPO_DIR", "POOLRAD_REPO").resolve(), DATA)
 MAX_UPLOAD = 25 * 1024 * 1024
 LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 DELIVERY_LOCK = threading.Lock()
@@ -265,7 +276,8 @@ def require_auth(request: Request):
 
 app.include_router(character_editor_router(
     EditorStore(DATA / 'character-editor', Path(os.getenv(
-        'POOLRAD_EDITOR_TOOL', ROOT.parent / 'poolrad-decomp/tools/character/edit_save.py'))),
+        'POOLRAD_EDITOR_TOOL',
+        poolrad_paths.repo('POOLRAD_REPO_DIR', 'POOLRAD_REPO') / 'tools/character/edit_save.py'))),
     require_auth))
 
 
@@ -399,7 +411,7 @@ def _target(channel: str, panes: list[dict]):
     if cfg:
         return match_pane(cfg, panes)
     for pane in panes:
-        if pane.get("agent") and discovered_id(pane.get("pane_id", "")) == channel:
+        if is_lane(pane) and discovered_id(pane.get("pane_id", "")) == channel:
             return pane
     if _known_channel(channel):
         return None
@@ -878,6 +890,50 @@ def operations_board(_: Annotated[str, Depends(require_auth)]):
         return ops_board.CACHE.snapshot()
     except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
         raise HTTPException(503, f"Operations board unavailable: {type(exc).__name__}") from exc
+
+
+@app.post("/api/ops-board/answer")
+def answer_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """Answer a lane's needs-owner question: record the reply as an `owner_answer` task
+    note, then unblock the task.
+
+    DESK_DESIGN 4.1 (t997): the desk's reply box. It goes through the daemon over the socket with the desk's own credential - the web never
+    reads sqlite and never shells out - so the unblock is the same verb a lane would run.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    reply = str((payload or {}).get("reply") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    if not reply:
+        raise HTTPException(400, "a reply is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = ops_board.answer_question(client, task_id, reply)
+    except Exception as exc:  # noqa: BLE001 - the desk shows the error, not a stack trace
+        raise HTTPException(503, f"Could not unblock {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "unblocked": True, "task": result}
+
+
+@app.post("/api/ops-board/not-now")
+def not_now_owner_question(payload: dict, _: Annotated[str, Depends(require_auth)]):
+    """'Not now': lower the task's priority so the question stops sitting at the top.
+
+    The owner's ask (4.1) is a deferral, not an answer: the task stays blocked and the
+    lane still waits, but the desk stops ranking it first. A priority change, nothing else.
+    """
+    task_id = str((payload or {}).get("task_id") or "").strip()
+    if not task_id:
+        raise HTTPException(400, "task_id is required")
+    import ops_board
+
+    try:
+        client = ops_board._client()
+        result = ops_board.defer_question(client, task_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, f"Could not lower {task_id}: {type(exc).__name__}") from exc
+    return {"task_id": task_id, "priority": "low", "task": result}
 
 
 @app.post("/api/ops-board/refresh")
@@ -1431,7 +1487,7 @@ def _post_message(data: MessageIn, identity: str, *, direct: bool = False):
             if existing:
                 return _message(existing, conn)
     pane = _target(data.channel, _panes())
-    if not pane or not pane.get("agent"):
+    if not is_lane(pane):
         raise HTTPException(409, "No active agent is available in this channel")
     with _db() as conn:
         if data.external_id:
@@ -1518,7 +1574,7 @@ def send_now(message_id: int, identity: Annotated[str, Depends(require_auth)]):
                     return _message(conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone(), conn)
             raise HTTPException(409, "Message changed while sending; refresh its status")
         pane = _target(row["channel"], _panes())
-        if not pane or not pane.get("agent"):
+        if not is_lane(pane):
             with _db() as conn:
                 conn.execute("UPDATE messages SET delivery='uncertain',transport_id=NULL,delivery_detail='Agent pane unavailable after cancellation' WHERE id=?", (message_id,))
             raise HTTPException(409, "Agent pane unavailable; delivery is unconfirmed")

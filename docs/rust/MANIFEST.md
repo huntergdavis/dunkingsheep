@@ -1,4 +1,4 @@
-# Port manifest (generated from b24f900, 2026-10-30)
+# Port manifest (generated from 70876c2, 2026-10-30)
 
 Everything the Rust port must reproduce, generated from the tree. Regenerate with `tools/gen_manifest.py` (TASKS.md T00) when main moves; `--check` fails when this document no longer matches the tree it names.
 
@@ -637,9 +637,9 @@ CREATE TABLE sources (
 );
 CREATE INDEX sources_by_state ON sources(state, next_at);
 
-## Tests (149 files; port each 1:1 under rust/crates/*/tests or as unit tests in the module)
+## Tests (150 files; port each 1:1 under rust/crates/*/tests or as unit tests in the module)
 
-_bootstrap fakes fixtures test_backpressure_metric_reason test_busy_native_queue test_check_public_secrets test_claude_turn_generation test_cli test_cli_guard test_cli_json_position
+_bootstrap fakes fixtures test_allowlist_doc test_backpressure_metric_reason test_busy_native_queue test_check_public_secrets test_claude_turn_generation test_cli test_cli_guard test_cli_json_position
 test_cli_read_after_write test_cli_respawn_dispatch test_codex_ambiguous_composer test_codex_turn_generation test_command_smoke test_composer_boundary test_deja_free test_diff_harness
 test_dispatch_feeds_reviews test_dunk_activity test_dunk_agent_launch test_dunk_allocator test_dunk_backend_default test_dunk_bootstrap_sweep test_dunk_callers test_dunk_cancelled_handoff
 test_dunk_carried_failure test_dunk_client_busy test_dunk_coalesce_freshness test_dunk_codex_busy_frame test_dunk_codex_composer test_dunk_codex_drafts_vs_echo test_dunk_codex_idle_footer
@@ -2326,7 +2326,7 @@ test_turn_auth_diagnostics test_turn_producer_installers test_unit_packaging tes
   - `add(entry)`
   - `remove(entry)`
 
-## dunk_tasks.py (1906 lines)
+## dunk_tasks.py (1934 lines)
 
 > Global and per-pane tasks: the coordination backbone beyond context limits.  A task is a row in a SQLite database owned by the daemon, addressed through the
 

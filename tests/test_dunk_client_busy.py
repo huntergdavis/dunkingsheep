@@ -99,6 +99,30 @@ class BusyDaemonIsNotDeadTest(unittest.TestCase):
         self.assertIn("Do NOT restart", message)
         self.assertNotIn("did not come up", message)
 
+    def test_existing_production_socket_never_forks_a_daemon(self):
+        # t696: a refused connect on a socket FILE that exists is busy, not absent.
+        with open(self.path, "w"):
+            pass
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+        with mock.patch.object(dunk_client, "DEFAULT_SOCKET", self.path), \
+                mock.patch.object(FlockClient, "start_daemon",
+                                  side_effect=AssertionError("forked")) as started, \
+                mock.patch.object(FlockClient, "__init__", lambda s, **k: setattr(s, "socket_path", self.path) or None), \
+                mock.patch.object(FlockClient, "probe", return_value=PROBE_ABSENT):
+            with self.assertRaises(DaemonBusy):
+                FlockClient.connect_or_start(socket_path=self.path, timeout=0.3)
+        self.assertFalse(started.called)
+
+    def test_spawn_on_production_socket_needs_the_owner(self):
+        with mock.patch.object(dunk_client, "DEFAULT_SOCKET", self.path), \
+                mock.patch.object(dunk_client, "_systemd_installed", return_value=False), \
+                mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(FlockClient, "__init__", lambda s, **k: setattr(s, "socket_path", self.path) or None):
+            os.environ.pop("DUNKINGSHEEP_OWNER_START", None)
+            with self.assertRaises(DaemonUnavailable) as caught:
+                FlockClient(socket_path=self.path).start_daemon()
+        self.assertIn("only the owner", str(caught.exception))
+
     def test_busy_error_stays_catchable_as_daemon_unavailable(self):
         self.assertTrue(issubclass(DaemonBusy, DaemonUnavailable))
 

@@ -25,8 +25,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
-FREE_RUNS = Path(os.environ.get("VP_FREE_RUNS", ROOT / "data" / "free_runs"))
-BAKEOFF = Path(os.environ.get("VP_BAKEOFF", ROOT / "data" / "bakeoff"))
+from desk_data import data_dir  # noqa: E402  (sibling module; state never lives in the repo)
+FREE_RUNS = Path(os.environ.get("VP_FREE_RUNS") or data_dir() / "free_runs")
+BAKEOFF = Path(os.environ.get("VP_BAKEOFF") or data_dir() / "bakeoff")
 LOCAL = ZoneInfo("America/Los_Angeles")
 NO_ATTRIBUTION = "no per-line attribution exists yet: no merged PR or credit-table row names the model that seeded a body"
 MATCH = re.compile(r"BYTES MATCH:\s*(\d+)\s*bytes")

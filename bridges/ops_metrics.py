@@ -23,13 +23,15 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import poolrad_paths
+
 
 ROOT = Path(__file__).resolve().parents[1]   # repo root: one repo (FLAT_FLEET.md 9)
-DATA = Path(os.environ.get("VP_DATA_DIR", ROOT / "data"))
+DATA = Path(os.environ.get("VP_DATA_DIR") or (Path(os.environ.get("DUNKINGSHEEP_DIR") or str(Path.home() / ".config" / "dunkingsheep")) / "desk"))
 DB = Path(os.environ.get("VP_OPS_DB", DATA / "operations.sqlite3"))
 MESSAGE_DB = DATA / "messages.sqlite3"
 DUNK_EVENTS_DB = Path(os.environ.get("DUNK_EVENTS_DB", Path.home() / ".config/dunkingsheep/metrics.db"))
-POOLRAD_REPO = Path(os.environ.get("POOLRAD_REPO", ROOT.parent / "poolrad-decomp"))
+POOLRAD_REPO = poolrad_paths.repo("POOLRAD_REPO")
 OPENCODE_DB = Path(os.environ.get("OPENCODE_DB", Path.home() / ".local/share/opencode/opencode.db"))
 HOST_WATCH_STATE = Path(os.environ.get("VP_HOST_WATCH_STATE", DATA / "host-watch-state.json"))
 PROJECT = "poolrad"
