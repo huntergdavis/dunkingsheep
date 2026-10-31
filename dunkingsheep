@@ -1175,7 +1175,16 @@ def _inbox_rows(messages):
               f"{waiting:>8} {m['body_bytes']:>7} {_clip(subject, 44)}")
 
 
+def _print_capped(r):
+    """t1165: a desk-capped result with no 'messages' key: show what we have, exit 0."""
+    print(f"result capped by the desk role ({r.get('bytes')} bytes > {r.get('cap')}): "
+          f"{r.get('note') or ''}")
+    print(r.get("head") or "")
+
+
 def print_inbox_list(r):
+    if "messages" not in r:
+        return _print_capped(r)
     print(f"mailbox {r['mailbox']}")
     _inbox_rows(r["messages"])
 
@@ -1751,6 +1760,8 @@ def print_task_metrics(result):
 
 
 def print_inbox_read(r):
+    if "messages" not in r:
+        return _print_capped(r)
     messages = r["messages"]
     if not messages:
         print(f"mailbox {r['mailbox']}: no unread messages")
@@ -1764,6 +1775,8 @@ def print_inbox_read(r):
                   f"{blob['size']} bytes  {blob['media_type']}")
         print(m["body"])
         print()
+    if r.get("truncated"):
+        print(f"[capped: {r.get('omitted')} older message(s) left out - {r.get('note')}]")
     _print_inbox_tasks(r)
 
 
@@ -1783,6 +1796,8 @@ def _print_inbox_tasks(r):
 
 
 def print_inbox_recover(r):
+    if "messages" not in r:
+        return _print_capped(r)
     messages = r["messages"]
     if messages:
         print(f"mailbox {r['mailbox']}: recovered {len(messages)} delivered message(s) "

@@ -6,6 +6,7 @@
 //! not here yet.
 
 pub mod ingest;
+pub mod ingestor;
 pub mod jsonl;
 pub mod pure;
 pub mod queries;
@@ -16,3 +17,6 @@ pub use pure::{
     chunk_text, fts_query, fts_tokens, make_snippet, redact, DEFAULT_CHUNK_CHARS,
     DEFAULT_OVERLAP_CHARS,
 };
+
+#[cfg(test)]
+mod behaviour_tests;

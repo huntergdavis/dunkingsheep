@@ -66,6 +66,16 @@ function useDashRoute() {
   return { standalone: path === '/dash' || path.startsWith('/dash/'), view, known: view in DASH_ROUTES };
 }
 
+// How the desk was told about an owner message (t1166): 'sent' (typed straight in) and 'nudged'
+// (inbox line) are fine and need no note; 'queued' and 'unconfirmed' are the daemon's own words.
+function notifyNote(notify) {
+  const state = notify?.state;
+  if (state === 'sent' || state === 'nudged') return '';
+  if (state === 'queued') return ' · held by the typing guard; it arrives when the desk box is clear';
+  if (state === 'unconfirmed') return ' · sent, not confirmed; the desk may already have it';
+  return ` · ${notify?.detail || 'desk not reached'}`;
+}
+
 function DashHeader({ side, view, standalone }) {
   if (!side && (!view || standalone)) return null;
   return <header className="dash-header">
@@ -904,7 +914,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
   useEffect(() => {
     if (!channel) return;
     let live = true;
-    const load = () => api(`/messages?channel=${encodeURIComponent(channel.id)}&limit=15`)
+    const load = () => api(channel.id === 'cos' ? '/owner-thread?limit=15' : `/messages?channel=${encodeURIComponent(channel.id)}&limit=15`)
       .then(data => { if (live) setChat(old => mergeMessages(old, data.items || [])); })
       .catch(e => { if (live) setChatError(e.message); });
     load(); const timer = setInterval(load, 4000);
@@ -912,7 +922,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
   }, [channel]);
   useEffect(() => {
     if (vpChannel) return;
-    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'vp') || null)).catch(() => {});
+    api('/channels').then(data => setOwnChannel((data.channels || []).find(c => c.id === 'cos') || null)).catch(() => {});
   }, [vpChannel]);
   async function refreshStates() {
     try {
@@ -953,10 +963,14 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
     if (!body || !channel) return;
     setChatBusy(true); setChatError('');
     try {
-      const receipt = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: channel.pane_id, channel: channel.id, text: body }) });
-      setChatOutcome(receipt.outcome || receipt.delivery);
+      // The desk dock is the owner mailbox (t1151/t1156): the same route as the desk page.
+      const owner = channel.id === 'cos';
+      const receipt = owner
+        ? await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: body }) })
+        : await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: channel.pane_id, channel: channel.id, text: body }) });
+      setChatOutcome(owner ? `${receipt.outcome} as ${receipt.message_id}${notifyNote(receipt.notify)}` : (receipt.outcome || receipt.delivery));
       setDraft('');
-      const data = await api(`/messages?channel=${encodeURIComponent(channel.id)}&limit=15`);
+      const data = await api(owner ? '/owner-thread?limit=15' : `/messages?channel=${encodeURIComponent(channel.id)}&limit=15`);
       chatScroll.jump();
       setChat(old => mergeMessages(old, data.items || []));
     } catch (e) { setChatError(e.message); } finally { setChatBusy(false); }
@@ -1078,7 +1092,7 @@ function ChannelStandalone({ channel }) {
     setLastDelivery(null);
     const load = async () => {
       try {
-        const [roster, messages] = await Promise.all([api('/channels'), api(`/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
+        const [roster, messages] = await Promise.all([api('/channels'), api(channel === 'cos' ? '/owner-thread?limit=50' : `/messages?channel=${encodeURIComponent(channel)}&limit=50`)]);
         if (!live) return;
         setChannels(roster.channels || []);
         setItems(old => mergeMessages(old, messages.items || []));
@@ -1092,6 +1106,16 @@ function ChannelStandalone({ channel }) {
     return () => { live = false; clearInterval(timer); };
   }, [channel]);
   async function send(data) {
+    if (channel === 'cos') {
+      // The Front Desk is reached through the owner mailbox (t1151): the row is stored
+      // first, then the thread re-reads it, so what shows is the daemon's record.
+      const receipt = await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: data.body, attachment_ids: data.attachment_ids }) });
+      const thread = await api('/owner-thread?limit=50');
+      messageScroll.jump();
+      setItems(old => mergeMessages(old, thread.items || []));
+      { const note = notifyNote(receipt.notify); if (note) setError(`Stored as ${receipt.message_id}.${note}`); }
+      return;
+    }
     const item = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: selected.pane_id, channel, text: data.body, attachment_ids: data.attachment_ids }) });
     messageScroll.jump();
     setItems(old => mergeMessages(old, [item]));
