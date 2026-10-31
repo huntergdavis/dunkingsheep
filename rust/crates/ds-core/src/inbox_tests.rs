@@ -536,3 +536,145 @@ fn the_unknown_transport_text_quotes_like_the_python() {
         error
     );
 }
+
+// -- the sweep's unread gate (t1053; dunk_inbox.py::Inbox.gate_unread) -----------
+
+/// A database holding only the given (id, sender, state, created_at) rows for `w`.
+fn gate_db(rows: &[(&str, Option<&str>, &str, f64)]) -> (tempfile::TempDir, crate::db::ReadPool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("inbox.db");
+    let connection = crate::db::open_writer(&path).expect("writer");
+    for statement in SCHEMA {
+        connection.execute_batch(statement).expect("schema");
+    }
+    for (id, sender, state, created_at) in rows {
+        connection
+            .execute(
+                "INSERT INTO messages (id, mailbox, mailbox_label, sender, body, state, created_at) \
+                 VALUES (?, 'w', 'w', ?, 'x', ?, ?)",
+                rusqlite::params![id, sender, state, created_at],
+            )
+            .expect("insert");
+    }
+    drop(connection);
+    let pool = crate::db::ReadPool::open(&path, 1).expect("pool");
+    (dir, pool)
+}
+
+#[test]
+fn gate_ignores_daemon_announcements() {
+    // NULL and empty-string senders are both "the daemon"; five of them gate nothing.
+    let rows: Vec<(String, Option<&str>)> = (0..5)
+        .map(|n| (format!("d{n}"), if n % 2 == 0 { None } else { Some("") }))
+        .collect();
+    let seeded: Vec<(&str, Option<&str>, &str, f64)> = rows
+        .iter()
+        .map(|(id, sender)| (id.as_str(), *sender, "queued", 1_000.0))
+        .collect();
+    let (_dir, pool) = gate_db(&seeded);
+    let gate = gate_unread(&pool, "w", 600.0, None, 1_000.0).expect("gate");
+    assert_eq!(
+        Gate {
+            fresh: 0,
+            expired: 0
+        },
+        gate
+    );
+}
+
+#[test]
+fn gate_counts_fresh_lane_mail_then_lets_it_expire() {
+    let (_dir, pool) = gate_db(&[("m1", Some("%5"), "queued", 1_000.0)]);
+    assert_eq!(
+        1,
+        gate_unread(&pool, "w", 600.0, None, 1_000.0)
+            .expect("gate")
+            .fresh
+    );
+    // 601 s later the same mail is past the window: nothing fresh, one expired
+    let gate = gate_unread(&pool, "w", 600.0, None, 1_601.0).expect("gate");
+    assert_eq!(
+        Gate {
+            fresh: 0,
+            expired: 1
+        },
+        gate
+    );
+    // the window is inclusive at exactly 600 s, as `t >= cutoff` is in the Python
+    let edge = gate_unread(&pool, "w", 600.0, None, 1_600.0).expect("gate");
+    assert_eq!(
+        Gate {
+            fresh: 1,
+            expired: 0
+        },
+        edge
+    );
+}
+
+#[test]
+fn gate_ignores_mail_older_than_last_turn_end() {
+    let (_dir, pool) = gate_db(&[("m1", Some("%5"), "queued", 1_000.0)]);
+    let gate = gate_unread(&pool, "w", 600.0, Some(1_005.0), 1_000.0).expect("gate");
+    assert_eq!(
+        Gate {
+            fresh: 0,
+            expired: 0
+        },
+        gate
+    );
+    // strictly newer than `since`: mail created AT the turn end was already seen
+    let at = gate_unread(&pool, "w", 600.0, Some(1_000.0), 1_000.0).expect("gate");
+    assert_eq!(
+        Gate {
+            fresh: 0,
+            expired: 0
+        },
+        at
+    );
+}
+
+#[test]
+fn gate_counts_only_queued_mail() {
+    let (_dir, pool) = gate_db(&[
+        ("m1", Some("%5"), "read", 1_000.0),
+        ("m2", Some("%5"), "cancelled", 1_000.0),
+        ("m3", Some("%5"), "queued", 1_000.0),
+    ]);
+    assert_eq!(
+        Gate {
+            fresh: 1,
+            expired: 0
+        },
+        gate_unread(&pool, "w", 600.0, None, 1_000.0).expect("gate")
+    );
+}
+
+#[test]
+fn the_sweep_gate_feeds_a_lane_whose_only_mail_expired() {
+    // daemon-only mail fed, fresh lane mail gates, expired mail fed (the task's three cases)
+    let (_dir, daemon_only) = gate_db(&[("d1", None, "queued", 1_000.0)]);
+    assert_eq!(
+        (0, false),
+        sweep_gate(&daemon_only, "w", None, 1_000.0).expect("gate")
+    );
+
+    let (_dir2, lane) = gate_db(&[("m1", Some("%5"), "queued", 1_000.0)]);
+    assert_eq!(
+        (1, false),
+        sweep_gate(&lane, "w", None, 1_100.0).expect("gate")
+    );
+    assert_eq!(
+        (0, true),
+        sweep_gate(&lane, "w", None, 1_601.0).expect("gate")
+    );
+
+    // fresh mail beside expired mail still gates, and the pane is NOT reported expired
+    let (_dir3, mixed) = gate_db(&[
+        ("m1", Some("%5"), "queued", 1_000.0),
+        ("m2", Some("%5"), "queued", 1_590.0),
+    ]);
+    assert_eq!(
+        (1, false),
+        sweep_gate(&mixed, "w", None, 1_601.0).expect("gate")
+    );
+}
