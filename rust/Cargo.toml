@@ -20,7 +20,10 @@ version = "0.1.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order (owner-approved 2026-10-31): objects keep INSERTION order like Python dicts, so
+# json.dumps parity (CLI printers, MCP schemas, the capped desk head) stops needing workarounds.
+# It pulls in `indexmap`; sort_keys=True sites must sort explicitly.
+serde_json = { version = "1", features = ["preserve_order"] }
 # T42 (ds-cli): the one parser crate RUST_PORT.md section 3 pins; the builder API is used
 # (not derive) because the command tree is generated data, not Rust types.
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
