@@ -85,9 +85,9 @@ read-only tooling, **P3** TUI and web.
 
 `api.rs` does not exist yet (T39 depends on T31-T38), so these Python changes since the manifest (70876c2) have no Rust counterpart to edit today. T39 must port them, by name, with the tests named here:
 
-- `dunk_api.py::_gate_unread` (t1053, 289306c): sweep unread gate counts only fresh lane/owner mail, `since` = the lane's last turn `ended_at`, 600 s window, appends to `expired` when mail is expired and none fresh. Test: `tests/test_dunk_gate_unread.py`. Needs `inbox.gate_unread` in `inbox.rs` first.
-- `dunk_api.py::h_dispatch`: add/remove/tick require the owner or system role; status and list stay open (message text asserted by tests).
-- `dunk_api.py::h_task_complete`: forwards `landed` (default true, via `_bool`) to `task_complete` (126ee15).
+- `dunk_api.py::_gate_unread` (t1053, 0c32c06 added, 289306c fixed): sweep unread gate counts only fresh lane/owner mail, `since` = the lane's last turn `ended_at`, 600 s window, appends to `expired` when mail is expired and none fresh. Test: `tests/test_dunk_gate_unread.py`. Needs `inbox.gate_unread` in `inbox.rs` first.
+- `dunk_api.py::h_dispatch` (tick path, 0c32c06): the lane plan's `unread` callback is `_gate_unread(...)` instead of the raw unread count, and the returned state gains `unread_mail_expired` (sorted set of panes fed anyway). The owner/system role gate text on add/remove/tick is NOT new (present at 70876c2, 9fe2ccd). Test: `tests/test_dunk_gate_unread.py` (sweep-level cases).
+- `dunk_api.py::h_task_complete`: forwards `landed` (default true, via `_bool`) to `task_complete` (126ee15). Test: `tests/test_cli_task_complete_flags.py`.
 
 ## Phase 3: TUI and web
 
