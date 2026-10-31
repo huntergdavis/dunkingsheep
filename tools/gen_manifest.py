@@ -47,7 +47,7 @@ MODULE_MAP = """## Module map
 | dunk_health.py, dunk_usage.py, dunk_views.py, dunk_pm.py, dunk_help.py | health.rs, usage.rs, views.rs, pm.rs, help.rs | ds-core | 2 | views reads the desk db read-only until phase 3 |
 | dunk_allocator.py, dunk_fallback.py, dunk_recovery*.py, dunk_native_session.py, dunk_http.py | allocator.rs, fallback.rs, recovery.rs, native_session.rs, http.rs | ds-core | 2 | http facade :8792 read-only; keep |
 | dunk_mcp.py | ds-mcp | ds-mcp | 1 | stdio JSON-RPC; tools from the registry filtered by role |
-| dunkingsheep (CLI) | ds-cli | ds-cli | 1 | generated parser + ported printers; local-only commands (context reads, github one-shots) |
+| dunkingsheep (CLI) | ds-cli | ds-cli | 1 | generated parser + ported printers; local-only commands (context reads, github one-shots). Parity (t1105): `build_parser` / `run_client_command` have no Rust counterpart until the ds-cli crate exists (the parser is generated there); the `task complete --unmerged` flag (dest=landed, t1044) is carried by the daemon-side `landed` parameter already ported in tasks/mod.rs (t1104, t1106) |
 | herdr_client.py | (dropped) | - | - | the herdr backend is retired (tmux default since 2026-10-24); keep the Terminal trait so a backend can return |
 | dunking_sheep_tui.py, text_editor.py | ds-tui (ratatui) | ds-tui | 3 | |
 | web/, bridges/, ui/ | ds-web (axum) + unchanged React | ds-web | 3 | FastAPI routes 1:1; the owner mailbox/report land here |"""
