@@ -1,0 +1,8 @@
+usage: dunkingsheep context promote [-h] [--global] slug
+
+positional arguments:
+  slug
+
+options:
+  -h, --help  show this help message and exit
+  --global

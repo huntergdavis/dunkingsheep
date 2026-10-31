@@ -1,0 +1,10 @@
+usage: dunkingsheep context ledger [-h] [--global] [--path PATH]
+                                   {adopt,status}
+
+positional arguments:
+  {adopt,status}
+
+options:
+  -h, --help      show this help message and exit
+  --global
+  --path PATH

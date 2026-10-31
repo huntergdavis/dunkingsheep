@@ -1,0 +1,8 @@
+usage: dunkingsheep dispatch tick [-h] [--dry-run] [--lanes LANES]
+
+options:
+  -h, --help     show this help message and exit
+  --dry-run
+  --lanes LANES  comma-separated pane ids or lane names to allow for this tick
+                 (default: dispatch_lanes.json, else
+                 DUNKINGSHEEP_DISPATCH_LANES, else nothing is fed)

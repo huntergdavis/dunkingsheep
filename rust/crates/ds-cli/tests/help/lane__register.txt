@@ -1,0 +1,13 @@
+usage: dunkingsheep lane register [-h]
+                                  --role {owner,desk,planner,worker,reviewer}
+                                  [--pane PANE] [--provider PROVIDER]
+                                  [--model MODEL] [--label LABEL]
+
+options:
+  -h, --help            show this help message and exit
+  --role {owner,desk,planner,worker,reviewer}
+  --pane PANE           pane id (default: this pane)
+  --provider PROVIDER   claude, codex, pi, opencode-go (reviewers must be
+                        claude/codex)
+  --model MODEL
+  --label LABEL

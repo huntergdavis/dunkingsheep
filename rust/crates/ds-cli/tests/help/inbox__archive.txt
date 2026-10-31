@@ -1,0 +1,10 @@
+usage: dunkingsheep inbox archive [-h] [--before BEFORE] [--state STATE]
+                                  mailbox
+
+positional arguments:
+  mailbox
+
+options:
+  -h, --help       show this help message and exit
+  --before BEFORE  only messages created before this ISO date/time or epoch
+  --state STATE    comma-separated states to archive (default queued,acked)

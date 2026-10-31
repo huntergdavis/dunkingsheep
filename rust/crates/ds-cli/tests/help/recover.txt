@@ -1,0 +1,6 @@
+usage: dunkingsheep recover [-h] [--apply] [--record]
+
+options:
+  -h, --help  show this help message and exit
+  --apply     type the launch commands into panes that are still empty shells
+  --record    snapshot live agent sessions into launches.json first

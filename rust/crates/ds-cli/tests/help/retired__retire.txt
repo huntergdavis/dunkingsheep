@@ -1,0 +1,8 @@
+usage: dunkingsheep retired retire [-h] --reason REASON pane
+
+positional arguments:
+  pane
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON  why, e.g. superseded-by:wW:p7

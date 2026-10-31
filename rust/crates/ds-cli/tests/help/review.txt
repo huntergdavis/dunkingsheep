@@ -1,0 +1,10 @@
+usage: dunkingsheep review [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    sync        open PRs -> review tasks; statuses follow verdicts
+                (system/owner)
+    list        live review tasks with PR, head, author, reviewer, age
+
+options:
+  -h, --help    show this help message and exit

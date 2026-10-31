@@ -1,0 +1,6 @@
+usage: dunkingsheep context init [-h] [--global] [--path PATH]
+
+options:
+  -h, --help   show this help message and exit
+  --global
+  --path PATH

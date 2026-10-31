@@ -1,0 +1,5 @@
+usage: dunkingsheep guide [-h] [--markdown]
+
+options:
+  -h, --help  show this help message and exit
+  --markdown  render as markdown

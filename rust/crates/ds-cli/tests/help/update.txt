@@ -1,0 +1,26 @@
+usage: dunkingsheep update [-h] [--target TARGET] [--text TEXT]
+                           [--every EVERY] [--name NAME] [--only-idle |
+                           --any-time] [--max-sends MAX_SENDS]
+                           [--skip-if-unconsumed | --always-send]
+                           [--hold-while-typing | --ignore-typing]
+                           id
+
+positional arguments:
+  id
+
+options:
+  -h, --help            show this help message and exit
+  --target, -T TARGET
+  --text, -t TEXT
+  --every, -e, --interval EVERY
+  --name, -n NAME
+  --only-idle
+  --any-time            clear only-idle gating
+  --max-sends MAX_SENDS
+                        0 clears the limit
+  --skip-if-unconsumed  backpressure: skip a send if the previous one was
+                        never picked up
+  --always-send         clear skip-if-unconsumed
+  --hold-while-typing   hold a send while someone is typing in the target
+                        (default)
+  --ignore-typing       send even while someone is typing in the target

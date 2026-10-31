@@ -1,0 +1,9 @@
+usage: dunkingsheep task note [-h] [--event EVENT] [--reason REASON] id
+
+positional arguments:
+  id
+
+options:
+  -h, --help       show this help message and exit
+  --event EVENT
+  --reason REASON

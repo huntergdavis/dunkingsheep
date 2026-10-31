@@ -1,0 +1,9 @@
+usage: dunkingsheep close [-h] [--force] {workspace,tab,pane} target
+
+positional arguments:
+  {workspace,tab,pane}
+  target                id, label, unique substring or 'self'
+
+options:
+  -h, --help            show this help message and exit
+  --force               allow closing the caller's own pane/tab/workspace

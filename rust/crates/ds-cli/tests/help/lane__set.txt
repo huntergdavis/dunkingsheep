@@ -1,0 +1,8 @@
+usage: dunkingsheep lane set [-h] pane mailbox
+
+positional arguments:
+  pane
+  mailbox
+
+options:
+  -h, --help  show this help message and exit

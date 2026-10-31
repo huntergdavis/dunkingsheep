@@ -1,0 +1,8 @@
+usage: dunkingsheep health [-h] [--repair] [--deep] [--write [PATH]]
+
+options:
+  -h, --help      show this help message and exit
+  --repair        apply the fixed repairs (stale leases, large WAL)
+  --deep          also run PRAGMA quick_check (slow on a large DB)
+  --write [PATH]  also write the JSON report (default
+                  ~/.config/dunkingsheep/health.json)

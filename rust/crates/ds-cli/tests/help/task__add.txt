@@ -1,0 +1,28 @@
+usage: dunkingsheep task add [-h] [--scope SCOPE] [--body BODY]
+                             [--status {open,in_progress,blocked,done,cancelled}]
+                             [--priority {low,medium,high,urgent}]
+                             [--assign PANE] [--depends-on ID] [--parent ID]
+                             [--multi] [--kind {work,review,verify,report}]
+                             [--author AUTHOR] [--repo REPO] [--pr PR]
+                             [--head HEAD]
+                             title
+
+positional arguments:
+  title
+
+options:
+  -h, --help            show this help message and exit
+  --scope SCOPE         'global' (default), 'self' or a pane id
+  --body, -b BODY
+  --status {open,in_progress,blocked,done,cancelled}
+  --priority, -p {low,medium,high,urgent}
+  --assign, -a PANE     assignee pane id/agent name (repeatable; 'self' =
+                        caller)
+  --depends-on, -d ID   task id that must be done first (repeatable)
+  --parent ID           parent task id (subtask)
+  --multi               allow several agents to claim this task
+  --kind {work,review,verify,report}
+  --author AUTHOR       lane that produced the artefact under review
+  --repo REPO           owner/name (reviews)
+  --pr PR               PR number (reviews)
+  --head HEAD           exact commit under review (reviews)

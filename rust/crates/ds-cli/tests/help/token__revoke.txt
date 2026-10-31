@@ -1,0 +1,7 @@
+usage: dunkingsheep token revoke [-h] label
+
+positional arguments:
+  label
+
+options:
+  -h, --help  show this help message and exit

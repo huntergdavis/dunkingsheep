@@ -1,0 +1,15 @@
+usage: dunkingsheep send [-h] [--wait S] [--ignore-typing] [--no-enter]
+                         target text [text ...]
+
+positional arguments:
+  target
+  text
+
+options:
+  -h, --help       show this help message and exit
+  --wait S         block up to S seconds for delivery before returning
+                   (default 10)
+  --ignore-typing  send even while someone is typing (default: queue it)
+  --no-enter       leave the text in the box without pressing Enter
+
+example: dunkingsheep send "Claude Proj" please summarize your progress

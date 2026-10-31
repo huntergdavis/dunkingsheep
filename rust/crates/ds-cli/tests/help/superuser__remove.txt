@@ -1,0 +1,7 @@
+usage: dunkingsheep superuser remove [-h] entry
+
+positional arguments:
+  entry
+
+options:
+  -h, --help  show this help message and exit

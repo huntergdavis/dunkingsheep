@@ -1,0 +1,9 @@
+usage: dunkingsheep state [-h] <action> ...
+
+positional arguments:
+  <action>
+    capture   record one row per agent lane now
+    latest    the most recent captured rows
+
+options:
+  -h, --help  show this help message and exit

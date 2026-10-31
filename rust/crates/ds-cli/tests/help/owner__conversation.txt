@@ -1,0 +1,10 @@
+usage: dunkingsheep owner conversation [-h] [--limit LIMIT] [--before BEFORE]
+
+options:
+  -h, --help       show this help message and exit
+  --limit LIMIT
+  --before BEFORE  only messages older than this unix time
+
+Telegram and the web are two transports for one mailbox: this is the complete
+record, with the transport each message arrived on and the question each reply
+answers.

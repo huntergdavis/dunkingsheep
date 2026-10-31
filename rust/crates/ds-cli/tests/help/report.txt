@@ -1,0 +1,14 @@
+usage: dunkingsheep report [-h] <action> ...
+
+Task metrics, lanes, needs-owner, review queue, poolrad progress, budget and
+watchdog, measured at generation time. Writes
+~/.config/dunkingsheep/reports/<ts>.md and posts it to the owner mailbox on
+the report transport when that mailbox exists (FLAT_FLEET.md 7.3).
+
+positional arguments:
+  <action>
+    run       generate one report
+    list      the report files produced so far, newest first
+
+options:
+  -h, --help  show this help message and exit

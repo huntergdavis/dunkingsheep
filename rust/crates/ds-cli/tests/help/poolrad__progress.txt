@@ -1,0 +1,4 @@
+usage: dunkingsheep poolrad progress [-h]
+
+options:
+  -h, --help  show this help message and exit
