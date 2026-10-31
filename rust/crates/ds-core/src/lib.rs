@@ -19,6 +19,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod inbox;
+pub mod inbox_store;
 pub mod lock;
 pub mod memory;
 pub mod proc;
