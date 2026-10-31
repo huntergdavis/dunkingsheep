@@ -205,10 +205,31 @@ pub fn allowed(role: &str, command: &str) -> bool {
 pub const DESK_RESULT_BYTES: usize = 4096;
 
 /// Python's `json.dumps` default (", " and ": " separators) so lengths and the `head`
-/// cut agree with the Python clamp. NOT mirrored: `ensure_ascii` escaping of non-ASCII.
+/// cut agree with the Python clamp, and `ensure_ascii` escaping (non-ASCII becomes
+/// `\uXXXX`, astral as a surrogate pair), so the output is pure ASCII and chars == bytes.
+/// NOT mirrored: object key ORDER. `Value` keeps keys sorted (no `preserve_order`, which
+/// would add the `indexmap` crate; RUST_PORT.md section 0 rule 5), so a capped `head` can
+/// list keys in a different order than Python's insertion order. Lengths are unaffected.
 struct PyFormatter;
 
 impl serde_json::ser::Formatter for PyFormatter {
+    fn write_string_fragment<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        fragment: &str,
+    ) -> std::io::Result<()> {
+        for c in fragment.chars() {
+            if c.is_ascii() {
+                w.write_all(&[c as u8])?;
+            } else {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    write!(w, "\\u{unit:04x}")?;
+                }
+            }
+        }
+        Ok(())
+    }
     fn begin_array_value<W: ?Sized + std::io::Write>(
         &mut self,
         w: &mut W,
@@ -255,7 +276,7 @@ fn py_dumps(value: &serde_json::Value) -> String {
 pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
     use serde_json::{json, Map, Value};
     let text = py_dumps(result);
-    if text.chars().count() <= DESK_RESULT_BYTES {
+    if text.len() <= DESK_RESULT_BYTES {
         return result.clone();
     }
     if let Some(Value::Array(messages)) = result.get("messages") {
@@ -286,7 +307,7 @@ pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
             for m in messages.iter().rev() {
                 let mut trial = vec![m.clone()];
                 trial.extend(kept.iter().cloned());
-                if py_dumps(&build(&trial)).chars().count() > DESK_RESULT_BYTES {
+                if py_dumps(&build(&trial)).len() > DESK_RESULT_BYTES {
                     break;
                 }
                 kept = trial;
@@ -298,9 +319,9 @@ pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
     }
     json!({
         "truncated": true,
-        "bytes": text.chars().count(),
+        "bytes": text.len(),
         "cap": DESK_RESULT_BYTES,
-        "head": text.chars().take(DESK_RESULT_BYTES).collect::<String>(),
+        "head": text[..DESK_RESULT_BYTES].to_string(),
         "note": "desk results are capped; ask a narrower question (task read <id>, task metrics) or file a task",
     })
 }
@@ -308,7 +329,13 @@ pub fn clamp_desk_result(result: &serde_json::Value) -> serde_json::Value {
 /// What the CLI's `print_inbox_read` / `print_inbox_list` / `print_inbox_recover` show for
 /// a result with no `messages` key (the capped shape). Exit status stays 0.
 pub fn capped_result_text(result: &serde_json::Value) -> String {
-    let get = |k: &str| result.get(k).map(|v| v.to_string()).unwrap_or_default();
+    // Python prints None for a missing key.
+    let get = |k: &str| {
+        result
+            .get(k)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "None".into())
+    };
     format!(
         "result capped by the desk role ({} bytes > {}): {}\n{}\n",
         get("bytes"),

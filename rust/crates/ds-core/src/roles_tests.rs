@@ -139,7 +139,7 @@ fn over_cap_inbox_keeps_newest_messages_and_the_messages_key() {
     let msgs = out["messages"].as_array().expect("messages key kept");
     assert_eq!("i9", msgs.last().unwrap()["message_id"]);
     assert_eq!((10 - msgs.len()) as u64, out["omitted"].as_u64().unwrap());
-    assert!(py_dumps(&out).chars().count() <= DESK_RESULT_BYTES);
+    assert!(py_dumps(&out).len() <= DESK_RESULT_BYTES);
 }
 
 #[test]
@@ -156,4 +156,26 @@ fn over_cap_result_without_messages_is_the_capped_shape_and_prints_its_head() {
     assert_eq!(DESK_RESULT_BYTES as u64, out["cap"].as_u64().unwrap());
     let text = capped_result_text(&out);
     assert!(text.contains("result capped by the desk role") && text.contains("rrrr"));
+}
+
+#[test]
+fn non_ascii_is_escaped_like_python_so_the_clamp_fires_at_the_same_size() {
+    // Python: len(json.dumps({"x": "\u2014" * 1000})) == 6009, over the 4096 cap.
+    let dashes = serde_json::json!({"x": "\u{2014}".repeat(1000)});
+    assert_eq!(6009, py_dumps(&dashes).len());
+    assert_eq!(
+        Some(true),
+        clamp_desk_result(&dashes)["truncated"].as_bool()
+    );
+    // astral: a surrogate pair, 12 chars (Python '\ud83d\ude00').
+    assert_eq!(
+        r#""\ud83d\ude00""#,
+        py_dumps(&serde_json::json!("\u{1F600}"))
+    );
+}
+
+#[test]
+fn a_missing_bytes_or_cap_prints_none_like_python() {
+    let text = capped_result_text(&serde_json::json!({"head": "h"}));
+    assert!(text.contains("(None bytes > None)"), "{text}");
 }
