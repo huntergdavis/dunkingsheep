@@ -566,6 +566,104 @@ impl Tasks {
             .await
     }
 
+    /// `update` for the non-status fields (t786 slice 5); see [`FieldEdit`].
+    pub async fn update(
+        &self,
+        id: &str,
+        edit: FieldEdit,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        if let Some(title) = &edit.title {
+            if title.trim().is_empty() {
+                return Err(DunkError::Refused("a task needs a title".into()));
+            }
+        }
+        let priority = match &edit.priority {
+            Some(value) => Some(validate_priority(value)?),
+            None => None,
+        };
+        let wanted = id.trim().to_string();
+        let actor = actor.map(|a| a.to_string());
+        let now = crate::clock::now_s();
+        let edit_for_call = edit.clone();
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let id = wanted.clone();
+                let (scope, old_priority, old_deps): (String, String, Option<String>) = tx
+                    .query_row(
+                        "SELECT scope, priority, depends_on FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                let mut deps_after: Option<Vec<String>> = None;
+                if let Some(deps) = &edit_for_call.depends_on {
+                    let deps: Vec<String> = deps.iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
+                    if deps.contains(&id) {
+                        return Err(DunkError::Refused("a task cannot depend on itself".into()));
+                    }
+                    for dep in &deps {
+                        let found: Option<String> = tx
+                            .query_row("SELECT id FROM tasks WHERE id = ?", params![dep], |row| row.get(0))
+                            .optional()
+                            .map_err(db::map_sqlite)?;
+                        if found.is_none() {
+                            return Err(DunkError::Refused(format!("no task with id {dep:?}")));
+                        }
+                    }
+                    deps_after = Some(deps);
+                }
+                let mut changed = false;
+                if let Some(title) = &edit_for_call.title {
+                    tx.execute("UPDATE tasks SET title = ? WHERE id = ?", params![title.trim(), id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(body) = &edit_for_call.body {
+                    tx.execute("UPDATE tasks SET body = ? WHERE id = ?", params![body, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(new) = &priority {
+                    tx.execute("UPDATE tasks SET priority = ? WHERE id = ?", params![new, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                    if *new != old_priority {
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                            params![id, "priority", now, actor, scope, new,
+                                    json!({ "from": old_priority, "to": new }).to_string()],
+                        ).map_err(db::map_sqlite)?;
+                    }
+                }
+                if let Some(after) = &deps_after {
+                    let before = decode_list(old_deps.as_deref());
+                    let encoded = json!(after).to_string();
+                    tx.execute("UPDATE tasks SET depends_on = ? WHERE id = ?", params![encoded, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                    if before != *after {
+                        tx.execute(
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                            params![id, "depends", now, actor, scope, old_priority,
+                                    json!({
+                                        "removed": before.iter().filter(|d| !after.contains(d)).collect::<Vec<_>>(),
+                                        "added": after.iter().filter(|d| !before.contains(d)).collect::<Vec<_>>(),
+                                        "depends_on": after,
+                                    }).to_string()],
+                        ).map_err(db::map_sqlite)?;
+                    }
+                }
+                if changed {
+                    tx.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", params![now, id]).map_err(db::map_sqlite)?;
+                }
+                tx.commit().map_err(db::map_sqlite)
+            })
+            .await?;
+        self.get(id.trim()).await
+    }
+
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
     ///
     /// The verdict is bound to the task's head by the row itself, so it is written here
@@ -875,6 +973,72 @@ fn migrate(conn: &Connection) -> Result<(), DunkError> {
         }
     }
     Ok(())
+}
+
+/// The validators (`validate_status` / `_priority` / `_kind` / `_verdict`), with the
+/// Python's refusal sentences. Each returns the normalised value.
+pub const STATUSES: [&str; 5] = ["open", "in_progress", "blocked", "done", "cancelled"];
+pub const PRIORITIES: [&str; 4] = ["low", "medium", "high", "urgent"];
+pub const KINDS: [&str; 4] = ["work", "review", "verify", "report"];
+pub const VERDICTS: [&str; 2] = ["accept", "needs-fix"];
+
+pub fn validate_status(status: &str) -> Result<String, DunkError> {
+    let status = status.trim();
+    if STATUSES.contains(&status) {
+        return Ok(status.to_string());
+    }
+    Err(DunkError::Refused(format!(
+        "status must be one of {}",
+        STATUSES.join(", ")
+    )))
+}
+
+pub fn validate_priority(priority: &str) -> Result<String, DunkError> {
+    let priority = priority.trim();
+    if PRIORITIES.contains(&priority) {
+        return Ok(priority.to_string());
+    }
+    Err(DunkError::Refused(format!(
+        "priority must be one of {}",
+        PRIORITIES.join(", ")
+    )))
+}
+
+pub fn validate_kind(kind: &str) -> Result<String, DunkError> {
+    let kind = if kind.trim().is_empty() {
+        DEFAULT_KIND.to_string()
+    } else {
+        kind.trim().to_lowercase()
+    };
+    if KINDS.contains(&kind.as_str()) {
+        return Ok(kind);
+    }
+    Err(DunkError::Refused(format!(
+        "kind must be one of {}; got {kind:?}",
+        KINDS.join(", ")
+    )))
+}
+
+pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
+    let verdict = verdict.trim().to_lowercase();
+    if VERDICTS.contains(&verdict.as_str()) {
+        return Ok(verdict);
+    }
+    Err(DunkError::Refused(format!(
+        "verdict must be one of {}; got {verdict:?}",
+        VERDICTS.join(", ")
+    )))
+}
+
+/// `update`'s field edits (t786 slice 5). A status change is `set_status`, which carries
+/// the t854/t891 guards; this edits title, body, priority and dependencies only, in ONE
+/// immediate transaction, and writes the `priority` and `depends` events the Python writes.
+#[derive(Debug, Default, Clone)]
+pub struct FieldEdit {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub priority: Option<String>,
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// `_decode`: a JSON list, or empty when the column is NULL, unparseable or not a list.
@@ -1475,5 +1639,71 @@ mod tests {
         assert!(tasks.get(&second.id).await.is_err());
         assert_eq!(tasks.events(&second.id).await, 1);
         assert_eq!(tasks.delete(&first.id).await.unwrap(), first.id);
+    }
+
+    #[test]
+    fn the_validators_refuse_with_the_pythons_sentences() {
+        assert_eq!(validate_priority(" high ").unwrap(), "high");
+        assert!(validate_priority("x")
+            .unwrap_err()
+            .to_string()
+            .contains("priority must be one of low, medium, high, urgent"));
+        assert!(validate_status("nope")
+            .unwrap_err()
+            .to_string()
+            .contains("status must be one of open, in_progress, blocked, done, cancelled"));
+        assert_eq!(validate_kind("").unwrap(), "work");
+        assert_eq!(validate_kind(" Review ").unwrap(), "review");
+        assert!(validate_kind("x")
+            .unwrap_err()
+            .to_string()
+            .contains("kind must be one of work, review, verify, report; got \"x\""));
+        assert_eq!(validate_verdict("ACCEPT").unwrap(), "accept");
+        assert!(validate_verdict("maybe").is_err());
+    }
+
+    #[tokio::test]
+    async fn update_edits_fields_and_records_priority_and_depends_events() {
+        let tasks = store("update").await;
+        let a = tasks.add("global", "a", "").await.unwrap();
+        let b = tasks.add("global", "b", "").await.unwrap();
+        let edit = FieldEdit {
+            title: Some(" renamed ".into()),
+            body: Some("new".into()),
+            priority: Some("urgent".into()),
+            depends_on: Some(vec![a.id.clone()]),
+        };
+        let got = tasks.update(&b.id, edit, Some("%1")).await.unwrap();
+        assert_eq!(
+            (got.title.as_str(), got.body.as_str(), got.priority.as_str()),
+            ("renamed", "new", "urgent")
+        );
+        assert_eq!(decode_list(Some(&got.depends_on)), vec![a.id.clone()]);
+        assert_eq!(tasks.events(&b.id).await, 2);
+        let own = FieldEdit {
+            depends_on: Some(vec![b.id.clone()]),
+            ..Default::default()
+        };
+        assert!(tasks
+            .update(&b.id, own, None)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cannot depend on itself"));
+        let ghost = FieldEdit {
+            depends_on: Some(vec!["t999".into()]),
+            ..Default::default()
+        };
+        assert!(tasks.update(&b.id, ghost, None).await.is_err());
+        let blank = FieldEdit {
+            title: Some("  ".into()),
+            ..Default::default()
+        };
+        assert!(tasks.update(&b.id, blank, None).await.is_err());
+        assert_eq!(
+            tasks.events(&b.id).await,
+            2,
+            "a refused edit writes nothing"
+        );
     }
 }
