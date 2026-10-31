@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod atomic_json;
+pub mod client;
 pub mod clock;
 pub mod config;
 pub mod db;
