@@ -6,4 +6,5 @@ pub mod cli_table;
 pub mod local;
 pub mod render;
 pub mod render_fleet;
+pub mod render_print;
 pub mod spec;
