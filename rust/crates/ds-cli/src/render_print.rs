@@ -1252,6 +1252,604 @@ pub fn render_recover(result: &Value) -> String {
     out + &warnings(result)
 }
 
+// ---- slice 5: what main lacks after #280 (t811) ---------------------------------------
+
+/// `d.get(key, default)`: the default only when the key is ABSENT (a present null stays null).
+fn get_or<'a>(v: &'a Value, key: &str, default: &'a Value) -> &'a Value {
+    v.get(key).unwrap_or(default)
+}
+
+fn arr(v: &Value, k: &str) -> Vec<Value> {
+    get(v, k).as_array().cloned().unwrap_or_default()
+}
+
+fn or_str(v: &Value, fallback: &str) -> String {
+    if truthy(v) {
+        py_str(v)
+    } else {
+        fallback.to_string()
+    }
+}
+
+/// `json.dumps(value, indent=2)` (ensure_ascii, `": "` item separator, insertion order).
+pub fn py_json_indent2(v: &Value) -> String {
+    fn go(v: &Value, depth: usize, out: &mut String) {
+        let pad = "  ".repeat(depth + 1);
+        let close = "  ".repeat(depth);
+        match v {
+            Value::Array(a) if a.is_empty() => out.push_str("[]"),
+            Value::Object(m) if m.is_empty() => out.push_str("{}"),
+            Value::Array(a) => {
+                out.push_str("[\n");
+                for (i, item) in a.iter().enumerate() {
+                    out.push_str(&pad);
+                    go(item, depth + 1, out);
+                    out.push_str(if i + 1 < a.len() { ",\n" } else { "\n" });
+                }
+                out.push_str(&close);
+                out.push(']');
+            }
+            Value::Object(m) => {
+                out.push_str("{\n");
+                for (i, (k, item)) in m.iter().enumerate() {
+                    out.push_str(&pad);
+                    out.push_str(&py_json_dumps(&Value::String(k.clone())));
+                    out.push_str(": ");
+                    go(item, depth + 1, out);
+                    out.push_str(if i + 1 < m.len() { ",\n" } else { "\n" });
+                }
+                out.push_str(&close);
+                out.push('}');
+            }
+            other => out.push_str(&py_json_dumps(other)),
+        }
+    }
+    let mut out = String::new();
+    go(v, 0, &mut out);
+    out
+}
+
+/// `print_owner_stats` and `print_view`: `print(json.dumps(result, indent=2))`.
+pub fn render_json_indent2(result: &Value) -> String {
+    format!("{}\n", py_json_indent2(result))
+}
+
+/// `_print_inbox_tasks`.
+pub fn render_inbox_tasks(r: &Value) -> String {
+    let tasks = get(r, "tasks");
+    let global = arr(tasks, "global");
+    let pane = arr(tasks, "pane");
+    if global.is_empty() && pane.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("--- tasks ---\n");
+    for task in pane.iter().chain(global.iter()) {
+        out += &format!("  {}\n", task_row(task));
+    }
+    let pick = get(get(tasks, "next"), "pick");
+    if truthy(pick) {
+        out += &format!(
+            "next: {} [{}] {}\n",
+            field(pick, "id"),
+            field(pick, "priority"),
+            field(pick, "title")
+        );
+    }
+    out + "\n"
+}
+
+/// `print_inbox_read`.
+pub fn render_inbox_read(r: &Value) -> String {
+    if r.get("messages").is_none() {
+        return render_capped(r);
+    }
+    let messages = arr(r, "messages");
+    if messages.is_empty() {
+        return format!(
+            "mailbox {}: no unread messages\n{}",
+            field(r, "mailbox"),
+            render_inbox_tasks(r)
+        );
+    }
+    let mut out = String::new();
+    for m in &messages {
+        let subject = if truthy(get(m, "subject")) {
+            format!(" | {}", field(m, "subject"))
+        } else {
+            String::new()
+        };
+        out += &format!(
+            "--- {} from {}{subject}\n",
+            field(m, "message_id"),
+            or_str(get(m, "sender"), "unknown")
+        );
+        for blob in arr(m, "attachments") {
+            out += &format!(
+                "    attachment {}  {}  {} bytes  {}\n",
+                field(&blob, "id"),
+                field(&blob, "filename"),
+                field(&blob, "size"),
+                field(&blob, "media_type")
+            );
+        }
+        out += &format!("{}\n\n", field(m, "body"));
+    }
+    if truthy(get(r, "truncated")) {
+        out += &format!(
+            "[capped: {} older message(s) left out - {}]\n",
+            field(r, "omitted"),
+            field(r, "note")
+        );
+    }
+    out + &render_inbox_tasks(r)
+}
+
+/// `print_inbox_recover`.
+pub fn render_inbox_recover(r: &Value) -> String {
+    if r.get("messages").is_none() {
+        return render_capped(r);
+    }
+    let n = arr(r, "messages").len();
+    let head = if n > 0 {
+        format!(
+            "mailbox {}: recovered {n} delivered message(s) - display them, then inbox ack\n",
+            field(r, "mailbox")
+        )
+    } else {
+        String::new()
+    };
+    head + &render_inbox_read(r)
+}
+
+/// `print_inbox_status`. `stamp` renders the sent/read/acked/cancelled times.
+pub fn render_inbox_status(r: &Value, stamp: Stamp) -> String {
+    let mut out = String::new();
+    for key in [
+        "message_id",
+        "state",
+        "destination",
+        "pane_id",
+        "sender",
+        "waiting_s",
+        "body_bytes",
+        "attachments",
+        "attachment_bytes",
+        "reason",
+    ] {
+        let v = get(r, key);
+        if !(v.is_null() || v == "") {
+            out += &format!("{} {}\n", ljust(key, 17), py_repr_or_str(v));
+        }
+    }
+    for (key, label) in [
+        ("created_at", "sent"),
+        ("read_at", "read"),
+        ("acked_at", "acked"),
+        ("cancelled_at", "cancelled"),
+    ] {
+        if truthy(get(r, key)) {
+            out += &format!("{} {}\n", ljust(label, 17), stamp(num(get(r, key))));
+        }
+    }
+    let notify = get(r, "notify");
+    if truthy(get(notify, "state")) {
+        let reason = if truthy(get(notify, "reason")) {
+            format!(" ({})", field(notify, "reason"))
+        } else {
+            String::new()
+        };
+        out += &format!(
+            "{} {}{reason}\n",
+            ljust("notify", 17),
+            field(notify, "state")
+        );
+    }
+    out
+}
+
+/// `str(value)` where containers print as their Python repr.
+fn py_repr_or_str(v: &Value) -> String {
+    if v.is_string() {
+        py_str(v)
+    } else if v.is_array() || v.is_object() {
+        py_repr_value(v)
+    } else {
+        py_str(v)
+    }
+}
+
+/// `print_retired`. `stamp_min` renders `%Y-%m-%d %H:%M` for the retired-at times.
+pub fn render_retired(result: &Value, stamp_min: Stamp) -> String {
+    if result.get("retired").is_some() {
+        let records = arr(result, "retired");
+        if records.is_empty() {
+            return "no retired panes\n".into();
+        }
+        let mut out = format!("{} {} REASON\n", ljust("PANE", 10), ljust("RETIRED", 20));
+        for record in records {
+            let at = stamp_min(num(get(&record, "retired_at")));
+            out += &format!(
+                "{} {} {}\n",
+                ljust(&field(&record, "pane_id"), 10),
+                ljust(&at, 20),
+                field(&record, "reason")
+            );
+        }
+        return out;
+    }
+    if result.get("unread_kept").is_some() {
+        let kept = if get(result, "unread_kept").is_null() {
+            String::new()
+        } else {
+            format!(
+                "; {} unread message(s) kept as the record",
+                field(result, "unread_kept")
+            )
+        };
+        return format!(
+            "retired {} ({}){kept}\n",
+            field(result, "pane_id"),
+            field(result, "reason")
+        );
+    }
+    format!("unretired {}\n", field(result, "pane_id"))
+}
+
+/// `print_report_list`. `stamp_min` renders `%Y-%m-%d %H:%M`.
+pub fn render_report_list(result: &Value, stamp_min: Stamp) -> String {
+    let count = if result.get("count").is_some() {
+        field(result, "count")
+    } else {
+        "0".into()
+    };
+    let mut out = format!("{count} report(s) in {}\n", field(result, "dir"));
+    for row in arr(result, "reports") {
+        out += &format!(
+            "  {} {} B  {}\n",
+            stamp_min(num(get(&row, "at"))),
+            rjust(&field(&row, "size"), 8),
+            field(&row, "path")
+        );
+    }
+    out
+}
+
+/// `print_owner_conversation`. `stamp_md` renders `%m-%d %H:%M`.
+pub fn render_owner_conversation(result: &Value, stamp_md: Stamp) -> String {
+    let count = if result.get("count").is_some() {
+        field(result, "count")
+    } else {
+        "0".into()
+    };
+    let mut out = format!(
+        "mailbox {}  messages {count}  waiting {}\n",
+        field(result, "mailbox"),
+        arr(result, "waiting").len()
+    );
+    for row in arr(result, "messages") {
+        let mark = if truthy(get(&row, "reply_to")) {
+            "->"
+        } else if get(&row, "state") == "queued" {
+            "? "
+        } else {
+            "  "
+        };
+        let when = stamp_md(num(get(&row, "created_at")));
+        let body = if truthy(get(&row, "body")) {
+            field(&row, "body")
+        } else {
+            String::new()
+        };
+        let first = py_splitlines(&body).first().copied().unwrap_or("");
+        out += &format!(
+            "{mark} {} {when} {} {} {}\n",
+            rjust(&field(&row, "id"), 6),
+            ljust(&or_str(get(&row, "transport"), "-"), 8),
+            ljust(&or_str(get(&row, "sender"), "-"), 8),
+            first_chars(first, 90)
+        );
+    }
+    out
+}
+
+/// `print_owner_take`. `stamp_hms` renders `%H:%M:%S`.
+pub fn render_owner_take(result: &Value, stamp_hms: Stamp) -> String {
+    let mut out = String::new();
+    for m in arr(result, "messages") {
+        let subject = if truthy(get(&m, "subject")) {
+            format!("[{}] ", field(&m, "subject"))
+        } else {
+            String::new()
+        };
+        out += &format!(
+            "--- owner message {} at {}\n",
+            field(&m, "id"),
+            stamp_hms(num(get(&m, "created_at")))
+        );
+        out += &format!("{subject}{}\n", field(&m, "body"));
+    }
+    out
+}
+
+/// `print_herdr`: (stderr text, stdout text).
+pub fn render_herdr(result: &Value) -> (String, String) {
+    let mut err = String::new();
+    if truthy(get(result, "error")) {
+        err = format!("herdr error: {}\n", field(result, "error"));
+    }
+    let out = if !get(result, "result").is_null() {
+        format!("{}\n", py_json_indent2(get(result, "result")))
+    } else if truthy(get(result, "text")) {
+        let t = field(result, "text");
+        if t.ends_with('\n') {
+            t
+        } else {
+            t + "\n"
+        }
+    } else {
+        String::new()
+    };
+    (err, out)
+}
+
+/// `print_dispatch`. `None` for the final branch (`dunk_dispatch.summary(result)` of a tick
+/// result), which needs the unported dispatch module; the caller prints that itself.
+pub fn render_dispatch(result: &Value) -> Option<String> {
+    if result.get("summary").is_some() {
+        return Some(format!(
+            "{}\nstandby queue: {} pending\n",
+            field(result, "summary"),
+            field(result, "pending")
+        ));
+    }
+    if result.get("items").is_some() {
+        let items = arr(result, "items");
+        if items.is_empty() {
+            return Some("standby queue is empty\n".into());
+        }
+        let mut out = format!(
+            "{} {} {} BRIEF\n",
+            ljust("ID", 5),
+            ljust("TASK", 7),
+            ljust("LANE", 10)
+        );
+        for item in items {
+            out += &format!(
+                "{} {} {} {}\n",
+                ljust(&field(&item, "id"), 5),
+                ljust(&or_str(get(&item, "task_id"), "-"), 7),
+                ljust(&or_str(get(&item, "lane"), "any"), 10),
+                clip(get(&item, "brief"), 70)
+            );
+        }
+        return Some(out);
+    }
+    if result.get("removed").is_some() {
+        return Some(format!(
+            "removed standby item {}\n",
+            field(result, "removed")
+        ));
+    }
+    if result.get("brief").is_some() && result.get("id").is_some() {
+        let task = if truthy(get(result, "task_id")) {
+            format!(" for {}", field(result, "task_id"))
+        } else {
+            String::new()
+        };
+        let lane = if truthy(get(result, "lane")) {
+            format!(" (reserved for {})", field(result, "lane"))
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "added standby item {}{task}{lane}\n",
+            field(result, "id")
+        ));
+    }
+    None
+}
+
+/// The per-record lines of `print_dispatch`'s tick branch (after `dunk_dispatch.summary`).
+pub fn render_dispatched(result: &Value) -> String {
+    let mut out = String::new();
+    for record in arr(result, "dispatched") {
+        let state = if truthy(get(&record, "sent")) {
+            "sent"
+        } else if !truthy(get(&record, "error")) {
+            "DRY RUN"
+        } else {
+            "FAILED"
+        };
+        let err = if truthy(get(&record, "error")) {
+            format!(" [{}]", field(&record, "error"))
+        } else {
+            String::new()
+        };
+        out += &format!(
+            "  {state} {}: {}{err}\n",
+            field(&record, "pane_id"),
+            field(&record, "text")
+        );
+    }
+    out
+}
+
+/// `print_status`. `stamp` renders `code_mtime`/`started_at`; `now` is `time.time()`.
+pub fn render_status(result: &Value, stamp: Stamp, now: f64) -> String {
+    let mut out = String::new();
+    let (version, code) = (get(result, "version"), get(result, "code_hash"));
+    if truthy(version) && truthy(code) {
+        out += &format!(
+            "{} {} (code {})\n",
+            ljust("version", 16),
+            py_str(version),
+            py_str(code)
+        );
+    } else if truthy(version) {
+        out += &format!("{} {}\n", ljust("version", 16), py_str(version));
+    }
+    for key in [
+        "code_mtime",
+        "started_at",
+        "code_stale",
+        "pid",
+        "dunkers",
+        "running",
+        "queued_messages",
+        "herdr_available",
+        "herdr_hint",
+        "state_file",
+        "uptime_s",
+        "self_pane_id",
+        "message",
+    ] {
+        let value = get(result, key);
+        if (value.is_null() || value == "") && key != "code_stale" {
+            continue;
+        }
+        let text = match key {
+            "code_mtime" | "started_at" => {
+                format!("{} ({}s ago)", stamp(num(value)), (now - num(value)) as i64)
+            }
+            "code_stale" => {
+                if value.is_null() {
+                    let errors = join(get(result, "code_identity_errors"), ", ");
+                    format!(
+                        "UNKNOWN - source identity unavailable{}",
+                        if errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {errors}")
+                        }
+                    )
+                } else if truthy(value) {
+                    let names = join(get(result, "code_changed_modules"), ", ");
+                    let mut t =
+                        "YES - code on disk differs from this process; restart it".to_string();
+                    if !names.is_empty() {
+                        t += &format!(" ({names})");
+                    }
+                    t
+                } else {
+                    "no".into()
+                }
+            }
+            _ => py_repr_or_str(value),
+        };
+        out += &format!("{} {text}\n", ljust(key, 16));
+    }
+    out
+}
+
+/// `print_task_metrics`. `stamp` renders the bucket start; the Python prints `%Y-%m-%d %H:00`.
+pub fn render_task_metrics(result: &Value, stamp: Stamp) -> String {
+    let window = get(result, "window");
+    let mut out = format!(
+        "scope {}  window {}s ({} buckets)\n",
+        field(result, "scope"),
+        field(window, "seconds"),
+        field(window, "bucket")
+    );
+    let current = get(result, "current");
+    let kv = |v: &Value| {
+        v.as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| format!("{k}={}", py_str(v)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    };
+    out += &format!("status:   {}\n", kv(get(current, "by_status")));
+    out += &format!("priority: {}\n", kv(get(current, "by_priority")));
+    let zero = Value::from(0);
+    let by_scope = get_or(current, "by_scope", &Value::Null);
+    out += &format!(
+        "scope:    global={} pane={}\n",
+        py_str(get_or(by_scope, "global", &zero)),
+        py_str(get_or(by_scope, "pane", &zero))
+    );
+    let t = get(result, "throughput");
+    let tv = |k: &str| py_str(get_or(t, k, &zero));
+    out += &format!(
+        "throughput: created={} claimed={} completed={} cancelled={} requeued={}\n",
+        tv("created"),
+        tv("claimed"),
+        tv("completed"),
+        tv("cancelled"),
+        tv("requeued")
+    );
+    for bucket in arr(t, "buckets") {
+        let at = stamp(num(get(&bucket, "bucket")));
+        let hour: String = at.chars().take(13).collect();
+        out += &format!(
+            "  {hour}:00 created={} completed={}",
+            field(&bucket, "created"),
+            field(&bucket, "completed")
+        );
+        if truthy(get(&bucket, "requeued")) {
+            out += &format!(" requeued={}", field(&bucket, "requeued"));
+        }
+        out += "\n";
+    }
+    for name in ["completion", "claim"] {
+        let latency = get(get(result, "latency_ms"), name);
+        if truthy(get(latency, "count")) {
+            out += &format!(
+                "{name} latency: n={} avg={}ms p50={} p90={} max={}\n",
+                field(latency, "count"),
+                field(latency, "avg"),
+                field(latency, "p50"),
+                field(latency, "p90"),
+                field(latency, "max")
+            );
+        }
+    }
+    for name in ["completed", "claimed"] {
+        let rows = arr(get(result, "by_actor"), name);
+        if !rows.is_empty() {
+            let items: Vec<String> = rows
+                .iter()
+                .map(|r| format!("{}={}", field(r, "actor"), field(r, "count")))
+                .collect();
+            out += &format!("by actor ({name}): {}\n", items.join(", "));
+        }
+    }
+    let assignees = arr(current, "by_assignee");
+    if !assignees.is_empty() {
+        let items: Vec<String> = assignees
+            .iter()
+            .map(|r| format!("{}={}", field(r, "assignee"), field(r, "count")))
+            .collect();
+        out += &format!("open by assignee: {}\n", items.join(", "));
+    }
+    let held = get(current, "leader_held");
+    if held.is_null() {
+        // An older daemon payload without the field: unknown must not read as a measured zero.
+        out += "leader-held tasks: unavailable (payload predates the metric)\n";
+    } else if let Some(count) = held
+        .as_object()
+        .and_then(|m| m.get("count"))
+        .and_then(Value::as_i64)
+    {
+        let age = get(held, "oldest_age_s");
+        if count == 0 {
+            out += "leader-held tasks: 0\n";
+        } else {
+            let age_text = if age.is_null() {
+                " (oldest unknown)".to_string()
+            } else if num(age) >= 86400.0 {
+                format!(" (oldest {:.1}d)", num(age) / 86400.0)
+            } else {
+                format!(" (oldest {:.1}h)", num(age) / 3600.0)
+            };
+            out += &format!("leader-held tasks: {count}{age_text}\n");
+        }
+    }
+    out
+}
+
 macro_rules! printer {
     ($name:ident, $render:ident) => {
         pub fn $name(v: &Value) {
@@ -1458,5 +2056,110 @@ mod tests {
         let r = json!({"apply": true, "herdr": "h", "ok": true, "launches": 1,
             "plan": [{"pane_id": "%1", "action": "relaunch", "agent": null, "command": "go", "applied": false, "apply_reason": "nope"}]});
         assert_eq!(render_recover(&r), "recover apply  backend h  ok True  launches 1\n  %1       relaunch        -        go\n           applied=False nope\n");
+    }
+
+    #[test]
+    fn inbox_read_recover_status() {
+        let m = json!({"message_id": "i1", "sender": null, "subject": "S", "body": "hi", "attachments": [{"id": "a", "filename": "f", "size": 3, "media_type": "x/y"}]});
+        let r = json!({"mailbox": "mb", "messages": [m], "truncated": true, "omitted": 2, "note": "n",
+            "tasks": {"global": [{"id": "t1", "status": "open", "priority": "low", "scope": "global", "is_global": true, "title": "T"}], "pane": [], "next": {"pick": {"id": "t1", "priority": "low", "title": "T"}}}});
+        assert_eq!(render_inbox_read(&r), "--- i1 from unknown | S\n    attachment a  f  3 bytes  x/y\nhi\n\n[capped: 2 older message(s) left out - n]\n--- tasks ---\n  t1    open        low    global     -                  T\nnext: t1 [low] T\n\n");
+        assert_eq!(
+            render_inbox_read(&json!({"mailbox": "mb", "messages": []})),
+            "mailbox mb: no unread messages\n"
+        );
+        assert!(render_inbox_recover(&r).starts_with(
+            "mailbox mb: recovered 1 delivered message(s) - display them, then inbox ack\n--- i1"
+        ));
+        assert!(render_inbox_read(&json!({"bytes": 9, "cap": 5}))
+            .starts_with("result capped by the desk role"));
+        let st = json!({"message_id": "i1", "state": "read", "waiting_s": 0, "created_at": 86400, "notify": {"state": "sent", "reason": "ok"}});
+        assert_eq!(render_inbox_status(&st, &utc_stamp), "message_id        i1\nstate             read\nwaiting_s         0\nsent              1970-01-02 00:00:00\nnotify            sent (ok)\n");
+    }
+
+    #[test]
+    fn retired_reports_owner_dispatch_herdr_status_json() {
+        let cut = |at: f64| utc_stamp(at)[..16].to_string();
+        assert_eq!(
+            render_retired(&json!({"retired": []}), &cut),
+            "no retired panes\n"
+        );
+        assert_eq!(
+            render_retired(
+                &json!({"retired": [{"pane_id": "%1", "retired_at": 0, "reason": "r"}]}),
+                &cut
+            ),
+            "PANE       RETIRED              REASON\n%1         1970-01-01 00:00     r\n"
+        );
+        assert_eq!(
+            render_retired(
+                &json!({"pane_id": "%1", "reason": "r", "unread_kept": 2}),
+                &cut
+            ),
+            "retired %1 (r); 2 unread message(s) kept as the record\n"
+        );
+        assert_eq!(
+            render_retired(&json!({"pane_id": "%1"}), &cut),
+            "unretired %1\n"
+        );
+        assert_eq!(
+            render_report_list(
+                &json!({"dir": "/d", "reports": [{"at": 0, "size": 5, "path": "p"}]}),
+                &cut
+            ),
+            "0 report(s) in /d\n  1970-01-01 00:00        5 B  p\n"
+        );
+        let conv = json!({"mailbox": "o", "count": 1, "waiting": [1], "messages": [{"id": 3, "state": "queued", "created_at": 0, "sender": "me", "body": "line1\nline2"}]});
+        assert_eq!(
+            render_owner_conversation(&conv, &|a| utc_stamp(a)[5..16].to_string()),
+            "mailbox o  messages 1  waiting 1\n?       3 01-01 00:00 -        me       line1\n"
+        );
+        assert_eq!(
+            render_owner_take(
+                &json!({"messages": [{"id": 1, "created_at": 0, "subject": "s", "body": "b"}]}),
+                &|a| utc_stamp(a)[11..].to_string()
+            ),
+            "--- owner message 1 at 00:00:00\n[s] b\n"
+        );
+        assert_eq!(
+            render_dispatch(&json!({"items": []})).unwrap(),
+            "standby queue is empty\n"
+        );
+        assert_eq!(
+            render_dispatch(&json!({"id": 4, "brief": "b", "task_id": "t1", "lane": "L"})).unwrap(),
+            "added standby item 4 for t1 (reserved for L)\n"
+        );
+        assert!(render_dispatch(&json!({"ticked": 1})).is_none());
+        assert_eq!(
+            render_dispatched(
+                &json!({"dispatched": [{"pane_id": "%1", "text": "x", "error": "e"}]})
+            ),
+            "  FAILED %1: x [e]\n"
+        );
+        assert_eq!(
+            render_herdr(&json!({"error": "bad", "result": {"a": [1, 2]}})),
+            (
+                "herdr error: bad\n".to_string(),
+                "{\n  \"a\": [\n    1,\n    2\n  ]\n}\n".to_string()
+            )
+        );
+        assert_eq!(render_herdr(&json!({"text": "t"})).1, "t\n");
+        assert_eq!(render_json_indent2(&json!({})), "{}\n");
+        let status = json!({"version": "1.0", "code_hash": "abc", "code_stale": false, "pid": 7, "started_at": 100.0});
+        assert_eq!(render_status(&status, &utc_stamp, 160.0), "version          1.0 (code abc)\nstarted_at       1970-01-01 00:01:40 (60s ago)\ncode_stale       no\npid              7\n");
+        let stale = json!({"code_stale": null, "code_identity_errors": ["e1"]});
+        assert_eq!(
+            render_status(&stale, &utc_stamp, 0.0),
+            "code_stale       UNKNOWN - source identity unavailable: e1\n"
+        );
+    }
+
+    #[test]
+    fn metrics_slice() {
+        let m = json!({"scope": "global", "window": {"seconds": 60, "bucket": "hour"}, "current": {"by_status": {"open": 1}, "by_priority": {"low": 1}, "by_scope": {"global": 1}, "leader_held": {"count": 2, "oldest_age_s": 7200}},
+            "throughput": {"created": 1, "buckets": [{"bucket": 0, "created": 1, "completed": 0, "requeued": 2}]}});
+        assert_eq!(render_task_metrics(&m, &utc_stamp), "scope global  window 60s (hour buckets)\nstatus:   open=1\npriority: low=1\nscope:    global=1 pane=0\nthroughput: created=1 claimed=0 completed=0 cancelled=0 requeued=0\n  1970-01-01 00:00 created=1 completed=0 requeued=2\nleader-held tasks: 2 (oldest 2.0h)\n");
+        assert!(render_task_metrics(&json!({}), &utc_stamp)
+            .ends_with("leader-held tasks: unavailable (payload predates the metric)\n"));
     }
 }
