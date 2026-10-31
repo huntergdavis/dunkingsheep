@@ -114,6 +114,15 @@ ALLOW = {
     # fleet-destructive verbs, which stay on a human in a terminal.
     "web": None,
     "desk": READ_ONLY | frozenset({
+        # Owner-directed queue actions (owner decision 2026-10-31: "a narrow grant"). The desk
+        # relays the OWNER's words, so it may reshape the queue - and only the queue, reversibly:
+        # block/unblock/assign/update. Closing or deleting work (task_cancel, task_delete,
+        # task_complete), anything that touches a lane or a process (respawn, start_agent,
+        # send_keys, close, shutdown) and anything privileged stays off: those are
+        # fleet-destructive and stay with an owner-role pane. (lane_register is a bootstrap
+        # path in READ_ONLY for every role; its HANDLER refuses a non-owner.) `task_update` is already
+        # refused status/assignees/block_reason for every non-owner role (dunk_api.h_task_update).
+        "task_block", "task_unblock", "task_assign", "task_update",
         "task_add", "task_note", "inbox_read", "inbox_fetch", "inbox_ack",
         "owner_take", "owner_poll", "owner_receipts", "owner_reply",
         # The owner mailbox is the desk's whole job (FLAT_FLEET.md 7.2): read it,

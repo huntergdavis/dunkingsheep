@@ -146,6 +146,16 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(dunk_roles.allowed("desk", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("desk", "task_complete"))
         self.assertTrue(dunk_roles.allowed("desk", "task_add"))
+
+    def test_the_desk_has_a_narrow_grant_of_reversible_queue_actions_and_nothing_destructive(self):
+        # owner decision 2026-10-31: block, unblock, assign and update, only.
+        for verb in ("task_block", "task_unblock", "task_assign", "task_update"):
+            self.assertTrue(dunk_roles.allowed("desk", verb), verb)
+        for verb in ("task_cancel", "task_delete", "task_complete", "task_next", "respawn_pane",
+                     "start_agent", "send_keys", "send_text", "lane_set",
+                     "close", "shutdown", "create_workspace", "superuser_add", "retire_pane",
+                     "add_dunk", "stop_all", "gh_token", "token_issue"):
+            self.assertFalse(dunk_roles.allowed("desk", verb), f"the desk must not have {verb}")
         self.assertFalse(dunk_roles.allowed("planner", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("anonymous", "task_next"))
         self.assertTrue(dunk_roles.allowed("anonymous", "task_list"))
