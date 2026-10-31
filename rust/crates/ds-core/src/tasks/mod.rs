@@ -449,6 +449,23 @@ impl Tasks {
             .await
     }
 
+    /// t1221 (t1218 C): the idempotent backstop the daemon tick runs. Opens every blocked
+    /// task whose block is a dependency block (empty or `blocked-by:*`) and whose
+    /// dependencies are all done AND landed, logs one `unblocked` event (actor `system`,
+    /// reason `auto: dependencies satisfied (sweep)`) and fires the unblocked observer for
+    /// each. A second sweep finds nothing. `needs-owner:`, `DEFERRED`, headroom and other
+    /// free-text reasons, and tasks with a cancelled dependency, are never touched. Pure
+    /// of the tick: it takes no clock or timer, so the T30 tick only has to call it.
+    pub async fn sweep_auto_unblock(&self) -> Result<Vec<String>, DunkError> {
+        let now = crate::clock::now_s();
+        let opened = self
+            .writer
+            .call(move |conn| auto_unblock(conn, now, None))
+            .await?;
+        self.fire_unblocked(&opened);
+        Ok(opened)
+    }
+
     fn fire_unblocked(&self, ids: &[String]) {
         for id in ids {
             self.fire(id, "unblocked", Some("system"), None);
@@ -881,16 +898,6 @@ impl Tasks {
             .await
     }
 
-    /// `leases_for`: live leases for a task (expired rows are ignored). T12 (t787) owns
-    /// claim/heartbeat/release; this read shares its `task_leases` schema.
-    pub async fn leases_for(&self, id: &str, now: Option<f64>) -> Result<Vec<Lease>, DunkError> {
-        let id = id.to_string();
-        let now = now.unwrap_or_else(crate::clock::now_s);
-        self.writer
-            .call(move |conn| leases_for_conn(conn, &id, now))
-            .await
-    }
-
     /// `_decorate`: the row plus everything a reader looks at (assignees, leases,
     /// claimable, eligible, allocation_waiting, the dependency fields). `pane_id` is the
     /// viewer: eligibility is per-viewer (F2).
@@ -1319,16 +1326,6 @@ pub struct DependencyState {
     /// Python's `eligible` (assignees, leases) is NOT ported yet, so this is the
     /// generic-list value: unassigned-or-multi is not checked here.
     pub dependencies_clear: bool,
-}
-
-/// One live `task_leases` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Lease {
-    pub task_id: String,
-    pub pane_id: String,
-    pub claimed_at: f64,
-    pub heartbeat_at: f64,
-    pub expires_at: f64,
 }
 
 /// `_decorate` output: the row and its derived fields, same names as the Python dict.
@@ -1834,6 +1831,60 @@ mod tests {
         let b = blocked_on(&store, "b", &[&a], None).await;
         store.task_complete(&a.id, Some("%1"), false).await.unwrap();
         assert_eq!("blocked", store.get(&b.id).await.unwrap().status);
+    }
+
+    #[tokio::test]
+    async fn sweep_opens_the_t810_shape_once_and_a_second_sweep_is_a_noop() {
+        let store = store("sweep-t810").await;
+        let a = store.add("global", "a", "").await.unwrap();
+        store.complete(&a.id).await.unwrap();
+        // t810: blocked with an empty reason AFTER its dependency was done: no event
+        // ever opens it, only the sweep.
+        let b = blocked_on(&store, "b", &[&a], None).await;
+        assert_eq!("blocked", store.get(&b.id).await.unwrap().status);
+        assert_eq!(
+            vec![b.id.clone()],
+            store.sweep_auto_unblock().await.unwrap()
+        );
+        let opened = store.get(&b.id).await.unwrap();
+        assert_eq!("open", opened.status);
+        assert_eq!(None, opened.block_reason);
+        assert!(store.sweep_auto_unblock().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_fires_the_unblocked_observer_once_per_task() {
+        let store = store("sweep-observer").await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        store.on_event(Box::new(move |id, event, _by, _kind| {
+            if event == "unblocked" {
+                sink.lock().unwrap().push(id.to_string());
+            }
+        }));
+        let a = store.add("global", "a", "").await.unwrap();
+        store.complete(&a.id).await.unwrap();
+        let b = blocked_on(&store, "b", &[&a], Some("blocked-by:t1")).await;
+        store.sweep_auto_unblock().await.unwrap();
+        store.sweep_auto_unblock().await.unwrap();
+        assert_eq!(vec![b.id], *seen.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_cancelled_dependencies_and_manual_reasons_alone() {
+        let store = store("sweep-untouched").await;
+        let done = store.add("global", "done", "").await.unwrap();
+        store.complete(&done.id).await.unwrap();
+        let dead = store.add("global", "dead", "").await.unwrap();
+        store.cancel(&dead.id, "no").await.unwrap();
+        let cancelled_dep = blocked_on(&store, "c", &[&dead], None).await;
+        let owner = blocked_on(&store, "o", &[&done], Some("needs-owner: pick one")).await;
+        let deferred = blocked_on(&store, "d", &[&done], Some("DEFERRED")).await;
+        let headroom = blocked_on(&store, "h", &[&done], Some("headroom 71%")).await;
+        assert!(store.sweep_auto_unblock().await.unwrap().is_empty());
+        for task in [&cancelled_dep, &owner, &deferred, &headroom] {
+            assert_eq!("blocked", store.get(&task.id).await.unwrap().status);
+        }
     }
 
     #[tokio::test]
