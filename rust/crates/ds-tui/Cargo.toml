@@ -3,7 +3,7 @@ name = "ds-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Dunking Sheep terminal UI (T61). Slices so far: text editor buffer, row formatting, app model."
+description = "Dunking Sheep terminal UI (T61). Slices so far: text editor buffer, row formatting."
 
 [dependencies]
 serde_json.workspace = true
