@@ -2,9 +2,9 @@
 //! `dunking_sheep_tui.py`: `rpc`, `refresh`, `refresh_tasks`, `flash`, `current_id`,
 //! `handle_key`, `handle_task_key`, `quit_and_shutdown`).
 //!
-//! NOT ported here: `connect` (needs the daemon client wiring), the modals and the
-//! dunk-edit keys `c i e n o u y m` (`pick_target`, `edit_*`, `toggle_*`), and every
-//! `draw*`. The task-view keys that open a modal (`b e a`) go through [`LineModal`].
+//! NOT ported here: `connect` (needs the daemon client wiring), the modals' drawing,
+//! the dunk keys `c` (`pick_target`) and `i` (`edit_interval`, needs `format_interval`,
+//! not in Rust yet), and every `draw*`. The task-view keys that open a modal (`b e a`) go through [`LineModal`].
 
 use serde_json::{json, Map, Value};
 
@@ -28,6 +28,8 @@ pub trait Backend {
 /// `line_modal(label, default)`: `None` means the user cancelled.
 pub trait LineModal {
     fn line_modal(&mut self, label: &str, default: &str) -> Option<String>;
+    /// `text_modal(initial_text)`: the multiline editor; `None` means cancelled.
+    fn text_modal(&mut self, initial_text: &str) -> Option<String>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +252,12 @@ impl<B: Backend> Model<B> {
                     self.rpc("toggle_dunk", args(&[("id", json!(id))]), now);
                 }
             }
+            Key::Char('e') => self.edit_text(modal, now),
+            Key::Char('n') => self.edit_name(modal, now),
+            Key::Char('o') => self.toggle_only_idle(now),
+            Key::Char('u') => self.toggle_skip_if_unconsumed(now),
+            Key::Char('y') => self.toggle_hold_while_typing(now),
+            Key::Char('m') => self.edit_max_sends(modal, now),
             Key::Char('t') => {
                 if let Some(id) = self.current_id(now) {
                     let call = args(&[
@@ -261,6 +269,117 @@ impl<B: Backend> Model<B> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The selected dunk, or the "No dunker selected" flash the Python's `current_id()` gives.
+    fn current_dunk(&mut self, now: f64) -> Option<Value> {
+        match self.dunks.get(self.selected).cloned() {
+            Some(dunk) => Some(dunk),
+            None => {
+                self.current_id(now);
+                None
+            }
+        }
+    }
+
+    fn update_dunk(&mut self, id: &Value, field: &str, value: Value, now: f64) {
+        let mut call = Map::new();
+        call.insert("id".into(), id.clone());
+        call.insert(field.into(), value);
+        self.rpc("update_dunk", call, now);
+    }
+
+    pub fn edit_text(&mut self, modal: &mut dyn LineModal, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let initial = dunk.get("text").and_then(Value::as_str).unwrap_or("");
+        if let Some(new_text) = modal.text_modal(initial) {
+            self.update_dunk(&dunk["id"], "text", json!(new_text.trim()), now);
+        }
+    }
+
+    pub fn edit_name(&mut self, modal: &mut dyn LineModal, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let initial = dunk.get("name").and_then(Value::as_str).unwrap_or("");
+        if let Some(value) = modal.line_modal("Dunker name", initial) {
+            self.update_dunk(&dunk["id"], "name", json!(value.trim()), now);
+        }
+    }
+
+    pub fn toggle_only_idle(&mut self, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let idle = dunk.get("only_when").and_then(Value::as_str) != Some("idle");
+        self.update_dunk(
+            &dunk["id"],
+            "only_when",
+            json!(if idle { "idle" } else { "any" }),
+            now,
+        );
+        let text = if idle {
+            "Sends wait for idle agent"
+        } else {
+            "Sends on schedule"
+        };
+        self.flash(text, 4.0, now);
+    }
+
+    pub fn toggle_skip_if_unconsumed(&mut self, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let new_value = !dunk.get("skip_if_unconsumed").is_some_and(truthy);
+        self.update_dunk(&dunk["id"], "skip_if_unconsumed", json!(new_value), now);
+        let text = if new_value {
+            "Skip sends the target never consumed"
+        } else {
+            "Always send on schedule"
+        };
+        self.flash(text, 4.0, now);
+    }
+
+    pub fn toggle_hold_while_typing(&mut self, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        // `dunk.get("hold_while_typing", True)`: absent means true.
+        let current = dunk.get("hold_while_typing").is_none_or(truthy);
+        self.update_dunk(&dunk["id"], "hold_while_typing", json!(!current), now);
+        let text = if !current {
+            "Hold while someone is typing in the target"
+        } else {
+            "Send even while someone is typing"
+        };
+        self.flash(text, 4.0, now);
+    }
+
+    pub fn edit_max_sends(&mut self, modal: &mut dyn LineModal, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        // `str(dunk.get("max_sends") or "")`: absent, null and 0 all show blank.
+        let current = match dunk.get("max_sends") {
+            Some(v) if truthy(v) => plain(v),
+            _ => String::new(),
+        };
+        let Some(value) = modal.line_modal("Max sends (blank = forever)", &current) else {
+            return;
+        };
+        let value = value.trim();
+        if value.is_empty() || value == "0" {
+            self.update_dunk(&dunk["id"], "max_sends", json!(0), now);
+        } else if value.chars().all(|c| c.is_ascii_digit()) {
+            match value.parse::<u64>() {
+                Ok(n) => self.update_dunk(&dunk["id"], "max_sends", json!(n), now),
+                Err(_) => self.flash("Max sends must be a whole number", 4.0, now),
+            }
+        } else {
+            self.flash("Max sends must be a whole number", 4.0, now);
         }
     }
 
@@ -449,6 +568,9 @@ mod tests {
         fn line_modal(&mut self, _: &str, _: &str) -> Option<String> {
             self.0.clone()
         }
+        fn text_modal(&mut self, _: &str) -> Option<String> {
+            self.0.clone()
+        }
     }
 
     fn model(replies: Vec<Result<Value, RpcError>>) -> Model<Fake> {
@@ -566,6 +688,61 @@ mod tests {
         assert_eq!(m.message, "claimed t9");
         m.handle_task_key(Key::Char('n'), &mut Says(None), 0.0);
         assert_eq!(m.message, "no task ready; following the queue");
+    }
+
+    fn with_dunk(d: Value) -> Model<Fake> {
+        let mut m = model(vec![Ok(json!({"dunks": [d]}))]);
+        m.refresh(0.0);
+        m
+    }
+
+    #[test]
+    fn toggles_send_the_flipped_value_and_flash() {
+        let mut m = with_dunk(json!({"id": "a"}));
+        m.handle_key(Key::Char('o'), &mut Says(None), 0.0);
+        let (cmd, a) = m.backend.calls.last().unwrap();
+        assert_eq!(
+            (cmd.as_str(), &a["only_when"]),
+            ("update_dunk", &json!("idle"))
+        );
+        assert_eq!(m.message, "Sends wait for idle agent");
+        m.handle_key(Key::Char('u'), &mut Says(None), 0.0);
+        assert_eq!(
+            m.backend.calls.last().unwrap().1["skip_if_unconsumed"],
+            json!(true)
+        );
+        // hold_while_typing defaults to true when absent, so the first press turns it off
+        m.handle_key(Key::Char('y'), &mut Says(None), 0.0);
+        assert_eq!(
+            m.backend.calls.last().unwrap().1["hold_while_typing"],
+            json!(false)
+        );
+        assert_eq!(m.message, "Send even while someone is typing");
+    }
+
+    #[test]
+    fn max_sends_blank_and_zero_mean_forever_and_junk_flashes() {
+        let mut m = with_dunk(json!({"id": "a", "max_sends": 3}));
+        m.handle_key(Key::Char('m'), &mut Says(Some("".into())), 0.0);
+        assert_eq!(m.backend.calls.last().unwrap().1["max_sends"], json!(0));
+        m.handle_key(Key::Char('m'), &mut Says(Some(" 12 ".into())), 0.0);
+        assert_eq!(m.backend.calls.last().unwrap().1["max_sends"], json!(12));
+        let calls = m.backend.calls.len();
+        m.handle_key(Key::Char('m'), &mut Says(Some("x1".into())), 0.0);
+        assert_eq!(m.backend.calls.len(), calls);
+        assert_eq!(m.message, "Max sends must be a whole number");
+    }
+
+    #[test]
+    fn edit_text_and_name_strip_and_cancel_sends_nothing() {
+        let mut m = with_dunk(json!({"id": "a"}));
+        let calls = m.backend.calls.len();
+        m.handle_key(Key::Char('e'), &mut Says(None), 0.0);
+        assert_eq!(m.backend.calls.len(), calls);
+        m.handle_key(Key::Char('e'), &mut Says(Some(" go on\n".into())), 0.0);
+        assert_eq!(m.backend.calls.last().unwrap().1["text"], json!("go on"));
+        m.handle_key(Key::Char('n'), &mut Says(Some("".into())), 0.0);
+        assert_eq!(m.backend.calls.last().unwrap().1["name"], json!(""));
     }
 
     #[test]
