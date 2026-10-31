@@ -223,6 +223,12 @@ impl Tasks {
                 params![id, scope, title, body, DEFAULT_STATUS, DEFAULT_PRIORITY,
                         DEFAULT_KIND, "[]", "[]", now, now],
             ).map_err(db::map_sqlite)?;
+            // t1225: the Python add() records `created` (scope is what the metrics scope
+            // filter keys on; a NULL scope drops the event from every scoped query).
+            conn.execute(
+                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to) VALUES (?,?,?,?,?,?,?)",
+                params![id, "created", now, None::<String>, scope, DEFAULT_PRIORITY, DEFAULT_STATUS],
+            ).map_err(db::map_sqlite)?;
             Ok(id)
         }).await?;
         self.fire(&id, "created", None, None);
@@ -2276,6 +2282,32 @@ mod tests {
                 ),
             ],
             "created once, completed once: completing a done task fires nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_records_a_created_event_with_scope_and_priority() {
+        let s = store("created-event").await;
+        let t = s.add("global", "work", "").await.unwrap();
+        assert_eq!(s.events(&t.id).await, 1);
+        let (event, scope, prio, to): (String, String, String, String) = s
+            .writer
+            .call({
+                let id = t.id.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT event, scope, priority, status_to FROM task_events WHERE task_id = ?",
+                        params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .map_err(db::map_sqlite)
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            (event.as_str(), scope.as_str(), prio.as_str(), to.as_str()),
+            ("created", "global", "low", "open")
         );
     }
 }
