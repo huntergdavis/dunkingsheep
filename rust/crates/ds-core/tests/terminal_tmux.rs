@@ -12,6 +12,23 @@ use std::path::PathBuf;
 use ds_core::terminal::tmux::{shell_join, TmuxBackend, PANE_FORMAT};
 use ds_core::terminal::{Terminal, TerminalError};
 
+use std::sync::{Mutex, MutexGuard};
+
+/// The tests in this file take turns. Each one writes a shell script and executes it at once, and
+/// Linux refuses to exec a file that ANY process still holds open for writing (ETXTBSY, "Text
+/// file busy", errno 26). With tests on parallel threads, a `fork` on one thread copies another
+/// thread's still-open write descriptor into a child that keeps it until its own `exec`, so a
+/// fresh script failed to run about one run in three (a different test each time; measured
+/// 2026-10-31, error `tmux: Text file busy (os error 26)`). The whole file takes ~0.3 s, so
+/// serialising it costs nothing and removes the race instead of narrowing it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 const SEP: &str = "\x1f";
 
 /// Write a fake tmux that logs its argv to `<dir>/argv.txt` and prints `stdout`,
@@ -56,6 +73,7 @@ fn pane_line(pane: &str, session: &str, window: &str, command: &str, pid: &str) 
 
 #[test]
 fn list_panes_parses_the_canned_listing() {
+    let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
     let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
@@ -78,6 +96,7 @@ fn list_panes_parses_the_canned_listing() {
 
 #[test]
 fn a_missing_server_is_an_empty_world_not_an_error() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(
         &dir.path().to_path_buf(),
@@ -92,6 +111,7 @@ fn a_missing_server_is_an_empty_world_not_an_error() {
 
 #[test]
 fn the_pane_format_is_the_python_format() {
+    let _serial = serial();
     // Fourteen fields, in the Python's order, separator included.
     assert_eq!(14, PANE_FORMAT.split('\x1f').count());
     assert!(PANE_FORMAT.starts_with("#{pane_id}"));
@@ -100,6 +120,7 @@ fn the_pane_format_is_the_python_format() {
 
 #[test]
 fn close_refuses_anything_this_backend_did_not_create() {
+    let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
     let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
@@ -112,6 +133,7 @@ fn close_refuses_anything_this_backend_did_not_create() {
 
 #[test]
 fn a_created_pane_can_be_closed_and_the_kill_argv_is_right() {
+    let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
     let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
@@ -127,6 +149,7 @@ fn a_created_pane_can_be_closed_and_the_kill_argv_is_right() {
 /// literal sends, then a settle, then Enter.
 #[test]
 fn run_command_is_literal_chunked_and_settles_before_enter() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let mut backend = TmuxBackend::new(fake);
@@ -150,6 +173,7 @@ fn run_command_is_literal_chunked_and_settles_before_enter() {
 /// length in one keystroke run.
 #[test]
 fn a_long_message_is_sent_in_chunks() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let mut backend = TmuxBackend::new(fake);
@@ -174,6 +198,7 @@ fn a_long_message_is_sent_in_chunks() {
 /// text produces no chunks at all (the Python's generator yields nothing).
 #[test]
 fn chunks_never_split_a_crlf_pair_and_empty_text_yields_none() {
+    let _serial = serial();
     let text = format!("{}\r\nabc", "y".repeat(899)); // the CRLF lands on the boundary
     let chunks = ds_core::terminal::tmux::text_chunks(&text, 900);
     assert_eq!(2, chunks.len(), "{chunks:?}");
@@ -189,6 +214,7 @@ fn chunks_never_split_a_crlf_pair_and_empty_text_yields_none() {
 /// Timing is measured through the fake tmux, which stamps each invocation.
 #[test]
 fn enter_waits_for_the_text_to_settle() {
+    let _serial = serial();
     let dir = tempdir();
     let script = dir.path().join("tmux");
     let log = dir.path().join("stamps.txt");
@@ -236,6 +262,7 @@ fn enter_waits_for_the_text_to_settle() {
 /// t994 finding 3: read_pane strips leading newlines, as the Python's `out.lstrip("\\n")`.
 #[test]
 fn read_pane_strips_leading_newlines() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
@@ -265,6 +292,7 @@ fn read_pane_strips_leading_newlines() {
 /// t994 finding 4: an empty target is refused and a missing pane has NO status.
 #[test]
 fn an_empty_target_is_refused_and_a_missing_pane_has_no_status() {
+    let _serial = serial();
     let dir = tempdir();
     // A fake that serves the canned pane, so "%2" EXISTS and "%404" does not.
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
@@ -286,6 +314,7 @@ fn an_empty_target_is_refused_and_a_missing_pane_has_no_status() {
 
 #[test]
 fn a_failing_tmux_is_a_refusal_with_tmux_s_own_message() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "can't find pane: %9", 1);
     let mut backend = TmuxBackend::new(fake);
@@ -296,6 +325,7 @@ fn a_failing_tmux_is_a_refusal_with_tmux_s_own_message() {
 
 #[test]
 fn a_missing_tmux_binary_is_unavailable_not_a_refusal() {
+    let _serial = serial();
     let mut backend = TmuxBackend::new("/nonexistent/tmux-for-tests");
     let error = backend.run_command("%2", "true").unwrap_err();
     assert!(error.backend_unavailable, "{error}");
@@ -304,6 +334,7 @@ fn a_missing_tmux_binary_is_unavailable_not_a_refusal() {
 
 #[test]
 fn capture_pane_asks_for_the_ansi_and_line_flags() {
+    let _serial = serial();
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "screen text", 0);
     let backend = TmuxBackend::new(fake);
@@ -314,6 +345,7 @@ fn capture_pane_asks_for_the_ansi_and_line_flags() {
 
 #[test]
 fn agent_child_pids_says_it_needs_proc_rs_rather_than_answering_empty() {
+    let _serial = serial();
     // The Python delegates to dunk_callers.pane_agent_pids (T03). An empty Vec here
     // would read as "no agent behind this pane", which is a different claim.
     let dir = tempdir();
@@ -325,6 +357,7 @@ fn agent_child_pids_says_it_needs_proc_rs_rather_than_answering_empty() {
 
 #[test]
 fn shell_join_quotes_only_what_needs_it() {
+    let _serial = serial();
     assert_eq!("pi --continue", shell_join(&["pi", "--continue"]));
     assert_eq!("a 'b c'", shell_join(&["a", "b c"]));
     assert_eq!("'it'\\''s'", shell_join(&["it's"]));
@@ -362,6 +395,7 @@ fn fake_tmux_that_resizes(dir: &PathBuf, before: &str, after: &str) -> PathBuf {
 
 #[test]
 fn resize_sends_the_python_argv_and_reports_the_size_read_back() {
+    let _serial = serial();
     let dir = tempdir();
     let before = pane_line("%2", "$2", "@2", "claude", "2202");
     let after = pane_line("%2", "$2", "@2", "claude", "2202")
@@ -396,6 +430,7 @@ fn resize_sends_the_python_argv_and_reports_the_size_read_back() {
 
 #[test]
 fn resize_refuses_out_of_bounds_before_touching_tmux() {
+    let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
     let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
@@ -422,6 +457,7 @@ fn resize_refuses_out_of_bounds_before_touching_tmux() {
 
 #[test]
 fn resize_names_a_missing_pane() {
+    let _serial = serial();
     let dir = tempdir();
     let listing = pane_line("%2", "$2", "@2", "claude", "2202");
     let fake = fake_tmux_that_resizes(&dir.path().to_path_buf(), &listing, &listing);
@@ -434,6 +470,7 @@ fn resize_names_a_missing_pane() {
 
 #[test]
 fn a_refused_resize_reports_tmux_words_and_no_geometry() {
+    let _serial = serial();
     let dir = tempdir();
     // The listing stays the same; resize-window fails with tmux's own words.
     let script = dir.path().join("tmux");
