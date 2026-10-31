@@ -89,6 +89,13 @@ read-only tooling, **P3** TUI and web.
 - `dunk_api.py::h_dispatch` (tick path, 0c32c06): the lane plan's `unread` callback is `_gate_unread(...)` instead of the raw unread count, and the returned state gains `unread_mail_expired` (sorted set of panes fed anyway). The owner/system role gate text on add/remove/tick is NOT new (present at 70876c2, 9fe2ccd). Test: `tests/test_dunk_gate_unread.py` (sweep-level cases).
 - `dunk_api.py::h_task_complete`: forwards `landed` (default true, via `_bool`) to `task_complete` (126ee15). Test: `tests/test_cli_task_complete_flags.py`.
 
+## Parity carry-over for T31/T36 (roles gate, push sweep)
+
+Neither `flock/roles_gate.rs` nor `flock/loops.rs` exists yet, and `push.rs` holds only the target-selection helper (no `may_review`, no provider list, no sweep), so PR #204 (Python `_push_tasks`: `self.roles.may_review(pane_id, role=role)`) has nothing in Rust to change today. When T31 ports `Roles::may_review` and T36 ports the push sweep:
+
+- `may_review` takes the caller's already-resolved role (`caller_role`) and never re-resolves it; a bare `role_of(pane_id)` without the live pane record demotes a pid-bound lane to `worker` and skipped a registered pi reviewer as `provider_may_not_review` (live 2026-10-30).
+- Port `tests/test_push_on_idle.py::test_a_pid_bound_reviewer_on_an_allowed_provider_is_fed` as a Rust test: a pid-bound `pi` reviewer, `reviewer_providers = [claude, codex, pi]`, a role lookup that answers `worker` unless handed the resolved role, one review task; the lane is claimed (`in_progress`).
+
 ## Phase 3: TUI and web
 
 | id | title | depends | creates | ports | tests | acceptance |
