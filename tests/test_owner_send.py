@@ -80,6 +80,14 @@ class OwnerSend(unittest.TestCase):
         self.assertEqual("desk_offline", data["notify"]["state"])
         self.assertNotIn("inbox_send", [v for v, _ in fake.calls])
 
+    def test_a_quiet_desk_is_still_nudged(self):
+        """Measured live: the desk had no declared turn (agent_status None) and read as offline."""
+        quiet = dict(DESK, agent_status=None)
+        fake = Fake(panes=[quiet])
+        data = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
+        self.assertEqual("nudged", data["notify"]["state"])
+        self.assertEqual("%133", next(a for v, a in fake.calls if v == "inbox_send")["to"])
+
     def test_a_failed_nudge_is_reported_not_hidden(self):
         data = self.run_with(Fake(fail_nudge=True),
                              lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()

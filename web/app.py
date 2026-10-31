@@ -610,8 +610,11 @@ def _desk_pane():
     # The registry may not carry a `cos` row (a fresh release has no channels.json): the
     # front desk is then the lane in the `desk` working dir, the same match the live row uses.
     cfg = CHANNEL_INDEX.get("cos") or {"id": "cos", "match": "desk"}
-    pane = match_pane(cfg, _panes())
-    return pane if pane and is_lane(pane) else None
+    # The MATCHED pane is the desk: the nudge is an inbox line, not keystrokes, so a quiet desk
+    # (no declared turn, `agent_status` None) must still be nudged. Requiring is_lane here made
+    # a running desk read as `desk_offline` and never hear about the owner's message (measured
+    # live 2026-10-31 on %133 after #238 fixed the composer).
+    return match_pane(cfg, _panes())
 
 
 @app.post("/api/owner-send")
