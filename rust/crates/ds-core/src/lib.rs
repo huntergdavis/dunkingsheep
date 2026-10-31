@@ -22,6 +22,7 @@ pub mod inbox;
 pub mod inbox_store;
 pub mod lock;
 pub mod memory;
+pub mod panes;
 pub mod proc;
 pub mod push;
 pub mod retry;
