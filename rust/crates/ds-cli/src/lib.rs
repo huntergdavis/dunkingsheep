@@ -1,0 +1,6 @@
+//! The `dunkingsheep` command line. T42 is the parser only: the argparse tree as data
+//! (`cli_table`, generated), a clap `Command` built from it (`args`), and the argparse
+//! `Namespace` shape recovered from the matches. Command bodies land in T43 onwards.
+pub mod args;
+pub mod cli_table;
+pub mod spec;

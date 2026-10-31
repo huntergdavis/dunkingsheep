@@ -1,0 +1,14 @@
+[package]
+name = "ds-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The dunkingsheep command line (T42: the generated parser; commands land in later tasks)."
+
+[[bin]]
+name = "dunkingsheep"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
