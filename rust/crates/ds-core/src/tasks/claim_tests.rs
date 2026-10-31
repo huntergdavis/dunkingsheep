@@ -335,3 +335,124 @@ async fn claim_next_scope_mine_and_refusals_are_named() {
         "'mine' takes only tasks naming this pane"
     );
 }
+
+fn assignees_of(task: &Task) -> Vec<String> {
+    decode_list(Some(&task.assignees))
+}
+
+#[tokio::test]
+async fn release_undoes_only_the_assignee_the_claim_added() {
+    let tasks = store("release").await;
+    let plain = tasks.add("global", "plain", "").await.unwrap();
+    let got = tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(claimed_id(&got), plain.id);
+    let back = tasks.release(&plain.id, "%1").await.unwrap();
+    assert_eq!(back.status, "open");
+    assert!(
+        assignees_of(&back).is_empty(),
+        "t595: the claim's own assignee goes with it"
+    );
+    assert!(tasks.leases_for(&plain.id, None).await.unwrap().is_empty());
+    // An assignment the owner made BEFORE the claim survives a release.
+    let owned = tasks.add("global", "owned", "").await.unwrap();
+    tasks.assign(&owned.id, &["%2"], "add").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "%2",
+            ClaimOptions {
+                allow_busy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let back = tasks.release(&owned.id, "%2").await.unwrap();
+    assert_eq!(assignees_of(&back), vec!["%2"]);
+    assert_eq!(back.status, "open");
+    assert!(tasks.release("t999", "%2").await.is_err());
+}
+
+#[tokio::test]
+async fn reap_requeues_an_expired_claim_keeps_its_owner_and_records_why() {
+    let tasks = store("reap").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    let before = tasks.events(&task.id).await;
+    // Not expired yet, and no caller identity: nothing is reaped.
+    assert!(tasks.reap(None, None, None, None).await.unwrap().is_empty());
+    let later = crate::clock::now_s() + 4000.0;
+    let gone = tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(
+        gone,
+        vec![Requeued {
+            task_id: task.id.clone(),
+            pane_id: "%1".into(),
+            reason: "expired"
+        }]
+    );
+    let back = tasks.get(&task.id).await.unwrap();
+    assert_eq!(back.status, "open");
+    assert_eq!(
+        assignees_of(&back),
+        vec!["%1"],
+        "t145: the OWNER is kept, the claim ends"
+    );
+    assert_eq!(tasks.events(&task.id).await, before + 1);
+}
+
+#[tokio::test]
+async fn reap_needs_a_live_pane_list_and_a_vanished_pane_alone_is_not_death() {
+    let tasks = store("reap-live").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    let fixture = tasks
+        .reap(Some(vec![]), None, None, Some("fixture"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(fixture.contains("alive_source='live'"), "{fixture}");
+    assert!(tasks.reap(Some(vec![]), None, None, None).await.is_err());
+    // The pane is missing from a LIVE list, but the lease is neither expired nor has a dead caller.
+    assert!(tasks
+        .reap(Some(vec!["%9".into()]), None, None, Some("live"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "in_progress");
+}
+
+#[tokio::test]
+async fn reap_a_dead_caller_requeues_and_another_live_lease_keeps_the_task_in_progress() {
+    let tasks = store("reap-caller").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    let opts = ClaimOptions {
+        caller: Some((4242, Some("s".into()), Some("pi".into()))),
+        ..Default::default()
+    };
+    tasks.claim_next("global", "%1", opts).await.unwrap();
+    tasks.claim_for_test(&task.id, "%2").await;
+    let dead: CallerAlive = Box::new(|pid, _| pid != 4242);
+    let none = tasks.reap(None, Some(dead), None, None).await.unwrap();
+    assert!(
+        none.is_empty(),
+        "%2 still holds a live lease: released, not requeued"
+    );
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "in_progress");
+    assert_eq!(tasks.leases_for(&task.id, None).await.unwrap().len(), 1);
+    // The last lease goes: now it is a real requeue, with the reason.
+    let later = crate::clock::now_s() + 4000.0;
+    let gone = tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(gone.len(), 1);
+    assert_eq!(gone[0].reason, "expired");
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "open");
+}

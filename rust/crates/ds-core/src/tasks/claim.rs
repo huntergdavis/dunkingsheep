@@ -5,8 +5,9 @@
 //! Slice 2: `claim_next` / `_claim_locked` (one immediate transaction, kinds, exclude_author,
 //! the busy refusal, scope 'mine').
 //!
-//! NOT PORTED yet (next slices): `release`, `reap`, and the per-viewer `claimable` /
-//! `eligible` fields of `_decorate`.
+//! Slice 3: `release`, `reap` and `_after_lease_change`.
+//!
+//! NOT PORTED yet: the per-viewer `claimable` / `eligible` fields of `_decorate`.
 
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
@@ -444,6 +445,189 @@ impl Tasks {
                 refusal,
             }),
         }
+    }
+}
+
+/// One requeued claim returned by `reap`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Requeued {
+    pub task_id: String,
+    pub pane_id: String,
+    pub reason: &'static str,
+}
+
+/// `caller_alive(pid, start)`: is the process behind a lease still there?
+pub type CallerAlive = Box<dyn Fn(i64, Option<&str>) -> bool + Send>;
+
+/// `_after_lease_change`: reopen a task when its last lease goes away, keeping the OWNER.
+/// A lease is activity: expiry, release and a reaped claim end the claim, not the
+/// assignment (t145), so the assignee list is written back as it was given. Returns the
+/// resulting status (F3: a task with another live lease stays in_progress).
+fn after_lease_change(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    assignees: &[String],
+    now: f64,
+) -> Result<String, DunkError> {
+    let remaining: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM task_leases WHERE task_id = ?",
+            params![id],
+            |r| r.get(0),
+        )
+        .map_err(db::map_sqlite)?;
+    let mut status: String = tx
+        .query_row("SELECT status FROM tasks WHERE id = ?", params![id], |r| {
+            r.get(0)
+        })
+        .map_err(db::map_sqlite)?;
+    if status != "done" && status != "cancelled" && remaining == 0 {
+        status = "open".into();
+    }
+    tx.execute(
+        "UPDATE tasks SET assignees = ?, status = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?",
+        params![json!(assignees).to_string(), status, now, id],
+    )
+    .map_err(db::map_sqlite)?;
+    Ok(status)
+}
+
+impl Tasks {
+    /// Give a claim back without completing it (`release`).
+    ///
+    /// A claim that ADDED its pane to the assignee list takes it away again on release
+    /// (t595): leaving it made a released task unclaimable by everyone. An assignment the
+    /// owner made before the claim is untouched, because the lease records which it was.
+    pub async fn release(&self, id: &str, pane_id: &str) -> Result<Task, DunkError> {
+        let wanted = id.trim().to_string();
+        let pane = pane_id.to_string();
+        let now = crate::clock::now_s();
+        let resolved = self
+            .writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let (scope, priority, status, raw): (String, String, String, Option<String>) = tx
+                    .query_row(
+                        "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+                        params![wanted],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                let added = tx
+                    .query_row(
+                        "SELECT assignee_added FROM task_leases WHERE task_id = ? AND pane_id = ?",
+                        params![wanted, pane],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .is_some_and(|v| v != 0);
+                tx.execute("DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?", params![wanted, pane])
+                    .map_err(db::map_sqlite)?;
+                let mut assignees = decode_list(raw.as_deref());
+                if added {
+                    assignees.retain(|a| *a != pane);
+                }
+                let resulting = after_lease_change(&tx, &wanted, &assignees, now)?;
+                tx.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to) VALUES (?,?,?,?,?,?,?,?)",
+                    params![wanted, "released", now, pane, scope, priority, status, resulting],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(wanted)
+            })
+            .await?;
+        self.get(&resolved).await
+    }
+
+    /// Return expired or dead-caller leases to the queue (`reap`).
+    ///
+    /// `alive_panes` is the set of panes the terminal backend knows, and must be tagged
+    /// `alive_source == "live"`: a fixture pane list must never move real work. Only the
+    /// lease deadline or a dead caller requeues a claim; a vanished pane is recorded in
+    /// the event but is not evidence by itself (the pane reader can lag, and a legacy
+    /// lease with no caller identity is unattributable, not dead).
+    pub async fn reap(
+        &self,
+        alive_panes: Option<Vec<String>>,
+        caller_alive: Option<CallerAlive>,
+        now: Option<f64>,
+        alive_source: Option<&str>,
+    ) -> Result<Vec<Requeued>, DunkError> {
+        if alive_panes.is_some() && alive_source != Some("live") {
+            return Err(DunkError::Refused(
+                "alive_panes must be tagged alive_source='live'; a fixture pane list must never move real work".into(),
+            ));
+        }
+        let now = now.unwrap_or_else(crate::clock::now_s);
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                type LeaseRow = (String, String, f64, Option<i64>, Option<String>, Option<String>);
+                let leases: Vec<LeaseRow> = {
+                    let mut stmt = tx
+                        .prepare("SELECT task_id, pane_id, expires_at, caller_pid, caller_start, caller_name FROM task_leases")
+                        .map_err(db::map_sqlite)?;
+                    let rows = stmt
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+                        .map_err(db::map_sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(db::map_sqlite)?;
+                    rows
+                };
+                let mut requeued = Vec::new();
+                for (task_id, pane_id, expires_at, pid, start, name) in leases {
+                    let expired = expires_at <= now;
+                    let gone = alive_panes.as_ref().is_some_and(|alive| !alive.contains(&pane_id));
+                    let dead_caller = match (&caller_alive, pid) {
+                        (Some(alive), Some(pid)) if pid != 0 => !alive(pid, start.as_deref()),
+                        _ => false,
+                    };
+                    // BOTH-condition rule: only the lease deadline or a dead caller are reasons.
+                    if !(expired || dead_caller) {
+                        continue;
+                    }
+                    let reason = if dead_caller { "caller_dead" } else { "expired" };
+                    tx.execute("DELETE FROM task_leases WHERE task_id = ? AND pane_id = ?", params![task_id, pane_id])
+                        .map_err(db::map_sqlite)?;
+                    let row: Option<(String, String, String, Option<String>)> = tx
+                        .query_row(
+                            "SELECT scope, priority, status, assignees FROM tasks WHERE id = ?",
+                            params![task_id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        )
+                        .optional()
+                        .map_err(db::map_sqlite)?;
+                    let Some((scope, priority, status, raw)) = row else { continue };
+                    let owners = decode_list(raw.as_deref());
+                    let resulting = after_lease_change(&tx, &task_id, &owners, now)?;
+                    let event = if resulting == "open" { "requeued" } else { "released" };
+                    tx.execute(
+                        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, meta) VALUES (?,?,?,?,?,?,?,?,?)",
+                        params![task_id, event, now, pane_id, scope, priority, status, resulting,
+                                json!({ "reason": reason, "pane_gone": gone, "caller_pid": pid, "caller_name": name }).to_string()],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    if resulting == "open" {
+                        if alive_panes.as_ref().is_some_and(|alive| !owners.is_empty() && !owners.iter().any(|o| alive.contains(o))) {
+                            // Advisory only: ownership is durable, so a dead owner needs an
+                            // explicit reassignment, not a lease side effect.
+                            eprintln!("task {task_id} reopened while owned by a pane that is not live: owners={}", owners.join(","));
+                        }
+                        requeued.push(Requeued { task_id, pane_id, reason });
+                    }
+                }
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(requeued)
+            })
+            .await
     }
 }
 
