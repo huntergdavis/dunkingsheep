@@ -1,4 +1,4 @@
-//! `flock/lanes.rs` (T30, slice 5): the `terminal::Pane` -> JSON adapter, and
+//! `flock/lanes.rs` (T30, slice 5, re-review head): the `terminal::Pane` -> JSON adapter, and
 //! `lane_activity`, `lane_status`, `resolve_lanes`.
 //!
 //! The adapter is `TmuxBackend._parse_panes`' dict (the shape every resolver in this module
