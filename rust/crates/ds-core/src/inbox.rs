@@ -303,6 +303,69 @@ pub fn count(
     })
 }
 
+/// The sweep's unread gate (t1053, `Inbox.gate_unread`): `fresh` unread mail may hold a
+/// lane back from the sweep; `expired` mail is past the window and the sweep feeds anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gate {
+    pub fresh: i64,
+    pub expired: i64,
+}
+
+/// The Python's `window_s=600.0` default.
+pub const GATE_WINDOW_S: f64 = 600.0;
+
+/// `gate_unread(mailbox, window_s, since)`: unread mail that may hold a lane back.
+///
+/// Daemon announcements (NULL or empty sender) never count: a lane does not read mail
+/// until prompted, so counting them deadlocked the fleet. Only mail from another lane or
+/// the owner counts, newer than `since` (the lane's last turn end, strictly) and no older
+/// than `window_s` (inclusive); past that the sweep feeds anyway.
+pub fn gate_unread(
+    pool: &ReadPool,
+    mailbox: &str,
+    window_s: f64,
+    since: Option<f64>,
+    now: f64,
+) -> Result<Gate, DunkError> {
+    let (where_clause, params) = mailbox_where(mailbox, "mailbox");
+    let cutoff = now - window_s;
+    let sql = format!(
+        "SELECT created_at FROM messages WHERE {where_clause} AND state = 'queued' \
+         AND sender IS NOT NULL AND sender != ''"
+    );
+    pool.with(|connection| {
+        let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
+        let times = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                row.get::<_, f64>(0)
+            })
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<f64>, _>>()
+            .map_err(map_sqlite)?;
+        let times: Vec<f64> = times
+            .into_iter()
+            .filter(|at| since.is_none_or(|since| *at > since))
+            .collect();
+        let fresh = times.iter().filter(|at| **at >= cutoff).count() as i64;
+        Ok(Gate {
+            fresh,
+            expired: times.len() as i64 - fresh,
+        })
+    })
+}
+
+/// `_gate_unread` (dunk_api.py): the count the sweep's `unread` callback returns, plus
+/// whether this pane belongs in `unread_mail_expired` (expired mail and nothing fresh).
+pub fn sweep_gate(
+    pool: &ReadPool,
+    pane_id: &str,
+    since: Option<f64>,
+    now: f64,
+) -> Result<(i64, bool), DunkError> {
+    let gate = gate_unread(pool, pane_id, GATE_WINDOW_S, since, now)?;
+    Ok((gate.fresh, gate.expired > 0 && gate.fresh == 0))
+}
+
 /// `list(mailbox, unread_only, limit)`: summaries, oldest first, no bodies.
 pub fn list(
     pool: &ReadPool,
