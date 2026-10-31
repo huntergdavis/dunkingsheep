@@ -713,3 +713,54 @@ fn purge_by_the_default_retention_keeps_recent_mail_and_collects_orphan_blobs() 
             .count()
     );
 }
+
+#[test]
+fn test_one_digest_row_per_project_updated_in_place() {
+    let fixture = Fixture::new();
+    let up = |body: &str| {
+        fixture
+            .store
+            .upsert_digest(
+                "w9:pH",
+                "pm-digest:poolrad",
+                body,
+                Some("PM digest: poolrad"),
+                Some("w1:p1"),
+                None,
+                None,
+            )
+            .unwrap()
+    };
+    let first = up("v1");
+    fixture.store.read("w9:pH", 10, false, true).unwrap();
+    let second = up("v2");
+    assert_eq!(first, second);
+    let (summary, body) = inbox::get(&fixture.pool(), &second, now_s()).unwrap();
+    assert_eq!(("v2", "queued"), (body.as_str(), summary.state.as_str()));
+    assert_eq!(Some("pm-digest:poolrad".to_string()), summary.digest_id);
+    let counts = inbox::count(&fixture.pool(), "w9:pH", &[], now_s()).unwrap();
+    assert_eq!((1, 1), (counts.total, counts.unread));
+    let read_at = fixture.store.read("w9:pH", 10, true, true).unwrap()[0].read_at;
+    assert_eq!(None, read_at, "an update clears the read stamp");
+}
+
+#[test]
+fn a_digest_needs_a_body_and_a_new_digest_id_is_a_new_message() {
+    let fixture = Fixture::new();
+    let err = fixture
+        .store
+        .upsert_digest("m", "d1", "  ", None, None, None, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("a digest needs a body"), "{err}");
+    let a = fixture
+        .store
+        .upsert_digest("m", "d1", "x", None, None, None, None)
+        .unwrap();
+    let b = fixture
+        .store
+        .upsert_digest("m", "d2", "x", None, None, None, None)
+        .unwrap();
+    assert_ne!(a, b);
+    let c = fixture.send("m", "plain");
+    assert_ne!(b, c, "digests and sends share one id counter");
+}

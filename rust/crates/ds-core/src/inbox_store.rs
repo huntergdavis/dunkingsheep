@@ -135,24 +135,7 @@ impl Store {
             .map(str::to_string);
         self.writer.call(move |connection| {
             let transaction = connection.transaction().map_err(map_sqlite)?;
-            // `_next_id`: the counter lives beside the messages, so ids survive restarts.
-            let stored_number: Option<i64> = transaction
-                .query_row(
-                    "SELECT value FROM counters WHERE name = 'message'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map(Some)
-                .or_else(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })
-                .map_err(map_sqlite)?;
-            let number = next_message_number(stored_number);
-            transaction
-                .execute(COUNTER_UPSERT, rusqlite::params![number, number])
-                .map_err(map_sqlite)?;
-            let message_id = format!("i{number}");
+            let message_id = next_message_id(&transaction)?;
             let created = now_s();
             transaction
                 .execute(
@@ -262,6 +245,79 @@ impl Store {
                     .sum()
             })
             .unwrap_or(0)
+    }
+
+    /// `upsert_digest`: ONE message per digest id, updated in place (a PM publishes a digest
+    /// every window; it must not become a stream). An update replaces the body and makes
+    /// the row unread again (read/ack/archive/cancel stamps and the notify state cleared);
+    /// `created_at` and the id stay. Returns the message id.
+    pub fn upsert_digest(
+        &self,
+        mailbox: &str,
+        digest_id: &str,
+        body: &str,
+        subject: Option<&str>,
+        sender: Option<&str>,
+        mailbox_label: Option<&str>,
+        pane_id: Option<&str>,
+    ) -> Result<String, DunkError> {
+        if body.trim().is_empty() {
+            return Err(refuse("a digest needs a body"));
+        }
+        check_sizes(body.len(), "", 0, 0).map_err(refuse)?;
+        let (mailbox, digest_id, body) =
+            (mailbox.to_string(), digest_id.to_string(), body.to_string());
+        let label = mailbox_label
+            .filter(|l| !l.is_empty())
+            .unwrap_or(&mailbox)
+            .to_string();
+        let own = |value: Option<&str>| value.map(str::to_string);
+        let (subject, sender, pane_id) = (own(subject), own(sender), own(pane_id));
+        self.writer.call(move |connection| {
+            let transaction = connection.transaction().map_err(map_sqlite)?;
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM messages WHERE digest_id = ?",
+                    [&digest_id],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|error| match error {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(map_sqlite)?;
+            let now = now_s();
+            let message_id = if let Some(id) = existing {
+                transaction
+                    .execute(
+                        "UPDATE messages SET mailbox=?, mailbox_label=?, pane_id=?, sender=?, \
+                         subject=?, body=?, state='queued', read_at=NULL, acked_at=NULL, \
+                         archived_at=NULL, cancelled_at=NULL, reason=NULL, notify_state=NULL, \
+                         notify_reason=NULL, digest_updated_at=? WHERE digest_id=?",
+                        rusqlite::params![
+                            mailbox, label, pane_id, sender, subject, body, now, digest_id
+                        ],
+                    )
+                    .map_err(map_sqlite)?;
+                id
+            } else {
+                let id = next_message_id(&transaction)?;
+                transaction
+                    .execute(
+                        "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
+                         subject, body, state, created_at, digest_id, digest_updated_at) \
+                         VALUES (?,?,?,?,?,?,?,'queued',?,?,?)",
+                        rusqlite::params![
+                            id, mailbox, label, pane_id, sender, subject, body, now, digest_id, now
+                        ],
+                    )
+                    .map_err(map_sqlite)?;
+                id
+            };
+            transaction.commit().map_err(map_sqlite)?;
+            Ok(message_id)
+        })
     }
 
     /// `read(mailbox, limit, peek, mark)`: full messages in queue order. Marks them read
@@ -611,6 +667,27 @@ fn attachments_of(
         })
         .map_err(map_sqlite)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
+/// `_next_id`: the counter lives beside the messages, so ids survive restarts.
+fn next_message_id(transaction: &rusqlite::Transaction) -> Result<String, DunkError> {
+    let stored_number: Option<i64> = transaction
+        .query_row(
+            "SELECT value FROM counters WHERE name = 'message'",
+            [],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(map_sqlite)?;
+    let number = next_message_number(stored_number);
+    transaction
+        .execute(COUNTER_UPSERT, rusqlite::params![number, number])
+        .map_err(map_sqlite)?;
+    Ok(format!("i{number}"))
 }
 
 /// `json.dumps(list_of_str)`: `["a", "b"]`.
