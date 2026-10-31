@@ -15,9 +15,10 @@ DESK = {"pane_id": "%133", "workspace_label": "bootstrap", "tab_label": "sn-desk
 
 
 class Fake:
-    def __init__(self, panes=(DESK,), fail_nudge=False, conversation=None, fail_direct=False):
+    def __init__(self, panes=(DESK,), fail_nudge=False, conversation=None, fail_direct=False,
+                 direct_outcome="ok"):
         self.calls, self.panes, self.fail_nudge = [], list(panes), fail_nudge
-        self.fail_direct = fail_direct
+        self.fail_direct, self.direct_outcome = fail_direct, direct_outcome
         self.conversation = conversation or []
 
     def call(self, verb, **args):
@@ -31,7 +32,8 @@ class Fake:
         if verb == "send_text":
             if self.fail_direct:
                 raise RuntimeError("terminal busy")
-            return {"ok": True, "outcome": "ok", "message_id": "m9", "message": "sent (confirmed)"}
+            return {"ok": True, "outcome": self.direct_outcome, "message_id": "m9",
+                    "message": f"typing guard says {self.direct_outcome}"}
         if verb == "inbox_send":
             if self.fail_nudge:
                 raise RuntimeError("inbox down")
@@ -104,6 +106,23 @@ class OwnerSend(unittest.TestCase):
         self.assertEqual("nudged", data["notify"]["state"])
         self.assertIn("terminal busy", data["notify"]["direct_failed"])
         self.assertEqual("%133", next(a for v, a in fake.calls if v == "inbox_send")["to"])
+
+    def test_a_refused_direct_send_falls_back_to_the_nudge(self):
+        """t1166: 'refused' returns ok False without raising; the desk must still be told."""
+        fake = Fake(direct_outcome="refused")
+        data = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
+        self.assertEqual("nudged", data["notify"]["state"], data)
+        self.assertIn("refused", data["notify"]["direct_failed"])
+        self.assertIn("inbox_send", [v for v, _ in fake.calls])
+
+    def test_a_queued_or_unconfirmed_direct_send_is_reported_as_such_and_never_doubled(self):
+        for outcome in ("queued", "unconfirmed"):
+            with self.subTest(outcome=outcome):
+                fake = Fake(direct_outcome=outcome)
+                data = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hi"})).json()
+                self.assertEqual(outcome, data["notify"]["state"], "never overclaimed as 'sent'")
+                self.assertNotIn("inbox_send", [v for v, _ in fake.calls],
+                                 "a held or maybe-delivered message must not be sent twice")
 
     def test_both_routes_failing_is_reported_not_hidden(self):
         data = self.run_with(Fake(fail_direct=True, fail_nudge=True),

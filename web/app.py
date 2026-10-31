@@ -665,12 +665,25 @@ async def api_owner_send(request: Request, _: Annotated[str, Depends(require_aut
     # If the direct send cannot go, fall back to the inbox nudge so the desk still hears of it.
     prompt = (f"Owner message {message_id} (web): {text}\n"
               f"Answer it now: dunkingsheep owner reply {message_id} \"<your answer>\"")
+    direct_detail = ""
     try:
         import asyncio
         sent = await asyncio.to_thread(_send_to_pane, pane["pane_id"], prompt)
-        result["notify"] = {"state": "sent", "route": sent.get("route"), "pane": pane["pane_id"],
-                            "outcome": sent.get("outcome"), "detail": sent.get("detail", "")}
-        return result
+        outcome = str(sent.get("outcome") or "").lower()
+        base = {"route": sent.get("route"), "pane": pane["pane_id"], "outcome": outcome,
+                "detail": sent.get("detail", "")}
+        if sent.get("ok") and outcome == "ok":
+            result["notify"] = dict(base, state="sent")
+            return result
+        if sent.get("ok") and outcome in ("queued", "unconfirmed"):
+            # The daemon HOLDS a queued send (the typing guard protects whoever is writing in the
+            # desk's box) and delivers it when the box clears; an unconfirmed one may have
+            # arrived. Neither is a failure and a second line would double the message: report
+            # exactly what the daemon said, never "sent", never nudge.
+            result["notify"] = dict(base, state=outcome, note=sent.get("note", ""))
+            return result
+        # refused, or any other outcome: the desk was NOT reached, so fall back to the nudge.
+        direct_detail = f"{outcome or 'no outcome'}: {sent.get('detail', '')}"[:200]
     except Exception as direct_error:  # noqa: BLE001 - fall back, never lose the message
         direct_detail = str(getattr(direct_error, "detail", direct_error))[:200]
     try:
