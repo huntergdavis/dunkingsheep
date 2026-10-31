@@ -66,6 +66,16 @@ function useDashRoute() {
   return { standalone: path === '/dash' || path.startsWith('/dash/'), view, known: view in DASH_ROUTES };
 }
 
+// How the desk was told about an owner message (t1166): 'sent' (typed straight in) and 'nudged'
+// (inbox line) are fine and need no note; 'queued' and 'unconfirmed' are the daemon's own words.
+function notifyNote(notify) {
+  const state = notify?.state;
+  if (state === 'sent' || state === 'nudged') return '';
+  if (state === 'queued') return ' · held by the typing guard; it arrives when the desk box is clear';
+  if (state === 'unconfirmed') return ' · sent, not confirmed; the desk may already have it';
+  return ` · ${notify?.detail || 'desk not reached'}`;
+}
+
 function DashHeader({ side, view, standalone }) {
   if (!side && (!view || standalone)) return null;
   return <header className="dash-header">
@@ -958,7 +968,7 @@ function PoolradPlay({ vpChannel, standalone = false, embedded = false }) {
       const receipt = owner
         ? await api('/owner-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: body }) })
         : await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: channel.pane_id, channel: channel.id, text: body }) });
-      setChatOutcome(owner ? `${receipt.outcome} as ${receipt.message_id}${receipt.notify?.state === 'nudged' ? '' : ` · ${receipt.notify?.detail || 'desk not nudged'}`}` : (receipt.outcome || receipt.delivery));
+      setChatOutcome(owner ? `${receipt.outcome} as ${receipt.message_id}${notifyNote(receipt.notify)}` : (receipt.outcome || receipt.delivery));
       setDraft('');
       const data = await api(owner ? '/owner-thread?limit=15' : `/messages?channel=${encodeURIComponent(channel.id)}&limit=15`);
       chatScroll.jump();
@@ -1103,7 +1113,7 @@ function ChannelStandalone({ channel }) {
       const thread = await api('/owner-thread?limit=50');
       messageScroll.jump();
       setItems(old => mergeMessages(old, thread.items || []));
-      if (receipt.notify && receipt.notify.state !== 'nudged') setError(`Stored as ${receipt.message_id}. ${receipt.notify.detail || 'The desk was not nudged.'}`);
+      { const note = notifyNote(receipt.notify); if (note) setError(`Stored as ${receipt.message_id}.${note}`); }
       return;
     }
     const item = await api('/pane-send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: selected.pane_id, channel, text: data.body, attachment_ids: data.attachment_ids }) });
