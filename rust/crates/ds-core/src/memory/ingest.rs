@@ -440,7 +440,7 @@ pub fn upsert_source_row(
     Ok(())
 }
 
-fn absolute(path: &str) -> String {
+pub(crate) fn absolute(path: &str) -> String {
     let expanded = match path.strip_prefix("~/") {
         Some(rest) => std::env::var("HOME")
             .map(|home| format!("{home}/{rest}"))
