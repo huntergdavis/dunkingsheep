@@ -10,6 +10,7 @@ inbox.db
 # large local source recording (demo mp4 is committed instead)
 *.log
 metrics.db
+!rust/fixtures/tasks/metrics.db
 *.pyc
 __pycache__/
 *.pyo
