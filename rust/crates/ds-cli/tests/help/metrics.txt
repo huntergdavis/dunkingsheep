@@ -1,0 +1,11 @@
+usage: dunkingsheep metrics [-h] [--window SECONDS] [--since SINCE]
+                            [--until UNTIL]
+
+Counts, duration distributions and coverage for a time window. Identifiers and
+numbers only; never message text.
+
+options:
+  -h, --help            show this help message and exit
+  --window, -w SECONDS  window ending now, in seconds (default 3600)
+  --since SINCE         window start as a unix timestamp
+  --until UNTIL         window end as a unix timestamp

@@ -1,0 +1,10 @@
+usage: dunkingsheep state latest [-h] [--project PROJECT] [--limit LIMIT]
+                                 [pane]
+
+positional arguments:
+  pane
+
+options:
+  -h, --help         show this help message and exit
+  --project PROJECT
+  --limit LIMIT

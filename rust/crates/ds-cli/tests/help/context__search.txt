@@ -1,0 +1,12 @@
+usage: dunkingsheep context search [-h] [--class CLS] [--scope SCOPE]
+                                   [--global]
+                                   query
+
+positional arguments:
+  query
+
+options:
+  -h, --help     show this help message and exit
+  --class CLS
+  --scope SCOPE
+  --global

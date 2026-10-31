@@ -1,0 +1,18 @@
+usage: dunkingsheep owner [-h] <action> ...
+
+positional arguments:
+  <action>
+    push          push an owner message to a pane (no inbox row, no typing)
+    poll          drain heartbeat: this lane polls, even when the queue is
+                  empty
+    take          drain what is waiting for a pane (the extension calls this)
+    conversation  the owner mailbox as one conversation (desk/web only)
+    reply         answer one owner question (desk/web only)
+    ingest        record one owner question that arrived on a transport (t594)
+    outbox        owner-mailbox replies waiting for a transport (t594)
+    delivered     record a transport's delivery receipt for one owner row
+                  (t594)
+    stats         owner-push counts and latency
+
+options:
+  -h, --help      show this help message and exit

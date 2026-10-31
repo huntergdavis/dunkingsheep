@@ -1,0 +1,5 @@
+usage: dunkingsheep state capture [-h] [--source SOURCE]
+
+options:
+  -h, --help       show this help message and exit
+  --source SOURCE  why this capture ran

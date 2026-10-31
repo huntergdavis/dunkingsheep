@@ -1,0 +1,9 @@
+usage: dunkingsheep memory backfill [-h] [--limit LIMIT] [--pause] [--resume]
+                                    [--status]
+
+options:
+  -h, --help     show this help message and exit
+  --limit LIMIT  cap the number of sources enqueued
+  --pause
+  --resume
+  --status

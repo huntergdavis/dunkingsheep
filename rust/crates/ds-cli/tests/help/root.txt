@@ -1,0 +1,153 @@
+usage: dunkingsheep [-h] [--version] [--json] [--socket SOCKET]
+                    [--self-pane SELF_PANE] [--no-start-daemon]
+                    <command> ...
+
+Send text into terminal panes on a schedule; control it from the keyboard, this CLI, a unix socket, or MCP.
+
+positional arguments:
+  <command>
+    allocation          registered-worker automatic backlog/review allocation
+    status              daemon health and counts
+    turn                declare a busy turn (pi/claude hooks)
+    poll                one batched read for sidebars: status + inbox + dunks
+    list (ls)           list all dunks
+    get                 show one dunk
+    add                 create a dunk (starts immediately)
+    update (set)        change a dunk's settings
+    remove (rm, delete)
+                        delete a dunk
+    start               start a dunk
+    stop                stop a dunk
+    toggle              start if stopped, stop if running
+    stop-all            stop every running dunk
+    fire (test)         send a dunk's text now
+    send                type text + Enter into a pane once (queued if someone
+                        is typing)
+    send-keys           press keys in a pane (queued if someone is typing)
+    install             put `dunkingsheep` on PATH as a plain command
+    guard               install the herdr guard (rollback backend) so agents
+                        cannot type over you
+    inbox               per-agent inboxes: messaging that never types
+    context             declarative context store: files are truth, index is a
+                        cache
+    load                per-caller CPU from /proc (pid+starttime guarded,
+                        process tree)
+    pm                  project PMs: lane routing and the one-per-project
+                        digest
+    task                global and per-pane tasks: the coordination queue
+    gh-token            print a one-hour App token for this lane's role (empty
+                        for the owner)
+    secrets-check       refuse a push/PR that would publish the desk's own
+                        secrets
+    git-credential      git credential helper: `git config --global
+                        credential.helper '!dunkingsheep git-credential'`
+    review              the review timer and its queue
+    poolrad             the Poolrad backlog: backlog-sync fills it, progress
+                        reads it
+    github              one-shot GitHub setup with the owner's own login
+    whoami              this caller's role and how it was bound
+    token               service tokens for pane-less processes (web desk,
+                        timers)
+    superuser           who may close panes/tabs/workspaces, stop the daemon
+                        or manage dunks
+    memory              memory/recall over past agent sessions
+    health              deterministic self-check; --repair fixes leases/WAL
+    watchdog            deterministic exception watchdog (no model); --dry-run
+                        sends nothing
+    watchdog-deadman    alert the VP if the watchdog heartbeat is stale
+                        (independent check)
+    usage               real provider usage from configurable commands
+    recover             post-upgrade recovery plan; --apply types into bare
+                        shells
+    doctor              post-upgrade doctor: backend surfaces + dunk target
+                        metadata
+    owner               owner -> agent delivery: pushed, never typed
+    report              the deterministic fleet report (no model)
+    state               continuous agent-state capture (the restartable-lane
+                        record)
+    roster              one row per agent lane (name, harness, state, task,
+                        inbox, cpu)
+    message-state       sent / delivered / seen for message ids
+    reply-stats         last and median time for a lane to read its mail
+    project-summary     ground truths, articles, tasks in flight, agents,
+                        timeline
+    api                 read-only HTTP surface for the Command Center (roster,
+                        message state, project summary)
+    capability (capabilities)
+                        how a target can receive: push queue (pi) or immediate
+                        guarded send
+    lane (lanes)        the lane registry: who each pane IS, declared or
+                        inferred
+    retired             retired panes: kept as the record, excluded from
+                        alerts and feeding
+    dispatch            standby queue + a deterministic tick that fills idle
+                        lanes
+    clear-box           DESTRUCTIVE, superuser: clear an unsubmitted draft
+                        (Ctrl-U)
+    delivery            can this lane receive a message, and if not why
+    flush               submit text left sitting in a pane's input box
+    messages (queue)    direct messages queued and recently sent
+    cancel-message (cancel)
+                        drop a queued message
+    metrics             read-only operations metrics as JSON
+    panes               list terminal panes (possible targets)
+    workspaces (tabs)   list workspaces and their tabs
+    new-workspace (workspace)
+                        create a named workspace (first tab + shell pane)
+    new-tab (tab)       create a named tab in a workspace
+    split               split a pane right or down into a new shell pane
+    start-agent (agent)
+                        launch an agent in a new pane, registered by name
+                        (tracked on the herdr rollback)
+    respawn-pane (respawn)
+                        guardedly replace an existing managed pane's process
+                        in place
+    rename              rename a workspace, tab or pane
+    focus               bring a workspace, tab or pane to the front
+    close               close a workspace, tab or pane (kills what runs
+                        inside)
+    herdr               run any herdr subcommand through the daemon (rollback
+                        backend only; refused under tmux)
+    herdr-help          the rollback backend's own usage: command groups, or
+                        one group's subcommands (refused under tmux)
+    read                read recent output of a pane
+    shutdown            stop the daemon (superusers only; dunks resume on next
+                        start)
+    serve               run the daemon in the foreground
+    tui                 open the curses UI
+    mcp                 run the MCP server on stdio (for agent harnesses)
+    mcp-setup           show or apply MCP registration for agent harnesses
+    guide (help, docs)  print the full guide (concepts, surfaces, protocol,
+                        recipes)
+    commands            list the socket/MCP command registry
+    mcp-map             OLD flat MCP tool -> NEW grouped tool/action mapping
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --json                print raw JSON results
+  --socket SOCKET       daemon socket path (default: $DUNKINGSHEEP_SOCKET or
+                        ~/.config/dunkingsheep/dunkingsheep.sock)
+  --self-pane SELF_PANE
+                        pane id to use for target 'self' (default: $TMUX_PANE,
+                        or $HERDR_PANE_ID on the rollback)
+  --no-start-daemon     fail instead of auto-starting the daemon
+
+Dunking Sheep types text (plus Enter) into terminal panes on a schedule.
+Each schedule is a "dunk": a target pane, a text, an interval, and a running
+flag. Dunks live in a background daemon, so the TUI, this CLI, the unix
+socket and the MCP server all see and control the same dunks.
+
+quick start
+  dunkingsheep panes                              # what can I target?
+  dunkingsheep add -T "Codex Site" -e 15 -t continue
+  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \
+      -t "Check the backlog. If done: dunkingsheep remove {id}. Else keep going."
+  dunkingsheep list                               # live status, ids, countdowns
+  dunkingsheep remove d2
+  dunkingsheep tui                                # the curses view of the same dunks
+
+learn more
+  dunkingsheep guide          full guide (concepts, MCP, socket protocol, recipes)
+  dunkingsheep commands       every command the socket/MCP expose (--json: schemas)
+  dunkingsheep <command> -h   per-command flags and examples

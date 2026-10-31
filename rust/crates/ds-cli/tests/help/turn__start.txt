@@ -1,0 +1,10 @@
+usage: dunkingsheep turn start [-h] [--pane PANE] [--ttl-s TTL_S]
+                               [--source SOURCE] [--handoff-id HANDOFF_ID]
+
+options:
+  -h, --help            show this help message and exit
+  --pane PANE           pane id (default: the caller's)
+  --ttl-s TTL_S
+  --source SOURCE
+  --handoff-id HANDOFF_ID
+                        next-job id from the initiating prompt

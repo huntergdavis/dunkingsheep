@@ -1,0 +1,5 @@
+usage: dunkingsheep report list [-h] [--out-dir OUT_DIR]
+
+options:
+  -h, --help         show this help message and exit
+  --out-dir OUT_DIR

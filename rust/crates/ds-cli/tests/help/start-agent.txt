@@ -1,0 +1,25 @@
+usage: dunkingsheep start-agent [-h] [--workspace WORKSPACE] [--tab TAB]
+                                [--split {right,down}] [--cwd CWD] [--focus]
+                                [--role {owner,desk,planner,worker,reviewer}]
+                                [--provider PROVIDER] [--model MODEL]
+                                name COMMAND [COMMAND ...]
+
+positional arguments:
+  name
+  COMMAND               the agent command line
+
+options:
+  -h, --help            show this help message and exit
+  --workspace, -w WORKSPACE
+                        new tab in this workspace (id, label or 'self')
+  --tab TAB             into this tab (id, label or 'self')
+  --split {right,down}  with --tab: split its pane
+  --cwd CWD
+  --focus
+  --role {owner,desk,planner,worker,reviewer}
+                        bind this role to the new pane from the launch record
+  --provider PROVIDER   claude, codex, pi, opencode-go (reviewers must be
+                        claude/codex)
+  --model MODEL
+
+example: dunkingsheep start-agent writer -w Site -- claude --model opus

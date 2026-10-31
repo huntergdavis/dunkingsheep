@@ -1,0 +1,31 @@
+usage: dunkingsheep task [-h] <subcommand> ...
+
+Tasks are global (fleet-wide) by default, or scoped to one pane. `task next`
+claims atomically; `task follow` asks the daemon to push work to you when
+idle.
+
+positional arguments:
+  <subcommand>
+    add         create a task
+    list (ls)   list visible tasks
+    read        read one task in full
+    update      change a task
+    assign      assign a task (use 'self' for yourself)
+    complete    complete a task for everyone
+    block       mark a task blocked
+    unblock     return a blocked task to the queue
+    cancel      cancel a task
+    delete      delete a task
+    note        append an event to a task's history
+    next        atomically claim the next task
+    heartbeat   extend the lease on a claimed task
+    release     give a claimed task back
+    follow      receive pushed tasks when idle
+    unfollow    stop receiving pushed tasks
+    followers   list panes receiving pushed tasks
+    stats       task counts by status
+    metrics     task throughput, depth and latency (JSON)
+    reap        requeue expired/dead leases now
+
+options:
+  -h, --help    show this help message and exit

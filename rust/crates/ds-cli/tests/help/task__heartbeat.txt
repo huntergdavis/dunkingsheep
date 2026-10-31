@@ -1,0 +1,8 @@
+usage: dunkingsheep task heartbeat [-h] [--lease SECONDS] id
+
+positional arguments:
+  id
+
+options:
+  -h, --help       show this help message and exit
+  --lease SECONDS

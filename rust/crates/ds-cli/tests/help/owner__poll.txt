@@ -1,0 +1,8 @@
+usage: dunkingsheep owner poll [-h] [--by BY] pane_id
+
+positional arguments:
+  pane_id
+
+options:
+  -h, --help  show this help message and exit
+  --by BY

@@ -1,0 +1,9 @@
+usage: dunkingsheep inbox read [-h] [--limit LIMIT] [--peek] [mailbox]
+
+positional arguments:
+  mailbox
+
+options:
+  -h, --help         show this help message and exit
+  --limit, -n LIMIT
+  --peek             do not mark them read

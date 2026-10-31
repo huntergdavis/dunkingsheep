@@ -1,0 +1,5 @@
+usage: dunkingsheep status [-h] [--check-herdr]
+
+options:
+  -h, --help     show this help message and exit
+  --check-herdr  probe the terminal backend (slow; default off)

@@ -1,0 +1,5 @@
+usage: dunkingsheep shutdown [-h] [--stop-all]
+
+options:
+  -h, --help  show this help message and exit
+  --stop-all  also stop every dunk first

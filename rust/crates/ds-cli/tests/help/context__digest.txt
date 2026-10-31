@@ -1,0 +1,11 @@
+usage: dunkingsheep context digest [-h] [--subject SUBJECT]
+                                   [--max-bytes MAX_BYTES] [--global]
+                                   [--project] [--path PATH]
+
+options:
+  -h, --help            show this help message and exit
+  --subject SUBJECT
+  --max-bytes MAX_BYTES
+  --global
+  --project
+  --path PATH

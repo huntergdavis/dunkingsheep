@@ -1,0 +1,13 @@
+usage: dunkingsheep owner delivered [-h] [--external-id EXTERNAL_ID]
+                                    message_id {web,telegram,report}
+
+positional arguments:
+  message_id
+  {web,telegram,report}
+
+options:
+  -h, --help            show this help message and exit
+  --external-id EXTERNAL_ID
+
+This receipt replaces telegram-status.json: a page is confirmed by the owner
+mailbox, not by a file read beside the bridge's credentials.

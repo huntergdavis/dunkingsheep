@@ -1,0 +1,14 @@
+usage: dunkingsheep send-keys [-h] [--wait S] [--ignore-typing]
+                              target keys [keys ...]
+
+positional arguments:
+  target
+  keys
+
+options:
+  -h, --help       show this help message and exit
+  --wait S         block up to S seconds for delivery before returning
+                   (default 10)
+  --ignore-typing  press them even while someone is typing (default: queue)
+
+example: dunkingsheep send-keys "Codex Site" Enter

@@ -1,0 +1,20 @@
+usage: dunkingsheep watchdog [-h] [--config CONFIG] [--dry-run] [--now NOW]
+                             [--error-file ERROR_FILE] [--replay]
+                             [--from REPLAY_FROM] [--to REPLAY_TO]
+                             [--step REPLAY_STEP]
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG       watchdog config (JSON); missing or invalid config
+                        refuses to start
+  --dry-run             report what would fire; send nothing, write no state
+                        or heartbeat
+  --now NOW             evaluate as of this UNIX time (reproducible runs)
+  --error-file ERROR_FILE
+                        where a config refusal is written for the dead-man to
+                        carry to the VP
+  --replay              re-evaluate the history-backed rules from --from to
+                        --to; reads only
+  --from REPLAY_FROM    replay start (UNIX time)
+  --to REPLAY_TO        replay end (UNIX time, default now)
+  --step REPLAY_STEP    replay step in minutes
