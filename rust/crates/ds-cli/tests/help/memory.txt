@@ -1,0 +1,18 @@
+usage: dunkingsheep memory [-h] <subcommand> ...
+
+Ranked recall over Claude/Codex/opencode/pi sessions, backed by SQLite + FTS5.
+Queries never reindex or wait for ingest.
+
+positional arguments:
+  <subcommand>
+    recall        ranked snippets
+    search        filtered search (same engine)
+    context       compact session-start digest
+    hook-context  Claude SessionStart hook JSON (memory context)
+    stats         counts, DB bytes, queue depth, latency
+    status        health, schema, ingest worker
+    ingest        queue a session log/sqlite for async ingest
+    backfill      discover + enqueue every session source
+
+options:
+  -h, --help      show this help message and exit

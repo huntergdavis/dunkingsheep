@@ -1,0 +1,9 @@
+usage: dunkingsheep inbox ack [-h] [--mailbox MAILBOX]
+                              message_ids [message_ids ...]
+
+positional arguments:
+  message_ids
+
+options:
+  -h, --help         show this help message and exit
+  --mailbox MAILBOX  only ack this mailbox (default: your own)

@@ -1,0 +1,5 @@
+usage: dunkingsheep github wrappers [-h] [--bin-dir BIN_DIR]
+
+options:
+  -h, --help         show this help message and exit
+  --bin-dir BIN_DIR

@@ -1,0 +1,10 @@
+usage: dunkingsheep task assign [-h] [--mode {add,remove,set}]
+                                id assignees [assignees ...]
+
+positional arguments:
+  id
+  assignees
+
+options:
+  -h, --help            show this help message and exit
+  --mode {add,remove,set}

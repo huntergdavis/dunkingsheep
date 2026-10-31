@@ -1,0 +1,9 @@
+usage: dunkingsheep load [-h] [--policies PATH]
+
+Sample registered callers' CPU from /proc. Identity is pid+starttime; a reused
+pid produces no sample. GPU is null with a reason on this hardware.
+
+options:
+  -h, --help       show this help message and exit
+  --policies PATH  JSON {agent: policy}; adds dry-run would-kill lines
+                   (default: load-policies.json)

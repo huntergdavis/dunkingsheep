@@ -1,0 +1,6 @@
+usage: dunkingsheep poolrad backlog-sync [-h] [--limit LIMIT] [--dry-run]
+
+options:
+  -h, --help         show this help message and exit
+  --limit, -n LIMIT
+  --dry-run

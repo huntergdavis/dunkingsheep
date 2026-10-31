@@ -1,0 +1,7 @@
+usage: dunkingsheep task read [-h] id
+
+positional arguments:
+  id
+
+options:
+  -h, --help  show this help message and exit

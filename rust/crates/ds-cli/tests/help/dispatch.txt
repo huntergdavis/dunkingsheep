@@ -1,0 +1,14 @@
+usage: dunkingsheep dispatch [-h] <action> ...
+
+positional arguments:
+  <action>
+    add       queue a one-line assignment
+    list      the standby queue, in order
+    remove    drop an item
+    tick      fill every ALLOWLISTED ready lane that has no mail
+    status    the last tick's numbers
+
+options:
+  -h, --help  show this help message and exit
+
+examples: dispatch add t6 'advance strict C to 250' / dispatch tick

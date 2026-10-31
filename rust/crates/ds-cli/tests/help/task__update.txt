@@ -1,0 +1,23 @@
+usage: dunkingsheep task update [-h] [--title TITLE] [--body BODY]
+                                [--status {open,in_progress,blocked,done,cancelled}]
+                                [--priority {low,medium,high,urgent}]
+                                [--assign PANE] [--depends-on ID]
+                                [--parent ID] [--block-reason TEXT] [--multi]
+                                [--no-multi]
+                                id
+
+positional arguments:
+  id
+
+options:
+  -h, --help            show this help message and exit
+  --title TITLE
+  --body, -b BODY
+  --status {open,in_progress,blocked,done,cancelled}
+  --priority, -p {low,medium,high,urgent}
+  --assign, -a PANE
+  --depends-on, -d ID
+  --parent ID
+  --block-reason TEXT
+  --multi
+  --no-multi

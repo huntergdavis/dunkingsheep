@@ -8,6 +8,7 @@
 resolver = "2"
 members = [
     "crates/ds-core",
+    "crates/ds-cli",
     "crates/ds-mcp",
 ]
 
@@ -19,3 +20,6 @@ version = "0.1.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# T42 (ds-cli): the one parser crate RUST_PORT.md section 3 pins; the builder API is used
+# (not derive) because the command tree is generated data, not Rust types.
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }

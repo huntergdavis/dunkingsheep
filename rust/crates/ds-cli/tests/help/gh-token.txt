@@ -1,0 +1,7 @@
+usage: dunkingsheep gh-token [-h] [--kind {author,reviewer}] [--quiet]
+
+options:
+  -h, --help            show this help message and exit
+  --kind {author,reviewer}
+                        owner/system only
+  --quiet               print nothing when no token applies

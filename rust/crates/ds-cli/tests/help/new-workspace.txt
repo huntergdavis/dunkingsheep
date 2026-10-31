@@ -1,0 +1,21 @@
+usage: dunkingsheep new-workspace [-h] [--as MAILBOX] [--label LABEL]
+                                  [--cwd CWD] [--run COMMAND] [--focus]
+                                  [--role {owner,desk,planner,worker,reviewer}]
+                                  [--provider PROVIDER] [--model MODEL]
+
+options:
+  -h, --help            show this help message and exit
+  --as MAILBOX          the lane this new pane IS: recorded in the lane
+                        registry, so mail for that lane reaches this pane
+                        after a backend change
+  --label, -l LABEL     name it (how you will target it later)
+  --cwd CWD             working directory for the new shell
+  --run, -r COMMAND     command to type + Enter into the new pane, e.g.
+                        'claude'
+  --focus               switch the view to it
+  --role {owner,desk,planner,worker,reviewer}
+                        bind this role to the new pane from the launch record
+  --provider PROVIDER
+  --model MODEL
+
+example: dunkingsheep new-workspace -l 'Site' --cwd ~/site -r claude

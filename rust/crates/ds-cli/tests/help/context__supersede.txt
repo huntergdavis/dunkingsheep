@@ -1,0 +1,9 @@
+usage: dunkingsheep context supersede [-h] [--global] slug [file]
+
+positional arguments:
+  slug
+  file
+
+options:
+  -h, --help  show this help message and exit
+  --global

@@ -1,0 +1,9 @@
+usage: dunkingsheep mcp-map [-h] [--markdown]
+
+The t8 audit: the declared MCP surface is now one namespaced tool per domain
+with an action argument. Every old tool is listed with its new home, and each
+old name remains callable.
+
+options:
+  -h, --help  show this help message and exit
+  --markdown  render as markdown

@@ -1,0 +1,14 @@
+usage: dunkingsheep superuser [-h] <subcommand> ...
+
+Superusers may perform destructive or affecting-others operations. Everyone
+else uses the inbox and task queue.
+
+positional arguments:
+  <subcommand>
+    status      show the allowlist and whether this pane is on it
+    add         add a pane id or name
+    remove      remove a pane id or name
+    recover     bootstrap: register this pane as the first owner
+
+options:
+  -h, --help    show this help message and exit

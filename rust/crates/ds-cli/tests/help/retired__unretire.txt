@@ -1,0 +1,7 @@
+usage: dunkingsheep retired unretire [-h] pane
+
+positional arguments:
+  pane
+
+options:
+  -h, --help  show this help message and exit

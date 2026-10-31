@@ -1,0 +1,10 @@
+usage: dunkingsheep poolrad [-h] <subcommand> ...
+
+positional arguments:
+  <subcommand>
+    backlog-sync  file the next N composable uncredited bodies as work
+                  (system/owner)
+    progress      credited / identities / CEILING / queue summary
+
+options:
+  -h, --help      show this help message and exit

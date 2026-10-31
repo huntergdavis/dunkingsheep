@@ -1,0 +1,7 @@
+usage: dunkingsheep inbox delete [-h] message_ids [message_ids ...]
+
+positional arguments:
+  message_ids
+
+options:
+  -h, --help   show this help message and exit

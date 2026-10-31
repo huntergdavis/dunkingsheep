@@ -1,0 +1,23 @@
+usage: dunkingsheep context add [-h] [--text TEXT] --class CLS
+                                --subject SUBJECT [--type TYPE_]
+                                [--authority AUTHORITY] [--source SOURCE]
+                                [--stated STATED]
+                                [--recheck-after RECHECK_AFTER]
+                                [--supersedes SUPERSEDES] [--global]
+                                [file]
+
+positional arguments:
+  file
+
+options:
+  -h, --help            show this help message and exit
+  --text TEXT           the body inline (otherwise stdin or the file argument)
+  --class CLS
+  --subject SUBJECT
+  --type TYPE_
+  --authority AUTHORITY
+  --source SOURCE
+  --stated STATED
+  --recheck-after RECHECK_AFTER
+  --supersedes SUPERSEDES
+  --global

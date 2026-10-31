@@ -1,0 +1,8 @@
+usage: dunkingsheep read [-h] [--lines LINES] target
+
+positional arguments:
+  target
+
+options:
+  -h, --help         show this help message and exit
+  --lines, -l LINES

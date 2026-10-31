@@ -1,0 +1,10 @@
+usage: dunkingsheep usage [-h] [--config CONFIG] [--max-age MAX_AGE]
+                          [provider]
+
+positional arguments:
+  provider
+
+options:
+  -h, --help         show this help message and exit
+  --config CONFIG    usage config mapping providers to commands
+  --max-age MAX_AGE  provider snapshot max age in seconds
