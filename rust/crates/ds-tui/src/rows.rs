@@ -35,6 +35,42 @@ pub fn rjust(text: &str, width: usize) -> String {
     format!("{}{text}", " ".repeat(width.saturating_sub(len(text))))
 }
 
+/// Python's `f"{x:g}"`: six significant digits, trailing zeros dropped, exponent form
+/// only below 1e-4 or from 1e6 up.
+pub fn fmt_g(x: f64) -> String {
+    if x == 0.0 {
+        return "0".into();
+    }
+    let exp = format!("{:.5e}", x);
+    let (mantissa, e) = exp.split_once('e').expect("exponent form");
+    let e: i32 = e.parse().expect("exponent");
+    if !(-4..6).contains(&e) {
+        let m = mantissa.trim_end_matches('0').trim_end_matches('.');
+        return format!("{m}e{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
+    }
+    let decimals = (5 - e).max(0) as usize;
+    let fixed = format!("{:.*}", decimals, x);
+    if fixed.contains('.') {
+        fixed
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        fixed
+    }
+}
+
+/// `dunk_core.format_interval(minutes)`: '10', '1.5', or '30s' under a minute.
+pub fn format_interval(minutes: f64) -> String {
+    if 0.0 < minutes && minutes < 1.0 {
+        return format!("{}s", fmt_g(minutes * 60.0));
+    }
+    if minutes == minutes.trunc() {
+        return format!("{}", minutes as i64);
+    }
+    fmt_g(minutes)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn format_row(
     num: &str,
@@ -114,6 +150,19 @@ mod tests {
         assert_eq!(clip("abcdef", 3), "abc");
         assert_eq!(clip("abcdef", 4), "a...");
         assert_eq!(clip("héllo wörld", 8), "héllo...");
+    }
+
+    #[test]
+    fn format_interval_matches_the_pythons_forms() {
+        assert_eq!(format_interval(10.0), "10");
+        assert_eq!(format_interval(1.5), "1.5");
+        assert_eq!(format_interval(0.5), "30s");
+        assert_eq!(format_interval(0.25), "15s");
+        assert_eq!(format_interval(1.0 / 3.0), "20s");
+        assert_eq!(format_interval(0.0), "0");
+        assert_eq!(format_interval(2.0 / 3.0), "40s");
+        assert_eq!(format_interval(1.0 / 7.0 + 1.0), "1.14286");
+        assert_eq!(fmt_g(0.00001234), "1.234e-05");
     }
 
     #[test]

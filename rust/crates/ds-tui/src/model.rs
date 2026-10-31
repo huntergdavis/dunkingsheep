@@ -3,8 +3,7 @@
 //! `handle_key`, `handle_task_key`, `quit_and_shutdown`).
 //!
 //! NOT ported here: `connect` (needs the daemon client wiring), the modals' drawing,
-//! the dunk keys `c` (`pick_target`) and `i` (`edit_interval`, needs `format_interval`,
-//! not in Rust yet), and every `draw*`. The task-view keys that open a modal (`b e a`) go through [`LineModal`].
+//! the dunk key `c` (`pick_target`), and every `draw*`. The task-view keys that open a modal (`b e a`) go through [`LineModal`].
 
 use serde_json::{json, Map, Value};
 
@@ -252,6 +251,7 @@ impl<B: Backend> Model<B> {
                     self.rpc("toggle_dunk", args(&[("id", json!(id))]), now);
                 }
             }
+            Key::Char('i') => self.edit_interval(modal, now),
             Key::Char('e') => self.edit_text(modal, now),
             Key::Char('n') => self.edit_name(modal, now),
             Key::Char('o') => self.toggle_only_idle(now),
@@ -288,6 +288,22 @@ impl<B: Backend> Model<B> {
         call.insert("id".into(), id.clone());
         call.insert(field.into(), value);
         self.rpc("update_dunk", call, now);
+    }
+
+    pub fn edit_interval(&mut self, modal: &mut dyn LineModal, now: f64) {
+        let Some(dunk) = self.current_dunk(now) else {
+            return;
+        };
+        let minutes = dunk
+            .get("interval_minutes")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let shown = crate::rows::format_interval(minutes);
+        if let Some(value) = modal.line_modal("Interval (minutes, or e.g. 90s / 1.5h)", &shown) {
+            if !value.trim().is_empty() {
+                self.update_dunk(&dunk["id"], "interval_minutes", json!(value.trim()), now);
+            }
+        }
     }
 
     pub fn edit_text(&mut self, modal: &mut dyn LineModal, now: f64) {
@@ -731,6 +747,19 @@ mod tests {
         m.handle_key(Key::Char('m'), &mut Says(Some("x1".into())), 0.0);
         assert_eq!(m.backend.calls.len(), calls);
         assert_eq!(m.message, "Max sends must be a whole number");
+    }
+
+    #[test]
+    fn edit_interval_sends_the_stripped_string_and_blank_sends_nothing() {
+        let mut m = with_dunk(json!({"id": "a", "interval_minutes": 5}));
+        let calls = m.backend.calls.len();
+        m.handle_key(Key::Char('i'), &mut Says(Some("  ".into())), 0.0);
+        assert_eq!(m.backend.calls.len(), calls);
+        m.handle_key(Key::Char('i'), &mut Says(Some(" 90s ".into())), 0.0);
+        assert_eq!(
+            m.backend.calls.last().unwrap().1["interval_minutes"],
+            json!("90s")
+        );
     }
 
     #[test]
