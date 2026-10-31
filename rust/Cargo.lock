@@ -144,6 +144,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-mcp"
+version = "0.1.0"
+dependencies = [
+ "ds-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
