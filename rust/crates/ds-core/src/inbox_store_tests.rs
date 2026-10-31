@@ -442,6 +442,23 @@ fn test_send_read_and_count_in_queue_order() {
 }
 
 #[test]
+fn a_marked_read_keeps_the_integer_waiting_s_computed_from_the_queued_row() {
+    // t1226: Python's read() returns state=read but the waiting_s of the queued row; a later
+    // get/status shows None because the stored state is no longer queued.
+    let fixture = Fixture::new();
+    fixture.send("writer", "waited");
+    let read = fixture.store.read("writer", 10, false, true).expect("read");
+    assert_eq!("read", read[0].summary.state);
+    assert!(
+        read[0].summary.waiting_s.is_some_and(|s| s >= 0),
+        "waiting_s was {:?}",
+        read[0].summary.waiting_s
+    );
+    let again = fixture.store.read("writer", 10, true, true).expect("peek");
+    assert!(again.is_empty(), "nothing queued is left to peek");
+}
+
+#[test]
 fn test_peek_does_not_consume() {
     let fixture = Fixture::new();
     fixture.send("writer", "still here");

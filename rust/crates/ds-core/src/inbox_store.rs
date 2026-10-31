@@ -361,7 +361,8 @@ impl Store {
                     )
                     .map_err(map_sqlite)?;
                     message.summary.state = "read".to_string();
-                    message.summary.waiting_s = None;
+                    // waiting_s stays what the queued row computed (t1226): Python returns
+                    // how long the message waited even though its state is now 'read'.
                     message.read_at = Some(now);
                 }
                 tx.commit().map_err(map_sqlite)?;
