@@ -1,0 +1,312 @@
+[
+ {
+  "input": {},
+  "output": "base ?; queue rows None, credited None, already filed None\n",
+  "printer": "print_poolrad_sync"
+ },
+ {
+  "input": {
+   "base": "abc123",
+   "errors": [
+    "boom",
+    "bang"
+   ],
+   "filed": [
+    {
+     "id": "OVL_01",
+     "rank": 1.5,
+     "task": "t9"
+    },
+    {
+     "id": "OVL_02",
+     "rank": 2
+    }
+   ],
+   "skipped": {
+    "already_filed": 2,
+    "credited": 3,
+    "queue_rows": 10
+   }
+  },
+  "output": "base abc123; queue rows 10, credited 3, already filed 2\n  filed t9 OVL_01 rank 1.5\n  filed (dry) OVL_02 rank 2\n  ! boom\n  ! bang\n",
+  "printer": "print_poolrad_sync"
+ },
+ {
+  "input": {
+   "base": null,
+   "errors": [],
+   "filed": [],
+   "skipped": {}
+  },
+  "output": "base ?; queue rows None, credited None, already filed None\n",
+  "printer": "print_poolrad_sync"
+ },
+ {
+  "input": {
+   "ceiling": 815,
+   "ceiling_note": "upper bound",
+   "composable_bodies": 7,
+   "credited": 5,
+   "identities": 2,
+   "main": "deadbeef",
+   "queue_candidates": 9,
+   "replaced": 4
+  },
+  "output": "credited strict bodies: 5  identities: 2  CEILING 815\n  upper bound\n  composable in queue: 7 of 9 candidates; main deadbeef\n",
+  "printer": "print_poolrad_progress"
+ },
+ {
+  "input": {
+   "ceiling": null,
+   "ceiling_note": "n",
+   "credited": 0,
+   "replaced": null,
+   "replaced_note": "no baseline"
+  },
+  "output": "credited strict bodies: 0  identities: None  CEILING None\n  n\n  composable in queue: None of None candidates; main None\n  replaced: n/a (no baseline)\n",
+  "printer": "print_poolrad_progress"
+ },
+ {
+  "input": {
+   "credited": 1.0,
+   "identities": true,
+   "main": [
+    1,
+    "a'b"
+   ],
+   "replaced": 0
+  },
+  "output": "credited strict bodies: 1.0  identities: True  CEILING None\n  None\n  composable in queue: None of None candidates; main [1, \"a'b\"]\n",
+  "printer": "print_poolrad_progress"
+ },
+ {
+  "input": {},
+  "output": "  nothing to do\n",
+  "printer": "print_review_sync"
+ },
+ {
+  "input": {
+   "cancelled": [
+    "t2",
+    "t3"
+   ],
+   "errors": [
+    "e1"
+   ],
+   "filed": [
+    {
+     "author": "%1",
+     "head": "0123456789abcdef0123",
+     "pr": 7,
+     "repo": "a/b",
+     "task": "t1"
+    },
+    {
+     "head": "abc",
+     "pr": 8,
+     "repo": "a/b"
+    }
+   ],
+   "repos": [
+    {
+     "open": 2,
+     "repo": "a/b"
+    }
+   ],
+   "statuses": [
+    {
+     "head": "abc",
+     "repo": "a/b",
+     "state": "success"
+    }
+   ]
+  },
+  "output": "a/b: 2 open PR(s)\n  filed t1 a/b#7 @ 0123456789ab author %1\n  filed (dry) a/b#8 @ abc author ?\n  cancelled t2\n  cancelled t3\n  status a/b@abc success\n  ! e1\n",
+  "printer": "print_review_sync"
+ },
+ {
+  "input": {
+   "cancelled": [],
+   "errors": [],
+   "filed": [],
+   "repos": [
+    {
+     "open": 0,
+     "repo": "x/y"
+    }
+   ]
+  },
+  "output": "x/y: 0 open PR(s)\n  nothing to do\n",
+  "printer": "print_review_sync"
+ },
+ {
+  "input": {
+   "statuses": [
+    {
+     "head": "h",
+     "repo": "x/y",
+     "state": "pending"
+    }
+   ]
+  },
+  "output": "  status x/y@h pending\n  nothing to do\n",
+  "printer": "print_review_sync"
+ },
+ {
+  "input": {},
+  "output": "no live reviews\n",
+  "printer": "print_review_list"
+ },
+ {
+  "input": {
+   "reviews": []
+  },
+  "output": "no live reviews\n",
+  "printer": "print_review_list"
+ },
+ {
+  "input": {
+   "reviews": [
+    {
+     "age_s": 3700,
+     "author": "pi",
+     "head": "abc",
+     "pr": 3,
+     "repo": "a/b",
+     "reviewer": [
+      "%5",
+      "%6"
+     ],
+     "status": "open",
+     "task": "t12"
+    },
+    {
+     "age_s": 59,
+     "head": "abcdef012345",
+     "pr": 33,
+     "repo": "a/b",
+     "reviewer": [],
+     "status": "in_progress",
+     "task": "t1234567"
+    },
+    {
+     "age_s": 7200.5,
+     "author": "averyverylongauthor",
+     "head": "h",
+     "pr": 1,
+     "repo": "r",
+     "reviewer": [
+      "a-long-reviewer-name"
+     ],
+     "status": "x",
+     "task": "t2"
+    }
+   ]
+  },
+  "output": "t12    open        a/b#3 @ abc author pi       reviewer %5,%6      age 61m\nt1234567 in_progress a/b#33 @ abcdef012345 author ?        reviewer -          age 0m\nt2     x           r#1 @ h author averyverylongauthor reviewer a-long-reviewer-name age 120.0m\n",
+  "printer": "print_review_list"
+ },
+ {
+  "input": {
+   "role": "worker"
+  },
+  "output": "pane -  role worker\n",
+  "printer": "print_whoami"
+ },
+ {
+  "input": {
+   "binding_note": "pid-bound",
+   "identity_note": "from tty",
+   "pane_id": "%3",
+   "registered": {
+    "by": "owner",
+    "pane_pid": 42,
+    "provider": "codex",
+    "role": "worker"
+   },
+   "role": "owner",
+   "via_token": true
+  },
+  "output": "pane %3  role owner  (service token)\n  identity: from tty\n  binding: pid-bound\n  registered: worker pid 42 provider codex by owner\n",
+  "printer": "print_whoami"
+ },
+ {
+  "input": {
+   "pane_id": null,
+   "registered": {
+    "role": "web"
+   },
+   "role": null
+  },
+  "output": "pane -  role None\n  registered: web pid None provider - by -\n",
+  "printer": "print_whoami"
+ },
+ {
+  "input": {
+   "registered": {},
+   "role": "x"
+  },
+  "output": "pane -  role x\n",
+  "printer": "print_whoami"
+ },
+ {
+  "input": {
+   "path": "/p/roles.json",
+   "role": "worker",
+   "superuser": false
+  },
+  "output": "roles /p/roles.json\n  owner: no (pane -, role worker)\n  (no lanes registered; `lane register --role owner` bootstraps)\n",
+  "printer": "print_superuser"
+ },
+ {
+  "input": {
+   "added": "%2",
+   "entry": {
+    "role": "worker"
+   },
+   "lanes": {
+    "%1": {
+     "pane_pid": null,
+     "role": "owner"
+    },
+    "%10": {
+     "role": "reviewer"
+    },
+    "%2": {
+     "label": "w1",
+     "pane_pid": 9,
+     "provider": "pi",
+     "role": "worker"
+    }
+   },
+   "name": "vp",
+   "pane_id": "%1",
+   "path": "/p",
+   "recovered": true,
+   "removed": "%9",
+   "role": "owner",
+   "superuser": true,
+   "tokens": [
+    {
+     "label": "web",
+     "role": "web"
+    },
+    {
+     "label": "t",
+     "role": "timer"
+    }
+   ]
+  },
+  "output": "roles /p\n  owner: yes (pane %1, role owner)\n  %1       owner     pid -\n  %10      reviewer  pid -\n  %2       worker    pid 9 pi w1\n  tokens: web=web, t=timer\n  added: %2\n  removed: %9 ({'role': 'worker'})\n  recovered: %1 (vp)\n",
+  "printer": "print_superuser"
+ },
+ {
+  "input": {
+   "lanes": {},
+   "path": "/p",
+   "removed": 0
+  },
+  "output": "roles /p\n  owner: no (pane -, role None)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  removed: 0 (None)\n",
+  "printer": "print_superuser"
+ }
+]
