@@ -114,6 +114,17 @@ ALLOW = {
     # fleet-destructive verbs, which stay on a human in a terminal.
     "web": None,
     "desk": READ_ONLY | frozenset({
+        # Owner-directed queue actions (owner decision 2026-10-31: "a narrow grant"). The desk
+        # relays the OWNER's words, so it may reshape the queue - and only the queue, reversibly:
+        # block/unblock/update. `task_assign` is NOT granted: h_task_assign refuses every role but
+        # owner/system/web, so listing it here would be an inert promise (t1172 review); assigning
+        # stays with an owner-role pane. Closing or deleting work (task_cancel, task_delete,
+        # task_complete), anything that touches a lane or a process (respawn, start_agent,
+        # send_keys, close, shutdown) and anything privileged stays off: those are
+        # fleet-destructive and stay with an owner-role pane. (lane_register is a bootstrap
+        # path in READ_ONLY for every role; its HANDLER refuses a non-owner.) `task_update` is already
+        # refused status/assignees/block_reason for every non-owner role (dunk_api.h_task_update).
+        "task_block", "task_unblock", "task_update",
         "task_add", "task_note", "inbox_read", "inbox_fetch", "inbox_ack",
         "owner_take", "owner_poll", "owner_receipts", "owner_reply",
         # The owner mailbox is the desk's whole job (FLAT_FLEET.md 7.2): read it,
@@ -426,6 +437,22 @@ def clamp_desk_result(result):
         return result
     if len(text) <= DESK_RESULT_BYTES:
         return result
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if isinstance(messages, list) and messages:
+        # t1165: keep the result shaped like an inbox result (the CLI indexes
+        # r["messages"]) and keep the NEWEST messages that fit, not a blind byte cut.
+        base = {k: v for k, v in result.items() if k != "messages"}
+        base.update(truncated=True, omitted=0, cap=DESK_RESULT_BYTES,
+                    note="desk results are capped; the oldest messages were left out "
+                         "(inbox list / inbox status <id> show them)")
+        kept = []
+        for m in reversed(messages):
+            trial = dict(base, messages=[m] + kept, omitted=len(messages) - len(kept) - 1)
+            if len(json.dumps(trial)) > DESK_RESULT_BYTES:
+                break
+            kept.insert(0, m)
+        if kept:
+            return dict(base, messages=kept, omitted=len(messages) - len(kept))
     return {"truncated": True, "bytes": len(text), "cap": DESK_RESULT_BYTES,
             "head": text[:DESK_RESULT_BYTES],
             "note": "desk results are capped; ask a narrower question "

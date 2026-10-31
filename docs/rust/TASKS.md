@@ -81,6 +81,21 @@ read-only tooling, **P3** TUI and web.
 | T55 | allocator.rs, fallback.rs, recovery.rs, native_session.rs, http.rs | T35 | those | the named modules | their test files | |
 | T56 | Phase-2 cutover of the timer units | T46 T50-T55 | packaging edits | - | - | every `dunkingsheep-*.service` ExecStart runs the Rust binary; one week of timers with no diff vs the Python outputs recorded in parallel |
 
+## Parity carry-over for T39 (api.rs)
+
+`api.rs` does not exist yet (T39 depends on T31-T38), so these Python changes since the manifest (70876c2) have no Rust counterpart to edit today. T39 must port them, by name, with the tests named here:
+
+- `dunk_api.py::_gate_unread` (t1053, 0c32c06 added, 289306c fixed): sweep unread gate counts only fresh lane/owner mail, `since` = the lane's last turn `ended_at`, 600 s window, appends to `expired` when mail is expired and none fresh. Test: `tests/test_dunk_gate_unread.py`. Needs `inbox.gate_unread` in `inbox.rs` first.
+- `dunk_api.py::h_dispatch` (tick path, 0c32c06): the lane plan's `unread` callback is `_gate_unread(...)` instead of the raw unread count, and the returned state gains `unread_mail_expired` (sorted set of panes fed anyway). The owner/system role gate text on add/remove/tick is NOT new (present at 70876c2, 9fe2ccd). Test: `tests/test_dunk_gate_unread.py` (sweep-level cases).
+- `dunk_api.py::h_task_complete`: forwards `landed` (default true, via `_bool`) to `task_complete` (126ee15). Test: `tests/test_cli_task_complete_flags.py`.
+
+## Parity carry-over for T31/T36 (roles gate, push sweep)
+
+Neither `flock/roles_gate.rs` nor `flock/loops.rs` exists yet, and `push.rs` holds only the target-selection helper (no `may_review`, no provider list, no sweep), so PR #204 (Python `_push_tasks`: `self.roles.may_review(pane_id, role=role)`) has nothing in Rust to change today. When T31 ports `Roles::may_review` and T36 ports the push sweep:
+
+- `may_review` takes the caller's already-resolved role (`caller_role`) and never re-resolves it; a bare `role_of(pane_id)` without the live pane record demotes a pid-bound lane to `worker` and skipped a registered pi reviewer as `provider_may_not_review` (live 2026-10-30).
+- Port `tests/test_push_on_idle.py::test_a_pid_bound_reviewer_on_an_allowed_provider_is_fed` as a Rust test: a pid-bound `pi` reviewer, `reviewer_providers = [claude, codex, pi]`, a role lookup that answers `worker` unless handed the resolved role, one review task; the lane is claimed (`in_progress`).
+
 ## Phase 3: TUI and web
 
 | id | title | depends | creates | ports | tests | acceptance |

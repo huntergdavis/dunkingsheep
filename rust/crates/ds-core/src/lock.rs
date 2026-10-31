@@ -97,6 +97,38 @@ fn open(path: &Path) -> Result<File, DunkError> {
         .map_err(|error| DunkError::Refused(format!("open {}: {error}", path.display())))
 }
 
+/// The Python's `identity_guard` shape: a BOUNDED wait, then a named refusal.
+///
+/// `identity_guard` tries `LOCK_EX|LOCK_NB` in a loop and gives up after 5 s with
+/// "identity record is busy". An unbounded wait is not the same mechanism: a wedged
+/// holder would hang the writer for ever instead of refusing, and the caller cannot tell
+/// "slow" from "deadlocked" (t980 finding 3).
+pub fn with_exclusive_timeout<T, F>(
+    path: &Path,
+    timeout: std::time::Duration,
+    body: F,
+) -> Result<T, DunkError>
+where
+    F: FnOnce() -> Result<T, DunkError>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match Guard::try_acquire(path, Mode::Exclusive)? {
+            Some(_guard) => return body(),
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(DunkError::Retryable(format!(
+                        "identity record is busy: {} stayed locked for {:?}",
+                        path.display(),
+                        timeout
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 /// The Python's `with _locked(path): ...` shape.
 pub fn with_exclusive<T, F>(path: &Path, body: F) -> Result<T, DunkError>
 where

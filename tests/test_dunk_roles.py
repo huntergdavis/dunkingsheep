@@ -116,6 +116,28 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(dunk_roles.allowed("anonymous", "turn_end"))
         self.assertFalse(dunk_roles.allowed("anonymous", "send_text"))
 
+    def test_a_failed_pane_lookup_does_not_demote_a_registered_lane(self):
+        """2026-10-30: the backend returned nothing for live panes under load and every
+        pid-registered lane became anonymous. One empty answer inside the grace window
+        keeps the last good record; a pane that stays gone is dropped after it."""
+        import dunk_core, time
+        from fakes import FakeHerdr
+        flock, roles = make_flock(self.tmp.name)
+        try:
+            roles.register("w2:p3", "worker", provider="pi", pane_pid=4100)
+            answers = [{"pane_id": "w2:p3", "pane_pid": 4100}, None, None]
+            flock._pane_info = lambda pane_id: answers.pop(0) if answers else None
+            self.assertEqual("worker", flock.caller_role("w2:p3"))
+            flock._role_pane_cache.clear()
+            flock._caller_state.role = None
+            self.assertEqual("worker", flock.caller_role("w2:p3"), "one empty answer keeps the role")
+            flock._role_pane_cache.clear()
+            flock._role_pane_last["w2:p3"] = (time.time() - 400, {"pane_id": "w2:p3", "pane_pid": 4100})
+            flock._caller_state.role = None
+            self.assertEqual("anonymous", flock.caller_role("w2:p3"), "gone past the grace window")
+        finally:
+            flock.close(); flock.inbox.close(); flock.tasks.close()
+
     def test_allowlist_shape(self):
         self.assertTrue(dunk_roles.allowed("owner", "shutdown"))
         self.assertFalse(dunk_roles.allowed("web", "shutdown"))
@@ -124,6 +146,19 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(dunk_roles.allowed("desk", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("desk", "task_complete"))
         self.assertTrue(dunk_roles.allowed("desk", "task_add"))
+
+    def test_the_desk_has_a_narrow_grant_of_reversible_queue_actions_and_nothing_destructive(self):
+        # owner decision 2026-10-31: block, unblock and update. Assign is NOT granted (its handler
+        # refuses a desk anyway, t1172), so the allowlist must not promise it.
+        for verb in ("task_block", "task_unblock", "task_update"):
+            self.assertTrue(dunk_roles.allowed("desk", verb), verb)
+        for verb in ("task_assign", "task_cancel", "task_delete", "task_complete", "task_next",
+                     "respawn_pane", "start_agent", "send_keys", "send_text", "lane_set",
+                     "close", "shutdown", "create_workspace", "superuser_add", "retire_pane",
+                     "add_dunk", "stop_all", "gh_token", "token_issue"):
+            self.assertFalse(dunk_roles.allowed("desk", verb), f"the desk must not have {verb}")
+
+    def test_the_rest_of_the_allowlist_shape(self):
         self.assertFalse(dunk_roles.allowed("planner", "inbox_send"))
         self.assertFalse(dunk_roles.allowed("anonymous", "task_next"))
         self.assertTrue(dunk_roles.allowed("anonymous", "task_list"))

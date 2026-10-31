@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Dunking Sheep Rust parity watcher daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -434,6 +434,14 @@ def build_parser():
     q.add_argument("--by")
     q.add_argument("--verdict", choices=["accept", "needs-fix"],
                    help="review tasks: the verdict (recorded from your bound lane)")
+    # The call site passes args.landed (t906), and without this argument EVERY
+    # `task complete` dies with AttributeError: 'Namespace' object has no attribute
+    # 'landed' - a live outage of the command every lane uses to finish work. The flag
+    # was in the same commit as the call site and was lost when the branch was rebased
+    # onto a main that had moved; this adds it back and the test below pins the pair.
+    q.add_argument("--unmerged", dest="landed", action="store_false", default=None,
+                   help="the work is done but its PR is NOT on main (a stacked branch): "
+                        "dependents stay closed until the merge is recorded (t906)")
 
     q = tsub.add_parser("block", help="mark a task blocked")
     q.add_argument("id")
@@ -1167,7 +1175,16 @@ def _inbox_rows(messages):
               f"{waiting:>8} {m['body_bytes']:>7} {_clip(subject, 44)}")
 
 
+def _print_capped(r):
+    """t1165: a desk-capped result with no 'messages' key: show what we have, exit 0."""
+    print(f"result capped by the desk role ({r.get('bytes')} bytes > {r.get('cap')}): "
+          f"{r.get('note') or ''}")
+    print(r.get("head") or "")
+
+
 def print_inbox_list(r):
+    if "messages" not in r:
+        return _print_capped(r)
     print(f"mailbox {r['mailbox']}")
     _inbox_rows(r["messages"])
 
@@ -1743,6 +1760,8 @@ def print_task_metrics(result):
 
 
 def print_inbox_read(r):
+    if "messages" not in r:
+        return _print_capped(r)
     messages = r["messages"]
     if not messages:
         print(f"mailbox {r['mailbox']}: no unread messages")
@@ -1756,6 +1775,8 @@ def print_inbox_read(r):
                   f"{blob['size']} bytes  {blob['media_type']}")
         print(m["body"])
         print()
+    if r.get("truncated"):
+        print(f"[capped: {r.get('omitted')} older message(s) left out - {r.get('note')}]")
     _print_inbox_tasks(r)
 
 
@@ -1775,6 +1796,8 @@ def _print_inbox_tasks(r):
 
 
 def print_inbox_recover(r):
+    if "messages" not in r:
+        return _print_capped(r)
     messages = r["messages"]
     if messages:
         print(f"mailbox {r['mailbox']}: recovered {len(messages)} delivered message(s) "

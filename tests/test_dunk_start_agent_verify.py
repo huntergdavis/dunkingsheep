@@ -113,6 +113,71 @@ class StartAgentVerifyTests(unittest.TestCase):
             self._start(["$ \n", "\n[agent exited rc=127]\n"],
                         proc=[self._child(["/usr/bin/claude"], comm="claude")])
 
+    def test_a_first_run_trust_dialog_is_refused_and_named(self):
+        """t957: a lane that reported 'started' and was inert behind a dialog.
+
+        Measured by the owner-role lane: start-agent said 'started agent reviewer-7 in
+        %110', the role registered, then `read %110` was blank, a dunk sat at 'Held
+        (typing)' and the stuck machine logged 'the composer text is not provably
+        ours'. The pane was up; the CLI was waiting for a dialog nobody answered.
+        """
+        screen = ("Do you trust the files in this folder?\n"
+                  "❯ 1. Yes, proceed\n  2. No, exit\n")
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*trust the files"):
+            self._start(screen)
+
+    def test_a_first_run_login_dialog_is_refused_too(self):
+        screen = "Select login method:\n❯ 1. Claude account\n  2. API key\n"
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*login method"):
+            self._start(screen)
+
+    def test_the_dialog_refusal_wins_over_a_live_process(self):
+        """A live claude sitting in a trust prompt is exactly the inert lane: the
+        process evidence must not excuse it (unlike launcher noise, t599)."""
+        with self.assertRaisesRegex(DunkError, "NOT interactive"):
+            self._start("Do you trust the files in this folder?\n",
+                        proc=[self._child(["claude"])])
+
+    # -- t958: the CAPTURED dialog, and the scrollback trap next to it ----------
+
+    def test_the_captured_codex_approval_dialog_is_refused(self):
+        """The gap t957's body admitted: 'no live claude first run was reproduced here'.
+
+        The captured screen was already in the repo (tests/fakes.py::
+        codex_approval_dialog, "captured from a real pane. The agent is waiting for a
+        person to choose; nothing may be typed or pressed") and NONE of the nine markers
+        matched its line, so a codex lane behind it was reported healthy.
+        """
+        from fakes import codex_approval_dialog
+        with self.assertRaisesRegex(DunkError, "NOT interactive.*confirm or Esc"):
+            self._start(codex_approval_dialog())
+
+    def test_the_ANSWERED_dialog_in_scrollback_is_not_a_refusal(self):
+        """The other half, and the reason the match is scoped to the live tail.
+
+        The same line sits in codex_answered_dialog_in_scrollback: a prompt answered a
+        while ago, with 20 output lines and an idle box under it. Matching the whole
+        capture would refuse every lane whose transcript still shows an answered prompt -
+        the same mistake MODAL_TAIL_LINES documents ('that is how the daemon came to
+        press Escape into working agents 1042 times').
+        """
+        from fakes import codex_answered_dialog_in_scrollback
+        result = self._start(codex_answered_dialog_in_scrollback())
+        self.assertEqual("probe", result["name"], "a healthy lane must start")
+
+    def test_the_dialog_match_reads_only_the_live_tail(self):
+        """Pins the SCOPE rather than the two fixtures: the marker is present, but far
+        above the last AGENT_DIALOG_TAIL_LINES rows, so it is history."""
+        screen = ("Press Enter to confirm or Esc to cancel\n"
+                  + "\n".join(f"  output line {n}" for n in range(1, 20))
+                  + "\n❯ \n")
+        result = self._start(screen)
+        self.assertEqual("probe", result["name"])
+
+    def test_a_welcome_screen_with_no_dialog_still_starts(self):
+        result = self._start("✻ Welcome to Claude Code\n❯ \n")
+        self.assertEqual("probe", result["name"])
+
     def test_a_clean_screen_with_no_process_is_refused(self):
         """Criterion (a): a bare idle shell is not a running agent where pids exist."""
         with self.assertRaisesRegex(DunkError, "never became a process"):

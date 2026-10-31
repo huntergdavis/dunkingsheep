@@ -1,0 +1,324 @@
+{
+  "_note": "Golden corpus for TASKS.md T51 (memory store port). Built by tools/snapshot_memory_corpus.py; regenerate with --write, verify with --check. Chunk texts are ALREADY redacted - a port that forgets a SECRET_PATTERNS entry produces a diff here.",
+  "chunks": [
+    {
+      "kind": "message",
+      "ordinal": 0,
+      "role": "user",
+      "session_id": "s-claude-1",
+      "text": "The task queue leases work to a pane; a lease expires and the reaper requeues it."
+    },
+    {
+      "kind": "message",
+      "ordinal": 1,
+      "role": "assistant",
+      "session_id": "s-claude-1",
+      "text": "Claiming walks the parent chain: a process identity is a pid plus its kernel start time."
+    },
+    {
+      "kind": "message",
+      "ordinal": 0,
+      "role": "user",
+      "session_id": "s-codex-1",
+      "text": "The overlay dispatcher reads slot 15 and composes 001F with exact-call stops."
+    },
+    {
+      "kind": "message",
+      "ordinal": 1,
+      "role": "assistant",
+      "session_id": "s-codex-1",
+      "text": "Aperture observability: 56 bus-aware models, 538 flat, so the aperture is not observable in their audits."
+    },
+    {
+      "kind": "message",
+      "ordinal": 0,
+      "role": "user",
+      "session_id": "s-pi-1",
+      "text": "Panes are listed by the terminal backend; a missing server is an empty world."
+    },
+    {
+      "kind": "message",
+      "ordinal": 1,
+      "role": "assistant",
+      "session_id": "s-pi-1",
+      "text": "Credentials must never reach the index: api_key=[REDACTED] and [REDACTED:github-token] and password=[REDACTED]"
+    }
+  ],
+  "expected": {
+    "context": {
+      "counts": {
+        "sessions": 1,
+        "snippets": 1
+      },
+      "query": "lease queue pane",
+      "sessions": [
+        {
+          "cwd": "/home/hunter/workspace/dunkingsheep",
+          "harness": "claude",
+          "project": "dunkingsheep",
+          "score": 361.9024,
+          "session_id": "s-claude-1",
+          "snippets": [
+            {
+              "chunk_id": 1,
+              "role": "user",
+              "score": 361.9024,
+              "snippet": "The task queue leases work to a pane; a lease expires and the reaper requeues it."
+            }
+          ],
+          "title": "task queue and leases",
+          "updated_at": 1700000100.0
+        }
+      ],
+      "text": "[claude] dunkingsheep | task queue and leases\n  - The task queue leases work to a pane; a lease expires and the reaper requeues it."
+    },
+    "recall": [
+      {
+        "kwargs": {
+          "limit": 5
+        },
+        "query": "lease requeue",
+        "recall": [
+          {
+            "chunk_id": 1,
+            "created_at": 1700000200.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "claude",
+            "kind": "message",
+            "ordinal": 0,
+            "project": "dunkingsheep",
+            "role": "user",
+            "score": 304.1509,
+            "session_id": "s-claude-1",
+            "snippet": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "text": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "title": "task queue and leases",
+            "updated_at": 1700000100.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "limit": 5
+        },
+        "query": "kernel start time",
+        "recall": [
+          {
+            "chunk_id": 2,
+            "created_at": 1700000201.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "claude",
+            "kind": "message",
+            "ordinal": 1,
+            "project": "dunkingsheep",
+            "role": "assistant",
+            "score": 382.9731,
+            "session_id": "s-claude-1",
+            "snippet": "Claiming walks the parent chain: a process identity is a pid plus its kernel start time.",
+            "text": "Claiming walks the parent chain: a process identity is a pid plus its kernel start time.",
+            "title": "task queue and leases",
+            "updated_at": 1700000100.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "limit": 5
+        },
+        "query": "aperture dispatcher slot",
+        "recall": [
+          {
+            "chunk_id": 3,
+            "created_at": 1700000200.0,
+            "cwd": "/home/hunter/workspace/poolrad-decomp",
+            "harness": "codex",
+            "kind": "message",
+            "ordinal": 0,
+            "project": "poolrad-decomp",
+            "role": "user",
+            "score": 277.1074,
+            "session_id": "s-codex-1",
+            "snippet": "The overlay dispatcher reads slot 15 and composes 001F with exact-call stops.",
+            "text": "The overlay dispatcher reads slot 15 and composes 001F with exact-call stops.",
+            "title": "overlay dispatcher",
+            "updated_at": 1700000050.0
+          },
+          {
+            "chunk_id": 4,
+            "created_at": 1700000201.0,
+            "cwd": "/home/hunter/workspace/poolrad-decomp",
+            "harness": "codex",
+            "kind": "message",
+            "ordinal": 1,
+            "project": "poolrad-decomp",
+            "role": "assistant",
+            "score": 173.3519,
+            "session_id": "s-codex-1",
+            "snippet": "Aperture observability: 56 bus-aware models, 538 flat, so the aperture is not observable in their audits.",
+            "text": "Aperture observability: 56 bus-aware models, 538 flat, so the aperture is not observable in their audits.",
+            "title": "overlay dispatcher",
+            "updated_at": 1700000050.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "harness": "pi",
+          "limit": 3
+        },
+        "query": "pane",
+        "recall": [
+          {
+            "chunk_id": 5,
+            "created_at": 1700000200.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "pi",
+            "kind": "message",
+            "ordinal": 0,
+            "project": "dunkingsheep",
+            "role": "user",
+            "score": 60.9467,
+            "session_id": "s-pi-1",
+            "snippet": "Panes are listed by the terminal backend; a missing server is an empty world.",
+            "text": "Panes are listed by the terminal backend; a missing server is an empty world.",
+            "title": "dispatch and panes",
+            "updated_at": 1700000000.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "limit": 5,
+          "project": "dunkingsheep"
+        },
+        "query": "queue",
+        "recall": [
+          {
+            "chunk_id": 1,
+            "created_at": 1700000200.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "claude",
+            "kind": "message",
+            "ordinal": 0,
+            "project": "dunkingsheep",
+            "role": "user",
+            "score": 127.6577,
+            "session_id": "s-claude-1",
+            "snippet": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "text": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "title": "task queue and leases",
+            "updated_at": 1700000100.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "limit": 5,
+          "since": 1700000080.0
+        },
+        "query": "lease",
+        "recall": [
+          {
+            "chunk_id": 1,
+            "created_at": 1700000200.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "claude",
+            "kind": "message",
+            "ordinal": 0,
+            "project": "dunkingsheep",
+            "role": "user",
+            "score": 176.4932,
+            "session_id": "s-claude-1",
+            "snippet": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "text": "The task queue leases work to a pane; a lease expires and the reaper requeues it.",
+            "title": "task queue and leases",
+            "updated_at": 1700000100.0
+          }
+        ]
+      },
+      {
+        "kwargs": {
+          "limit": 5
+        },
+        "query": "credentials index",
+        "recall": [
+          {
+            "chunk_id": 6,
+            "created_at": 1700000201.0,
+            "cwd": "/home/hunter/workspace/dunkingsheep",
+            "harness": "pi",
+            "kind": "message",
+            "ordinal": 1,
+            "project": "dunkingsheep",
+            "role": "assistant",
+            "score": 255.3154,
+            "session_id": "s-pi-1",
+            "snippet": "Credentials must never reach the index: api_key=[REDACTED] and [REDACTED:github-token] and password=[REDACTED]",
+            "text": "Credentials must never reach the index: api_key=[REDACTED] and [REDACTED:github-token] and password=[REDACTED]",
+            "title": "dispatch and panes",
+            "updated_at": 1700000000.0
+          }
+        ]
+      }
+    ],
+    "stats": {
+      "chunks": 6,
+      "harness": [
+        {
+          "chunks": 2,
+          "harness": "claude",
+          "sessions": 1
+        },
+        {
+          "chunks": 2,
+          "harness": "codex",
+          "sessions": 1
+        },
+        {
+          "chunks": 2,
+          "harness": "pi",
+          "sessions": 1
+        }
+      ],
+      "partial_sources": 0,
+      "queue": {
+        "done": 0,
+        "failed": 0,
+        "leased": 0,
+        "queued": 0,
+        "skipped": 0
+      },
+      "queue_depth": 0,
+      "schema_version": 1,
+      "sessions": 3,
+      "sources": 0
+    }
+  },
+  "now": 1734560200.0,
+  "sessions": [
+    {
+      "cwd": "/home/hunter/workspace/dunkingsheep",
+      "harness": "claude",
+      "id": "s-claude-1",
+      "project": "dunkingsheep",
+      "title": "task queue and leases",
+      "updated_at": 1700000100.0
+    },
+    {
+      "cwd": "/home/hunter/workspace/poolrad-decomp",
+      "harness": "codex",
+      "id": "s-codex-1",
+      "project": "poolrad-decomp",
+      "title": "overlay dispatcher",
+      "updated_at": 1700000050.0
+    },
+    {
+      "cwd": "/home/hunter/workspace/dunkingsheep",
+      "harness": "pi",
+      "id": "s-pi-1",
+      "project": "dunkingsheep",
+      "title": "dispatch and panes",
+      "updated_at": 1700000000.0
+    }
+  ]
+}

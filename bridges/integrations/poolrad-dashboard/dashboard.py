@@ -14,12 +14,15 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_REPO = Path(os.getenv("POOLRAD_DASHBOARD_REPO", HERE.parents[2] / "poolrad-decomp-opencode-ds41flash"))
+sys.path.insert(0, str(HERE.parents[1]))   # bridges/: the shared path resolution
+import poolrad_paths  # noqa: E402
+DEFAULT_REPO = poolrad_paths.repo("POOLRAD_DASHBOARD_REPO", "POOLRAD_REPO")
 STATE = HERE / "state"
 
 

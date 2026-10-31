@@ -26,6 +26,19 @@ use serde_json::Value;
 
 use crate::error::DunkError;
 
+/// How many times opening a writer retries the WAL switch on a busy database.
+///
+/// Bounded on purpose: a genuinely locked database must still fail, and a caller must
+/// not wait for ever on an open (t1006).
+const WAL_OPEN_ATTEMPTS: u32 = 5;
+/// The first backoff for that retry, doubled per attempt (5, 10, 20, 40 ms).
+const WAL_OPEN_BACKOFF_MS: u64 = 5;
+
+/// Is this refusal the retryable busy/locked one?
+fn error_is_busy(error: &DunkError) -> bool {
+    matches!(error, DunkError::Busy)
+}
+
 /// The Python's `BUSY_TIMEOUT_MS` (`dunk_sqlite.py`).
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
@@ -79,10 +92,40 @@ pub fn open_writer_with_timeout(path: &Path, busy_ms: u64) -> Result<Connection,
         .busy_timeout(std::time::Duration::from_millis(busy_ms))
         .map_err(map_sqlite)?;
     // An in-memory database has no journal file to switch.
+    //
+    // Switching to WAL needs a lock the OTHER writer may hold at this instant, so
+    // `PRAGMA journal_mode = WAL` can answer SQLITE_BUSY even though the busy timeout
+    // is already set (the timeout covers statements, not this pragma's exclusive
+    // moment). Measured: `two_writers_serialize_their_transactions` failed 1 run in 20
+    // with `writer: Busy` here, in a place nothing in the test could influence - and
+    // two daemons (or a timer process starting while the daemon writes) hit exactly
+    // this. The retry module T02 landed exists for this sentence: a busy answer is
+    // RETRYABLE, and failing the open instead is the bug.
     if path.to_string_lossy() != ":memory:" {
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
-            .map_err(map_sqlite)?;
+        let mut last = None;
+        for attempt in 0..WAL_OPEN_ATTEMPTS {
+            match connection.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => {
+                    last = None;
+                    break;
+                }
+                Err(error) => {
+                    let mapped = map_sqlite(error);
+                    if error_is_busy(&mapped) && attempt + 1 < WAL_OPEN_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            WAL_OPEN_BACKOFF_MS << attempt.min(4),
+                        ));
+                        last = Some(mapped);
+                        continue;
+                    }
+                    last = Some(mapped);
+                    break;
+                }
+            }
+        }
+        if let Some(error) = last {
+            return Err(error);
+        }
     }
     Ok(connection)
 }
@@ -198,6 +241,82 @@ impl Drop for Writer {
                 actor.abort();
             }
         }
+    }
+}
+
+/// A SYNCHRONOUS handle over the async writer actor (t978).
+///
+/// `Writer::call` is `async`, but every ported store method is a plain blocking call -
+/// that is the Python's shape, and keeping the signatures identical is the port's
+/// premise. This handle owns a current-thread runtime, starts the actor inside it, and
+/// `block_on`s each call, so a store reads exactly like the Python's:
+///
+/// ```ignore
+/// let writer = SyncWriter::spawn(path)?;
+/// writer.call(|connection| {
+///     connection.execute("INSERT INTO events (at, kind) VALUES (?1, ?2)", (1.0, "x"))?;
+///     Ok(())
+/// })?;
+/// ```
+///
+/// WHY THIS SHAPE (the t978 decision): the alternatives were a runtime per store (the
+/// same thing with the runtime visible in every store), or making the stores async
+/// (which changes every caller signature including the CLI's synchronous paths). This
+/// keeps the async surface where it already is and confines the runtime to one place.
+///
+/// Callers must NOT call this from inside a tokio runtime: `block_on` from within a
+/// runtime panics. The store layer runs on the daemon's synchronous command handlers,
+/// which is where the Python's blocking methods already ran.
+pub struct SyncWriter {
+    writer: std::sync::Arc<Writer>,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl std::fmt::Debug for SyncWriter {
+    /// The writer actor holds a channel and a task handle, neither of which is
+    /// useful in a debug line; the path is.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SyncWriter")
+            .field("path", &self.path())
+            .finish()
+    }
+}
+
+impl SyncWriter {
+    /// Open the database and start the writer actor inside a fresh runtime.
+    pub fn spawn(path: impl AsRef<Path>) -> Result<Self, DunkError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| DunkError::Refused(format!("tokio runtime: {error}")))?;
+        let writer = {
+            let _entered = runtime.enter(); // the actor task lives in this runtime
+            Writer::spawn(path)?
+        };
+        Ok(SyncWriter {
+            writer: std::sync::Arc::new(writer),
+            runtime,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        self.writer.path()
+    }
+
+    /// Run one write on the writer's connection, blocking until it is done.
+    pub fn call<T, F>(&self, work: F) -> Result<T, DunkError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, DunkError> + Send + 'static,
+    {
+        self.runtime.block_on(self.writer.call(work))
+    }
+
+    /// Drain the actor and stop it.
+    pub fn shutdown(self) {
+        let SyncWriter { writer, runtime } = self;
+        runtime.block_on(writer.shutdown());
     }
 }
 
