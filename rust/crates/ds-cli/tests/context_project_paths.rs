@@ -26,12 +26,17 @@ fn add_ground_truth(root: &Path, global: bool, slug: &str, body: &str, ledger: &
         .unwrap();
 }
 
-fn run_cli(project: &Path, config: &Path, args: &[&str]) -> Output {
+fn run_cli(project: &Path, config: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .arg("--no-start-daemon")
         .args(args)
         .current_dir(project)
         .env("DUNKINGSHEEP_DIR", config)
+        .env(
+            "DUNKINGSHEEP_CONTEXT_LEDGER",
+            config.join("context-ledger.db"),
+        )
+        .env("HOME", home)
         .env_remove("DUNKINGSHEEP_SOCKET")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
@@ -44,12 +49,14 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("config");
     std::fs::create_dir_all(&config).unwrap();
-    std::env::set_var("DUNKINGSHEEP_DIR", &config);
 
     let project = temp.path().join("one");
+    let home = temp.path().join("home");
     let store_root = project.join(".dunkingsheep");
     std::fs::create_dir_all(&project).unwrap();
-    let mut ledger = Ledger::new(None);
+    std::fs::create_dir_all(&home).unwrap();
+    let ledger_path = config.join("context-ledger.db");
+    let mut ledger = Ledger::new(Some(&ledger_path));
     add_ground_truth(
         &store_root,
         false,
@@ -58,7 +65,12 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
         &mut ledger,
     );
 
-    let digest = run_cli(&project, &config, &["context", "digest", "--project"]);
+    let digest = run_cli(
+        &project,
+        &config,
+        &home,
+        &["context", "digest", "--project"],
+    );
     assert!(
         digest.status.success(),
         "{}",
@@ -71,7 +83,7 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
         "{digest_text}"
     );
 
-    let check = run_cli(&project, &config, &["context", "check", "--project"]);
+    let check = run_cli(&project, &config, &home, &["context", "check", "--project"]);
     assert!(
         check.status.success(),
         "{}",
@@ -87,11 +99,16 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
         original.replace("Original trusted rule.", "Edited rule."),
     )
     .unwrap();
-    let modified_digest = run_cli(&project, &config, &["context", "digest", "--project"]);
+    let modified_digest = run_cli(
+        &project,
+        &config,
+        &home,
+        &["context", "digest", "--project"],
+    );
     let modified_text = String::from_utf8(modified_digest.stdout).unwrap();
     assert!(modified_text.contains("path-regression"), "{modified_text}");
     assert!(modified_text.contains("NOT injected"), "{modified_text}");
-    let modified_check = run_cli(&project, &config, &["context", "check", "--project"]);
+    let modified_check = run_cli(&project, &config, &home, &["context", "check", "--project"]);
     let modified_check_text = String::from_utf8(modified_check.stdout).unwrap();
     assert!(
         modified_check_text.contains("entries 1, refusals 1"),
@@ -107,11 +124,21 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
         original,
     )
     .unwrap();
-    let other_digest = run_cli(&other_project, &config, &["context", "digest", "--project"]);
+    let other_digest = run_cli(
+        &other_project,
+        &config,
+        &home,
+        &["context", "digest", "--project"],
+    );
     let other_text = String::from_utf8(other_digest.stdout).unwrap();
     assert!(other_text.contains("Ground truths (0)"), "{other_text}");
     assert!(other_text.contains("NOT injected"), "{other_text}");
-    let other_check = run_cli(&other_project, &config, &["context", "check", "--project"]);
+    let other_check = run_cli(
+        &other_project,
+        &config,
+        &home,
+        &["context", "check", "--project"],
+    );
     let other_check_text = String::from_utf8(other_check.stdout).unwrap();
     assert!(
         other_check_text.contains("entries 1, refusals 1"),
@@ -126,17 +153,46 @@ fn project_relative_digest_and_check_use_the_absolute_ledger_key() {
         "Global trusted rule.",
         &mut ledger,
     );
-    let global_digest = run_cli(&project, &config, &["context", "digest", "--global"]);
+    let global_digest = run_cli(&project, &config, &home, &["context", "digest", "--global"]);
     let global_text = String::from_utf8(global_digest.stdout).unwrap();
     assert!(global_text.contains("Ground truths (1)"), "{global_text}");
     assert!(
         global_text.contains("Global trusted rule."),
         "{global_text}"
     );
-    let global_check = run_cli(&project, &config, &["context", "check", "--global"]);
+    let global_check = run_cli(&project, &config, &home, &["context", "check", "--global"]);
     let global_check_text = String::from_utf8(global_check.stdout).unwrap();
     assert!(
         global_check_text.contains("entries 1, refusals 0"),
         "{global_check_text}"
     );
+}
+
+#[test]
+fn context_check_expands_tilde_in_project_path_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config");
+    let project = temp.path().join("project");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(home.join("store/ground-truth")).unwrap();
+
+    let output = run_cli(
+        &project,
+        &config,
+        &home,
+        &["context", "check", "--path", "~/store"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains(&format!("project ({}):", home.join("store").display())),
+        "{text}"
+    );
+    assert!(!text.contains("~/store"), "{text}");
 }

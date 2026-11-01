@@ -244,9 +244,8 @@ pub fn context_read(
             let mut out = String::new();
             for (name, store) in &stores {
                 let root = if sub == "check" && name == "project" {
-                    display_path
-                        .as_deref()
-                        .unwrap_or_else(|| Path::new(".dunkingsheep"))
+                    Store::new(display_path.as_deref(), false)
+                        .root
                         .display()
                         .to_string()
                 } else {
