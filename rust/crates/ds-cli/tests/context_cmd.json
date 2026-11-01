@@ -1,0 +1,147 @@
+{
+ "files": {
+  "cfg/context/README.md": "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+  "cfg/context/ground-truth/2020-01-02-global-truth.md": "---\nclass: ground-truth\nsubject: global-truth\ntype: principle\nscope: global\nauthority: owner\nstated: 2020-01-02\nsource: owner\nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nNever publish secrets.\n",
+  "proj/.dunkingsheep/README.md": "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+  "proj/.dunkingsheep/fact/flux-capacitor-rule.md": "---\nclass: fact\nsubject: flux-capacitor-rule\ntype: reference\nscope: project\nauthority: measured\nstated: 2020-03-04\nsource: lab\nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux capacitors need 1.21 gigawatts.\n",
+  "proj/.dunkingsheep/history/old-flux.md": "---\nclass: history\nsubject: old-flux\ntype: reference\nscope: project\nauthority: agent\nstated: 2019-01-01\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nOld flux note.\n",
+  "proj/.dunkingsheep/provisional/flux-routing.md": "---\nclass: provisional\nsubject: flux-routing\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-03-05\nsource: \nrecheck_after: 7d\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nDraft idea about flux routing.\n"
+ },
+ "steps": [
+  {
+   "argv": [
+    "get",
+    "flux-capacitor-rule"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "# flux-capacitor-rule (fact, measured, project)\n\nFlux capacitors need 1.21 gigawatts.\n"
+  },
+  {
+   "argv": [
+    "get",
+    "2020-01-02-global-truth"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "# 2020-01-02-global-truth (ground-truth, owner, global)\n\nNever publish secrets.\n"
+  },
+  {
+   "argv": [
+    "get",
+    "no-such-entry"
+   ],
+   "code": 1,
+   "stderr": "no entry 'no-such-entry' in global, project\n",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "search",
+    "flux"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "project  history       old-flux                                 old-flux\nproject  provisional   flux-routing                             flux-routing\nproject  fact          flux-capacitor-rule                      flux-capacitor-rule\n"
+  },
+  {
+   "argv": [
+    "search",
+    "flux",
+    "--class",
+    "fact"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "project  fact          flux-capacitor-rule                      flux-capacitor-rule\n"
+  },
+  {
+   "argv": [
+    "search",
+    "nothingmatchesthis"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "ledger",
+    "status"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "bootstrap   fact          flux-capacitor-rule\nbootstrap   provisional   flux-routing\nbootstrap   history       old-flux\n"
+  },
+  {
+   "argv": [
+    "index"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "global: indexed 1 -> <T>/cfg/context/.index.db\nproject: indexed 3 -> .dunkingsheep/.index.db\n"
+  },
+  {
+   "argv": [
+    "check"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "global (<T>/cfg/context): entries 1, refusals 0, stale 2\nproject (.dunkingsheep): entries 3, refusals 1, stale 2\n"
+  },
+  {
+   "argv": [
+    "digest"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n- [project/provisional/flux-routing] Draft idea about flux routing. (STALE - re-check before trusting)\n- [project/history/old-flux] Old flux note.\n\n"
+  },
+  {
+   "argv": [
+    "digest",
+    "--subject",
+    "flux-capacitor-rule"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n\n"
+  },
+  {
+   "argv": [
+    "digest",
+    "--max-bytes",
+    "400"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n- [project/provisional/flux-routing] Draft idea about flux routing. (STALE - re-check before trusting)\n- [project/history/old-flux] Old flux note.\n\n"
+  },
+  {
+   "argv": [
+    "stats"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "global (<T>/cfg/context): counts {'ground-truth': 1, 'fact': 0, 'provisional': 0, 'history': 0}, injected_7d 3, reads_7d 1, never_delivered 0, never_read 0\nproject (.dunkingsheep): counts {'ground-truth': 0, 'fact': 1, 'provisional': 1, 'history': 1}, injected_7d 7, reads_7d 5, never_delivered 0, never_read 0\n"
+  },
+  {
+   "argv": [
+    "stats",
+    "--global"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "global (<T>/cfg/context): counts {'ground-truth': 1, 'fact': 0, 'provisional': 0, 'history': 0}, injected_7d 3, reads_7d 1, never_delivered 0, never_read 0\n"
+  },
+  {
+   "argv": [
+    "check",
+    "--project"
+   ],
+   "code": 0,
+   "stderr": "",
+   "stdout": "project (.dunkingsheep): entries 3, refusals 1, stale 2\n"
+  }
+ ]
+}
