@@ -92,6 +92,69 @@ fn open(path: &Path) -> Result<Connection, DunkError> {
     Ok(connection)
 }
 
+fn attempt_sink(
+    db: &mut Connection,
+    identity: &str,
+    name: &'static str,
+    now: f64,
+    body: &str,
+    sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
+) -> Result<Option<SinkAttempt>, DunkError> {
+    let transaction = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(map_sqlite)?;
+    let prior: Option<(f64, Option<f64>)> = transaction
+        .query_row(
+            "SELECT last_attempt, delivered FROM alerts WHERE identity=?1 AND sink=?2",
+            (identity, name),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    let suppressed = prior.is_some_and(|(last_attempt, delivered)| {
+        delivered.is_some_and(|delivered| now - delivered < COOLDOWN_S)
+            || now - last_attempt < RETRY_S
+    });
+    if suppressed {
+        transaction.commit().map_err(map_sqlite)?;
+        return Ok(None);
+    }
+    transaction
+        .execute(
+            "INSERT INTO alerts(identity,sink,last_attempt,delivered) VALUES (?1,?2,?3,NULL) \
+             ON CONFLICT(identity,sink) DO UPDATE SET last_attempt=excluded.last_attempt, delivered=NULL",
+            (identity, name, now),
+        )
+        .map_err(map_sqlite)?;
+    transaction.commit().map_err(map_sqlite)?;
+
+    let result = match sink(body) {
+        Ok(SinkDelivery::Delivered) => {
+            db.execute(
+                "UPDATE alerts SET delivered=?1 WHERE identity=?2 AND sink=?3",
+                (now, identity, name),
+            )
+            .map_err(map_sqlite)?;
+            SinkAttempt {
+                sink: name,
+                delivered: true,
+                error: None,
+            }
+        }
+        Ok(SinkDelivery::Undeliverable) => SinkAttempt {
+            sink: name,
+            delivered: false,
+            error: Some("notification target is unavailable".into()),
+        },
+        Err(error) => SinkAttempt {
+            sink: name,
+            delivered: false,
+            error: Some(error),
+        },
+    };
+    Ok(Some(result))
+}
+
 /// Notify the owner and VP sinks independently for one pane/process/dialog identity.
 ///
 /// Missing generation or signature skips without creating the database. Each sink's
@@ -125,59 +188,11 @@ pub fn notify(
     let mut db = open(&path)?;
     let mut results = Vec::new();
 
-    for (name, sink) in [("owner", owner_sink), ("vp", vp_sink)] {
-        let transaction = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(map_sqlite)?;
-        let prior: Option<(f64, Option<f64>)> = transaction
-            .query_row(
-                "SELECT last_attempt, delivered FROM alerts WHERE identity=?1 AND sink=?2",
-                (&identity, name),
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(map_sqlite)?;
-        let suppressed = prior.is_some_and(|(last_attempt, delivered)| {
-            delivered.is_some_and(|delivered| now - delivered < COOLDOWN_S)
-                || now - last_attempt < RETRY_S
-        });
-        if suppressed {
-            transaction.commit().map_err(map_sqlite)?;
-            continue;
-        }
-        transaction
-            .execute(
-                "INSERT INTO alerts(identity,sink,last_attempt,delivered) VALUES (?1,?2,?3,NULL) \
-                 ON CONFLICT(identity,sink) DO UPDATE SET last_attempt=excluded.last_attempt, delivered=NULL",
-                (&identity, name, now),
-            )
-            .map_err(map_sqlite)?;
-        transaction.commit().map_err(map_sqlite)?;
-
-        match sink(&body) {
-            Ok(SinkDelivery::Delivered) => {
-                db.execute(
-                    "UPDATE alerts SET delivered=?1 WHERE identity=?2 AND sink=?3",
-                    (now, &identity, name),
-                )
-                .map_err(map_sqlite)?;
-                results.push(SinkAttempt {
-                    sink: name,
-                    delivered: true,
-                    error: None,
-                });
-            }
-            Ok(SinkDelivery::Undeliverable) => results.push(SinkAttempt {
-                sink: name,
-                delivered: false,
-                error: Some("notification target is unavailable".into()),
-            }),
-            Err(error) => results.push(SinkAttempt {
-                sink: name,
-                delivered: false,
-                error: Some(error),
-            }),
-        }
+    if let Some(result) = attempt_sink(&mut db, &identity, "owner", now, &body, owner_sink)? {
+        results.push(result);
+    }
+    if let Some(result) = attempt_sink(&mut db, &identity, "vp", now, &body, vp_sink)? {
+        results.push(result);
     }
     Ok(results)
 }
