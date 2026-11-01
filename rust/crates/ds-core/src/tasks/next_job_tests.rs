@@ -29,6 +29,28 @@ async fn events(store: &Tasks, task: &str, event: &str) -> Vec<(Option<String>, 
         .unwrap()
 }
 
+async fn decision(store: &Tasks, actor: Option<&str>, meta: Option<&str>) {
+    let (actor, meta) = (actor.map(str::to_string), meta.map(str::to_string));
+    store
+        .writer
+        .call(move |conn| {
+            conn.execute(
+                "INSERT INTO task_events (task_id,event,at,actor,meta) VALUES (?,?,?,?,?)",
+                params![
+                    "t-decision",
+                    "next_job_decision",
+                    crate::clock::now_s(),
+                    actor,
+                    meta
+                ],
+            )
+            .map_err(db::map_sqlite)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 fn state(s: &str) -> Option<Map<String, Value>> {
     let mut m = Map::new();
     m.insert("state".into(), json!(s));
@@ -84,6 +106,47 @@ async fn the_record_uses_a_unique_event_name_and_carries_the_shape() {
     assert_eq!(json!(1), meta["attempt"]);
     assert_eq!(Some(PANE.to_string()), rows[0].0);
     assert_eq!(Some("m8454".to_string()), out.message_id);
+}
+
+#[tokio::test]
+async fn next_job_decisions_returns_latest_actor_state_in_event_order() {
+    let store = store("decisions-order").await;
+    decision(&store, Some("pane-a"), Some(r#"{"reason":"first"}"#)).await;
+    decision(&store, Some("pane-b"), Some(r#"{"reason":"only"}"#)).await;
+    decision(&store, Some("pane-a"), Some(r#"{"reason":"latest"}"#)).await;
+    decision(&store, Some(""), Some("not-json")).await;
+    decision(&store, None, Some("not-json")).await;
+
+    let decisions = store.next_job_decisions().await.expect("decisions");
+    assert_eq!(
+        decisions,
+        vec![
+            ("pane-a".into(), json!({"reason": "latest"})),
+            ("pane-b".into(), json!({"reason": "only"})),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn next_job_decisions_rejects_malformed_meta() {
+    let malformed_store = store("decisions-malformed").await;
+    decision(&malformed_store, Some("pane-a"), Some("{malformed")).await;
+    let error = malformed_store
+        .next_job_decisions()
+        .await
+        .expect_err("malformed JSON must fail recovery");
+    assert!(error.to_string().starts_with("invalid JSON:"), "{error}");
+
+    let missing_store = store("decisions-missing").await;
+    decision(&missing_store, Some("pane-a"), None).await;
+    assert_eq!(
+        missing_store
+            .next_job_decisions()
+            .await
+            .unwrap_err()
+            .to_string(),
+        "next-job decision metadata is missing"
+    );
 }
 
 #[tokio::test]
