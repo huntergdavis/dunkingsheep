@@ -392,7 +392,7 @@ fn h_token_revoke_matches_python() {
         Some("w1:p2"),
     )
     .expect("revoke token");
-    assert_eq!(revoked, json!({"label": "watchdog", "revoked": true}));
+    assert_eq!(revoked, json!({"label": "watchdog", "revoked": 1}));
 
     let again = dispatch_recovery_token(
         &dispatcher,
@@ -402,7 +402,7 @@ fn h_token_revoke_matches_python() {
         Some("w1:p2"),
     )
     .expect("idempotent revoke");
-    assert_eq!(again, json!({"label": "watchdog", "revoked": false}));
+    assert_eq!(again, json!({"label": "watchdog", "revoked": 0}));
 }
 
 fn args(value: Value) -> Option<Args> {
