@@ -12,6 +12,7 @@
 use serde_json::{Map, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, usage_command, Outcome};
@@ -91,6 +92,144 @@ fn github(ns: &Map<String, Value>) -> Outcome {
         }
         Some(other) => not_ported(&format!("github {other}")),
         None => not_ported("github"),
+    }
+}
+
+fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Option<Vec<String>>) {
+    let executable = executable.display().to_string();
+    let launch = format!("{executable} mcp");
+    let json_block = format!(
+        "{{\n  \"mcpServers\": {{\n    \"dunkingsheep\": {{\n      \"command\": \"{}\",\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}",
+        executable
+    );
+    let toml_block =
+        format!("[mcp_servers.dunkingsheep]\ncommand = \"{executable}\"\nargs = [\"mcp\"]\n");
+    match harness {
+        "claude" => {
+            let cmd = vec![
+                "claude".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "--scope".to_string(),
+                scope.to_string(),
+                "dunkingsheep".to_string(),
+                "--".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = cmd.join(" ");
+            (
+                format!("# Claude Code\n{rendered}\nclaude mcp list   # expect: dunkingsheep: {launch} - Connected\n"),
+                Some(cmd),
+            )
+        }
+        "codex" => {
+            let cmd = vec![
+                "codex".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "dunkingsheep".to_string(),
+                "--".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = cmd.join(" ");
+            (
+                format!("# OpenAI Codex CLI\n{rendered}\ncodex mcp list    # expect a dunkingsheep row, status enabled\n# or in ~/.codex/config.toml:\n{toml_block}"),
+                Some(cmd),
+            )
+        }
+        "gemini" => {
+            let cmd = vec![
+                "gemini".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "--scope".to_string(),
+                scope.to_string(),
+                "dunkingsheep".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = cmd.join(" ");
+            (
+                format!("# Gemini CLI\n{rendered}\n# or add the JSON block below to ~/.gemini/settings.json\n"),
+                Some(cmd),
+            )
+        }
+        "cursor" => (
+            format!("# Cursor / Windsurf / VS Code / Claude Desktop: add to the mcp.json (or claude_desktop_config.json) file:\n{json_block}\n"),
+            None,
+        ),
+        "json" => (format!("{json_block}\n"), None),
+        "toml" => (toml_block, None),
+        _ => (String::new(), None),
+    }
+}
+
+fn mcp_setup(ns: &Map<String, Value>) -> Outcome {
+    let harness = text(ns, "harness").unwrap_or("all");
+    let scope = text(ns, "scope").unwrap_or("user");
+    let apply = matches!(ns.get("apply"), Some(Value::Bool(true)));
+    let harnesses: &[&str] = if harness == "all" {
+        &["claude", "codex", "gemini", "cursor"]
+    } else {
+        &[harness]
+    };
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("cannot locate dunkingsheep executable: {error}\n"),
+                code: 3,
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut code = 0;
+    if harness == "all" {
+        stdout.push_str("Register Dunking Sheep as an MCP server. Pick your harness, or run\n`dunkingsheep mcp-setup <harness> --apply` to have this done for you.\n\n");
+    }
+    for name in harnesses {
+        let (instructions, command) = mcp_setup_text(name, scope, &executable);
+        stdout.push_str(&instructions);
+        stdout.push('\n');
+        if apply && harness != "all" {
+            let Some(command) = command else {
+                stderr = format!("error: {name} has no CLI to apply; paste the block above\n");
+                code = 2;
+                break;
+            };
+            let path_env = std::env::var("PATH").unwrap_or_default();
+            if find_executable(&command[0], &path_env).is_none() {
+                stderr = format!("error: {} is not on PATH\n", command[0]);
+                code = 3;
+                break;
+            }
+            stdout.push_str(&format!("$ {}\n", command.join(" ")));
+            match Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::inherit())
+                .output()
+            {
+                Ok(output) => {
+                    stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+                    stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+                    code = output.status.code().unwrap_or(1);
+                }
+                Err(error) => {
+                    stderr = format!("error: cannot run {}: {error}\n", command[0]);
+                    code = 3;
+                }
+            }
+            break;
+        }
+    }
+    Outcome {
+        stdout,
+        stderr,
+        code,
     }
 }
 
@@ -552,6 +691,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
         "install" => install_launcher(ns, json),
+        "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
         // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
         "secrets-check" => crate::secrets_cmd::secrets_check_command(
