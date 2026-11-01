@@ -20,6 +20,15 @@ fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
 
+fn task_stamp(at: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(at.floor() as i64, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
@@ -749,6 +758,51 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 })
             }
             _ => not_ported("inbox"),
+        },
+        "task" => match text(ns, "task_command").unwrap_or("") {
+            "metrics" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "window_s".into(),
+                    ns.get("window").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "since".into(),
+                    ns.get("since").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "until".into(),
+                    ns.get("until").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "bucket".into(),
+                    ns.get("bucket")
+                        .cloned()
+                        .unwrap_or(Value::String("hour".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "task_metrics", args, |result| {
+                    crate::render_print::render_task_metrics(result, &task_stamp)
+                })
+            }
+            "reap" => crate::daemon_cmd::run_command(ns, "task_reap", Map::new(), |result| {
+                let requeued = result["requeued"].as_array().cloned().unwrap_or_default();
+                let ids = requeued
+                    .iter()
+                    .map(|task| crate::render_fleet::py_str(&task["task_id"]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let suffix = if ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {ids}")
+                };
+                format!("requeued {} lease(s){suffix}\n", requeued.len())
+            }),
+            _ => not_ported("task"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`

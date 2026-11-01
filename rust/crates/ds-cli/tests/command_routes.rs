@@ -272,3 +272,39 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_22_task_metrics() {
+    let metrics = run_daemon_cli(
+        &[
+            "task", "metrics", "global", "--window", "7200.5", "--since", "100.25", "--until",
+            "7300.75", "--bucket", "day",
+        ],
+        "task_metrics",
+        json!({"scope":"global", "window_s":7200.5, "since":100.25, "until":7300.75, "bucket":"day"}),
+        json!({
+            "scope":"global", "window":{"seconds":3600, "bucket":"day"},
+            "current":{"by_status":{"open":2}, "by_priority":{"high":2}, "by_scope":{"global":2, "pane":0}, "leader_held":{"count":0, "oldest_age_s":0}},
+            "throughput":{"created":3, "claimed":1, "completed":1, "cancelled":0, "requeued":1, "buckets":[]}
+        }),
+    );
+    assert_eq!(0, metrics.status.code().unwrap());
+    assert_eq!(
+        "scope global  window 3600s (day buckets)\nstatus:   open=2\npriority: high=2\nscope:    global=2 pane=0\nthroughput: created=3 claimed=1 completed=1 cancelled=0 requeued=1\nleader-held tasks: 0\n",
+        String::from_utf8(metrics.stdout).unwrap()
+    );
+    assert!(metrics.stderr.is_empty());
+
+    let reap = run_daemon_cli(
+        &["task", "reap"],
+        "task_reap",
+        json!({}),
+        json!({"requeued":[{"task_id":"t7"}, {"task_id":"t8"}]}),
+    );
+    assert_eq!(0, reap.status.code().unwrap());
+    assert_eq!(
+        "requeued 2 lease(s): t7, t8\n",
+        String::from_utf8(reap.stdout).unwrap()
+    );
+    assert!(reap.stderr.is_empty());
+}
