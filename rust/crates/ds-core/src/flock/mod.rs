@@ -99,6 +99,8 @@ pub struct Flock {
     pub(crate) turn_states: Mutex<commands_turns::Turns>,
     /// Turn-end nudge cooldowns and the in-progress reservation (T36).
     pub(crate) turn_dispatch: Mutex<commands_turns::TurnDispatchState>,
+    /// Shared status view cache for requests served by this flock.
+    status_view: status::ViewCache,
 }
 
 impl Flock {
@@ -124,9 +126,22 @@ impl Flock {
             role_stores: Mutex::new(roles_gate::RoleStores::default()),
             turn_states: Mutex::new(commands_turns::Turns::new()),
             turn_dispatch: Mutex::new(commands_turns::TurnDispatchState::default()),
+            status_view: status::ViewCache::new(),
         };
         flock.load_launches();
         flock
+    }
+
+    /// Returns this flock's shared status view cache.
+    #[allow(dead_code)]
+    pub(crate) fn view_cache(&self) -> &status::ViewCache {
+        &self.status_view
+    }
+
+    /// Invalidates the cached status view after a state change.
+    #[allow(dead_code)]
+    pub(crate) fn invalidate_view(&self) {
+        self.status_view.invalidate();
     }
 
     // -- launches.json --------------------------------------------------------
