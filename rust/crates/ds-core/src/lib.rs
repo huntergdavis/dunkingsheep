@@ -24,6 +24,7 @@ pub mod error;
 pub mod flock;
 pub mod inbox;
 pub mod inbox_store;
+pub mod load;
 pub mod lock;
 pub mod memory;
 pub mod metrics;
