@@ -1,7 +1,7 @@
 //! T44, slice 6: run a parsed command. `main.rs` used to stop at "parsed but not ported yet";
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
 //! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
-//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token` and `git-credential`
+//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token`, `git-credential` and `doctor`
 //! (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything else, including the `context` write subcommands, keeps the
 //! "parsed but not ported yet" answer (exit 1).
 //!
@@ -102,6 +102,13 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
+        // `client.call("doctor"), print_doctor`
+        "doctor" => crate::daemon_cmd::run_command(
+            ns,
+            "doctor",
+            Map::new(),
+            crate::render_print::render_doctor,
+        ),
         "git-credential" => {
             let stdin = std::io::stdin();
             crate::daemon_cmd::git_credential(ns, &mut stdin.lock())
