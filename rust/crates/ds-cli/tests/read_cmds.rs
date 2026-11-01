@@ -96,4 +96,45 @@ fn panes_workspaces_tabs_and_whoami_print_what_the_python_printers_printed() {
             cmds.lock().unwrap()
         );
     }
+
+    // --json prints the RAW daemon result: the client's identity note is added only to the HUMAN
+    // output (Python's _whoami), never to --json (review t1503). A daemon-provided note wins.
+    let raw = json!({"pane_id": "%3", "role": "worker"});
+    let socket = base.path().join("json.sock");
+    fake_daemon(&socket, raw.clone());
+    let sock = socket.display().to_string();
+    let ns = try_parse([
+        "dunkingsheep",
+        "--socket",
+        sock.as_str(),
+        "--self-pane",
+        "%99",
+        "whoami",
+        "--json",
+    ])
+    .unwrap();
+    let out = run(&ns);
+    assert_eq!(0, out.code);
+    assert_eq!(
+        raw,
+        serde_json::from_str::<Value>(&out.stdout).unwrap(),
+        "whoami --json must not gain identity_note"
+    );
+    let with_note = json!({"pane_id": "%3", "role": "worker", "identity_note": "from the daemon"});
+    let socket = base.path().join("note.sock");
+    fake_daemon(&socket, with_note);
+    let sock = socket.display().to_string();
+    let ns = try_parse([
+        "dunkingsheep",
+        "--socket",
+        sock.as_str(),
+        "--self-pane",
+        "%99",
+        "whoami",
+    ])
+    .unwrap();
+    assert!(
+        run(&ns).stdout.contains("identity: from the daemon"),
+        "the daemon's own note wins"
+    );
 }
