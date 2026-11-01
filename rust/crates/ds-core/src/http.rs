@@ -149,10 +149,12 @@ fn hex(b: u8) -> Option<u8> {
 }
 
 /// `parse_qs`: `a=1&a=2&b=3` into name -> values; `+` is a space, `%XX` is decoded, and a blank
-/// value is dropped (the stdlib default `keep_blank_values=False`).
+/// value is dropped (the stdlib default `keep_blank_values=False`). Pairs split on `&` ONLY: since
+/// Python 3.10 a `;` is data, not a separator (`parse_qs('ids=a;b&x=1')` is `{'ids': ['a;b'],
+/// 'x': ['1']}`), so `?ids=i1;i2` must reach the daemon whole.
 pub fn parse_query(query: &str) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for pair in query.split(['&', ';']).filter(|p| !p.is_empty()) {
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
         if value.is_empty() {
             continue;

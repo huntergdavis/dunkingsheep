@@ -491,3 +491,26 @@ fn query_and_path_decoding_follow_the_stdlib() {
     assert_eq!(unquote("a%41"), "aA");
     assert_eq!(now_iso().len(), 20);
 }
+
+#[test]
+fn a_semicolon_is_data_not_a_separator() {
+    // Reviewer finding on t1435: Python 3.10+ parse_qs splits on '&' only, so 'ids=a;b&x=1' is
+    // ids=['a;b'], x=['1']. Splitting on ';' too silently truncated ?ids=i1;i2.
+    let q = parse_query("ids=a;b&x=1");
+    assert_eq!(q["ids"], ["a;b"]);
+    assert_eq!(q["x"], ["1"]);
+    assert_eq!(q.len(), 2);
+    let backend = FakeBackend::new(vec![]);
+    let daemon = FakeDaemon::new(vec![]);
+    get("/api/messages/state?ids=i1;i2", &backend, &daemon).unwrap();
+    get("/api/reply-stats?mailboxes=a;b", &backend, &daemon).unwrap();
+    let sent = daemon.commands.borrow().clone();
+    assert_eq!(
+        sent[0],
+        ("message_state".to_string(), json!({"message_ids": "i1;i2"}))
+    );
+    assert_eq!(
+        sent[1],
+        ("reply_stats".to_string(), json!({"mailboxes": "a;b"}))
+    );
+}
