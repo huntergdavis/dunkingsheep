@@ -249,7 +249,10 @@ impl Superusers {
         if stamp == self.stamp {
             return Ok(false);
         }
-        self.load(false)?;
+        // Python: `self.load()` with its default `create=True`. A file deleted under us is
+        // therefore re-seeded with the defaults (and any pane grant is revoked), never kept
+        // from memory (t1307 review; #293 merged with `load(false)`).
+        self.load(true)?;
         self.stamp = stamp;
         Ok(true)
     }

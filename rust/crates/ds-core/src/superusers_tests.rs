@@ -182,3 +182,46 @@ fn a_falsy_entry_in_the_flat_list_is_dropped_not_turned_into_a_name() {
         Some(&json!({"label": "None"}))
     ));
 }
+
+#[test]
+fn refresh_after_the_file_is_deleted_reseeds_the_defaults_and_revokes_the_pane() {
+    // t1325 / t1307: Python's refresh() calls load() with create=True.
+    std::env::remove_var("DUNKINGSHEEP_VP_NAME");
+    std::env::remove_var("DUNKINGSHEEP_OWNER_NAME");
+    std::env::remove_var("DUNKINGSHEEP_VP_PANE");
+    std::env::remove_var("DUNKINGSHEEP_OWNER_PANE");
+    let d = dir("refresh-deleted");
+    let path = d.join("superusers.json");
+    // The pane is granted by a file that EXISTS when the store loads it (that is what sets
+    // the stat stamp refresh() compares against).
+    std::fs::write(&path, json!({"panes": ["w9:p8"]}).to_string()).unwrap();
+    let mut store = Superusers::new(&path, true).unwrap();
+    assert!(store.is_superuser("w9:p8", None));
+    std::fs::remove_file(&path).unwrap();
+    assert!(store.refresh().unwrap(), "a vanished file is a change");
+    assert!(
+        !store.is_superuser("w9:p8", None),
+        "the pane grant must be revoked"
+    );
+    assert!(path.exists(), "the file is recreated");
+    assert!(store.names.contains("VP of agentry") && store.names.contains("owner"));
+    assert!(store.panes.is_empty());
+    let on_disk = read_panes_locked(&path).unwrap();
+    assert!(on_disk.1.contains("owner") && on_disk.0.is_empty());
+}
+
+#[test]
+fn a_store_that_seeded_itself_does_not_notice_a_later_deletion_like_the_python() {
+    // PARITY QUIRK, pinned: Python's load() returns before setting `_stamp` when it seeds,
+    // so a store created on a missing file has stamp None, and after the file is deleted
+    // again `stat` is None too: refresh() says "unchanged" and keeps the grant in memory.
+    // (Verified against the real dunk_superusers.) Changing it is a behaviour decision.
+    std::env::remove_var("DUNKINGSHEEP_VP_PANE");
+    std::env::remove_var("DUNKINGSHEEP_OWNER_PANE");
+    let path = dir("seeded-then-deleted").join("superusers.json");
+    let mut store = Superusers::new(&path, true).unwrap();
+    store.add("w9:p8").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(!store.refresh().unwrap());
+    assert!(store.is_superuser("w9:p8", None));
+}
