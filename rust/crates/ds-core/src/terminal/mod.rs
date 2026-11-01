@@ -173,6 +173,21 @@ pub trait Terminal: std::fmt::Debug {
     /// The panes under one grouped view (`list_panes_grouped` in the Python).
     fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>>;
 
+    /// List panes through the additive fallible seam. Existing backends keep their
+    /// best-effort `list_panes` behavior until they override this method to expose
+    /// backend failures to callers that need to distinguish an empty world from an
+    /// unavailable listing.
+    fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
+        Ok(self.list_panes())
+    }
+
+    /// List grouped panes through the additive fallible seam. Backends may override
+    /// this method when they can preserve a listing error; the default retains the
+    /// legacy grouped result without changing existing callers.
+    fn try_list_panes_grouped(&self) -> Result<BTreeMap<String, Vec<Pane>>, TerminalError> {
+        Ok(self.list_panes_grouped())
+    }
+
     /// Child pids of a pane's shell, for the process-ancestry guard.
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError>;
 
@@ -271,4 +286,46 @@ pub trait Terminal: std::fmt::Debug {
     /// refusal rather than omitting the method - an absent method is discovered by
     /// compiling, which is not a sentence a caller can act on.
     fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fakes::FakeTerminal, Pane, Terminal, TerminalError};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn fallible_list_defaults_preserve_the_existing_pane_results() {
+        let terminal = FakeTerminal::new();
+        assert_eq!(Ok(terminal.list_panes()), terminal.try_list_panes());
+        assert_eq!(
+            Ok(terminal.list_panes_grouped()),
+            terminal.try_list_panes_grouped()
+        );
+    }
+
+    #[derive(Debug)]
+    struct FakeGroupedPaneAdapter(Result<BTreeMap<String, Vec<Pane>>, TerminalError>);
+
+    impl FakeGroupedPaneAdapter {
+        fn try_list_panes_grouped(&self) -> Result<BTreeMap<String, Vec<Pane>>, TerminalError> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn grouped_pane_adapter_forwards_success_and_preserves_offline_error() {
+        let pane = Pane {
+            pane_id: "%7".into(),
+            workspace: "w3".into(),
+            ..Pane::default()
+        };
+        let panes = BTreeMap::from([("w3".to_string(), vec![pane])]);
+        let adapter = FakeGroupedPaneAdapter(Ok(panes.clone()));
+        assert_eq!(Ok(panes.clone()), adapter.try_list_panes_grouped());
+
+        let adapter = FakeGroupedPaneAdapter(Err(TerminalError::unavailable("offline")));
+        let error = adapter.try_list_panes_grouped().unwrap_err();
+        assert_eq!("offline", error.message);
+        assert!(error.backend_unavailable);
+    }
 }
