@@ -259,7 +259,7 @@ fn cli_route_03_dunk_edit_lifecycle_a() {
     );
     assert_eq!(0, updated.status.code().unwrap());
     assert_eq!(
-        "id               d1\ntext             'updated'\n",
+        "id               d1\nskip_if_unconsumed None\nhold_while_typing None\ntext             'updated'\n",
         String::from_utf8(updated.stdout).unwrap()
     );
     assert!(updated.stderr.is_empty());
