@@ -87,6 +87,11 @@ impl Flock {
             }
             Err(error) => eprintln!("task reaper: pane listing failed: {error}"),
         }
+        if let Some(tasks) = self.stores().tasks {
+            if let Err(error) = tasks.sweep_auto_unblock().await {
+                eprintln!("task reaper auto-unblock sweep failed: {error}");
+            }
+        }
         if !env.is_live() {
             tick.skipped_not_live = true;
             return tick;
