@@ -516,6 +516,71 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
+fn owner_command(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "owner_command") {
+        Some("push") => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("body".into(), Value::String(joined_words(ns, "body")));
+            args.insert(
+                "subject".into(),
+                ns.get("subject").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "owner_push", args, |result| {
+                format!(
+                    "pushed owner message {} for {} (no inbox row, nothing typed)\n",
+                    crate::render_print::py_str(&result["id"]),
+                    crate::render_print::py_str(&result["pane_id"])
+                )
+            })
+        }
+        Some("poll") => {
+            let mut args = Map::new();
+            args.insert(
+                "pane_id".into(),
+                ns.get("pane_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "by".into(),
+                ns.get("by")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("harness".into())),
+            );
+            crate::daemon_cmd::run_command(ns, "owner_poll", args, |result| {
+                format!(
+                    "poll recorded for {} by {}\n",
+                    crate::render_print::py_str(&result["pane_id"]),
+                    crate::render_print::py_str(&result["by"])
+                )
+            })
+        }
+        Some("take") => {
+            let mut args = Map::new();
+            args.insert(
+                "pane_id".into(),
+                ns.get("pane_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("by".into(), ns.get("by").cloned().unwrap_or(Value::Null));
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|time| time.format("%H:%M:%S").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "owner_take", args, |result| {
+                crate::render_print::render_owner_take(result, &stamp)
+            })
+        }
+        Some(other) => not_ported(&format!("owner {other}")),
+        None => not_ported("owner"),
+    }
+}
+
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let result = match text(ns, "action").unwrap_or("status") {
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
@@ -570,6 +635,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "owner" => owner_command(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
