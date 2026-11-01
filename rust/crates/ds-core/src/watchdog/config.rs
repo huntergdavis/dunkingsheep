@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 pub const SCHEMA_ID: &str = "dunkingsheep-watchdog/2";
 pub const SEVERITIES: [&str; 3] = ["info", "warning", "critical"];
@@ -770,9 +770,9 @@ pub fn load_config(path: &str) -> Result<Value, ConfigError> {
     }
     let text = std::fs::read_to_string(path)
         .map_err(|error| ConfigError::new("<file>", format!("unreadable or not JSON: {error}")))?;
-    let config: Value = serde_json::from_str(&text)
+    let mut config: Value = serde_json::from_str(&text)
         .map_err(|error| ConfigError::new("<file>", format!("unreadable or not JSON: {error}")))?;
-    validate_config(&config)?;
+    validate_config(&mut config)?;
     Ok(config)
 }
 
