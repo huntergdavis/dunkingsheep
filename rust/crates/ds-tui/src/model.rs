@@ -21,6 +21,10 @@ pub enum RpcError {
 /// The minimum client interface needed by the TUI state machine.
 pub trait RpcClient {
     fn call(&mut self, command: &str, args: Value) -> Result<Value, RpcError>;
+
+    /// Close resources owned by an in-process fallback. Daemon clients leave the
+    /// shared service running when the TUI exits.
+    fn close_local(&mut self) {}
 }
 
 /// Which backend currently serves requests.
@@ -178,6 +182,13 @@ impl<C: RpcClient> TuiModel<C> {
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
         self.message = text.into();
         self.message_until = now + seconds;
+    }
+
+    /// Release only an in-process fallback; daemon-owned dunks outlive the TUI.
+    pub fn shutdown(&mut self) {
+        if self.mode == ClientMode::Local {
+            self.client.close_local();
+        }
     }
 }
 
