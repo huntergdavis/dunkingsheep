@@ -1194,6 +1194,31 @@ impl Tasks {
         Ok(json!({"scopes": scopes, "by_scope": by_scope, "totals": totals}))
     }
 
+    /// The review columns `Task` does not carry (author, repo, pr, verdict) for one task.
+    pub async fn review_facts(&self, id: &str) -> Result<ReviewFacts, DunkError> {
+        let wanted = id.trim().to_string();
+        let id = wanted.clone();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT author, repo, pr, verdict FROM tasks WHERE id = ?",
+                    params![id],
+                    |row| {
+                        Ok(ReviewFacts {
+                            author: row.get(0)?,
+                            repo: row.get(1)?,
+                            pr: row.get(2)?,
+                            verdict: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(db::map_sqlite)?
+                .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))
+            })
+            .await
+    }
+
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
     ///
     /// The verdict is bound to the task's head by the row itself, so it is written here
@@ -1558,6 +1583,15 @@ pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
         "verdict must be one of {}; got {verdict:?}",
         VERDICTS.join(", ")
     )))
+}
+
+/// The review columns of a task row that `Task` does not carry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReviewFacts {
+    pub author: Option<String>,
+    pub repo: Option<String>,
+    pub pr: Option<i64>,
+    pub verdict: Option<String>,
 }
 
 /// `add`'s optional arguments (t1313 slice 2); `Default` is the Python's defaults.
