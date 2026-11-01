@@ -46,6 +46,7 @@ pub mod tasks;
 pub mod terminal;
 pub mod usage;
 pub mod usage_providers;
+pub mod watchdog;
 
 pub use error::{refusal, DunkError};
 
