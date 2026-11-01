@@ -538,6 +538,22 @@ impl Terminal for TmuxBackend {
         }
     }
 
+    fn list_panes_with_status(&self) -> Vec<(Pane, Option<String>)> {
+        // t1296: one `list-panes`, not one more tmux process per pane. Nothing here knows a
+        // harness's own status, so every listed pane answers the word `unknown`, as
+        // `_parse_panes` starts them.
+        self.list_panes()
+            .into_iter()
+            .map(|pane| (pane, Some("unknown".to_string())))
+            .collect()
+    }
+
+    fn get_pane_with_status(&self, pane_id: &str) -> Option<(Pane, Option<String>)> {
+        // One listing; `agent_status` would list again.
+        self.get_pane(pane_id)
+            .map(|pane| (pane, Some("unknown".to_string())))
+    }
+
     fn agent_status(&self, pane_id: &str) -> Option<String> {
         // FINDING 4: the Python's base implementation is `get_pane(...).get("agent_status")`,
         // so a pane that does not exist is None - not "unknown". Nothing here knows a

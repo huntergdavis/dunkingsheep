@@ -64,6 +64,7 @@ pub struct Flock {
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
     caller: Mutex<CallerState>,
     role_panes: Mutex<panes::RolePaneCache>,
+    turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
     /// The role registry and the legacy allowlist (T31), attached after construction.
     pub(crate) role_stores: roles_gate::RoleStoresCell,
@@ -83,6 +84,7 @@ impl Flock {
             launches: Mutex::new(BTreeMap::new()),
             caller: Mutex::new(CallerState::default()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
+            turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
             role_stores: Mutex::new(roles_gate::RoleStores::default()),
         };
@@ -400,14 +402,19 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod commands_inbox;
+pub mod commands_owner_views;
 pub mod dunks;
+pub mod lanes;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
+pub mod views;
 pub mod roles_gate;
 
 #[cfg(test)]
 mod commands_inbox_tests;
+#[cfg(test)]
+mod lanes_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]

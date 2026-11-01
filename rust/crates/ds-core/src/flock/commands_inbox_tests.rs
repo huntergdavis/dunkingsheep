@@ -12,6 +12,7 @@ use crate::inbox_store::{Outgoing, Store};
 use serde_json::{json, Value};
 
 struct Env {
+    metrics: std::sync::Mutex<Vec<(String, Option<String>, Option<i64>)>>,
     panes: Vec<Value>,
     role: &'static str,
     override_name: Option<String>,
@@ -54,6 +55,19 @@ impl InboxEnv for Env {
     fn now(&self) -> f64 {
         crate::clock::now_s()
     }
+    fn record_metric(
+        &self,
+        kind: &str,
+        pane: Option<&str>,
+        _: &str,
+        _: Option<&str>,
+        ms: Option<i64>,
+    ) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .push((kind.to_string(), pane.map(str::to_string), ms));
+    }
 }
 
 fn pane(id: &str, tab: &str) -> Value {
@@ -66,6 +80,7 @@ fn env(role: &'static str) -> Env {
     let store = Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).expect("open");
     let pool = ReadPool::open(store.path(), 1).expect("pool");
     Env {
+        metrics: Default::default(),
         panes: vec![pane("w1:p1", "Mine"), pane("w1:p2", "Other")],
         role,
         override_name: None,
@@ -168,4 +183,74 @@ fn recover_with_no_receipt_is_empty_not_an_error() {
     let (key, rows) = f.inbox_recover(&e, None, Some("w1:p1")).unwrap();
     assert_eq!("Mine", key);
     assert!(rows.is_empty());
+}
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn an_ack_applies_only_to_the_callers_own_mailbox() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let other = put(&e, "Other", "not yours");
+    let err = f
+        .inbox_ack(&e, &ids(&[&other]), None, Some("w1:p1"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("is not in mailbox 'Mine'"), "{err}");
+    assert_eq!(
+        1,
+        f.inbox_count(&e, Some("Other"), Some("w1:p1"))
+            .unwrap()
+            .unread
+    );
+}
+
+#[test]
+fn acking_own_mail_reports_the_mailbox_pending_ids_and_a_metric() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let id = put(&e, "Mine", "mine");
+    let result = f.inbox_ack(&e, &ids(&[&id]), None, Some("w1:p1")).unwrap();
+    assert_eq!(vec![id], result.transition.changed);
+    assert_eq!(Some("Mine".to_string()), result.acked_in);
+    assert_eq!(Some(vec![]), result.still_pending);
+    let metrics = e.metrics.lock().unwrap();
+    assert_eq!(1, metrics.len());
+    assert_eq!("inbox.acked", metrics[0].0);
+}
+
+#[test]
+fn an_unscoped_in_process_ack_keeps_the_old_behaviour() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let id = put(&e, "Other", "x");
+    let result = f.inbox_ack(&e, &ids(&[&id]), None, None).unwrap();
+    assert_eq!(None, result.acked_in);
+    assert_eq!(None, result.still_pending);
+    assert_eq!(1, result.transition.changed.len());
+}
+
+#[test]
+fn archive_cancel_delete_pass_through_the_store() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let a = put(&e, "Mine", "a");
+    let b = put(&e, "Mine", "b");
+    assert_eq!(1, f.inbox_cancel(&e, &ids(&[&a])).unwrap().changed.len());
+    assert_eq!(1, f.inbox_archive(&e, "Mine", None, None).unwrap().archived);
+    assert_eq!(vec![b.clone()], f.inbox_delete(&e, &ids(&[&b])).unwrap());
+    assert!(f.inbox_status(&e, &b).is_err());
+}
+
+#[test]
+fn fetch_of_an_unknown_attachment_is_a_plain_refusal() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let err = f
+        .inbox_fetch(&e, "nope", Some(d.path()))
+        .unwrap_err()
+        .to_string();
+    assert_eq!("no attachment with id 'nope'", err);
 }

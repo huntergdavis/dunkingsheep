@@ -94,6 +94,54 @@ fn list_panes_parses_the_canned_listing() {
     );
 }
 
+/// How many times the fake tmux ran (one argv line per process).
+fn spawns(dir: &std::path::Path) -> usize {
+    fs::read_to_string(dir.join("argv.txt"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+#[test]
+fn listing_panes_with_their_status_is_one_tmux_process_not_one_per_pane() {
+    // t1296: TerminalEnv asked `agent_status` for every pane, and on tmux that is a
+    // get_pane -> list-panes: N panes cost N+1 spawns where Python's `_parse_panes` costs 1.
+    let _serial = serial();
+    let dir = tempdir();
+    let listing = (0..6)
+        .map(|n| {
+            pane_line(
+                &format!("%{n}"),
+                "$1",
+                "@1",
+                "claude",
+                &format!("{}", 3000 + n),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let backend = TmuxBackend::new(fake);
+    let panes = backend.list_panes_with_status();
+    assert_eq!(6, panes.len());
+    assert!(panes.iter().all(|(_, s)| s.as_deref() == Some("unknown")));
+    assert_eq!(1, spawns(dir.path()), "one list-panes for all six panes");
+}
+
+#[test]
+fn one_pane_with_its_status_is_one_tmux_process_and_a_missing_pane_is_none() {
+    let _serial = serial();
+    let dir = tempdir();
+    let listing = pane_line("%2", "$2", "@2", "claude", "2202");
+    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let backend = TmuxBackend::new(fake);
+    let (pane, status) = backend.get_pane_with_status("%2").expect("pane");
+    assert_eq!("%2", pane.pane_id);
+    assert_eq!(Some("unknown".to_string()), status);
+    assert_eq!(1, spawns(dir.path()), "get_pane + agent_status was two");
+    assert!(backend.get_pane_with_status("%99").is_none());
+}
+
 #[test]
 fn a_missing_server_is_an_empty_world_not_an_error() {
     let _serial = serial();
