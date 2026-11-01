@@ -460,8 +460,8 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_bucket_throughput_by_hour() {
         let store = store("bucket").await;
-        let one = store.add("global", "one", "").await.unwrap();
-        let two = store.add("global", "two", "").await.unwrap();
+        store.add("global", "one", "").await.unwrap();
+        store.add("global", "two", "").await.unwrap();
         let metrics = store.metrics(global_only()).await.unwrap();
         assert_eq!(3600, metrics["window"]["bucket_seconds"]);
         assert_eq!(

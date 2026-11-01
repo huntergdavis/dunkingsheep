@@ -387,3 +387,87 @@ async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults()
         events
     );
 }
+
+// -- task_add ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_add_defaults_to_global_medium_open_and_unowned() {
+    let (flock, _tasks) = flock_with_store("add-default").await;
+    let t = flock
+        .task_add(
+            "title",
+            None,
+            None,
+            TaskAddArgs::default(),
+            "owner",
+            Some("w1:p1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ("global", "medium", "open"),
+        (t.scope.as_str(), t.priority.as_str(), t.status.as_str())
+    );
+    assert_eq!(
+        "[]", t.assignees,
+        "unassigned work is claimable, not handed to the creator"
+    );
+}
+
+#[tokio::test]
+async fn task_add_resolves_self_and_refuses_lane_roles_assigning_others() {
+    let (flock, _tasks) = flock_with_store("add-owners").await;
+    let mine = TaskAddArgs {
+        assignees: &["self"],
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("a", None, None, mine, "worker", Some("w1:p1"))
+        .await
+        .unwrap();
+    assert_eq!(r#"["w1:p1"]"#, t.assignees);
+    let other = TaskAddArgs {
+        assignees: &["w2:p2"],
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("b", None, None, other, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+    assert!(flock
+        .task_add("b", None, None, other, "owner", Some("w1:p1"))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles() {
+    let (flock, _tasks) = flock_with_store("add-refuse").await;
+    let args = TaskAddArgs::default();
+    let err = flock
+        .task_add("x", Some("w3:p3"), None, args, "owner", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("private queue"), "{err}");
+    assert!(flock
+        .task_add("  ", None, None, args, "owner", None)
+        .await
+        .is_err());
+    let review = TaskAddArgs {
+        kind: Some("review"),
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("r", None, None, review, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+    let blocked = TaskAddArgs {
+        status: Some("blocked"),
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("s", None, None, blocked, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+}

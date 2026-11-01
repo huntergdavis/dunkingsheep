@@ -14,13 +14,25 @@ use std::sync::Arc;
 
 use super::Flock;
 use crate::error::DunkError;
-use crate::tasks::{Task, Tasks};
+use crate::tasks::{AddOptions, Task, Tasks};
 
 /// `TASK_GLOBAL`.
 pub const TASK_GLOBAL: &str = "global";
 
 /// Roles that file their own work and may not hand it to another lane.
 const LANE_ROLES: [&str; 4] = ["desk", "planner", "worker", "reviewer"];
+
+/// `task_add`'s optional arguments.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskAddArgs<'a> {
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub assignees: &'a [&'a str],
+    pub parent_id: Option<&'a str>,
+    pub depends_on: &'a [&'a str],
+    pub multi_assignee: bool,
+}
 
 impl Flock {
     /// `_task_scope`: resolve a caller's scope and enforce per-pane privacy. Global is
@@ -165,6 +177,50 @@ impl Flock {
         let task = tasks.get(task_id).await?;
         Self::require_task_visible(&task, self_pane_id)?;
         Ok(task)
+    }
+
+    /// `task_add`: resolve scope and owners, apply the pre-write refusals, then one store
+    /// write. Unassigned work stays unowned (`default_task_owner`); a Flock-level priority
+    /// of `medium` is the Python's default (the store's own default is `low`). `role` is the
+    /// caller's role (`caller_role`, not ported); `kind` is checked here but the store has
+    /// no `kind` argument in the Python either, so it is not written.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn task_add(
+        &self,
+        title: &str,
+        scope: Option<&str>,
+        body: Option<&str>,
+        opts: TaskAddArgs<'_>,
+        role: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
+        let mut owners = Self::task_assignees(opts.assignees, self_pane_id)?;
+        Self::check_task_add(&target, &owners, role, opts.kind, opts.status, self_pane_id)?;
+        if owners.is_empty() {
+            owners = Self::default_task_owner(self_pane_id);
+        }
+        let non_empty = |v: Option<&str>, d: &str| match v {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => d.to_string(),
+        };
+        tasks
+            .add_with(
+                &target,
+                title,
+                body.unwrap_or(""),
+                AddOptions {
+                    status: Some(non_empty(opts.status, "open")),
+                    priority: Some(non_empty(opts.priority, "medium")),
+                    assignees: owners,
+                    parent_id: opts.parent_id.map(str::to_string),
+                    depends_on: opts.depends_on.iter().map(|d| d.to_string()).collect(),
+                    created_by: self_pane_id.filter(|p| !p.is_empty()).map(str::to_string),
+                    multi_assignee: opts.multi_assignee,
+                },
+            )
+            .await
     }
 
     /// `task_block`.
