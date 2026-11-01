@@ -228,6 +228,7 @@ impl Flock {
 
 /// `create_tab`: `workspace` is an id, label or 'self'; omitted means the caller's own
 /// workspace when known, else the backend's focused one.
+#[allow(clippy::too_many_arguments)]
 pub fn create_tab(
     backend: &mut dyn LayoutBackend,
     workspace: Option<&str>,
@@ -259,6 +260,7 @@ pub fn create_tab(
 }
 
 /// `split_pane`: split an existing pane (any pane target) right or down.
+#[allow(clippy::too_many_arguments)]
 pub fn split_pane(
     backend: &mut dyn LayoutBackend,
     target: &str,
@@ -371,14 +373,21 @@ pub fn shlex_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// `_verify_agent_started(name, pane_id, kind)`: the confirmed child pid, or `None`.
+pub type VerifyHook<'a> =
+    &'a mut dyn FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError>;
+
+/// `lane_register(pane, role, provider, model, label)`.
+pub type RegisterHook<'a> =
+    &'a mut dyn FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError>;
+
 /// What `start_agent` needs besides the layout backend: the start check (`agent_verify`),
 /// the lane registration (`lane_register`, unported) and the launch record.
 pub struct StartHooks<'a> {
-    /// `_verify_agent_started(name, pane_id, kind)`: the confirmed child pid, or `None`.
-    pub verify: &'a mut dyn FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError>,
-    /// `lane_register(pane, role, provider, model, label)`; only called when `role` is given.
-    pub lane_register:
-        &'a mut dyn FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError>,
+    /// The start check (`agent_verify`).
+    pub verify: VerifyHook<'a>,
+    /// Only called when `role` is given.
+    pub lane_register: RegisterHook<'a>,
 }
 
 /// `start_agent`: launch `command` in a new pane registered by name. Placement: inside `tab`
