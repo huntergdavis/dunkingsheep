@@ -285,7 +285,10 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     );
     let (text, detail) = box_text(&collapsed);
     assert_eq!("[Pasted text #1 +75 lines]", text);
-    assert!(detail.contains("composer: the prompt row at"), "{detail}");
+    assert!(
+        detail.contains("read 1 prompt line(s); text starts on row"),
+        "{detail}"
+    );
 
     let shell = "hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n";
     assert_eq!(None, typed_text(shell));
