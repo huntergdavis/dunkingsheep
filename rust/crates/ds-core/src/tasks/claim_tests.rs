@@ -3,12 +3,10 @@
 use super::*;
 use crate::tasks::FieldEdit;
 
-async fn store(tag: &str) -> Tasks {
-    let dir = std::env::temp_dir().join(format!("ds-claim-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    Tasks::open(&path).await.unwrap()
+async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+    let dir = crate::testsupport::dir(&format!("claim-{tag}"));
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    crate::testsupport::Scratch::new(tasks, dir)
 }
 
 fn cand(id: &str, status: &str) -> Candidate {

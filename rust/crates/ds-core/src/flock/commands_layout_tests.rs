@@ -589,10 +589,14 @@ fn the_sandbox_workspace_is_found_case_insensitively_else_created() {
     );
 }
 
-fn flock_for_tests(tag: &str) -> Flock {
-    let dir = std::env::temp_dir().join(format!("ds-layout-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false)
+fn flock_for_tests(tag: &str) -> crate::testsupport::Scratch<Flock> {
+    let dir = crate::testsupport::dir(&format!("layout-{tag}"));
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    crate::testsupport::Scratch::new(flock, dir)
 }
 
 fn no_verify() -> impl FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError> {
@@ -856,10 +860,9 @@ impl crate::flock::panes::PaneInfoEnv for NoPanes {
     }
 }
 
-fn lane_flock(tag: &str, owner: Option<&str>) -> Flock {
-    let dir = std::env::temp_dir().join(format!("ds-layout-lane-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn lane_flock(tag: &str, owner: Option<&str>) -> crate::testsupport::Scratch<Flock> {
+    let scratch = crate::testsupport::dir(&format!("layout-lane-{tag}"));
+    let dir = scratch.path().to_path_buf();
     let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
     let mut roles = crate::roles::Roles::new(
         &crate::config::Env::default(),
@@ -874,7 +877,7 @@ fn lane_flock(tag: &str, owner: Option<&str>) -> Flock {
             .unwrap();
     }
     flock.attach_roles(roles, None);
-    flock
+    crate::testsupport::Scratch::new(flock, scratch)
 }
 
 #[allow(clippy::too_many_arguments)]

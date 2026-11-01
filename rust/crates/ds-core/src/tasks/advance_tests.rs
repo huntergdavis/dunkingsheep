@@ -10,12 +10,10 @@ const OWNER: &str = "w1:p1";
 const FOREIGN: &str = "w9:p9";
 const OPERATOR: &str = "w5:p5";
 
-async fn store(tag: &str) -> Tasks {
-    let dir = std::env::temp_dir().join(format!("ds-adv-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    Tasks::open(&path).await.unwrap()
+async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+    let dir = crate::testsupport::dir(&format!("adv-{tag}"));
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    crate::testsupport::Scratch::new(tasks, dir)
 }
 
 /// A planner that never claims.

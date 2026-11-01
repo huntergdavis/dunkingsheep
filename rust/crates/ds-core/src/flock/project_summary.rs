@@ -213,11 +213,9 @@ mod tests {
         std::fs::write(dir.join(format!("{slug}.md")), text).unwrap();
     }
 
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ds-psummary-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(tag: &str) -> crate::testsupport::Scratch<PathBuf> {
+        let scratch = crate::testsupport::dir(&format!("psummary-{tag}"));
+        crate::testsupport::Scratch::new(scratch.path().to_path_buf(), scratch)
     }
 
     #[test]
@@ -233,7 +231,8 @@ mod tests {
         );
         entry(&root, "fact", "zeta", "zeta-fact", "z body");
         entry(&root, "fact", "alpha", "alpha-fact", "a body");
-        let global = Store::new(Some(&tmp("empty-global")), false);
+        let global_dir = tmp("empty-global");
+        let global = Store::new(Some(&global_dir), false);
         let stores = vec![
             ("global".to_string(), global),
             ("project".to_string(), Store::new(Some(&root), false)),
@@ -310,7 +309,8 @@ mod tests {
 
     #[test]
     fn the_global_summary_has_no_path_no_agents_and_every_repos_merges() {
-        let global = Store::new(Some(&tmp("g-empty")), false);
+        let global_dir = tmp("g-empty");
+        let global = Store::new(Some(&global_dir), false);
         let (label, dir, stores) = stores_for(None, None, global);
         assert_eq!(
             (label.as_str(), dir.is_none(), stores.len()),
@@ -365,10 +365,11 @@ mod tests {
     #[test]
     fn stores_for_resolves_the_project_dir_and_adds_the_project_store_only_when_it_exists() {
         let dir = tmp("resolve");
+        let (g2_dir, g3_dir, g4_dir) = (tmp("g2"), tmp("g3"), tmp("g4"));
         let (label, got, none_yet) = stores_for(
             Some("demo"),
             Some(dir.to_str().unwrap()),
-            Store::new(Some(&tmp("g2")), false),
+            Store::new(Some(&g2_dir), false),
         );
         assert_eq!(
             (label.as_str(), got.as_deref()),
@@ -383,13 +384,13 @@ mod tests {
         let (_, _, both) = stores_for(
             Some("demo"),
             Some(dir.to_str().unwrap()),
-            Store::new(Some(&tmp("g3")), false),
+            Store::new(Some(&g3_dir), false),
         );
         assert_eq!(
             both.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             ["global", "project"]
         );
-        let (g, _, only) = stores_for(Some("global"), None, Store::new(Some(&tmp("g4")), false));
+        let (g, _, only) = stores_for(Some("global"), None, Store::new(Some(&g4_dir), false));
         assert_eq!((g.as_str(), only.len()), ("global", 1));
     }
 }

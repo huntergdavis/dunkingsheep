@@ -315,7 +315,8 @@ fn seed_tasks_db(path: &std::path::Path) {
 
 #[test]
 fn the_loader_reads_the_store_read_only_and_never_sees_events_after_now() {
-    let dir = std::env::temp_dir().join(format!("ds-wd-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("wd");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tasks.db");
     let _ = std::fs::remove_file(&path);
@@ -379,7 +380,8 @@ fn only_events_that_pass_the_filters_are_parsed() {
 
 #[test]
 fn a_malformed_assignees_column_fails_the_load() {
-    let dir = std::env::temp_dir().join(format!("ds-wd-assignees-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("wd-assignees");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tasks.db");
     let _ = std::fs::remove_file(&path);

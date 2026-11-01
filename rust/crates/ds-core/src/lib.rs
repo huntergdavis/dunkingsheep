@@ -55,6 +55,8 @@ pub mod stuck;
 pub mod superusers;
 pub mod tasks;
 pub mod terminal;
+#[cfg(test)]
+pub(crate) mod testsupport;
 pub mod usage;
 pub mod usage_providers;
 pub mod watchdog;
