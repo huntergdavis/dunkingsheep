@@ -169,6 +169,20 @@ pub fn mailbox_where(mailbox: &str, column: &str) -> (String, Vec<String>) {
     )
 }
 
+/// Every mailbox a pane owns, by the `pane_id` column: a name like `crackdown-codex` outlives
+/// the pane and is what the alert and the archive key on (`h_retire_pane`'s
+/// `SELECT DISTINCT mailbox FROM messages WHERE pane_id = ? AND mailbox IS NOT NULL`).
+pub fn mailboxes_for_pane(pool: &ReadPool, pane_id: &str) -> Result<Vec<String>, DunkError> {
+    let pane = pane_id.to_string();
+    pool.with(move |connection| {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT mailbox FROM messages WHERE pane_id = ? AND mailbox IS NOT NULL ORDER BY mailbox")
+            .map_err(map_sqlite)?;
+        let rows = statement.query_map([pane], |row| row.get::<_, String>(0)).map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    })
+}
+
 #[cfg(test)]
 #[path = "inbox_tests.rs"]
 mod inbox_tests;
