@@ -803,6 +803,14 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 let mut args = Map::new();
                 args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
                 args.insert("by".into(), ns.get("by").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "verdict".into(),
+                    ns.get("verdict").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "landed".into(),
+                    ns.get("landed").cloned().unwrap_or(Value::Bool(true)),
+                );
                 crate::daemon_cmd::run_command(ns, "task_complete", args, |task| {
                     crate::render_print::render_task(task, &task_stamp)
                 })

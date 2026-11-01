@@ -336,7 +336,12 @@ fn cli_route_17_task_edit_a() {
             "--unmerged",
         ],
         "task_complete",
-        json!({"id":"t7", "by":"%99"}),
+        json!({
+            "id": "t7",
+            "by": "%99",
+            "verdict": "needs-fix",
+            "landed": false
+        }),
         json!({"id":"t7", "priority":"low", "status":"done", "title":"Updated", "scope":"global"}),
     );
     assert_eq!(0, completed.status.code().unwrap());
