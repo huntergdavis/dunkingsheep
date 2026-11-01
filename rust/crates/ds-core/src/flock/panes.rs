@@ -43,6 +43,10 @@ pub struct RolePaneCache {
 pub struct Stores {
     pub tasks: Option<Arc<Tasks>>,
     pub inbox: Option<Arc<inbox_store::Store>>,
+    /// `Flock.metrics` (`dunk_metrics.Metrics`): None until `wire_observability`.
+    pub metrics: Option<Arc<crate::metrics::MetricsStore>>,
+    /// `Flock.memory`'s read side: None when not persisting or the memory db is absent.
+    pub memory: Option<Arc<crate::db::ReadPool>>,
 }
 
 impl std::fmt::Debug for Stores {
@@ -50,6 +54,8 @@ impl std::fmt::Debug for Stores {
         f.debug_struct("Stores")
             .field("tasks", &self.tasks.is_some())
             .field("inbox", &self.inbox.is_some())
+            .field("metrics", &self.metrics.is_some())
+            .field("memory", &self.memory.is_some())
             .finish()
     }
 }
@@ -116,6 +122,34 @@ impl Flock {
     /// Attach the opened stores (`Flock.__init__`'s `self.tasks` / `self.inbox`).
     pub fn attach_stores(&self, stores: Stores) {
         *self.stores.lock().expect("stores lock") = stores;
+    }
+
+    /// `Flock.__init__`'s memory and metrics wiring. Persisting: metrics live beside the state
+    /// file (`<state_dir>/metrics.db`, so a flock persisting into a temp dir keeps its events
+    /// there) and the memory db is opened read-only when it exists. Not persisting: metrics are
+    /// in memory and there is no memory store. Metrics are pruned on open. Missing or failing
+    /// stores leave the field `None`; the flock still works (`Err` only for the metrics db).
+    pub fn wire_observability(
+        &self,
+        state_dir: &std::path::Path,
+        memory_db: Option<&std::path::Path>,
+    ) -> Result<(), crate::error::DunkError> {
+        let metrics = if self.persist_enabled {
+            crate::metrics::MetricsStore::open(state_dir.join("metrics.db"))?
+        } else {
+            crate::metrics::MetricsStore::open(":memory:")?
+        };
+        metrics.prune(None, crate::metrics::MAX_EVENTS)?;
+        let memory = match memory_db {
+            Some(path) if self.persist_enabled && path.exists() => {
+                crate::db::ReadPool::open(path, 2).ok().map(Arc::new)
+            }
+            _ => None,
+        };
+        let mut guard = self.stores.lock().expect("stores lock");
+        guard.metrics = Some(Arc::new(metrics));
+        guard.memory = memory;
+        Ok(())
     }
 
     /// The attached stores.

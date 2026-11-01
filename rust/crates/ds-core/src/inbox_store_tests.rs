@@ -781,3 +781,267 @@ fn a_digest_needs_a_body_and_a_new_digest_id_is_a_new_message() {
     let c = fixture.send("m", "plain");
     assert_ne!(b, c, "digests and sends share one id counter");
 }
+
+// ---- T15d: ack, cancel, archive, delete, fetch -------------------------------------------
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn sql(fixture: &Fixture, statement: &'static str, id: String, value: rusqlite::types::Value) {
+    fixture
+        .store
+        .writer
+        .call(move |c| {
+            c.execute(statement, rusqlite::params![value, id])
+                .map_err(crate::db::map_sqlite)?;
+            Ok(())
+        })
+        .expect("sql");
+}
+
+#[test]
+fn test_an_ack_is_scoped_to_the_callers_mailbox() {
+    let f = Fixture::new();
+    let id = f.send("bob", "from alice");
+    assert!(f.store.ack(&ids(&[&id]), Some("alice")).is_err());
+    assert_eq!(1, unread(&f, "bob"));
+    assert!(f.store.ack(&ids(&[&id]), Some("alice")).is_err());
+    assert_eq!(1, unread(&f, "bob"));
+    f.store.ack(&ids(&[&id]), Some("bob")).expect("own ack");
+    assert_eq!(0, unread(&f, "bob"));
+}
+
+#[test]
+fn test_a_pane_suffixed_mailbox_is_the_same_mailbox() {
+    let f = Fixture::new();
+    let id = f.send("alice", "hello");
+    sql(
+        &f,
+        "UPDATE messages SET mailbox = ? WHERE id = ?",
+        id.clone(),
+        "alice (w9:pH)".to_string().into(),
+    );
+    assert_eq!(1, unread(&f, "alice"));
+    assert_eq!(1, unread(&f, "alice (w9:pH)"));
+    f.store.ack(&ids(&[&id]), Some("alice")).expect("ack");
+    assert_eq!(0, unread(&f, "alice"));
+    assert_eq!(0, unread(&f, "alice (w9:pH)"));
+}
+
+#[test]
+fn test_a_foreign_mailbox_with_a_pane_suffix_is_still_refused() {
+    let f = Fixture::new();
+    let id = f.send("bob", "hello");
+    sql(
+        &f,
+        "UPDATE messages SET mailbox = ? WHERE id = ?",
+        id.clone(),
+        "bob (w9:pH)".to_string().into(),
+    );
+    assert!(f.store.ack(&ids(&[&id]), Some("alice")).is_err());
+    assert_eq!(1, unread(&f, "bob"));
+}
+
+#[test]
+fn test_ack_stamps_read_at() {
+    let f = Fixture::new();
+    let id = f.send("writer", "handled");
+    f.store.ack(&ids(&[&id]), None).expect("ack");
+    let status = inbox::status(&f.pool(), &id, now_s()).expect("status");
+    assert_eq!("acked", status.state);
+    assert!(status.read_at.is_some(), "ack must stamp read_at");
+    assert!(status.acked_at.is_some());
+    assert_eq!(0, unread(&f, "writer"));
+    assert_eq!(
+        0,
+        inbox::stats(&f.pool(), now_s()).expect("stats")[0].unread
+    );
+}
+
+#[test]
+fn test_status_of_a_cancelled_message() {
+    let f = Fixture::new();
+    let id = f.send("writer", "never mind");
+    f.store.cancel(&ids(&[&id])).expect("cancel");
+    let status = inbox::status(&f.pool(), &id, now_s()).expect("status");
+    assert_eq!("cancelled", status.state);
+    assert!(status.cancelled_at.is_some());
+    assert_eq!(0, unread(&f, "writer"));
+}
+
+#[test]
+fn test_a_read_message_cannot_be_cancelled() {
+    let f = Fixture::new();
+    let id = f.send("writer", "too late");
+    f.store.read("writer", 10, false, true).expect("read");
+    let result = f.store.cancel(&ids(&[&id])).expect("cancel");
+    assert!(result.changed.is_empty());
+    assert_eq!(("read".to_string()), result.unchanged[0].1);
+}
+
+#[test]
+fn test_archive_is_bulk_and_never_deletes() {
+    let f = Fixture::new();
+    for n in 0..3 {
+        f.send("dead", &format!("m{n}"));
+    }
+    assert_eq!(
+        3,
+        f.store
+            .archive("dead", None, None)
+            .expect("archive")
+            .archived
+    );
+    let count = inbox::count(&f.pool(), "dead", &[], now_s()).expect("count");
+    assert_eq!((0, 3, 3), (count.unread, count.archived, count.total));
+    let rows = inbox::list(&f.pool(), "dead", false, 50, now_s()).expect("list");
+    assert_eq!(3, rows.len());
+}
+
+#[test]
+fn test_archive_before_only_touches_older_mail() {
+    let f = Fixture::new();
+    let old = f.send("dead", "old");
+    sql(
+        &f,
+        "UPDATE messages SET created_at = ? WHERE id = ?",
+        old,
+        1.0f64.into(),
+    );
+    f.send("dead", "new");
+    assert_eq!(
+        1,
+        f.store
+            .archive("dead", Some(100.0), None)
+            .expect("archive")
+            .archived
+    );
+    assert_eq!(1, unread(&f, "dead"));
+}
+
+#[test]
+fn archive_refuses_a_blank_mailbox_and_states_it_may_not_touch() {
+    let f = Fixture::new();
+    assert_eq!(
+        "a mailbox is required",
+        f.store.archive("  ", None, None).unwrap_err().to_string()
+    );
+    let only_cancelled = ids(&["cancelled", "archived", "nope"]);
+    assert_eq!(
+        "state must be one of queued, read, acked",
+        f.store
+            .archive("x", None, Some(&only_cancelled))
+            .unwrap_err()
+            .to_string()
+    );
+}
+
+#[test]
+fn test_unknown_ids_are_a_clear_error_everywhere() {
+    let f = Fixture::new();
+    let dir = f.dir.path().to_path_buf();
+    let errors = [
+        f.store.ack(&ids(&["i999"]), None).unwrap_err().to_string(),
+        f.store.cancel(&ids(&["i999"])).unwrap_err().to_string(),
+        f.store.delete(&ids(&["i999"])).unwrap_err().to_string(),
+        f.store.fetch("nope", &dir).unwrap_err().to_string(),
+    ];
+    assert_eq!("no message with id 'i999'", errors[0]);
+    assert_eq!("no message with id 'i999'", errors[1]);
+    assert_eq!("no message with id 'i999'", errors[2]);
+    assert_eq!("no attachment with id 'nope'", errors[3]);
+    assert_eq!(
+        "at least one message id is required",
+        f.store.ack(&ids(&["  "]), None).unwrap_err().to_string()
+    );
+}
+
+#[test]
+fn a_refused_batch_changes_nothing() {
+    let f = Fixture::new();
+    let id = f.send("writer", "first");
+    assert!(f.store.cancel(&ids(&[&id, "i999"])).is_err());
+    assert_eq!(
+        1,
+        unread(&f, "writer"),
+        "the Python raises before its single commit"
+    );
+}
+
+#[test]
+fn delete_removes_the_message_its_attachments_and_the_orphan_blob() {
+    let f = Fixture::new();
+    let file = f.file("a.txt", "payload");
+    let keep = f.file("b.txt", "other");
+    let id = f
+        .store
+        .send(&Outgoing {
+            mailbox: "w",
+            body: Some("x"),
+            attachments: &[file],
+            ..Default::default()
+        })
+        .expect("send");
+    f.store
+        .send(&Outgoing {
+            mailbox: "w",
+            body: Some("y"),
+            attachments: &[keep],
+            ..Default::default()
+        })
+        .expect("send");
+    assert_eq!(
+        2,
+        std::fs::read_dir(f.dir.path().join("blobs"))
+            .unwrap()
+            .count()
+    );
+    assert_eq!(
+        vec![id.clone()],
+        f.store.delete(&ids(&[&id])).expect("delete")
+    );
+    assert_eq!(
+        1,
+        std::fs::read_dir(f.dir.path().join("blobs"))
+            .unwrap()
+            .count()
+    );
+    assert!(inbox::status(&f.pool(), &id, now_s()).is_err());
+}
+
+#[test]
+fn fetch_copies_the_blob_out_under_its_filename() {
+    let f = Fixture::new();
+    let file = f.file("report.txt", "hello blob");
+    let id = f
+        .store
+        .send(&Outgoing {
+            mailbox: "w",
+            body: Some("x"),
+            attachments: &[file],
+            ..Default::default()
+        })
+        .expect("send");
+    let (_, message) = inbox::get(&f.pool(), &id, now_s()).expect("get");
+    let _ = message;
+    let attachment_id = f
+        .store
+        .writer
+        .call(|c| {
+            c.query_row("SELECT id FROM attachments LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(crate::db::map_sqlite)
+        })
+        .expect("attachment id");
+    let out = f.dir.path().join("out/dir");
+    let fetched = f.store.fetch(&attachment_id, &out).expect("fetch");
+    assert_eq!(out.join("report.txt"), fetched.path);
+    assert_eq!(
+        "hello blob",
+        std::fs::read_to_string(&fetched.path).unwrap()
+    );
+    assert_eq!(id, fetched.message_id);
+    assert_eq!(10, fetched.size);
+}

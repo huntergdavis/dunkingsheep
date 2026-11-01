@@ -394,6 +394,395 @@ pub fn expand_template(text: &str, dunker: &Dunker) -> String {
         .into_owned()
 }
 
+/// `_numeric_id`: the number in `d<n>`, else 0.
+pub fn numeric_id(dunk_id: &str) -> i64 {
+    dunk_id
+        .strip_prefix('d')
+        .filter(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|rest| rest.parse().ok())
+        .unwrap_or(0)
+}
+
+/// `_check_only_when`: `None`, `""`, `none`, `any`, `always` clear the gate; `idle` is the
+/// only gate.
+pub fn check_only_when(value: Option<&str>) -> Result<Option<String>, DunkError> {
+    match value {
+        None | Some("" | "none" | "None" | "any" | "always") => Ok(None),
+        Some("idle") => Ok(Some("idle".into())),
+        Some(_) => Err(DunkError::Refused(
+            "only_when must be 'idle' or empty".into(),
+        )),
+    }
+}
+
+/// `_check_max_sends`: empty/zero is no cap; otherwise a positive integer.
+pub fn check_max_sends(value: Option<&str>) -> Result<Option<i64>, DunkError> {
+    let bad = || DunkError::Refused("max_sends must be a positive integer".into());
+    match value.map(str::trim) {
+        None | Some("" | "0") => Ok(None),
+        Some(text) => match text.parse::<i64>() {
+            Ok(n) if n > 0 => Ok(Some(n)),
+            _ => Err(bad()),
+        },
+    }
+}
+
+/// `_check_bool`.
+pub fn check_bool(value: &str, name: &str) -> Result<bool, DunkError> {
+    match value.trim().to_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "n" | "off" => Ok(false),
+        "1" | "true" | "yes" | "y" | "on" => Ok(true),
+        _ => Err(DunkError::Refused(format!("{name} must be true or false"))),
+    }
+}
+
+/// `Flock.add` arguments. `None` means "not given" (the Python default).
+#[derive(Debug, Default, Clone)]
+pub struct AddArgs {
+    pub text: Option<String>,
+    pub interval: Option<String>,
+    pub name: Option<String>,
+    pub start: bool,
+    pub only_when: Option<String>,
+    pub max_sends: Option<String>,
+    pub skip_if_unconsumed: Option<String>,
+    pub hold_while_typing: Option<String>,
+}
+
+/// `Flock.update` arguments. `only_when` and `max_sends` are tri-state like the Python's
+/// `...` sentinel: outer `None` leaves the field alone, `Some(None)` clears it.
+#[derive(Debug, Default, Clone)]
+pub struct UpdateArgs {
+    pub text: Option<String>,
+    pub interval: Option<String>,
+    pub name: Option<String>,
+    pub only_when: Option<Option<String>>,
+    pub max_sends: Option<Option<String>>,
+    pub skip_if_unconsumed: Option<String>,
+    pub hold_while_typing: Option<String>,
+}
+
+/// The dunk list of `Flock` (`dunkers`, `next_id`) and the methods that mutate it. The target
+/// is resolved by the caller (`Flock.resolve_target`) and passed as a pane row. The timer
+/// thread (`_spawn_timer`/`_halt`) is NOT here: `start`/`stop` change the persisted fields only.
+#[derive(Debug)]
+pub struct DunkList {
+    inner: std::sync::Mutex<ListState>,
+}
+
+#[derive(Debug)]
+struct ListState {
+    dunkers: Vec<Dunker>,
+    next_id: i64,
+}
+
+impl Default for DunkList {
+    fn default() -> Self {
+        DunkList::new()
+    }
+}
+
+impl DunkList {
+    pub fn new() -> DunkList {
+        DunkList {
+            inner: std::sync::Mutex::new(ListState {
+                dunkers: Vec::new(),
+                next_id: 1,
+            }),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ListState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// `_load` (the dunk part): `next_id` and every row that parses; a corrupt row is
+    /// skipped, restored rows read `Restored`. A running dunk with a stale `next_send_at`
+    /// is pushed `RESTORE_GRACE_S` ahead (its timer is the caller's to respawn).
+    pub fn load(&self, payload: &Map<String, Value>) {
+        let mut state = self.state();
+        state.next_id = int_or_zero(payload, "next_id");
+        if state.next_id == 0 {
+            state.next_id = 1;
+        }
+        let rows = payload
+            .get("dunkers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for row in rows {
+            let Some(map) = row.as_object() else { continue };
+            let Ok(mut dunker) = Dunker::from_dict(map) else {
+                continue;
+            };
+            dunker.status = "Restored".into();
+            state.next_id = state.next_id.max(numeric_id(&dunker.id) + 1);
+            state.dunkers.push(dunker);
+        }
+        let now = clock::now_s();
+        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
+            if dunker.next_send_at.map_or(true, |at| at == 0.0 || at < now) {
+                dunker.next_send_at = Some(now + RESTORE_GRACE_S);
+            }
+        }
+    }
+
+    /// What `_save` writes for the dunk part: `next_id` and one ordered row per dunk.
+    pub fn snapshot(&self) -> (i64, Vec<Vec<(&'static str, Value)>>) {
+        let state = self.state();
+        (
+            state.next_id,
+            state.dunkers.iter().map(Dunker::persisted_pairs).collect(),
+        )
+    }
+
+    /// `_find`: exact id, else a bare number means `d<number>`.
+    fn find(state: &ListState, dunk_id: &str) -> Result<usize, DunkError> {
+        let wanted = dunk_id.trim();
+        let position = state
+            .dunkers
+            .iter()
+            .position(|d| d.id == wanted)
+            .or_else(|| {
+                let numeric = !wanted.is_empty() && wanted.chars().all(|c| c.is_ascii_digit());
+                numeric
+                    .then(|| {
+                        state
+                            .dunkers
+                            .iter()
+                            .position(|d| d.id == format!("d{wanted}"))
+                    })
+                    .flatten()
+            });
+        position.ok_or_else(|| DunkError::Refused(format!("no dunk with id {wanted:?}")))
+    }
+
+    pub fn get(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
+        let state = self.state();
+        Ok(state.dunkers[Self::find(&state, dunk_id)?].to_dict())
+    }
+
+    pub fn list(&self) -> Vec<Map<String, Value>> {
+        self.state().dunkers.iter().map(Dunker::to_dict).collect()
+    }
+
+    /// `Flock.add`. `pane` is the resolved target row, if a target was given.
+    pub fn add(
+        &self,
+        pane: Option<&Map<String, Value>>,
+        args: &AddArgs,
+    ) -> Result<Map<String, Value>, DunkError> {
+        let interval = match args.interval.as_deref() {
+            Some(text) => parse_interval(text)?,
+            None => DEFAULT_INTERVAL_MINUTES,
+        };
+        let gate_given = args.only_when.is_some();
+        let only_when = check_only_when(args.only_when.as_deref())?;
+        let max_sends = check_max_sends(args.max_sends.as_deref())?;
+        let skip = match &args.skip_if_unconsumed {
+            Some(v) => check_bool(v, "skip_if_unconsumed")?,
+            None => false,
+        };
+        let hold = match &args.hold_while_typing {
+            Some(v) => check_bool(v, "hold_while_typing")?,
+            None => true,
+        };
+        let mut state = self.state();
+        let mut dunker = Dunker::new(&format!("d{}", state.next_id));
+        dunker.name = args.name.clone().unwrap_or_default();
+        dunker.interval_minutes = interval;
+        dunker.text = args
+            .text
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TEXT.to_string());
+        dunker.only_when = only_when;
+        dunker.max_sends = max_sends;
+        dunker.skip_if_unconsumed = skip;
+        dunker.hold_while_typing = hold;
+        state.next_id += 1;
+        if let Some(pane) = pane {
+            dunker.set_target(pane);
+            dunker.status = "Target set".into();
+            // Typing into an agent mid-turn can abort that turn, silently. A schedule aimed at
+            // an agent waits for it to be idle unless the caller says otherwise.
+            if !gate_given
+                && dunker
+                    .target_agent
+                    .as_deref()
+                    .is_some_and(|a| !a.is_empty())
+            {
+                dunker.only_when = Some("idle".into());
+            }
+        }
+        if args.start {
+            if pane.is_some() {
+                start_fields(&mut dunker)?;
+            } else {
+                dunker.status = "No target - press c".into();
+            }
+        }
+        let out = dunker.to_dict();
+        state.dunkers.push(dunker);
+        Ok(out)
+    }
+
+    /// `Flock.update`.
+    pub fn update(
+        &self,
+        dunk_id: &str,
+        pane: Option<&Map<String, Value>>,
+        args: &UpdateArgs,
+    ) -> Result<Map<String, Value>, DunkError> {
+        let interval = args.interval.as_deref().map(parse_interval).transpose()?;
+        let only_when = match &args.only_when {
+            Some(v) => Some(check_only_when(v.as_deref())?),
+            None => None,
+        };
+        let max_sends = match &args.max_sends {
+            Some(v) => Some(check_max_sends(v.as_deref())?),
+            None => None,
+        };
+        let skip = args
+            .skip_if_unconsumed
+            .as_deref()
+            .map(|v| check_bool(v, "skip_if_unconsumed"))
+            .transpose()?;
+        let hold = args
+            .hold_while_typing
+            .as_deref()
+            .map(|v| check_bool(v, "hold_while_typing"))
+            .transpose()?;
+        let mut state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let dunker = &mut state.dunkers[index];
+        let mut changed: Vec<&str> = Vec::new();
+        if let Some(pane) = pane {
+            dunker.set_target(pane);
+            changed.push("target");
+        }
+        if let Some(text) = &args.text {
+            dunker.text = text.clone();
+            changed.push("text");
+        }
+        if let Some(interval) = interval {
+            if interval != dunker.interval_minutes {
+                dunker.interval_minutes = interval;
+                if dunker.running {
+                    let now = clock::now_s();
+                    let anchor = dunker.last_sent_at.or(dunker.started_at).unwrap_or(now);
+                    dunker.next_send_at = Some((now + 1.0).max(anchor + interval * 60.0));
+                }
+                changed.push("interval");
+            }
+        }
+        if let Some(name) = &args.name {
+            dunker.name = name.clone();
+            changed.push("name");
+        }
+        if let Some(gate) = only_when {
+            dunker.only_when = gate;
+            changed.push("only_when");
+        }
+        if let Some(cap) = max_sends {
+            dunker.max_sends = cap;
+            changed.push("max_sends");
+        }
+        if let Some(flag) = skip {
+            dunker.skip_if_unconsumed = flag;
+            changed.push("skip_if_unconsumed");
+        }
+        if let Some(flag) = hold {
+            dunker.hold_while_typing = flag;
+            changed.push("hold_while_typing");
+        }
+        if let Some(last) = changed.last() {
+            let words = last.replace('_', " ");
+            let mut chars = words.chars();
+            let head = chars.next().map(|c| c.to_uppercase().collect::<String>());
+            dunker.status = format!(
+                "{}{} set",
+                head.unwrap_or_default(),
+                chars.as_str().to_lowercase()
+            );
+        }
+        Ok(dunker.to_dict())
+    }
+
+    /// `Flock.remove`.
+    pub fn remove(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
+        let mut state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let mut dunker = state.dunkers.remove(index);
+        dunker.running = false;
+        Ok(dunker.to_dict())
+    }
+
+    /// `Flock.start` (the persisted fields; the timer is the caller's).
+    pub fn start(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
+        let mut state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let dunker = &mut state.dunkers[index];
+        start_fields(dunker)?;
+        Ok(dunker.to_dict())
+    }
+
+    /// `Flock.stop`.
+    pub fn stop(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
+        let mut state = self.state();
+        let index = Self::find(&state, dunk_id)?;
+        let dunker = &mut state.dunkers[index];
+        stop_fields(dunker);
+        Ok(dunker.to_dict())
+    }
+
+    /// `Flock.toggle`.
+    pub fn toggle(&self, dunk_id: &str) -> Result<Map<String, Value>, DunkError> {
+        let running = {
+            let state = self.state();
+            state.dunkers[Self::find(&state, dunk_id)?].running
+        };
+        if running {
+            self.stop(dunk_id)
+        } else {
+            self.start(dunk_id)
+        }
+    }
+
+    /// `Flock.stop_all`.
+    pub fn stop_all(&self) -> Vec<Map<String, Value>> {
+        let mut state = self.state();
+        for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
+            stop_fields(dunker);
+        }
+        state.dunkers.iter().map(Dunker::to_dict).collect()
+    }
+}
+
+/// `RESTORE_GRACE_S`.
+pub const RESTORE_GRACE_S: f64 = 5.0;
+
+/// `_start` without the timer: needs a target; sets the countdown.
+fn start_fields(dunker: &mut Dunker) -> Result<(), DunkError> {
+    if dunker.target_pane_id.as_deref().map_or(true, str::is_empty) {
+        dunker.status = "No target - press c".into();
+        return Err(DunkError::Refused(format!("{} has no target", dunker.id)));
+    }
+    let now = clock::now_s();
+    dunker.running = true;
+    dunker.started_at = Some(now);
+    dunker.next_send_at = Some(now + dunker.interval_minutes * 60.0);
+    dunker.last_error = None;
+    Ok(())
+}
+
+fn stop_fields(dunker: &mut Dunker) {
+    dunker.running = false;
+    dunker.next_send_at = None;
+    dunker.status = "Stopped".into();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +917,182 @@ mod tests {
         assert_eq!(0.0_f64.round_ties_even(), 0.5_f64.round_ties_even());
         assert_eq!(2.0, 2.5_f64.round_ties_even());
         assert_eq!(4.0, 3.5_f64.round_ties_even());
+    }
+
+    fn pane(id: &str, agent: Option<&str>) -> Map<String, Value> {
+        kw(json!({"pane_id": id, "agent": agent, "tab_label": "Claude Proj"}))
+    }
+
+    #[test]
+    fn add_assigns_ids_and_resolves_target_labels() {
+        let list = DunkList::new();
+        let first = list
+            .add(Some(&pane("w1:p1", Some("claude"))), &AddArgs::default())
+            .unwrap();
+        let second = list
+            .add(
+                None,
+                &AddArgs {
+                    name: Some("x".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(json!("d1"), first["id"]);
+        assert_eq!(json!("d2"), second["id"]);
+        assert_eq!(json!("Claude Proj / claude"), first["target_label"]);
+        assert_eq!(json!("(no target)"), second["target_label"]);
+        // an agent target defaults to the idle gate; no target stays ungated
+        assert_eq!(json!("idle"), first["only_when"]);
+        assert!(second["only_when"].is_null());
+        // saying only_when=any is honoured
+        let any = AddArgs {
+            only_when: Some("any".into()),
+            ..Default::default()
+        };
+        assert!(list
+            .add(Some(&pane("w1:p2", Some("claude"))), &any)
+            .unwrap()["only_when"]
+            .is_null());
+    }
+
+    #[test]
+    fn start_needs_a_target_and_stop_clears_the_countdown() {
+        let list = DunkList::new();
+        list.add(None, &AddArgs::default()).unwrap();
+        assert!(list.start("d1").is_err());
+        let started = list
+            .add(
+                Some(&pane("w1:p1", None)),
+                &AddArgs {
+                    start: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(json!(true), started["running"]);
+        assert!(started["next_send_at"].is_number());
+        let stopped = list.stop("2").unwrap(); // a bare number means d2
+        assert_eq!(json!(false), stopped["running"]);
+        assert!(stopped["next_send_at"].is_null());
+        assert_eq!(json!("Stopped"), stopped["status"]);
+        assert_eq!(json!(true), list.toggle("d2").unwrap()["running"]);
+        let all = list.stop_all();
+        assert!(all.iter().all(|d| d["running"] == json!(false)));
+    }
+
+    #[test]
+    fn update_changes_fields_and_clears_with_an_explicit_none() {
+        let list = DunkList::new();
+        list.add(
+            None,
+            &AddArgs {
+                only_when: Some("idle".into()),
+                max_sends: Some("3".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let out = list
+            .update(
+                "d1",
+                None,
+                &UpdateArgs {
+                    text: Some("hi".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(json!("hi"), out["text"]);
+        assert_eq!(json!("idle"), out["only_when"], "omitted leaves it alone");
+        assert_eq!(json!("Text set"), out["status"]);
+        let cleared = list
+            .update(
+                "d1",
+                None,
+                &UpdateArgs {
+                    only_when: Some(None),
+                    max_sends: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(cleared["only_when"].is_null() && cleared["max_sends"].is_null());
+        assert_eq!(json!("Max sends set"), cleared["status"]);
+    }
+
+    #[test]
+    fn remove_get_and_the_refusals() {
+        let list = DunkList::new();
+        list.add(None, &AddArgs::default()).unwrap();
+        assert!(list.get("d9").is_err());
+        assert!(list
+            .add(
+                None,
+                &AddArgs {
+                    only_when: Some("busy".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert!(list
+            .add(
+                None,
+                &AddArgs {
+                    max_sends: Some("-1".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert!(list
+            .add(
+                None,
+                &AddArgs {
+                    interval: Some("abc".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert_eq!(json!("d1"), list.remove("d1").unwrap()["id"]);
+        assert!(list.list().is_empty());
+    }
+
+    #[test]
+    fn load_restores_rows_skips_corrupt_ones_and_keeps_ids_moving() {
+        let src = DunkList::new();
+        src.add(None, &AddArgs::default()).unwrap();
+        src.add(
+            Some(&pane("w1:p1", None)),
+            &AddArgs {
+                start: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (next_id, rows) = src.snapshot();
+        let mut dunkers: Vec<Value> = rows
+            .into_iter()
+            .map(|row| Value::Object(row.into_iter().map(|(k, v)| (k.to_string(), v)).collect()))
+            .collect();
+        dunkers.push(json!("garbage"));
+        dunkers[1]["next_send_at"] = json!(1.0); // stale
+        let list = DunkList::new();
+        list.load(&kw(json!({"next_id": next_id, "dunkers": dunkers})));
+        let all = list.list();
+        assert_eq!(2, all.len());
+        assert_eq!(json!("Restored"), all[0]["status"]);
+        assert!(all[1]["next_send_at"].as_f64().unwrap() > clock::now_s());
+        assert_eq!(
+            json!("d3"),
+            list.add(None, &AddArgs::default()).unwrap()["id"]
+        );
+    }
+
+    #[test]
+    fn numeric_id_reads_d_numbers() {
+        assert_eq!(
+            (7, 0, 0),
+            (numeric_id("d7"), numeric_id("x7"), numeric_id("d"))
+        );
     }
 }

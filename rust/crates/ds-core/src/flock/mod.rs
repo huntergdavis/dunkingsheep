@@ -396,6 +396,7 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub mod commands_inbox;
 pub mod commands_owner_views;
 pub mod dunks;
 pub mod mailbox;
@@ -403,6 +404,8 @@ pub mod panes;
 pub mod resolve;
 pub mod views;
 
+#[cfg(test)]
+mod commands_inbox_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
