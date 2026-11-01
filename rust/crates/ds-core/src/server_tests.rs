@@ -320,3 +320,33 @@ fn die_with_parent_watches_the_spawner_only_for_test_spawns_or_explicit_pids() {
     );
     assert!(!kill_own_process_group(&Env::from_pairs(&[])));
 }
+
+struct ThreadId;
+impl Dispatcher for ThreadId {
+    fn dispatch(&self, _: &str, _: &Value, _: &RequestCtx) -> Result<Value, DunkError> {
+        Ok(json!(format!("{:?}", std::thread::current().id())))
+    }
+}
+
+/// main's flock keeps caller state thread-local (CALLERS): every request of a connection must run
+/// on ONE thread, start to finish, and two connections must not share one.
+#[test]
+fn a_connections_requests_all_run_on_one_thread_and_connections_do_not_share() {
+    let path = sock_path("threads");
+    let _ = std::fs::remove_file(&path);
+    let mut server = FlockServer::new(Arc::new(ThreadId), path.clone());
+    server.bind().unwrap();
+    let stop = server.stop_handle();
+    let thread = std::thread::spawn(move || {
+        let _ = server.serve_forever();
+    });
+    let mut a = connect(&path);
+    let mut b = connect(&path);
+    let mut seen = |c: &mut Conn| c.call(json!({"id": 1, "cmd": "t"}))["result"].clone();
+    let (a1, b1, a2, b2) = (seen(&mut a), seen(&mut b), seen(&mut a), seen(&mut b));
+    assert_eq!(a1, a2);
+    assert_eq!(b1, b2);
+    assert_ne!(a1, b1);
+    stop.store(true, Ordering::SeqCst);
+    thread.join().unwrap();
+}
