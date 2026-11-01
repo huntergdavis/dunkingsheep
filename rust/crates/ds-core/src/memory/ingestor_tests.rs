@@ -48,6 +48,35 @@ fn count(path: &Path, sql: &str) -> i64 {
         .expect("count")
 }
 
+/// Wait for `done`, failing only when `progress` stops changing for `STALL` (or after an
+/// absolute `CAP`). A fixed wall-clock bound on work whose speed depends on the host (every
+/// commit is an fsync) measured the host, not the code: under load 55-72 the resumed ingest of
+/// the stop/resume test was still advancing (163 -> 168 chunks between two looks) when a fixed
+/// 15 s ran out, and the test failed in 21 of 30 full-suite runs (t1461).
+fn wait_for_progress(
+    what: &str,
+    mut done: impl FnMut() -> bool,
+    mut progress: impl FnMut() -> i64,
+) {
+    const STALL: Duration = Duration::from_secs(20);
+    const CAP: Duration = Duration::from_secs(300);
+    let started = Instant::now();
+    let (mut last, mut last_change) = (progress(), Instant::now());
+    while started.elapsed() < CAP {
+        if done() {
+            return;
+        }
+        let now = progress();
+        if now != last {
+            (last, last_change) = (now, Instant::now());
+        } else if last_change.elapsed() > STALL {
+            panic!("timed out waiting for {what}: no progress for {STALL:?} (stuck at {last})");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for {what}: still not done after {CAP:?} (progress {last})");
+}
+
 fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -187,9 +216,11 @@ fn a_stop_mid_ingest_is_skipped_not_failed_and_the_next_start_resumes_it() {
     // a restart requeues the partial source and finishes it
     let again = Ingestor::new(&db, POLL, Some(Duration::ZERO));
     again.start().expect("start");
-    wait_until("the resumed source", || {
-        count(&db, "SELECT COUNT(*) FROM ingest_queue WHERE state='done'") == 1
-    });
+    wait_for_progress(
+        "the resumed source",
+        || count(&db, "SELECT COUNT(*) FROM ingest_queue WHERE state='done'") == 1,
+        || count(&db, "SELECT COUNT(*) FROM chunks"),
+    );
     again.stop();
     assert_eq!(48, count(&db, "SELECT COUNT(*) FROM chunks"));
 }
