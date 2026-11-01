@@ -639,18 +639,20 @@ async fn test_atomic_claim_never_double_assigns() {
 async fn test_lease_expiry_requeues() {
     let tasks = store("py-lease-expiry").await;
     let task = tasks.add("global", "work", "").await.unwrap();
+    // The lease is long and the clock is passed to `reap`, so nothing here depends on how fast the
+    // host runs (t1424/t1367: a 50 ms lease plus a sleep failed under load average ~46).
     tasks
-        .claim_next("global", "w1:p1", lease(0.05))
+        .claim_next("global", "w1:p1", lease(60.0))
         .await
         .unwrap();
+    let start = crate::clock::now_s();
     assert!(tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(live(&["w1:p1"]), None, Some(start), Some("live"))
         .await
         .unwrap()
         .is_empty());
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let requeued = tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(live(&["w1:p1"]), None, Some(start + 120.0), Some("live"))
         .await
         .unwrap();
     let pairs: Vec<(String, &str)> = requeued
@@ -784,13 +786,19 @@ async fn test_refusal_reason_names_why_nothing_was_claimable() {
 async fn test_expired_lease_keeps_the_durable_assignee_and_blocks_other_lanes() {
     let tasks = store("py-expired-keeps-owner").await;
     let task = add_with(&tasks, "owned work", None, &["w1:p1"], &[], false).await;
+    // Long lease + an explicit reap clock instead of a 50 ms lease and a sleep (t1424: flaky
+    // under host load).
     tasks
-        .claim_next("global", "w1:p1", lease(0.05))
+        .claim_next("global", "w1:p1", lease(60.0))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let requeued = tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(
+            live(&["w1:p1"]),
+            None,
+            Some(crate::clock::now_s() + 120.0),
+            Some("live"),
+        )
         .await
         .unwrap();
     let pairs: Vec<(String, &str)> = requeued

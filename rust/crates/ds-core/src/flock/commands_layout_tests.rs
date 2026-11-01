@@ -1,7 +1,6 @@
 //! Ports (by name, layout halves only) of tests/test_dunk_core.py: the create_*/split/rename/
 //! focus/failure tests, against a dict-based fake of `tests/fakes.py::FakeHerdr`.
-//! The `close` halves, the dunk-target assertions (`flock.add`), and `start_agent` are in
-//! later slices.
+//! Slice 4 adds the `close` halves (`close_target` through `DunkList::halt_aimed_at`).
 
 use super::*;
 
@@ -842,4 +841,388 @@ fn shlex_join_matches_pythons_quote_rules() {
     assert_eq!("a,b x_y", join(&["a,b", "x_y"])); // ',' and '_' are safe in Python
     assert_eq!("'it'\"'\"'s' ''", join(&["it's", ""]));
     assert_eq!("'a b' 'c$d'", join(&["a b", "c$d"]));
+}
+
+// -- t1420: the mailbox/role write-back of create_workspace ---------------------------------
+
+struct NoPanes;
+
+impl crate::flock::panes::PaneInfoEnv for NoPanes {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn get_pane(&self, _: &str) -> Option<Value> {
+        None
+    }
+}
+
+fn lane_flock(tag: &str, owner: Option<&str>) -> Flock {
+    let dir = std::env::temp_dir().join(format!("ds-layout-lane-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
+    let mut roles = crate::roles::Roles::new(
+        &crate::config::Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    if let Some(pane) = owner {
+        roles
+            .register(pane, "owner", None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+    flock
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_lane(
+    flock: &Flock,
+    herdr: &mut FakeLayout,
+    label: &str,
+    mailbox: Option<&str>,
+    role: Option<&str>,
+    caller: Option<&str>,
+) -> Result<Value, DunkError> {
+    let mut submit = |_: &str, _: &str| (true, "sent".to_string());
+    flock.create_workspace_with_lane(
+        herdr,
+        Some(label),
+        Some("/tmp"),
+        None,
+        false,
+        mailbox,
+        role,
+        Some("pi"),
+        None,
+        caller,
+        &mut submit,
+        &NoPanes,
+    )
+}
+
+#[test]
+fn a_mailbox_is_written_to_the_registry_as_declared_and_titles_the_pane() {
+    // tests/test_dunk_inbox.py: create_workspace(label=..., mailbox="guarded lane") records the lane.
+    let flock = lane_flock("declared", None);
+    let mut herdr = FakeLayout::new();
+    let made = make_lane(
+        &flock,
+        &mut herdr,
+        "guarded",
+        Some("guarded lane"),
+        None,
+        None,
+    )
+    .unwrap();
+    let pane_id = made["pane_id"].as_str().unwrap().to_string();
+    let registry = flock.lane_registry(false).unwrap();
+    assert_eq!(
+        (Some("guarded lane".to_string()), true),
+        Flock::row_identity(registry.get(&pane_id))
+    );
+    let pane = herdr
+        .panes
+        .iter()
+        .find(|p| p["pane_id"] == pane_id.as_str())
+        .unwrap();
+    assert_eq!(
+        "guarded lane", pane["label"],
+        "the title carries the lane name"
+    );
+    assert!(made.get("role").is_none());
+}
+
+#[test]
+fn an_inferred_name_never_overwrites_a_declared_one() {
+    // tests/test_dunk_inbox.py::test_an_inferred_name_never_overwrites_a_declared_one
+    let flock = lane_flock("inferred", None);
+    let mut herdr = FakeLayout::new();
+    let made = make_lane(&flock, &mut herdr, "pm", Some("PM (par-a)"), None, None).unwrap();
+    let pane_id = made["pane_id"].as_str().unwrap();
+    assert!(!flock.remember_lane(pane_id, "\u{2733} some title", false));
+    let registry = flock.lane_registry(false).unwrap();
+    assert_eq!(
+        (Some("PM (par-a)".to_string()), true),
+        Flock::row_identity(registry.get(pane_id))
+    );
+}
+
+#[test]
+fn two_workspaces_declaring_one_name_both_get_a_declared_row() {
+    // The write-back records both; refusing the ambiguity is resolve_mailbox's job, not this one's.
+    let flock = lane_flock("two", None);
+    let mut herdr = FakeLayout::new();
+    let a = make_lane(&flock, &mut herdr, "one", Some("par-b"), None, None).unwrap();
+    let b = make_lane(&flock, &mut herdr, "two", Some("par-b"), None, None).unwrap();
+    assert_ne!(a["pane_id"], b["pane_id"]);
+    let registry = flock.lane_registry(false).unwrap();
+    for made in [&a, &b] {
+        let id = made["pane_id"].as_str().unwrap();
+        assert_eq!(
+            (Some("par-b".to_string()), true),
+            Flock::row_identity(registry.get(id))
+        );
+    }
+}
+
+#[test]
+fn no_mailbox_and_no_role_writes_nothing() {
+    let flock = lane_flock("none", None);
+    let mut herdr = FakeLayout::new();
+    make_lane(&flock, &mut herdr, "plain", None, None, None).unwrap();
+    make_lane(&flock, &mut herdr, "empty", Some(""), Some(""), None).unwrap();
+    assert!(flock.lane_registry(false).unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_title_is_false_and_never_an_error() {
+    let mut herdr = FakeLayout::new();
+    assert!(title_pane(&mut herdr, "w1:p1", "lane-x"));
+    herdr.fail_layout = Some("rename refused".into());
+    assert!(!title_pane(&mut herdr, "w1:p1", "lane-x"));
+}
+
+#[test]
+fn a_role_registers_the_new_pane_through_lane_register() {
+    let owner = "w9:p9";
+    let flock = lane_flock("role", Some(owner));
+    let mut herdr = FakeLayout::new();
+    let made = make_lane(
+        &flock,
+        &mut herdr,
+        "worker",
+        Some("w-1"),
+        Some("worker"),
+        Some(owner),
+    )
+    .unwrap();
+    // `lane_register` returns the registry entry: the role, the provider passed through, the
+    // label (the mailbox wins over the workspace label) and who registered it.
+    assert_eq!("worker", made["role"]["role"], "{made}");
+    assert_eq!("pi", made["role"]["provider"], "{made}");
+    assert_eq!("w-1", made["role"]["label"], "{made}");
+    assert_eq!(owner, made["role"]["by"], "{made}");
+}
+
+#[test]
+fn a_refused_role_propagates_after_the_workspace_and_the_mailbox_already_exist() {
+    // Python: create_workspace, _remember_lane, _title_pane, THEN lane_register raises.
+    let flock = lane_flock("refused", Some("w9:p9"));
+    let mut herdr = FakeLayout::new();
+    let before = herdr.workspaces.len();
+    let error = make_lane(
+        &flock,
+        &mut herdr,
+        "x",
+        Some("x-lane"),
+        Some("worker"),
+        Some("w2:p3"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("lane register requires the owner role"),
+        "{error}"
+    );
+    assert_eq!(
+        before + 1,
+        herdr.workspaces.len(),
+        "the workspace was created"
+    );
+    assert_eq!(
+        1,
+        flock.lane_registry(false).unwrap().len(),
+        "and the mailbox was recorded"
+    );
+}
+
+// ---- close_target (T37b, t1419) ------------------------------------------------------------
+
+use crate::flock::dunks::{AddArgs, DunkList};
+
+impl CloseBackend for FakeLayout {
+    /// `FakeHerdr.close`: drops every pane/tab/workspace carrying the id.
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String> {
+        if let Some(m) = self.failed() {
+            return Err(m);
+        }
+        let key = id_key(kind);
+        let known = self
+            .workspaces
+            .iter()
+            .chain(&self.tabs)
+            .chain(&self.panes)
+            .any(|i| text(i, key) == target_id);
+        if !known {
+            return Err(format!("{kind} {target_id} not found"));
+        }
+        self.panes.retain(|p| text(p, key) != target_id);
+        self.tabs.retain(|t| text(t, key) != target_id);
+        self.workspaces.retain(|w| text(w, key) != target_id);
+        self.layout_calls
+            .push(vec![json!("close"), json!(kind), json!(target_id)]);
+        Ok(json!({"type": "ok"}))
+    }
+}
+
+fn aim(dunks: &DunkList, pane: &str) -> String {
+    let target = json!({"pane_id": pane, "label": pane});
+    let added = dunks
+        .add(
+            Some(target.as_object().unwrap()),
+            &AddArgs {
+                start: true,
+                interval: Some("60".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    added["id"].as_str().unwrap().to_string()
+}
+
+fn close(
+    backend: &mut FakeLayout,
+    dunks: &DunkList,
+    kind: &str,
+    target: &str,
+    force: bool,
+) -> Result<Closed, DunkError> {
+    close_target(
+        backend,
+        dunks,
+        kind,
+        target,
+        Some("w1:p2"),
+        force,
+        &mut || {},
+    )
+}
+
+#[test]
+fn test_close_stops_dunks_aimed_inside_and_refuses_own_container() {
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let dunk = aim(&dunks, "w2:p3");
+    let bystander = aim(&dunks, "w1:p2");
+    let closed = close(&mut backend, &dunks, "tab", "Other", false).unwrap();
+    assert_eq!(
+        json!({"kind": "tab", "id": "w2:t3", "closed_panes": ["w2:p3"], "stopped_dunks": [dunk]}),
+        closed.result
+    );
+    assert_eq!(json!(false), dunks.get(&dunk).unwrap()["running"]);
+    assert_eq!(json!("Target closed"), dunks.get(&dunk).unwrap()["status"]);
+    assert_eq!(json!(true), dunks.get(&bystander).unwrap()["running"]);
+    let gone = resolve_kind(&backend, "tab", "Other", Some("w1:p2")).unwrap_err();
+    assert!(gone.to_string().contains("no tab matches"), "{gone}");
+    // Never close the caller's own pane, tab or workspace.
+    for (kind, target) in [("pane", "self"), ("tab", "self"), ("workspace", "alpha")] {
+        let err = close(&mut backend, &dunks, kind, target, false).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to close"),
+            "{kind}: {err}"
+        );
+    }
+    // Closing a whole workspace stops every dunk inside it.
+    let other = aim(&dunks, "w2:p1");
+    let closed = close(&mut backend, &dunks, "workspace", "beta", false).unwrap();
+    let mut panes: Vec<String> = closed.result["closed_panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap().to_string())
+        .collect();
+    panes.sort();
+    assert_eq!(vec!["w2:p1", "w2:p2"], panes);
+    assert_eq!(json!([other]), closed.result["stopped_dunks"]);
+}
+
+#[test]
+fn test_a_closed_dunk_never_reports_itself_as_scheduled_again() {
+    // No countdown thread exists here to overwrite the status; the stored fields are the whole
+    // stop, so the status stays "Target closed" and nothing is scheduled.
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let dunk = aim(&dunks, "w2:p3");
+    close(&mut backend, &dunks, "tab", "Other", false).unwrap();
+    let after = dunks.get(&dunk).unwrap();
+    assert_eq!(json!("Target closed"), after["status"]);
+    assert_eq!(Value::Null, after["next_send_in_s"]);
+    assert_eq!(Value::Null, after["next_send_at"]);
+}
+
+#[test]
+fn the_close_half_of_test_rename_focus_and_close_by_kind() {
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let closed = close(&mut backend, &dunks, "tab", "Other", false).unwrap();
+    assert_eq!(
+        "Closed tab Other", closed.last_message,
+        "the label, not the id"
+    );
+    assert_eq!(
+        vec![json!("close"), json!("tab"), json!("w2:t3")],
+        *backend.layout_calls.last().unwrap()
+    );
+    let err = close(&mut backend, &dunks, "window", "x", false).unwrap_err();
+    assert_eq!("kind must be 'workspace', 'tab' or 'pane'", err.to_string());
+}
+
+#[test]
+fn force_lets_a_caller_close_its_own_container_and_the_text_names_the_flag() {
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let err = close(&mut backend, &dunks, "tab", "self", false)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        "refusing to close the tab this caller runs in (w1:t2); pass --force only if you \
+         intend to kill your own pane/tab/workspace",
+        err
+    );
+    let closed = close(&mut backend, &dunks, "tab", "self", true).unwrap();
+    assert_eq!(json!(["w1:p2"]), closed.result["closed_panes"]);
+}
+
+#[test]
+fn a_backend_refusal_is_named_and_stops_no_dunk() {
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let dunk = aim(&dunks, "w2:p3");
+    backend.fail_layout = Some("nope".to_string());
+    let err = close(&mut backend, &dunks, "tab", "Other", false)
+        .unwrap_err()
+        .to_string();
+    assert_eq!("the terminal backend could not close tab w2:t3: nope", err);
+    assert_eq!(
+        json!(true),
+        dunks.get(&dunk).unwrap()["running"],
+        "nothing closed, nothing stopped"
+    );
+}
+
+#[test]
+fn save_runs_only_when_a_dunk_was_stopped() {
+    let (mut backend, dunks) = (FakeLayout::new(), DunkList::new());
+    let mut saves = 0;
+    close_target(
+        &mut backend,
+        &dunks,
+        "tab",
+        "Other",
+        Some("w1:p2"),
+        false,
+        &mut || saves += 1,
+    )
+    .unwrap();
+    assert_eq!(0, saves, "no dunk aimed inside");
+    aim(&dunks, "w2:p1");
+    close_target(
+        &mut backend,
+        &dunks,
+        "tab",
+        "Codex Site",
+        Some("w1:p2"),
+        false,
+        &mut || saves += 1,
+    )
+    .unwrap();
+    assert_eq!(1, saves);
 }

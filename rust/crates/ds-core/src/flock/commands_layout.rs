@@ -11,12 +11,16 @@
 //!
 //! Slice 3 adds `start_agent` (its start verification is `agent_verify.rs`, injected).
 //!
-//! NOT in this slice: `close_target` (it halts dunkers, which `Flock` does not hold yet),
-//! `respawn_pane`, `retire_pane`, the `mailbox` /
-//! `role` write-back of `create_workspace` (needs `lane_register`), and `last_message`.
+//! Slice 4 adds `close_target` (T37b, t1419): it halts the dunkers aimed at the closed panes
+//! through `DunkList::halt_aimed_at`; the backend's `close` is the [`CloseBackend`] extension
+//! trait so existing `LayoutBackend` implementors are untouched.
+//!
+//! The `mailbox`/`role` write-back of `create_workspace` is `Flock::create_workspace_with_lane`
+//! (t1420). NOT in this slice: `respawn_pane`, `retire_pane` and `last_message`.
 
 use serde_json::{json, Map, Value};
 
+use super::dunks::DunkList;
 use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
 use super::Flock;
 use crate::error::DunkError;
@@ -161,6 +165,65 @@ pub fn create_workspace(
         .trim()
         .to_string();
     after_create(result, command, &what, submit)
+}
+
+/// `_title_pane`: best effort, put the lane name in the pane title too. A title is a courtesy
+/// (the agent may replace it); the registry is the record. A failed rename is `false`, never an
+/// error, and never undoes the registration that preceded it.
+pub fn title_pane(backend: &mut dyn LayoutBackend, pane_id: &str, mailbox: &str) -> bool {
+    backend.rename("pane", pane_id, mailbox).is_ok()
+}
+
+impl Flock {
+    /// `create_workspace` with its `mailbox`/`role` write-back. `mailbox` names the lane the new
+    /// pane IS and is written into the lane registry as soon as the pane exists (declared), the
+    /// write-back a backend flip needs: without it the only record of the lane is a title the
+    /// agent may overwrite, and a restore produces a pane nobody can address. `role` registers
+    /// the pane through `lane_register` (owner/system only) and reports under `out["role"]`; a
+    /// refusal there propagates AFTER the workspace exists, as in the Python.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_workspace_with_lane(
+        &self,
+        backend: &mut dyn LayoutBackend,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        command: Option<&str>,
+        focus: bool,
+        mailbox: Option<&str>,
+        role: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        self_pane_id: Option<&str>,
+        submit: Submit<'_>,
+        env: &dyn super::panes::PaneInfoEnv,
+    ) -> Result<Value, DunkError> {
+        let mut out = create_workspace(backend, label, cwd, command, focus, submit)?;
+        let pane_id = out
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        // `if mailbox and out.get("pane_id")`: truthiness of the raw string, then `.strip()`.
+        let mailbox = mailbox.filter(|m| !m.is_empty());
+        if let (Some(mailbox), Some(pane)) = (mailbox, pane_id.as_deref()) {
+            self.remember_lane(pane, mailbox.trim(), true);
+            title_pane(backend, pane, mailbox);
+        }
+        if let (Some(role), Some(pane)) = (role.filter(|r| !r.is_empty()), pane_id.as_deref()) {
+            let lane_label = mailbox.or(label.filter(|l| !l.is_empty()));
+            let registered = self.lane_register(
+                Some(pane),
+                Some(role),
+                provider,
+                model,
+                lane_label,
+                self_pane_id,
+                env,
+            )?;
+            out["role"] = registered;
+        }
+        Ok(out)
+    }
 }
 
 /// `create_tab`: `workspace` is an id, label or 'self'; omitted means the caller's own
@@ -490,6 +553,81 @@ pub fn focus(
         ))
     })?;
     Ok(json!({"kind": kind, "id": target_id, "focused": true}))
+}
+
+/// `self.herdr.close(kind, target_id)`: the backend's result dict, or its message as `Err`.
+pub trait CloseBackend: LayoutBackend {
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String>;
+}
+
+/// What `close_target` returns: the wire dict and the `last_message` the Python sets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closed {
+    pub result: Value,
+    pub last_message: String,
+}
+
+fn id_key(kind: &str) -> &'static str {
+    match kind {
+        "workspace" => "workspace_id",
+        "tab" => "tab_id",
+        _ => "pane_id",
+    }
+}
+
+/// `close_target`: close a workspace, tab or pane, killing whatever runs inside. Refuses to
+/// close the caller's own pane or its containers unless `force` is set, since a process
+/// closing its own terminal is almost always a mistake; do it from another pane. Dunks aimed
+/// into the closed area are stopped. `save` stands for `_save()` (called only when a dunk
+/// was stopped, as in the Python).
+pub fn close_target(
+    backend: &mut dyn CloseBackend,
+    dunks: &DunkList,
+    kind: &str,
+    target: &str,
+    self_pane_id: Option<&str>,
+    force: bool,
+    save: &mut dyn FnMut(),
+) -> Result<Closed, DunkError> {
+    let (kind, target_id, item) = resolve_kind(backend, kind, target, self_pane_id)?;
+    let key = id_key(&kind);
+    let own = self_pane_id
+        .filter(|s| !s.is_empty())
+        .and_then(|id| backend.get_pane(id));
+    if !force && own.is_some_and(|own| text(&own, key) == target_id) {
+        return refused(format!(
+            "refusing to close the {kind} this caller runs in ({target_id}); pass --force \
+             only if you intend to kill your own pane/tab/workspace"
+        ));
+    }
+    let doomed: Vec<String> = backend
+        .list_panes()
+        .iter()
+        .filter(|p| text(p, key) == target_id)
+        .map(|p| text(p, "pane_id"))
+        .collect();
+    backend.close(&kind, &target_id).map_err(|m| {
+        DunkError::Refused(format!(
+            "the terminal backend could not close {kind} {target_id}: {m}"
+        ))
+    })?;
+    let stopped = dunks.halt_aimed_at(&doomed);
+    if !stopped.is_empty() {
+        save();
+    }
+    let label = {
+        let label = text(&item, "label");
+        if label.is_empty() {
+            target_id.clone()
+        } else {
+            label
+        }
+    };
+    Ok(Closed {
+        result: json!({"kind": kind, "id": target_id, "closed_panes": doomed,
+            "stopped_dunks": stopped}),
+        last_message: format!("Closed {kind} {label}"),
+    })
 }
 
 #[cfg(test)]
