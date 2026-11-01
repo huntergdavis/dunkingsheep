@@ -986,7 +986,7 @@ mod flush_box_tests {
         assert!(result["detail"]
             .as_str()
             .unwrap()
-            .starts_with(AMBIGUOUS_COMPOSER));
+            .starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER));
         assert!(pane.keys.is_empty());
         assert_eq!(1, pane.reads.borrow().len());
     }
