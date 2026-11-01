@@ -434,6 +434,7 @@ struct Env {
     handoffs_open: bool,
     next_job: Value,
     plan_skip: Option<&'static str>,
+    panic_in_plan: bool,
     sent: Mutex<Vec<String>>,
     metrics: Mutex<Vec<String>>,
     plan_saw: Mutex<Vec<(Option<i64>, Option<f64>, usize)>>,
@@ -456,6 +457,7 @@ impl Env {
             handoffs_open: false,
             next_job: json!({ "action": "none", "reason": "no_handoff" }),
             plan_skip: None,
+            panic_in_plan: false,
             sent: Mutex::new(vec![]),
             metrics: Mutex::new(vec![]),
             plan_saw: Mutex::new(vec![]),
@@ -489,6 +491,9 @@ impl TurnDispatchEnv for Env {
             .lock()
             .unwrap()
             .push((unread, last, nudges.len()));
+        if self.panic_in_plan {
+            panic!("a hook failed");
+        }
         if let Some(reason) = self.plan_skip {
             return json!({ "action": "skip", "reason": reason });
         }
@@ -758,4 +763,63 @@ fn a_next_job_claim_or_an_open_handoff_or_a_closed_lane_ends_before_the_nudge() 
         assert_eq!(out["reason"], reason);
         assert!(env.sent.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn a_panicking_hook_does_not_wedge_the_pane() {
+    // Python releases the reservation in `finally`, so a failing dispatch cannot wedge a lane.
+    // Review t1421: one panic in an env hook left the pane `dispatch_in_progress` for ever.
+    let flock = flock();
+    let mut broken = Env::ready();
+    broken.panic_in_plan = true;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flock.dispatch_on_turn_end(PANE, &broken)
+    }));
+    assert!(caught.is_err(), "the hook's panic propagates");
+    assert!(
+        flock.turn_dispatch.lock().unwrap().dispatching.is_empty(),
+        "the reservation was released"
+    );
+    let healthy = Env::ready();
+    let again = flock.dispatch_on_turn_end(PANE, &healthy);
+    assert_eq!(
+        again["delivered"], true,
+        "the same pane dispatches normally afterwards"
+    );
+    assert_eq!(
+        healthy.plan_saw.lock().unwrap().len(),
+        1,
+        "the healthy plan actually ran"
+    );
+    // A different pane was never affected.
+    assert_eq!(
+        flock.dispatch_claimed_turn_end("w1:p2", 1000.0, &Env::ready())["delivered"],
+        true
+    );
+}
+
+#[test]
+fn a_gate_that_is_not_ready_with_no_named_reason_fails_closed() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.readiness = Ok(Readiness {
+        allowed: true,
+        candidate: true,
+        ready: false,
+        not_ready_reason: None,
+    });
+    let out = dispatch(&flock, &env);
+    assert_eq!(
+        out["reason"], "readiness_unknown",
+        "Python: StopIteration lands in the fail-closed branch"
+    );
+    assert!(env.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_task_with_no_id_is_the_text_none_like_pythons_str() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.tasks = Ok(vec![json!({ "title": "no id" })]);
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["task_id"], "None");
+    assert_eq!(out["item"], "board:None");
 }

@@ -440,13 +440,14 @@ impl Flock {
             }
             state.dispatching.insert(pane_id.to_string());
         }
-        let result = self.dispatch_claimed_turn_end(pane_id, crate::clock::now_s(), env);
-        self.turn_dispatch
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .dispatching
-            .remove(pane_id);
-        result
+        // The Python runs the whole claimed dispatch inside try/finally: the reservation is
+        // released even when a hook raises, so one failing dispatch cannot wedge a lane. A drop
+        // guard does the same here, panic included.
+        let _reservation = Reservation {
+            flock: self,
+            pane_id,
+        };
+        self.dispatch_claimed_turn_end(pane_id, crate::clock::now_s(), env)
     }
 
     /// `_dispatch_claimed_turn_end`: prompt a lane that ended its turn still holding work.
@@ -534,17 +535,25 @@ impl Flock {
         // allowlist and readiness gate as the timer dispatcher.
         match env.readiness(pane_id, unread) {
             Ok(gate) => {
-                let reason = if !gate.allowed {
-                    Some("not_allowed".to_string())
+                if !gate.allowed {
+                    record.insert("reason".into(), json!("not_allowed"));
                 } else if !gate.candidate {
-                    Some("unavailable_lane".to_string())
+                    record.insert("reason".into(), json!("unavailable_lane"));
                 } else if !gate.ready {
-                    Some(gate.not_ready_reason.unwrap_or_else(|| "not_ready".into()))
-                } else {
-                    None
-                };
-                if let Some(reason) = reason {
-                    record.insert("reason".into(), json!(reason));
+                    match gate.not_ready_reason {
+                        Some(reason) => {
+                            record.insert("reason".into(), json!(reason));
+                        }
+                        // Python's `next(...)` over the four names raises StopIteration inside
+                        // its try, which lands in the fail-closed branch: readiness_unknown.
+                        None => {
+                            record.insert(
+                                "error".into(),
+                                json!("lane gate not ready with no named reason"),
+                            );
+                            record.insert("reason".into(), json!("readiness_unknown"));
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -562,7 +571,11 @@ impl Flock {
             return Value::Object(record);
         }
         let item = plan.get("item").cloned().unwrap_or(Value::Null);
-        let task_id = item.get("id").map(value_text).unwrap_or_default();
+        // `str(task.get("id"))`: a missing id is the text "None", like the Python.
+        let task_id = item
+            .get("id")
+            .map(value_text)
+            .unwrap_or_else(|| "None".to_string());
         record.insert("action".into(), json!("nudge"));
         record.insert("task_id".into(), json!(task_id));
         record.insert("item".into(), json!(format!("board:{task_id}")));
@@ -620,6 +633,26 @@ impl Flock {
 fn value_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
         other => other.to_string(),
+    }
+}
+
+/// Releases a pane's turn-end dispatch reservation on drop (`finally: discard`).
+struct Reservation<'a> {
+    flock: &'a Flock,
+    pane_id: &'a str,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.flock
+            .turn_dispatch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .dispatching
+            .remove(self.pane_id);
     }
 }
