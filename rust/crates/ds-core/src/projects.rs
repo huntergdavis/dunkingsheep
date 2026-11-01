@@ -101,10 +101,19 @@ pub struct Authority {
     pub research_argv: Vec<String>,
 }
 
+/// Posts the "project is live" report to the owner's mailbox (docs/PROJECTS.md step 7). A trait
+/// so the registry is tested without a mailbox; the daemon's implementation sends through the
+/// inbox store. `Ok` carries the message id the report was filed under.
+pub trait Reporter: std::fmt::Debug + Send {
+    fn report(&self, project: &str, body: &str) -> Result<String, String>;
+}
+
 /// The registry of projects this daemon started.
 #[derive(Debug, Default)]
 pub struct Projects {
     projects: Vec<Project>,
+    /// None until the owner mailbox is wired: the `reported` step then says it was NOT sent.
+    reporter: Option<Box<dyn Reporter>>,
 }
 
 /// `[a-z0-9][a-z0-9-]{1,38}`: a slug, because the name becomes a directory under the root.
@@ -199,6 +208,14 @@ impl Projects {
         Self::default()
     }
 
+    /// A registry that posts its report through `reporter`.
+    pub fn with_reporter(reporter: Box<dyn Reporter>) -> Self {
+        Projects {
+            reporter: Some(reporter),
+            ..Self::default()
+        }
+    }
+
     pub fn get(&self, name: &str) -> Option<&Project> {
         self.projects.iter().find(|p| p.name == name)
     }
@@ -291,7 +308,13 @@ impl Projects {
         usage_gate(usage)?;
         let project = &mut self.projects[index];
         project.state = State::Partial;
-        let result = run_steps(project, terminal, request, authority);
+        let result = run_steps(
+            project,
+            terminal,
+            request,
+            authority,
+            self.reporter.as_deref(),
+        );
         if result.is_ok() {
             project.state = State::Live;
         }
@@ -320,6 +343,7 @@ fn run_steps(
     terminal: &mut dyn Terminal,
     request: &Request,
     authority: &Authority,
+    reporter: Option<&dyn Reporter>,
 ) -> Result<(), DunkError> {
     if !project.done("validated") {
         log(
@@ -384,23 +408,59 @@ fn run_steps(
         }
     }
     if !project.done("reported") {
-        // NOTHING IS SENT: the owner-mailbox report needs the inbox store (a later slice). The
-        // step is logged as NOT ok, with what the report will carry, so a Live project never
-        // claims a report it did not make.
         let panes: Vec<String> = project
             .agents
             .iter()
             .map(|(r, p)| format!("{r}={p}"))
             .collect();
-        log(
-            project,
-            "reported",
-            false,
-            format!(
-                "pending: not sent (owner mailbox not wired); would carry {}",
-                panes.join(",")
+        match reporter {
+            // NOTHING IS SENT when no mailbox is wired: the step is logged as NOT ok with what
+            // the report will carry, so a Live project never claims a report it did not make.
+            None => log(
+                project,
+                "reported",
+                false,
+                format!(
+                    "pending: not sent (owner mailbox not wired); would carry {}",
+                    panes.join(",")
+                ),
             ),
-        );
+            Some(reporter) => {
+                // The brief is the desk's text: only its first line, capped, goes in the report.
+                let brief: String = project
+                    .brief
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect();
+                let body = format!(
+                    "project {} is live\ndirectory: {}\nagents: {}\nbrief: {}",
+                    project.name,
+                    project.dir.display(),
+                    panes.join(", "),
+                    brief
+                );
+                match reporter.report(&project.name, &body) {
+                    Ok(id) => log(
+                        project,
+                        "reported",
+                        true,
+                        format!("sent {id}; {}", panes.join(",")),
+                    ),
+                    // A failed report FAILS the step: the project stays Partial, and the next
+                    // call retries only this step (every earlier step is already done).
+                    Err(error) => {
+                        return fail(
+                            project,
+                            "reported",
+                            format!("{error}; would carry {}", panes.join(",")),
+                        )
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -921,5 +981,145 @@ mod tests {
         let c = credit(&[("free", "available")], &[("free", 100.0)]);
         assert!(pick_tier(Role::Worker, &c).is_err());
         assert!(!WORKER_TIER_ORDER.contains(&"free") && !RESEARCH_TIER_ORDER.contains(&"free"));
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeReporter {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FakeReporter {
+        fn new() -> FakeReporter {
+            FakeReporter {
+                sent: Default::default(),
+                fail: Default::default(),
+            }
+        }
+    }
+
+    impl Reporter for FakeReporter {
+        fn report(&self, project: &str, body: &str) -> Result<String, String> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("owner mailbox unavailable".into());
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((project.into(), body.into()));
+            Ok(format!("i{}", self.sent.lock().unwrap().len()))
+        }
+    }
+
+    #[test]
+    fn a_wired_reporter_sends_the_report_and_the_step_says_so() {
+        let reporter = FakeReporter::new();
+        let (mut term, mut projects, root) = (
+            FakeTerminal::new(),
+            Projects::with_reporter(Box::new(reporter.clone())),
+            root("report-ok"),
+        );
+        let mut req = request("app");
+        req.brief = "build a thing\nSECOND LINE must not leak into the report".into();
+        let live = projects
+            .spawn(
+                &mut term,
+                &root,
+                &req,
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        assert_eq!(State::Live, live.state);
+        let event = live.events.iter().find(|e| e.step == "reported").unwrap();
+        assert!(event.ok, "{}", event.detail);
+        assert!(
+            event.detail.starts_with("sent i1; research="),
+            "{}",
+            event.detail
+        );
+        let sent = reporter.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "app");
+        assert!(
+            sent[0].1.contains("project app is live") && sent[0].1.contains("agents: research="),
+            "{}",
+            sent[0].1
+        );
+        assert!(
+            sent[0].1.contains("brief: build a thing") && !sent[0].1.contains("SECOND LINE"),
+            "{}",
+            sent[0].1
+        );
+    }
+
+    #[test]
+    fn a_failed_report_leaves_the_project_partial_and_the_retry_sends_only_the_report() {
+        let reporter = FakeReporter::new();
+        reporter
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (mut term, mut projects, root) = (
+            FakeTerminal::new(),
+            Projects::with_reporter(Box::new(reporter.clone())),
+            root("report-retry"),
+        );
+        let err = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("step reported failed") && err.contains("owner mailbox unavailable"),
+            "{err}"
+        );
+        assert_eq!(State::Partial, projects.get("app").unwrap().state);
+        let agents_before = projects.get("app").unwrap().agents.len();
+        reporter
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let live = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        assert_eq!(State::Live, live.state);
+        assert_eq!(
+            agents_before,
+            live.agents.len(),
+            "no second agent was started by the retry"
+        );
+        assert_eq!(
+            live.events
+                .iter()
+                .filter(|e| e.step == "research_agent" && e.ok)
+                .count(),
+            1
+        );
+        assert_eq!(
+            reporter.sent.lock().unwrap().len(),
+            1,
+            "exactly one report went out"
+        );
+        // and a live project is idempotent: asking again sends nothing more
+        projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        assert_eq!(reporter.sent.lock().unwrap().len(), 1);
     }
 }
