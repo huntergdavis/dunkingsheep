@@ -311,7 +311,7 @@ fn spent_value(value: &Value) -> Option<Result<u32, String>> {
                         }
                     })
                 });
-            parsed.map(Some)
+            parsed
         }
         _ => None,
     }
