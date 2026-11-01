@@ -786,12 +786,14 @@ impl DunkList {
 impl Flock {
     /// Extract the dunk-owned fields from the already-decoded whole-state payload.
     /// The whole-Flock loader owns file reads and calls this after parsing succeeds.
+    #[allow(dead_code)] // The whole-state restore caller is assigned to t1753.
     pub(crate) fn _load_dunks(&self, payload: &Map<String, Value>) {
         self.dunks.load(payload);
     }
 
     /// Route a dunk mutation through the whole-Flock snapshot seam. This module does not write
     /// an independent dunk-only file; the store decides how the complete state is persisted.
+    #[allow(dead_code)] // Dunk CRUD callers will use this facade in following assigned leaves.
     pub(crate) fn _save_dunks(&self, store: &dyn SnapshotStore) -> Result<(), DunkError> {
         store.save(self)
     }

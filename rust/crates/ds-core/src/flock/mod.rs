@@ -80,6 +80,8 @@ pub struct Flock {
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
     /// The in-memory dunk list and next_id slot. Whole-state persistence is owned by the
     /// later snapshot leaf; this leaf only loads/extracts dunk fields and invokes its seam.
+    #[allow(dead_code)]
+    // Snapshot and runtime dunk CRUD callers are assigned to dependent leaves.
     pub(crate) dunks: dunks::DunkList,
     /// pane_id -> FIFO messages waiting for the pane's outbox worker.
     pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
