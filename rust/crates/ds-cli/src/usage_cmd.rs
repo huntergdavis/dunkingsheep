@@ -9,7 +9,7 @@
 //! command body.
 
 use ds_core::usage;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// What the command printed and how it exits.
 #[derive(Debug, PartialEq, Eq)]
