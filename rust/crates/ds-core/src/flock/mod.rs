@@ -9,8 +9,10 @@
 //! `_pane_info`, and the construction of the stores that have no Rust owner yet
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
@@ -40,6 +42,20 @@ fn plain_lane_re() -> &'static Regex {
 /// `_NOT_A_NAME_MARKERS`.
 const NOT_A_NAME_MARKERS: [&str; 5] = ["[inbox]", "read it with", "|", "\u{2502}", "\u{203a}"];
 
+static NEXT_FLOCK_ID: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// The Python's `threading.local()` (`dunk_core.py:727`): the caller state of the request
+    /// running on THIS thread, per flock. It used to be one `Mutex<CallerState>` on the shared
+    /// `Flock`, so a request with an owner token could be read by any concurrent request
+    /// (privilege confusion, t1347/t1354).
+    ///
+    /// CONTRACT for the server (T40): a request runs its Flock calls on ONE thread, with no
+    /// `.await` between `set_caller` and `clear_caller` (a sync handler on a blocking thread, or
+    /// a plain synchronous block inside an async fn), and ends with `clear_caller`.
+    static CALLERS: RefCell<BTreeMap<u64, CallerState>> = const { RefCell::new(BTreeMap::new()) };
+}
+
 /// Who is making the current request (`set_caller`): pane id plus the stable agent pid/start.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CallerState {
@@ -62,10 +78,13 @@ pub struct Flock {
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
-    caller: Mutex<CallerState>,
+    /// Which flock this is, for the per-thread caller state below.
+    id: u64,
     role_panes: Mutex<panes::RolePaneCache>,
     turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
+    /// The role registry and the legacy allowlist (T31), attached after construction.
+    pub(crate) role_stores: roles_gate::RoleStoresCell,
     /// pane_id -> its full turn (turn_id, caller, handoff; T36). `turns` above is the
     /// activity view `lane_activity` reads; `commands_turns` keeps the two in step.
     pub(crate) turn_states: Mutex<commands_turns::Turns>,
@@ -83,10 +102,11 @@ impl Flock {
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
-            caller: Mutex::new(CallerState::default()),
+            id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
+            role_stores: Mutex::new(roles_gate::RoleStores::default()),
             turn_states: Mutex::new(commands_turns::Turns::new()),
         };
         flock.load_launches();
@@ -349,29 +369,36 @@ impl Flock {
 
     // -- caller state ------------------------------------------------------------
 
+    /// Run `work` on this thread's caller state for this flock. `work` must not call back into
+    /// another caller-state method (the cell is borrowed for its duration).
+    pub(crate) fn with_caller<R>(&self, work: impl FnOnce(&mut CallerState) -> R) -> R {
+        CALLERS.with(|callers| work(callers.borrow_mut().entry(self.id).or_default()))
+    }
+
     /// `set_caller`.
     pub fn set_caller(&self, caller: Option<Value>) {
-        self.caller.lock().expect("caller lock").value = caller;
+        self.with_caller(|state| state.value = caller);
     }
 
     /// `current_caller`.
     pub fn current_caller(&self) -> Option<Value> {
-        self.caller.lock().expect("caller lock").value.clone()
+        self.with_caller(|state| state.value.clone())
     }
 
     /// `clear_caller`: every per-request field except `socket_peer_ok`, which only
     /// `clear_socket_peer` resets (as in the Python).
     pub fn clear_caller(&self) {
-        let mut state = self.caller.lock().expect("caller lock");
-        let peer = state.socket_peer_ok;
-        *state = CallerState::default();
-        state.socket_peer_ok = peer;
+        self.with_caller(|state| {
+            let peer = state.socket_peer_ok;
+            *state = CallerState::default();
+            state.socket_peer_ok = peer;
+        });
     }
 
     /// `set_socket_peer` (t423): true = verifiable peer credentials, false = failed (fail
     /// closed), `None` = in-process trusted code.
     pub fn set_socket_peer(&self, ok: Option<bool>) {
-        self.caller.lock().expect("caller lock").socket_peer_ok = ok;
+        self.with_caller(|state| state.socket_peer_ok = ok);
     }
 
     /// `clear_socket_peer`.
@@ -381,12 +408,12 @@ impl Flock {
 
     /// The tri-state the completion binding reads.
     pub fn socket_peer_ok(&self) -> Option<bool> {
-        self.caller.lock().expect("caller lock").socket_peer_ok
+        self.with_caller(|state| state.socket_peer_ok)
     }
 
     /// A snapshot of the caller state.
     pub fn caller_state(&self) -> CallerState {
-        self.caller.lock().expect("caller lock").clone()
+        self.with_caller(|state| state.clone())
     }
 }
 
@@ -411,6 +438,7 @@ pub mod lanes;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
+pub mod roles_gate;
 pub mod views;
 
 #[cfg(test)]
@@ -425,5 +453,7 @@ mod mailbox_tests;
 mod panes_tests;
 #[cfg(test)]
 mod resolve_tests;
+#[cfg(test)]
+mod roles_gate_tests;
 #[cfg(test)]
 mod tests;
