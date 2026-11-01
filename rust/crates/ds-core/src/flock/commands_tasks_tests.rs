@@ -715,3 +715,80 @@ async fn task_add_deduplicates_assignees_and_task_list_filters_needs_owner() {
         asked.into_iter().map(|d| d.task.id).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn task_reap_requeues_a_dead_caller_and_returns_the_python_shape() {
+    let (flock, tasks) = flock_with_store("task-reap").await;
+    let task = tasks.add("global", "leased", "").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            WORKER,
+            ClaimOptions {
+                caller: Some((999_999_999, Some("missing".into()), Some("test".into()))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let result = flock.task_reap(None, None).await.unwrap();
+    assert_eq!(
+        serde_json::json!({"requeued": [{
+            "task_id": task.id,
+            "pane_id": WORKER,
+            "reason": "caller_dead"
+        }]}),
+        result
+    );
+    assert_eq!("open", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn task_reap_refuses_fixture_pane_lists_before_reaping() {
+    let (flock, tasks) = flock_with_store("task-reap-fixture").await;
+    let task = tasks.add("global", "leased", "").await.unwrap();
+    tasks
+        .claim_next("global", WORKER, ClaimOptions::default())
+        .await
+        .unwrap();
+
+    let error = flock
+        .task_reap(Some(vec![]), Some("fixture"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("alive_source='live'"), "{error}");
+    assert_eq!("in_progress", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn task_metrics_privacy_and_scope() {
+    let (flock, tasks) = flock_with_store("task-metrics-scope").await;
+    tasks.add("global", "global", "").await.unwrap();
+    tasks.add(WORKER, "private", "").await.unwrap();
+
+    let visible = flock
+        .task_metrics(None, None, None, None, None, Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::json!("visible"), visible["scope"]);
+    assert_eq!(2, visible["current"]["total"]);
+
+    let global = flock
+        .task_metrics(None, None, None, Some("global"), None, Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!(1, global["current"]["total"]);
+    assert!(flock
+        .task_metrics(None, None, None, Some(OTHER), None, Some(WORKER))
+        .await
+        .is_err());
+
+    let all = flock
+        .task_metrics(None, None, None, Some("all"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::json!("all"), all["scope"]);
+    assert_eq!(2, all["current"]["total"]);
+}

@@ -8,7 +8,7 @@
 //! `task_list`/`task_read` (need the store's filtered list and `recent_notes`), `task_update`,
 //! `task_complete` (verdict, `_authorize_task_complete`, `_require_completion_binding`, the
 //! github hook), `task_next`/`_claim_filters`, heartbeat/release/follow/unfollow/followers/
-//! stats/metrics/reap. The caller's role arrives as a parameter: `caller_role` is not ported.
+//! stats. The caller's role arrives as a parameter: `caller_role` is not ported.
 
 use std::sync::Arc;
 
@@ -612,6 +612,29 @@ impl Flock {
                 scope_label: label,
             })
             .await
+    }
+
+    /// `task_reap`: requeue claims whose lease expired or whose recorded caller died.
+    ///
+    /// `alive_panes` is supplied only from a live terminal snapshot. The store refuses a
+    /// fixture-tagged list, so test data can never make a real lease look abandoned.
+    pub async fn task_reap(
+        &self,
+        alive_panes: Option<Vec<String>>,
+        alive_source: Option<&str>,
+    ) -> Result<serde_json::Value, DunkError> {
+        let tasks = self.task_store()?;
+        let caller_alive: crate::tasks::CallerAlive = Box::new(crate::proc::process_alive);
+        let requeued = tasks
+            .reap(alive_panes, Some(caller_alive), None, alive_source)
+            .await?;
+        Ok(serde_json::json!({
+            "requeued": requeued.into_iter().map(|item| serde_json::json!({
+                "task_id": item.task_id,
+                "pane_id": item.pane_id,
+                "reason": item.reason,
+            })).collect::<Vec<_>>()
+        }))
     }
 
     /// `task_read`: the task, if the caller may see it.
