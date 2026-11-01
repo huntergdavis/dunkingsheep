@@ -78,6 +78,10 @@ pub struct Flock {
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
+    /// pane_id -> FIFO messages waiting for the pane's outbox worker.
+    pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
+    /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
+    next_message_id: AtomicU64,
     /// Which flock this is, for the per-thread caller state below.
     id: u64,
     /// pane_id -> the scope it follows for the next task (`self.task_waiters`).
@@ -109,6 +113,8 @@ impl Flock {
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
+            outbox: Mutex::new(BTreeMap::new()),
+            next_message_id: AtomicU64::new(1),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             task_waiters: Mutex::new(BTreeMap::new()),
             push_wake: Arc::new(tokio::sync::Notify::new()),

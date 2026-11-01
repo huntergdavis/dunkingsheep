@@ -15,8 +15,13 @@
 //! unknowable composer boundary.
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard};
 
+use super::Flock;
 use crate::clock;
+use crate::error::DunkError;
 use crate::terminal::composer::federated_composer;
 use crate::terminal::screen::{
     banner_marker, box_text, is_our_send, modal_open, status_marker, strip_ansi, typed_text,
@@ -536,5 +541,76 @@ impl Message {
 
     pub fn to_dict(&self) -> Value {
         self.to_dict_at(clock::now_s())
+    }
+}
+
+/// Snapshot persistence is deliberately invoked after worker startup and after the
+/// outbox mutex is released, matching Python's `_enqueue` then `_save` ordering.
+/// The store reads the current whole-Flock state when called, so a fast worker may
+/// already have changed the queue by then.
+pub trait SnapshotStore: Send + Sync {
+    fn save(&self, flock: &Flock) -> Result<(), DunkError>;
+}
+
+/// Ensure the per-pane delivery worker exists. `enqueue` calls this while holding
+/// the outbox mutex, after appending the message. Implementations must not re-enter
+/// the outbox during this call.
+pub trait OutboxWake: Send + Sync {
+    fn ensure_worker(&self, flock: &Flock, pane_id: &str) -> Result<(), DunkError>;
+}
+
+fn outbox_lock(
+    outbox: &Mutex<BTreeMap<String, Vec<Message>>>,
+) -> MutexGuard<'_, BTreeMap<String, Vec<Message>>> {
+    outbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Flock {
+    /// Allocate a unique monotonically increasing `mN` message identity and build
+    /// the queued message record. Delivery behavior is supplied by later leaves.
+    pub fn new_message(
+        &self,
+        pane_id: &str,
+        target_label: &str,
+        text: &str,
+        source: &str,
+    ) -> Result<Message, DunkError> {
+        let id = self
+            .next_message_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| DunkError::Refused("message id exhausted".into()))?;
+        Ok(Message::new(
+            &format!("m{id}"),
+            pane_id,
+            target_label,
+            text,
+            source,
+        ))
+    }
+
+    /// Append a message to its pane's FIFO, ensure its worker under the queue lock,
+    /// then save the current whole-Flock snapshot after releasing that lock.
+    pub fn enqueue(
+        &self,
+        message: Message,
+        wake: &dyn OutboxWake,
+        store: &dyn SnapshotStore,
+    ) -> Result<(), DunkError> {
+        let pane_id = message.pane_id.clone();
+        {
+            let mut outbox = outbox_lock(&self.outbox);
+            outbox.entry(pane_id.clone()).or_default().push(message);
+            wake.ensure_worker(self, &pane_id)?;
+        }
+        store.save(self)
+    }
+
+    /// Current pane queues for the snapshot-store seam and deterministic tests.
+    pub fn outbox_snapshot(&self) -> BTreeMap<String, Vec<Message>> {
+        outbox_lock(&self.outbox).clone()
     }
 }
