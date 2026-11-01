@@ -224,6 +224,64 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_09_inbox_write_b() {
+    let archived = run_daemon_cli(
+        &[
+            "inbox",
+            "archive",
+            "reviewer",
+            "--before",
+            "2026-10-01",
+            "--state",
+            "read,acked",
+        ],
+        "inbox_archive",
+        json!({
+            "mailbox": "reviewer",
+            "before": "2026-10-01",
+            "state": "read,acked"
+        }),
+        json!({
+            "mailbox": "reviewer",
+            "archived": 2,
+            "states": ["read", "acked"],
+            "before": "2026-10-01"
+        }),
+    );
+    assert_eq!(0, archived.status.code().unwrap());
+    assert_eq!(
+        "archived 2 message(s) in reviewer (states read,acked before 2026-10-01)\n",
+        String::from_utf8(archived.stdout).unwrap()
+    );
+    assert!(archived.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["inbox", "stats"],
+        "inbox_stats",
+        json!({}),
+        json!({"mailboxes": []}),
+    );
+    assert_eq!(0, stats.status.code().unwrap());
+    assert_eq!("no mailboxes\n", String::from_utf8(stats.stdout).unwrap());
+    assert!(stats.stderr.is_empty());
+
+    let dest = tempfile::tempdir().unwrap();
+    let dest_path = dest.path().to_str().unwrap();
+    let fetched = run_daemon_cli(
+        &["inbox", "fetch", "attachment-1", "--dest", dest_path],
+        "inbox_fetch",
+        json!({"attachment_id": "attachment-1", "dest": dest_path}),
+        json!({"path": "/sandbox/attachment.txt", "size": 12}),
+    );
+    assert_eq!(0, fetched.status.code().unwrap());
+    assert_eq!(
+        "wrote /sandbox/attachment.txt (12 bytes)\n",
+        String::from_utf8(fetched.stdout).unwrap()
+    );
+    assert!(fetched.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
