@@ -247,7 +247,10 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     assert_eq!(Some("delete numb".to_string()), typed_text(&claude_draft));
     let (text, detail) = box_text(&claude_draft);
     assert_eq!("delete numb", text);
-    assert!(detail.contains("composer: the prompt row at"), "{detail}");
+    assert!(
+        detail.contains("read 1 prompt line(s); text starts on row"),
+        "{detail}"
+    );
 
     let codex_draft = codex_typing("fix the flaky test");
     assert_eq!(
