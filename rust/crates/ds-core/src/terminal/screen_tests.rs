@@ -267,9 +267,9 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     assert_eq!(Some(String::new()), typed_text(&claude_hint));
     assert!(box_text(&claude_hint).1.contains("hint"));
 
-    let codex_hint = codex_hint("Ask Codex to do anything");
-    assert_eq!(Some(String::new()), typed_text(&codex_hint));
-    assert!(box_text(&codex_hint).1.contains("hint"));
+    let codex_hint_screen = codex_hint("Ask Codex to do anything");
+    assert_eq!(Some(String::new()), typed_text(&codex_hint_screen));
+    assert!(box_text(&codex_hint_screen).1.contains("hint"));
     let codex_skills_hint = codex_hint("Use /skills to list available skills");
     assert_eq!(Some(String::new()), typed_text(&codex_skills_hint));
     assert!(box_text(&codex_skills_hint).1.contains("hint"));
