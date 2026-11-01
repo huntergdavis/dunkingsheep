@@ -9,21 +9,98 @@
 //! NOT in this slice: the handlers themselves.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+use tokio::runtime::Handle;
 
 use crate::error::DunkError;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::Flock;
+use crate::proc::Caller;
+use crate::server::RequestCtx;
+use crate::terminal::Terminal;
 use crate::{registry, roles};
 
 /// A request's arguments (the Python `args` dict; insertion-ordered).
 pub type Args = Map<String, Value>;
 
-/// A handler: `command.handler(flock, args, self_pane_id)` in the Python. The per-request
-/// caller state is the flock's own thread-local (`Flock::set_caller`, #305): a request runs on
-/// ONE thread with no `.await` between `set_caller` and `clear_caller`.
-pub type Handler = fn(&Flock, Args, Option<&str>) -> Result<Value, DunkError>;
+/// A synchronous adapter for command dependencies. All methods are object-safe so a daemon can
+/// supply one per request without putting backend types in handler signatures.
+pub trait CommandEnv: PaneInfoEnv {
+    /// The daemon's terminal adapter. The mutex permits the existing mutable terminal API while
+    /// keeping the request context shared with role and read-only adapters.
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>>;
+
+    /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
+    fn now_s(&self) -> f64;
+}
+
+/// Context shared by every handler in one synchronous request. The server must keep this whole
+/// dispatch on its dedicated `std::thread` connection worker. In particular, a Tokio
+/// `spawn_blocking` worker is not sufficient: it still has a current Tokio handle and is rejected
+/// by [`HandlerContext::block_on`].
+pub struct HandlerContext<'a> {
+    pub flock: &'a Flock,
+    pub request: &'a RequestCtx,
+    pub env: &'a dyn CommandEnv,
+    pub runtime: &'a Handle,
+}
+
+impl HandlerContext<'_> {
+    pub fn self_pane_id(&self) -> Option<&str> {
+        self.request.self_pane_id.as_deref()
+    }
+
+    /// Drive an async store/Flock call on the dedicated standard thread running this request.
+    /// This rejects Tokio tasks and `spawn_blocking` workers, where caller-sensitive work could
+    /// otherwise be moved to a different thread between synchronous handler calls.
+    pub fn block_on<F: std::future::Future>(&self, future: F) -> Result<F::Output, DunkError> {
+        if Handle::try_current().is_ok() {
+            return Err(DunkError::Refused(
+                "async command work requires a dedicated blocking request thread".into(),
+            ));
+        }
+        Ok(self.runtime.block_on(future))
+    }
+}
+
+/// A handler receives the complete per-request context, not ambient caller arguments.
+pub type Handler = fn(&HandlerContext<'_>, Args) -> Result<Value, DunkError>;
+
+/// Installs request identity into Flock's thread-local and clears all fields on every exit path.
+struct RequestCallerGuard<'a>(&'a Flock);
+
+impl<'a> RequestCallerGuard<'a> {
+    fn install(flock: &'a Flock, request: &RequestCtx) -> Self {
+        let caller = request.caller.as_ref().map(caller_value);
+        flock.set_caller(caller);
+        flock.set_service_token(request.service_token.as_deref());
+        flock.with_caller(|state| {
+            state.identity_bound = request.identity_bound;
+            state.identity_note = request.identity_note.clone();
+        });
+        flock.set_socket_peer(request.socket_peer.then_some(true));
+        Self(flock)
+    }
+}
+
+impl Drop for RequestCallerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_caller();
+        self.0.clear_socket_peer();
+    }
+}
+
+fn caller_value(caller: &Caller) -> Value {
+    json!({
+        "pane_id": caller.pane_id,
+        "pid": caller.pid,
+        "start": caller.start,
+        "name": caller.name,
+        "source": caller.source,
+    })
+}
 
 /// The two caller-identity calls `dispatch` makes on the flock (`Flock.caller_role`,
 /// `Flock.require_superuser`). A trait so this slice does not wait for flock/roles_gate.rs.
@@ -32,19 +109,17 @@ pub trait CallerGate {
     fn require_superuser(&self, self_pane_id: Option<&str>, name: &str) -> Result<(), DunkError>;
 }
 
-/// The real gate: the flock's own `caller_role` / `require_superuser` (flock/roles_gate.rs)
-/// over the pane-info environment of the request.
-pub struct FlockGate<'a> {
-    pub flock: &'a Flock,
-    pub env: &'a dyn PaneInfoEnv,
-}
+/// The real gate: the flock's own role methods over the request's pane adapter and clock.
+pub struct FlockGate<'a>(pub &'a HandlerContext<'a>);
 
 impl CallerGate for FlockGate<'_> {
     fn caller_role(&self, self_pane_id: Option<&str>) -> Result<String, DunkError> {
-        self.flock.caller_role(self_pane_id, self.env)
+        self.0.flock.caller_role(self_pane_id, self.0.env)
     }
     fn require_superuser(&self, self_pane_id: Option<&str>, name: &str) -> Result<(), DunkError> {
-        self.flock.require_superuser(self_pane_id, name, self.env)
+        self.0
+            .flock
+            .require_superuser(self_pane_id, name, self.0.env)
     }
 }
 
@@ -120,15 +195,17 @@ impl Dispatcher {
         self.handlers.insert(name, handler);
     }
 
-    /// `dunk_api.dispatch(flock, name, args, self_pane_id)`.
-    pub fn dispatch<G: CallerGate>(
+    /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
+    /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
+    pub fn dispatch<G: CallerGate + ?Sized>(
         &self,
-        flock: &Flock,
+        context: &HandlerContext<'_>,
         gate: &G,
         name: &str,
         args: Option<Args>,
-        self_pane_id: Option<&str>,
     ) -> Result<Value, DunkError> {
+        let _caller = RequestCallerGuard::install(context.flock, context.request);
+        let self_pane_id = context.self_pane_id();
         let command = registry::command(name)
             .ok_or_else(|| DunkError::Refused(format!("unknown command {}", py_repr(name))))?;
         let role = gate.caller_role(self_pane_id)?;
@@ -177,7 +254,7 @@ impl Dispatcher {
             )));
         }
         let result = match self.handlers.get(command.name) {
-            Some(handler) => handler(flock, args, self_pane_id)?,
+            Some(handler) => handler(context, args)?,
             None => return Err(not_ported(command.name)),
         };
         Ok(if role == "desk" {
