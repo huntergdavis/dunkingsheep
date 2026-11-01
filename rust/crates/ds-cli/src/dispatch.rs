@@ -20,6 +20,19 @@ fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
 
+fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
+    ns.get(key)
+        .and_then(Value::as_array)
+        .map(|words| {
+            words
+                .iter()
+                .map(crate::render_fleet::py_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
