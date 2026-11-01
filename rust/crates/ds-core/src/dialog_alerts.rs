@@ -99,19 +99,15 @@ fn open(path: &Path) -> Result<Connection, DunkError> {
 /// `Undeliverable` is treated as a failure; successful sinks are suppressed for 30m,
 /// failed sinks retry after 60s. A crash after delivery but before the delivered
 /// update may repeat an alert, preserving at-least-once delivery.
-pub fn notify<OwnerSink, VpSink>(
+pub fn notify(
     pane_id: &str,
     generation: Option<&str>,
     signature: Option<&str>,
-    mut owner_sink: OwnerSink,
-    mut vp_sink: VpSink,
+    owner_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
+    vp_sink: &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
     path: Option<&Path>,
     now: Option<f64>,
-) -> Result<Vec<SinkAttempt>, DunkError>
-where
-    OwnerSink: FnMut(&str) -> Result<SinkDelivery, String>,
-    VpSink: FnMut(&str) -> Result<SinkDelivery, String>,
-{
+) -> Result<Vec<SinkAttempt>, DunkError> {
     let Some(generation) = generation.filter(|value| !value.is_empty()) else {
         return Ok(Vec::new());
     };
@@ -129,16 +125,7 @@ where
     let mut db = open(&path)?;
     let mut results = Vec::new();
 
-    for (name, sink) in [
-        (
-            "owner",
-            &mut owner_sink as &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
-        ),
-        (
-            "vp",
-            &mut vp_sink as &mut dyn FnMut(&str) -> Result<SinkDelivery, String>,
-        ),
-    ] {
+    for (name, sink) in [("owner", owner_sink), ("vp", vp_sink)] {
         let transaction = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
@@ -214,24 +201,30 @@ mod tests {
         }
     }
 
+    fn successful_sink(_: &str) -> Result<SinkDelivery, String> {
+        Ok(SinkDelivery::Delivered)
+    }
+
     #[test]
     fn durable_dedupe_is_per_pane_generation_and_dialog() {
         let (_directory, path) = path();
         let owner_calls = Cell::new(0);
         let vp_calls = Cell::new(0);
-        let mut notify = |pane, generation, signature, now| {
+        let notify = |pane, generation, signature, now| {
+            let mut owner = |_| {
+                owner_calls.set(owner_calls.get() + 1);
+                Ok(SinkDelivery::Delivered)
+            };
+            let mut vp = |_| {
+                vp_calls.set(vp_calls.get() + 1);
+                Ok(SinkDelivery::Delivered)
+            };
             super::notify(
                 pane,
                 Some(generation),
                 Some(signature),
-                |_| {
-                    owner_calls.set(owner_calls.get() + 1);
-                    Ok(SinkDelivery::Delivered)
-                },
-                |_| {
-                    vp_calls.set(vp_calls.get() + 1);
-                    Ok(SinkDelivery::Delivered)
-                },
+                &mut owner,
+                &mut vp,
                 Some(&path),
                 Some(now),
             )
@@ -266,42 +259,41 @@ mod tests {
     #[test]
     fn recurrent_identical_dialog_realerts_at_the_thirty_minute_boundary() {
         let (_directory, path) = path();
-        let sink = |_| Ok(SinkDelivery::Delivered);
+        let mut owner = successful_sink;
+        let mut vp = successful_sink;
         assert_eq!(
             2,
             notify(
                 "%2",
                 Some("g1"),
                 Some("question"),
-                sink,
-                sink,
+                &mut owner,
+                &mut vp,
                 Some(&path),
                 Some(100.0)
             )
             .unwrap()
             .len()
         );
-        let sink = |_| Ok(SinkDelivery::Delivered);
         assert!(notify(
             "%2",
             Some("g1"),
             Some("question"),
-            sink,
-            sink,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(1899.0)
         )
         .unwrap()
         .is_empty());
-        let sink = |_| Ok(SinkDelivery::Delivered);
         assert_eq!(
             2,
             notify(
                 "%2",
                 Some("g1"),
                 Some("question"),
-                sink,
-                sink,
+                &mut owner,
+                &mut vp,
                 Some(&path),
                 Some(1900.0)
             )
@@ -315,7 +307,7 @@ mod tests {
         let (_directory, path) = path();
         let owner_calls = Cell::new(0);
         let vp_calls = Cell::new(0);
-        let owner = |_| {
+        let mut owner = |_: &str| {
             owner_calls.set(owner_calls.get() + 1);
             if owner_calls.get() == 1 {
                 Err("offline".into())
@@ -323,7 +315,7 @@ mod tests {
                 Ok(SinkDelivery::Delivered)
             }
         };
-        let vp = |_| {
+        let mut vp = |_: &str| {
             vp_calls.set(vp_calls.get() + 1);
             Ok(SinkDelivery::Delivered)
         };
@@ -331,8 +323,8 @@ mod tests {
             "%2",
             Some("g1"),
             Some("question"),
-            owner,
-            vp,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(100.0),
         )
@@ -348,41 +340,25 @@ mod tests {
             ],
             first
         );
-        let owner = |_| {
-            owner_calls.set(owner_calls.get() + 1);
-            Ok(SinkDelivery::Delivered)
-        };
-        let vp = |_| {
-            vp_calls.set(vp_calls.get() + 1);
-            Ok(SinkDelivery::Delivered)
-        };
         assert!(notify(
             "%2",
             Some("g1"),
             Some("question"),
-            owner,
-            vp,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(159.0)
         )
         .unwrap()
         .is_empty());
-        let owner = |_| {
-            owner_calls.set(owner_calls.get() + 1);
-            Ok(SinkDelivery::Delivered)
-        };
-        let vp = |_| {
-            vp_calls.set(vp_calls.get() + 1);
-            Ok(SinkDelivery::Delivered)
-        };
         assert_eq!(
             vec![delivered("owner")],
             notify(
                 "%2",
                 Some("g1"),
                 Some("question"),
-                owner,
-                vp,
+                &mut owner,
+                &mut vp,
                 Some(&path),
                 Some(160.0)
             )
@@ -396,8 +372,8 @@ mod tests {
     fn undeliverable_sink_is_failed_and_retried() {
         let (_directory, path) = path();
         let vp_calls = Cell::new(0);
-        let owner = |_| Ok(SinkDelivery::Delivered);
-        let vp = |_| {
+        let mut owner = successful_sink;
+        let mut vp = |_: &str| {
             vp_calls.set(vp_calls.get() + 1);
             if vp_calls.get() == 1 {
                 Ok(SinkDelivery::Undeliverable)
@@ -409,8 +385,8 @@ mod tests {
             "%2",
             Some("g1"),
             Some("question"),
-            owner,
-            vp,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(100.0),
         )
@@ -419,19 +395,14 @@ mod tests {
             Some("notification target is unavailable".to_string()),
             first[1].error
         );
-        let owner = |_| Ok(SinkDelivery::Delivered);
-        let vp = |_| {
-            vp_calls.set(vp_calls.get() + 1);
-            Ok(SinkDelivery::Delivered)
-        };
         assert_eq!(
             vec![delivered("vp")],
             notify(
                 "%2",
                 Some("g1"),
                 Some("question"),
-                owner,
-                vp,
+                &mut owner,
+                &mut vp,
                 Some(&path),
                 Some(160.0)
             )
@@ -444,7 +415,11 @@ mod tests {
     fn unidentified_dialog_skips_without_creating_storage_or_calling_sinks() {
         let (directory, path) = path();
         let calls = Cell::new(0);
-        let sink = |_| {
+        let mut owner = |_: &str| {
+            calls.set(calls.get() + 1);
+            Ok(SinkDelivery::Delivered)
+        };
+        let mut vp = |_: &str| {
             calls.set(calls.get() + 1);
             Ok(SinkDelivery::Delivered)
         };
@@ -452,8 +427,8 @@ mod tests {
             "%2",
             None,
             Some("question"),
-            sink,
-            sink,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(100.0)
         )
@@ -463,8 +438,8 @@ mod tests {
             "%2",
             Some("g1"),
             Some(""),
-            sink,
-            sink,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(100.0)
         )
@@ -478,7 +453,7 @@ mod tests {
     fn last_attempt_is_committed_before_the_sink_runs() {
         let (_directory, path) = path();
         let path_for_sink = path.clone();
-        let owner = |_| {
+        let mut owner = |_: &str| {
             let connection = Connection::open(&path_for_sink).unwrap();
             let (last_attempt, delivered): (f64, Option<f64>) = connection
                 .query_row(
@@ -491,13 +466,13 @@ mod tests {
             assert_eq!(None, delivered);
             Err("crash after reservation".into())
         };
-        let vp = |_| Ok(SinkDelivery::Delivered);
+        let mut vp = successful_sink;
         let report = notify(
             "%2",
             Some("g1"),
             Some("question"),
-            owner,
-            vp,
+            &mut owner,
+            &mut vp,
             Some(&path),
             Some(100.0),
         )
