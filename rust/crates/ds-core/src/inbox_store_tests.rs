@@ -57,6 +57,105 @@ fn a_write_through_the_store_is_visible_to_a_fresh_read_pool() {
 }
 
 #[test]
+fn sync_store_bridge_drives_private_writer_from_tokio_worker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = std::sync::Arc::new(
+        Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).expect("open"),
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("outer runtime");
+
+    let message_id = runtime
+        .block_on(with_sync_store(std::sync::Arc::clone(&store), |store| {
+            assert!(tokio::runtime::Handle::try_current().is_ok());
+            store.send(&Outgoing {
+                mailbox: "bridge-test",
+                body: Some("private writer ran on blocking pool"),
+                ..Default::default()
+            })
+        }))
+        .expect("blocking store call");
+
+    let pool = ReadPool::open(store.path(), 1).expect("read pool");
+    let (summary, body) = inbox::get(&pool, &message_id, now_s()).expect("message round trip");
+    assert_eq!(summary.mailbox, "bridge-test");
+    assert_eq!(body, "private writer ran on blocking pool");
+}
+
+#[test]
+fn ensure_next_job_is_idempotent_and_refuses_recipient_change() {
+    let fixture = Fixture::new();
+    let first = fixture
+        .store
+        .ensure_next_job("nj-0123", "worker", "%23", "next body", "Next task")
+        .expect("materialise intent");
+    fixture
+        .store
+        .record_notify(
+            "nj-0123",
+            "sent",
+            Some("accepted"),
+            Some("receipt-1"),
+            Some(1),
+        )
+        .expect("record receipt");
+    let recorded = inbox::status(&fixture.pool(), "nj-0123", now_s()).expect("recorded row");
+
+    let replay = fixture
+        .store
+        .ensure_next_job(
+            "nj-0123",
+            "worker",
+            "%23",
+            "replacement body",
+            "Replacement subject",
+        )
+        .expect("replay committed intent");
+    assert_eq!(first.created_at, replay.created_at);
+    assert_eq!(replay.state, "queued");
+    assert_eq!(replay.mailbox, "worker");
+    assert_eq!(replay.destination, "worker");
+    assert_eq!(replay.pane_id.as_deref(), Some("%23"));
+    assert_eq!(replay.sender.as_deref(), Some("next-job"));
+    assert_eq!(replay.notify_state.as_deref(), Some("sent"));
+    assert_eq!(replay.notify_reason.as_deref(), Some("accepted"));
+    assert_eq!(replay.notify_at, recorded.notify_at);
+    assert_eq!(replay.notify_transport_id.as_deref(), Some("receipt-1"));
+    assert_eq!(replay.notify_attempt, Some(1));
+
+    let (summary, body) = inbox::get(&fixture.pool(), "nj-0123", now_s()).expect("stored row");
+    assert_eq!(summary.subject.as_deref(), Some("Next task"));
+    assert_eq!(body, "next body");
+
+    assert_eq!(
+        fixture
+            .store
+            .ensure_next_job("other-id", "worker", "%23", "body", "subject")
+            .unwrap_err()
+            .to_string(),
+        "next-job message id must start with nj-"
+    );
+    for (mailbox, pane_id) in [("other-worker", "%23"), ("worker", "%24")] {
+        assert_eq!(
+            fixture
+                .store
+                .ensure_next_job("nj-0123", mailbox, pane_id, "changed", "changed")
+                .unwrap_err()
+                .to_string(),
+            "next-job recipient changed"
+        );
+    }
+
+    let unchanged = inbox::status(&fixture.pool(), "nj-0123", now_s()).expect("unchanged row");
+    assert_eq!(unchanged.mailbox, "worker");
+    assert_eq!(unchanged.pane_id.as_deref(), Some("%23"));
+    assert_eq!(unchanged.notify_transport_id.as_deref(), Some("receipt-1"));
+}
+
+#[test]
 fn ids_count_up_from_one_and_survive_a_restart() {
     let fixture = Fixture::new();
     assert_eq!("i1", fixture.send("writer", "one"));
