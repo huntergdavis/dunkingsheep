@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use super::Flock;
 use crate::error::DunkError;
-use crate::tasks::{AddOptions, Task, Tasks};
+use crate::tasks::{AddOptions, FieldEdit, Task, Tasks};
 
 /// `TASK_GLOBAL`.
 pub const TASK_GLOBAL: &str = "global";
@@ -32,6 +32,21 @@ pub struct TaskAddArgs<'a> {
     pub parent_id: Option<&'a str>,
     pub depends_on: &'a [&'a str],
     pub multi_assignee: bool,
+}
+
+/// `task_update`'s optional arguments; `None` leaves a field alone (the Python's Ellipsis
+/// for `parent_id` and `block_reason` is `Some(None)` to clear).
+#[derive(Debug, Default, Clone)]
+pub struct TaskUpdateArgs<'a> {
+    pub title: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub parent_id: Option<Option<&'a str>>,
+    pub assignees: Option<&'a [&'a str]>,
+    pub depends_on: Option<&'a [&'a str]>,
+    pub block_reason: Option<Option<&'a str>>,
+    pub multi_assignee: Option<bool>,
 }
 
 impl Flock {
@@ -221,6 +236,55 @@ impl Flock {
                 },
             )
             .await
+    }
+
+    /// `task_read`: the task, if the caller may see it.
+    pub async fn task_read(
+        &self,
+        task_id: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await
+    }
+
+    /// `task_update`: field edits through `Tasks::update`, then a status change through
+    /// `set_status` (which carries the terminal-status guards). The Python does both in one
+    /// transaction; here a refused status leaves the field edits applied.
+    pub async fn task_update(
+        &self,
+        task_id: &str,
+        args: TaskUpdateArgs<'_>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let resolved = match args.assignees {
+            Some(list) => Some(Self::task_assignees(list, self_pane_id)?),
+            None => None,
+        };
+        let own = |v: &str| v.to_string();
+        let edit = FieldEdit {
+            title: args.title.map(own),
+            body: args.body.map(own),
+            priority: args.priority.map(own),
+            depends_on: args.depends_on.map(|l| l.iter().map(|d| own(d)).collect()),
+            parent_id: args.parent_id.map(|p| p.map(own)),
+            assignees: resolved,
+            multi_assignee: args.multi_assignee,
+            block_reason: args.block_reason.map(|r| r.map(own)),
+        };
+        let mut task = tasks.update(task_id, edit, self_pane_id).await?;
+        if let Some(status) = args.status {
+            let reason = match args.block_reason {
+                Some(Some(r)) => Some(r),
+                _ => None,
+            };
+            task = tasks
+                .set_status(task_id, status, reason, self_pane_id)
+                .await?;
+        }
+        Ok(task)
     }
 
     /// `task_block`.

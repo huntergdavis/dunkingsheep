@@ -471,3 +471,49 @@ async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles
         .await
         .is_err());
 }
+
+// -- task_read / task_update ---------------------------------------------------------
+
+#[tokio::test]
+async fn task_read_refuses_another_panes_private_task() {
+    let (flock, tasks) = flock_with_store("read").await;
+    let private = tasks.add("w3:p3", "mine", "").await.unwrap();
+    assert!(flock.task_read(&private.id, Some("w3:p3")).await.is_ok());
+    assert!(flock.task_read(&private.id, None).await.is_ok());
+    let err = flock
+        .task_read(&private.id, Some("w4:p4"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("private queue"), "{err}");
+}
+
+#[tokio::test]
+async fn task_update_edits_fields_resolves_self_and_moves_status() {
+    let (flock, tasks) = flock_with_store("update").await;
+    let t = tasks.add("global", "t", "").await.unwrap();
+    let args = TaskUpdateArgs {
+        title: Some("new"),
+        priority: Some("high"),
+        assignees: Some(&["me"]),
+        status: Some("blocked"),
+        block_reason: Some(Some("waiting")),
+        ..Default::default()
+    };
+    let got = flock.task_update(&t.id, args, Some("w1:p1")).await.unwrap();
+    assert_eq!(
+        ("new", "high", "blocked"),
+        (
+            got.title.as_str(),
+            got.priority.as_str(),
+            got.status.as_str()
+        )
+    );
+    assert_eq!(r#"["w1:p1"]"#, got.assignees);
+    assert_eq!(Some("waiting"), got.block_reason.as_deref());
+    let private = tasks.add("w3:p3", "p", "").await.unwrap();
+    assert!(flock
+        .task_update(&private.id, TaskUpdateArgs::default(), Some("w4:p4"))
+        .await
+        .is_err());
+}
