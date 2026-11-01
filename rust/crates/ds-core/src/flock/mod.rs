@@ -402,6 +402,7 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub mod agent_verify;
 pub mod commands_inbox;
 pub mod commands_owner_views;
 pub mod commands_turns;
