@@ -9,14 +9,18 @@
 //!
 //! Slice 2: `turn_active` and `turn_expire` (the crashed-turn path).
 //!
-//! NOT PORTED yet (next T36 slices): `_dispatch_on_turn_end` / `_dispatch_claimed_turn_end` (the
-//! guardrails and the send), and the loops (`_task_reaper_loop`,
+//! Slice 4 (t1412): `_dispatch_on_turn_end` / `_dispatch_claimed_turn_end`, the turn-end nudge:
+//! every guardrail in the Python's order, the record it returns, and the cooldown bookkeeping.
+//! The planning functions of `dunk_dispatch` (`turn_end_plan`, `lane_plan`, `turn_end_text`)
+//! are T54 and reach this code through [`TurnDispatchEnv`].
+//!
+//! NOT PORTED yet (next T36 slices): the loops (`_task_reaper_loop`,
 //! `_task_push_loop`, `_stuck_observer_loop`, the next-job wake) in `flock/loops.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::Flock;
 use crate::activity::Turn;
@@ -334,5 +338,288 @@ impl Flock {
             .iter()
             .map(|(pane_id, state)| json!({ "pane_id": pane_id, "ttl_s": state.ttl_s, "reason": "ttl" }))
             .collect()
+    }
+}
+
+/// Per-flock turn-end dispatch state: when each pane (and each pane+task) was last prompted,
+/// and the panes a dispatch is currently running for (`turn_end_nudges`,
+/// `turn_end_task_nudges`, `turn_end_dispatching`).
+#[derive(Debug, Default)]
+pub struct TurnDispatchState {
+    pub nudges: BTreeMap<String, f64>,
+    pub task_nudges: BTreeMap<(String, String), f64>,
+    pub dispatching: BTreeSet<String>,
+}
+
+/// What `_dispatch_claimed_turn_end` asks of the shared lane gate (`dunk_dispatch.lane_plan`).
+#[derive(Debug, Clone, Default)]
+pub struct Readiness {
+    /// The pane is on the dispatch allowlist.
+    pub allowed: bool,
+    /// The pane is a live, non-retired lane with a known status.
+    pub candidate: bool,
+    pub ready: bool,
+    /// First true of has_mail / blocked / dead / working, when not ready.
+    pub not_ready_reason: Option<String>,
+}
+
+/// Everything the turn-end nudge reaches outside the Flock's own state. The planning functions
+/// belong to `dunk_dispatch` (T54); until then they are the caller's.
+pub trait TurnDispatchEnv {
+    /// `TURN_END_DISPATCH`: the trigger is switched on.
+    fn dispatch_enabled(&self) -> bool;
+    /// `inbox_count(None, self_pane_id=pane).unread`.
+    fn unread_count(&self, pane_id: &str) -> Result<Option<i64>, String>;
+    /// The pane's live claims as decorated task records (`task_read` per lease).
+    fn claimed_tasks(&self, pane_id: &str) -> Result<Vec<Value>, String>;
+    /// `dunk_dispatch.turn_end_plan(...)`: `{action: "nudge"|"skip", reason, item}`.
+    fn turn_end_plan(
+        &self,
+        pane_id: &str,
+        tasks: &[Value],
+        unread: Option<i64>,
+        last_nudge_at: Option<f64>,
+        task_nudges: &BTreeMap<String, f64>,
+        now: f64,
+    ) -> Value;
+    /// Ids of this pane's messages still `queued` in the outbox.
+    fn pending_outbox(&self, pane_id: &str) -> Vec<String>;
+    /// The allowlist + the shared lane readiness gate; an error fails closed.
+    fn readiness(&self, pane_id: &str, unread: Option<i64>) -> Result<Readiness, String>;
+    /// `dunk_dispatch.turn_end_text(task)`.
+    fn turn_end_text(&self, task: &Value) -> String;
+    /// `send_now(pane, text, wait_s=TURN_END_WAIT_S, source="turn_end")`: `{outcome, message_id,
+    /// message}`; an Err is a refusal.
+    fn send_now(&self, pane_id: &str, text: &str) -> Result<Value, String>;
+    /// `self.metrics.record("turn.end.dispatch", ...)`.
+    fn record(&self, pane_id: &str, outcome: &str, reason: Option<&str>, bytes: Option<usize>);
+    /// `self.next_jobs.advance(pane_id, "turn.end")`: the next-job plan.
+    fn advance_next_job(&self, pane_id: &str) -> Value;
+    /// Any next-job handoff of this pane whose task is not yet done or cancelled.
+    fn open_handoffs(&self, pane_id: &str) -> bool;
+}
+
+impl Flock {
+    /// `_dispatch_on_turn_end`: advance the next-job plan; a claim, or an unfinished handoff,
+    /// ends here with `delivered: false`; otherwise reserve the pane (concurrent turn ends cannot
+    /// enqueue twice) and run the claimed-work nudge.
+    pub fn dispatch_on_turn_end(&self, pane_id: &str, env: &dyn TurnDispatchEnv) -> Value {
+        let plan = env.advance_next_job(pane_id);
+        self.dispatch_after_plan(pane_id, plan, env)
+    }
+
+    fn dispatch_after_plan(&self, pane_id: &str, plan: Value, env: &dyn TurnDispatchEnv) -> Value {
+        let with_delivered = |mut plan: Value| {
+            if let Some(object) = plan.as_object_mut() {
+                object.insert("delivered".into(), json!(false));
+            }
+            plan
+        };
+        let reason = plan.get("reason").and_then(Value::as_str).unwrap_or("");
+        if [
+            "disabled",
+            "not_allowed",
+            "unavailable_lane",
+            "readiness_unknown",
+        ]
+        .contains(&reason)
+        {
+            return with_delivered(plan);
+        }
+        if plan.get("action").and_then(Value::as_str) == Some("claim") || env.open_handoffs(pane_id)
+        {
+            return with_delivered(plan);
+        }
+        {
+            let mut state = self.turn_dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            if state.dispatching.contains(pane_id) {
+                return json!({
+                    "trigger": "turn.end", "pane_id": pane_id, "action": "skip",
+                    "reason": "dispatch_in_progress", "delivered": false,
+                });
+            }
+            state.dispatching.insert(pane_id.to_string());
+        }
+        let result = self.dispatch_claimed_turn_end(pane_id, crate::clock::now_s(), env);
+        self.turn_dispatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .dispatching
+            .remove(pane_id);
+        result
+    }
+
+    /// `_dispatch_claimed_turn_end`: prompt a lane that ended its turn still holding work.
+    /// Every guardrail is a code the caller and the log can read, in the Python's order:
+    /// disabled, then the plan's own skips (unread_unknown, unread_mail, no_open_work, cooldown,
+    /// task_cooldown, ...), held_delivery_pending, not_allowed, unavailable_lane, the lane gate
+    /// (has_mail / blocked / dead / working), readiness_unknown. A send that is HELD (the box
+    /// would not clear, a dead session, an unconfirmed submit) is recorded as held and is NOT
+    /// counted as delivered and does NOT start the cooldown clock.
+    pub fn dispatch_claimed_turn_end(
+        &self,
+        pane_id: &str,
+        now: f64,
+        env: &dyn TurnDispatchEnv,
+    ) -> Value {
+        let mut record = Map::new();
+        record.insert("trigger".into(), json!("turn.end"));
+        record.insert("pane_id".into(), json!(pane_id));
+        record.insert("action".into(), json!("skip"));
+        record.insert("reason".into(), Value::Null);
+        record.insert("delivered".into(), json!(false));
+        if !env.dispatch_enabled() {
+            record.insert("reason".into(), json!("disabled"));
+            return Value::Object(record);
+        }
+        let last_nudge = self
+            .turn_dispatch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .nudges
+            .get(pane_id)
+            .copied();
+        let unread = match env.unread_count(pane_id) {
+            Ok(unread) => unread,
+            Err(error) => {
+                record.insert(
+                    "error".into(),
+                    json!(format!("inbox count failed: {error}")),
+                );
+                None
+            }
+        };
+        let tasks = match env.claimed_tasks(pane_id) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                record.insert("error".into(), json!(format!("task list failed: {error}")));
+                Vec::new()
+            }
+        };
+        let task_nudges: BTreeMap<String, f64> = {
+            let state = self.turn_dispatch.lock().unwrap_or_else(|p| p.into_inner());
+            tasks
+                .iter()
+                .filter_map(|task| {
+                    let id = task.get("id").map(value_text)?;
+                    state
+                        .task_nudges
+                        .get(&(pane_id.to_string(), id.clone()))
+                        .map(|at| (id, *at))
+                })
+                .collect()
+        };
+        let plan = env.turn_end_plan(pane_id, &tasks, unread, last_nudge, &task_nudges, now);
+        if plan.get("action").and_then(Value::as_str) != Some("nudge") {
+            let reason = plan
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            record.insert("reason".into(), json!(reason));
+            env.record(pane_id, "held", Some(&reason), None);
+            eprintln!("turn.end {pane_id}: no nudge (trigger=turn.end reason={reason})");
+            return Value::Object(record);
+        }
+        // One prompt at a time per pane: stacking a second behind one still waiting for the
+        // box is how a lane gets three contradictory prompts after one turn.
+        let pending = env.pending_outbox(pane_id);
+        if let Some(first) = pending.first() {
+            record.insert("reason".into(), json!("held_delivery_pending"));
+            env.record(pane_id, "held", Some("held_delivery_pending"), None);
+            eprintln!("turn.end {pane_id}: no nudge (trigger=turn.end reason=held_delivery_pending message={first})");
+            return Value::Object(record);
+        }
+        // Claiming a task is necessary but does not opt a lane into automatic prompts: the same
+        // allowlist and readiness gate as the timer dispatcher.
+        match env.readiness(pane_id, unread) {
+            Ok(gate) => {
+                let reason = if !gate.allowed {
+                    Some("not_allowed".to_string())
+                } else if !gate.candidate {
+                    Some("unavailable_lane".to_string())
+                } else if !gate.ready {
+                    Some(gate.not_ready_reason.unwrap_or_else(|| "not_ready".into()))
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    record.insert("reason".into(), json!(reason));
+                }
+            }
+            Err(error) => {
+                record.insert("reason".into(), json!("readiness_unknown"));
+                record.insert("error".into(), json!(error));
+            }
+        }
+        if let Some(reason) = record
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(String::from)
+        {
+            env.record(pane_id, "held", Some(&reason), None);
+            eprintln!("turn.end {pane_id}: no nudge (trigger=turn.end reason={reason})");
+            return Value::Object(record);
+        }
+        let item = plan.get("item").cloned().unwrap_or(Value::Null);
+        let task_id = item.get("id").map(value_text).unwrap_or_default();
+        record.insert("action".into(), json!("nudge"));
+        record.insert("task_id".into(), json!(task_id));
+        record.insert("item".into(), json!(format!("board:{task_id}")));
+        let text = env.turn_end_text(&item);
+        let bytes = text.len();
+        let message = match env.send_now(pane_id, &text) {
+            Ok(message) => message,
+            Err(error) => {
+                // Never break turn_end: a refusal is recorded, not raised, and is not delivered.
+                record.insert("delivered".into(), json!(false));
+                record.insert("outcome".into(), json!("refused"));
+                record.insert("error".into(), json!(error));
+                env.record(pane_id, "failed", Some("refused"), None);
+                eprintln!("turn.end {pane_id}: trigger=turn.end nudge REFUSED for task {task_id} ({error}); not counted as delivered");
+                return Value::Object(record);
+            }
+        };
+        let outcome = message
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let delivered = outcome == "ok";
+        record.insert(
+            "message_id".into(),
+            message.get("message_id").cloned().unwrap_or(Value::Null),
+        );
+        record.insert("delivered".into(), json!(delivered));
+        record.insert("outcome".into(), json!(outcome));
+        record.insert(
+            "message".into(),
+            message.get("message").cloned().unwrap_or(Value::Null),
+        );
+        if delivered {
+            {
+                let mut state = self.turn_dispatch.lock().unwrap_or_else(|p| p.into_inner());
+                state.nudges.insert(pane_id.to_string(), now);
+                state
+                    .task_nudges
+                    .insert((pane_id.to_string(), task_id.clone()), now);
+            }
+            env.record(pane_id, "ok", None, Some(bytes));
+            eprintln!("turn.end {pane_id}: trigger=turn.end nudge DELIVERED task={task_id}");
+        } else {
+            // HELD, NOT DELIVERED: the message stays in the outbox and the worker retries when
+            // the box clears. Saying "delivered" here is the claim the task forbids.
+            env.record(pane_id, "held", Some(&outcome), Some(bytes));
+            eprintln!("turn.end {pane_id}: trigger=turn.end nudge NOT delivered for task {task_id} (outcome={outcome}); held, not counted as delivered");
+        }
+        Value::Object(record)
+    }
+}
+
+/// Python's `str(value)` for an id that is a string or a number.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
     }
 }

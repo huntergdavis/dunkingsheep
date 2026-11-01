@@ -90,6 +90,8 @@ pub struct Flock {
     /// pane_id -> its full turn (turn_id, caller, handoff; T36). `turns` above is the
     /// activity view `lane_activity` reads; `commands_turns` keeps the two in step.
     pub(crate) turn_states: Mutex<commands_turns::Turns>,
+    /// Turn-end nudge cooldowns and the in-progress reservation (T36).
+    pub(crate) turn_dispatch: Mutex<commands_turns::TurnDispatchState>,
 }
 
 impl Flock {
@@ -111,6 +113,7 @@ impl Flock {
             stores: Mutex::new(panes::Stores::default()),
             role_stores: Mutex::new(roles_gate::RoleStores::default()),
             turn_states: Mutex::new(commands_turns::Turns::new()),
+            turn_dispatch: Mutex::new(commands_turns::TurnDispatchState::default()),
         };
         flock.load_launches();
         flock
