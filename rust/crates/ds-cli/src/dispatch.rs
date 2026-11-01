@@ -870,7 +870,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             );
             args.insert(
                 "wait_s".into(),
-                ns.get("wait").cloned().unwrap_or(Value::from(10)),
+                Value::from(ns.get("wait").and_then(Value::as_f64).unwrap_or(10.0)),
             );
             args.insert(
                 "desk_token".into(),
