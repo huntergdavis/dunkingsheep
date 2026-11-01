@@ -7,9 +7,8 @@
 //! `--json` and the human form come from one call, as in the Python).
 //!
 //! NOT here: `init`, `add`, `promote`, `supersede`, `retire`, `ledger adopt` (writes), and
-//! `snapshot` (its human form is `json.dumps(indent=2)` of an insertion-ordered dict, and
-//! serde_json's maps are key-sorted: held with the other json.dumps printers pending the
-//! owner's `preserve_order` decision). Python's `SystemExit("message")` is `Err(Refused)`.
+//! `snapshot` (not ported; Python renders it with insertion-ordered `json.dumps(indent=2)`).
+//! Python's `SystemExit("message")` is `Err(Refused)`.
 
 use std::path::{Path, PathBuf};
 

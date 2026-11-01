@@ -5,16 +5,14 @@
 //! (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything else, including the `context` write subcommands, keeps the
 //! "parsed but not ported yet" answer (exit 1).
 //!
-//! `--json` for `context`: the Python prints `json.dumps(result, indent=2)` (insertion order);
-//! serde_json's maps are key-sorted, so this prints the same document with SORTED keys
-//! (`usage_cmd::sorted_json`). Valid, equal as JSON, not byte-identical: held with the other
-//! json.dumps printers pending the owner's `preserve_order` decision.
+//! `--json` for `context`: Python prints `json.dumps(result, indent=2)`; the ordered mode in
+//! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
 
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 use crate::context_cmd::context_read;
-use crate::usage_cmd::{sorted_json, usage_command, Outcome};
+use crate::usage_cmd::{ordered_json, usage_command, Outcome};
 
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
@@ -43,7 +41,7 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     match context_read(sub, ns, None, now) {
         Ok(out) => Outcome {
             stdout: if json {
-                format!("{}\n", sorted_json(&out.value))
+                format!("{}\n", ordered_json(&out.value))
             } else {
                 out.text
             },

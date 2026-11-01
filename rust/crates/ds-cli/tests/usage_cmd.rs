@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use ds_cli::usage_cmd::{sorted_json, usage_command};
+use ds_cli::usage_cmd::{ordered_json, sorted_json, usage_command};
 use serde_json::json;
 
 struct Setup {
@@ -110,6 +110,21 @@ fn sorted_json_sorts_every_level_and_escapes_astral_characters() {
     assert_eq!(
         "{\n  \"a\": {\n    \"c\": \"\\ud83d\\ude00\\u00e9\",\n    \"z\": [\n      1,\n      {\n        \"x\": 3,\n        \"y\": 2\n      }\n    ]\n  },\n  \"b\": 1\n}",
         sorted_json(&value)
+    );
+}
+
+#[test]
+fn ordered_json_preserves_insertion_and_python_scalar_format() {
+    let mut nested = serde_json::Map::new();
+    nested.insert("tiny".into(), json!(1e-7));
+    nested.insert("label".into(), json!("café😀"));
+    let mut root = serde_json::Map::new();
+    root.insert("zeta".into(), serde_json::Value::Object(nested));
+    root.insert("alpha".into(), json!([1.0, "é😀"]));
+    let value = serde_json::Value::Object(root);
+    assert_eq!(
+        "{\n  \"zeta\": {\n    \"tiny\": 1e-07,\n    \"label\": \"caf\\u00e9\\ud83d\\ude00\"\n  },\n  \"alpha\": [\n    1.0,\n    \"\\u00e9\\ud83d\\ude00\"\n  ]\n}",
+        ordered_json(&value)
     );
 }
 

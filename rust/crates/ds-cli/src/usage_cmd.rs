@@ -58,11 +58,19 @@ pub fn usage_command(
 /// Python prints them (`1e-07`, not `1e-7`).
 pub fn sorted_json(value: &Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, value, 0);
+    write_value(&mut out, value, 0, true);
     out
 }
 
-fn write_value(out: &mut String, value: &Value, depth: usize) {
+/// `json.dumps(value, indent=2)`: preserve object insertion order while using the same
+/// Python-compatible escaping and float spelling as [`sorted_json`].
+pub fn ordered_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_value(&mut out, value, 0, false);
+    out
+}
+
+fn write_value(out: &mut String, value: &Value, depth: usize, sort_keys: bool) {
     match value {
         Value::Array(items) if items.is_empty() => out.push_str("[]"),
         Value::Object(map) if map.is_empty() => out.push_str("{}"),
@@ -70,7 +78,7 @@ fn write_value(out: &mut String, value: &Value, depth: usize) {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 line(out, i, depth + 1);
-                write_value(out, item, depth + 1);
+                write_value(out, item, depth + 1, sort_keys);
             }
             out.push('\n');
             out.push_str(&"  ".repeat(depth));
@@ -78,13 +86,15 @@ fn write_value(out: &mut String, value: &Value, depth: usize) {
         }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            if sort_keys {
+                keys.sort();
+            }
             out.push('{');
             for (i, key) in keys.iter().enumerate() {
                 line(out, i, depth + 1);
                 out.push_str(&usage::dumps_sorted(&Value::String((*key).clone())));
                 out.push_str(": ");
-                write_value(out, &map[*key], depth + 1);
+                write_value(out, &map[*key], depth + 1, sort_keys);
             }
             out.push('\n');
             out.push_str(&"  ".repeat(depth));
