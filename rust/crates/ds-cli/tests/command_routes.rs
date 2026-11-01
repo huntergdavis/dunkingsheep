@@ -17,14 +17,22 @@ fn ordered_result() -> Value {
 }
 
 fn run_cli(socket: &str, command: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
-        .args(["--socket", socket, "--self-pane", "%99"])
+    run_cli_with_env(socket, command, &[])
+}
+
+fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    cli.args(["--socket", socket, "--self-pane", "%99"])
         .args(command)
         .env_remove("DUNKINGSHEEP_SOCKET")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
         .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
-        .output()
-        .expect("run Rust CLI")
+        .env_remove("DUNKINGSHEEP_CLIENT_TIMEOUT")
+        .env_remove("DUNKINGSHEEP_SEND_TIMEOUT_S");
+    for (key, value) in env {
+        cli.env(key, value);
+    }
+    cli.output().expect("run Rust CLI")
 }
 
 fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Output {
@@ -303,6 +311,92 @@ fn cli_route_05_dunk_send() {
         String::from_utf8(keys.stdout).unwrap()
     );
     assert!(keys.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_05_dunk_send_extends_client_timeout() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let expected = [
+            (
+                "fire_dunk",
+                json!({"id": "d1", "countdown_s": 0, "wait": true}),
+                json!({"id": "d1", "ok": true, "queued": false, "message": "delivered"}),
+            ),
+            (
+                "send_text",
+                json!({
+                    "target": "Pane A",
+                    "text": "slow send",
+                    "hold_while_typing": true,
+                    "wait_s": 0.1,
+                    "desk_token": null,
+                    "press_enter": true
+                }),
+                json!({
+                    "queued": false,
+                    "ok": true,
+                    "target_label": "Pane A",
+                    "pane_id": "%42"
+                }),
+            ),
+        ];
+        for (rpc, args, result) in expected {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!("status", request["cmd"]);
+            let mut writer = &stream;
+            writer.write_all(b"{\"ok\":true,\"result\":{}}\n").unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(rpc, request["cmd"]);
+            assert_eq!(args, request["args"]);
+            assert_eq!("%99", request["self_pane_id"]);
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            let response = json!({"ok": true, "result": result});
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+        }
+    });
+
+    let timing = [
+        ("DUNKINGSHEEP_CLIENT_TIMEOUT", "0.2"),
+        ("DUNKINGSHEEP_SEND_TIMEOUT_S", "0.6"),
+    ];
+    let fired = run_cli_with_env(&socket_text, &["test", "d1"], &timing);
+    assert_eq!(Some(0), fired.status.code());
+    assert_eq!(
+        "d1: sent (delivered)\n",
+        String::from_utf8(fired.stdout).unwrap()
+    );
+    assert!(fired.stderr.is_empty());
+
+    let timing = [
+        ("DUNKINGSHEEP_CLIENT_TIMEOUT", "0.2"),
+        ("DUNKINGSHEEP_SEND_TIMEOUT_S", "0.05"),
+    ];
+    let sent = run_cli_with_env(
+        &socket_text,
+        &["send", "Pane A", "slow", "send", "--wait", "0.1"],
+        &timing,
+    );
+    assert_eq!(Some(0), sent.status.code());
+    assert_eq!(
+        "sent to Pane A (%42)\n",
+        String::from_utf8(sent.stdout).unwrap()
+    );
+    assert!(sent.stderr.is_empty());
+    daemon.join().unwrap();
 }
 
 #[test]

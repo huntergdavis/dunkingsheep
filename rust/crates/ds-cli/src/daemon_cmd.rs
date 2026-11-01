@@ -12,6 +12,7 @@
 
 use std::io::BufRead;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ds_core::client::{connect_or_start_system, ClientError, FlockClient, UnixTransport};
 use ds_core::error::DunkError;
@@ -267,11 +268,48 @@ pub fn run_command(
         Ok(client) => client,
         Err(outcome) => return outcome,
     };
+    let send_timeout = std::env::var("DUNKINGSHEEP_SEND_TIMEOUT_S")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(duration_from_seconds)
+        .unwrap_or(Duration::from_secs(120));
+    client.timeout = command_timeout(
+        client.timeout,
+        cmd,
+        ns.get("wait").and_then(Value::as_f64),
+        send_timeout,
+    );
     let result = match call(&mut client, cmd, args) {
         Ok(result) => result,
         Err(outcome) => return outcome,
     };
     finish(ns, &result, &printer)
+}
+
+fn duration_from_seconds(seconds: f64) -> Option<Duration> {
+    if seconds.is_finite() && seconds >= 0.0 {
+        Duration::try_from_secs_f64(seconds).ok()
+    } else {
+        None
+    }
+}
+
+fn command_timeout(
+    base: Duration,
+    cmd: &str,
+    wait: Option<f64>,
+    send_minimum: Duration,
+) -> Duration {
+    let wait_timeout = wait
+        .filter(|seconds| *seconds != 0.0)
+        .and_then(|seconds| duration_from_seconds(seconds + 10.0))
+        .unwrap_or_default();
+    let send_timeout = if matches!(cmd, "fire_dunk" | "send_text" | "send_keys") {
+        send_minimum
+    } else {
+        Duration::ZERO
+    };
+    base.max(wait_timeout).max(send_timeout)
 }
 
 /// `whoami`: the daemon knows the pane (or its absence), the client knows WHY there is none, so
