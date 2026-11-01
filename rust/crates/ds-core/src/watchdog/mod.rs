@@ -17,6 +17,7 @@ use crate::error::DunkError;
 
 pub mod config;
 pub mod rules;
+pub mod rules_delivery;
 pub mod rules_dunks;
 pub mod rules_host;
 pub mod rules_inbox;
