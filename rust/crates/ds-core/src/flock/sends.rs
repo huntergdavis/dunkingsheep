@@ -579,7 +579,7 @@ impl Flock {
     ) -> Result<Message, DunkError> {
         let id = self
             .next_message_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
             .map_err(|_| DunkError::Refused("message id exhausted".into()))?;
