@@ -508,6 +508,32 @@ async fn task_update_edits_fields_resolves_self_and_moves_status() {
         .is_err());
 }
 
+#[tokio::test]
+async fn task_update_keeps_field_edits_atomic_when_status_is_invalid() {
+    let (flock, tasks) = flock_with_store("update-atomic-refusal").await;
+    let task = tasks.add("global", "before", "").await.unwrap();
+    let error = flock
+        .task_update(
+            &task.id,
+            TaskUpdateArgs {
+                title: Some("after"),
+                priority: Some("urgent"),
+                status: Some("invalid-status"),
+                ..Default::default()
+            },
+            Some(WORKER),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("status must be one of"), "{error}");
+
+    let unchanged = tasks.get(&task.id).await.unwrap();
+    assert_eq!("before", unchanged.title);
+    assert_eq!("low", unchanged.priority);
+    assert_eq!("open", unchanged.status);
+}
+
 async fn depends_on(tasks: &Tasks, task: &str, deps: &[&str]) {
     tasks
         .update(
