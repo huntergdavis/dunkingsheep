@@ -696,6 +696,23 @@ fn h_turn_start_matches_python() {
     assert_eq!(result["turn_id"].as_str().unwrap().len(), 32);
     assert_eq!(env.turn_calls.lock().unwrap().len(), 2);
 
+    for falsey_ttl in [json!(0), json!(false), json!("")] {
+        let default_ttl = dispatch_with_env(
+            &d,
+            &flock,
+            &FixedRole("worker", false),
+            "turn_start",
+            args(json!({"ttl_s": falsey_ttl})),
+            &request,
+            &env,
+        )
+        .expect("falsey Python ttl_s uses the default");
+        assert_eq!(
+            default_ttl["ttl_s"],
+            crate::flock::commands_turns::turn_ttl_s()
+        );
+    }
+
     let wrong_pane = dispatch_with_env(
         &d,
         &flock,
@@ -722,6 +739,21 @@ fn h_turn_start_matches_python() {
         invalid_handoff,
         Err(DunkError::Refused(message)) if message == "invalid next-job handoff id"
     ));
+
+    let non_string_handoff = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"handoff_id": 123})),
+        &request,
+        &env,
+    );
+    assert!(matches!(
+        non_string_handoff,
+        Err(DunkError::Refused(message))
+            if message == "expected string or bytes-like object, got 'int'"
+    ));
     assert_eq!(
         env.turn_calls.lock().unwrap().len(),
         2,
@@ -740,6 +772,20 @@ fn h_turn_start_matches_python() {
         invalid_ttl,
         Err(DunkError::Refused(message))
             if message == "could not convert string to float: 'not-a-number'"
+    ));
+
+    let string_zero_ttl = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"ttl_s": "0"})),
+        &request,
+        &env,
+    );
+    assert!(matches!(
+        string_zero_ttl,
+        Err(DunkError::Refused(message)) if message == "ttl_s must be positive"
     ));
 }
 

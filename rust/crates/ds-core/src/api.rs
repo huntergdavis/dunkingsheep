@@ -363,11 +363,30 @@ pub fn h_turn_start(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
 
     let ttl_s = args
         .get("ttl_s")
-        .filter(|value| !value.is_null())
+        .filter(|value| truthy(value))
         .map(python_float)
         .transpose()?;
+    if ttl_s.is_some_and(|ttl| ttl == 0.0) {
+        return Err(DunkError::Refused("ttl_s must be positive".into()));
+    }
     let source = args.get("source").and_then(Value::as_str);
-    let handoff_id = args.get("handoff_id").and_then(Value::as_str);
+    let handoff_id = match args.get("handoff_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(value) => {
+            let python_type = match value {
+                Value::Bool(_) => "bool",
+                Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+                Value::Number(_) => "float",
+                Value::Array(_) => "list",
+                Value::Object(_) => "dict",
+                Value::Null | Value::String(_) => unreachable!("matched above"),
+            };
+            return Err(DunkError::Refused(format!(
+                "expected string or bytes-like object, got '{python_type}'"
+            )));
+        }
+    };
     context.flock.turn_start(
         pane,
         ttl_s,
