@@ -1,7 +1,8 @@
 //! T44, slice 6: run a parsed command. `main.rs` used to stop at "parsed but not ported yet";
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
 //! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
-//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`). Everything else, including the `context` write subcommands, keeps the
+//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token` and `git-credential`
+//! (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything else, including the `context` write subcommands, keeps the
 //! "parsed but not ported yet" answer (exit 1).
 //!
 //! `--json` for `context`: the Python prints `json.dumps(result, indent=2)` (insertion order);
@@ -52,6 +53,32 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     }
 }
 
+/// `github wrappers [--bin-dir DIR]` (the owner's one-shot setup). `github protect` needs
+/// `dunk_github` (unported) and keeps the not-ported answer.
+fn github(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "github_command") {
+        Some("wrappers") => {
+            let bin_dir = text(ns, "bin_dir").unwrap_or("~/.local/bin");
+            let path = std::env::var("PATH").unwrap_or_default();
+            match crate::github_cmd::wrappers_install(bin_dir, &path) {
+                Ok(result) => Outcome {
+                    stdout: crate::github_cmd::render_wrappers(&result),
+                    stderr: String::new(),
+                    code: 0,
+                },
+                // Python's `SystemExit("no real `gh` found on PATH to wrap")`: stderr, exit 1.
+                Err(message) => Outcome {
+                    stdout: String::new(),
+                    stderr: format!("{message}\n"),
+                    code: 1,
+                },
+            }
+        }
+        Some(other) => not_ported(&format!("github {other}")),
+        None => not_ported("github"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -72,6 +99,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 ns.get("max_age").and_then(Value::as_f64),
                 json,
             )
+        }
+        "github" => github(ns),
+        "gh-token" => crate::daemon_cmd::gh_token(ns),
+        "git-credential" => {
+            let stdin = std::io::stdin();
+            crate::daemon_cmd::git_credential(ns, &mut stdin.lock())
         }
         other => not_ported(other),
     }
