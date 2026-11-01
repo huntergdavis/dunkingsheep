@@ -14,19 +14,26 @@ const CWD: &str = "/home/hunter/workspace/poolrad-codex-review-c";
 const TIMELINE: &str = include_str!("../../../../tests/fixtures/t416-native-turn-timeline.json");
 
 struct Fixture {
+    _dir: tempfile::TempDir,
     home: PathBuf,
     rollout: PathBuf,
 }
 
 fn fixture(tag: &str) -> Fixture {
-    let dir = std::env::temp_dir().join(format!("ds-native-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let home = dir.join("codex-home");
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("ds-native-{tag}-"))
+        .tempdir()
+        .unwrap();
+    let home = dir.path().join("codex-home");
     std::fs::create_dir_all(&home).unwrap();
     // Resolve symlinks once, as the guard does (/tmp may be one).
     let home = PathBuf::from(realpath(home.to_str().unwrap()));
     let rollout = home.join(format!("rollout-{SESSION}.jsonl"));
-    let f = Fixture { home, rollout };
+    let f = Fixture {
+        _dir: dir,
+        home,
+        rollout,
+    };
     f.write_rollout(&[], true);
     let db = Connection::open(f.home.join("state_5.sqlite")).unwrap();
     db.execute(
@@ -354,13 +361,15 @@ fn bytes_splitlines_splits_on_the_three_newlines_only() {
 #[cfg(unix)]
 #[test]
 fn realpath_resolves_symlink_prefixes_with_missing_suffixes_and_parent_traversal() {
-    let root = std::env::temp_dir().join(format!("ds-realpath-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let target = root.join("target");
+    let root = tempfile::Builder::new()
+        .prefix("ds-realpath-")
+        .tempdir()
+        .unwrap();
+    let target = root.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
     let existing = target.join("existing");
     std::fs::write(&existing, "fixture").unwrap();
-    let alias = root.join("alias");
+    let alias = root.path().join("alias");
     symlink(&target, &alias).unwrap();
 
     let expected_missing = target.join("missing").join("leaf");
@@ -371,6 +380,7 @@ fn realpath_resolves_symlink_prefixes_with_missing_suffixes_and_parent_traversal
     );
 
     let through_missing_parent = root
+        .path()
         .join("missing")
         .join("..")
         .join("alias")
@@ -397,6 +407,4 @@ fn realpath_resolves_symlink_prefixes_with_missing_suffixes_and_parent_traversal
             .display()
             .to_string()
     );
-
-    std::fs::remove_dir_all(root).unwrap();
 }
