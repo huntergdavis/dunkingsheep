@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
@@ -82,6 +82,9 @@ pub struct Flock {
     id: u64,
     /// pane_id -> the scope it follows for the next task (`self.task_waiters`).
     pub(crate) task_waiters: Mutex<BTreeMap<String, String>>,
+    /// `self._next_job_wake` (an Event): set on turn end, task completion and close; the push
+    /// loop waits on it with the sweep interval as the timeout (`flock/loops_push.rs`).
+    pub(crate) push_wake: Arc<tokio::sync::Notify>,
     role_panes: Mutex<panes::RolePaneCache>,
     turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
@@ -106,6 +109,7 @@ impl Flock {
             launches: Mutex::new(BTreeMap::new()),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             task_waiters: Mutex::new(BTreeMap::new()),
+            push_wake: Arc::new(tokio::sync::Notify::new()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
@@ -443,6 +447,7 @@ pub mod dunks;
 pub mod lane_registry_rows;
 pub mod lanes;
 pub mod loops;
+pub mod loops_push;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
@@ -463,6 +468,8 @@ mod commands_turns_tests;
 mod dunks_tests;
 #[cfg(test)]
 mod lanes_tests;
+#[cfg(test)]
+mod loops_push_tests;
 #[cfg(test)]
 mod loops_tests;
 #[cfg(test)]
