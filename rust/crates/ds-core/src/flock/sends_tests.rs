@@ -576,7 +576,7 @@ const FOOTER: &str = "  model \u{b7} /tmp/synthetic-fixture \u{b7} task";
 
 fn frame(body: &str, continuation: &[&str]) -> String {
     let mut rows: Vec<String> = vec!["synthetic transcript".into()];
-    rows.extend(std::iter::repeat(String::new()).take(17));
+    rows.resize(18, String::new());
     rows.push(format!("\u{203a} {body}"));
     rows.extend(continuation.iter().map(|c| c.to_string()));
     rows.push(String::new());
