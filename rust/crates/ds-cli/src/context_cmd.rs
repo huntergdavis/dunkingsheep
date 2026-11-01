@@ -45,6 +45,33 @@ fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Resolve a project store the same way the daemon's context writer does: from the
+/// invocation's current directory to an absolute path, without resolving symlinks.
+fn project_store_path(path: Option<&Path>) -> Result<PathBuf, DunkError> {
+    let path = Store::new(path, false).root;
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map_err(|error| DunkError::Refused(error.to_string()))?
+            .join(path)
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !absolute.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
 /// `which = "global" if args.global_store else "project" if args.project else None`.
 fn which(ns: &Map<String, Value>) -> Option<&'static str> {
     if flag(ns, "global_store") {
@@ -98,7 +125,12 @@ pub fn context_read(
     ledger_path: Option<&Path>,
     now: chrono::NaiveDateTime,
 ) -> Result<Out, DunkError> {
-    let path: Option<PathBuf> = text(ns, "path").map(PathBuf::from);
+    let display_path: Option<PathBuf> = text(ns, "path").map(PathBuf::from);
+    let path = if flag(ns, "global_store") || !matches!(sub, "ledger" | "digest" | "check") {
+        display_path.clone()
+    } else {
+        Some(project_store_path(display_path.as_deref())?)
+    };
     let path = path.as_deref();
     match sub {
         "ledger" => {
@@ -211,7 +243,15 @@ pub fn context_read(
             let mut value = Map::new();
             let mut out = String::new();
             for (name, store) in &stores {
-                let root = store.root.display().to_string();
+                let root = if sub == "check" && name == "project" {
+                    display_path
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new(".dunkingsheep"))
+                        .display()
+                        .to_string()
+                } else {
+                    store.root.display().to_string()
+                };
                 match sub {
                     "index" => {
                         let (indexed, index_path) = store.index().map_err(ctx_err)?;
