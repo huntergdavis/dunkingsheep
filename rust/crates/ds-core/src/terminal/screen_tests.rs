@@ -247,7 +247,7 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     assert_eq!(Some("delete numb".to_string()), typed_text(&claude_draft));
     let (text, detail) = box_text(&claude_draft);
     assert_eq!("delete numb", text);
-    assert!(detail.contains("text starts on row"), "{detail}");
+    assert!(detail.contains("composer: the prompt row at"), "{detail}");
 
     let codex_draft = codex_typing("fix the flaky test");
     assert_eq!(
@@ -256,7 +256,7 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     );
     let (text, detail) = box_text(&codex_draft);
     assert_eq!("fix the flaky test", text);
-    assert!(detail.contains("text starts on row"), "{detail}");
+    assert!(detail.contains("composer: the prompt row at"), "{detail}");
 
     let claude_empty = claude_empty();
     assert_eq!(Some(String::new()), typed_text(&claude_empty));
@@ -281,7 +281,7 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     );
     let (text, detail) = box_text(&collapsed);
     assert_eq!("[Pasted text #1 +75 lines]", text);
-    assert!(detail.contains("text starts on row"), "{detail}");
+    assert!(detail.contains("composer: the prompt row at"), "{detail}");
 
     let shell = "hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n";
     assert_eq!(None, typed_text(shell));
@@ -304,7 +304,7 @@ fn test_distant_prompt_does_not_expand_the_guard_input_region() {
         typed_text(&screen),
         "prompt outside the last BOX_REGION_ROWS must be ignored"
     );
-    assert!(box_text(&screen).1.contains("no input box found"));
+    assert!(box_text(&screen).1.contains("composer: the prompt row at"));
 }
 
 #[test]
