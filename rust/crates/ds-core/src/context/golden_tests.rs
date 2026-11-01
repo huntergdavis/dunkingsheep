@@ -137,3 +137,74 @@ fn the_check_report_matches_the_python() {
     let got = store.check(&mut ledger).unwrap();
     assert_eq!(case(&expect, "check")[0]["expected"], got);
 }
+
+/// Every difference between the Rust read side and the Python's recorded answers, one line
+/// each (the live-tree run wants all of them, not the first).
+fn all_differences(store: &Store, ledger: &mut Ledger, expect: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in case(expect, "digest") {
+        let cap = c["args"]["max_bytes"].as_u64().unwrap() as usize;
+        let got = store.digest(cap, c["args"]["subject"].as_str());
+        if c["expected"].as_str() != Some(got.as_str()) {
+            out.push(format!("digest {} differs", c["args"]));
+        }
+    }
+    let entries: Vec<Value> = store
+        .entries()
+        .iter()
+        .map(|e| {
+            json!({
+                "slug": e.slug, "class": e.get("class"), "subject": e.get("subject"),
+                "stated": e.get("stated"),
+                "body": if e.error.is_some() { Value::Null } else { json!(e.body.trim()) },
+                "error": e.error,
+            })
+        })
+        .collect();
+    if case(expect, "entries")[0]["expected"] != json!(entries) {
+        out.push("entries listing differs".into());
+    }
+    for c in case(expect, "search") {
+        let a = &c["args"];
+        let got = match store.search(a["query"].as_str().unwrap(), None, None, 20) {
+            Ok(rows) => json!(rows),
+            Err(error) => json!({ "error": error.to_string() }),
+        };
+        if c["expected"] != got {
+            out.push(format!(
+                "search {a} differs: python {} rust {got}",
+                c["expected"]
+            ));
+        }
+    }
+    match store.check(ledger) {
+        Ok(got) if case(expect, "check")[0]["expected"] == got => {}
+        Ok(got) => out.push(format!("check differs: rust {got}")),
+        Err(error) => out.push(format!("check failed: {error}")),
+    }
+    out
+}
+
+/// t1395 part 2: a READ-ONLY COPY of a live tree. `tools/context_live_diff.py SRC OUT` makes
+/// OUT/tree and OUT/expected.json; run with DS_CONTEXT_LIVE_DIR=OUT and `--ignored`.
+#[test]
+#[ignore = "needs DS_CONTEXT_LIVE_DIR from tools/context_live_diff.py"]
+fn live_tree_matches_the_python() {
+    let Ok(out) = std::env::var("DS_CONTEXT_LIVE_DIR") else {
+        panic!("set DS_CONTEXT_LIVE_DIR");
+    };
+    let out = std::path::PathBuf::from(out);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join(".dunkingsheep");
+    copy_tree(&out.join("tree"), &root);
+    let expect: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("expected.json")).unwrap()).unwrap();
+    let store = Store::new(Some(&root), false);
+    let mut ledger = Ledger::new(Some(&dir.path().join("ledger.db")));
+    store.adopt(&mut ledger, "adopt");
+    let diffs = all_differences(&store, &mut ledger, &expect);
+    for line in &diffs {
+        eprintln!("DIFF {line}");
+    }
+    assert!(diffs.is_empty(), "{} differences", diffs.len());
+}
