@@ -18,11 +18,13 @@ time. The performance target is under 50 ms per call.
 
 ### Measurement
 
-| Revision | Host | Panes | Warmup | Samples | p50 | p95 | p99 | Max |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Pending exact-head benchmark run | | 1,000 | 1,000 | 500 × 20 | | | | |
+| Revision | Host | Panes | Run outcome | Measured samples | p50 | p95 | p99 | Max |
+| --- | --- | ---: | --- | ---: | --- | --- | --- | --- |
+| `974530cee47853513c0efddcf2c1166a018d391a` | `cell`, Linux 7.0.0 x86_64 | 1,000 | **NOT RUN**: three attempts stopped after 120 s during dependency compilation | 0 (planned 500 × 20) | NOT MEASURED | NOT MEASURED | NOT MEASURED | NOT MEASURED |
 
 The benchmark prints the host name, OS, architecture, warmup count, sample
-count, and timings so a result can be copied here with the exact revision and
-machine details. This synthetic table measurement does not establish the
-separate release-build performance gate.
+count, and timings so a completed result can be copied here with the exact
+revision and machine details. In the recorded row, all three local `cargo
+bench` attempts stopped during dependency compilation before the executable
+started, so no warmup or measured samples ran. This synthetic table measurement
+does not establish the separate release-build performance gate.

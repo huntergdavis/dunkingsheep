@@ -62,13 +62,15 @@ fn bench_list_panes_1000() {
         "samples: {SAMPLE_COUNT} x {ITERATIONS_PER_SAMPLE} calls = {} measured calls",
         SAMPLE_COUNT * ITERATIONS_PER_SAMPLE
     );
-    println!("p50: {} ns/call", percentile(&samples_ns_per_call, 50));
+    let p50 = percentile(&samples_ns_per_call, 50);
+    println!("p50: {p50} ns/call");
     println!("p95: {} ns/call", percentile(&samples_ns_per_call, 95));
     println!("p99: {} ns/call", percentile(&samples_ns_per_call, 99));
     println!(
         "max: {} ns/call",
         samples_ns_per_call[samples_ns_per_call.len() - 1]
     );
+    println!("target p50 < 50 ms: {}", p50 < 50_000_000);
 }
 
 fn main() {
