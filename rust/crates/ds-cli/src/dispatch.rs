@@ -1480,6 +1480,30 @@ fn load_failure(message: String, code: i32) -> Outcome {
     }
 }
 
+fn allocation(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    for key in [
+        "action", "pane_id", "pool", "pools", "roles", "skills", "requires", "task_id", "revision",
+        "body",
+    ] {
+        if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+            args.insert(key.to_string(), value.clone());
+        }
+    }
+    if text(ns, "action") == Some("register") {
+        args.insert(
+            "enabled".into(),
+            Value::Bool(!matches!(ns.get("disable"), Some(Value::Bool(true)))),
+        );
+    }
+    crate::daemon_cmd::run_command(
+        ns,
+        "allocation",
+        args,
+        crate::render_print::render_json_indent2,
+    )
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1504,6 +1528,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
         "owner" => match text(ns, "owner_command") {
