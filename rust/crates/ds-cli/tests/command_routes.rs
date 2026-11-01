@@ -351,3 +351,45 @@ fn cli_route_17_task_edit_a() {
     );
     assert!(completed.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_23_owner_inbox_a() {
+    let pushed = run_daemon_cli(
+        &["owner", "push", "%42", "hello", "owner"],
+        "owner_push",
+        json!({"target": "%42", "body": "hello owner", "subject": null}),
+        json!({"id": 77, "pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), pushed.status.code());
+    assert_eq!(
+        "pushed owner message 77 for %42 (no inbox row, nothing typed)\n",
+        String::from_utf8(pushed.stdout).unwrap()
+    );
+    assert!(pushed.stderr.is_empty());
+
+    let polled = run_daemon_cli(
+        &["owner", "poll", "%42"],
+        "owner_poll",
+        json!({"pane_id": "%42", "by": "harness"}),
+        json!({"pane_id": "%42", "by": "harness"}),
+    );
+    assert_eq!(Some(0), polled.status.code());
+    assert_eq!(
+        "poll recorded for %42 by harness\n",
+        String::from_utf8(polled.stdout).unwrap()
+    );
+    assert!(polled.stderr.is_empty());
+
+    let taken = run_daemon_cli(
+        &["owner", "take", "%42", "--json"],
+        "owner_take",
+        json!({"pane_id": "%42", "by": null}),
+        json!({"messages": []}),
+    );
+    assert_eq!(Some(0), taken.status.code());
+    assert_eq!(
+        "{\n  \"messages\": []\n}\n",
+        String::from_utf8(taken.stdout).unwrap()
+    );
+    assert!(taken.stderr.is_empty());
+}
