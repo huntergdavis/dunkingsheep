@@ -163,13 +163,15 @@ pub fn context_read(
             ))
         }
         "search" => {
+            // The CLI passes NO limit, so `Store.search`'s default of 20 applies (review t1427:
+            // this was 10 on a wrong reading, invisible to a 3-hit fixture).
             let query = text(ns, "query").unwrap_or("");
             let stores = select_stores(None, which(ns));
             let mut rows = Vec::new();
             let mut out = String::new();
             for (name, store) in &stores {
                 for mut row in store
-                    .search(query, text(ns, "cls"), text(ns, "scope"), 10)
+                    .search(query, text(ns, "cls"), text(ns, "scope"), 20)
                     .map_err(ctx_err)?
                 {
                     row["store"] = json!(name);

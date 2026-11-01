@@ -3,6 +3,31 @@
   "cfg/context/README.md": "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
   "cfg/context/ground-truth/2020-01-02-global-truth.md": "---\nclass: ground-truth\nsubject: global-truth\ntype: principle\nscope: global\nauthority: owner\nstated: 2020-01-02\nsource: owner\nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nNever publish secrets.\n",
   "proj/.dunkingsheep/README.md": "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+  "proj/.dunkingsheep/fact/bulk-flux-00.md": "---\nclass: fact\nsubject: bulk-flux-00\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-01\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 0\n",
+  "proj/.dunkingsheep/fact/bulk-flux-01.md": "---\nclass: fact\nsubject: bulk-flux-01\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-02\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 1 padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-02.md": "---\nclass: fact\nsubject: bulk-flux-02\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-03\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 2 padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-03.md": "---\nclass: fact\nsubject: bulk-flux-03\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-04\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 3 padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-04.md": "---\nclass: fact\nsubject: bulk-flux-04\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-05\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 4 padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-05.md": "---\nclass: fact\nsubject: bulk-flux-05\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-06\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 5 padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-06.md": "---\nclass: fact\nsubject: bulk-flux-06\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-07\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 6 padding padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-07.md": "---\nclass: fact\nsubject: bulk-flux-07\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-08\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 7\n",
+  "proj/.dunkingsheep/fact/bulk-flux-08.md": "---\nclass: fact\nsubject: bulk-flux-08\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-09\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 8 padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-09.md": "---\nclass: fact\nsubject: bulk-flux-09\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-10\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 9 padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-10.md": "---\nclass: fact\nsubject: bulk-flux-10\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-11\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 10 padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-11.md": "---\nclass: fact\nsubject: bulk-flux-11\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-12\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 11 padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-12.md": "---\nclass: fact\nsubject: bulk-flux-12\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-13\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 12 padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-13.md": "---\nclass: fact\nsubject: bulk-flux-13\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-14\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 13 padding padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-14.md": "---\nclass: fact\nsubject: bulk-flux-14\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-15\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 14\n",
+  "proj/.dunkingsheep/fact/bulk-flux-15.md": "---\nclass: fact\nsubject: bulk-flux-15\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-16\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 15 padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-16.md": "---\nclass: fact\nsubject: bulk-flux-16\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-17\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 16 padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-17.md": "---\nclass: fact\nsubject: bulk-flux-17\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-18\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 17 padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-18.md": "---\nclass: fact\nsubject: bulk-flux-18\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-19\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 18 padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-19.md": "---\nclass: fact\nsubject: bulk-flux-19\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-20\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 19 padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-20.md": "---\nclass: fact\nsubject: bulk-flux-20\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-21\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 20 padding padding padding padding padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-21.md": "---\nclass: fact\nsubject: bulk-flux-21\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-22\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 21\n",
+  "proj/.dunkingsheep/fact/bulk-flux-22.md": "---\nclass: fact\nsubject: bulk-flux-22\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-23\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 22 padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-23.md": "---\nclass: fact\nsubject: bulk-flux-23\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-24\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 23 padding padding\n",
+  "proj/.dunkingsheep/fact/bulk-flux-24.md": "---\nclass: fact\nsubject: bulk-flux-24\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-04-25\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux bulk note 24 padding padding padding\n",
   "proj/.dunkingsheep/fact/flux-capacitor-rule.md": "---\nclass: fact\nsubject: flux-capacitor-rule\ntype: reference\nscope: project\nauthority: measured\nstated: 2020-03-04\nsource: lab\nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nFlux capacitors need 1.21 gigawatts.\n",
   "proj/.dunkingsheep/history/old-flux.md": "---\nclass: history\nsubject: old-flux\ntype: reference\nscope: project\nauthority: agent\nstated: 2019-01-01\nsource: \nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nOld flux note.\n",
   "proj/.dunkingsheep/provisional/flux-routing.md": "---\nclass: provisional\nsubject: flux-routing\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-03-05\nsource: \nrecheck_after: 7d\nsupersedes: null\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nDraft idea about flux routing.\n"
@@ -42,7 +67,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "project  history       old-flux                                 old-flux\nproject  provisional   flux-routing                             flux-routing\nproject  fact          flux-capacitor-rule                      flux-capacitor-rule\n"
+   "stdout": "project  history       old-flux                                 old-flux\nproject  provisional   flux-routing                             flux-routing\nproject  fact          bulk-flux-00                             bulk-flux-00\nproject  fact          bulk-flux-07                             bulk-flux-07\nproject  fact          bulk-flux-14                             bulk-flux-14\nproject  fact          bulk-flux-21                             bulk-flux-21\nproject  fact          bulk-flux-01                             bulk-flux-01\nproject  fact          bulk-flux-08                             bulk-flux-08\nproject  fact          bulk-flux-15                             bulk-flux-15\nproject  fact          bulk-flux-22                             bulk-flux-22\nproject  fact          bulk-flux-02                             bulk-flux-02\nproject  fact          bulk-flux-09                             bulk-flux-09\nproject  fact          bulk-flux-16                             bulk-flux-16\nproject  fact          bulk-flux-23                             bulk-flux-23\nproject  fact          flux-capacitor-rule                      flux-capacitor-rule\nproject  fact          bulk-flux-03                             bulk-flux-03\nproject  fact          bulk-flux-10                             bulk-flux-10\nproject  fact          bulk-flux-17                             bulk-flux-17\nproject  fact          bulk-flux-24                             bulk-flux-24\nproject  fact          bulk-flux-04                             bulk-flux-04\n"
   },
   {
    "argv": [
@@ -53,7 +78,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "project  fact          flux-capacitor-rule                      flux-capacitor-rule\n"
+   "stdout": "project  fact          bulk-flux-00                             bulk-flux-00\nproject  fact          bulk-flux-07                             bulk-flux-07\nproject  fact          bulk-flux-14                             bulk-flux-14\nproject  fact          bulk-flux-21                             bulk-flux-21\nproject  fact          bulk-flux-01                             bulk-flux-01\nproject  fact          bulk-flux-08                             bulk-flux-08\nproject  fact          bulk-flux-15                             bulk-flux-15\nproject  fact          bulk-flux-22                             bulk-flux-22\nproject  fact          bulk-flux-02                             bulk-flux-02\nproject  fact          bulk-flux-09                             bulk-flux-09\nproject  fact          bulk-flux-16                             bulk-flux-16\nproject  fact          bulk-flux-23                             bulk-flux-23\nproject  fact          flux-capacitor-rule                      flux-capacitor-rule\nproject  fact          bulk-flux-03                             bulk-flux-03\nproject  fact          bulk-flux-10                             bulk-flux-10\nproject  fact          bulk-flux-17                             bulk-flux-17\nproject  fact          bulk-flux-24                             bulk-flux-24\nproject  fact          bulk-flux-04                             bulk-flux-04\nproject  fact          bulk-flux-11                             bulk-flux-11\nproject  fact          bulk-flux-18                             bulk-flux-18\n"
   },
   {
    "argv": [
@@ -71,7 +96,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "bootstrap   fact          flux-capacitor-rule\nbootstrap   provisional   flux-routing\nbootstrap   history       old-flux\n"
+   "stdout": "bootstrap   fact          bulk-flux-00\nbootstrap   fact          bulk-flux-01\nbootstrap   fact          bulk-flux-02\nbootstrap   fact          bulk-flux-03\nbootstrap   fact          bulk-flux-04\nbootstrap   fact          bulk-flux-05\nbootstrap   fact          bulk-flux-06\nbootstrap   fact          bulk-flux-07\nbootstrap   fact          bulk-flux-08\nbootstrap   fact          bulk-flux-09\nbootstrap   fact          bulk-flux-10\nbootstrap   fact          bulk-flux-11\nbootstrap   fact          bulk-flux-12\nbootstrap   fact          bulk-flux-13\nbootstrap   fact          bulk-flux-14\nbootstrap   fact          bulk-flux-15\nbootstrap   fact          bulk-flux-16\nbootstrap   fact          bulk-flux-17\nbootstrap   fact          bulk-flux-18\nbootstrap   fact          bulk-flux-19\nbootstrap   fact          bulk-flux-20\nbootstrap   fact          bulk-flux-21\nbootstrap   fact          bulk-flux-22\nbootstrap   fact          bulk-flux-23\nbootstrap   fact          bulk-flux-24\nbootstrap   fact          flux-capacitor-rule\nbootstrap   provisional   flux-routing\nbootstrap   history       old-flux\n"
   },
   {
    "argv": [
@@ -79,7 +104,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "global: indexed 1 -> <T>/cfg/context/.index.db\nproject: indexed 3 -> .dunkingsheep/.index.db\n"
+   "stdout": "global: indexed 1 -> <T>/cfg/context/.index.db\nproject: indexed 28 -> .dunkingsheep/.index.db\n"
   },
   {
    "argv": [
@@ -87,7 +112,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "global (<T>/cfg/context): entries 1, refusals 0, stale 2\nproject (.dunkingsheep): entries 3, refusals 1, stale 2\n"
+   "stdout": "global (<T>/cfg/context): entries 1, refusals 0, stale 2\nproject (.dunkingsheep): entries 28, refusals 26, stale 2\n"
   },
   {
    "argv": [
@@ -95,7 +120,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n- [project/provisional/flux-routing] Draft idea about flux routing. (STALE - re-check before trusting)\n- [project/history/old-flux] Old flux note.\n\n"
+   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/bulk-flux-00] Flux bulk note 0\n- [project/fact/bulk-flux-01] Flux bulk note 1 padding\n- [project/fact/bulk-flux-02] Flux bulk note 2 padding padding\n- [project/fact/bulk-flux-03] Flux bulk note 3 padding padding padding\n- [project/fact/bulk-flux-04] Flux bulk note 4 padding padding padding padding\n- [project/fact/bulk-flux-05] Flux bulk note 5 padding padding padding padding padding\n- [project/fact/bulk-flux-06] Flux bulk note 6 padding padding padding padding padding padding\n- [project/fact/bulk-flux-07] Flux bulk note 7\n- [project/fact/bulk-flux-08] Flux bulk note 8 padding\n- [project/fact/bulk-flux-09] Flux bulk note 9 padding padding\n- [project/fact/bulk-flux-10] Flux bulk note 10 padding padding padding\n- [project/fact/bulk-flux-11] Flux bulk note 11 padding padding padding padding\n- [project/fact/bulk-flux-12] Flux bulk note 12 padding padding padding padding padding\n- [project/fact/bulk-flux-13] Flux bulk note 13 padding padding padding padding padding padding\n- [project/fact/bulk-flux-14] Flux bulk note 14\n- [project/fact/bulk-flux-15] Flux bulk note 15 padding\n- [project/fact/bulk-flux-16] Flux bulk note 16 padding padding\n- [project/fact/bulk-flux-17] Flux bulk note 17 padding padding padding\n- [project/fact/bulk-flux-18] Flux bulk note 18 padding padding padding padding\n- [project/fact/bulk-flux-19] Flux bulk note 19 padding padding padding padding padding\n- [project/fact/bulk-flux-20] Flux bulk note 20 padding padding padding padding padding padding\n- [project/fact/bulk-flux-21] Flux bulk note 21\n- [project/fact/bulk-flux-22] Flux bulk note 22 padding\n- [project/fact/bulk-flux-23] Flux bulk note 23 padding padding\n- [project/fact/bulk-flux-24] Flux bulk note 24 padding padding padding\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n- [project/provisional/flux-routing] Draft idea about flux routing. (STALE - re-check before trusting)\n- [project/history/old-flux] Old flux note.\n\n"
   },
   {
    "argv": [
@@ -115,7 +140,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/flux-capacitor-rule] Flux capacitors need 1.21 gigawatts.\n- [project/provisional/flux-routing] Draft idea about flux routing. (STALE - re-check before trusting)\n- [project/history/old-flux] Old flux note.\n\n"
+   "stdout": "## Ground truths (1)\n- [global-truth] Never publish secrets.\n\n## Relevant\n- [project/fact/bulk-flux-00] Flux bulk note 0\n- [project/fact/bulk-flux-01] Flux bulk note 1 padding\n- [project/fact/bulk-flux-02] Flux bulk note 2 padding padding\n- [project/fact/bulk-flux-03] Flux bulk note 3 padding padding padding\n- [project/fact/bulk-flux-04] Flux bulk note 4 padding padding padding padding\nomitted: 23 entries over the 400-byte cap\n\n"
   },
   {
    "argv": [
@@ -123,7 +148,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "global (<T>/cfg/context): counts {'ground-truth': 1, 'fact': 0, 'provisional': 0, 'history': 0}, injected_7d 3, reads_7d 1, never_delivered 0, never_read 0\nproject (.dunkingsheep): counts {'ground-truth': 0, 'fact': 1, 'provisional': 1, 'history': 1}, injected_7d 7, reads_7d 5, never_delivered 0, never_read 0\n"
+   "stdout": "global (<T>/cfg/context): counts {'ground-truth': 1, 'fact': 0, 'provisional': 0, 'history': 0}, injected_7d 3, reads_7d 1, never_delivered 0, never_read 0\nproject (.dunkingsheep): counts {'ground-truth': 0, 'fact': 26, 'provisional': 1, 'history': 1}, injected_7d 34, reads_7d 41, never_delivered 0, never_read 6\n"
   },
   {
    "argv": [
@@ -141,7 +166,7 @@
    ],
    "code": 0,
    "stderr": "",
-   "stdout": "project (.dunkingsheep): entries 3, refusals 1, stale 2\n"
+   "stdout": "project (.dunkingsheep): entries 28, refusals 26, stale 2\n"
   }
  ]
 }

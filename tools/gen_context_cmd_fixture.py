@@ -58,6 +58,12 @@ def build(base):
               type_="reference", authority="agent", stated="2020-03-05", slug="flux-routing")
     store.add("Old flux note.", cls="history", subject="old-flux",
               type_="reference", authority="agent", stated="2019-01-01", slug="old-flux")
+    # More than 10 AND more than 20 hits for "flux": the CLI passes no limit, so the Python
+    # default (20) applies. A fixture with 3 hits cannot see the difference (review t1427).
+    for n in range(25):
+        store.add("Flux bulk note %d %s" % (n, "padding " * (n % 7)), cls="fact",
+                  subject="bulk-flux-%02d" % n, type_="reference", authority="agent",
+                  stated="2020-04-%02d" % (n % 28 + 1), slug="bulk-flux-%02d" % n)
     glob = dunk_context.Store(global_store=True)
     glob.ledger = None
     glob.add("Never publish secrets.", cls="ground-truth", subject="global-truth",
