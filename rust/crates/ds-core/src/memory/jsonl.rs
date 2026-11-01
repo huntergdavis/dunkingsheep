@@ -126,6 +126,23 @@ struct Pending {
     at: Option<f64>,
 }
 
+/// The throttle pause after a flush, ENDED EARLY by a stop. A plain `sleep(throttle)` made
+/// `Ingestor::stop` block for the whole interval (its join waited on the sleeping worker) and
+/// made any test of a mid-file stop depend on wall-clock timing (t1440). The pause is taken in
+/// short slices and abandoned as soon as `should_stop` is true; the line loop then sees the stop
+/// before reading further, exactly as it would after the sleep.
+fn sleep_unless_stopped(total: Duration, should_stop: &dyn Fn() -> bool) {
+    const SLICE: Duration = Duration::from_millis(5);
+    let deadline = std::time::Instant::now() + total;
+    while !total.is_zero() && !should_stop() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        std::thread::sleep(SLICE.min(deadline - now));
+    }
+}
+
 /// `_ingest_jsonl`. `should_stop` is polled before every line; on a stop the pending batch
 /// is flushed and the stats carry `stopped: true`. `throttle` sleeps after each flush.
 pub fn ingest_jsonl(
@@ -169,9 +186,7 @@ pub fn ingest_jsonl(
                 None,
             )?;
             pending.chunks.clear();
-            if !throttle.is_zero() {
-                std::thread::sleep(throttle);
-            }
+            sleep_unless_stopped(throttle, should_stop);
         }
         Ok(())
     };

@@ -141,21 +141,26 @@ fn pause_holds_the_queue_and_resume_drains_it() {
 #[test]
 fn a_stop_mid_ingest_is_skipped_not_failed_and_the_next_start_resumes_it() {
     let (dir, db) = store();
-    // many sessions + a real throttle so the stop lands mid-file
-    let source = sample(&dir, "s.jsonl", "s", 40);
-    let ingestor = Ingestor::new(&db, POLL, Some(Duration::from_millis(60)));
+    // t1440: DETERMINISTIC. The throttle is long enough that the worker is parked after the
+    // first flushed session until we stop it, and the stop wakes the pause at once; no sleep
+    // decides where the stop lands. A few sessions are plenty: the old 40 sessions (320 chunks,
+    // ingested twice) took ~10 s in a debug build and failed under any load.
+    let source = sample(&dir, "s.jsonl", "s", 6);
+    let ingestor = Ingestor::new(&db, POLL, Some(Duration::from_secs(60)));
     ingestor
         .enqueue(&source, Some("generic"), Some("demo"))
         .expect("enqueue");
     ingestor.start().expect("start");
-    wait_until("the lease", || {
-        count(
-            &db,
-            "SELECT COUNT(*) FROM ingest_queue WHERE state='leased'",
-        ) == 1
+    wait_until("the first flushed session", || {
+        count(&db, "SELECT COUNT(*) FROM chunks") > 0
     });
-    std::thread::sleep(Duration::from_millis(200));
+    let stopping = Instant::now();
     ingestor.stop();
+    assert!(
+        stopping.elapsed() < Duration::from_secs(10),
+        "stop must not wait out the 60 s throttle (took {:?})",
+        stopping.elapsed()
+    );
     assert_eq!(
         1,
         count(
@@ -174,6 +179,11 @@ fn a_stop_mid_ingest_is_skipped_not_failed_and_the_next_start_resumes_it() {
         1,
         count(&db, "SELECT COUNT(*) FROM sources WHERE state='partial'")
     );
+    let partial = count(&db, "SELECT COUNT(*) FROM chunks");
+    assert!(
+        partial > 0 && partial < 48,
+        "the stop landed mid-file: {partial} of 48 chunks"
+    );
     // a restart requeues the partial source and finishes it
     let again = Ingestor::new(&db, POLL, Some(Duration::ZERO));
     again.start().expect("start");
@@ -181,7 +191,7 @@ fn a_stop_mid_ingest_is_skipped_not_failed_and_the_next_start_resumes_it() {
         count(&db, "SELECT COUNT(*) FROM ingest_queue WHERE state='done'") == 1
     });
     again.stop();
-    assert_eq!(320, count(&db, "SELECT COUNT(*) FROM chunks"));
+    assert_eq!(48, count(&db, "SELECT COUNT(*) FROM chunks"));
 }
 
 #[test]
