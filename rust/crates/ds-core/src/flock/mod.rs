@@ -435,6 +435,7 @@ pub mod commands_layout;
 pub mod commands_owner_views;
 pub mod commands_tasks;
 pub mod commands_turns;
+pub mod delivery;
 pub mod dunks;
 pub mod lane_registry_rows;
 pub mod lanes;
@@ -442,6 +443,7 @@ pub mod mailbox;
 pub mod panes;
 pub mod resolve;
 pub mod roles_gate;
+pub mod roster;
 pub mod views;
 
 #[cfg(test)]
