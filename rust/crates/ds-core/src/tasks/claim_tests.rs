@@ -540,6 +540,28 @@ async fn add_with(
     tasks.update(&task.id, edit, None).await.unwrap()
 }
 
+async fn caller_identity(
+    tasks: &Tasks,
+    task_id: &str,
+    pane_id: &str,
+) -> (Option<i64>, Option<String>, Option<String>) {
+    let task_id = task_id.to_string();
+    let pane_id = pane_id.to_string();
+    tasks
+        .writer
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT caller_pid, caller_start, caller_name FROM task_leases \
+                 WHERE task_id = ? AND pane_id = ?",
+                rusqlite::params![task_id, pane_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap()
+}
+
 fn claimed_task(outcome: ClaimOutcome) -> Option<Task> {
     match outcome {
         ClaimOutcome::Claimed { task, .. } => Some(*task),
@@ -563,6 +585,55 @@ fn lease(seconds: f64) -> ClaimOptions {
 
 fn live(panes: &[&str]) -> Option<Vec<String>> {
     Some(panes.iter().map(|p| p.to_string()).collect())
+}
+
+#[tokio::test]
+async fn test_priority_order_then_age() {
+    let tasks = store("py-priority-order").await;
+    let low = tasks.add("global", "low", "low").await.unwrap();
+    let urgent = tasks.add("global", "urgent", "urgent").await.unwrap();
+    let high = tasks.add("global", "high", "high").await.unwrap();
+    let medium = tasks.add("global", "medium", "medium").await.unwrap();
+    let order: Vec<_> = tasks
+        .list("global")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    assert_eq!(vec![urgent.id, high.id, medium.id, low.id], order);
+}
+
+#[tokio::test]
+async fn test_default_low_oldest_first_and_explicit_priority_preserved() {
+    let tasks = store("py-default-priority").await;
+    let older = tasks.add("global", "older", "").await.unwrap();
+    let newer = tasks.add("global", "newer", "").await.unwrap();
+    let explicit = tasks
+        .add("global", "explicit medium", "medium")
+        .await
+        .unwrap();
+    tasks.assign(&older.id, &["w1:p1"], "add").await.unwrap();
+    tasks.assign(&newer.id, &["w1:p1"], "add").await.unwrap();
+    assert_eq!("low", older.priority);
+    assert_eq!("low", newer.priority);
+    assert_eq!("medium", explicit.priority);
+    let order: Vec<_> = tasks
+        .list("global")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    assert_eq!(
+        vec![explicit.id.clone(), older.id.clone(), newer.id.clone()],
+        order
+    );
+    let claimed = tasks
+        .claim_next("mine", "w1:p1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(explicit.id, claimed_id(&claimed));
 }
 
 #[tokio::test]
@@ -591,6 +662,29 @@ async fn test_dependencies_gate_next_until_done() {
         .await
         .unwrap();
     assert_eq!(second.id, claimed_task(claimed).unwrap().id);
+}
+
+#[tokio::test]
+async fn test_global_completion_is_final_for_everyone() {
+    let tasks = store("py-global-completion").await;
+    let task = add_with(&tasks, "shared", None, &["w1:p1", "w2:p2"], &[], false).await;
+    let claimed = tasks
+        .claim_next("global", "w1:p1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(task.id, claimed_id(&claimed));
+    let done = tasks
+        .task_complete(&task.id, Some("w1:p1"), true)
+        .await
+        .unwrap();
+    assert_eq!("done", done.status);
+    assert!(claimed_task(
+        tasks
+            .claim_next("global", "w2:p2", ClaimOptions::default())
+            .await
+            .unwrap()
+    )
+    .is_none());
 }
 
 #[tokio::test]
@@ -963,20 +1057,418 @@ async fn test_multi_assignee_allows_parallel_claims() {
         .is_empty());
 }
 
-// NOT PORTED from TaskStoreTests (batch 1), with reasons:
+#[tokio::test]
+async fn test_assigned_agent_can_claim_its_task() {
+    let tasks = store("py-assigned-agent").await;
+    let task = add_with(&tasks, "assigned", None, &["w1:p1"], &[], false).await;
+    let other = tasks
+        .list_visible(
+            Some("global"),
+            None,
+            None,
+            false,
+            100,
+            Some("w2:p2"),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    let mine = tasks
+        .list_visible(
+            Some("global"),
+            None,
+            None,
+            false,
+            100,
+            Some("w1:p1"),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(!other[0].eligible);
+    assert!(mine[0].eligible);
+    assert!(claimed_task(
+        tasks
+            .claim_next("global", "w2:p2", ClaimOptions::default())
+            .await
+            .unwrap()
+    )
+    .is_none());
+    let claimed = tasks
+        .claim_next("global", "w1:p1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(task.id, claimed_id(&claimed));
+}
+
+#[tokio::test]
+async fn test_reap_records_actual_status_when_another_lease_lives() {
+    let tasks = store("py-reap-other-lease").await;
+    let task = add_with(&tasks, "shared", None, &[], &[], true).await;
+    tasks
+        .claim_next("global", "w1:p1", lease(60.0))
+        .await
+        .unwrap();
+    tasks
+        .claim_next("global", "w2:p2", lease(300.0))
+        .await
+        .unwrap();
+    let now = crate::clock::now_s() + 120.0;
+    assert!(tasks
+        .reap(live(&["w1:p1", "w2:p2"]), None, Some(now), Some("live"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        vec!["w2:p2"],
+        tasks
+            .leases_for(&task.id, Some(now))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|lease| lease.pane_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!("in_progress", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_mine_claims_owned_global_and_skips_unowned_backlog() {
+    let tasks = store("py-mine-global").await;
+    let backlog = add_with(&tasks, "leader backlog", Some("urgent"), &[], &[], false).await;
+    let owned = add_with(&tasks, "my work", Some("medium"), &["w1:p1"], &[], false).await;
+    let claimed = tasks
+        .claim_next("mine", "w1:p1", lease(300.0))
+        .await
+        .unwrap();
+    let claimed = claimed_task(claimed).unwrap();
+    assert_eq!(owned.id, claimed.id);
+    assert_eq!("in_progress", claimed.status);
+    assert_eq!("open", tasks.get(&backlog.id).await.unwrap().status);
+    assert!(assignees_of(&tasks.get(&backlog.id).await.unwrap()).is_empty());
+}
+
+#[tokio::test]
+async fn test_mine_claims_own_pane_assigned_task() {
+    let tasks = store("py-mine-pane").await;
+    let local = tasks.add("w1:p1", "local work", "").await.unwrap();
+    tasks.assign(&local.id, &["w1:p1"], "add").await.unwrap();
+    let claimed = tasks
+        .claim_next("mine", "w1:p1", lease(300.0))
+        .await
+        .unwrap();
+    assert_eq!(local.id, claimed_id(&claimed));
+}
+
+#[tokio::test]
+async fn test_mine_excludes_other_workers_tasks() {
+    let tasks = store("py-mine-other").await;
+    let other = add_with(&tasks, "their work", None, &["w9:p9"], &[], false).await;
+    let refused = refused_with(
+        tasks
+            .claim_next("mine", "w1:p1", lease(300.0))
+            .await
+            .unwrap(),
+    );
+    assert_eq!("empty", refused.reason);
+    let still = tasks.get(&other.id).await.unwrap();
+    assert_eq!("open", still.status);
+    assert_eq!(vec!["w9:p9"], assignees_of(&still));
+}
+
+#[tokio::test]
+async fn test_mine_empty_when_no_owned_work() {
+    let tasks = store("py-mine-empty").await;
+    tasks.add("global", "leader backlog", "").await.unwrap();
+    let refused = refused_with(
+        tasks
+            .claim_next("mine", "w1:p1", lease(300.0))
+            .await
+            .unwrap(),
+    );
+    assert_eq!("empty", refused.reason);
+    assert!(refused.task_ids.is_empty());
+}
+
+#[tokio::test]
+async fn test_mine_busy_refusal_preserved() {
+    let tasks = store("py-mine-busy").await;
+    let first = add_with(&tasks, "first", None, &["w1:p1"], &[], false).await;
+    let second = add_with(&tasks, "second", None, &["w1:p1"], &[], false).await;
+    let claimed = tasks
+        .claim_next("mine", "w1:p1", lease(300.0))
+        .await
+        .unwrap();
+    assert_eq!(first.id, claimed_id(&claimed));
+    let refused = refused_with(
+        tasks
+            .claim_next("mine", "w1:p1", lease(300.0))
+            .await
+            .unwrap(),
+    );
+    assert_eq!("busy", refused.reason);
+    let allowed = tasks
+        .claim_next(
+            "mine",
+            "w1:p1",
+            ClaimOptions {
+                allow_busy: true,
+                lease_seconds: Some(300.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.id, claimed_id(&allowed));
+}
+
+#[tokio::test]
+async fn test_mine_requires_a_pane() {
+    let tasks = store("py-mine-no-pane").await;
+    assert!(tasks
+        .claim_next("mine", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("scope 'mine' requires a known caller pane"));
+}
+
+#[tokio::test]
+async fn test_pane_id_scope_does_not_take_anothers_assigned_global() {
+    let tasks = store("py-pane-scope-not-owner").await;
+    let owned = add_with(&tasks, "their work", None, &["%34"], &[], false).await;
+    let refused = refused_with(
+        tasks
+            .claim_next("%34", "%36", ClaimOptions::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!("empty", refused.reason);
+    let still = tasks.get(&owned.id).await.unwrap();
+    assert_eq!("open", still.status);
+    assert_eq!(vec!["%34"], assignees_of(&still));
+    let mine = tasks
+        .claim_next("mine", "%34", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(owned.id, claimed_id(&mine));
+}
+
+#[tokio::test]
+async fn test_claim_records_the_caller_pid_and_start() {
+    let tasks = store("py-caller-record").await;
+    let task = tasks.add("global", "caller", "").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "w1:p1",
+            ClaimOptions {
+                lease_seconds: Some(60.0),
+                caller: Some((
+                    std::process::id() as i64,
+                    Some("12345".into()),
+                    Some("pi".into()),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            Some(std::process::id() as i64),
+            Some("12345".into()),
+            Some("pi".into())
+        ),
+        caller_identity(&tasks, &task.id, "w1:p1").await
+    );
+}
+
+#[tokio::test]
+async fn test_heartbeat_refreshes_the_caller_identity() {
+    let tasks = store("py-heartbeat-caller").await;
+    let task = tasks.add("global", "caller", "").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "w1:p1",
+            ClaimOptions {
+                lease_seconds: Some(30.0),
+                caller: Some((1, Some("1".into()), Some("old".into()))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tasks
+        .heartbeat(
+            &task.id,
+            "w1:p1",
+            Some(60.0),
+            Some((2, Some("2".into()), Some("new".into()))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (Some(2), Some("2".into()), Some("new".into())),
+        caller_identity(&tasks, &task.id, "w1:p1").await
+    );
+}
+
+#[tokio::test]
+async fn test_reap_requeues_a_dead_caller_even_with_a_live_pane() {
+    let tasks = store("py-reap-dead-caller").await;
+    let task = tasks.add("global", "caller", "").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "w1:p1",
+            ClaimOptions {
+                lease_seconds: Some(600.0),
+                caller: Some((
+                    std::process::id() as i64,
+                    Some("1".into()),
+                    Some("pi".into()),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let dead: CallerAlive = Box::new(|_, _| false);
+    let reaped = tasks
+        .reap(Some(vec!["w1:p1".into()]), Some(dead), None, Some("live"))
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![(task.id.clone(), "caller_dead")],
+        reaped
+            .iter()
+            .map(|row| (row.task_id.clone(), row.reason))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!("open", tasks.get(&task.id).await.unwrap().status);
+    assert!(tasks.leases_for(&task.id, None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_reap_keeps_a_live_caller() {
+    let tasks = store("py-reap-live-caller").await;
+    let task = tasks.add("global", "caller", "").await.unwrap();
+    tasks
+        .claim_next(
+            "global",
+            "w1:p1",
+            ClaimOptions {
+                lease_seconds: Some(600.0),
+                caller: Some((
+                    std::process::id() as i64,
+                    Some("1".into()),
+                    Some("pi".into()),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let alive: CallerAlive = Box::new(|_, _| true);
+    assert!(tasks
+        .reap(Some(vec!["w1:p1".into()]), Some(alive), None, Some("live"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!("in_progress", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_reap_does_not_guess_for_a_legacy_lease_without_a_caller() {
+    let tasks = store("py-reap-legacy-caller").await;
+    let task = tasks.add("global", "legacy", "").await.unwrap();
+    tasks
+        .claim_next("global", "w1:p1", lease(600.0))
+        .await
+        .unwrap();
+    let dead: CallerAlive = Box::new(|_, _| false);
+    assert!(tasks
+        .reap(Some(vec!["w1:p1".into()]), Some(dead), None, Some("live"))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!("in_progress", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_old_lease_table_is_migrated_in_place() {
+    let dir = crate::testsupport::dir("py-old-lease-schema");
+    let path = dir.path().join("tasks.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE task_leases (
+                task_id TEXT NOT NULL,
+                pane_id TEXT NOT NULL,
+                claimed_at REAL NOT NULL,
+                heartbeat_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                PRIMARY KEY (task_id, pane_id)
+            );",
+        )
+        .unwrap();
+    }
+    let tasks = Tasks::open(&path).await.unwrap();
+    let columns = tasks
+        .writer
+        .call(|conn| {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(task_leases)")
+                .map_err(crate::db::map_sqlite)?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(crate::db::map_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(crate::db::map_sqlite)?;
+            Ok(names)
+        })
+        .await
+        .unwrap();
+    assert!(
+        ["caller_pid", "caller_start", "caller_name"]
+            .iter()
+            .all(|column| columns.iter().any(|name| name == column)),
+        "lease migration did not add caller identity columns: {columns:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_claim_requires_a_pane() {
+    let tasks = store("py-requires-pane").await;
+    tasks.add("global", "work", "").await.unwrap();
+    assert!(tasks
+        .claim_next("global", "", ClaimOptions::default())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("claiming a task requires a caller pane id"));
+}
+
+// Deferred from Python claim/lease classes, with reasons:
 //  - test_every_refusal_is_logged_with_the_pane_and_reason,
 //    test_reap_advisory_names_the_sole_owner_when_that_owner_is_gone,
 //    test_reap_advisory_is_silent_when_the_owner_is_alive: they assert on Python `logging`
-//    records; the Rust claim.rs writes those lines with `eprintln!` (claim.rs:355, :601), so
-//    a test cannot capture them without a logging crate (RUST_PORT.md 7 says `tracing`).
-//  - test_claim_requires_a_pane: Python passes `None`; `claim_next(&str)` cannot be given
-//    one, so the case does not exist in the Rust types.
+//    records; Rust uses `eprintln!` (claim.rs:355, :601), which has no capture adapter here.
+//  - FlockTaskTests claim/follow/push cases, PushAndReleaseTests, and
+//    TerminalStatusReleasesTheLease tests: they require Flock, roles and/or adapter wiring;
+//    defer to T31/T35 rather than adding those surfaces to this Tasks-only slice.
+//  - test_a_cleared_row_factory_does_not_break_a_lease_read: Python sqlite row_factory drift
+//    has no equivalent in the Rust row API; the Rust lease decoder uses typed row access.
 
 // t872 (Python PR #166), ported by name: blocking ends the claim, and the reaper never
 // resurrects a blocked task.
 
 #[tokio::test]
-async fn blocking_deletes_the_lease() {
+async fn test_blocking_deletes_the_lease() {
     let tasks = store("t872-block").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     tasks
@@ -990,7 +1482,7 @@ async fn blocking_deletes_the_lease() {
 }
 
 #[tokio::test]
-async fn the_reaper_does_not_reopen_a_blocked_task() {
+async fn test_the_reaper_does_not_reopen_a_blocked_task() {
     let tasks = store("t872-reap-blocked").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     tasks
@@ -1010,7 +1502,7 @@ async fn the_reaper_does_not_reopen_a_blocked_task() {
 }
 
 #[tokio::test]
-async fn the_reaper_still_reopens_an_in_progress_task() {
+async fn test_the_reaper_still_reopens_an_in_progress_task() {
     let tasks = store("t872-reap-working").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     tasks
