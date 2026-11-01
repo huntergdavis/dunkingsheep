@@ -2,6 +2,8 @@
 //! guard, with the saved %30 trace controls.
 
 use serde_json::json;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 use super::*;
 
@@ -347,4 +349,54 @@ fn bytes_splitlines_splits_on_the_three_newlines_only() {
     let lines = split_lines(b"a\nb\r\nc\rd\x0be");
     assert_eq!(lines, [&b"a"[..], b"b", b"c", b"d\x0be"]);
     assert!(split_lines(b"").is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn realpath_resolves_symlink_prefixes_with_missing_suffixes_and_parent_traversal() {
+    let root = std::env::temp_dir().join(format!("ds-realpath-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let target = root.join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let existing = target.join("existing");
+    std::fs::write(&existing, "fixture").unwrap();
+    let alias = root.join("alias");
+    symlink(&target, &alias).unwrap();
+
+    let expected_missing = target.join("missing").join("leaf");
+    let through_alias = alias.join("missing").join("leaf");
+    assert_eq!(
+        realpath(through_alias.to_str().unwrap()),
+        expected_missing.display().to_string()
+    );
+
+    let through_missing_parent = root
+        .join("missing")
+        .join("..")
+        .join("alias")
+        .join("missing");
+    let expected_parent_result = target.join("missing");
+    assert_eq!(
+        realpath(through_missing_parent.to_str().unwrap()),
+        expected_parent_result.display().to_string()
+    );
+
+    assert_eq!(
+        realpath(existing.to_str().unwrap()),
+        std::fs::canonicalize(&existing)
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        realpath("."),
+        std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string()
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
 }

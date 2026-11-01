@@ -15,6 +15,7 @@
 //! BOUND: the final stat re-read closes the window up to that read; a turn that starts after it
 //! is not prevented. This is a bounded precondition, not atomic coordination.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -162,34 +163,64 @@ fn py_str(v: &Value) -> String {
     }
 }
 
-/// `os.path.realpath`: resolve symlinks; a path that does not exist stays lexical (absolute).
+/// `os.path.realpath`: resolve existing symlink prefixes even when a later path component is
+/// missing. A later `..` can return to an existing prefix, where symlinks must still be resolved.
 pub fn realpath(path: &str) -> String {
     let p = if path.is_empty() {
         std::env::current_dir().unwrap_or_default()
     } else {
         PathBuf::from(path)
     };
-    match std::fs::canonicalize(&p) {
-        Ok(real) => real.display().to_string(),
-        Err(_) => {
-            let abs = if p.is_absolute() {
-                p
-            } else {
-                std::env::current_dir().unwrap_or_default().join(p)
-            };
-            let mut out = PathBuf::new();
-            for part in abs.components() {
-                match part {
-                    std::path::Component::ParentDir => {
-                        out.pop();
-                    }
-                    std::path::Component::CurDir => {}
-                    other => out.push(other),
-                }
+    let abs = if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().unwrap_or_default().join(p)
+    };
+    let mut pending: VecDeque<PathBuf> = abs
+        .components()
+        .map(|component| PathBuf::from(component.as_os_str()))
+        .collect();
+    let mut resolved = PathBuf::new();
+    let mut followed_symlinks = 0;
+
+    while let Some(part) = pending.pop_front() {
+        match part.components().next() {
+            Some(std::path::Component::Prefix(prefix)) => resolved.push(prefix.as_os_str()),
+            Some(std::path::Component::RootDir) => {
+                resolved.push(std::path::MAIN_SEPARATOR.to_string());
             }
-            out.display().to_string()
+            Some(std::path::Component::CurDir) | None => {}
+            Some(std::path::Component::ParentDir) => {
+                resolved.pop();
+            }
+            Some(std::path::Component::Normal(name)) => {
+                let candidate = resolved.join(name);
+                if std::fs::symlink_metadata(&candidate)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    if let Ok(target) = std::fs::read_link(&candidate) {
+                        followed_symlinks += 1;
+                        if followed_symlinks <= 40 {
+                            if target.is_absolute() {
+                                resolved.clear();
+                            }
+                            for target_part in target
+                                .components()
+                                .map(|component| PathBuf::from(component.as_os_str()))
+                                .rev()
+                            {
+                                pending.push_front(target_part);
+                            }
+                            continue;
+                        }
+                    }
+                }
+                resolved.push(name);
+            }
         }
     }
+
+    resolved.display().to_string()
 }
 
 /// `os.path.expanduser` for a leading `~` or `~/`.
