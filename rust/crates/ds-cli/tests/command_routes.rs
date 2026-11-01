@@ -272,3 +272,77 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_17_task_edit_a() {
+    let updated = run_daemon_cli(
+        &[
+            "task",
+            "update",
+            "t7",
+            "--title",
+            "Updated",
+            "--body",
+            "new body",
+            "--status",
+            "blocked",
+            "--assign",
+            "%99",
+            "--depends-on",
+            "t6",
+            "--parent",
+            "t5",
+            "--block-reason",
+            "waiting",
+            "--no-multi",
+        ],
+        "task_update",
+        json!({
+            "id":"t7", "title":"Updated", "body":"new body", "status":"blocked",
+            "assignees":["%99"], "depends_on":["t6"], "parent_id":"t5",
+            "block_reason":"waiting", "multi_assignee":false
+        }),
+        json!({"id":"t7", "priority":"low", "status":"blocked", "title":"Updated", "scope":"global"}),
+    );
+    assert_eq!(0, updated.status.code().unwrap());
+    assert_eq!(
+        "t7 [low] blocked  Updated\nscope       global\n",
+        String::from_utf8(updated.stdout).unwrap()
+    );
+    assert!(updated.stderr.is_empty());
+
+    let assigned = run_daemon_cli(
+        &["task", "assign", "t7", "%98", "%99", "--mode", "set"],
+        "task_assign",
+        json!({"id":"t7", "assignees":["%98", "%99"], "mode":"set"}),
+        json!({"id":"t7", "priority":"low", "status":"open", "title":"Updated", "scope":"global", "assignees":["%98", "%99"]}),
+    );
+    assert_eq!(0, assigned.status.code().unwrap());
+    assert_eq!(
+        "t7 [low] open  Updated\nscope       global\nassignees   %98, %99\n",
+        String::from_utf8(assigned.stdout).unwrap()
+    );
+    assert!(assigned.stderr.is_empty());
+
+    let completed = run_daemon_cli(
+        &[
+            "task",
+            "complete",
+            "t7",
+            "--by",
+            "%99",
+            "--verdict",
+            "needs-fix",
+            "--unmerged",
+        ],
+        "task_complete",
+        json!({"id":"t7", "by":"%99"}),
+        json!({"id":"t7", "priority":"low", "status":"done", "title":"Updated", "scope":"global"}),
+    );
+    assert_eq!(0, completed.status.code().unwrap());
+    assert_eq!(
+        "t7 [low] done  Updated\nscope       global\n",
+        String::from_utf8(completed.stdout).unwrap()
+    );
+    assert!(completed.stderr.is_empty());
+}

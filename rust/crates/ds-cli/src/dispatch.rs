@@ -20,6 +20,15 @@ fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
 
+fn task_stamp(at: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(at.floor() as i64, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
@@ -749,6 +758,56 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 })
             }
             _ => not_ported("inbox"),
+        },
+        "task" => match text(ns, "task_command").unwrap_or("") {
+            "update" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                for (argument, field) in [
+                    ("title", "title"),
+                    ("body", "body"),
+                    ("status", "status"),
+                    ("priority", "priority"),
+                    ("parent", "parent_id"),
+                    ("block_reason", "block_reason"),
+                    ("assign", "assignees"),
+                    ("depends_on", "depends_on"),
+                    ("multi_assignee", "multi_assignee"),
+                ] {
+                    if let Some(value) = ns.get(argument).filter(|value| !value.is_null()) {
+                        args.insert(field.into(), value.clone());
+                    }
+                }
+                crate::daemon_cmd::run_command(ns, "task_update", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "assign" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "assignees".into(),
+                    ns.get("assignees").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "mode".into(),
+                    ns.get("mode")
+                        .cloned()
+                        .unwrap_or(Value::String("add".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "task_assign", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "complete" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert("by".into(), ns.get("by").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_complete", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            _ => not_ported("task"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
