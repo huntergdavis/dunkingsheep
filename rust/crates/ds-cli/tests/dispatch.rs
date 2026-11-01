@@ -144,3 +144,58 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
         refused.stderr
     );
 }
+
+/// `github wrappers` through argv -> parser -> dispatch, in a sandbox (a fake real `gh`, a
+/// throwaway GIT_CONFIG_GLOBAL, a temp bin dir); and `github protect` stays honest.
+#[test]
+fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let real_dir = t.path().join("realbin");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let real = real_dir.join("gh");
+    std::fs::write(&real, "#!/bin/sh\necho real\n").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = t.path().join("gitconfig");
+    std::fs::write(
+        &cfg,
+        "[credential \"https://github.com\"]\n\thelper = !gh auth git-credential\n",
+    )
+    .unwrap();
+    std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", real_dir.display()));
+    let bin = t.path().join("bin").display().to_string();
+    let ns = try_parse([
+        "dunkingsheep",
+        "github",
+        "wrappers",
+        "--bin-dir",
+        bin.as_str(),
+    ])
+    .unwrap();
+    let out = run(&ns);
+    std::env::set_var("PATH", old_path);
+    assert_eq!(0, out.code, "{}", out.stderr);
+    assert!(
+        out.stdout.starts_with("gh_wrapper           "),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("['!dunkingsheep git-credential', '!gh auth git-credential']"),
+        "{}",
+        out.stdout
+    );
+    assert!(t.path().join("bin/gh").exists());
+    let ns = try_parse(["dunkingsheep", "github", "protect", "someorg/repo"]).unwrap();
+    let out = run(&ns);
+    assert_eq!(1, out.code);
+    assert!(
+        out.stderr
+            .contains("`github protect` is parsed but not ported yet"),
+        "{}",
+        out.stderr
+    );
+}
