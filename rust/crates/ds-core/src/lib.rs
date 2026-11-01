@@ -41,6 +41,7 @@ pub mod retry;
 pub mod review;
 pub mod roles;
 pub mod stuck;
+pub mod superusers;
 pub mod tasks;
 pub mod terminal;
 pub mod usage;

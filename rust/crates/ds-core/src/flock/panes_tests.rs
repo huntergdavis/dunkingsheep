@@ -88,3 +88,81 @@ fn stores_start_empty_and_can_be_attached() {
     flock.attach_stores(Stores::default());
     assert!(flock.stores().tasks.is_none());
 }
+
+fn scratch(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ds-obs-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_flock_that_does_not_persist_gets_in_memory_metrics_and_no_memory_store() {
+    let flock = flock();
+    assert!(flock.stores().metrics.is_none() && flock.stores().memory.is_none());
+    flock
+        .wire_observability(
+            &scratch("mem"),
+            Some(std::path::Path::new("/nonexistent/m.db")),
+        )
+        .unwrap();
+    let stores = flock.stores();
+    assert!(stores.metrics.is_some(), "metrics are always there");
+    assert!(
+        stores.memory.is_none(),
+        "no memory store without persistence"
+    );
+}
+
+#[test]
+fn a_persisting_flock_keeps_its_metrics_beside_the_state_file() {
+    let dir = scratch("persist");
+    let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true);
+    // no memory db on disk: the flock still builds, memory stays None
+    flock
+        .wire_observability(&dir, Some(&dir.join("memory.db")))
+        .unwrap();
+    assert!(dir.join("metrics.db").exists());
+    assert!(flock.stores().memory.is_none());
+}
+
+#[test]
+fn metrics_record_prune_and_earliest() {
+    use crate::metrics::{Event, MetricsStore, MAX_EVENTS};
+    let store = MetricsStore::open(scratch("metrics").join("metrics.db")).unwrap();
+    assert_eq!(None, store.earliest().unwrap());
+    let now = crate::clock::now_s();
+    for (age, kind) in [
+        (100.0 * 86400.0, "old"),
+        (10.0, "message.sent"),
+        (5.0, "message.sent"),
+    ] {
+        store.record(&Event {
+            at: now - age,
+            kind: kind.into(),
+            pane_id: Some("w1:p1".into()),
+            duration_ms: Some(7),
+            ..Default::default()
+        });
+    }
+    assert!(store.earliest().unwrap().unwrap() < now - 99.0 * 86400.0);
+    // the 30-day retention drops only the old one
+    assert_eq!(1, store.prune(None, MAX_EVENTS).unwrap());
+    let kept = store.events_between(now - 60.0, now + 1.0).unwrap();
+    assert_eq!(2, kept.len());
+    assert_eq!(Some(7), kept[0].duration_ms);
+    // the cap drops the oldest beyond max_events
+    assert_eq!(1, store.prune(None, 1).unwrap());
+    assert_eq!(
+        1,
+        store.events_between(now - 60.0, now + 1.0).unwrap().len()
+    );
+    // a disabled store records nothing
+    let mut off = MetricsStore::open(":memory:").unwrap();
+    off.enabled = false;
+    off.record(&Event {
+        kind: "x".into(),
+        ..Default::default()
+    });
+    assert_eq!(None, off.earliest().unwrap());
+}

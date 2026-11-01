@@ -27,7 +27,7 @@ async fn flock_with_store(tag: &str) -> (Flock, Arc<Tasks>) {
     let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
     flock.attach_stores(Stores {
         tasks: Some(tasks.clone()),
-        inbox: None,
+        ..Default::default()
     });
     (flock, tasks)
 }
