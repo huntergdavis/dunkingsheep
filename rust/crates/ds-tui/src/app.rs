@@ -15,6 +15,11 @@ pub trait TuiLoopIo<C: RpcClient> {
     fn draw(&mut self, model: &TuiModel<C>, now: f64) -> Result<(), Self::Error>;
     fn read_key(&mut self, timeout: Duration) -> Result<Option<char>, Self::Error>;
 
+    /// Forward keys not consumed by the event loop to the command adapter.
+    fn handle_key(&mut self, _model: &mut TuiModel<C>, _key: char) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Re-establish the daemon connection after the model's retry threshold.
     fn reconnect(&mut self, _model: &mut TuiModel<C>, _now: f64) {}
 }
@@ -22,8 +27,8 @@ pub trait TuiLoopIo<C: RpcClient> {
 /// Draw, poll input, refresh RPC-backed state, and clean up on loop exit.
 ///
 /// `q` exits the loop and `v` switches between the dunk and task views. All other
-/// input remains available to a future command-handler adapter. Cleanup also runs
-/// when terminal I/O returns an error.
+/// input is forwarded to the command adapter. Cleanup also runs when terminal I/O
+/// returns an error.
 pub fn run<C, I>(model: &mut TuiModel<C>, io: &mut I) -> Result<(), I::Error>
 where
     C: RpcClient,
@@ -49,6 +54,9 @@ where
                 View::Dunks => View::Tasks,
                 View::Tasks => View::Dunks,
             };
+        }
+        if let Some(key) = key.filter(|key| !matches!(key, 'q' | 'v')) {
+            io.handle_key(model, key)?;
         }
 
         let now = io.now();
@@ -103,6 +111,7 @@ mod tests {
         draws: usize,
         timeouts: Vec<Duration>,
         reconnects: usize,
+        handled_keys: Vec<char>,
     }
 
     impl TuiLoopIo<FakeClient> for FakeIo {
@@ -122,6 +131,15 @@ mod tests {
             Ok(self.keys.pop_front().unwrap_or(Some('q')))
         }
 
+        fn handle_key(
+            &mut self,
+            _: &mut TuiModel<FakeClient>,
+            key: char,
+        ) -> Result<(), Self::Error> {
+            self.handled_keys.push(key);
+            Ok(())
+        }
+
         fn reconnect(&mut self, _: &mut TuiModel<FakeClient>, _: f64) {
             self.reconnects += 1;
         }
@@ -134,6 +152,7 @@ mod tests {
             draws: 0,
             timeouts: Vec::new(),
             reconnects: 0,
+            handled_keys: Vec::new(),
         }
     }
 
@@ -151,6 +170,17 @@ mod tests {
         assert_eq!(model.view, View::Tasks);
         assert_eq!(model.client.calls, 5); // dunk view once, then dunk + task views
         assert_eq!(close_count.get(), 1);
+    }
+
+    #[test]
+    fn run_forwards_unhandled_keys_to_io_handler() {
+        let mut model = TuiModel::connected(FakeClient::default(), 0.0);
+        let mut io = io([Some('a'), Some('v'), Some('q')]);
+
+        run(&mut model, &mut io).unwrap();
+
+        assert_eq!(io.handled_keys, vec!['a']);
+        assert_eq!(model.view, View::Tasks);
     }
 
     #[test]
