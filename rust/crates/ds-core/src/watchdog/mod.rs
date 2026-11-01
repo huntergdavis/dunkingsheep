@@ -158,11 +158,18 @@ impl TaskData {
             &[&now],
         )?;
         for task in &mut tasks {
-            let parsed = task["assignees"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or_else(|| json!([]));
+            // `json.loads(task.get("assignees") or "[]")`: absent or empty is `[]`, but a
+            // malformed value RAISES in Python, so the load fails and the rules that needed
+            // the store are reported as errors, never passed silently (review t1401).
+            let parsed = match task["assignees"].as_str().filter(|s| !s.is_empty()) {
+                None => json!([]),
+                Some(text) => serde_json::from_str::<Value>(text).map_err(|error| {
+                    DunkError::Refused(format!(
+                        "task {} has malformed assignees JSON: {error}",
+                        task["id"].as_str().unwrap_or("?")
+                    ))
+                })?,
+            };
             task["assignees"] = parsed;
         }
         Ok(TaskData {

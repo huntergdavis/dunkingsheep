@@ -176,7 +176,7 @@ fn task_lease_expired_unrenewed_and_reaped() {
         ],
         ..Default::default()
     };
-    let mut findings = rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW);
+    let mut findings = rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW).unwrap();
     sort_findings(&mut findings);
     assert_eq!(
         vec![
@@ -216,7 +216,9 @@ fn old_reap_ages_out_of_the_fresh_window() {
         ..Default::default()
     };
     assert!(
-        rule_task_lease_stale(&data, &lease_rule(30, 1440, 60), NOW).is_empty(),
+        rule_task_lease_stale(&data, &lease_rule(30, 1440, 60), NOW)
+            .unwrap()
+            .is_empty(),
         "a 90-minute-old reap is history, not news"
     );
 }
@@ -236,7 +238,7 @@ fn a_pane_gone_reap_counts_and_a_reasonless_one_does_not() {
         ],
         ..Default::default()
     };
-    let findings = rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW);
+    let findings = rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW).unwrap();
     assert_eq!(vec![pair("task.lease_stale", "reaped:1")], keys(&findings));
 }
 
@@ -335,5 +337,65 @@ fn the_loader_reads_the_store_read_only_and_never_sees_events_after_now() {
     assert!(
         TaskData::load(&dir.join("missing.db"), 20.0).is_err(),
         "an unreadable store is an error"
+    );
+}
+
+fn raw_event(id: i64, name: &str, at: f64, meta: Option<&str>) -> Value {
+    json!({"id": id, "task_id": "e", "event": name, "at": at, "meta": meta})
+}
+
+#[test]
+fn a_malformed_reap_meta_is_an_error_not_a_quiet_skip() {
+    // Python: json.loads(event["meta"] or "{}") raises, the rule errors (review t1401).
+    for bad in ["{not json", "[1, 2]", "5", "null", "\"text\""] {
+        let data = TaskData {
+            events: vec![raw_event(1, "requeued", NOW - MIN, Some(bad))],
+            ..Default::default()
+        };
+        let error = rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW)
+            .expect_err(bad)
+            .to_string();
+        assert!(error.contains("task_events 1"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn only_events_that_pass_the_filters_are_parsed() {
+    // The Python parses meta AFTER the name and age filters, so garbage on an unrelated or an
+    // old event is never read.
+    let data = TaskData {
+        events: vec![
+            raw_event(1, "status", NOW - MIN, Some("{not json")),
+            raw_event(2, "requeued", NOW - 500.0 * MIN, Some("{not json")),
+            raw_event(3, "released", NOW - MIN, None),
+            raw_event(4, "released", NOW - MIN, Some("")),
+        ],
+        ..Default::default()
+    };
+    assert!(rule_task_lease_stale(&data, &lease_rule(30, 60, 60), NOW)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_malformed_assignees_column_fails_the_load() {
+    let dir = std::env::temp_dir().join(format!("ds-wd-assignees-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tasks.db");
+    let _ = std::fs::remove_file(&path);
+    seed_tasks_db(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("UPDATE tasks SET assignees = '[\"w1:p1\"'", [])
+        .unwrap();
+    drop(conn);
+    let error = TaskData::load(&path, 20.0).unwrap_err().to_string();
+    assert!(error.contains("malformed assignees JSON"), "{error}");
+    // Absent or empty assignees are still `[]`, as `json.loads(x or "[]")` gives.
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("UPDATE tasks SET assignees = ''", []).unwrap();
+    drop(conn);
+    assert_eq!(
+        json!([]),
+        TaskData::load(&path, 20.0).unwrap().tasks[0]["assignees"]
     );
 }

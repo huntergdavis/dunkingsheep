@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use super::{finding, minutes, py_float, py_number, TaskData, SOURCE_RULE};
+use crate::error::DunkError;
 
 /// A DECLARED marker, not prose inference: a blocked task whose reason starts with this is
 /// parked on the owner, not stale. The digest still counts it.
@@ -95,8 +96,16 @@ pub fn rule_task_blocked_stale(data: &TaskData, rule: &Value, now: f64) -> Vec<V
     out
 }
 
-/// `rule_task_lease_stale`.
-pub fn rule_task_lease_stale(data: &TaskData, rule: &Value, now: f64) -> Vec<Value> {
+/// `rule_task_lease_stale`. Returns an error where the Python raises: an event that passes the
+/// name and age filters is parsed with `json.loads(event["meta"] or "{}")`, so a malformed meta
+/// raises, and so does a meta that is valid JSON but not an object (`meta.get` on a list or a
+/// number). The evaluator reports that as a rule error instead of a quiet skip (review t1401).
+/// Events the filters drop are never parsed, exactly as in Python.
+pub fn rule_task_lease_stale(
+    data: &TaskData,
+    rule: &Value,
+    now: f64,
+) -> Result<Vec<Value>, DunkError> {
     let mut out = Vec::new();
     let never_renewed = &rule["never_renewed_minutes"];
     for lease in &data.leases {
@@ -148,11 +157,21 @@ pub fn rule_task_lease_stale(data: &TaskData, rule: &Value, now: f64) -> Vec<Val
         if !matches!(name, "requeued" | "released") || num(&event["at"]) < since {
             continue;
         }
-        let meta: Value = event["meta"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_else(|| json!({}));
+        let meta: Value = match event["meta"].as_str().filter(|s| !s.is_empty()) {
+            None => json!({}),
+            Some(text) => serde_json::from_str(text).map_err(|error| {
+                DunkError::Refused(format!(
+                    "task_events {} has malformed meta JSON: {error}",
+                    event["id"]
+                ))
+            })?,
+        };
+        if !meta.is_object() {
+            return Err(DunkError::Refused(format!(
+                "task_events {} meta is not an object",
+                event["id"]
+            )));
+        }
         let reason = meta["reason"].as_str().unwrap_or("");
         if reason != "expired" && reason != "pane_gone" {
             continue;
@@ -180,5 +199,5 @@ pub fn rule_task_lease_stale(data: &TaskData, rule: &Value, now: f64) -> Vec<Val
             true,
         ));
     }
-    out
+    Ok(out)
 }
