@@ -19,6 +19,13 @@ use crate::tasks::{Task, Tasks};
 /// `TASK_GLOBAL`.
 pub const TASK_GLOBAL: &str = "global";
 
+/// What `task_cancel` returns: the cancelled row plus the dependents it strands (t878).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cancelled {
+    pub task: Task,
+    pub blocked_dependents: Vec<String>,
+}
+
 /// Roles that file their own work and may not hand it to another lane.
 const LANE_ROLES: [&str; 4] = ["desk", "planner", "worker", "reviewer"];
 
@@ -192,17 +199,24 @@ impl Flock {
         tasks.unblock(task_id).await
     }
 
-    /// `task_cancel`.
+    /// `task_cancel`: the row WITH `blocked_dependents` (t878), the ids of the open, in-progress
+    /// or blocked tasks that depend on it and are now unclaimable by work. Silence there is the
+    /// defect t878 removed.
     pub async fn task_cancel(
         &self,
         task_id: &str,
         reason: Option<&str>,
         self_pane_id: Option<&str>,
-    ) -> Result<Task, DunkError> {
+    ) -> Result<Cancelled, DunkError> {
         let tasks = self.task_store()?;
         self.visible_task(&tasks, task_id, self_pane_id).await?;
         // As `task_block`: None stays NULL (t1314), not ''.
-        tasks.set_status(task_id, "cancelled", reason, None).await
+        let task = tasks.set_status(task_id, "cancelled", reason, None).await?;
+        let blocked_dependents = tasks.blocked_dependents(&task.id).await?;
+        Ok(Cancelled {
+            task,
+            blocked_dependents,
+        })
     }
 
     /// `task_delete`: `{"deleted": id}` in the Python, the id here.

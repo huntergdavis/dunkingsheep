@@ -281,6 +281,7 @@ async fn block_unblock_cancel_and_delete_go_through_the_store() {
             .task_cancel(&task.id, Some("no"), Some(WORKER))
             .await
             .unwrap()
+            .task
             .status
     );
     let gone = tasks.add("global", "gone", "").await.unwrap();
@@ -360,7 +361,8 @@ async fn a_reasonless_block_or_cancel_stores_null_not_an_empty_string() {
     let got = flock
         .task_cancel(&cancelled.id, None, Some(WORKER))
         .await
-        .unwrap();
+        .unwrap()
+        .task;
     assert_eq!("cancelled", got.status);
     assert_eq!(None, got.block_reason);
     // A given reason is still kept verbatim.
@@ -383,4 +385,66 @@ async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults()
         .unwrap();
     let events = tasks.events_named(&task.id).await;
     assert_eq!(vec!["note".to_string(), "".to_string()], events);
+}
+
+async fn depends_on(tasks: &Tasks, task: &str, deps: &[&str]) {
+    tasks
+        .update(
+            task,
+            crate::tasks::FieldEdit {
+                depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancel_names_the_dependents_it_strands() {
+    // tests/test_dunk_tasks.py test_cancel_names_the_dependents_it_strands (t878).
+    let (flock, tasks) = flock_with_store("strands").await;
+    let dep = tasks.add("global", "the dependency", "").await.unwrap();
+    let row = tasks.add("global", "waits on it", "").await.unwrap();
+    depends_on(&tasks, &row.id, &[&dep.id]).await;
+    let cancelled = flock
+        .task_cancel(&dep.id, Some("duplicate"), Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!(vec![row.id.clone()], cancelled.blocked_dependents);
+    assert_eq!("cancelled", cancelled.task.status);
+}
+
+#[tokio::test]
+async fn only_live_dependents_are_named_and_the_ids_are_sorted() {
+    let (flock, tasks) = flock_with_store("strands-live").await;
+    let dep = tasks.add("global", "dep", "").await.unwrap();
+    let blocked = tasks.add("global", "blocked", "").await.unwrap();
+    let open = tasks.add("global", "open", "").await.unwrap();
+    let done = tasks.add("global", "done", "").await.unwrap();
+    let unrelated = tasks.add("global", "unrelated", "").await.unwrap();
+    for t in [&blocked, &open, &done] {
+        depends_on(&tasks, &t.id, &[&dep.id]).await;
+    }
+    tasks.block(&blocked.id, "x").await.unwrap();
+    tasks.complete(&done.id).await.unwrap();
+    let _ = unrelated;
+    let cancelled = flock
+        .task_cancel(&dep.id, None, Some(WORKER))
+        .await
+        .unwrap();
+    let mut want = vec![blocked.id.clone(), open.id.clone()];
+    want.sort();
+    assert_eq!(
+        want, cancelled.blocked_dependents,
+        "done dependents are not stranded"
+    );
+    let none = tasks.add("global", "alone", "").await.unwrap();
+    assert!(flock
+        .task_cancel(&none.id, None, None)
+        .await
+        .unwrap()
+        .blocked_dependents
+        .is_empty());
 }
