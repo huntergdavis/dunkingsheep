@@ -1289,6 +1289,37 @@ fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, command, args, printer)
 }
 
+fn state(ns: &Map<String, Value>) -> Outcome {
+    let command = text(ns, "state_command").unwrap_or("");
+    let (rpc, args) = match command {
+        "capture" => {
+            let mut args = Map::new();
+            args.insert(
+                "source".into(),
+                ns.get("source")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("periodic".into())),
+            );
+            ("state_capture", args)
+        }
+        "latest" => {
+            let mut args = Map::new();
+            for (source, target) in [
+                ("pane", "pane_id"),
+                ("project", "project"),
+                ("limit", "limit"),
+            ] {
+                if let Some(value) = ns.get(source).filter(|value| !value.is_null()) {
+                    args.insert(target.into(), value.clone());
+                }
+            }
+            ("state_latest", args)
+        }
+        other => return not_ported(&format!("state {other}")),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1319,6 +1350,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "state" => state(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {

@@ -2206,3 +2206,38 @@ fn cli_route_12_context_local_write_b() {
         String::from_utf8(missing.stderr).unwrap()
     );
 }
+fn cli_route_27_state() {
+    let captured = run_daemon_cli(
+        &["state", "capture"],
+        "state_capture",
+        json!({"source": "periodic"}),
+        json!({"captured": true, "source": "periodic"}),
+    );
+    assert_eq!(0, captured.status.code().unwrap());
+    assert_eq!(
+        "{\n  \"captured\": true,\n  \"source\": \"periodic\"\n}\n",
+        String::from_utf8(captured.stdout).unwrap()
+    );
+    assert!(captured.stderr.is_empty());
+
+    let latest = run_daemon_cli(
+        &[
+            "state",
+            "latest",
+            "%14",
+            "--project",
+            "demo",
+            "--limit",
+            "7",
+        ],
+        "state_latest",
+        json!({"pane_id": "%14", "project": "demo", "limit": 7}),
+        json!({"rows": [{"pane_id": "%14"}], "count": 1}),
+    );
+    assert_eq!(0, latest.status.code().unwrap());
+    assert_eq!(
+        "{\n  \"rows\": [\n    {\n      \"pane_id\": \"%14\"\n    }\n  ],\n  \"count\": 1\n}\n",
+        String::from_utf8(latest.stdout).unwrap()
+    );
+    assert!(latest.stderr.is_empty());
+}
