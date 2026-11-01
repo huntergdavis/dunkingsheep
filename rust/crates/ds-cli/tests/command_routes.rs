@@ -393,3 +393,80 @@ fn cli_route_23_owner_inbox_a() {
     );
     assert!(taken.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_24_owner_inbox_b() {
+    let conversation = run_daemon_cli(
+        &["owner", "conversation", "--limit", "7", "--before", "12.5"],
+        "owner_conversation",
+        json!({"limit": 7, "before": 12.5}),
+        json!({"mailbox": "owner", "count": 0, "waiting": [], "messages": []}),
+    );
+    assert_eq!(Some(0), conversation.status.code());
+    assert_eq!(
+        "mailbox owner  messages 0  waiting 0\n",
+        String::from_utf8(conversation.stdout).unwrap()
+    );
+    assert!(conversation.stderr.is_empty());
+
+    let reply_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(reply_file.path(), "file reply\n").unwrap();
+    let reply_path = reply_file.path().to_str().unwrap();
+    let reply = run_daemon_cli(
+        &["owner", "reply", "question-4", "--body-file", reply_path],
+        "owner_reply",
+        json!({"message_id": "question-4", "body": "file reply\n"}),
+        json!({
+            "question": "question-4",
+            "reply": {"message_id": "reply-5"},
+            "transport": "web",
+            "acked": true
+        }),
+    );
+    assert_eq!(Some(0), reply.status.code());
+    assert_eq!(
+        "answered question-4 with reply-5 on web (question True acked)\n",
+        String::from_utf8(reply.stdout).unwrap()
+    );
+    assert!(reply.stderr.is_empty());
+
+    let ingest_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ingest_file.path(), "incoming question\n").unwrap();
+    let ingest_path = ingest_file.path().to_str().unwrap();
+    let ingested = run_daemon_cli(
+        &[
+            "owner",
+            "ingest",
+            "telegram",
+            "--body-file",
+            ingest_path,
+            "--external-id",
+            "telegram:91",
+        ],
+        "owner_ingest",
+        json!({
+            "transport": "telegram",
+            "body": "incoming question\n",
+            "external_id": "telegram:91"
+        }),
+        json!({"accepted": true, "message_id": "question-6"}),
+    );
+    assert_eq!(Some(0), ingested.status.code());
+    assert_eq!(
+        "{\n  \"accepted\": true,\n  \"message_id\": \"question-6\"\n}\n",
+        String::from_utf8(ingested.stdout).unwrap()
+    );
+    assert!(ingested.stderr.is_empty());
+
+    let temp = tempfile::tempdir().unwrap();
+    let missing = run_cli(
+        &temp.path().join("no-daemon.sock").display().to_string(),
+        &["owner", "reply", "question-7"],
+    );
+    assert_eq!(Some(1), missing.status.code());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        "owner reply: a body or --body-file is required\n",
+        String::from_utf8(missing.stderr).unwrap()
+    );
+}
