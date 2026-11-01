@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use ds_core::client::{connect_or_start_system, ClientError, FlockClient, UnixTransport};
 use ds_core::error::DunkError;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::usage_cmd::{sorted_json, Outcome};
 
@@ -57,6 +57,11 @@ fn call_failure(error: ClientError, timeout_s: f64) -> Outcome {
 /// `FlockClient.connect_or_start(socket_path=args.socket, self_pane_id=args.self_pane,
 /// start=False)`.
 pub fn connect(ns: &Map<String, Value>) -> Result<FlockClient<UnixTransport>, Outcome> {
+    raw_client(ns).map_err(connect_failure)
+}
+
+/// The same connection, with the raw error (for commands that map failures their own way).
+pub fn raw_client(ns: &Map<String, Value>) -> Result<FlockClient<UnixTransport>, DunkError> {
     let socket = ns
         .get("socket")
         .and_then(Value::as_str)
@@ -74,7 +79,150 @@ pub fn connect(ns: &Map<String, Value>) -> Result<FlockClient<UnixTransport>, Ou
         std::time::Duration::from_secs(10),
         &exe,
     )
-    .map_err(connect_failure)
+}
+
+/// `context add|promote|supersede|retire` over the socket, role-gated THERE (`_context_via_daemon`).
+/// Output is always the one-line text (this path bypasses `--json`, as the Python does):
+/// `added <class>/<slug>`, `promoted <slug>`, `superseded by <slug>`, `retired <slug>`.
+/// A refusal (the daemon's or a missing body file) is `refused: <reason>` on stderr, exit 2;
+/// no daemon is `daemon unavailable (...); the owner may write locally with --local`, exit 1.
+/// DIFFERENCE: the Python opens a bare `FlockClient` (no probe) and reports the `OSError` text
+/// from the failing call; this one probes first and reports the connect error's text.
+pub fn context_write(ns: &Map<String, Value>, stdin: &mut dyn std::io::Read) -> Outcome {
+    let refused = |text: String| Outcome {
+        stdout: String::new(),
+        stderr: format!("refused: {text}\n"),
+        code: 2,
+    };
+    let text = |key: &str| {
+        ns.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let sub = text("context_command").unwrap_or("");
+    let global = matches!(ns.get("global_store"), Some(Value::Bool(true)));
+    let project_path = if global {
+        Value::Null
+    } else {
+        let given = text("path").unwrap_or(".dunkingsheep");
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Value::String(cwd.join(given).display().to_string())
+    };
+    // `_context_body`: --text, else stdin for `-` (the default), else the file.
+    let mut body = || -> Result<String, String> {
+        if let Some(t) = text("text") {
+            return Ok(t.to_string());
+        }
+        let file = ns.get("file").and_then(Value::as_str).unwrap_or("-");
+        if file == "-" {
+            let mut buf = String::new();
+            let _ = stdin.read_to_string(&mut buf);
+            return Ok(buf);
+        }
+        std::fs::read_to_string(file).map_err(|_| {
+            format!(
+                "no such file: {} - the body comes from --text, stdin or a file",
+                ds_core::context::store::py_repr(file)
+            )
+        })
+    };
+    let opt = |key: &str| ns.get(key).cloned().unwrap_or(Value::Null);
+    let mut args = Map::new();
+    let (cmd, done): (&str, fn(&Value) -> String) = match sub {
+        "add" => {
+            let body = match body() {
+                Ok(b) => b,
+                Err(m) => return refused(m),
+            };
+            for (key, value) in [
+                ("body", json!(body)),
+                ("cls", opt("cls")),
+                ("subject", opt("subject")),
+                ("type", opt("type_")),
+                ("authority", opt("authority")),
+                ("source", opt("source")),
+                ("stated", opt("stated")),
+                ("recheck_after", opt("recheck_after")),
+                ("supersedes", opt("supersedes")),
+                ("global_store", json!(global)),
+                ("project_path", project_path.clone()),
+            ] {
+                args.insert(key.into(), value);
+            }
+            ("context_add", |r| {
+                format!(
+                    "added {}/{}\n",
+                    crate::render_fleet::py_str(&r["class"]),
+                    crate::render_fleet::py_str(&r["slug"])
+                )
+            })
+        }
+        "promote" => {
+            for (key, value) in [
+                ("slug", opt("slug")),
+                ("global_store", json!(global)),
+                ("project_path", project_path.clone()),
+            ] {
+                args.insert(key.into(), value);
+            }
+            ("context_promote", |r| {
+                format!("promoted {}\n", crate::render_fleet::py_str(&r["slug"]))
+            })
+        }
+        "supersede" => {
+            let body = match body() {
+                Ok(b) => b,
+                Err(m) => return refused(m),
+            };
+            for (key, value) in [
+                ("slug", opt("slug")),
+                ("body", json!(body)),
+                ("global_store", json!(global)),
+                ("project_path", project_path.clone()),
+            ] {
+                args.insert(key.into(), value);
+            }
+            ("context_supersede", |r| {
+                format!(
+                    "superseded by {}\n",
+                    crate::render_fleet::py_str(&r["slug"])
+                )
+            })
+        }
+        _ => {
+            for (key, value) in [
+                ("slug", opt("slug")),
+                ("reason", opt("reason")),
+                ("global_store", json!(global)),
+                ("project_path", project_path.clone()),
+            ] {
+                args.insert(key.into(), value);
+            }
+            ("context_retire", |r| {
+                format!("retired {}\n", crate::render_fleet::py_str(&r["slug"]))
+            })
+        }
+    };
+    let unavailable = |text: String| Outcome {
+        stdout: String::new(),
+        stderr: format!("daemon unavailable ({text}); the owner may write locally with --local\n"),
+        code: 1,
+    };
+    let mut client = match raw_client(ns) {
+        Ok(client) => client,
+        Err(DunkError::Unavailable(m)) => return unavailable(m),
+        Err(other) => return refused(other.to_string()),
+    };
+    match client.call(cmd, args) {
+        Ok(result) => Outcome {
+            stdout: done(&result),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(ClientError::Dunk(e)) => refused(e.to_string()),
+        Err(ClientError::Io(e)) => unavailable(e.to_string()),
+        Err(ClientError::Unavailable(m)) | Err(ClientError::Protocol(m)) => unavailable(m),
+    }
 }
 
 /// One daemon call with the CLI's error mapping.

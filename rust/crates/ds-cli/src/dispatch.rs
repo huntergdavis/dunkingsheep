@@ -29,6 +29,15 @@ fn not_ported(command: &str) -> Outcome {
 
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
+    // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
+    // `--local` writes the files directly, which is not ported.
+    if matches!(sub, "add" | "promote" | "supersede" | "retire") {
+        if matches!(ns.get("local"), Some(Value::Bool(true))) {
+            return not_ported(&format!("context {sub} --local"));
+        }
+        let stdin = std::io::stdin();
+        return crate::daemon_cmd::context_write(ns, &mut stdin.lock());
+    }
     let now = chrono::Local::now().naive_local();
     match context_read(sub, ns, None, now) {
         Ok(out) => Outcome {
