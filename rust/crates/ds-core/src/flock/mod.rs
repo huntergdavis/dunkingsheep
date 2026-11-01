@@ -439,10 +439,12 @@ pub mod delivery;
 pub mod dunks;
 pub mod lane_registry_rows;
 pub mod lanes;
+pub mod loops;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
 pub mod roles_gate;
+pub mod sends;
 pub mod views;
 
 #[cfg(test)]
@@ -450,7 +452,13 @@ mod commands_inbox_tests;
 #[cfg(test)]
 mod commands_turns_tests;
 #[cfg(test)]
+mod commands_owner_views_tests;
+#[cfg(test)]
+mod dunks_tests;
+#[cfg(test)]
 mod lanes_tests;
+#[cfg(test)]
+mod loops_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
@@ -459,5 +467,7 @@ mod panes_tests;
 mod resolve_tests;
 #[cfg(test)]
 mod roles_gate_tests;
+#[cfg(test)]
+mod sends_tests;
 #[cfg(test)]
 mod tests;
