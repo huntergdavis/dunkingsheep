@@ -1,7 +1,7 @@
 //! T44, slice 6: run a parsed command. `main.rs` used to stop at "parsed but not ported yet";
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
-//! rest. Wired today: `context` (the READ subcommands, `context_cmd`) and `usage`
-//! (`usage_cmd`). Everything else, including the `context` write subcommands, keeps the
+//! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
+//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`). Everything else, including the `context` write subcommands, keeps the
 //! "parsed but not ported yet" answer (exit 1).
 //!
 //! `--json` for `context`: the Python prints `json.dumps(result, indent=2)` (insertion order);
@@ -58,6 +58,12 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
         "context" => context(ns, json),
+        // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
+        "secrets-check" => crate::secrets_cmd::secrets_check_command(
+            text(ns, "cwd").filter(|c| !c.is_empty()),
+            text(ns, "base").filter(|b| !b.is_empty()),
+            matches!(ns.get("quiet"), Some(Value::Bool(true))),
+        ),
         "usage" => {
             let config = text(ns, "config").unwrap_or("");
             usage_command(
