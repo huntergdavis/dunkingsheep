@@ -1,0 +1,18 @@
+Dunking Sheep types text (plus Enter) into terminal panes on a schedule.
+Each schedule is a "dunk": a target pane, a text, an interval, and a running
+flag. Dunks live in a background daemon, so the TUI, this CLI, the unix
+socket and the MCP server all see and control the same dunks.
+
+quick start
+  dunkingsheep panes                              # what can I target?
+  dunkingsheep add -T "Codex Site" -e 15 -t continue
+  dunkingsheep add -T self -e 60 --only-idle --skip-if-unconsumed \
+      -t "Check the backlog. If done: dunkingsheep remove {id}. Else keep going."
+  dunkingsheep list                               # live status, ids, countdowns
+  dunkingsheep remove d2
+  dunkingsheep tui                                # the curses view of the same dunks
+
+learn more
+  dunkingsheep guide          full guide (concepts, MCP, socket protocol, recipes)
+  dunkingsheep commands       every command the socket/MCP expose (--json: schemas)
+  dunkingsheep <command> -h   per-command flags and examples

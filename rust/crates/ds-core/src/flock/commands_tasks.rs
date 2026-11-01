@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use super::Flock;
 use crate::error::DunkError;
-use crate::tasks::{Task, Tasks};
+use crate::tasks::{AddOptions, Decorated, FieldEdit, Task, Tasks};
 
 /// `TASK_GLOBAL`.
 pub const TASK_GLOBAL: &str = "global";
@@ -28,6 +28,38 @@ pub struct Cancelled {
 
 /// Roles that file their own work and may not hand it to another lane.
 const LANE_ROLES: [&str; 4] = ["desk", "planner", "worker", "reviewer"];
+
+/// `task_add`'s optional arguments.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TaskAddArgs<'a> {
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub author: Option<&'a str>,
+    pub repo: Option<&'a str>,
+    /// Text, as the Python takes it (`pr must be a number` is the store's refusal).
+    pub pr: Option<&'a str>,
+    pub head: Option<&'a str>,
+    pub assignees: &'a [&'a str],
+    pub parent_id: Option<&'a str>,
+    pub depends_on: &'a [&'a str],
+    pub multi_assignee: bool,
+}
+
+/// `task_update`'s optional arguments; `None` leaves a field alone (the Python's Ellipsis
+/// for `parent_id` and `block_reason` is `Some(None)` to clear).
+#[derive(Debug, Default, Clone)]
+pub struct TaskUpdateArgs<'a> {
+    pub title: Option<&'a str>,
+    pub body: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub parent_id: Option<Option<&'a str>>,
+    pub assignees: Option<&'a [&'a str]>,
+    pub depends_on: Option<&'a [&'a str]>,
+    pub block_reason: Option<Option<&'a str>>,
+    pub multi_assignee: Option<bool>,
+}
 
 impl Flock {
     /// `_task_scope`: resolve a caller's scope and enforce per-pane privacy. Global is
@@ -178,6 +210,146 @@ impl Flock {
         Ok(task)
     }
 
+    /// `task_add`: resolve scope and owners, apply the pre-write refusals, then one store
+    /// write. Unassigned work stays unowned (`default_task_owner`); the default priority is `low`
+    /// (`dunk_core.task_add`: `priority or "low"`). `role` is the
+    /// caller's role (`caller_role`, not ported); kind, author, repo, pr and head go to the store.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn task_add(
+        &self,
+        title: &str,
+        scope: Option<&str>,
+        body: Option<&str>,
+        opts: TaskAddArgs<'_>,
+        role: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
+        let mut owners = Self::task_assignees(opts.assignees, self_pane_id)?;
+        let owner_refs: Vec<&str> = owners.iter().map(String::as_str).collect();
+        Self::check_task_add(
+            &target,
+            &owner_refs,
+            role,
+            opts.kind,
+            opts.status,
+            self_pane_id,
+        )?;
+        if owners.is_empty() {
+            owners = Self::default_task_owner(self_pane_id);
+        }
+        let non_empty = |v: Option<&str>, d: &str| match v {
+            Some(v) if !v.is_empty() => v.to_string(),
+            _ => d.to_string(),
+        };
+        tasks
+            .add_with(
+                &target,
+                title,
+                body.unwrap_or(""),
+                AddOptions {
+                    status: Some(non_empty(opts.status, "open")),
+                    priority: Some(non_empty(opts.priority, "low")),
+                    assignees: owners,
+                    parent_id: opts.parent_id.map(str::to_string),
+                    depends_on: opts.depends_on.iter().map(|d| d.to_string()).collect(),
+                    created_by: self_pane_id.filter(|p| !p.is_empty()).map(str::to_string),
+                    multi_assignee: opts.multi_assignee,
+                    kind: Some(non_empty(opts.kind, "work")),
+                    author: opts.author.map(str::to_string),
+                    repo: opts.repo.map(str::to_string),
+                    pr: opts.pr.map(str::to_string),
+                    head: opts.head.map(str::to_string),
+                },
+            )
+            .await
+    }
+
+    /// `task_list`: `(explicit scope or None for "visible", tasks)`. A scope other than
+    /// blank/`all` goes through `task_scope` (privacy), then the store filters. `limit` of 0
+    /// means the Python's default of 200.
+    pub async fn task_list(
+        &self,
+        scope: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        include_done: bool,
+        limit: usize,
+        self_pane_id: Option<&str>,
+        kind: Option<&str>,
+        needs_owner: bool,
+    ) -> Result<(Option<String>, Vec<Decorated>), DunkError> {
+        let tasks = self.task_store()?;
+        let explicit = match scope.map(str::trim) {
+            None | Some("") | Some("all") => None,
+            Some(_) => Some(Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?),
+        };
+        let limit = if limit == 0 { 200 } else { limit };
+        let rows = tasks
+            .list_visible(
+                explicit.as_deref(),
+                status,
+                assignee,
+                include_done,
+                limit,
+                self_pane_id,
+                kind,
+                needs_owner,
+            )
+            .await?;
+        Ok((explicit, rows))
+    }
+
+    /// `task_read`: the task, if the caller may see it.
+    pub async fn task_read(
+        &self,
+        task_id: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await
+    }
+
+    /// `task_update`: field edits through `Tasks::update`, then a status change through
+    /// `set_status` (which carries the terminal-status guards). The Python does both in one
+    /// transaction; here a refused status leaves the field edits applied.
+    pub async fn task_update(
+        &self,
+        task_id: &str,
+        args: TaskUpdateArgs<'_>,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let resolved = match args.assignees {
+            Some(list) => Some(Self::task_assignees(list, self_pane_id)?),
+            None => None,
+        };
+        let own = |v: &str| v.to_string();
+        let edit = FieldEdit {
+            title: args.title.map(own),
+            body: args.body.map(own),
+            priority: args.priority.map(own),
+            depends_on: args.depends_on.map(|l| l.iter().map(|d| own(d)).collect()),
+            parent_id: args.parent_id.map(|p| p.map(own)),
+            assignees: resolved,
+            multi_assignee: args.multi_assignee,
+            block_reason: args.block_reason.map(|r| r.map(own)),
+        };
+        let mut task = tasks.update(task_id, edit, self_pane_id).await?;
+        if let Some(status) = args.status {
+            let reason = match args.block_reason {
+                Some(Some(r)) => Some(r),
+                _ => None,
+            };
+            task = tasks
+                .set_status(task_id, status, reason, self_pane_id)
+                .await?;
+        }
+        Ok(task)
+    }
+
     /// `task_block`.
     pub async fn task_block(
         &self,
@@ -275,3 +447,57 @@ impl Flock {
 #[cfg(test)]
 #[path = "commands_tasks_tests.rs"]
 mod commands_tasks_tests;
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+    use crate::flock::panes::Stores;
+
+    #[tokio::test]
+    async fn task_list_reports_visible_or_the_explicit_scope_and_enforces_privacy() {
+        let dir = std::env::temp_dir().join(format!("ds-ct-list-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tasks.db");
+        let _ = std::fs::remove_file(&path);
+        let tasks = Arc::new(Tasks::open(&path).await.unwrap());
+        let flock = Flock::new(dir.join("l.json"), dir.join("n.json"), false);
+        flock.attach_stores(Stores {
+            tasks: Some(tasks.clone()),
+            ..Default::default()
+        });
+        tasks.add("global", "g", "").await.unwrap();
+        tasks.add("w1:p1", "p", "").await.unwrap();
+        let (scope, rows) = flock
+            .task_list(None, None, None, true, 0, Some("w1:p1"), None, false)
+            .await
+            .unwrap();
+        assert_eq!((None, 2), (scope, rows.len()));
+        let (scope, rows) = flock
+            .task_list(
+                Some("global"),
+                None,
+                None,
+                true,
+                0,
+                Some("w1:p1"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!((Some("global".to_string()), 1), (scope, rows.len()));
+        assert!(flock
+            .task_list(
+                Some("w2:p2"),
+                None,
+                None,
+                true,
+                0,
+                Some("w1:p1"),
+                None,
+                false
+            )
+            .await
+            .is_err());
+    }
+}

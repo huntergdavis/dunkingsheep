@@ -373,7 +373,140 @@ async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults()
         .await
         .unwrap();
     let events = tasks.events_named(&task.id).await;
-    assert_eq!(vec!["note".to_string(), "".to_string()], events);
+    assert_eq!(
+        vec!["created".to_string(), "note".to_string(), "".to_string()],
+        events
+    );
+}
+
+// -- task_add ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_add_defaults_to_global_low_open_and_unowned() {
+    let (flock, _tasks) = flock_with_store("add-default").await;
+    let t = flock
+        .task_add(
+            "title",
+            None,
+            None,
+            TaskAddArgs::default(),
+            "owner",
+            Some("w1:p1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ("global", "low", "open"),
+        (t.scope.as_str(), t.priority.as_str(), t.status.as_str())
+    );
+    assert_eq!(
+        "[]", t.assignees,
+        "unassigned work is claimable, not handed to the creator"
+    );
+}
+
+#[tokio::test]
+async fn task_add_resolves_self_and_refuses_lane_roles_assigning_others() {
+    let (flock, _tasks) = flock_with_store("add-owners").await;
+    let mine = TaskAddArgs {
+        assignees: &["self"],
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("a", None, None, mine, "worker", Some("w1:p1"))
+        .await
+        .unwrap();
+    assert_eq!(r#"["w1:p1"]"#, t.assignees);
+    let other = TaskAddArgs {
+        assignees: &["w2:p2"],
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("b", None, None, other, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+    assert!(flock
+        .task_add("b", None, None, other, "owner", Some("w1:p1"))
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles() {
+    let (flock, _tasks) = flock_with_store("add-refuse").await;
+    let args = TaskAddArgs::default();
+    let err = flock
+        .task_add("x", Some("w3:p3"), None, args, "owner", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("private queue"), "{err}");
+    assert!(flock
+        .task_add("  ", None, None, args, "owner", None)
+        .await
+        .is_err());
+    let review = TaskAddArgs {
+        kind: Some("review"),
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("r", None, None, review, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+    let blocked = TaskAddArgs {
+        status: Some("blocked"),
+        ..Default::default()
+    };
+    assert!(flock
+        .task_add("s", None, None, blocked, "worker", Some("w1:p1"))
+        .await
+        .is_err());
+}
+
+// -- task_read / task_update ---------------------------------------------------------
+
+#[tokio::test]
+async fn task_read_refuses_another_panes_private_task() {
+    let (flock, tasks) = flock_with_store("read").await;
+    let private = tasks.add("w3:p3", "mine", "").await.unwrap();
+    assert!(flock.task_read(&private.id, Some("w3:p3")).await.is_ok());
+    assert!(flock.task_read(&private.id, None).await.is_ok());
+    let err = flock
+        .task_read(&private.id, Some("w4:p4"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("private queue"), "{err}");
+}
+
+#[tokio::test]
+async fn task_update_edits_fields_resolves_self_and_moves_status() {
+    let (flock, tasks) = flock_with_store("update").await;
+    let t = tasks.add("global", "t", "").await.unwrap();
+    let args = TaskUpdateArgs {
+        title: Some("new"),
+        priority: Some("high"),
+        assignees: Some(&["me"]),
+        status: Some("blocked"),
+        block_reason: Some(Some("waiting")),
+        ..Default::default()
+    };
+    let got = flock.task_update(&t.id, args, Some("w1:p1")).await.unwrap();
+    assert_eq!(
+        ("new", "high", "blocked"),
+        (
+            got.title.as_str(),
+            got.priority.as_str(),
+            got.status.as_str()
+        )
+    );
+    assert_eq!(r#"["w1:p1"]"#, got.assignees);
+    assert_eq!(Some("waiting"), got.block_reason.as_deref());
+    let private = tasks.add("w3:p3", "p", "").await.unwrap();
+    assert!(flock
+        .task_update(&private.id, TaskUpdateArgs::default(), Some("w4:p4"))
+        .await
+        .is_err());
 }
 
 async fn depends_on(tasks: &Tasks, task: &str, deps: &[&str]) {
@@ -490,5 +623,96 @@ fn check_task_add_returns_the_resolved_owners_for_the_store_write() {
     assert_eq!(
         owners(&[WORKER]),
         Flock::check_task_add("global", &["me"], "worker", None, None, Some(WORKER)).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
+    let (flock, tasks) = flock_with_store("add-review").await;
+    let args = TaskAddArgs {
+        kind: Some("review"),
+        author: Some("w7:p7"),
+        repo: Some("o/r"),
+        pr: Some("5"),
+        head: Some("abcdef1234567890"),
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("review it", None, None, args, "system", None)
+        .await
+        .unwrap();
+    assert_eq!("review", t.kind);
+    let again = flock
+        .task_add("again", None, None, args, "system", None)
+        .await;
+    let err = again.unwrap_err().to_string();
+    assert!(
+        err.contains("a live review task for o/r#5@abcdef123456 already exists"),
+        "{err}"
+    );
+    assert!(err.contains(&format!("({})", t.id)), "{err}");
+    let bare = TaskAddArgs {
+        kind: Some("review"),
+        ..Default::default()
+    };
+    let err = flock
+        .task_add("x", None, None, bare, "system", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("needs repo, pr and head"), "{err}");
+    let bad = TaskAddArgs {
+        pr: Some("five"),
+        ..Default::default()
+    };
+    let err = flock
+        .task_add("x", None, None, bad, "owner", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("pr must be a number; got 'five'"), "{err}");
+    let (_, listed) = flock
+        .task_list(None, None, None, true, 0, None, Some("review"), false)
+        .await
+        .unwrap();
+    assert_eq!(1, listed.len());
+    drop(tasks);
+}
+
+#[tokio::test]
+async fn task_add_deduplicates_assignees_and_task_list_filters_needs_owner() {
+    let (flock, _tasks) = flock_with_store("add-dedupe").await;
+    let args = TaskAddArgs {
+        assignees: &["w1:p1", "w1:p1", " "],
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("d", None, None, args, "owner", None)
+        .await
+        .unwrap();
+    assert_eq!(r#"["w1:p1"]"#, t.assignees);
+    let q = flock
+        .task_add("q", None, None, TaskAddArgs::default(), "owner", None)
+        .await
+        .unwrap();
+    flock
+        .task_block(&q.id, Some("needs-owner: which port?"), None)
+        .await
+        .unwrap();
+    let w = flock
+        .task_add("w", None, None, TaskAddArgs::default(), "owner", None)
+        .await
+        .unwrap();
+    flock
+        .task_block(&w.id, Some("waiting on PR"), None)
+        .await
+        .unwrap();
+    let (_, asked) = flock
+        .task_list(None, None, None, true, 0, None, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![q.id],
+        asked.into_iter().map(|d| d.task.id).collect::<Vec<_>>()
     );
 }
