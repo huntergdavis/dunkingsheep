@@ -158,6 +158,33 @@ fn a_missing_server_is_an_empty_world_not_an_error() {
 }
 
 #[test]
+fn fallible_listing_preserves_the_exact_tmux_failure() {
+    let _serial = serial();
+    let dir = tempdir();
+    let fake = fake_tmux(&dir.path().to_path_buf(), "pane listing is offline", 7);
+    let backend = TmuxBackend::new(fake);
+    let expected = Err(TerminalError::refused("pane listing is offline"));
+
+    assert_eq!(expected, backend.try_list_panes());
+    assert_eq!(expected, backend.try_list_panes_grouped());
+}
+
+#[test]
+fn fallible_listing_keeps_a_missing_server_as_an_empty_world() {
+    let _serial = serial();
+    let dir = tempdir();
+    let fake = fake_tmux(
+        &dir.path().to_path_buf(),
+        "no server running on /tmp/tmux-1000/default",
+        1,
+    );
+    let backend = TmuxBackend::new(fake);
+
+    assert_eq!(Ok(Vec::new()), backend.try_list_panes());
+    assert_eq!(Ok(Default::default()), backend.try_list_panes_grouped());
+}
+
+#[test]
 fn the_pane_format_is_the_python_format() {
     let _serial = serial();
     // Fourteen fields, in the Python's order, separator included.
