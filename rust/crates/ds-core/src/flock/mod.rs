@@ -406,6 +406,7 @@ pub mod commands_inbox;
 pub mod commands_owner_views;
 pub mod commands_turns;
 pub mod dunks;
+pub mod lane_registry_rows;
 pub mod lanes;
 pub mod mailbox;
 pub mod panes;
