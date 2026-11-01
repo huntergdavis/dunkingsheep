@@ -3,16 +3,17 @@
 //! `_own_mailbox`, `_mailbox_or_self` (incl. the `own_only` lock), `inbox_count`,
 //! `inbox_list`, `inbox_status`, `inbox_stats`, `inbox_recover`.
 //!
-//! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`.
-//!
-//! NOT in this slice (tracked on t802): `inbox_send` (PM redirect, system_sender gate,
-//! notice folding: needs the outbox and `send_now`) and `inbox_read` (needs the tasks view). `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
+//! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`; slice 3 adds `inbox_send` and
+//! `inbox_read`. The outbox (`send_now`, the queued-notice fold), the PM routing file, the
+//! tasks view and metrics have no Rust owner yet, so they sit behind [`InboxEnv`] hooks.
+//! NOT ported: the `last_message` status string and the `log.info` line of `inbox_send`. `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
 
 use crate::error::DunkError;
 use crate::inbox::{self, Counts, MailboxStats, Status, Summary};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::inbox_store::{Archived, Fetched, Message, Store, Transition};
+use crate::inbox_store::{Archived, Fetched, Message, Outgoing, Store, Transition};
+use serde_json::Value;
 
 use super::mailbox::MailboxEnv;
 use super::Flock;
@@ -41,6 +42,116 @@ pub trait InboxEnv: MailboxEnv {
         sender: Option<&str>,
         duration_ms: Option<i64>,
     );
+    /// `dunk_pm.load_routing()`; an unreadable file is an empty routing (the send path
+    /// swallows it: "routing must never block a send").
+    fn pm_routing(&self) -> Vec<RouteEntry>;
+    /// `_refresh_queued_notice` + folding: when a notice for `pane_id` is still waiting,
+    /// update it to `text`, attach `message_id` to it and return its id.
+    fn fold_into_queued_notice(
+        &self,
+        pane_id: &str,
+        text: &str,
+        message_id: &str,
+    ) -> Option<String>;
+    /// `send_now(pane_id, text, wait_s=0, notify_for=message_id)`.
+    fn send_now(&self, pane_id: &str, text: &str, message_id: &str) -> Result<Nudge, DunkError>;
+    /// `self.metrics.record("inbox.sent", ..., bytes=.., attempts=..)`.
+    fn record_sent(
+        &self,
+        pane_id: Option<&str>,
+        mailbox: &str,
+        sender: Option<&str>,
+        bytes: usize,
+        attachments: usize,
+    );
+    /// `self.tasks.for_pane(pane)`, already rendered as the wire's JSON.
+    fn tasks_for_pane(&self, pane_id: &str) -> Value;
+}
+
+/// One project in the PM routing file (`dunk_pm.load_routing`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteEntry {
+    pub project: String,
+    pub pm: String,
+    pub members: Vec<String>,
+    /// `redirect` or `flag`.
+    pub mode: String,
+    pub vp_pane: String,
+}
+
+/// What `send_now` answered.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Nudge {
+    pub queued: bool,
+    pub message: Option<String>,
+}
+
+/// `SYSTEM_SENDERS`.
+pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
+
+/// `NOTICE_PREFIX`.
+pub const NOTICE_PREFIX: &str = "[inbox] ";
+
+/// `_notice_text`: the one short line typed into a pane to say mail has arrived. It names the
+/// inbox, says who it is from and what it is about, and stays short on purpose: a short send
+/// is the one that always submits.
+pub fn notice_text(
+    mailbox: &str,
+    unread: i64,
+    sender: Option<&str>,
+    subject: Option<&str>,
+) -> String {
+    let mut head = format!("{NOTICE_PREFIX}new message for {mailbox}");
+    if unread > 1 {
+        head.push_str(&format!(" ({unread} unread)"));
+    }
+    if let Some(sender) = sender.filter(|s| !s.is_empty()) {
+        head.push_str(&format!(" from {sender}"));
+    }
+    if let Some(subject) = subject.filter(|s| !s.is_empty()) {
+        let trimmed: String = subject.trim().chars().take(60).collect();
+        head.push_str(&format!(": {trimmed}"));
+    }
+    format!("{head}. Read it with: dunkingsheep inbox read")
+}
+
+/// `inbox_send`'s arguments.
+#[derive(Debug, Clone, Default)]
+pub struct SendArgs<'a> {
+    pub to: &'a str,
+    pub body: &'a str,
+    pub subject: Option<&'a str>,
+    pub attach: &'a [PathBuf],
+    pub notify: bool,
+    pub self_pane_id: Option<&'a str>,
+    pub system_sender: Option<&'a str>,
+}
+
+/// What `inbox_send` returns: the stored message's id plus the fields the Python adds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendResult {
+    pub message_id: String,
+    pub mailbox: String,
+    pub label: String,
+    pub pane_id: Option<String>,
+    pub sender: Option<String>,
+    /// `{"from": "vp", "to": pm, "project": ..}` or `{"flag": project}`.
+    pub redirected: Option<Value>,
+    pub notified: bool,
+    /// `Some("undeliverable")` with `reason` when a system sender's send was refused.
+    pub outcome: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// `inbox_read`'s result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadResult {
+    pub mailbox: String,
+    pub messages: Vec<Message>,
+    /// `Some` only when a caller pane is known.
+    pub tasks: Option<Value>,
+    /// `Some` only when the batch was marked read (not peek, not empty).
+    pub marked_read: Option<usize>,
 }
 
 /// `inbox_ack`'s result: `_transition`'s fields plus `acked_in` and `still_pending`.
@@ -299,6 +410,239 @@ impl Flock {
             }
         };
         env.store().fetch(attachment_id, dest)
+    }
+}
+
+impl Flock {
+    /// `inbox_send`: put a message in another agent's inbox. Nothing is typed into their
+    /// terminal except, when `notify`, a short line saying they have mail.
+    ///
+    /// `system_sender` names a non-agent sender (the watchdog). It is accepted only from
+    /// SYSTEM_SENDERS and only from a caller with no pane (a systemd unit); an agent always
+    /// runs in a pane, so it cannot claim the name.
+    pub fn inbox_send(&self, env: &dyn InboxEnv, args: &SendArgs) -> Result<SendResult, DunkError> {
+        let self_pane = args.self_pane_id.filter(|p| !p.is_empty());
+        if let Some(system) = args.system_sender {
+            if !SYSTEM_SENDERS.contains(&system) {
+                return Err(refused(format!(
+                    "unknown system sender {}",
+                    py_repr(system)
+                )));
+            }
+            // Over the socket a system sender must hold the system token; in-process
+            // callers (the daemon's own loops, tests) are trusted code.
+            if self.socket_peer_ok().is_some() {
+                let role = self_pane
+                    .map(|p| env.caller_role(p))
+                    .unwrap_or_else(|| "anonymous".to_string());
+                if !matches!(role.as_str(), "system" | "owner") {
+                    return Err(refused(format!(
+                        "system sender {} requires the system token; a pane-less process \
+                         without one is anonymous (FLAT_FLEET.md 4.1)",
+                        py_repr(system)
+                    )));
+                }
+            }
+            if self_pane.is_some() {
+                return Err(refused(
+                    "a system sender cannot be claimed from a pane".to_string(),
+                ));
+            }
+        }
+        let mut undeliverable_reason = None;
+        let (mut mailbox, mut label, mut pane_id) =
+            match self.resolve_mailbox(env, args.to, self_pane, true, "") {
+                Ok(found) => found,
+                Err(refusal) => {
+                    // A SYSTEM SENDER MUST NEVER BE KILLED BY A FAIL-CLOSED REFUSAL. The
+                    // watchdog escalates to a lane that may have been handed over minutes
+                    // ago; raising here took the exception watchdog down twice on
+                    // 2026-10-24 and the fleet ran blind for nine minutes. The message is
+                    // STORED under the name it was addressed to, marked undeliverable with
+                    // the refusal as its reason. Agents still get the hard refusal.
+                    if args.system_sender.is_none() {
+                        return Err(refusal);
+                    }
+                    undeliverable_reason = Some(refusal.to_string());
+                    let name = args.to.trim().to_string();
+                    (name.clone(), name, None)
+                }
+            };
+        // The sender is the raw pane id, never a mailbox label. On 2026-10-19 wS:p1's mail
+        // arrived "from codex poolrad" because the label resolved through a sibling pane.
+        let sender: Option<String> = args
+            .system_sender
+            .map(str::to_string)
+            .or_else(|| self_pane.map(str::to_string));
+        // PM routing: a lane that messages the VP out of habit is redirected to its project
+        // PM (or flagged). Routing must never block a send.
+        let mut body = args.body.to_string();
+        let mut subject = args.subject.map(str::to_string);
+        let mut redirected = None;
+        let routing = env.pm_routing();
+        let project = routing.iter().find(|entry| {
+            pane_id.is_some()
+                && pane_id.as_deref() == Some(entry.vp_pane.as_str())
+                && self_pane.is_some_and(|p| entry.members.iter().any(|m| m == p))
+        });
+        if let (Some(entry), Some(me)) = (project, self_pane) {
+            // `dunk_pm.redirect`: the PM is never redirected to itself.
+            if me != entry.pm {
+                if entry.mode == "redirect" {
+                    if let Ok(found) = self.resolve_mailbox(env, &entry.pm, Some(me), false, "") {
+                        (mailbox, label, pane_id) = found;
+                        body = format!(
+                            "[redirected from the VP to the {} PM]\n\n{body}",
+                            entry.project
+                        );
+                        redirected = Some(serde_json::json!({
+                            "from": "vp", "to": entry.pm, "project": entry.project}));
+                    }
+                } else {
+                    subject = Some(
+                        format!(
+                            "[lane mail to VP: {}] {}",
+                            entry.project,
+                            subject.as_deref().unwrap_or("")
+                        )
+                        .trim()
+                        .to_string(),
+                    );
+                    redirected = Some(serde_json::json!({"flag": entry.project}));
+                }
+            }
+        }
+        let message_id = env.store().send(&Outgoing {
+            mailbox: &mailbox,
+            body: Some(&body),
+            subject: subject.as_deref(),
+            sender: sender.as_deref(),
+            mailbox_label: Some(&label),
+            pane_id: pane_id.as_deref(),
+            attachments: args.attach,
+            ..Default::default()
+        })?;
+        let mut notified = false;
+        if args.notify {
+            if let Some(pane) = pane_id.as_deref() {
+                let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
+                let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());
+                // A notice for this pane may already be waiting. Say the new count rather
+                // than stacking a second one: an agent that reads its inbox once has
+                // handled both messages.
+                if let Some(existing) = env.fold_into_queued_notice(pane, &text, &message_id) {
+                    env.store().record_notify(
+                        &message_id,
+                        "queued",
+                        Some(&format!("folded into {existing}")),
+                        None,
+                        None,
+                    )?;
+                    notified = true;
+                } else {
+                    match env.send_now(pane, &text, &message_id) {
+                        Ok(nudge) => {
+                            env.store().record_notify(
+                                &message_id,
+                                if nudge.queued { "queued" } else { "sent" },
+                                nudge.message.as_deref(),
+                                None,
+                                None,
+                            )?;
+                            notified = true;
+                        }
+                        Err(error) => {
+                            env.store().record_notify(
+                                &message_id,
+                                "failed",
+                                Some(&error.to_string()),
+                                None,
+                                None,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        env.record_sent(
+            pane_id.as_deref(),
+            &mailbox,
+            sender.as_deref(),
+            body.len(),
+            args.attach.len(),
+        );
+        Ok(SendResult {
+            message_id,
+            mailbox,
+            label,
+            pane_id,
+            sender,
+            redirected,
+            notified,
+            outcome: undeliverable_reason
+                .as_ref()
+                .map(|_| "undeliverable".to_string()),
+            reason: undeliverable_reason,
+        })
+    }
+
+    /// `inbox_read`: read a batch WITHOUT consuming it, build the whole result, then commit.
+    ///
+    /// The order is the point (VP, t93): marking read first meant a reader whose rendering
+    /// or task lookup failed had already consumed the batch, and pi-review-1 issued a verdict
+    /// on a head whose withdrawal message it never saw. So: (1) fetch without marking, (2)
+    /// build the FULL result, including the caller's task queues, (3) only then mark read.
+    /// A failure in 1 or 2 leaves the batch unread, which is the safe direction.
+    pub fn inbox_read(
+        &self,
+        env: &dyn InboxEnv,
+        mailbox: Option<&str>,
+        limit: usize,
+        peek: bool,
+        self_pane_id: Option<&str>,
+    ) -> Result<ReadResult, DunkError> {
+        let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?;
+        let mut messages = env.store().read(&key, limit, true, false)?;
+        // The owner's directive: mail and the reader's task queues travel together, so one
+        // inbox read is the whole handoff. This runs BEFORE the mark.
+        let tasks = self_pane_id
+            .filter(|p| !p.is_empty())
+            .map(|p| env.tasks_for_pane(p));
+        if peek || messages.is_empty() {
+            return Ok(ReadResult {
+                mailbox: key,
+                messages,
+                tasks,
+                marked_read: None,
+            });
+        }
+        let ids: Vec<String> = messages
+            .iter()
+            .map(|m| m.summary.message_id.clone())
+            .collect();
+        let marked = env.store().mark_read(&ids, None)?;
+        // t128: the mark commits BEFORE the socket response reaches the client, so a
+        // response lost after this point used to silently consume the batch. The receipt
+        // bounds recovery to the latest delivered batch per mailbox.
+        env.store().record_delivery(&key, &ids, None)?;
+        let now = env.now();
+        for message in &mut messages {
+            message.summary.state = "read".to_string();
+            message.read_at = Some(now);
+            env.record_metric(
+                "inbox.read",
+                None,
+                &key,
+                message.summary.sender.as_deref(),
+                Some(((now - message.summary.created_at) * 1000.0) as i64),
+            );
+        }
+        Ok(ReadResult {
+            mailbox: key,
+            messages,
+            tasks,
+            marked_read: Some(marked),
+        })
     }
 }
 

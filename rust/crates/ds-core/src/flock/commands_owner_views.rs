@@ -11,8 +11,10 @@
 
 use serde_json::{json, Value};
 
+use super::Flock;
 use crate::error::DunkError;
 use crate::owner::OwnerPush;
+use crate::terminal::Terminal;
 
 fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
@@ -129,6 +131,50 @@ pub fn h_owner_receipts(store: &OwnerPush, args: &Value) -> Result<Value, DunkEr
         .collect();
     let receipts = store.receipts(&ids)?;
     serde_json::to_value(receipts).map_err(|e| DunkError::Refused(e.to_string()))
+}
+
+/// `h_lanes`: `list` (default) or `set`. `set` has the same gate as the `lane_set` command: a
+/// name that decides who receives mail is not something any lane may assert about another.
+/// `require_superuser(self_pane_id, "lane_set")` is `flock.require_superuser` (not ported).
+pub fn h_lanes(
+    flock: &Flock,
+    terminal: &dyn Terminal,
+    args: &Value,
+    self_pane_id: Option<&str>,
+    require_superuser: &dyn Fn(Option<&str>, &str) -> Result<(), DunkError>,
+) -> Result<Value, DunkError> {
+    let action = text_or(args, "action")
+        .unwrap_or("list")
+        .trim()
+        .to_lowercase();
+    if action == "set" {
+        require_superuser(self_pane_id, "lane_set")?;
+        return flock.lane_set(
+            terminal,
+            text(args, "pane").unwrap_or(""),
+            text(args, "mailbox").unwrap_or(""),
+        );
+    }
+    if action != "list" {
+        return Err(DunkError::Refused(
+            "lanes action must be list or set".into(),
+        ));
+    }
+    let rows = flock.lanes();
+    Ok(json!({"count": rows.len(), "lanes": rows}))
+}
+
+/// `h_lane_set`: no KeyError for a parameterless call - the refusal names what is missing.
+pub fn h_lane_set(
+    flock: &Flock,
+    terminal: &dyn Terminal,
+    args: &Value,
+) -> Result<Value, DunkError> {
+    flock.lane_set(
+        terminal,
+        text(args, "pane").unwrap_or(""),
+        text(args, "mailbox").unwrap_or(""),
+    )
 }
 
 /// Python `repr(str)` for the quoted names in the refusals.
@@ -274,6 +320,81 @@ mod tests {
             (none["requested"].as_i64(), none["truncated"].as_bool()),
             (Some(0), Some(false)),
             "an empty request reports its own counts"
+        );
+    }
+
+    fn lane_flock(tag: &str) -> (Flock, crate::terminal::fakes::FakeTerminal) {
+        let dir =
+            std::env::temp_dir().join(format!("ds-owner-views-lanes-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut term = crate::terminal::fakes::FakeTerminal::new();
+        term.panes.push(crate::terminal::Pane {
+            pane_id: "%7".into(),
+            ..Default::default()
+        });
+        (
+            Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true),
+            term,
+        )
+    }
+
+    #[test]
+    fn lanes_set_is_superuser_gated_and_list_is_the_default() {
+        let (flock, term) = lane_flock("h");
+        let deny = |_: Option<&str>, what: &str| -> Result<(), DunkError> {
+            Err(DunkError::Refused(format!("{what} is superuser-only")))
+        };
+        let allow = |_: Option<&str>, _: &str| -> Result<(), DunkError> { Ok(()) };
+        let err = h_lanes(
+            &flock,
+            &term,
+            &json!({"action": "set", "pane": "%7", "mailbox": "pm"}),
+            Some("%1"),
+            &deny,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "lane_set is superuser-only");
+        assert_eq!(
+            h_lanes(&flock, &term, &json!({}), None, &deny).unwrap(),
+            json!({"count": 0, "lanes": []}),
+            "list needs no superuser"
+        );
+        let set = h_lanes(
+            &flock,
+            &term,
+            &json!({"action": " SET ", "pane": "%7", "mailbox": "pm"}),
+            Some("%1"),
+            &allow,
+        )
+        .unwrap();
+        assert_eq!(
+            set,
+            json!({"pane_id": "%7", "mailbox": "pm", "declared": true})
+        );
+        let listed = h_lanes(&flock, &term, &json!({"action": "list"}), None, &deny).unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["lanes"][0]["mailbox"], "pm");
+        assert_eq!(
+            h_lanes(&flock, &term, &json!({"action": "drop"}), None, &allow)
+                .unwrap_err()
+                .to_string(),
+            "lanes action must be list or set"
+        );
+    }
+
+    #[test]
+    fn a_parameterless_lane_set_names_what_is_missing() {
+        let (flock, term) = lane_flock("p");
+        assert_eq!(
+            h_lane_set(&flock, &term, &json!({}))
+                .unwrap_err()
+                .to_string(),
+            "lane set must be given a pane id and a mailbox name"
+        );
+        assert_eq!(
+            h_lane_set(&flock, &term, &json!({"pane": "%7", "mailbox": "x"})).unwrap()["declared"],
+            true
         );
     }
 }
