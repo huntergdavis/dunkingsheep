@@ -80,7 +80,7 @@ impl<'a> RequestCallerGuard<'a> {
             state.identity_bound = request.identity_bound;
             state.identity_note = request.identity_note.clone();
         });
-        flock.set_socket_peer(request.socket_peer.then_some(true));
+        flock.set_socket_peer(request.socket_peer);
         Self(flock)
     }
 }

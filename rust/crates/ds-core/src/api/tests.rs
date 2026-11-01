@@ -52,6 +52,29 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct CompletionEnv(TestEnv);
+
+impl PaneInfoEnv for CompletionEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        Some(json!({
+            "pane_id": pane_id,
+            "pane_pid": std::process::id(),
+        }))
+    }
+}
+
+impl CommandEnv for CompletionEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        self.0.terminal()
+    }
+    fn now_s(&self) -> f64 {
+        self.0.now_s()
+    }
+}
+
 fn dispatch<G: CallerGate + ?Sized>(
     dispatcher: &Dispatcher,
     flock: &Flock,
@@ -111,10 +134,18 @@ fn fail(_: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
     Err(DunkError::Refused("handler failed".into()))
 }
 
+fn completion_binding_probe(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let pane = context.self_pane_id().expect("request pane");
+    context
+        .flock
+        .require_completion_binding(pane, context.env, context.request.caller.as_ref())?;
+    Ok(json!({"socket_peer": context.flock.socket_peer_ok()}))
+}
+
 fn request_context<'a>(
     flock: &'a Flock,
     request: &'a RequestCtx,
-    env: &'a TestEnv,
+    env: &'a dyn CommandEnv,
     runtime: &'a tokio::runtime::Runtime,
 ) -> HandlerContext<'a> {
     HandlerContext {
@@ -123,6 +154,24 @@ fn request_context<'a>(
         env,
         runtime: runtime.handle(),
     }
+}
+
+fn dispatch_request(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    request: &RequestCtx,
+) -> Result<Value, DunkError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let env = CompletionEnv(TestEnv::default());
+    let context = request_context(flock, request, &env, &runtime);
+    dispatcher.dispatch(
+        &context,
+        &FixedRole("owner", true),
+        "get_dunk",
+        args(json!({"id": "d1"})),
+    )
 }
 
 #[test]
@@ -476,7 +525,7 @@ fn concurrent_requests_keep_caller_identity_on_their_own_thread() {
                         source: "test",
                         ..crate::proc::Caller::default()
                     }),
-                    socket_peer: true,
+                    socket_peer: Some(true),
                     ..RequestCtx::default()
                 };
                 let context = request_context(&flock, &request, &env, &runtime);
@@ -525,7 +574,7 @@ fn request_caller_fields_are_cleared_after_handler_error() {
             ..crate::proc::Caller::default()
         }),
         service_token: Some("secret".into()),
-        socket_peer: true,
+        socket_peer: Some(true),
         ..RequestCtx::default()
     };
     let context = request_context(&flock, &request, &env, &runtime);
@@ -539,6 +588,62 @@ fn request_caller_fields_are_cleared_after_handler_error() {
         .expect_err("handler refusal");
     assert!(matches!(error, DunkError::Refused(text) if text == "handler failed"));
     assert_eq!(flock.caller_state(), crate::flock::CallerState::default());
+    assert_eq!(flock.socket_peer_ok(), None);
+}
+
+#[test]
+fn socket_peer_verdict_stays_distinct_from_trusted_in_process_dispatch() {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register("get_dunk", completion_binding_probe);
+    let pane = Some("w1:p1".to_string());
+    let pid = std::process::id() as i64;
+    let caller = crate::proc::Caller::new(
+        Some(pid),
+        crate::proc::process_start(pid),
+        None,
+        pane.clone(),
+        "peer",
+    );
+
+    let unverified = RequestCtx {
+        self_pane_id: pane.clone(),
+        socket_peer: Some(false),
+        ..RequestCtx::default()
+    };
+    let error = dispatch_request(&dispatcher, &flock, &unverified)
+        .expect_err("unverified socket must not complete caller-sensitive work");
+    assert!(
+        matches!(error, DunkError::Refused(text) if text.contains("socket peer credentials unavailable"))
+    );
+    assert_eq!(
+        flock.socket_peer_ok(),
+        None,
+        "refusal clears request provenance"
+    );
+
+    let verified = RequestCtx {
+        caller: Some(caller.clone()),
+        self_pane_id: pane.clone(),
+        socket_peer: Some(true),
+        ..RequestCtx::default()
+    };
+    let result = dispatch_request(&dispatcher, &flock, &verified).expect("verified socket");
+    assert_eq!(result["socket_peer"], true);
+    assert_eq!(
+        flock.socket_peer_ok(),
+        None,
+        "success clears request provenance"
+    );
+
+    let in_process = RequestCtx {
+        caller: Some(caller),
+        self_pane_id: pane,
+        socket_peer: None,
+        ..RequestCtx::default()
+    };
+    let result = dispatch_request(&dispatcher, &flock, &in_process).expect("trusted in-process");
+    assert_eq!(result["socket_peer"], Value::Null);
     assert_eq!(flock.socket_peer_ok(), None);
 }
 

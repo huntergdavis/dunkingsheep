@@ -39,9 +39,10 @@ pub struct RequestCtx {
     /// `Some(true)` bound to the pane process, `Some(false)` refused, `None` not checked.
     pub identity_bound: Option<bool>,
     pub identity_note: Option<String>,
-    /// Transport provenance (t423): a socket request whose peer credentials failed must not
-    /// degrade into the absent-caller state that trusted in-process code uses.
-    pub socket_peer: bool,
+    /// Transport provenance and peer-credential result (t423). `None` is trusted in-process
+    /// code; `Some(false)` is a socket request without usable peer credentials; `Some(true)` is
+    /// a socket request with peer credentials.
+    pub socket_peer: Option<bool>,
 }
 
 /// What the server needs to know about a pane to bind an identity to it.
@@ -314,7 +315,7 @@ pub fn handle_line(
             .get("service_token")
             .and_then(Value::as_str)
             .map(str::to_string),
-        socket_peer: peer_pid.is_some(),
+        socket_peer: Some(peer_pid.is_some()),
         ..RequestCtx::default()
     };
     ctx.self_pane_id = bind_identity(dispatcher, &mut ctx, claimed, &name);
