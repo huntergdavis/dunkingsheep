@@ -10,13 +10,15 @@ use crate::terminal::fakes::FakeTerminal;
 use crate::terminal::Terminal;
 use serde_json::json;
 
-fn flock() -> Flock {
-    let dir = std::env::temp_dir();
-    Flock::new(
-        dir.join("lanes-launches.json"),
-        dir.join("lanes-lanes.json"),
+fn flock() -> crate::testsupport::Scratch<Flock> {
+    // t1490: a private directory, not files in the shared temp dir that every run reused.
+    let dir = crate::testsupport::dir("lanes");
+    let flock = Flock::new(
+        dir.path().join("lanes-launches.json"),
+        dir.path().join("lanes-lanes.json"),
         false,
-    )
+    );
+    crate::testsupport::Scratch::new(flock, dir)
 }
 
 fn none(_: &str) -> (bool, bool, Option<String>) {

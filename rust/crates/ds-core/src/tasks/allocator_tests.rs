@@ -6,14 +6,11 @@ use serde_json::json;
 use super::*;
 use crate::tasks::FieldEdit;
 
-async fn store(tag: &str) -> Tasks {
-    let dir = std::env::temp_dir().join(format!("ds-alloc-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    let tasks = Tasks::open(&path).await.unwrap();
+async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+    let dir = crate::testsupport::dir(&format!("alloc-{tag}"));
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
     tasks.allocation_init().await.unwrap();
-    tasks
+    crate::testsupport::Scratch::new(tasks, dir)
 }
 
 /// `self.task(...)`: a global task with a body, owned by `%leader`.
@@ -843,7 +840,8 @@ async fn atomic_rollback_retains_the_owner_when_the_intent_write_fails() {
 
 #[tokio::test]
 async fn restart_and_duplicate_passes_keep_one_claim() {
-    let dir = std::env::temp_dir().join(format!("ds-alloc-restart-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("alloc-restart");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tasks.db");
     let _ = std::fs::remove_file(&path);
@@ -886,7 +884,8 @@ async fn restart_and_duplicate_passes_keep_one_claim() {
 
 #[tokio::test]
 async fn two_connections_cannot_double_allocate() {
-    let dir = std::env::temp_dir().join(format!("ds-alloc-race-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("alloc-race");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tasks.db");
     let _ = std::fs::remove_file(&path);

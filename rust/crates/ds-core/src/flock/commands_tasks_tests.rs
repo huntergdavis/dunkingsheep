@@ -18,18 +18,16 @@ fn owners(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-async fn flock_with_store(tag: &str) -> (Flock, Arc<Tasks>) {
-    let dir = std::env::temp_dir().join(format!("ds-ct-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    let tasks = Arc::new(Tasks::open(&path).await.unwrap());
+async fn flock_with_store(tag: &str) -> (crate::testsupport::Scratch<Flock>, Arc<Tasks>) {
+    let scratch = crate::testsupport::dir(&format!("ct-{tag}"));
+    let dir = scratch.path().to_path_buf();
+    let tasks = Arc::new(Tasks::open(dir.join("tasks.db")).await.unwrap());
     let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
     flock.attach_stores(Stores {
         tasks: Some(tasks.clone()),
         ..Default::default()
     });
-    (flock, tasks)
+    (crate::testsupport::Scratch::new(flock, scratch), tasks)
 }
 
 // -- _task_scope ---------------------------------------------------------------------
@@ -324,7 +322,8 @@ async fn note_records_an_event_without_a_visibility_check() {
 
 #[tokio::test]
 async fn a_missing_store_is_a_named_refusal() {
-    let dir = std::env::temp_dir().join(format!("ds-ct-nostore-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("ct-nostore");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let flock = Flock::new(dir.join("l.json"), dir.join("r.json"), false);
     let error = flock

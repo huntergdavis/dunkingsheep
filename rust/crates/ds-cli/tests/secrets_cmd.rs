@@ -22,10 +22,26 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-fn repo(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-cli-secrets-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// A repository path that owns its directory: removed when the test drops it (t1490; these
+/// used to be left in the temp dir by every run).
+struct Repo {
+    path: PathBuf,
+    _tmp: tempfile::TempDir,
+}
+
+impl std::ops::Deref for Repo {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.path
+    }
+}
+
+fn repo(tag: &str) -> Repo {
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("ds-cli-secrets-{tag}-"))
+        .tempdir()
+        .expect("scratch dir");
+    let dir = tmp.path().to_path_buf();
     git(&dir, &["init", "-q", "-b", "main"]);
     git(&dir, &["config", "user.email", "t@example.com"]);
     git(&dir, &["config", "user.name", "t"]);
@@ -33,7 +49,10 @@ fn repo(tag: &str) -> PathBuf {
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-q", "-m", "base"]);
     git(&dir, &["checkout", "-q", "-b", "lane/x"]);
-    dir
+    Repo {
+        path: dir,
+        _tmp: tmp,
+    }
 }
 
 fn leak(dir: &Path) {

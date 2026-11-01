@@ -487,7 +487,8 @@ mod tests {
 
     #[test]
     fn a_non_repo_is_null_with_a_reason() {
-        let dir = std::env::temp_dir().join(format!("ds-views-norepo-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("views-norepo");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let out = git_merges(dir.to_str().unwrap(), 10);
         assert!(out["as_of"].is_null());
@@ -501,7 +502,8 @@ mod tests {
     #[test]
     fn a_stuck_git_times_out_with_the_pythons_reason() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("ds-views-stuck-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("views-stuck");
+        let dir = scratch_dir.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let fake = dir.join("fakegit");
@@ -525,7 +527,8 @@ mod tests {
 
     #[test]
     fn a_missing_git_binary_is_a_named_reason() {
-        let dir = std::env::temp_dir().join(format!("ds-views-nogit-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("views-nogit");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let out = git_merges_with(dir.to_str().unwrap(), 10, "/nonexistent/git", 5.0);
         assert!(out["reason"]
@@ -536,7 +539,8 @@ mod tests {
 
     #[test]
     fn merges_are_read_from_a_real_repository() {
-        let dir = std::env::temp_dir().join(format!("ds-views-repo-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("views-repo");
+        let dir = scratch_dir.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -643,7 +647,8 @@ mod tests {
 
     #[test]
     fn app_rows_are_read_from_the_applications_database() {
-        let dir = std::env::temp_dir().join(format!("ds-views-app-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("views-app");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("messages.sqlite3");
         let _ = std::fs::remove_file(&path);

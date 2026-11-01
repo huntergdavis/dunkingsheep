@@ -40,21 +40,21 @@ impl Dispatcher for Fake {
     }
 }
 
-fn sock_path(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-server-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join("s.sock")
+fn sock_dir(tag: &str) -> tempfile::TempDir {
+    crate::testsupport::dir(&format!("server-{tag}"))
 }
 
 struct Running {
     path: PathBuf,
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    // Last field: removed after `Drop` has stopped and joined the server (t1490).
+    _dir: tempfile::TempDir,
 }
 
 fn start(tag: &str) -> Running {
-    let path = sock_path(tag);
-    let _ = std::fs::remove_file(&path);
+    let dir = sock_dir(tag);
+    let path = dir.path().join("s.sock");
     let mut server = FlockServer::new(Arc::new(Fake::default()), path.clone());
     server.bind().unwrap();
     let stop = server.stop_handle();
@@ -65,6 +65,7 @@ fn start(tag: &str) -> Running {
         path,
         stop,
         thread: Some(thread),
+        _dir: dir,
     }
 }
 
@@ -184,8 +185,8 @@ fn second_server_on_same_socket_refuses() {
 
 #[test]
 fn stale_socket_file_is_reclaimed() {
-    let path = sock_path("stale");
-    let _ = std::fs::remove_file(&path);
+    let _dir = sock_dir("stale");
+    let path = _dir.path().join("s.sock");
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap()); // leaves the file, nobody listens
     assert!(path.exists());
     let mut server = FlockServer::new(Arc::new(Fake::default()), path.clone());
@@ -332,8 +333,8 @@ impl Dispatcher for ThreadId {
 /// on ONE thread, start to finish, and two connections must not share one.
 #[test]
 fn a_connections_requests_all_run_on_one_thread_and_connections_do_not_share() {
-    let path = sock_path("threads");
-    let _ = std::fs::remove_file(&path);
+    let _dir = sock_dir("threads");
+    let path = _dir.path().join("s.sock");
     let mut server = FlockServer::new(Arc::new(ThreadId), path.clone());
     server.bind().unwrap();
     let stop = server.stop_handle();

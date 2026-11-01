@@ -193,14 +193,16 @@ mod tests {
         json!({"pane_id": id, "agent": agent, "label": label, "tab_label": label, "workspace_label": "w", "cwd": "/tmp", "agent_status": "idle"})
     }
 
-    fn setup(tag: &str, env_panes: Vec<Value>) -> (Flock, Env, OwnerPush) {
-        let dir = std::env::temp_dir().join(format!("ds-delivery-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn setup(
+        tag: &str,
+        env_panes: Vec<Value>,
+    ) -> (crate::testsupport::Scratch<Flock>, Env, OwnerPush) {
+        let scratch = crate::testsupport::dir(&format!("delivery-{tag}"));
+        let dir = scratch.path().to_path_buf();
         let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true);
         let owner = OwnerPush::open(dir.join("owner-push.db")).unwrap();
         (
-            flock,
+            crate::testsupport::Scratch::new(flock, scratch),
             Env {
                 panes: env_panes,
                 ..Env::default()

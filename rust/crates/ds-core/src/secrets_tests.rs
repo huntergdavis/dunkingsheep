@@ -68,14 +68,15 @@ fn fnmatch_follows_python_for_star_question_and_classes() {
 
 struct Repo {
     dir: PathBuf,
+    // Removes the repository when the test is done with it (t1490).
+    _tmp: tempfile::TempDir,
 }
 
 impl Repo {
     fn new(tag: &str) -> Repo {
-        let dir = std::env::temp_dir().join(format!("ds-secrets-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let repo = Repo { dir };
+        let tmp = crate::testsupport::dir(&format!("secrets-{tag}"));
+        let dir = tmp.path().to_path_buf();
+        let repo = Repo { dir, _tmp: tmp };
         repo.git(&["init", "-q", "-b", "main"]);
         repo.git(&["config", "user.email", "t@example.com"]);
         repo.git(&["config", "user.name", "t"]);
@@ -147,7 +148,8 @@ fn test_the_cli_exit_code_is_what_the_hooks_branch_on() {
 #[test]
 fn an_undeterminable_range_is_a_warning_not_a_refusal() {
     // A repo with no base ref: the guard must not fail closed (it would block every lane).
-    let dir = std::env::temp_dir().join(format!("ds-secrets-nobase-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("secrets-nobase");
+    let dir = scratch_dir.path().to_path_buf();
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let _ = super::git(&["init", "-q", "-b", "trunk"], &dir);

@@ -77,11 +77,14 @@ mod tests {
     use crate::terminal::fakes::FakeTerminal;
     use crate::terminal::Pane;
 
-    fn flock(tag: &str) -> Flock {
-        let dir = std::env::temp_dir().join(format!("ds-lanes-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true)
+    fn flock(tag: &str) -> crate::testsupport::Scratch<Flock> {
+        let dir = crate::testsupport::dir(&format!("lanes-{tag}"));
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("lanes.json"),
+            true,
+        );
+        crate::testsupport::Scratch::new(flock, dir)
     }
 
     fn term_with(pane: &str) -> FakeTerminal {

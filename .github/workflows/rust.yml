@@ -36,6 +36,9 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+      # t1490: tests that build their own directory under the shared temp dir leak it on every
+      # run (31,557 dirs, 3.8 GB once filled the host's tmpfs); use testsupport::dir / tempfile.
+      - run: python3 tools/check_test_tempdirs.py
 
   build-and-test:
     name: cargo build + test

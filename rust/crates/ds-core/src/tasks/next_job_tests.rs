@@ -6,12 +6,10 @@ use super::*;
 
 const PANE: &str = "%4";
 
-async fn store(tag: &str) -> Tasks {
-    let dir = std::env::temp_dir().join(format!("ds-nj-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    Tasks::open(&path).await.unwrap()
+async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+    let dir = crate::testsupport::dir(&format!("nj-{tag}"));
+    let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    crate::testsupport::Scratch::new(tasks, dir)
 }
 
 async fn events(store: &Tasks, task: &str, event: &str) -> Vec<(Option<String>, Option<String>)> {
