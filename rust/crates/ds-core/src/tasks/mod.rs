@@ -1007,6 +1007,76 @@ impl Tasks {
             .await
     }
 
+    /// `Tasks.list`: decorated tasks in the scopes the caller may see, filtered, in
+    /// `order_key` order. `scope` is the already-resolved explicit scope (None = visible).
+    pub async fn list_visible(
+        &self,
+        scope: Option<&str>,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        include_done: bool,
+        limit: usize,
+        pane_id: Option<&str>,
+    ) -> Result<Vec<Decorated>, DunkError> {
+        let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
+        let scopes: Vec<String> = match scope.map(str::trim) {
+            None | Some("") | Some("all") => {
+                let mut v = vec!["global".to_string()];
+                v.extend(pane.map(String::from));
+                v
+            }
+            Some("self") => match pane {
+                Some(p) => vec!["global".into(), p.into()],
+                None => {
+                    return Err(DunkError::Refused(
+                        "scope 'self' requires a known pane id".into(),
+                    ))
+                }
+            },
+            Some("global") => vec!["global".into()],
+            Some(other) => vec!["global".into(), validate_scope(other)?],
+        };
+        let status = match status.filter(|s| !s.is_empty()) {
+            Some(s) => Some(validate_status(s)?),
+            None => None,
+        };
+        let assignee = assignee
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(String::from);
+        let pane = pane_id.map(String::from);
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let marks = vec!["?"; scopes.len()].join(",");
+                let mut sql = format!("SELECT id FROM tasks WHERE scope IN ({marks})");
+                let mut binds: Vec<String> = scopes.clone();
+                if let Some(status) = &status {
+                    sql.push_str(" AND status = ?");
+                    binds.push(status.clone());
+                } else if !include_done {
+                    sql.push_str(" AND status NOT IN ('done', 'cancelled')");
+                }
+                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+                let ids: Vec<String> = stmt
+                    .query_map(rusqlite::params_from_iter(binds.iter()), |r| r.get(0))
+                    .map_err(db::map_sqlite)?
+                    .collect::<Result<_, _>>()
+                    .map_err(db::map_sqlite)?;
+                let mut out = Vec::new();
+                for id in ids {
+                    let d = decorate_conn(conn, &id, pane.as_deref(), now)?;
+                    if assignee.as_ref().is_none_or(|a| d.assignees.contains(a)) {
+                        out.push(d);
+                    }
+                }
+                out.sort_by_key(|d| order_key(&d.task.priority, d.task.created_at, &d.task.id));
+                out.truncate(limit);
+                Ok(out)
+            })
+            .await
+    }
+
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
     ///
     /// The verdict is bound to the task's head by the row itself, so it is written here
@@ -1823,6 +1893,73 @@ mod tests {
         // a refused add allocates no number
         let next = store.add("global", "n", "").await.unwrap();
         assert_eq!("t2", next.id);
+    }
+
+    #[tokio::test]
+    async fn list_visible_filters_by_scope_status_assignee_and_orders_by_priority() {
+        let store = store("listvis").await;
+        let low = store.add("global", "low", "").await.unwrap();
+        let hi = store
+            .add_with(
+                "global",
+                "hi",
+                "",
+                AddOptions {
+                    priority: Some("urgent".into()),
+                    assignees: vec!["w1:p1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mine = store.add("w1:p1", "mine", "").await.unwrap();
+        let theirs = store.add("w2:p2", "theirs", "").await.unwrap();
+        store.complete(&low.id).await.unwrap();
+        let ids = |v: Vec<Decorated>| v.into_iter().map(|d| d.task.id).collect::<Vec<_>>();
+        let all = store
+            .list_visible(None, None, None, true, 200, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            vec![hi.id.clone(), low.id.clone(), mine.id.clone()],
+            ids(all)
+        );
+        let open = store
+            .list_visible(None, None, None, false, 200, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(vec![hi.id.clone(), mine.id.clone()], ids(open));
+        let done = store
+            .list_visible(None, Some("done"), None, false, 200, None)
+            .await
+            .unwrap();
+        assert_eq!(vec![low.id.clone()], ids(done));
+        let by = store
+            .list_visible(None, None, Some("w1:p1"), true, 200, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(vec![hi.id.clone()], ids(by));
+        let named = store
+            .list_visible(Some("w2:p2"), None, None, true, 200, None)
+            .await
+            .unwrap();
+        assert!(ids(named).contains(&theirs.id));
+        assert_eq!(
+            1,
+            store
+                .list_visible(None, None, None, true, 1, None)
+                .await
+                .unwrap()
+                .len()
+        );
+        assert!(store
+            .list_visible(None, Some("bogus"), None, true, 1, None)
+            .await
+            .is_err());
+        assert!(store
+            .list_visible(Some("self"), None, None, true, 1, None)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
