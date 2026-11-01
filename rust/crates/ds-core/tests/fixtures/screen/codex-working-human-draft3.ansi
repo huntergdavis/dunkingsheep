@@ -1,0 +1,40 @@
+
+  [38;2;99;168;248m>_ [1m[39mOpenAI Codex[0;2m (v0.164.0)[0m
+     [2m/tmp/claude-1000/-home-hunter-workspace-vp-of-agentry/60be00f5-51ad-46af-8006-775bc0ac5268/scratchpad/codexscratch[0m
+
+[2m  To get started, describe a task or try one of these commands:[0m
+
+  /init[2m - create an AGENTS.md file with instructions for Codex[0m
+  /status[2m - show current session configuration[0m
+  /permissions[2m - choose what Codex is allowed to do[0m
+  /model[2m - choose what model and reasoning effort to use[0m
+  /review[2m - review any changes and find issues[0m
+
+
+[1;2m› [0mRun this single shell command and then reply with the word done: sleep 40
+
+
+[2m• [0mI’ll run [38;2;166;227;161msleep 40[39m now.
+
+
+
+
+
+
+
+
+
+
+
+
+
+[1m[38;2;128;128;128m•[0m [2mWaiting for background terminal[0m [2m(23s • [0;1mesc[0;2m to interrupt) · 1 background terminal running · /ps to view · /stop to close[0m
+[2m  └ sleep 40[0m
+
+
+[1m›[0m my human draft line one
+  draft line two
+  draft line three
+
+  [38;2;246;226;183mGPT-6-Astra high[39m · [38;2;171;223;167m/tmp/claude-1000/-home-hunter-workspace-vp-of-agentry/60be00f5-51ad-46af-8006-775bc0ac5268/scratchpad/codexs…
+[39m  [1mtab[0m to queue message

@@ -41,6 +41,137 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_by_time ON events (at);
 CREATE INDEX IF NOT EXISTS events_by_kind ON events (kind, at);";
 
+/// The live event store (`dunk_metrics.Metrics`: `__init__`, `record`, `prune`, `earliest`).
+/// Writes go through the blocking `db::SyncWriter` (t978), so the flock's synchronous command
+/// handlers call it directly. NOT here: the read side (`summary` over a window) is the pure
+/// aggregation above, fed by `events_between`.
+#[derive(Debug)]
+pub struct MetricsStore {
+    writer: crate::db::SyncWriter,
+    pub enabled: bool,
+    pub retention_s: f64,
+}
+
+impl MetricsStore {
+    /// `Metrics(path)`: creates the directory and the schema. `":memory:"` is an in-memory db.
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<MetricsStore, crate::error::DunkError> {
+        let path = path.as_ref();
+        if path != std::path::Path::new(":memory:") {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    crate::error::DunkError::Refused(format!("{}: {e}", parent.display()))
+                })?;
+            }
+        }
+        let writer = crate::db::SyncWriter::spawn(path)?;
+        writer.call(|conn| conn.execute_batch(SCHEMA).map_err(crate::db::map_sqlite))?;
+        Ok(MetricsStore {
+            writer,
+            enabled: true,
+            retention_s: RETENTION_S,
+        })
+    }
+
+    /// `record`: never fails the caller (telemetry must not break delivery).
+    pub fn record(&self, event: &Event) {
+        if !self.enabled {
+            return;
+        }
+        let e = event.clone();
+        let at = if e.at == 0.0 {
+            crate::clock::now_s()
+        } else {
+            e.at
+        };
+        let _ =
+            self.writer.call(move |conn| {
+                conn.execute(
+                "INSERT INTO events (at, kind, pane_id, mailbox, sender, source, outcome, reason, \
+                 duration_ms, attempts, bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                rusqlite::params![
+                    at, e.kind, e.pane_id, e.mailbox, e.sender, e.source, e.outcome, e.reason,
+                    e.duration_ms, e.attempts, e.bytes
+                ],
+            )
+            .map_err(crate::db::map_sqlite)?;
+                Ok(())
+            });
+    }
+
+    /// `prune`: drop events older than the retention, then the oldest beyond `max_events`.
+    /// Returns how many rows went.
+    pub fn prune(
+        &self,
+        older_than_s: Option<f64>,
+        max_events: i64,
+    ) -> Result<i64, crate::error::DunkError> {
+        let cutoff = crate::clock::now_s() - older_than_s.unwrap_or(self.retention_s);
+        self.writer.call(move |conn| {
+            let mut removed = conn
+                .execute("DELETE FROM events WHERE at < ?", [cutoff])
+                .map_err(crate::db::map_sqlite)? as i64;
+            let total: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                .map_err(crate::db::map_sqlite)?;
+            if total > max_events {
+                let over = total - max_events;
+                conn.execute(
+                    "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY at LIMIT ?)",
+                    [over],
+                )
+                .map_err(crate::db::map_sqlite)?;
+                removed += over;
+            }
+            Ok(removed)
+        })
+    }
+
+    /// `earliest`: the oldest event time, if any.
+    pub fn earliest(&self) -> Result<Option<f64>, crate::error::DunkError> {
+        self.writer.call(|conn| {
+            conn.query_row("SELECT MIN(at) FROM events", [], |r| r.get(0))
+                .map_err(crate::db::map_sqlite)
+        })
+    }
+
+    /// `_rows(start, end)`: the events in `[start, end)`, oldest first.
+    pub fn events_between(
+        &self,
+        start: f64,
+        end: f64,
+    ) -> Result<Vec<Event>, crate::error::DunkError> {
+        self.writer.call(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT at, kind, pane_id, mailbox, sender, source, outcome, reason, \
+                     duration_ms, attempts, bytes FROM events WHERE at >= ? AND at < ? ORDER BY at",
+                )
+                .map_err(crate::db::map_sqlite)?;
+            let rows = stmt
+                .query_map([start, end], |r| {
+                    Ok(Event {
+                        at: r.get(0)?,
+                        kind: r.get(1)?,
+                        pane_id: r.get(2)?,
+                        mailbox: r.get(3)?,
+                        sender: r.get(4)?,
+                        source: r.get(5)?,
+                        outcome: r.get(6)?,
+                        reason: r.get(7)?,
+                        duration_ms: r.get(8)?,
+                        attempts: r.get(9)?,
+                        bytes: r.get(10)?,
+                    })
+                })
+                .map_err(crate::db::map_sqlite)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(crate::db::map_sqlite)
+        })
+    }
+}
+
 /// What each event means. Returned with every summary, so a consumer never guesses.
 pub static KINDS: &[(&str, &str)] = &[
     (

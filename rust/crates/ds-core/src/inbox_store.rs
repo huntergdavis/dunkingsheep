@@ -21,8 +21,9 @@ use crate::clock::now_s;
 use crate::db::{map_sqlite, SyncWriter};
 use crate::error::DunkError;
 use crate::inbox::{
-    check_sizes, next_message_number, receipt_of, retention_cutoff, validate_transport, Summary,
-    COUNTER_UPSERT, MAX_BLOB_BYTES, PURGE_SELECTION, RETENTION_S, SCHEMA,
+    check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
+    retention_cutoff, validate_transport, Summary, COUNTER_UPSERT, MAX_BLOB_BYTES, PURGE_SELECTION,
+    RETENTION_S, SCHEMA, STATES,
 };
 
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.
@@ -585,6 +586,300 @@ impl Store {
 
     pub fn shutdown(self) {
         self.writer.shutdown();
+    }
+}
+
+/// What `ack`/`cancel` did: `_transition`'s `{state, changed, unchanged}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    pub state: String,
+    pub changed: Vec<String>,
+    /// `(message_id, state it was already in)`.
+    pub unchanged: Vec<(String, String)>,
+}
+
+/// `archive`'s `{mailbox, archived, states, before}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Archived {
+    pub mailbox: String,
+    pub archived: usize,
+    pub states: Vec<String>,
+    pub before: Option<f64>,
+}
+
+/// `fetch`'s result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fetched {
+    pub attachment_id: String,
+    pub path: PathBuf,
+    pub filename: Option<String>,
+    pub size: i64,
+    pub media_type: Option<String>,
+    pub message_id: String,
+}
+
+/// `[str(i).strip() for i in ids if str(i).strip()]`, and the empty refusal.
+fn clean_ids(message_ids: &[String]) -> Result<Vec<String>, DunkError> {
+    let ids: Vec<String> = message_ids
+        .iter()
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Err(refuse("at least one message id is required"));
+    }
+    Ok(ids)
+}
+
+/// Python `repr()` of a str, for the `{message_id!r}` texts.
+fn py_repr(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    format!("{quote}{s}{quote}")
+}
+
+impl Store {
+    /// `ack`: implies read (`read_at` is stamped so a board that counts NULLs as unread
+    /// cannot report drained mail as waiting), and is scoped to the caller's mailbox: an id
+    /// from another mailbox is refused, never silently marked read there.
+    pub fn ack(
+        &self,
+        message_ids: &[String],
+        mailbox: Option<&str>,
+    ) -> Result<Transition, DunkError> {
+        self.transition(
+            message_ids,
+            "acked",
+            "acked_at",
+            &["queued", "read"],
+            true,
+            mailbox,
+        )
+    }
+
+    /// `cancel`.
+    pub fn cancel(&self, message_ids: &[String]) -> Result<Transition, DunkError> {
+        self.transition(
+            message_ids,
+            "cancelled",
+            "cancelled_at",
+            &["queued"],
+            false,
+            None,
+        )
+    }
+
+    /// `_transition`. The whole batch is one transaction: a refusal part-way leaves nothing
+    /// changed (the Python raises before its single commit).
+    fn transition(
+        &self,
+        message_ids: &[String],
+        state: &'static str,
+        stamp: &'static str,
+        allowed: &'static [&'static str],
+        read_stamp: bool,
+        mailbox: Option<&str>,
+    ) -> Result<Transition, DunkError> {
+        let ids = clean_ids(message_ids)?;
+        let mailbox = mailbox.filter(|m| !m.is_empty()).map(str::to_string);
+        self.writer.call(move |connection| {
+            let tx = connection.transaction().map_err(map_sqlite)?;
+            let (mut changed, mut unchanged) = (Vec::new(), Vec::new());
+            for id in &ids {
+                let row: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT state, mailbox FROM messages WHERE id = ?",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })
+                    .map_err(map_sqlite)?;
+                let Some((current, owner)) = row else {
+                    return Err(refuse(format!("no message with id {}", py_repr(id))));
+                };
+                if let Some(mailbox) = &mailbox {
+                    if normalise_mailbox(&owner) != normalise_mailbox(mailbox) {
+                        // A write not scoped to its owner is a blast radius: the VP acked a
+                        // sent copy and the recipient lane lost its unread.
+                        return Err(refuse(format!(
+                            "message {id} is not in mailbox {}; an ack only applies to the \
+                             caller's own mailbox",
+                            py_repr(mailbox)
+                        )));
+                    }
+                }
+                if !allowed.contains(&current.as_str()) {
+                    unchanged.push((id.clone(), current));
+                    continue;
+                }
+                let now = now_s();
+                if read_stamp {
+                    tx.execute(
+                        &format!(
+                            "UPDATE messages SET state = ?, {stamp} = ?, \
+                             read_at = COALESCE(read_at, ?) WHERE id = ?"
+                        ),
+                        rusqlite::params![state, now, now, id],
+                    )
+                } else {
+                    tx.execute(
+                        &format!("UPDATE messages SET state = ?, {stamp} = ? WHERE id = ?"),
+                        rusqlite::params![state, now, id],
+                    )
+                }
+                .map_err(map_sqlite)?;
+                changed.push(id.clone());
+            }
+            tx.commit().map_err(map_sqlite)?;
+            Ok(Transition {
+                state: state.to_string(),
+                changed,
+                unchanged,
+            })
+        })
+    }
+
+    /// `archive`: bulk-retire a mailbox without deleting anything. Default states are queued
+    /// and acked; `cancelled`, `archived` and `undeliverable` are never archivable.
+    pub fn archive(
+        &self,
+        mailbox: &str,
+        before: Option<f64>,
+        states: Option<&[String]>,
+    ) -> Result<Archived, DunkError> {
+        let mailbox = mailbox.trim().to_string();
+        if mailbox.is_empty() {
+            return Err(refuse("a mailbox is required"));
+        }
+        let requested: Vec<String> = match states {
+            None => vec!["queued".to_string(), "acked".to_string()],
+            Some(list) => list.to_vec(),
+        };
+        let allowed: Vec<String> = requested
+            .into_iter()
+            .filter(|s| {
+                STATES.contains(&s.as_str())
+                    && !matches!(s.as_str(), "cancelled" | "archived" | "undeliverable")
+            })
+            .collect();
+        if allowed.is_empty() {
+            return Err(refuse("state must be one of queued, read, acked"));
+        }
+        let now = now_s();
+        let placeholders = vec!["?"; allowed.len()].join(",");
+        let (condition, box_params) = mailbox_where(&mailbox, "mailbox");
+        let mut sql = format!(
+            "UPDATE messages SET state = 'archived', archived_at = ?, \
+             read_at = COALESCE(read_at, ?) WHERE {condition} AND state IN ({placeholders})"
+        );
+        let mut params: Vec<rusqlite::types::Value> = vec![now.into(), now.into()];
+        params.extend(box_params.into_iter().map(Into::into));
+        params.extend(allowed.iter().cloned().map(Into::into));
+        if let Some(before) = before {
+            sql.push_str(" AND created_at < ?");
+            params.push(before.into());
+        }
+        let archived = self.writer.call(move |connection| {
+            connection
+                .execute(&sql, rusqlite::params_from_iter(params.iter()))
+                .map_err(map_sqlite)
+        })?;
+        Ok(Archived {
+            mailbox,
+            archived,
+            states: allowed,
+            before,
+        })
+    }
+
+    /// `delete`: hard-delete messages and their attachment rows, then collect orphan blobs.
+    /// Every id is checked first, so an unknown id deletes nothing.
+    pub fn delete(&self, message_ids: &[String]) -> Result<Vec<String>, DunkError> {
+        let ids = clean_ids(message_ids)?;
+        let doomed = ids.clone();
+        self.writer.call(move |connection| {
+            let tx = connection.transaction().map_err(map_sqlite)?;
+            for id in &doomed {
+                let found: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM messages WHERE id = ?", [id], |r| {
+                        r.get(0)
+                    })
+                    .map_err(map_sqlite)?;
+                if found == 0 {
+                    return Err(refuse(format!("no message with id {}", py_repr(id))));
+                }
+            }
+            for id in &doomed {
+                tx.execute("DELETE FROM attachments WHERE message_id = ?", [id])
+                    .map_err(map_sqlite)?;
+                tx.execute("DELETE FROM messages WHERE id = ?", [id])
+                    .map_err(map_sqlite)?;
+            }
+            tx.commit().map_err(map_sqlite)?;
+            Ok(())
+        })?;
+        self.collect_blobs()?;
+        Ok(ids)
+    }
+
+    /// `fetch`: copy an attachment out of the store into `dest_dir` (created if missing).
+    pub fn fetch(&self, attachment_id: &str, dest_dir: &Path) -> Result<Fetched, DunkError> {
+        let wanted = attachment_id.to_string();
+        let row = self.writer.call(move |connection| {
+            connection
+                .query_row(
+                    "SELECT sha256, filename, size, media_type, message_id \
+                     FROM attachments WHERE id = ?",
+                    [&wanted],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(map_sqlite)
+        })?;
+        let Some((sha, filename, size, media, message_id)) = row else {
+            return Err(refuse(format!(
+                "no attachment with id {}",
+                py_repr(attachment_id)
+            )));
+        };
+        let blob_path = self.blob_dir.join(&sha);
+        if !blob_path.exists() {
+            return Err(refuse(format!(
+                "attachment {attachment_id} is missing from the store"
+            )));
+        }
+        let dest = expand_user(dest_dir);
+        fs::create_dir_all(&dest).map_err(|e| refuse(format!("{}: {e}", dest.display())))?;
+        let name = filename.clone().filter(|n| !n.is_empty()).unwrap_or(sha);
+        let target = dest.join(name);
+        fs::copy(&blob_path, &target).map_err(|e| refuse(format!("{}: {e}", target.display())))?;
+        Ok(Fetched {
+            attachment_id: attachment_id.to_string(),
+            path: target,
+            filename,
+            size,
+            media_type: media,
+            message_id,
+        })
     }
 }
 
