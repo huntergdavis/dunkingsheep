@@ -342,7 +342,7 @@ fn a_connections_requests_all_run_on_one_thread_and_connections_do_not_share() {
     });
     let mut a = connect(&path);
     let mut b = connect(&path);
-    let mut seen = |c: &mut Conn| c.call(json!({"id": 1, "cmd": "t"}))["result"].clone();
+    let seen = |c: &mut Conn| c.call(json!({"id": 1, "cmd": "t"}))["result"].clone();
     let (a1, b1, a2, b2) = (seen(&mut a), seen(&mut b), seen(&mut a), seen(&mut b));
     assert_eq!(a1, a2);
     assert_eq!(b1, b2);
