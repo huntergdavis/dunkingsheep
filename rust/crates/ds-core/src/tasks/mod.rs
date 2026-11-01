@@ -1136,7 +1136,7 @@ impl Tasks {
                             _ => "status",
                         };
                         let duration_ms =
-                            (status == "done").then(|| ((now - created_at) * 1000.0) as i64);
+                            (status == "done").then_some(((now - created_at) * 1000.0) as i64);
                         tx.execute(
                             "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
                              status_from, status_to, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
