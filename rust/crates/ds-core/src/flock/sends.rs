@@ -401,9 +401,13 @@ mod send_lock_tests {
     use super::*;
     use std::sync::TryLockError;
 
-    fn test_flock() -> (Flock, tempfile::TempDir) {
+    fn test_flock() -> (Arc<Flock>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches.json"),
+            dir.path(),
+            false,
+        ));
         (flock, dir)
     }
 
@@ -433,12 +437,16 @@ mod send_lock_tests {
         let burst = flock
             .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
             .unwrap();
-        let blocked_burst = flock
-            .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
-            .unwrap_err();
-        assert!(blocked_burst
-            .to_string()
-            .contains("the typing lock was held for more than 0s by ('w1:p1',"));
+        let other_flock = flock.clone();
+        let blocked_burst = std::thread::spawn(move || {
+            other_flock
+                .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
+                .unwrap_err()
+                .to_string()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked_burst.contains("the typing lock was held for more than 0s by ('w1:p1',"));
 
         // Confirmation waits keep the whole-send lock but release the global lock, so
         // another pane can type its own burst while this pane waits for confirmation.
@@ -459,19 +467,24 @@ mod send_lock_tests {
         let _held = flock
             .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
             .unwrap();
-        let mut terminal_mutations = 0;
 
-        let result = flock.typing_guard_with_timeout("w1:p2", Duration::ZERO);
-        if result.is_ok() {
-            terminal_mutations += 1;
-        } else {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("refusing to type concurrently"));
-        }
+        let other_flock = flock.clone();
+        let action_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let other_action_runs = action_runs.clone();
+        let result = std::thread::spawn(move || {
+            let guard = other_flock.typing_guard_with_timeout("w1:p2", Duration::ZERO)?;
+            other_action_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(guard);
+            Ok::<(), DunkError>(())
+        })
+        .join()
+        .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to type concurrently"));
 
-        assert_eq!(0, terminal_mutations);
+        assert_eq!(0, action_runs.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -485,10 +498,16 @@ mod send_lock_tests {
             .unwrap();
         drop(inner);
 
-        let blocked = flock
-            .typing_guard_with_timeout("w1:p2", Duration::ZERO)
-            .unwrap_err();
-        assert!(blocked.to_string().contains("('w1:p1',"));
+        let other_flock = flock.clone();
+        let blocked = std::thread::spawn(move || {
+            other_flock
+                .typing_guard_with_timeout("w1:p2", Duration::ZERO)
+                .unwrap_err()
+                .to_string()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked.contains("('w1:p1',"));
         drop(outer);
         assert!(flock
             .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
