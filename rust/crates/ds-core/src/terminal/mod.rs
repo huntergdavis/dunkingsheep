@@ -239,6 +239,29 @@ pub trait Terminal: std::fmt::Debug {
     /// or `None` when the pane is not an agent.
     fn agent_status(&self, pane_id: &str) -> Option<String>;
 
+    /// Every pane with the status the backend knows for it, from ONE listing where the
+    /// backend can give both (t1296). The default asks `agent_status` per pane, which is
+    /// right for a backend that has its own status source but costs one call per pane; the
+    /// tmux backend overrides it because it knows none and Python's `_parse_panes` starts
+    /// every pane at `unknown` from the same single `list-panes`.
+    fn list_panes_with_status(&self) -> Vec<(Pane, Option<String>)> {
+        self.list_panes()
+            .into_iter()
+            .map(|pane| {
+                let status = self.agent_status(&pane.pane_id);
+                (pane, status)
+            })
+            .collect()
+    }
+
+    /// One pane with its status (`get_pane` + `agent_status`); see
+    /// [`Terminal::list_panes_with_status`].
+    fn get_pane_with_status(&self, pane_id: &str) -> Option<(Pane, Option<String>)> {
+        let pane = self.get_pane(pane_id)?;
+        let status = self.agent_status(pane_id);
+        Some((pane, status))
+    }
+
     /// Size the pane's window and report the geometry read back (t928).
     ///
     /// In T22's own scope (`resize-window`, TASKS.md) and used by the web desk:
