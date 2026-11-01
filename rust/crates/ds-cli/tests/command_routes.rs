@@ -254,8 +254,6 @@ fn cli_route_05_dunk_send() {
             "--wait",
             "0.25",
             "--ignore-typing",
-            "--desk-token",
-            "ticket-9",
             "--no-enter",
         ],
         "send_text",
@@ -264,7 +262,7 @@ fn cli_route_05_dunk_send() {
             "text": "hello from Rust",
             "hold_while_typing": false,
             "wait_s": 0.25,
-            "desk_token": "ticket-9",
+            "desk_token": null,
             "press_enter": false
         }),
         json!({
