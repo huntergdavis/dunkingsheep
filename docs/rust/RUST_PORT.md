@@ -136,6 +136,9 @@ the TUI and the web desk. The Python tree is deleted only after phase 3.
 | `notify` | watch `roles.json`, `service-tokens.json`, `dunks.json` | replaces stat-on-every-call refresh |
 | `jsonwebtoken` (rsa) | GitHub App JWT (RS256) | replaces PyJWT |
 | `reqwest` (rustls, json, blocking off) | GitHub REST | async, no OpenSSL dependency |
+| `axum` (=0.8.9; `http1`, `json`, `tokio`) | ds-web HTTP routes | one Tokio-based Axum/Hyper HTTP stack in ds-web; ds-core remains transport-neutral |
+| `ratatui` (=0.30.2; `std`, `crossterm_0_29`) | ds-tui rendering | maintained terminal UI widgets and layout; only the Crossterm backend is enabled |
+| `crossterm` (=0.29.0; `events`, `windows`) | ds-tui input and terminal control | terminal events and control, using the same version selected by Ratatui's backend |
 | `sha2`, `hmac` | ledger hashes, token hashes | |
 | `rand` | tokens | `secrets.token_urlsafe` equivalent: 32 bytes base64url |
 | `chrono` | ISO timestamps where the Python formats them | only at the edges; internally `SystemTime` |
@@ -146,6 +149,15 @@ the TUI and the web desk. The Python tree is deleted only after phase 3.
 Not used: an ORM, an async-sqlite wrapper (the writer actor is simpler and
 matches the Python's lock discipline), a tmux crate (control mode is a
 line protocol; we parse it ourselves, section 5.1).
+
+Phase 3 dependency decision (t1527): exact versions are pinned in the workspace
+manifest and the TUI package consumes the Ratatui/Crossterm pins. The current
+workspace does not yet contain `ds-web`, so Axum is declared centrally for that
+adapter and will enter `Cargo.lock` when its package is added; do not add Hyper
+or another listener implementation directly. ds-core stays transport-neutral
+and keeps the shared Tokio runtime dependency. Until full Rust web/TUI acceptance,
+keep the installed Python web and TUI available as the boring fallback; do not
+replace them with a hand-written HTTP parser or ship a production switch.
 
 ---
 
