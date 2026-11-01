@@ -217,6 +217,40 @@ fn h_task_follow_handlers_match_python() {
     );
 }
 
+#[test]
+fn h_task_follow_rejects_falsey_non_string_scopes() {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_follow_unfollow_followers();
+    let gate = FixedRole("worker", false);
+
+    for (scope, rendered) in [
+        (json!(false), "False"),
+        (json!(0), "0"),
+        (json!([]), "[]"),
+        (json!({}), "{}"),
+    ] {
+        let error = dispatch(
+            &dispatcher,
+            &flock,
+            &gate,
+            "task_follow",
+            args(json!({"scope": scope})),
+            Some("w1:p1"),
+        );
+        assert_eq!(
+            refusal(error),
+            format!(
+                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got '{rendered}')"
+            )
+        );
+    }
+
+    let followers = dispatch(&dispatcher, &flock, &gate, "task_followers", None, None)
+        .expect("read followers after invalid scopes");
+    assert_eq!(followers, json!({"followers": []}));
+}
+
 fn args(value: Value) -> Option<Args> {
     value.as_object().cloned()
 }

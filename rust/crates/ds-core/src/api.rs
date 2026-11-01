@@ -149,9 +149,9 @@ fn truthy(value: &Value) -> bool {
 }
 
 fn python_scope_arg(value: Option<&Value>) -> Option<String> {
-    let value = value.filter(|value| truthy(value))?;
+    let value = value?;
     Some(match value {
-        Value::Null => unreachable!("falsey null is filtered out"),
+        Value::Null => return None,
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::String(value) => value.clone(),
