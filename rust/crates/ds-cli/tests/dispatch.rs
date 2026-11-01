@@ -67,10 +67,10 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
 }
 
 #[test]
-fn commands_without_a_body_say_so_and_exit_1_and_writes_are_not_ported() {
+fn commands_without_a_body_say_so_and_exit_1() {
     for argv in [
         vec!["dunkingsheep", "status"],
-        vec!["dunkingsheep", "context", "init"],
+        vec!["dunkingsheep", "health"],
     ] {
         let ns = try_parse(&argv).unwrap();
         let out = run(&ns);

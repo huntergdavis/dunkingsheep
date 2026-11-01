@@ -27,13 +27,46 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+/// The local (no daemon) writes: `context init`, `ledger adopt`, and `add|promote|supersede|retire
+/// --local`.
+fn context_local(ns: &Map<String, Value>, sub: &str, json: bool) -> Outcome {
+    let stdin = std::io::stdin();
+    match crate::context_local::context_write_local(sub, ns, &mut stdin.lock(), None) {
+        Ok(out) => Outcome {
+            stdout: if json {
+                format!("{}\n", sorted_json(&out.value))
+            } else {
+                out.text
+            },
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(fail) => {
+            let message = fail.message();
+            Outcome {
+                stdout: String::new(),
+                stderr: if message.is_empty() {
+                    String::new()
+                } else {
+                    format!("{message}\n")
+                },
+                code: fail.code(),
+            }
+        }
+    }
+}
+
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
+    // `init` and `ledger adopt` have no daemon path: they write locally.
+    if sub == "init" || (sub == "ledger" && text(ns, "action") == Some("adopt")) {
+        return context_local(ns, sub, json);
+    }
     // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
     // `--local` writes the files directly, which is not ported.
     if matches!(sub, "add" | "promote" | "supersede" | "retire") {
         if matches!(ns.get("local"), Some(Value::Bool(true))) {
-            return not_ported(&format!("context {sub} --local"));
+            return context_local(ns, sub, json);
         }
         let stdin = std::io::stdin();
         return crate::daemon_cmd::context_write(ns, &mut stdin.lock());
@@ -53,12 +86,21 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
         Err(error) if error.to_string().contains("not a read-side command") => {
             not_ported(&format!("context {sub}"))
         }
+        // A store `ContextError` is `Refused("context: ...")`: stderr, exit 2. Anything else is
         // Python's `SystemExit("message")`: the message on stderr, exit 1.
-        Err(error) => Outcome {
-            stdout: String::new(),
-            stderr: format!("{error}\n"),
-            code: 1,
-        },
+        Err(error) => {
+            let message = error.to_string();
+            let code = if message.starts_with("context: ") {
+                2
+            } else {
+                1
+            };
+            Outcome {
+                stdout: String::new(),
+                stderr: format!("{message}\n"),
+                code,
+            }
+        }
     }
 }
 

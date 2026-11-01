@@ -1,0 +1,207 @@
+{
+ "files": {
+  "README.md": "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+  "fact/2020-03-04-alpha.md": "---\nclass: fact\nsubject: alpha\ntype: reference\nscope: project\nauthority: measured\nstated: 2020-03-04\nsource: lab\nrecheck_after: null\nsupersedes: null\nsuperseded_by: <TODAY>-alpha\nretired_at: null\nretired_reason: null\n---\n\nBody A\n",
+  "fact/2020-03-06-gamma.md": "---\nclass: fact\nsubject: gamma\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-03-06\nsource: null\nrecheck_after: null\nsupersedes: null\nsuperseded_by: null\nretired_at: <TODAY>\nretired_reason: obsolete second line\n---\n\nBody C from a file.\n\n**Retired <TODAY>**: obsolete\nsecond line\n",
+  "ground-truth/<TODAY>-alpha.md": "---\nclass: ground-truth\nsubject: alpha\ntype: reference\nscope: project\nauthority: owner\nstated: <TODAY>\nsource: lab\nrecheck_after: null\nsupersedes: 2020-03-04-alpha\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nBody A\n",
+  "provisional/2020-03-05-beta.md": "---\nclass: provisional\nsubject: beta\ntype: reference\nscope: project\nauthority: agent\nstated: 2020-03-05\nsource: null\nrecheck_after: 7d\nsupersedes: null\nsuperseded_by: <TODAY>-beta\nretired_at: null\nretired_reason: null\n---\n\nBody B\n",
+  "provisional/<TODAY>-beta.md": "---\nclass: provisional\nsubject: beta\ntype: reference\nscope: project\nauthority: agent\nstated: <TODAY>\nsource: \nrecheck_after: 7d\nsupersedes: 2020-03-05-beta\nsuperseded_by: null\nretired_at: null\nretired_reason: null\n---\n\nBody D supersedes B.\n"
+ },
+ "steps": [
+  {
+   "argv": [
+    "init"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "store at .dunkingsheep\n"
+  },
+  {
+   "argv": [
+    "add",
+    "--local",
+    "--text",
+    "Body A",
+    "--class",
+    "fact",
+    "--subject",
+    "alpha",
+    "--type",
+    "reference",
+    "--authority",
+    "measured",
+    "--source",
+    "lab",
+    "--stated",
+    "2020-03-04"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "added fact/2020-03-04-alpha\n"
+  },
+  {
+   "argv": [
+    "add",
+    "--local",
+    "--text",
+    "Body B",
+    "--class",
+    "provisional",
+    "--subject",
+    "beta",
+    "--stated",
+    "2020-03-05"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "added provisional/2020-03-05-beta\n"
+  },
+  {
+   "argv": [
+    "add",
+    "--local",
+    "--class",
+    "fact",
+    "--subject",
+    "gamma",
+    "--stated",
+    "2020-03-06",
+    "body-c.md"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "added fact/2020-03-06-gamma\n"
+  },
+  {
+   "argv": [
+    "promote",
+    "2020-03-04-alpha",
+    "--local"
+   ],
+   "code": 1,
+   "env": {},
+   "stderr": "refused: only an owner act promotes a ground truth\n",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "promote",
+    "nonexistent",
+    "--local"
+   ],
+   "code": 1,
+   "env": {
+    "DUNKINGSHEEP_SUPERUSER": "1"
+   },
+   "stderr": "",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "promote",
+    "2020-03-04-alpha",
+    "--local"
+   ],
+   "code": 0,
+   "env": {
+    "DUNKINGSHEEP_SUPERUSER": "1"
+   },
+   "stderr": "",
+   "stdout": "promoted <TODAY>-alpha\n"
+  },
+  {
+   "argv": [
+    "supersede",
+    "2020-03-05-beta",
+    "body-d.md",
+    "--local"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "superseded by <TODAY>-beta\n"
+  },
+  {
+   "argv": [
+    "retire",
+    "2020-03-06-gamma",
+    "--reason",
+    "obsolete\nsecond line",
+    "--local"
+   ],
+   "code": 0,
+   "env": {},
+   "stderr": "",
+   "stdout": "retired 2020-03-06-gamma\n"
+  },
+  {
+   "argv": [
+    "ledger",
+    "adopt"
+   ],
+   "code": 1,
+   "env": {},
+   "stderr": "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal\n",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "ledger",
+    "adopt"
+   ],
+   "code": 0,
+   "env": {
+    "DUNKINGSHEEP_SUPERUSER": "1"
+   },
+   "stderr": "",
+   "stdout": "adopted 2 entries into <T>/cfg/context-ledger.db\n"
+  },
+  {
+   "argv": [
+    "add",
+    "--local",
+    "--text",
+    "x",
+    "--class",
+    "bogus",
+    "--subject",
+    "s"
+   ],
+   "code": 2,
+   "env": {},
+   "stderr": "context: class must be one of ('ground-truth', 'fact', 'provisional', 'history')\n",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "add",
+    "--local",
+    "--class",
+    "fact",
+    "--subject",
+    "s",
+    "no-such-file.md"
+   ],
+   "code": 2,
+   "env": {},
+   "stderr": "no such file: 'no-such-file.md' - the body comes from --text, stdin or a file; for text inline use: dunkingsheep context add --text '<claim>' --class ... --subject ...\n",
+   "stdout": ""
+  },
+  {
+   "argv": [
+    "init",
+    "--json"
+   ],
+   "code": 0,
+   "env": {
+    "DUNKINGSHEEP_SUPERUSER": "1"
+   },
+   "stderr": "",
+   "stdout": "{\n  \"root\": \".dunkingsheep\"\n}\n"
+  }
+ ]
+}

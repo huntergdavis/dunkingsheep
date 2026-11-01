@@ -32,8 +32,11 @@ fn refused<T>(text: String) -> Result<T, DunkError> {
     Err(DunkError::Refused(text))
 }
 
+/// A `ContextError` from the store. Python's `main()` turns it into `Refused("context: ...")`
+/// (stderr, exit 2); the prefix is how `dispatch` tells it from a plain `SystemExit` message
+/// (exit 1).
 fn ctx_err(error: ds_core::context::ContextError) -> DunkError {
-    DunkError::Refused(error.0)
+    DunkError::Refused(format!("context: {}", error.0))
 }
 
 fn flag(ns: &Map<String, Value>, key: &str) -> bool {
