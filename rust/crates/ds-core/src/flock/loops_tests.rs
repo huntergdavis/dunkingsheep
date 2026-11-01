@@ -9,9 +9,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::loops::{run_reaper, ReaperEnv};
-use crate::error::DunkError;
 use super::panes::Stores;
 use super::Flock;
+use crate::error::DunkError;
 use crate::tasks::{ClaimOptions, Tasks};
 
 struct Fake {
