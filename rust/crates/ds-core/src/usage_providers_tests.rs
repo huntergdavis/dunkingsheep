@@ -103,13 +103,15 @@ fn claude_is_a_named_error_not_a_guess() {
 
 #[test]
 fn a_hung_opencode_times_out_instead_of_blocking_the_caller() {
-    use std::os::unix::fs::PermissionsExt;
+    // t1501: the script is run THROUGH `sh`, never exec'd. Exec'ing a file this thread just wrote
+    // fails with ETXTBSY ("Text file busy") whenever a parallel test thread forks while the write
+    // handle is open (the child inherits it until its own exec); a file only ever READ by sh has
+    // no such window, so there is no retry and no sleep.
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("opencode");
-    fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(&script, "sleep 5\n").unwrap();
     let started = Instant::now();
-    let r = opencode_with(script.to_str().unwrap(), 0.3, 5.0);
+    let r = opencode_via("sh", &[script.to_str().unwrap()], 0.3, 5.0);
     assert!(
         started.elapsed() < Duration::from_secs(4),
         "returned at the deadline"

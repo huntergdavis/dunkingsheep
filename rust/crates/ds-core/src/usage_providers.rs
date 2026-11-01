@@ -376,7 +376,17 @@ pub fn opencode(now: f64) -> Value {
 }
 
 fn opencode_with(program: &str, timeout_s: f64, now: f64) -> Value {
-    match run_captured(program, &["stats", "--days", "1"], timeout_s) {
+    opencode_via(program, &[], timeout_s, now)
+}
+
+/// `opencode_with` with leading arguments before `stats --days 1`. Production passes none. A test
+/// that needs a hung "opencode" passes `("sh", [script])`: the script is then READ by the shell
+/// and never exec'd, so a freshly written file cannot fail with ETXTBSY ("Text file busy") when a
+/// parallel test thread forks while the write handle is still open (t1501).
+fn opencode_via(program: &str, lead: &[&str], timeout_s: f64, now: f64) -> Value {
+    let mut args: Vec<&str> = lead.to_vec();
+    args.extend(["stats", "--days", "1"]);
+    match run_captured(program, &args, timeout_s) {
         Err(e) => err("opencode", &format!("opencode stats failed: {e}"), now),
         Ok((code, _, stderr)) if code != 0 => err(
             "opencode",
