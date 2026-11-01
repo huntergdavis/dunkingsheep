@@ -87,6 +87,11 @@ pub struct Flock {
     pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
     /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
     next_message_id: AtomicU64,
+    /// One whole-send lock per pane (`Flock._lock_for`). The `Arc` lets a caller keep the
+    /// selected lock alive while holding its mutex guard.
+    pub(crate) pane_send_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// The reentrant, fleet-wide keystroke-burst lock (`Flock._typing`).
+    pub(crate) typing_lock: sends::TypingLock,
     /// Which flock this is, for the per-thread caller state below.
     id: u64,
     /// pane_id -> the scope it follows for the next task (`self.task_waiters`).
@@ -123,6 +128,8 @@ impl Flock {
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
+            pane_send_locks: Mutex::new(BTreeMap::new()),
+            typing_lock: sends::TypingLock::default(),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             task_waiters: Mutex::new(BTreeMap::new()),
             push_wake: Arc::new(tokio::sync::Notify::new()),
