@@ -8,5 +8,6 @@ pub mod local;
 pub mod render;
 pub mod render_fleet;
 pub mod render_print;
+pub mod secrets_cmd;
 pub mod spec;
 pub mod usage_cmd;
