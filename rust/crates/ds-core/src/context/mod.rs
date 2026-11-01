@@ -7,6 +7,9 @@ pub mod digest;
 pub mod ledger;
 pub mod store;
 
+#[cfg(test)]
+mod golden_tests;
+
 /// `ContextError(ValueError)`: a named refusal for the context store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextError(pub String);
