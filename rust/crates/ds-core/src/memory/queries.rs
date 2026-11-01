@@ -58,14 +58,14 @@ struct Bucket {
 pub fn context(
     pool: &ReadPool,
     query: &str,
-    sessions: usize,
+    sessions: i64,
     snippets_per_session: usize,
     now: f64,
 ) -> Result<Value, DunkError> {
     let rows = recall(
         pool,
         query,
-        (sessions * 4).max(20),
+        sessions.saturating_mul(4).max(20) as usize,
         &Filters::default(),
         now,
         240,
@@ -99,7 +99,14 @@ pub fn context(
             .partial_cmp(&a.hit.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    buckets.truncate(sessions);
+    let output_limit = if sessions < 0 {
+        buckets
+            .len()
+            .saturating_sub(sessions.saturating_abs() as usize)
+    } else {
+        sessions as usize
+    };
+    buckets.truncate(output_limit);
     let mut lines: Vec<String> = Vec::new();
     for bucket in &buckets {
         let title: String = bucket
