@@ -1618,6 +1618,30 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task(task, &task_stamp)
                 })
             }
+            "block" | "cancel" => {
+                let sub = text(ns, "task_command").unwrap_or("");
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "reason".into(),
+                    ns.get("reason").cloned().unwrap_or(Value::Null),
+                );
+                let method = if sub == "block" {
+                    "task_block"
+                } else {
+                    "task_cancel"
+                };
+                crate::daemon_cmd::run_command(ns, method, args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "unblock" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_unblock", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
             _ => not_ported("task"),
         },
         "stop" | "toggle" => {

@@ -1031,6 +1031,48 @@ fn cli_route_04_dunk_edit_lifecycle_b() {
 }
 
 #[test]
+fn cli_route_18_task_edit_b() {
+    let blocked = run_daemon_cli(
+        &["task", "block", "t8", "--reason", "waiting on input"],
+        "task_block",
+        json!({"id":"t8", "reason":"waiting on input"}),
+        json!({"id":"t8", "priority":"medium", "status":"blocked", "title":"Work", "scope":"global", "block_reason":"waiting on input"}),
+    );
+    assert_eq!(0, blocked.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] blocked  Work\nscope       global\nblocked     waiting on input\n",
+        String::from_utf8(blocked.stdout).unwrap()
+    );
+    assert!(blocked.stderr.is_empty());
+
+    let unblocked = run_daemon_cli(
+        &["task", "unblock", "t8"],
+        "task_unblock",
+        json!({"id":"t8"}),
+        json!({"id":"t8", "priority":"medium", "status":"open", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, unblocked.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] open  Work\nscope       global\n",
+        String::from_utf8(unblocked.stdout).unwrap()
+    );
+    assert!(unblocked.stderr.is_empty());
+
+    let cancelled = run_daemon_cli(
+        &["task", "cancel", "t8"],
+        "task_cancel",
+        json!({"id":"t8", "reason":null}),
+        json!({"id":"t8", "priority":"medium", "status":"cancelled", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, cancelled.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] cancelled  Work\nscope       global\n",
+        String::from_utf8(cancelled.stdout).unwrap()
+    );
+    assert!(cancelled.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_16_task_create_read() {
     let added = run_daemon_cli(
         &[
