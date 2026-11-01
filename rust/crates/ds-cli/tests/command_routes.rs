@@ -88,7 +88,7 @@ fn cli_route_56_mcp_setup() {
     assert!(apply.stderr.is_empty());
     assert_eq!(
         format!("mcp\nadd\n--scope\nproject\ndunkingsheep\n--\n{executable}\nmcp\n"),
-        std::fs::read_to_string(capture).unwrap()
+        std::fs::read_to_string(&capture).unwrap()
     );
 
     let cursor = run(&["mcp-setup", "cursor", "--apply"]);
