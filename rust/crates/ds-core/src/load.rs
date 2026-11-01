@@ -11,8 +11,8 @@
 //! previous sample is always empty, `cpu_pct` is always `None` and `peak_cpu_pct` always 0.0.
 //! The tests assert the Python's behaviour; a fix is a Python+Rust change of its own.
 //!
-//! NOT in this slice: the policy evaluation is injected (`Evaluate`) because `policy.rs` is a
-//! separate open PR and slices are not stacked; wiring it is one line once that lands.
+//! The policy evaluation is injected (`Evaluate`) so this module does not own the choice of
+//! evaluator; production passes `policy::evaluate` mapped to its `PolicyError` text.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

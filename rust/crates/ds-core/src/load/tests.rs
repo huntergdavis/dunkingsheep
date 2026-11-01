@@ -11,16 +11,9 @@ fn no_policy(_: &Object, _: &Object) -> Result<Vec<Value>, String> {
     Err("no evaluator wired".into())
 }
 
-/// Stand-in for `dunk_policy.evaluate` covering only the rss rule these tests use; the real
-/// one is policy.rs (separate PR).
+/// `dunk_policy.evaluate`, the real one.
 fn rss_rule(sample: &Object, policy: &Object) -> Result<Vec<Value>, String> {
-    let limit = policy.get("rss_mb_over").and_then(Value::as_f64);
-    Ok(match limit {
-        Some(limit) if sample["rss_mb"].as_f64().unwrap_or(0.0) >= limit => vec![json!({
-            "rule": "rss", "agent": sample["name"], "measured": sample["rss_mb"],
-            "threshold": limit, "window": policy["rss_window_s"], "pid": sample["pid"]})],
-        _ => vec![],
-    })
+    crate::policy::evaluate(sample, policy).map_err(|e| e.to_string())
 }
 
 #[test]
