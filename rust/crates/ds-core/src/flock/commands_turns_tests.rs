@@ -336,3 +336,86 @@ fn the_activity_view_follows_the_turn() {
     assert!(done.ended_at.is_some());
     assert_eq!(done.expires_at, Some(0.0));
 }
+
+#[test]
+fn a_declared_turn_holds_until_turn_end() {
+    // test_a_declared_turn_holds_sends_until_turn_end (the hold decision; the send is T33).
+    let flock = flock();
+    let token = started(&flock);
+    assert!(flock.turn_active(PANE));
+    flock
+        .turn_end(None, "turn_end", Some(PANE), Some(&token), true, &NoHooks)
+        .unwrap();
+    assert!(!flock.turn_active(PANE), "an ended turn no longer holds");
+    assert!(!flock.turn_active("w9:p9"), "no turn, no hold");
+}
+
+#[test]
+fn a_crashed_turn_releases_after_ttl_and_logs_the_reason() {
+    let (flock, spy) = (flock(), Spy::default());
+    flock.set_caller(Some(as_caller(41, "100")));
+    flock
+        .turn_start(
+            None,
+            Some(0.05),
+            Some("test-crash"),
+            Some(PANE),
+            None,
+            &NoHooks,
+        )
+        .unwrap();
+    assert!(flock.turn_active(PANE));
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    // No turn_end arrives: the TTL must release the hold, not hold forever.
+    let released = flock.turn_expire(None, &spy);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0]["reason"], "ttl");
+    assert_eq!(released[0]["pane_id"], PANE);
+    assert!(!flock.turn_active(PANE));
+    assert!(
+        flock.turns.lock().unwrap().get(PANE).is_none(),
+        "the activity view loses it too"
+    );
+    let calls = spy.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("record turn.expired w1:p1")
+                && c.contains("\"ttl\"")
+                && c.contains("released")),
+        "{calls:?}"
+    );
+    assert!(
+        flock.turn_expire(None, &spy).is_empty(),
+        "nothing left to release"
+    );
+}
+
+#[test]
+fn an_unexpired_turn_survives_the_sweep_and_an_ended_one_is_swept() {
+    let flock = flock();
+    let token = started(&flock);
+    assert!(
+        flock.turn_expire(None, &NoHooks).is_empty(),
+        "a live turn is not released"
+    );
+    assert!(flock.turn_active(PANE));
+    flock
+        .turn_end(None, "turn_end", Some(PANE), Some(&token), true, &NoHooks)
+        .unwrap();
+    let swept = flock.turn_expire(None, &NoHooks);
+    assert_eq!(
+        swept.len(),
+        1,
+        "an ended turn (expires_at 0) is swept like the Python's"
+    );
+    assert!(flock.turn_states.lock().unwrap().get(PANE).is_none());
+}
+
+#[test]
+fn turn_expire_takes_an_explicit_now() {
+    let flock = flock();
+    started(&flock);
+    let far = crate::clock::now_s() + 10_000.0;
+    assert_eq!(flock.turn_expire(Some(far), &NoHooks).len(), 1);
+}
