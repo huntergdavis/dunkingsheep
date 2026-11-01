@@ -243,33 +243,51 @@ fn codex_hint(hint: &str) -> String {
 
 #[test]
 fn test_typed_text_tells_a_draft_from_a_dim_hint() {
-    assert_eq!(
-        Some("delete numb".to_string()),
-        typed_text(&claude_typing("delete numb"))
-    );
+    let claude_draft = claude_typing("delete numb");
+    assert_eq!(Some("delete numb".to_string()), typed_text(&claude_draft));
+    let (text, detail) = box_text(&claude_draft);
+    assert_eq!("delete numb", text);
+    assert!(detail.contains("text starts on row"), "{detail}");
+
+    let codex_draft = codex_typing("fix the flaky test");
     assert_eq!(
         Some("fix the flaky test".to_string()),
-        typed_text(&codex_typing("fix the flaky test"))
+        typed_text(&codex_draft)
     );
-    assert_eq!(Some(String::new()), typed_text(&claude_empty()));
-    assert_eq!(Some(String::new()), typed_text(&claude_hint()));
-    assert_eq!(
-        Some(String::new()),
-        typed_text(&codex_hint("Ask Codex to do anything"))
-    );
-    assert_eq!(
-        Some(String::new()),
-        typed_text(&codex_hint("Use /skills to list available skills"))
-    );
+    let (text, detail) = box_text(&codex_draft);
+    assert_eq!("fix the flaky test", text);
+    assert!(detail.contains("text starts on row"), "{detail}");
+
+    let claude_empty = claude_empty();
+    assert_eq!(Some(String::new()), typed_text(&claude_empty));
+    assert!(box_text(&claude_empty)
+        .1
+        .contains("nothing after the sigil"));
+    let claude_hint = claude_hint();
+    assert_eq!(Some(String::new()), typed_text(&claude_hint));
+    assert!(box_text(&claude_hint).1.contains("hint"));
+
+    let codex_hint = codex_hint("Ask Codex to do anything");
+    assert_eq!(Some(String::new()), typed_text(&codex_hint));
+    assert!(box_text(&codex_hint).1.contains("hint"));
+    let codex_skills_hint = codex_hint("Use /skills to list available skills");
+    assert_eq!(Some(String::new()), typed_text(&codex_skills_hint));
+    assert!(box_text(&codex_skills_hint).1.contains("hint"));
+
+    let collapsed = claude_collapsed(75);
     assert_eq!(
         Some("[Pasted text #1 +75 lines]".to_string()),
-        typed_text(&claude_collapsed(75))
+        typed_text(&collapsed)
     );
-    assert_eq!(
-        None,
-        typed_text("hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n")
-    );
+    let (text, detail) = box_text(&collapsed);
+    assert_eq!("[Pasted text #1 +75 lines]", text);
+    assert!(detail.contains("text starts on row"), "{detail}");
+
+    let shell = "hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n";
+    assert_eq!(None, typed_text(shell));
+    assert!(box_text(shell).1.contains("no input box found"));
     assert_eq!(None, typed_text(""));
+    assert!(box_text("").1.contains("no input box found"));
 }
 
 #[test]
@@ -286,11 +304,13 @@ fn test_distant_prompt_does_not_expand_the_guard_input_region() {
         typed_text(&screen),
         "prompt outside the last BOX_REGION_ROWS must be ignored"
     );
+    assert!(box_text(&screen).1.contains("no input box found"));
 }
 
 #[test]
 fn test_the_busy_capture_is_not_foreign_text() {
     assert_eq!(Some(String::new()), typed_text(BUSY_FRAME));
+    assert!(box_text(BUSY_FRAME).1.contains("empty"));
 }
 
 #[test]
