@@ -2,11 +2,12 @@
 //! authentication half of `tests/test_dunk_turn_end_dispatch.py` (the dispatch guardrails are the
 //! next slice).
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use super::commands_turns::{NoHooks, TurnHooks, TurnState};
+use super::commands_turns::{NoHooks, Readiness, TurnDispatchEnv, TurnHooks, TurnState};
 use super::Flock;
 use crate::proc::Caller;
 
@@ -418,4 +419,407 @@ fn turn_expire_takes_an_explicit_now() {
     started(&flock);
     let far = crate::clock::now_s() + 10_000.0;
     assert_eq!(flock.turn_expire(Some(far), &NoHooks).len(), 1);
+}
+
+// -- T36 slice 4 (t1412): the turn-end nudge, from the dispatch half of
+//    tests/test_dunk_turn_end_dispatch.py. The planning functions are T54's, so the fake plans.
+
+struct Env {
+    enabled: bool,
+    unread: Result<Option<i64>, String>,
+    tasks: Result<Vec<Value>, String>,
+    pending: Vec<String>,
+    readiness: Result<Readiness, String>,
+    send: Result<Value, String>,
+    handoffs_open: bool,
+    next_job: Value,
+    plan_skip: Option<&'static str>,
+    panic_in_plan: bool,
+    sent: Mutex<Vec<String>>,
+    metrics: Mutex<Vec<String>>,
+    plan_saw: Mutex<Vec<(Option<i64>, Option<f64>, usize)>>,
+}
+
+impl Env {
+    fn ready() -> Env {
+        Env {
+            enabled: true,
+            unread: Ok(Some(0)),
+            tasks: Ok(vec![json!({ "id": "t1", "title": "vitals row colour" })]),
+            pending: vec![],
+            readiness: Ok(Readiness {
+                allowed: true,
+                candidate: true,
+                ready: true,
+                not_ready_reason: None,
+            }),
+            send: Ok(json!({ "outcome": "ok", "message_id": "m1", "message": "typed" })),
+            handoffs_open: false,
+            next_job: json!({ "action": "none", "reason": "no_handoff" }),
+            plan_skip: None,
+            panic_in_plan: false,
+            sent: Mutex::new(vec![]),
+            metrics: Mutex::new(vec![]),
+            plan_saw: Mutex::new(vec![]),
+        }
+    }
+    fn metric(&self, what: &str) -> bool {
+        self.metrics.lock().unwrap().iter().any(|m| m == what)
+    }
+}
+
+impl TurnDispatchEnv for Env {
+    fn dispatch_enabled(&self) -> bool {
+        self.enabled
+    }
+    fn unread_count(&self, _: &str) -> Result<Option<i64>, String> {
+        self.unread.clone()
+    }
+    fn claimed_tasks(&self, _: &str) -> Result<Vec<Value>, String> {
+        self.tasks.clone()
+    }
+    fn turn_end_plan(
+        &self,
+        _: &str,
+        tasks: &[Value],
+        unread: Option<i64>,
+        last: Option<f64>,
+        nudges: &BTreeMap<String, f64>,
+        _: f64,
+    ) -> Value {
+        self.plan_saw
+            .lock()
+            .unwrap()
+            .push((unread, last, nudges.len()));
+        if self.panic_in_plan {
+            panic!("a hook failed");
+        }
+        if let Some(reason) = self.plan_skip {
+            return json!({ "action": "skip", "reason": reason });
+        }
+        if unread.is_none() {
+            return json!({ "action": "skip", "reason": "unread_unknown" });
+        }
+        if last.is_some() {
+            return json!({ "action": "skip", "reason": "cooldown" });
+        }
+        match tasks.first() {
+            Some(task) => json!({ "action": "nudge", "item": task }),
+            None => json!({ "action": "skip", "reason": "no_open_work" }),
+        }
+    }
+    fn pending_outbox(&self, _: &str) -> Vec<String> {
+        self.pending.clone()
+    }
+    fn readiness(&self, _: &str, _: Option<i64>) -> Result<Readiness, String> {
+        self.readiness.clone()
+    }
+    fn turn_end_text(&self, task: &Value) -> String {
+        format!(
+            "TASK {} - {}",
+            task["id"].as_str().unwrap_or(""),
+            task["title"].as_str().unwrap_or("")
+        )
+    }
+    fn send_now(&self, _: &str, text: &str) -> Result<Value, String> {
+        self.sent.lock().unwrap().push(text.to_string());
+        self.send.clone()
+    }
+    fn record(&self, pane: &str, outcome: &str, reason: Option<&str>, bytes: Option<usize>) {
+        self.metrics
+            .lock()
+            .unwrap()
+            .push(format!("{pane} {outcome} {reason:?} {}", bytes.is_some()));
+    }
+    fn advance_next_job(&self, _: &str) -> Value {
+        self.next_job.clone()
+    }
+    fn open_handoffs(&self, _: &str) -> bool {
+        self.handoffs_open
+    }
+}
+
+fn dispatch(flock: &Flock, env: &Env) -> Value {
+    flock.dispatch_claimed_turn_end(PANE, 1000.0, env)
+}
+
+#[test]
+fn a_lane_holding_work_and_holding_no_mail_is_prompted() {
+    let (flock, env) = (flock(), Env::ready());
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["action"], "nudge");
+    assert_eq!(out["delivered"], true);
+    assert_eq!(out["task_id"], "t1");
+    assert_eq!(out["item"], "board:t1");
+    assert_eq!(out["message_id"], "m1");
+    assert_eq!(
+        env.sent.lock().unwrap().as_slice(),
+        ["TASK t1 - vitals row colour"]
+    );
+    assert!(
+        env.metric("w1:p1 ok None true"),
+        "an ok metric carrying the byte count"
+    );
+}
+
+#[test]
+fn the_trigger_can_be_switched_off() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.enabled = false;
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["reason"], "disabled");
+    assert!(env.sent.lock().unwrap().is_empty() && env.metrics.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_lane_with_no_open_work_is_left_alone() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.tasks = Ok(vec![]);
+    let out = dispatch(&flock, &env);
+    assert_eq!(
+        (out["reason"].as_str(), out["delivered"].as_bool()),
+        (Some("no_open_work"), Some(false))
+    );
+    assert!(env.sent.lock().unwrap().is_empty());
+    assert!(env.metric("w1:p1 held Some(\"no_open_work\") false"));
+}
+
+#[test]
+fn an_unreadable_mailbox_is_a_skip_not_a_guess() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.unread = Err("db busy".into());
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["reason"], "unread_unknown");
+    assert_eq!(out["error"], "inbox count failed: db busy");
+    assert_eq!(
+        env.plan_saw.lock().unwrap()[0].0,
+        None,
+        "the plan is told the count is unknown"
+    );
+    assert!(env.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_unreadable_task_list_is_recorded_and_plans_with_none() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.tasks = Err("locked".into());
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["error"], "task list failed: locked");
+    assert_eq!(out["reason"], "no_open_work");
+}
+
+#[test]
+fn a_prompt_still_waiting_is_not_stacked_by_the_next_turn_end() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.pending = vec!["m0".into()];
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["reason"], "held_delivery_pending");
+    assert!(env.sent.lock().unwrap().is_empty());
+    assert!(env.metric("w1:p1 held Some(\"held_delivery_pending\") false"));
+}
+
+#[test]
+fn empty_allowlist_never_prompts_a_claimed_lane() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.readiness = Ok(Readiness {
+        allowed: false,
+        candidate: true,
+        ready: true,
+        not_ready_reason: None,
+    });
+    assert_eq!(dispatch(&flock, &env)["reason"], "not_allowed");
+    env.readiness = Ok(Readiness {
+        allowed: true,
+        candidate: false,
+        ready: true,
+        not_ready_reason: None,
+    });
+    assert_eq!(dispatch(&flock, &env)["reason"], "unavailable_lane");
+    assert!(env.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_shared_gate_blocks_a_lane_that_is_not_ready_and_names_why() {
+    for why in ["has_mail", "blocked", "dead", "working"] {
+        let (flock, mut env) = (flock(), Env::ready());
+        env.readiness = Ok(Readiness {
+            allowed: true,
+            candidate: true,
+            ready: false,
+            not_ready_reason: Some(why.into()),
+        });
+        let out = dispatch(&flock, &env);
+        assert_eq!(out["reason"], why);
+        assert!(env.sent.lock().unwrap().is_empty(), "{why}: nothing queued");
+    }
+}
+
+#[test]
+fn unreadable_lane_fails_closed() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.readiness = Err("pane lookup failed".into());
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["reason"], "readiness_unknown");
+    assert_eq!(out["error"], "pane lookup failed");
+    assert!(env.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_held_prompt_is_never_counted_as_delivered() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.send = Ok(json!({ "outcome": "queued", "message_id": "m9", "message": "held" }));
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["action"], "nudge");
+    assert_eq!(out["delivered"], false);
+    assert_eq!(out["outcome"], "queued");
+    assert!(env.metric("w1:p1 held Some(\"queued\") true"));
+    // ... and it does not start the cooldown clock: the next turn end still gets planned fresh.
+    let again = dispatch(&flock, &env);
+    assert_eq!(again["action"], "nudge", "no cooldown after a held send");
+}
+
+#[test]
+fn a_refused_send_is_recorded_not_raised_and_not_delivered() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.send = Err("pane gone".into());
+    let out = dispatch(&flock, &env);
+    assert_eq!(
+        (
+            out["delivered"].as_bool(),
+            out["outcome"].as_str(),
+            out["error"].as_str()
+        ),
+        (Some(false), Some("refused"), Some("pane gone"))
+    );
+    assert!(env.metric("w1:p1 failed Some(\"refused\") false"));
+}
+
+#[test]
+fn the_same_pane_is_not_prompted_twice_in_a_row() {
+    let (flock, env) = (flock(), Env::ready());
+    assert_eq!(dispatch(&flock, &env)["delivered"], true);
+    let second = dispatch(&flock, &env);
+    assert_eq!(second["reason"], "cooldown");
+    assert_eq!(env.sent.lock().unwrap().len(), 1, "one prompt only");
+    let saw = env.plan_saw.lock().unwrap().clone();
+    assert_eq!(
+        saw[1].1,
+        Some(1000.0),
+        "the plan is handed when the pane was last prompted"
+    );
+    assert_eq!(saw[1].2, 1, "and when each held task was");
+}
+
+#[test]
+fn a_task_id_that_is_a_number_is_keyed_like_pythons_str() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.tasks = Ok(vec![json!({ "id": 7, "title": "n" })]);
+    assert_eq!(dispatch(&flock, &env)["task_id"], "7");
+}
+
+#[test]
+fn concurrent_turn_ends_cannot_enqueue_twice() {
+    let (flock, env) = (flock(), Env::ready());
+    flock
+        .turn_dispatch
+        .lock()
+        .unwrap()
+        .dispatching
+        .insert(PANE.to_string());
+    let second = flock.dispatch_on_turn_end(PANE, &env);
+    assert_eq!(second["reason"], "dispatch_in_progress");
+    assert_eq!(second["delivered"], false);
+    assert!(env.sent.lock().unwrap().is_empty());
+    flock.turn_dispatch.lock().unwrap().dispatching.clear();
+    assert_eq!(flock.dispatch_on_turn_end(PANE, &env)["delivered"], true);
+    assert!(
+        flock.turn_dispatch.lock().unwrap().dispatching.is_empty(),
+        "the reservation is released"
+    );
+}
+
+#[test]
+fn a_next_job_claim_or_an_open_handoff_or_a_closed_lane_ends_before_the_nudge() {
+    let flock = flock();
+    let mut env = Env::ready();
+    env.next_job = json!({ "action": "claim", "reason": "handoff" });
+    let out = flock.dispatch_on_turn_end(PANE, &env);
+    assert_eq!(
+        (out["action"].as_str(), out["delivered"].as_bool()),
+        (Some("claim"), Some(false))
+    );
+    let mut env = Env::ready();
+    env.handoffs_open = true;
+    assert_eq!(flock.dispatch_on_turn_end(PANE, &env)["delivered"], false);
+    for reason in [
+        "disabled",
+        "not_allowed",
+        "unavailable_lane",
+        "readiness_unknown",
+    ] {
+        let mut env = Env::ready();
+        env.next_job = json!({ "action": "skip", "reason": reason });
+        let out = flock.dispatch_on_turn_end(PANE, &env);
+        assert_eq!(out["reason"], reason);
+        assert!(env.sent.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_panicking_hook_does_not_wedge_the_pane() {
+    // Python releases the reservation in `finally`, so a failing dispatch cannot wedge a lane.
+    // Review t1421: one panic in an env hook left the pane `dispatch_in_progress` for ever.
+    let flock = flock();
+    let mut broken = Env::ready();
+    broken.panic_in_plan = true;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        flock.dispatch_on_turn_end(PANE, &broken)
+    }));
+    assert!(caught.is_err(), "the hook's panic propagates");
+    assert!(
+        flock.turn_dispatch.lock().unwrap().dispatching.is_empty(),
+        "the reservation was released"
+    );
+    let healthy = Env::ready();
+    let again = flock.dispatch_on_turn_end(PANE, &healthy);
+    assert_eq!(
+        again["delivered"], true,
+        "the same pane dispatches normally afterwards"
+    );
+    assert_eq!(
+        healthy.plan_saw.lock().unwrap().len(),
+        1,
+        "the healthy plan actually ran"
+    );
+    // A different pane was never affected.
+    assert_eq!(
+        flock.dispatch_claimed_turn_end("w1:p2", 1000.0, &Env::ready())["delivered"],
+        true
+    );
+}
+
+#[test]
+fn a_gate_that_is_not_ready_with_no_named_reason_fails_closed() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.readiness = Ok(Readiness {
+        allowed: true,
+        candidate: true,
+        ready: false,
+        not_ready_reason: None,
+    });
+    let out = dispatch(&flock, &env);
+    assert_eq!(
+        out["reason"], "readiness_unknown",
+        "Python: StopIteration lands in the fail-closed branch"
+    );
+    assert!(env.sent.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_task_with_no_id_is_the_text_none_like_pythons_str() {
+    let (flock, mut env) = (flock(), Env::ready());
+    env.tasks = Ok(vec![json!({ "title": "no id" })]);
+    let out = dispatch(&flock, &env);
+    assert_eq!(out["task_id"], "None");
+    assert_eq!(out["item"], "board:None");
 }
