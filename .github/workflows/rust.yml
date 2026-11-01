@@ -20,8 +20,11 @@ name: rust
 on:
   push:
     paths: ["rust/**", ".github/workflows/rust.yml"]
+  # NO paths filter on pull_request (t1370): these jobs are about to be REQUIRED checks on main,
+  # and a required check that never reports (a PR touching no rust/ file: a Python fix, docs,
+  # packaging, ui/) blocks that PR forever under enforce_admins. The jobs take about a minute,
+  # so running on every PR is the boring, safe choice.
   pull_request:
-    paths: ["rust/**", ".github/workflows/rust.yml"]
 
 jobs:
   fmt:
