@@ -6,6 +6,10 @@
 
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::Rect;
+use ratatui::prelude::{Frame, Line, Text};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use serde_json::Value;
 
 /// Retry interval used by `DunkingSheepTui.connect` in the Python client.
@@ -39,6 +43,167 @@ pub enum ClientMode {
 pub enum View {
     Dunks,
     Tasks,
+}
+
+/// Result of handling one key in the line-input modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineModalResult {
+    Pending,
+    Cancelled,
+    Submitted(String),
+}
+
+/// State and Ratatui rendering for the Python TUI's seven-row line input modal.
+///
+/// The value starts empty while the existing value is displayed as a prompt. Enter
+/// submits the typed text, or the displayed default when the input is empty.
+pub struct LineModal {
+    label: String,
+    default: String,
+    value: String,
+    cursor: usize,
+}
+
+impl LineModal {
+    pub fn new(label: impl Into<String>, default: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            default: default.into(),
+            value: String::new(),
+            cursor: 0,
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Apply one crossterm key, retaining the Python modal's ASCII input and cursor
+    /// behavior. Non-printable and non-ASCII characters do not alter the value.
+    pub fn handle_key(&mut self, key: KeyEvent) -> LineModalResult {
+        match key.code {
+            KeyCode::Enter => LineModalResult::Submitted(if self.value.is_empty() {
+                self.default.clone()
+            } else {
+                self.value.clone()
+            }),
+            KeyCode::Esc => LineModalResult::Cancelled,
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    let before = char_boundary(&self.value, self.cursor - 1);
+                    let after = char_boundary(&self.value, self.cursor);
+                    self.value.replace_range(before..after, "");
+                    self.cursor -= 1;
+                }
+                LineModalResult::Pending
+            }
+            KeyCode::Delete => {
+                if self.cursor < self.value.chars().count() {
+                    let before = char_boundary(&self.value, self.cursor);
+                    let after = char_boundary(&self.value, self.cursor + 1);
+                    self.value.replace_range(before..after, "");
+                }
+                LineModalResult::Pending
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                LineModalResult::Pending
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.value.chars().count());
+                LineModalResult::Pending
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                LineModalResult::Pending
+            }
+            KeyCode::End => {
+                self.cursor = self.value.chars().count();
+                LineModalResult::Pending
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() && character.is_ascii() && !character.is_control() =>
+            {
+                let offset = char_boundary(&self.value, self.cursor);
+                self.value.insert(offset, character);
+                self.cursor += 1;
+                LineModalResult::Pending
+            }
+            _ => LineModalResult::Pending,
+        }
+    }
+
+    /// Render a centered modal. Its rectangle is clipped to the terminal bounds, so
+    /// small terminals remain drawable instead of requesting an oversized window.
+    pub fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let desired_width = self
+            .label
+            .chars()
+            .count()
+            .saturating_add(18)
+            .max(48)
+            .min(usize::from(area.width.saturating_sub(4).max(20)));
+        let width = u16::try_from(desired_width)
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        let height = 7_u16.min(area.height);
+        let modal = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+
+        frame.render_widget(Clear, modal);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(modal);
+        frame.render_widget(block, modal);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let input_width = usize::from(inner.width);
+        let visible = self.visible_input(input_width);
+        let lines = Text::from(vec![
+            Line::from(self.label.as_str()),
+            Line::from(format!("Current: {}", self.default)),
+            Line::from("Enter keeps current, Esc cancels"),
+            Line::from(""),
+            Line::from(visible),
+        ]);
+        frame.render_widget(Paragraph::new(lines), inner);
+
+        if inner.height >= 5 && inner.width > 0 {
+            let cursor_offset =
+                u16::try_from(self.cursor.min(input_width.saturating_sub(1))).unwrap_or(u16::MAX);
+            let cursor_x = inner.x + cursor_offset;
+            frame.set_cursor_position((cursor_x, inner.y + 4));
+        }
+    }
+
+    fn visible_input(&self, width: usize) -> String {
+        let mut characters: Vec<char> = self.value.chars().collect();
+        if characters.len() > width {
+            characters.drain(..characters.len() - width);
+        }
+        characters.into_iter().collect()
+    }
+}
+
+fn char_boundary(value: &str, character_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(character_index)
+        .map_or(value.len(), |(offset, _)| offset)
 }
 
 /// Mutable UI model for connection status, flashes, and the last connection attempt.
@@ -205,7 +370,36 @@ fn python_truthy(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
+    use ratatui::{backend::TestBackend, Terminal};
     use std::collections::VecDeque;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn modal_snapshot(modal: &LineModal, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, frame.area()))
+            .expect("draw modal");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    fn bordered_line(content: &str, inner_width: usize) -> String {
+        format!("  │ {content:<inner_width$} │")
+    }
+
 
     #[derive(Default)]
     struct FakeClient {
@@ -359,5 +553,71 @@ mod tests {
         assert_eq!(model.message, "Daemon error: gone");
         assert_eq!(model.client.calls[0].0, "list_dunks");
         assert_eq!(model.client.calls[1].0, "task_list");
+    }
+
+    #[test]
+    fn line_modal_initial_value_snapshot_and_empty_submit_use_default() {
+        let mut modal = LineModal::new("Name", "current");
+        assert_eq!(
+            modal_snapshot(&modal, 36, 11),
+            vec![
+                "".into(),
+                "".into(),
+                format!("  ┌{}┐", "─".repeat(30)),
+                bordered_line("Name", 28),
+                bordered_line("Current: current", 28),
+                bordered_line("Enter keeps current, Esc can", 28),
+                bordered_line("", 28),
+                bordered_line("", 28),
+                format!("  └{}┘", "─".repeat(30)),
+                "".into(),
+                "".into(),
+            ]
+        );
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter)),
+            LineModalResult::Submitted("current".into())
+        );
+    }
+
+    #[test]
+    fn line_modal_escape_cancels_without_changing_the_prompt_snapshot() {
+        let mut modal = LineModal::new("Interval minutes", "5");
+        let before = modal_snapshot(&modal, 36, 11);
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Esc)),
+            LineModalResult::Cancelled
+        );
+        assert_eq!(modal_snapshot(&modal, 36, 11), before);
+    }
+
+    #[test]
+    fn line_modal_submit_snapshot_contains_typed_value() {
+        let mut modal = LineModal::new("Name", "default");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Char('x'))),
+            LineModalResult::Pending
+        );
+        let snapshot = modal_snapshot(&modal, 36, 11);
+        assert_eq!(snapshot[7], bordered_line("x", 28));
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter)),
+            LineModalResult::Submitted("x".into())
+        );
+    }
+
+    #[test]
+    fn line_modal_narrow_terminal_snapshot_is_clipped_and_safe() {
+        let modal = LineModal::new("Very Long Label", "long default");
+        assert_eq!(
+            modal_snapshot(&modal, 12, 5),
+            vec![
+                format!("┌{}┐", "─".repeat(10)),
+                "│ Very Lon │".into(),
+                "│ Current: │".into(),
+                "│ Enter ke │".into(),
+                format!("└{}┘", "─".repeat(10)),
+            ]
+        );
     }
 }
