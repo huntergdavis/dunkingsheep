@@ -29,6 +29,7 @@ use crate::db;
 use crate::error::DunkError;
 
 pub mod advance;
+pub mod allocator;
 mod claim;
 pub mod next_job;
 pub use claim::{
