@@ -11,6 +11,7 @@
 
 use serde_json::{json, Value};
 
+use super::delivery::DeliveryEnv;
 use super::Flock;
 use crate::error::DunkError;
 use crate::owner::OwnerPush;
@@ -175,6 +176,26 @@ pub fn h_lane_set(
         text(args, "pane").unwrap_or(""),
         text(args, "mailbox").unwrap_or(""),
     )
+}
+
+/// `h_delivery_capability`: what the desk may do with this target - push queue or immediate
+/// send. A missing target is refused by name.
+pub fn h_delivery_capability(
+    flock: &Flock,
+    env: &dyn DeliveryEnv,
+    owner: &OwnerPush,
+    args: &Value,
+    self_pane_id: Option<&str>,
+    now: f64,
+) -> Result<Value, DunkError> {
+    let target = text(args, "target").unwrap_or("").trim();
+    if target.is_empty() {
+        return Err(DunkError::Refused(
+            "delivery_capability must be given a target (a pane id like %9 or a pinned lane name)"
+                .into(),
+        ));
+    }
+    flock.delivery_capability(env, owner, target, self_pane_id, now)
 }
 
 /// Python `repr(str)` for the quoted names in the refusals.
