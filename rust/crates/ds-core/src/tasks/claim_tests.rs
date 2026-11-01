@@ -639,18 +639,24 @@ async fn test_atomic_claim_never_double_assigns() {
 async fn test_lease_expiry_requeues() {
     let tasks = store("py-lease-expiry").await;
     let task = tasks.add("global", "work", "").await.unwrap();
+    // t1367: this used to claim with a 0.05 s lease, assert the first reap found nothing, sleep
+    // 100 ms and reap again. On a loaded host more than 50 ms passed between the claim and the
+    // first reap, so the lease had ALREADY expired and that reap requeued it (measured: 8 of 100
+    // runs failed at load average ~65). `reap` takes `now`, so the test names the instants
+    // instead of racing the wall clock: a normal lease, one second before it expires, one second
+    // after.
     tasks
-        .claim_next("global", "w1:p1", lease(0.05))
+        .claim_next("global", "w1:p1", lease(300.0))
         .await
         .unwrap();
+    let expires_at = tasks.leases_for(&task.id, None).await.unwrap()[0].expires_at;
     assert!(tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(live(&["w1:p1"]), None, Some(expires_at - 1.0), Some("live"))
         .await
         .unwrap()
         .is_empty());
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let requeued = tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(live(&["w1:p1"]), None, Some(expires_at + 1.0), Some("live"))
         .await
         .unwrap();
     let pairs: Vec<(String, &str)> = requeued
@@ -784,13 +790,14 @@ async fn test_refusal_reason_names_why_nothing_was_claimable() {
 async fn test_expired_lease_keeps_the_durable_assignee_and_blocks_other_lanes() {
     let tasks = store("py-expired-keeps-owner").await;
     let task = add_with(&tasks, "owned work", None, &["w1:p1"], &[], false).await;
+    // t1367: a named instant after expiry instead of a 0.05 s lease and a real sleep.
     tasks
-        .claim_next("global", "w1:p1", lease(0.05))
+        .claim_next("global", "w1:p1", lease(300.0))
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let expires_at = tasks.leases_for(&task.id, None).await.unwrap()[0].expires_at;
     let requeued = tasks
-        .reap(live(&["w1:p1"]), None, None, Some("live"))
+        .reap(live(&["w1:p1"]), None, Some(expires_at + 1.0), Some("live"))
         .await
         .unwrap();
     let pairs: Vec<(String, &str)> = requeued
