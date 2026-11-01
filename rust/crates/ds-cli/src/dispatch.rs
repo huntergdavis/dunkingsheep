@@ -741,6 +741,44 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    let (command, printer): (&str, fn(&Value) -> String) = match text(ns, "owner_command") {
+        Some("outbox") => {
+            args.insert(
+                "transport".into(),
+                ns.get("transport").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::from(20)),
+            );
+            (
+                "owner_outbox",
+                crate::render_print::render_view as fn(&Value) -> String,
+            )
+        }
+        Some("delivered") => {
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "transport".into(),
+                ns.get("transport").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(external_id) = ns.get("external_id").filter(|value| !value.is_null()) {
+                args.insert("external_id".into(), external_id.clone());
+            }
+            ("owner_delivered", crate::render_print::render_view)
+        }
+        Some("stats") => ("owner_stats", crate::render_print::render_owner_stats),
+        Some(other) => return not_ported(&format!("owner {other}")),
+        None => return not_ported("owner"),
+    };
+    crate::daemon_cmd::run_command(ns, command, args, printer)
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -765,8 +803,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
-"owner" => match text(ns, "owner_command") {
+        "owner" => match text(ns, "owner_command") {
             Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
+            Some("outbox" | "delivered" | "stats") => owner_outbox(ns),
             _ => owner_command(ns),
         },
         "gh-token" => crate::daemon_cmd::gh_token(ns),

@@ -470,3 +470,45 @@ fn cli_route_24_owner_inbox_b() {
         String::from_utf8(missing.stderr).unwrap()
     );
 }
+
+#[test]
+fn cli_route_25_owner_inbox_c() {
+    let outbox = run_daemon_cli(
+        &["owner", "outbox", "telegram", "--limit", "9"],
+        "owner_outbox",
+        json!({"transport": "telegram", "limit": 9}),
+        json!({"count": 0, "rows": []}),
+    );
+    assert_eq!(Some(0), outbox.status.code());
+    assert_eq!(
+        "{\n  \"count\": 0,\n  \"rows\": []\n}\n",
+        String::from_utf8(outbox.stdout).unwrap()
+    );
+    assert!(outbox.stderr.is_empty());
+
+    let delivered = run_daemon_cli(
+        &["owner", "delivered", "question-8", "web"],
+        "owner_delivered",
+        json!({"message_id": "question-8", "transport": "web"}),
+        json!({"delivered": true}),
+    );
+    assert_eq!(Some(0), delivered.status.code());
+    assert_eq!(
+        "{\n  \"delivered\": true\n}\n",
+        String::from_utf8(delivered.stdout).unwrap()
+    );
+    assert!(delivered.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["owner", "stats"],
+        "owner_stats",
+        json!({}),
+        json!({"counts": {"queued": 2}}),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "{\n  \"counts\": {\n    \"queued\": 2\n  }\n}\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+}
