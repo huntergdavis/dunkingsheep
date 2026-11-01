@@ -111,17 +111,27 @@ pub fn text_records(
         let (id, body) = row.map_err(crate::db::map_sqlite)?;
         out.push(("inbox".into(), id, body.unwrap_or_default()));
     }
-    for task in &TaskData::load(tasks_db, now)?.tasks {
-        let field = |key: &str| match &task[key] {
-            Value::String(s) => s.clone(),
-            Value::Null => "None".into(),
-            other => other.to_string(),
-        };
-        out.push((
-            "task".into(),
-            field("id"),
-            format!("{}\n{}", field("title"), field("body")),
-        ));
+    // Keep TaskData's shared validation (including parsed assignees), but read the scanned
+    // fields strictly below. Its generic JSON conversion intentionally maps BLOBs to null and
+    // invalid UTF-8 to lossy text, either of which could hide or alter a credential here.
+    let _task_data = TaskData::load(tasks_db, now)?;
+    let task_conn = Connection::open_with_flags(tasks_db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(crate::db::map_sqlite)?;
+    let mut task_stmt = task_conn
+        .prepare("SELECT id, title, body FROM tasks ORDER BY id")
+        .map_err(crate::db::map_sqlite)?;
+    let task_rows = task_stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(crate::db::map_sqlite)?;
+    for row in task_rows {
+        let (id, title, body) = row.map_err(crate::db::map_sqlite)?;
+        out.push(("task".into(), id, format!("{title}\n{body}")));
     }
     let dunks = load_dunks(dunks_json)?;
     let mut dunk_records = Vec::with_capacity(dunks.len());

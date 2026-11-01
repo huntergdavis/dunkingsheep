@@ -363,6 +363,46 @@ fn extra_an_unreadable_store_is_an_error_not_a_pass() {
 }
 
 #[test]
+fn extra_secret_scan_rejects_token_bearing_blob_task_fields() {
+    for field in ["title", "body"] {
+        let fleet = Fleet::new();
+        fleet.task("t1", "ordinary", "ordinary");
+        Connection::open(fleet.path("tasks.db"))
+            .unwrap()
+            .execute(
+                &format!("UPDATE tasks SET {field}=? WHERE id='t1'"),
+                [rusqlite::types::Value::Blob(FAKE_TOKEN.as_bytes().to_vec())],
+            )
+            .unwrap();
+
+        assert!(
+            fleet.scan_result(&rule()).is_err(),
+            "a BLOB task {field} must fail closed instead of hiding its contents"
+        );
+    }
+}
+
+#[test]
+fn extra_secret_scan_rejects_invalid_utf8_task_fields() {
+    for field in ["title", "body"] {
+        let fleet = Fleet::new();
+        fleet.task("t1", "ordinary", "ordinary");
+        Connection::open(fleet.path("tasks.db"))
+            .unwrap()
+            .execute(
+                &format!("UPDATE tasks SET {field}=CAST(x'80' AS TEXT) WHERE id='t1'"),
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            fleet.scan_result(&rule()).is_err(),
+            "invalid UTF-8 task {field} must fail closed instead of being lossy-decoded"
+        );
+    }
+}
+
+#[test]
 fn extra_every_shipped_pattern_matches_its_own_example_and_nothing_innocent() {
     let patterns: Vec<Regex> = rule()["patterns"]
         .as_array()
