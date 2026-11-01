@@ -1759,6 +1759,48 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task_stats(result)
                 })
             }
+            "metrics" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "window_s".into(),
+                    ns.get("window").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "since".into(),
+                    ns.get("since").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "until".into(),
+                    ns.get("until").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "bucket".into(),
+                    ns.get("bucket")
+                        .cloned()
+                        .unwrap_or(Value::String("hour".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "task_metrics", args, |result| {
+                    crate::render_print::render_task_metrics(result, &task_stamp)
+                })
+            }
+            "reap" => crate::daemon_cmd::run_command(ns, "task_reap", Map::new(), |result| {
+                let requeued = result["requeued"].as_array().cloned().unwrap_or_default();
+                let ids = requeued
+                    .iter()
+                    .map(|task| crate::render_fleet::py_str(&task["task_id"]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let suffix = if ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {ids}")
+                };
+                format!("requeued {} lease(s){suffix}\n", requeued.len())
+            }),
             _ => not_ported("task"),
         },
         "stop" | "toggle" => {
