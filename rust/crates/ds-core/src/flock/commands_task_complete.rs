@@ -193,9 +193,29 @@ impl Flock {
         ))
     }
 
-    /// The review-completion gates of `task_complete`, in the Python's order. Returns the
-    /// validated verdict. `verdict` on a non-review task is a refusal (the `elif` branch).
+    /// The review-completion gates of `task_complete` in the Python's order: the first half (caller
+    /// role, no-self-review, verdict required and validated), then [`Flock::require_review_evidence`]
+    /// (`_require_review_evidence`, needs the task notes), then the second half
+    /// ([`Flock::check_review_head_unjudged`]: cancelled, already done). This composes the two
+    /// halves WITHOUT the evidence step in between, so the real `task_complete` must call the halves
+    /// itself and put the evidence check between them: running evidence after this function would
+    /// reorder the refusals a lane sees (t656 vs t621). Returns the validated verdict. `verdict` on a
+    /// non-review task is a refusal (the `elif` branch).
     pub fn check_task_completion_gates(
+        task: &Decorated,
+        facts: &ReviewFacts,
+        verdict: Option<&str>,
+        who: &ReviewCaller<'_>,
+    ) -> Result<Option<String>, DunkError> {
+        let verdict = Self::check_review_caller_and_verdict(task, facts, verdict, who)?;
+        if task.task.kind == "review" {
+            Self::check_review_head_unjudged(task, facts)?;
+        }
+        Ok(verdict)
+    }
+
+    /// First half of the gates: everything before `_require_review_evidence`.
+    pub fn check_review_caller_and_verdict(
         task: &Decorated,
         facts: &ReviewFacts,
         verdict: Option<&str>,
@@ -261,6 +281,16 @@ impl Flock {
             return refuse("completing a review needs --verdict accept|needs-fix");
         };
         let verdict = validate_verdict(verdict)?;
+        Ok(Some(verdict))
+    }
+
+    /// Second half of the gates: one verdict per head (t656). A cancelled task is not a place to put
+    /// a verdict, and a done one already carries the verdict its merge record was built on.
+    pub fn check_review_head_unjudged(
+        task: &Decorated,
+        facts: &ReviewFacts,
+    ) -> Result<(), DunkError> {
+        let t = &task.task;
         if t.status == "cancelled" {
             return refuse(format!(
                 "{} is cancelled: a cancelled review takes no verdict. If the head still needs \
@@ -276,7 +306,7 @@ impl Flock {
                 crate::context::store::py_repr(facts.verdict.as_deref().unwrap_or(""))
             ));
         }
-        Ok(Some(verdict))
+        Ok(())
     }
 }
 

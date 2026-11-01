@@ -250,6 +250,26 @@ async fn a_store_that_cannot_answer_fails_closed_for_a_reviewer_t723() {
 }
 
 #[tokio::test]
+async fn the_halves_compose_to_the_whole_and_evidence_slots_between_them() {
+    // %142 / Python order: authorship and verdict, THEN `_require_review_evidence`, THEN cancelled
+    // and done. The two halves let the real caller put the evidence check in between.
+    let (_flock, tasks) = setup("halves").await;
+    let (d, facts) = review(&tasks, false).await;
+    let none = BTreeSet::new();
+    let who = caller("w2:p2", "reviewer", true, &none);
+    let first = Flock::check_review_caller_and_verdict(&d, &facts, Some("accept"), &who).unwrap();
+    assert_eq!(Some("accept".to_string()), first);
+    assert!(Flock::check_review_head_unjudged(&d, &facts).is_ok());
+    assert_eq!(
+        first,
+        Flock::check_task_completion_gates(&d, &facts, Some("accept"), &who).unwrap()
+    );
+    // the first half never looks at the head's status: a refusal about the caller wins regardless
+    let down = caller_store_down("w2:p2", "reviewer", "locked");
+    assert!(Flock::check_review_caller_and_verdict(&d, &facts, Some("accept"), &down).is_err());
+}
+
+#[tokio::test]
 async fn a_done_or_cancelled_review_takes_no_second_verdict_and_work_takes_none() {
     let (_flock, tasks) = setup("done").await;
     let (d, facts) = review(&tasks, true).await;
