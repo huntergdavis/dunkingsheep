@@ -5,12 +5,14 @@
 //! first version used --replace-all and dropped the owner's own `gh auth git-credential`).
 //!
 //! The wrapper script text is `gh_wrapper.sh`, written FROM the Python's `GH_WRAPPER` so the
-//! bytes are the Python's. NOT here: `github protect` (needs `dunk_github`: app loading and
-//! the branch-protection payload, unported).
+//! bytes are the Python's. `github protect` loads only the configured review App metadata and
+//! uses the user's `gh` CLI for the one-shot branch protection update.
 
+use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::{env, io::Write};
 
 /// `GH_WRAPPER`, byte for byte, with `__REAL_GH__` to be replaced.
 pub const GH_WRAPPER: &str = include_str!("gh_wrapper.sh");
@@ -18,6 +20,176 @@ pub const GH_WRAPPER: &str = include_str!("gh_wrapper.sh");
 const HELPER: &str = "!dunkingsheep git-credential";
 const KEY: &str = "credential.https://github.com.helper";
 const NOTE: &str = "lanes use https remotes; our helper is first and any helper already configured (the owner's gh login) is kept as the fallback (gh-token prints nothing for the owner role)";
+const REVIEW_CONTEXT: &str = "dunkingsheep/review";
+
+fn load_reviewer_app() -> Result<(i64, String), String> {
+    let config_dir = env::var_os("DUNKINGSHEEP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env::var_os("HOME").unwrap_or_default())
+                .join(".config")
+                .join("dunkingsheep")
+        });
+    let app_path = config_dir.join("github-app-reviewer.json");
+    let raw = std::fs::read(&app_path).map_err(|_| {
+        format!(
+            "no GitHub App registered as 'reviewer': {} is missing (create it with the manifest page, docs/FLAT_FLEET.md 6.1)",
+            app_path.display()
+        )
+    })?;
+    let app: Value = serde_json::from_slice(&raw).map_err(|_| {
+        format!(
+            "no GitHub App registered as 'reviewer': {} is missing (create it with the manifest page, docs/FLAT_FLEET.md 6.1)",
+            app_path.display()
+        )
+    })?;
+    let id = app
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "GitHub App 'reviewer' is missing a numeric id".to_string())?;
+    let slug = app
+        .get("slug")
+        .and_then(Value::as_str)
+        .filter(|slug| !slug.is_empty())
+        .unwrap_or("dunkingsheep-reviewer")
+        .to_string();
+    let pem = app
+        .get("pem")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config_dir.join("github-app-reviewer.pem"));
+    if !pem.exists() {
+        return Err(format!(
+            "GitHub App 'reviewer' private key missing: {}",
+            pem.display()
+        ));
+    }
+    Ok((id, slug))
+}
+
+/// The branch-protection request body used by Python's `dunk_github.protection_payload`.
+pub fn protection_payload(
+    approvals: i64,
+    reviewer_app_id: i64,
+    bypass_app_slug: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "required_status_checks": {
+            "strict": false,
+            "checks": [{"context": REVIEW_CONTEXT, "app_id": reviewer_app_id}]
+        },
+        "enforce_admins": true,
+        "required_pull_request_reviews": {
+            "dismiss_stale_reviews": true,
+            "require_code_owner_reviews": false,
+            "required_approving_review_count": approvals
+        },
+        "restrictions": null,
+        "allow_force_pushes": false,
+        "allow_deletions": false,
+        "required_linear_history": false
+    });
+    if let Some(slug) = bypass_app_slug {
+        payload["required_pull_request_reviews"]["bypass_pull_request_allowances"] =
+            json!({"apps": [slug]});
+    }
+    payload
+}
+
+fn gh_api(args: &[&str], payload: &Value) -> Result<Output, String> {
+    let mut child = Command::new("gh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let body = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(&body)
+        .map_err(|error| error.to_string())?;
+    child.wait_with_output().map_err(|error| error.to_string())
+}
+
+fn trimmed(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
+}
+
+/// `dunkingsheep github protect`: dry-run prints the payload; apply delegates to `gh api`.
+pub fn protect(
+    repo: &str,
+    approvals: i64,
+    bypass_reviewer_app: bool,
+    dry_run: bool,
+) -> crate::usage_cmd::Outcome {
+    let (reviewer_id, reviewer_slug) = match load_reviewer_app() {
+        Ok(app) => app,
+        Err(error) => {
+            return crate::usage_cmd::Outcome {
+                stdout: String::new(),
+                stderr: format!("{error}\n"),
+                code: 1,
+            }
+        }
+    };
+    let payload = protection_payload(
+        approvals,
+        reviewer_id,
+        bypass_reviewer_app.then_some(reviewer_slug.as_str()),
+    );
+    if dry_run {
+        return crate::usage_cmd::Outcome {
+            stdout: format!("{}\n", crate::usage_cmd::ordered_json(&payload)),
+            stderr: String::new(),
+            code: 0,
+        };
+    }
+
+    let protection_path = format!("repos/{repo}/branches/main/protection");
+    let put_args = ["api", "-X", "PUT", &protection_path, "--input", "-"];
+    let put = match gh_api(&put_args, &payload) {
+        Ok(output) => output,
+        Err(error) => {
+            return crate::usage_cmd::Outcome {
+                stdout: String::new(),
+                stderr: format!("{error}\n"),
+                code: 1,
+            }
+        }
+    };
+    if !put.status.success() {
+        let error = trimmed(&put.stderr);
+        let error = if error.is_empty() {
+            trimmed(&put.stdout)
+        } else {
+            error
+        };
+        return crate::usage_cmd::Outcome {
+            stdout: String::new(),
+            stderr: format!("{error}\n"),
+            code: put.status.code().unwrap_or(1),
+        };
+    }
+
+    let auto_merge = json!({"allow_auto_merge": true, "delete_branch_on_merge": true});
+    let repo_path = format!("repos/{repo}");
+    let patch_args = ["api", "-X", "PATCH", &repo_path, "--input", "-"];
+    let auto_merge_status = match gh_api(&patch_args, &auto_merge) {
+        Ok(output) if output.status.success() => "on".to_string(),
+        Ok(output) => format!("NOT enabled: {}", trimmed(&output.stderr)),
+        Err(error) => format!("NOT enabled: {error}"),
+    };
+    crate::usage_cmd::Outcome {
+        stdout: format!(
+            "protected {repo}: {approvals} approval(s), {REVIEW_CONTEXT} required (app {reviewer_id}), auto-merge {auto_merge_status}\n"
+        ),
+        stderr: String::new(),
+        code: 0,
+    }
+}
 
 /// What the install did (the Python's result dict, in its key order).
 #[derive(Debug, Clone, PartialEq, Eq)]

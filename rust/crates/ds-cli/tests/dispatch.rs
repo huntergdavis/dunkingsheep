@@ -172,9 +172,9 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
 }
 
 /// `github wrappers` through argv -> parser -> dispatch, in a sandbox (a fake real `gh`, a
-/// throwaway GIT_CONFIG_GLOBAL, a temp bin dir); and `github protect` stays honest.
+/// throwaway GIT_CONFIG_GLOBAL, a temp bin dir).
 #[test]
-fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
+fn github_wrappers_runs_end_to_end_in_a_sandbox() {
     let _env_lock = lock_env();
     use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
@@ -221,14 +221,145 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
         out.stdout
     );
     assert!(t.path().join("bin/gh").exists());
-    let ns = try_parse(["dunkingsheep", "github", "protect", "someorg/repo"]).unwrap();
-    let out = run(&ns);
-    assert_eq!(1, out.code);
-    assert!(
-        out.stderr
-            .contains("`github protect` is parsed but not ported yet"),
-        "{}",
-        out.stderr
+}
+
+/// `github protect` prints the payload in dry-run mode and sends both API calls only to a fake
+/// `gh` executable. No owner credentials or live branch-protection endpoint are used.
+#[test]
+fn github_protect_uses_fixture_app_and_fake_gh() {
+    let _env_lock = lock_env();
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = tempfile::tempdir().unwrap();
+    let config = t.path().join("config");
+    let fake_bin = t.path().join("fake-bin");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let pem = config.join("reviewer.pem");
+    std::fs::write(&pem, "fixture key, never read").unwrap();
+    std::fs::write(
+        config.join("github-app-reviewer.json"),
+        serde_json::json!({
+            "id": 5531872,
+            "slug": "dunkingsheep-reviewer",
+            "pem": pem,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let args_capture = t.path().join("gh-args.txt");
+    let input_capture = t.path().join("gh-inputs.txt");
+    let fake_gh = fake_bin.join("gh");
+    std::fs::write(
+        &fake_gh,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DS_GH_ARGS_FILE\"\ncat >> \"$DS_GH_INPUTS_FILE\"\nprintf '\\n--END--\\n' >> \"$DS_GH_INPUTS_FILE\"\nif [ \"$3\" = PUT ]; then printf '{\"ok\":true}\\n'; exit 0; fi\nprintf 'fixture auto-merge refusal\\n' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let old_config = std::env::var_os("DUNKINGSHEEP_DIR");
+    let old_path = std::env::var_os("PATH");
+    let old_args_capture = std::env::var_os("DS_GH_ARGS_FILE");
+    let old_input_capture = std::env::var_os("DS_GH_INPUTS_FILE");
+    std::env::set_var("DUNKINGSHEEP_DIR", &config);
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()));
+    std::env::set_var("DS_GH_ARGS_FILE", &args_capture);
+    std::env::set_var("DS_GH_INPUTS_FILE", &input_capture);
+
+    let dry_ns = try_parse([
+        "dunkingsheep",
+        "github",
+        "protect",
+        "someorg/repo",
+        "--approvals",
+        "2",
+        "--bypass-reviewer-app",
+        "--dry-run",
+    ])
+    .unwrap();
+    let dry = run(&dry_ns);
+    let dry_invoked_gh = args_capture.exists();
+    let apply_ns = try_parse([
+        "dunkingsheep",
+        "github",
+        "protect",
+        "someorg/repo",
+        "--approvals",
+        "2",
+        "--bypass-reviewer-app",
+    ])
+    .unwrap();
+    let applied = run(&apply_ns);
+
+    match old_config {
+        Some(value) => std::env::set_var("DUNKINGSHEEP_DIR", value),
+        None => std::env::remove_var("DUNKINGSHEEP_DIR"),
+    }
+    match old_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    match old_args_capture {
+        Some(value) => std::env::set_var("DS_GH_ARGS_FILE", value),
+        None => std::env::remove_var("DS_GH_ARGS_FILE"),
+    }
+    match old_input_capture {
+        Some(value) => std::env::set_var("DS_GH_INPUTS_FILE", value),
+        None => std::env::remove_var("DS_GH_INPUTS_FILE"),
+    }
+
+    assert_eq!(0, dry.code, "{}", dry.stderr);
+    assert!(!dry_invoked_gh, "dry-run invoked gh");
+    let payload: Value = serde_json::from_str(&dry.stdout).expect("dry-run JSON payload");
+    assert_eq!(
+        serde_json::json!([{"context": "dunkingsheep/review", "app_id": 5531872}]),
+        payload["required_status_checks"]["checks"]
+    );
+    assert_eq!(false, payload["required_status_checks"]["strict"]);
+    assert_eq!(true, payload["enforce_admins"]);
+    assert_eq!(
+        true,
+        payload["required_pull_request_reviews"]["dismiss_stale_reviews"]
+    );
+    assert_eq!(
+        false,
+        payload["required_pull_request_reviews"]["require_code_owner_reviews"]
+    );
+    assert_eq!(
+        2,
+        payload["required_pull_request_reviews"]["required_approving_review_count"]
+    );
+    assert_eq!(
+        serde_json::json!(["dunkingsheep-reviewer"]),
+        payload["required_pull_request_reviews"]["bypass_pull_request_allowances"]["apps"]
+    );
+    assert_eq!(Value::Null, payload["restrictions"]);
+    assert_eq!(false, payload["allow_force_pushes"]);
+    assert_eq!(false, payload["allow_deletions"]);
+    assert_eq!(false, payload["required_linear_history"]);
+
+    assert_eq!(0, applied.code, "{}", applied.stderr);
+    assert_eq!(
+        "protected someorg/repo: 2 approval(s), dunkingsheep/review required (app 5531872), auto-merge NOT enabled: fixture auto-merge refusal\n",
+        applied.stdout
+    );
+    let args = std::fs::read_to_string(&args_capture).unwrap();
+    assert_eq!(
+        "api -X PUT repos/someorg/repo/branches/main/protection --input -\napi -X PATCH repos/someorg/repo --input -\n",
+        args
+    );
+    let inputs = std::fs::read_to_string(&input_capture).unwrap();
+    let bodies: Vec<Value> = inputs
+        .split("\n--END--\n")
+        .filter(|body| !body.trim().is_empty())
+        .map(|body| serde_json::from_str(body).expect("fake gh JSON body"))
+        .collect();
+    assert_eq!(2, bodies.len());
+    assert_eq!(payload, bodies[0]);
+    assert_eq!(
+        serde_json::json!({"allow_auto_merge": true, "delete_branch_on_merge": true}),
+        bodies[1]
     );
 }
 
