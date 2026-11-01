@@ -126,7 +126,10 @@ impl LineModal {
                 LineModalResult::Pending
             }
             KeyCode::Char(character)
-                if key.modifiers.is_empty() && character.is_ascii() && !character.is_control() =>
+                if (key.modifiers.is_empty()
+                    || key.modifiers == crossterm::event::KeyModifiers::SHIFT)
+                    && character.is_ascii()
+                    && !character.is_control() =>
             {
                 let offset = char_boundary(&self.value, self.cursor);
                 self.value.insert(offset, character);
@@ -400,7 +403,6 @@ mod tests {
         format!("  │ {content:<inner_width$} │")
     }
 
-
     #[derive(Default)]
     struct FakeClient {
         responses: VecDeque<Result<Value, RpcError>>,
@@ -619,5 +621,33 @@ mod tests {
                 format!("└{}┘", "─".repeat(10)),
             ]
         );
+    }
+
+    #[test]
+    fn line_modal_accepts_shifted_uppercase_and_printable_ascii_keys() {
+        let mut modal = LineModal::new("Name", "current");
+        assert_eq!(
+            modal.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT,)),
+            LineModalResult::Pending
+        );
+        assert_eq!(modal.value(), "A");
+        assert_eq!(
+            modal.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT,)),
+            LineModalResult::Pending
+        );
+        assert_eq!(modal.value(), "A!");
+
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+        ] {
+            assert_eq!(
+                modal.handle_key(KeyEvent::new(KeyCode::Char('x'), modifiers)),
+                LineModalResult::Pending
+            );
+        }
+        assert_eq!(modal.value(), "A!");
     }
 }
