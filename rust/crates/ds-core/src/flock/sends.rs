@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
+use super::commands_inbox::NOTICE_PREFIX;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
 use super::Flock;
@@ -29,6 +30,7 @@ use crate::terminal::screen::{
     banner_marker, box_text, is_our_send, modal_open, status_marker, strip_ansi, typed_text,
     AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
 };
+use crate::terminal::screen::{collapse, CONSUMPTION_PREFIX_CHARS};
 
 /// `CONSUMPTION_READ_LINES`.
 pub const CONSUMPTION_READ_LINES: i64 = 40;
@@ -46,6 +48,8 @@ pub const SUBMIT_VERIFY_GAPS: [f64; 2] = [0.4, 1.0];
 pub const SUBMIT_KEY_AFTER: usize = 2;
 /// `_press_until_submitted`: number of press-and-check rounds.
 pub const SUBMIT_ATTEMPTS: usize = SUBMIT_GAPS.len();
+/// `_remember_typed`: how many recent texts to retain for each pane.
+const REMEMBERED_SENDS: usize = 4;
 
 /// `HARNESS_QUEUES_WHILE_BUSY` (measured, not assumed): claude, pi and codex queue what is typed
 /// while they work (codex via Tab). An unknown harness keeps the capability hold.
@@ -644,6 +648,76 @@ fn outbox_lock(
 }
 
 impl Flock {
+    /// Remember text this flock typed into a pane, moving duplicate text to newest.
+    ///
+    /// A later observer uses this bounded history to distinguish a stranded send from a
+    /// human draft. The state remains in memory, as in Python's `sent_text_by_pane`.
+    #[allow(dead_code)] // The guarded send caller is assigned to a dependent T33 leaf.
+    pub(crate) fn remember_typed(&self, pane_id: &str, text: &str) {
+        let mut history = self
+            .sent_text_by_pane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let recent = history.entry(pane_id.to_string()).or_default();
+        if let Some(index) = recent.iter().position(|previous| previous == text) {
+            recent.remove(index);
+        }
+        recent.push(text.to_string());
+        if recent.len() > REMEMBERED_SENDS {
+            let excess = recent.len() - REMEMBERED_SENDS;
+            recent.drain(..excess);
+        }
+    }
+
+    /// Whether a composer contains text owned by this flock, from a notice, recent typed
+    /// history, or the pane's queued outbox messages.
+    ///
+    /// Candidate state is cloned under its own short lock and all comparisons happen after
+    /// releasing the locks. This helper performs no pane reads and holds no lock across one.
+    #[allow(dead_code)] // The send observer caller is assigned to a dependent T33 leaf.
+    pub(crate) fn looks_like_ours(&self, pane_id: &str, shown: &str) -> bool {
+        if !shown.is_empty() && collapse(shown).starts_with(NOTICE_PREFIX.trim()) {
+            return true;
+        }
+        if shown.is_empty() {
+            return false;
+        }
+
+        let mut candidates = self
+            .sent_text_by_pane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_default();
+        {
+            let outbox = outbox_lock(&self.outbox);
+            candidates.extend(
+                outbox
+                    .get(pane_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|message| message.status == "queued" && !message.text.is_empty())
+                    .map(|message| message.text.clone()),
+            );
+        }
+
+        let shown = collapse(shown);
+        for candidate in &candidates {
+            let full = collapse(candidate);
+            if full.is_empty() {
+                continue;
+            }
+            let consumption_prefix: String = full.chars().take(CONSUMPTION_PREFIX_CHARS).collect();
+            if full.starts_with(&shown) || shown.starts_with(&consumption_prefix) {
+                return true;
+            }
+        }
+        candidates
+            .iter()
+            .any(|candidate| is_our_send(shown.as_str(), Some(candidate), true))
+    }
+
     /// Allocate a unique monotonically increasing `mN` message identity and build
     /// the queued message record. Delivery behavior is supplied by later leaves.
     pub fn new_message(

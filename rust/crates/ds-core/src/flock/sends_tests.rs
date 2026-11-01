@@ -1037,3 +1037,79 @@ mod flush_box_tests {
         assert_eq!(6, pane.reads.borrow().len());
     }
 }
+
+#[cfg(test)]
+mod owned_text_tests {
+    use super::super::sends::Message;
+    use super::Flock;
+
+    fn flock() -> Flock {
+        let dir = tempfile::tempdir().unwrap();
+        // Persisting is disabled; the in-memory ownership state starts empty.
+        Flock::new(dir.path().join("launches.json"), dir.path(), false)
+    }
+
+    #[test]
+    fn looks_like_ours_recognizes_inbox_notice_after_restart_without_memory() {
+        let restarted = flock();
+
+        assert!(restarted.looks_like_ours(
+            "%1",
+            "[inbox] new message for codex-rust-writer; read it with inbox read"
+        ));
+        assert!(!restarted.looks_like_ours("%1", "a human's draft"));
+    }
+
+    #[test]
+    fn looks_like_ours_recognizes_normalized_recent_typed_text_by_prefix() {
+        let flock = flock();
+        flock.remember_typed("%1", "finish the review\nthen update the owner");
+
+        assert!(flock.looks_like_ours("%1", "finish   the review"));
+        assert!(flock.looks_like_ours("%1", "finish the review then update the owner"));
+        assert!(!flock.looks_like_ours("%2", "finish the review"));
+    }
+
+    #[test]
+    fn looks_like_ours_recognizes_queued_text_only_while_queued() {
+        let flock = flock();
+        let message = Message::new("m1", "%1", "writer", "queued body text", "t1749");
+        flock
+            .outbox
+            .lock()
+            .unwrap()
+            .entry("%1".into())
+            .or_default()
+            .push(message.clone());
+
+        assert!(flock.looks_like_ours("%1", "queued body"));
+        flock.outbox.lock().unwrap().get_mut("%1").unwrap()[0].status = "sent".into();
+        assert!(!flock.looks_like_ours("%1", "queued body"));
+    }
+
+    #[test]
+    fn looks_like_ours_uses_the_80_character_consumption_prefix_for_wrapped_text() {
+        let flock = flock();
+        let full = format!("{} trailing source text", "界".repeat(96));
+        flock.remember_typed("%1", &full);
+        let shown = format!("{}…", "界".repeat(80));
+
+        assert!(flock.looks_like_ours("%1", &shown));
+    }
+
+    #[test]
+    fn looks_like_ours_bounds_recent_history_and_rejects_empty_text() {
+        let flock = flock();
+        for index in 0..5 {
+            flock.remember_typed("%1", &format!("owned message {index}"));
+        }
+
+        assert_eq!(4, flock.sent_text_by_pane.lock().unwrap()["%1"].len());
+        assert!(!flock.looks_like_ours("%1", "owned message 0"));
+        assert!(flock.looks_like_ours("%1", "owned message 4"));
+
+        flock.remember_typed("%2", "");
+        assert!(!flock.looks_like_ours("%2", ""));
+        assert!(!flock.looks_like_ours("%2", "human text"));
+    }
+}
