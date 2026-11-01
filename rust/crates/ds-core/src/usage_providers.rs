@@ -319,7 +319,7 @@ pub(crate) fn return_code(status: &std::process::ExitStatus) -> i32 {
 
 /// `subprocess.run(argv, capture_output=True, text=True, timeout=...)`: stdin closed, both
 /// pipes drained on threads, the DIRECT child killed at the deadline (as Python does).
-fn run_captured(
+pub(crate) fn run_captured(
     program: &str,
     args: &[&str],
     timeout_s: f64,

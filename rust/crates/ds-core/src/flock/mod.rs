@@ -64,6 +64,7 @@ pub struct Flock {
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
     caller: Mutex<CallerState>,
     role_panes: Mutex<panes::RolePaneCache>,
+    turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
 }
 
@@ -81,6 +82,7 @@ impl Flock {
             launches: Mutex::new(BTreeMap::new()),
             caller: Mutex::new(CallerState::default()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
+            turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
         };
         flock.load_launches();
@@ -397,14 +399,19 @@ fn truthy(value: &Value) -> bool {
 }
 
 pub mod commands_inbox;
+pub mod commands_owner_views;
 pub mod commands_tasks;
 pub mod dunks;
+pub mod lanes;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
+pub mod views;
 
 #[cfg(test)]
 mod commands_inbox_tests;
+#[cfg(test)]
+mod lanes_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
