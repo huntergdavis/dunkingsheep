@@ -1,12 +1,13 @@
-//! T33 (t801), slice 1: the send DECISIONS - `Message`, `dead_session`, `send_blocker`,
-//! `clear_to_send`, `box_holds`, `send_submit_key`. Ports `Message` (state and `outcome` /
-//! `to_dict`), `Flock._dead_session`, `send_blocker`, `_clear_to_send`, `_box_holds`,
-//! `_send_submit_key`, `_pane_harness`, `read_screen`/`read_box`.
+//! T33 (t801), slices 1 and t1742: send decisions and the unguarded submit-confirmation ladder -
+//! `Message`, `dead_session`, `send_blocker`, `clear_to_send`, `box_holds`, `send_submit_key`,
+//! `press_until_submitted`. Ports `Message` (state and `outcome` / `to_dict`),
+//! `Flock._dead_session`, `send_blocker`, `_clear_to_send`, `_box_holds`, `_send_submit_key`,
+//! `_press_until_submitted`, `_pane_harness`, `read_screen`/`read_box`.
 //!
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
-//! slices of t801): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and the per-pane outbox
-//! task, `submit_text`/`press_keys`, `_press_until_submitted`, `_flush_once`, flush/clear_box.
+//! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and
+//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, flush/clear_box.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -26,6 +27,18 @@ use crate::terminal::screen::{
 pub const CONSUMPTION_READ_LINES: i64 = 40;
 /// `TYPING_SETTLE_S`: the box must read clear on two checks this far apart.
 pub const TYPING_SETTLE_S: f64 = 1.0;
+/// `_press_until_submitted`: quiet time before each retry key.
+pub const SUBMIT_GAPS: [f64; 4] = [0.2, 1.0, 3.0, 6.0];
+/// `_press_until_submitted`: wait budget for confirming one press.
+pub const SUBMIT_CONFIRM_S: f64 = 2.0;
+/// `_press_until_submitted`: pane reads during one confirmation window.
+pub const SUBMIT_POLL_S: [f64; 5] = [0.1, 0.2, 0.4, 0.8, 1.0];
+/// `_press_until_submitted`: repeated reads that distinguish a redraw from a cleared box.
+pub const SUBMIT_VERIFY_GAPS: [f64; 2] = [0.4, 1.0];
+/// `_press_until_submitted`: try Enter twice before falling back to C-m.
+pub const SUBMIT_KEY_AFTER: usize = 2;
+/// `_press_until_submitted`: number of press-and-check rounds.
+pub const SUBMIT_ATTEMPTS: usize = SUBMIT_GAPS.len();
 
 /// `HARNESS_QUEUES_WHILE_BUSY` (measured, not assumed): claude, pi and codex queue what is typed
 /// while they work (codex via Tab). An unknown harness keeps the capability hold.
@@ -47,6 +60,203 @@ pub trait SendEnv {
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String);
     /// `DUNKINGSHEEP_FEDERATED_INPUT == "1"`.
     fn federated_input(&self) -> bool;
+}
+
+/// Clock, per-key guarded send, and side effects needed by the unguarded submit-confirmation
+/// ladder. A production adapter is supplied by later runtime work; this trait does not make this
+/// helper an end-to-end send path.
+pub trait SubmitEnv: SendEnv {
+    /// Injected sleep; tests advance a fake clock instead of waiting.
+    fn sleep_s(&mut self, seconds: f64);
+    /// Injected monotonic seconds, used to bound each confirmation window.
+    fn now_s(&mut self) -> f64;
+    /// Send one retry key under the caller's pane guard, returning the actual key selected.
+    fn send_submit_key_guarded(
+        &mut self,
+        pane_id: &str,
+        fallback: &str,
+        busy_hint: bool,
+    ) -> (bool, String, Option<String>);
+    /// Previously learned submit key for this pane.
+    fn remembered_submit_key(&self, pane_id: &str) -> Option<String>;
+    /// Remember the key that succeeded; Tab is normalized to Enter by the caller.
+    fn remember_submit_key(&mut self, pane_id: &str, key: &str);
+    /// Record the existing `submit.attempt` metric.
+    fn record_submit_attempt(
+        &mut self,
+        pane_id: &str,
+        outcome: &str,
+        attempts: usize,
+        bytes: usize,
+    );
+    /// Whether the pane entered a working state after the send's readable, idle baseline.
+    fn turn_started(&mut self, pane_id: &str, baseline: &str) -> bool {
+        !is_working_status(Some(baseline))
+            && is_working_status(self.read_status(pane_id).as_deref())
+    }
+}
+
+/// Statuses that mean the lane was already running a turn before this send.
+fn is_working_status(status: Option<&str>) -> bool {
+    matches!(status, Some("working" | "busy" | "running" | "processing"))
+}
+
+/// `_press_until_submitted`: repeat safe submit keys until the text leaves the box or a turn
+/// transition confirms this send. `Captured(None)` stays unreadable and cannot be promoted by a
+/// later status read. Each key is delegated to the environment's one-key guarded operation.
+pub fn press_until_submitted(
+    env: &mut dyn SubmitEnv,
+    pane_id: &str,
+    text: &str,
+    first_pressed: bool,
+    busy_hint: bool,
+    baseline: StatusBaseline,
+) -> (bool, String) {
+    if let Some(dead) = dead_session(env, pane_id) {
+        return (
+            false,
+            format!("agent session is dead ({dead}); not submitting into a dead composer"),
+        );
+    }
+
+    let pre_status = match baseline {
+        StatusBaseline::ReadNow => env.read_status(pane_id),
+        StatusBaseline::Captured(status) => status,
+    };
+    let mut key = "Enter".to_string();
+    let mut last_hold = None;
+
+    for attempt in 1..=SUBMIT_ATTEMPTS {
+        let gap = SUBMIT_GAPS[attempt - 1];
+        if gap != 0.0 {
+            env.sleep_s(gap);
+        }
+        if !(first_pressed && attempt == 1) {
+            key = env.remembered_submit_key(pane_id).unwrap_or_else(|| {
+                if attempt > SUBMIT_KEY_AFTER && attempt % 2 == 1 {
+                    "C-m".to_string()
+                } else {
+                    "Enter".to_string()
+                }
+            });
+            let (ok, detail, actual_key) = env.send_submit_key_guarded(pane_id, &key, busy_hint);
+            if !ok {
+                return (false, detail);
+            }
+            if let Some(actual_key) = actual_key {
+                key = actual_key;
+            }
+        }
+
+        let deadline = env.now_s() + SUBMIT_CONFIRM_S;
+        last_hold = None;
+        for wait in SUBMIT_POLL_S {
+            if env.now_s() >= deadline {
+                break;
+            }
+            env.sleep_s(wait);
+            last_hold = box_holds(env, pane_id, text);
+            if last_hold == Some(false) {
+                for verify_gap in SUBMIT_VERIFY_GAPS {
+                    env.sleep_s(verify_gap);
+                    last_hold = box_holds(env, pane_id, text);
+                    if last_hold != Some(false) {
+                        break;
+                    }
+                }
+                if last_hold == Some(false) {
+                    if attempt > 1 {
+                        env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
+                    }
+                    env.record_submit_attempt(pane_id, "ok", attempt, text.len());
+                    return (
+                        true,
+                        if attempt == 1 {
+                            "sent".to_string()
+                        } else {
+                            format!("sent ({key} x{attempt})")
+                        },
+                    );
+                }
+                if last_hold == Some(true) {
+                    if turn_started(env, pane_id, pre_status.as_deref()) {
+                        if attempt > 1 {
+                            env.remember_submit_key(
+                                pane_id,
+                                if key == "Tab" { "Enter" } else { &key },
+                            );
+                        }
+                        env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
+                        return (true, "sent (confirmed by the turn it started)".to_string());
+                    }
+                    break;
+                }
+            }
+        }
+
+        if last_hold != Some(true) {
+            if turn_started(env, pane_id, pre_status.as_deref()) {
+                if attempt > 1 {
+                    env.remember_submit_key(pane_id, if key == "Tab" { "Enter" } else { &key });
+                }
+                env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
+                return (true, "sent (confirmed by the turn it started)".to_string());
+            }
+            continue;
+        }
+
+        if turn_started(env, pane_id, pre_status.as_deref()) {
+            if attempt > 1 {
+                // Python resets a busy Tab echo to Enter once the turn itself confirms delivery.
+                env.remember_submit_key(pane_id, "Enter");
+            }
+            env.record_submit_attempt(pane_id, "ok-turn", attempt, text.len());
+            return (true, "sent (confirmed by the turn it started)".to_string());
+        }
+    }
+
+    if last_hold.is_none() {
+        return (
+            false,
+            format!(
+                "submission unconfirmed: input box unreadable or changing after {SUBMIT_ATTEMPTS} presses; the lane may or may not have taken it - check the pane before resending"
+            ),
+        );
+    }
+    if is_working_status(pre_status.as_deref()) {
+        return (
+            false,
+            format!(
+                "submission unconfirmed: the lane was already working before this send ({SUBMIT_ATTEMPTS} presses); status alone cannot confirm a new message - check the pane"
+            ),
+        );
+    }
+    (
+        false,
+        format!(
+            "text did not submit after {SUBMIT_ATTEMPTS} Enter presses; it is still in the pane's input box"
+        ),
+    )
+}
+
+/// Baseline-aware turn confirmation: an unreadable or already-working baseline is never proof.
+fn turn_started(env: &mut dyn SubmitEnv, pane_id: &str, baseline: Option<&str>) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    if is_working_status(Some(baseline)) {
+        return false;
+    }
+    env.turn_started(pane_id, baseline)
+}
+
+/// The baseline captured for a send, distinct from a status sampled when the ladder starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusBaseline {
+    /// Sample status at ladder entry, after the dead-session check.
+    ReadNow,
+    /// Preserve the caller's captured status, including `None` for unreadable.
+    Captured(Option<String>),
 }
 
 /// `read_screen`: the one way a component asks the pane what it looks like.
