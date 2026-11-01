@@ -102,6 +102,21 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
+        // `client.call("list_panes"), print_panes`
+        "panes" => crate::daemon_cmd::run_command(
+            ns,
+            "list_panes",
+            Map::new(),
+            crate::render_print::render_panes,
+        ),
+        // `workspaces` and its alias `tabs`: `client.call("list_workspaces"), print_workspaces`
+        "workspaces" => crate::daemon_cmd::run_command(
+            ns,
+            "list_workspaces",
+            Map::new(),
+            crate::render_fleet::render_workspaces,
+        ),
+        "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("doctor"), print_doctor`
         "doctor" => crate::daemon_cmd::run_command(
             ns,

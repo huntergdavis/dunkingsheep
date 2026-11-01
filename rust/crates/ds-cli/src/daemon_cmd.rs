@@ -121,6 +121,41 @@ pub fn run_command(
     }
 }
 
+/// `whoami`: the daemon knows the pane (or its absence), the client knows WHY there is none, so
+/// the client's identity note travels with the answer (`setdefault`: the daemon's own wins).
+pub fn whoami(ns: &Map<String, Value>) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let mut result = match call(&mut client, "whoami", Map::new()) {
+        Ok(Value::Object(map)) => map,
+        Ok(_) => Map::new(),
+        Err(outcome) => return outcome,
+    };
+    if !client.identity_note.is_empty() {
+        result
+            .entry("identity_note")
+            .or_insert_with(|| Value::String(client.identity_note.clone()));
+    }
+    let result = Value::Object(result);
+    let stdout = if matches!(ns.get("json"), Some(Value::Bool(true))) {
+        format!("{}\n", sorted_json(&result))
+    } else {
+        crate::render_fleet::render_whoami(&result)
+    };
+    let code = if result.get("ok") == Some(&Value::Bool(false)) {
+        2
+    } else {
+        0
+    };
+    Outcome {
+        stdout,
+        stderr: String::new(),
+        code,
+    }
+}
+
 /// `gh-token [--kind author|reviewer] [--quiet]`: the token on stdout, or (unless `--quiet`) why
 /// there is none on stderr; exit 0 either way.
 pub fn gh_token(ns: &Map<String, Value>) -> Outcome {
