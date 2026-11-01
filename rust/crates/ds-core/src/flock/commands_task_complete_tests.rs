@@ -158,7 +158,17 @@ fn caller<'a>(
         pane: Some(pane),
         role,
         may_review: may,
-        worked,
+        worked: Ok(worked),
+    }
+}
+
+/// A reviewer whose authorship check could not be answered (`authors_of` raised).
+fn caller_store_down<'a>(pane: &'a str, role: &'a str, error: &'a str) -> ReviewCaller<'a> {
+    ReviewCaller {
+        pane: Some(pane),
+        role,
+        may_review: true,
+        worked: Err(error),
     }
 }
 
@@ -194,6 +204,49 @@ async fn the_review_gates_run_in_the_pythons_order() {
     );
     // the owner is exempt from the lane checks
     assert!(gate(&caller("w1:p1", "owner", false, &worked), Some("accept")).is_ok());
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_answer_fails_closed_for_a_reviewer_t723() {
+    // review t1500: Python raises "cannot verify that <pane> is not the author of <repo>#<pr>: ..."
+    // when `authors_of` raises, BEFORE any verdict is recorded; the gate must not default to "no
+    // authors".
+    let (_flock, tasks) = setup("failclosed").await;
+    let (d, facts) = review(&tasks, false).await;
+    let gate = |who: &ReviewCaller<'_>, verdict: Option<&str>| {
+        Flock::check_task_completion_gates(&d, &facts, verdict, who).map_err(|e| e.to_string())
+    };
+    let down = caller_store_down("w2:p2", "reviewer", "database is locked");
+    let expected = "cannot verify that w2:p2 is not the author of o/r#5: database is locked. \
+                    no-self-review is checked before a verdict is recorded, so this review is \
+                    refused until the task store answers.";
+    assert_eq!(expected, gate(&down, Some("accept")).unwrap_err());
+    // it refuses before the verdict is even looked at
+    assert_eq!(expected, gate(&down, None).unwrap_err());
+    assert_eq!(expected, gate(&down, Some("not-a-verdict")).unwrap_err());
+    // the owner is exempt from the lane checks, so a store error does not stop an owner
+    assert!(gate(
+        &caller_store_down("w1:p1", "owner", "locked"),
+        Some("accept")
+    )
+    .is_ok());
+    // an earlier gate still wins: a reviewer that may not review is refused for THAT reason
+    let mut not_allowed = caller_store_down("w2:p2", "reviewer", "locked");
+    not_allowed.may_review = false;
+    assert!(gate(&not_allowed, Some("accept"))
+        .unwrap_err()
+        .contains("may not review"));
+    // and the task's own author check still precedes the store question
+    let err = gate(
+        &caller_store_down("w7:p7", "reviewer", "locked"),
+        Some("accept"),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("a lane never accepts its own work (no-self-merge)"),
+        "{err}"
+    );
+    assert!(!err.contains("cannot verify"), "{err}");
 }
 
 #[tokio::test]

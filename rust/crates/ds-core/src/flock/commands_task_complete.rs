@@ -23,8 +23,12 @@ pub struct ReviewCaller<'a> {
     pub role: &'a str,
     /// `roles.may_review(pane, role=role)`.
     pub may_review: bool,
-    /// `tasks.authors_of(repo, pr)`: lanes that worked on this PR.
-    pub worked: &'a BTreeSet<String>,
+    /// `tasks.authors_of(repo, pr)`: lanes that worked on this PR, or the store's error text when it
+    /// could not answer. The caller passes an empty set when the task has no repo+pr (the Python
+    /// never queries then). `Err` makes a reviewer's completion FAIL CLOSED (t723): an unverified
+    /// reviewer is the bug the no-self-review guard exists to stop, so it must never be defaulted to
+    /// "no authors" by a caller that swallowed the error.
+    pub worked: Result<&'a BTreeSet<String>, &'a str>,
 }
 
 impl Flock {
@@ -224,7 +228,22 @@ impl Flock {
             {
                 return refuse("a lane never accepts its own work (no-self-merge)");
             }
-            if who.worked.contains(pane) {
+            let worked = match who.worked {
+                Ok(worked) => worked,
+                Err(error) => {
+                    return refuse(format!(
+                        "cannot verify that {pane} is not the author of {}#{}: {error}. \
+                         no-self-review is checked before a verdict is recorded, so this review \
+                         is refused until the task store answers.",
+                        facts.repo.as_deref().unwrap_or("None"),
+                        facts
+                            .pr
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "None".into())
+                    ));
+                }
+            };
+            if worked.contains(pane) {
                 return refuse(format!(
                     "a lane never accepts its own work (no-self-merge): {pane} worked on {}#{} \
                      (task author, assignee or completer), so it cannot review this head. \
