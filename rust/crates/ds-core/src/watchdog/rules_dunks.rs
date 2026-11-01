@@ -73,11 +73,18 @@ impl DunkEvents for MetricsDb<'_> {
 pub fn load_dunks(path: &Path) -> Result<Vec<Value>, DunkError> {
     let text = std::fs::read_to_string(path)?;
     let parsed: Value = serde_json::from_str(&text)?;
-    Ok(parsed
-        .get("dunkers")
-        .and_then(Value::as_array)
+    let object = parsed
+        .as_object()
+        .ok_or_else(|| DunkError::Refused("dunks.json root is not an object".into()))?;
+    let Some(dunkers) = object.get("dunkers") else {
+        return Ok(Vec::new());
+    };
+    // An explicitly present field must be a list. Python's downstream iteration happens to
+    // accept falsey empty strings/dicts as empty, but malformed store shape must not hide a scan.
+    dunkers
+        .as_array()
         .cloned()
-        .unwrap_or_default())
+        .ok_or_else(|| DunkError::Refused("dunks.json 'dunkers' is not an array".into()))
 }
 
 /// `_retired_panes`: `{pane_id: record}` from `retired-panes.json`.

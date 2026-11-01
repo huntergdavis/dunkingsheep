@@ -21,6 +21,7 @@ pub mod rules_dunks;
 pub mod rules_host;
 pub mod rules_inbox;
 pub mod rules_lanes;
+pub mod rules_security;
 
 pub const SOURCE_RULE: &str = "watchdog-rule";
 
