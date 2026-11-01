@@ -1,14 +1,16 @@
 //! T44, slice 6: run a parsed command. `main.rs` used to stop at "parsed but not ported yet";
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
 //! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
-//! (`usage_cmd`) and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token`, `git-credential` and `doctor`
-//! (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything else, including the `context` write subcommands, keeps the
-//! "parsed but not ported yet" answer (exit 1).
+//! (`usage_cmd`), `install` and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token`,
+//! `git-credential` and `doctor` (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything
+//! else, including the `context` write subcommands, keeps the "parsed but not ported yet" answer
+//! (exit 1).
 //!
 //! `--json` for `context`: Python prints `json.dumps(result, indent=2)`; the ordered mode in
 //! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
 
 use serde_json::{Map, Value};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::context_cmd::context_read;
@@ -84,6 +86,177 @@ fn github(ns: &Map<String, Value>) -> Outcome {
         }
         Some(other) => not_ported(&format!("github {other}")),
         None => not_ported("github"),
+    }
+}
+
+fn install_launcher(ns: &Map<String, Value>, json: bool) -> Outcome {
+    let requested_dir = text(ns, "bin_dir").unwrap_or("~/.local/bin");
+    let bin_dir = if requested_dir == "~" {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(requested_dir))
+    } else if let Some(rest) = requested_dir.strip_prefix("~/") {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(rest)
+    } else {
+        PathBuf::from(requested_dir)
+    };
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => return install_error(error.to_string()),
+    };
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
+    let poller = project_root.join("tools/dunk_poll.py");
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let python = find_executable("python3", &path_env);
+
+    let result = (|| -> Result<Value, String> {
+        std::fs::create_dir_all(&bin_dir)
+            .map_err(|error| format!("cannot create {}: {error}", bin_dir.display()))?;
+        if !poller.is_file() {
+            return Err(format!("no dunk-poll script at {}", poller.display()));
+        }
+        let python = python.ok_or_else(|| "no python3 found on PATH for dunk-poll".to_string())?;
+        let launcher = bin_dir.join("dunkingsheep");
+        let poll_launcher = bin_dir.join("dunk-poll");
+        let launcher_body = format!(
+            "#!/bin/sh\n# Dunking Sheep Rust CLI launcher, installed by `dunkingsheep install`.\nexec {} \"$@\"\n",
+            shell_quote(&executable.display().to_string())
+        );
+        let poll_body = format!(
+            "#!/bin/sh\nexec {} {} \"$@\"\n",
+            shell_quote(&python.display().to_string()),
+            shell_quote(&poller.display().to_string())
+        );
+        write_executable(&launcher, &launcher_body)?;
+        write_executable(&poll_launcher, &poll_body)?;
+
+        let on_path_here = std::env::split_paths(&path_env)
+            .filter(|path| !path.as_os_str().is_empty())
+            .any(|path| real_path(&path) == real_path(&bin_dir));
+        let mut result = Map::new();
+        result.insert(
+            "launcher".into(),
+            Value::String(launcher.display().to_string()),
+        );
+        result.insert(
+            "poll_launcher".into(),
+            Value::String(poll_launcher.display().to_string()),
+        );
+        result.insert(
+            "runs".into(),
+            Value::String(executable.display().to_string()),
+        );
+        result.insert(
+            "poll_runs".into(),
+            Value::String(poller.display().to_string()),
+        );
+        result.insert("on_path_here".into(), Value::Bool(on_path_here));
+        result.insert(
+            "resolves_to".into(),
+            find_executable("dunkingsheep", &path_env)
+                .map(|path| Value::String(path.display().to_string()))
+                .unwrap_or(Value::Null),
+        );
+        result.insert(
+            "poll_resolves_to".into(),
+            find_executable("dunk-poll", &path_env)
+                .map(|path| Value::String(path.display().to_string()))
+                .unwrap_or(Value::Null),
+        );
+        Ok(Value::Object(result))
+    })();
+
+    match result {
+        Ok(value) if json => Outcome {
+            stdout: format!("{}\n", ordered_json(&value)),
+            stderr: String::new(),
+            code: 0,
+        },
+        Ok(value) => {
+            let mut stdout = String::new();
+            if let Some(object) = value.as_object() {
+                for (key, value) in object {
+                    stdout.push_str(&format!("{key:<16} {}\n", python_str(value)));
+                }
+            }
+            if value["resolves_to"].is_null() {
+                stdout.push_str(&format!(
+                    "\nNote: {requested_dir} is not on this shell's PATH.\n"
+                ));
+            }
+            stdout.push_str(
+                "\nSuperuser setup: run `dunkingsheep superuser recover` from the VP pane, then `dunkingsheep superuser status`.\n",
+            );
+            Outcome {
+                stdout,
+                stderr: String::new(),
+                code: 0,
+            }
+        }
+        Err(message) => install_error(message),
+    }
+}
+
+fn install_error(message: String) -> Outcome {
+    Outcome {
+        stdout: String::new(),
+        stderr: format!("{message}\n"),
+        code: 1,
+    }
+}
+
+fn write_executable(path: &Path, body: &str) -> Result<(), String> {
+    std::fs::write(path, body)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("cannot chmod {}: {error}", path.display()))
+}
+
+fn real_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn find_executable(name: &str, path_env: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_env)
+        .map(|dir| {
+            if dir.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                dir
+            }
+        })
+        .map(|dir| dir.join(name))
+        .find(|path| {
+            std::fs::metadata(path)
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+fn shell_quote(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+fn python_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::String(text) => text.clone(),
+        _ => value.to_string(),
     }
 }
 
@@ -373,6 +546,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
+        "install" => install_launcher(ns, json),
         "context" => context(ns, json),
         // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
         "secrets-check" => crate::secrets_cmd::secrets_check_command(
