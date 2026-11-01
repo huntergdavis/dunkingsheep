@@ -253,6 +253,46 @@ fn the_view_is_cached_until_invalidated_fresh_or_the_ttl_or_another_pane() {
 }
 
 #[test]
+fn flock_owns_one_shared_view_cache_across_request_borrows() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = super::Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let other_flock = super::Flock::new(
+        dir.path().join("other-launches.json"),
+        dir.path().join("other-lanes.json"),
+        false,
+    );
+    let cache = flock.view_cache();
+    assert!(std::ptr::eq(cache, flock.view_cache()));
+    assert!(!std::ptr::eq(cache, other_flock.view_cache()));
+
+    let env = Env::new();
+    env.message.replace("before".into());
+    let before = flock
+        .view_cache()
+        .view(&env, Some("w1:p1"), false, VIEW_CACHE_S);
+    env.message.replace("after".into());
+    assert_eq!(
+        before,
+        flock
+            .view_cache()
+            .view(&env, Some("w1:p1"), false, VIEW_CACHE_S),
+        "a borrowed handle sees the shared cached view"
+    );
+
+    flock.invalidate_view();
+    assert_eq!(
+        json!("after"),
+        flock
+            .view_cache()
+            .view(&env, Some("w1:p1"), false, VIEW_CACHE_S)["status"]["message"]
+    );
+}
+
+#[test]
 fn a_view_carries_dunks_the_pane_and_an_inbox_count_or_its_error() {
     let mut env = Env::new();
     env.dunks.add(None, &AddArgs::default()).unwrap();
