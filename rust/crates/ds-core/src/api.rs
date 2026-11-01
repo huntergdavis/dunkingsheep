@@ -220,6 +220,11 @@ impl Dispatcher {
         self.register("turn_start", h_turn_start);
     }
 
+    /// Register only the T39 help handler leaf.
+    pub fn register_help(&mut self) {
+        self.register("help", h_help);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -293,6 +298,37 @@ impl Dispatcher {
 /// `dunk_api.h_whoami`.
 pub fn h_whoami(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
     context.flock.whoami(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_help`.
+pub fn h_help(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let version = context.env.status_env()?.version();
+    let commands: Vec<Value> = registry::COMMANDS
+        .iter()
+        .map(|command| {
+            json!({
+                "name": command.name,
+                "description": command.description,
+                "input_schema": registry::input_schema(command.name)
+                    .expect("registered command must have an input schema"),
+                "mcp_tool": command.mcp,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "guide": crate::help::guide(python_bool_arg(&args, "markdown", false), &version),
+        // The Rust runtime currently supports the tmux terminal only; Python's herdr_help
+        // raises DunkError on tmux, which the help handler turns into JSON null.
+        "herdr_help": Value::Null,
+        "protocol": {
+            "transport": "unix socket, newline-delimited JSON",
+            "request": {"id": "any", "cmd": "<command name>", "args": {},
+                        "self_pane_id": "optional pane id that 'self' resolves to"},
+            "response": {"id": "echoed", "ok": true, "result": {}},
+            "error": {"id": "echoed", "ok": false, "error": "message"},
+        },
+        "commands": commands,
+    }))
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {

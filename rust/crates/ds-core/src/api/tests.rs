@@ -8,11 +8,13 @@ use serde_json::json;
 use std::cell::Cell;
 use std::sync::Mutex;
 
+use crate::config::Env;
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
+use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
 
@@ -269,6 +271,67 @@ fn refusal(result: Result<Value, DunkError>) -> String {
         Err(DunkError::Refused(text)) => text,
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+#[test]
+fn h_help_matches_python() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("role registry");
+    flock.attach_roles(roles, None);
+    let env = ParityEnv::new(None);
+    let request = RequestCtx::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_help();
+    let got = dispatcher
+        .dispatch(&context, &gate, "help", args(json!({"markdown": "yes"})))
+        .expect("help");
+
+    assert_eq!(got["guide"], crate::help::guide(true, "2.99.0"));
+    assert_eq!(got["herdr_help"], Value::Null);
+    assert_eq!(
+        got["protocol"],
+        json!({
+            "transport": "unix socket, newline-delimited JSON",
+            "request": {"id": "any", "cmd": "<command name>", "args": {},
+                        "self_pane_id": "optional pane id that 'self' resolves to"},
+            "response": {"id": "echoed", "ok": true, "result": {}},
+            "error": {"id": "echoed", "ok": false, "error": "message"},
+        })
+    );
+    let expected_commands: Vec<Value> = crate::registry::COMMANDS
+        .iter()
+        .map(|command| {
+            json!({
+                "name": command.name,
+                "description": command.description,
+                "input_schema": crate::registry::input_schema(command.name).unwrap(),
+                "mcp_tool": command.mcp,
+            })
+        })
+        .collect();
+    assert_eq!(got["commands"], json!(expected_commands));
+    assert!(got["commands"].as_array().unwrap().len() > 100);
 }
 
 fn args(value: Value) -> Option<Args> {
