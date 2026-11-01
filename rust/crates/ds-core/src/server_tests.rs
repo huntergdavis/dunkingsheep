@@ -166,6 +166,16 @@ fn args_must_be_an_object_but_falsy_args_mean_empty() {
 }
 
 #[test]
+fn socket_requests_without_peer_credentials_keep_an_unverified_verdict() {
+    let fake = Fake::default();
+    let (reply, _) = handle_line(&fake, r#"{"id":1,"cmd":"whoami"}"#, None);
+    assert_eq!(
+        reply.result.expect("whoami result")["socket_peer"],
+        json!(false)
+    );
+}
+
+#[test]
 fn shutdown_command_stops_the_server() {
     let mut running = start("shutdown");
     let mut conn = connect(&running.path);
