@@ -268,7 +268,8 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
         .contains("nothing after the sigil"));
     let claude_hint = claude_hint();
     assert_eq!(Some(String::new()), typed_text(&claude_hint));
-    assert!(box_text(&claude_hint).1.contains("hint"));
+    let (_, detail) = box_text(&claude_hint);
+    assert!(detail.contains("nothing after the sigil"), "{detail}");
 
     let codex_hint_screen = codex_hint("Ask Codex to do anything");
     assert_eq!(Some(String::new()), typed_text(&codex_hint_screen));
