@@ -54,7 +54,7 @@ pub fn first_line(text: &str) -> &str {
 /// `datetime.fromisoformat` for the shapes a `stated` field carries: a date, or a naive
 /// datetime with `T` or a space. (A tz-aware value raises TypeError against the naive
 /// `datetime.now()` in the Python; here it is treated as unparseable, i.e. not stale.)
-fn parse_stated(text: &str) -> Option<NaiveDateTime> {
+pub(crate) fn parse_stated(text: &str) -> Option<NaiveDateTime> {
     if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
         return date.and_hms_opt(0, 0, 0);
     }
