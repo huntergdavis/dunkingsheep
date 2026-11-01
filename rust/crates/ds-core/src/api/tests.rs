@@ -712,6 +712,7 @@ fn h_turn_start_matches_python() {
             crate::flock::commands_turns::turn_ttl_s()
         );
     }
+    let hook_calls_before_refusals = env.turn_calls.lock().unwrap().len();
 
     let wrong_pane = dispatch_with_env(
         &d,
@@ -756,7 +757,7 @@ fn h_turn_start_matches_python() {
     ));
     assert_eq!(
         env.turn_calls.lock().unwrap().len(),
-        2,
+        hook_calls_before_refusals,
         "refusals have no hooks"
     );
     let invalid_ttl = dispatch_with_env(
