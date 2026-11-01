@@ -257,21 +257,18 @@ fn record_from_state(value: &Value) -> Option<Record> {
     let terminal = optional_string(row, "terminal")?;
     let attempts = match row.get("attempts") {
         None | Some(Value::Null) => 0,
-        Some(Value::Number(value)) => {
-            let integer = value
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .or_else(|| {
-                    value.as_f64().and_then(|value| {
-                        (value.is_finite()
-                            && value.fract() == 0.0
-                            && value >= 0.0
-                            && value <= f64::from(u32::MAX))
-                        .then(|| value as u32)
-                    })
-                })?;
-            integer
-        }
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .or_else(|| {
+                value.as_f64().and_then(|value| {
+                    (value.is_finite()
+                        && value.fract() == 0.0
+                        && value >= 0.0
+                        && value <= f64::from(u32::MAX))
+                    .then_some(value as u32)
+                })
+            })?,
         Some(_) => return None,
     };
     Some(Record {
@@ -289,30 +286,24 @@ fn spent_value(value: &Value) -> Option<Result<u32, String>> {
     match value {
         // Python bool is an int for this filter and conversion.
         Value::Bool(value) => Some(Ok(u32::from(*value))),
-        Value::Number(number) => {
-            let parsed = number
-                .as_u64()
-                .map(|value| {
-                    u32::try_from(value).map_err(|_| "spent value exceeds u32".to_string())
+        Value::Number(number) => number
+            .as_u64()
+            .map(|value| u32::try_from(value).map_err(|_| "spent value exceeds u32".to_string()))
+            .or_else(|| {
+                number.as_i64().map(|value| {
+                    u32::try_from(value).map_err(|_| "spent value is outside u32".to_string())
                 })
-                .or_else(|| {
-                    number.as_i64().map(|value| {
-                        u32::try_from(value).map_err(|_| "spent value is outside u32".to_string())
-                    })
+            })
+            .or_else(|| {
+                number.as_f64().map(|value| {
+                    let truncated = value.trunc();
+                    if !value.is_finite() || truncated < 0.0 || truncated > f64::from(u32::MAX) {
+                        Err("spent value is outside u32".to_string())
+                    } else {
+                        Ok(truncated as u32)
+                    }
                 })
-                .or_else(|| {
-                    number.as_f64().map(|value| {
-                        let truncated = value.trunc();
-                        if !value.is_finite() || truncated < 0.0 || truncated > f64::from(u32::MAX)
-                        {
-                            Err("spent value is outside u32".to_string())
-                        } else {
-                            Ok(truncated as u32)
-                        }
-                    })
-                });
-            parsed
-        }
+            }),
         _ => None,
     }
 }
@@ -709,7 +700,7 @@ mod tests {
         restored.forget("w1:p1");
         let first_after_restore = restored.decide(&observation("hello"), &config, 20.0);
         assert_eq!("wait", first_after_restore.action);
-        assert_eq!(1, first_after_restore.attempts);
+        assert_eq!(1, restored.records["w1:p1"].attempts);
         assert_eq!(
             "terminal",
             restored.decide(&observation("hello"), &config, 40.0).action
