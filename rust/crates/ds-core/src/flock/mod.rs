@@ -65,6 +65,8 @@ pub struct Flock {
     caller: Mutex<CallerState>,
     role_panes: Mutex<panes::RolePaneCache>,
     stores: Mutex<panes::Stores>,
+    /// The role registry and the legacy allowlist (T31), attached after construction.
+    pub(crate) role_stores: roles_gate::RoleStoresCell,
 }
 
 impl Flock {
@@ -82,6 +84,7 @@ impl Flock {
             caller: Mutex::new(CallerState::default()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             stores: Mutex::new(panes::Stores::default()),
+            role_stores: Mutex::new(roles_gate::RoleStores::default()),
         };
         flock.load_launches();
         flock
@@ -401,6 +404,7 @@ pub mod dunks;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
+pub mod roles_gate;
 
 #[cfg(test)]
 mod commands_inbox_tests;
@@ -410,5 +414,7 @@ mod mailbox_tests;
 mod panes_tests;
 #[cfg(test)]
 mod resolve_tests;
+#[cfg(test)]
+mod roles_gate_tests;
 #[cfg(test)]
 mod tests;
