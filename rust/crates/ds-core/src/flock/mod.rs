@@ -443,6 +443,7 @@ pub mod mailbox;
 pub mod panes;
 pub mod resolve;
 pub mod roles_gate;
+pub mod roster;
 pub mod views;
 
 #[cfg(test)]
