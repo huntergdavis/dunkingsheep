@@ -9,7 +9,6 @@
 //! `project_summary` (needs the context store, lanes and `task_list`).
 
 use std::path::Path;
-use std::process::Command;
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Map, Value};
@@ -421,6 +420,7 @@ pub fn reply_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn state(patch: Value) -> Value {
         let mut base = json!({"id": 1, "role": "owner", "channel": "vp", "created_at": "2026-10-24T00:00:00Z",
