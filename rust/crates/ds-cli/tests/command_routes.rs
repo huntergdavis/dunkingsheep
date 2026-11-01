@@ -1114,6 +1114,48 @@ fn cli_route_19_task_edit_c() {
 }
 
 #[test]
+fn cli_route_20_task_claim_a() {
+    let heartbeat = run_daemon_cli(
+        &["task", "heartbeat", "t10", "--lease", "90.5"],
+        "task_heartbeat",
+        json!({"id":"t10", "lease_seconds":90.5}),
+        json!({"task_id":"t10", "lease_seconds":90.5}),
+    );
+    assert_eq!(0, heartbeat.status.code().unwrap());
+    assert_eq!(
+        "lease on t10 extended (90s)\n",
+        String::from_utf8(heartbeat.stdout).unwrap()
+    );
+    assert!(heartbeat.stderr.is_empty());
+
+    let released = run_daemon_cli(
+        &["task", "release", "t10"],
+        "task_release",
+        json!({"id":"t10"}),
+        json!({"id":"t10", "priority":"medium", "status":"open", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, released.status.code().unwrap());
+    assert_eq!(
+        "t10 [medium] open  Work\nscope       global\n",
+        String::from_utf8(released.stdout).unwrap()
+    );
+    assert!(released.stderr.is_empty());
+
+    let followed = run_daemon_cli(
+        &["task", "follow", "self"],
+        "task_follow",
+        json!({"scope":"self"}),
+        json!({"scope":"self", "pane_id":"%99", "followers":["%99", "%98"]}),
+    );
+    assert_eq!(0, followed.status.code().unwrap());
+    assert_eq!(
+        "following self as %99 (2 follower(s))\n",
+        String::from_utf8(followed.stdout).unwrap()
+    );
+    assert!(followed.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_16_task_create_read() {
     let added = run_daemon_cli(
         &[
