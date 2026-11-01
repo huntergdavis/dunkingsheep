@@ -5,7 +5,8 @@
 //! marker constants they read.
 //!
 //! Slice 2 adds `box_text`, `_typed_text`, `_is_our_send`, `_prompt_body`, `_is_border_line`.
-//! NOT here yet: `classify_delivery`, `_federated_composer`, the native-footer and styled-boundary
+//! Slice 3 adds `classify_delivery`.
+//! NOT here yet: `_federated_composer`, the native-footer and styled-boundary
 //! readers (`_composer_region_text`, `_styled_composer_boundary`, ...).
 //!
 //! The rule these keep: ONLY THE BOTTOM OF THE SCREEN IS THE LIVE INTERFACE. Scanning the
@@ -600,6 +601,69 @@ pub fn is_our_send(typed: &str, last_sent_text: Option<&str>, awaiting_consumpti
         }
     }
     awaiting_consumption && COLLAPSED_INPUT_MARKERS.iter().any(|m| low.contains(m))
+}
+
+/// `classify_delivery`: why a pane can or cannot receive a message, as `(state, reason)`.
+///
+/// States: `dead`, `blocked`, `working`, `ready`. `blocked` is the one that matters: the pane
+/// is alive and idle but a send would be held, so a dispatcher must count it as unavailable and
+/// say why. Pure, so a canned screen can be asserted without a terminal.
+pub fn classify_delivery(
+    screen: &str,
+    status: Option<&str>,
+    typed: Option<&str>,
+    our_text: Option<&str>,
+    awaiting_consumption: bool,
+) -> (&'static str, Option<String>) {
+    if let Some(marker) = banner_marker(screen, &DEAD_SESSION_MARKERS) {
+        return ("dead", Some(format!("dead session ({marker})")));
+    }
+    if let Some(marker) = status_marker(
+        screen,
+        &PAUSED_GOAL_MARKERS,
+        STATUS_TAIL_LINES,
+        false,
+        false,
+    ) {
+        return (
+            "blocked",
+            Some(format!(
+                "paused goal ({marker}) - it will not act on a message"
+            )),
+        );
+    }
+    if let Some(marker) = status_marker(
+        screen,
+        &CONTEXT_FULL_MARKERS,
+        STATUS_TAIL_LINES,
+        true,
+        false,
+    ) {
+        return (
+            "blocked",
+            Some(format!("context full ({marker}) - needs a /clear first")),
+        );
+    }
+    if let Some(progress) = status_marker(screen, &WORKING_MARKERS, STATUS_TAIL_LINES, true, false)
+    {
+        // The pane is mid-work: it offers an interrupt, so something is running.
+        return ("working", Some(format!("mid-work ({progress})")));
+    }
+    if typed.is_some_and(|t| !t.is_empty())
+        && !is_our_send(typed.unwrap_or(""), our_text, awaiting_consumption)
+    {
+        // OWNER POLICY (2026-10-24): 'a human is typing' is not a real state on this path.
+        // Text we did not type is PRESERVED at send time, never a reason to refuse delivery.
+        return ("ready", None);
+    }
+    let status_text = status.unwrap_or("").to_lowercase();
+    if matches!(
+        status_text.as_str(),
+        "working" | "thinking" | "running" | "busy"
+    ) {
+        return ("working", Some(status_text));
+    }
+    ("ready", None)
 }
 
 #[cfg(test)]
