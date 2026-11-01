@@ -198,7 +198,6 @@ fn python_value_repr(value: &Value) -> String {
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::Number(value) => value.to_string(),
-        Value::String(_) => unreachable!("matched above"),
     }
 }
 
