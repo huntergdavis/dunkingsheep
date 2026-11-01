@@ -922,6 +922,55 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
 }
 
 #[test]
+fn h_lane_unregister_matches_python() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    roles
+        .register("%owner", "owner", None, None, None, None, None, None)
+        .unwrap();
+    roles
+        .register("%target", "worker", None, None, None, None, None, None)
+        .unwrap();
+    flock.attach_roles(roles, None);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lane_unregister();
+    let request = RequestCtx {
+        self_pane_id: Some("%owner".into()),
+        ..RequestCtx::default()
+    };
+    let env = TestEnv::default();
+    let removed = dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        "lane_unregister",
+        args(json!({"pane": "%target"})),
+        &request,
+        &env,
+    )
+    .unwrap();
+
+    assert_eq!(removed["pane_id"], "%target");
+    assert_eq!(removed["removed"]["role"], "worker");
+    assert_eq!(
+        flock.caller_role(Some("%target"), &env).unwrap(),
+        crate::roles::DEFAULT_ROLE
+    );
+}
+
+#[test]
 fn test_desk_args_are_clamped_before_the_argument_checks() {
     let (_dir, flock) = flock();
     let mut d = Dispatcher::new();

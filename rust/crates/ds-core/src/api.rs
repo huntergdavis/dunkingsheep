@@ -225,6 +225,11 @@ impl Dispatcher {
         self.register("help", h_help);
     }
 
+    /// Register only the T39 lane-unregister handler.
+    pub fn register_lane_unregister(&mut self) {
+        self.register("lane_unregister", h_lane_unregister);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -329,6 +334,17 @@ pub fn h_help(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         },
         "commands": commands,
     }))
+}
+
+/// `dunk_api.h_lane_unregister`.
+pub fn h_lane_unregister(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = args
+        .get("pane")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("pane is required".into()))?;
+    context
+        .flock
+        .lane_unregister(pane, context.self_pane_id(), context.env)
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
