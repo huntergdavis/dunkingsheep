@@ -32,6 +32,7 @@ pub mod advance;
 pub mod allocator;
 mod claim;
 pub mod next_job;
+pub mod next_job_runtime;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };
