@@ -65,6 +65,8 @@ pub struct Flock {
     caller: Mutex<CallerState>,
     role_panes: Mutex<panes::RolePaneCache>,
     stores: Mutex<panes::Stores>,
+    /// pane_id -> its turn (`self.turns`, T36).
+    pub(crate) turns: Mutex<commands_turns::Turns>,
 }
 
 impl Flock {
@@ -82,6 +84,7 @@ impl Flock {
             caller: Mutex::new(CallerState::default()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             stores: Mutex::new(panes::Stores::default()),
+            turns: Mutex::new(commands_turns::Turns::new()),
         };
         flock.load_launches();
         flock
@@ -396,11 +399,14 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub mod commands_turns;
 pub mod dunks;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
 
+#[cfg(test)]
+mod commands_turns_tests;
 #[cfg(test)]
 mod mailbox_tests;
 #[cfg(test)]
