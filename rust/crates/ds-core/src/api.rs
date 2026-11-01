@@ -148,6 +148,60 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+fn python_scope_arg(value: Option<&Value>) -> Option<String> {
+    let value = value.filter(|value| truthy(value))?;
+    Some(match value {
+        Value::Null => unreachable!("falsey null is filtered out"),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_value_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{}: {}", py_repr(key), python_value_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn python_value_repr(value: &Value) -> String {
+    match value {
+        Value::String(value) => py_repr(value),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_value_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{}: {}", py_repr(key), python_value_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(value) => value.to_string(),
+        Value::String(_) => unreachable!("matched above"),
+    }
+}
+
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
 pub fn clamp_desk_args(command: &str, args: &Args) -> Args {
     let mut args = args.clone();
@@ -193,6 +247,13 @@ impl Dispatcher {
     /// Register the handler for a registry command (later slices call this).
     pub fn register(&mut self, name: &'static str, handler: Handler) {
         self.handlers.insert(name, handler);
+    }
+
+    /// Register only the T39 task-following API leaf.
+    pub fn register_task_follow_unfollow_followers(&mut self) {
+        self.register("task_follow", h_task_follow);
+        self.register("task_unfollow", h_task_unfollow);
+        self.register("task_followers", h_task_followers);
     }
 
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
@@ -263,6 +324,43 @@ impl Dispatcher {
             result
         })
     }
+}
+
+/// `dunk_api.h_task_follow`.
+pub fn h_task_follow(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let scope = python_scope_arg(args.get("scope"));
+    let (scope, followers) = context
+        .flock
+        .task_follow(scope.as_deref(), context.self_pane_id())?;
+    Ok(json!({
+        "pane_id": context.self_pane_id(),
+        "scope": scope,
+        "following": true,
+        "followers": followers,
+    }))
+}
+
+/// `dunk_api.h_task_unfollow`.
+pub fn h_task_unfollow(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let (was_following, followers) = context.flock.task_unfollow(context.self_pane_id())?;
+    Ok(json!({
+        "pane_id": context.self_pane_id(),
+        "following": false,
+        "was_following": was_following,
+        "followers": followers,
+    }))
+}
+
+/// `dunk_api.h_task_followers`.
+pub fn h_task_followers(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let mut followers = context.flock.task_followers();
+    followers.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(json!({
+        "followers": followers
+            .into_iter()
+            .map(|(pane_id, scope)| json!({"pane_id": pane_id, "scope": scope}))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// The named refusal for a registered command with no Rust handler yet.
