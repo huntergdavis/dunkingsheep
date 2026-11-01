@@ -279,6 +279,7 @@ fn github_protect_uses_fixture_app_and_fake_gh() {
     ])
     .unwrap();
     let dry = run(&dry_ns);
+    let dry_invoked_gh = args_capture.exists();
     let apply_ns = try_parse([
         "dunkingsheep",
         "github",
@@ -309,7 +310,7 @@ fn github_protect_uses_fixture_app_and_fake_gh() {
     }
 
     assert_eq!(0, dry.code, "{}", dry.stderr);
-    assert!(!args_capture.exists(), "dry-run invoked gh");
+    assert!(!dry_invoked_gh, "dry-run invoked gh");
     let payload: Value = serde_json::from_str(&dry.stdout).expect("dry-run JSON payload");
     assert_eq!(
         serde_json::json!([{"context": "dunkingsheep/review", "app_id": 5531872}]),
