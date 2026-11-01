@@ -62,9 +62,10 @@ impl Flock {
 
     /// `set_service_token`.
     pub fn set_service_token(&self, token: Option<&str>) {
-        let mut state = self.caller.lock().expect("caller lock");
-        state.service_token = non_empty(token).map(String::from);
-        state.role = None;
+        self.with_caller(|state| {
+            state.service_token = non_empty(token).map(String::from);
+            state.role = None;
+        });
     }
 
     /// `caller_role`: the token first, then the registry (with the live pane record for a
@@ -77,21 +78,16 @@ impl Flock {
         env: &dyn PaneInfoEnv,
     ) -> Result<String, DunkError> {
         let pane = non_empty(self_pane_id);
-        {
-            let state = self.caller.lock().expect("caller lock");
+        let cached = self.with_caller(|state| {
             let in_request = state.socket_peer_ok.is_some();
-            if in_request && state.role_pane.as_deref() == self_pane_id {
-                if let Some(cached) = &state.role {
-                    return Ok(cached.clone());
-                }
-            }
+            (in_request && state.role_pane.as_deref() == self_pane_id)
+                .then(|| state.role.clone())
+                .flatten()
+        });
+        if let Some(cached) = cached {
+            return Ok(cached);
         }
-        let token = self
-            .caller
-            .lock()
-            .expect("caller lock")
-            .service_token
-            .clone();
+        let token = self.with_caller(|state| state.service_token.clone());
         let mut role: Option<String> = None;
         if let Some(token) = non_empty(token.as_deref()) {
             role = self.with_roles(|roles, _| roles.token_role(token))?;
@@ -128,9 +124,10 @@ impl Flock {
             });
         }
         let role = role.expect("set above");
-        let mut state = self.caller.lock().expect("caller lock");
-        state.role = Some(role.clone());
-        state.role_pane = self_pane_id.map(String::from);
+        self.with_caller(|state| {
+            state.role = Some(role.clone());
+            state.role_pane = self_pane_id.map(String::from);
+        });
         Ok(role)
     }
 
@@ -184,14 +181,20 @@ impl Flock {
         for key in ["pid", "start", "name", "source"] {
             shown.insert(key.into(), caller.get(key).cloned().unwrap_or(Value::Null));
         }
-        let state = self.caller.lock().expect("caller lock");
+        let (via_token, bound, binding_note) = self.with_caller(|state| {
+            (
+                state.service_token.is_some(),
+                state.identity_bound,
+                state.identity_note.clone(),
+            )
+        });
         Ok(json!({
             "pane_id": self_pane_id, "role": role,
             "registered": entry,
-            "via_token": state.service_token.is_some(),
+            "via_token": via_token,
             "caller": shown,
-            "bound": state.identity_bound,
-            "binding_note": state.identity_note,
+            "bound": bound,
+            "binding_note": binding_note,
         }))
     }
 
@@ -275,7 +278,7 @@ impl Flock {
             )
         })?;
         self.forget_role_pane(&target);
-        self.caller.lock().expect("caller lock").role = None;
+        self.with_caller(|state| state.role = None);
         Ok(Value::Object(entry))
     }
 

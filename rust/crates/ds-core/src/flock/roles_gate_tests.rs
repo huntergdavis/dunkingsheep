@@ -276,3 +276,120 @@ fn an_unattached_registry_is_a_named_refusal() {
         "{refused}"
     );
 }
+
+// -- t1347 / t1354: the caller state is PER REQUEST (the Python's threading.local) ----------
+
+#[test]
+fn one_requests_service_token_is_never_seen_by_another_request() {
+    // Request A holds an owner token; request B is an anonymous pane-less caller on the SAME
+    // flock. B must be anonymous. With one shared CallerState B inherited A's token and role.
+    use std::sync::{Arc, Barrier};
+
+    let flock = Arc::new(staffed("isolation"));
+    flock.clear_caller();
+    let owner_token = flock
+        .token_issue("owner", Some("a"), Some(OWNER), &NoPanes)
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    flock.clear_caller();
+    let (a_has_token, b_looked) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+
+    let a = {
+        let (flock, a_has_token, b_looked) = (flock.clone(), a_has_token.clone(), b_looked.clone());
+        std::thread::spawn(move || {
+            flock.set_service_token(Some(&owner_token));
+            assert_eq!(
+                flock.caller_role(None, &NoPanes).unwrap(),
+                "owner",
+                "A is the owner"
+            );
+            a_has_token.wait(); // A is mid-request, token set
+            b_looked.wait(); // B has looked
+            assert_eq!(
+                flock.caller_role(None, &NoPanes).unwrap(),
+                "owner",
+                "A keeps its own role"
+            );
+            assert_eq!(flock.whoami(None, &NoPanes).unwrap()["via_token"], true);
+            flock.clear_caller();
+        })
+    };
+    let b = {
+        let (flock, a_has_token, b_looked) = (flock.clone(), a_has_token.clone(), b_looked.clone());
+        std::thread::spawn(move || {
+            a_has_token.wait();
+            let role = flock.caller_role(None, &NoPanes).unwrap();
+            let via_token = flock.whoami(None, &NoPanes).unwrap()["via_token"].clone();
+            let plain = flock.caller_role(Some(OTHER), &NoPanes).unwrap();
+            b_looked.wait();
+            (role, via_token, plain)
+        })
+    };
+    a.join().expect("request A");
+    let (role, via_token, plain) = b.join().expect("request B");
+    assert_eq!(role, "anonymous", "B must not inherit A's owner token");
+    assert_eq!(via_token, false);
+    assert_eq!(
+        plain, "anonymous",
+        "a pane with no registration is anonymous, not A's owner"
+    );
+}
+
+#[test]
+fn one_requests_socket_peer_verdict_and_cached_role_do_not_leak() {
+    use std::sync::{Arc, Barrier};
+
+    let flock = Arc::new(staffed("peer"));
+    let (a_set, b_looked) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    let a = {
+        let (flock, a_set, b_looked) = (flock.clone(), a_set.clone(), b_looked.clone());
+        std::thread::spawn(move || {
+            flock.set_socket_peer(Some(false)); // A's peer failed verification
+            assert_eq!(flock.caller_role(Some(OWNER), &NoPanes).unwrap(), "owner"); // cached for A
+            a_set.wait();
+            b_looked.wait();
+            assert_eq!(
+                flock.socket_peer_ok(),
+                Some(false),
+                "A keeps its own verdict"
+            );
+            flock.clear_socket_peer();
+        })
+    };
+    let b = {
+        let (flock, a_set, b_looked) = (flock.clone(), a_set.clone(), b_looked.clone());
+        std::thread::spawn(move || {
+            a_set.wait();
+            let peer = flock.socket_peer_ok();
+            // B is also "in a request" (peer verified) and asks about the SAME pane id.
+            flock.set_socket_peer(Some(true));
+            let role = flock.caller_role(Some(OTHER), &NoPanes).unwrap();
+            b_looked.wait();
+            (peer, role)
+        })
+    };
+    a.join().expect("request A");
+    let (peer, role) = b.join().expect("request B");
+    assert_eq!(peer, None, "B must not see A's failed-peer verdict");
+    assert_eq!(role, "anonymous");
+}
+
+#[test]
+fn clear_caller_on_one_thread_leaves_another_threads_state_alone() {
+    use std::sync::Arc;
+    let flock = Arc::new(staffed("clear"));
+    flock.set_service_token(Some("mine"));
+    let other = {
+        let flock = flock.clone();
+        std::thread::spawn(move || {
+            flock.set_service_token(Some("theirs"));
+            flock.clear_caller();
+            flock.caller_state().service_token
+        })
+    };
+    assert_eq!(other.join().unwrap(), None);
+    assert_eq!(flock.caller_state().service_token.as_deref(), Some("mine"));
+    flock.clear_caller();
+}
