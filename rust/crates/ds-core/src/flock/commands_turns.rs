@@ -201,7 +201,10 @@ impl Flock {
             .ok_or_else(|| DunkError::Refused("turn end requires a pane".into()))?;
         let now = crate::clock::now_s();
         let state = {
-            let mut turns = self.turn_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut turns = self
+                .turn_states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let invalid: Option<&str> = match turns.get(pane_id) {
                 None => Some("no_active_turn"),
                 Some(state) if state.ended_at.is_some() => Some("already_ended"),
