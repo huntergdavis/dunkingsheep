@@ -301,6 +301,52 @@ impl Flock {
         Ok((explicit, rows))
     }
 
+    /// `task_stats`: counts by status for the visible scopes (or the explicit one).
+    pub async fn task_stats(
+        &self,
+        scope: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<serde_json::Value, DunkError> {
+        let tasks = self.task_store()?;
+        let explicit = match scope.map(str::trim) {
+            None | Some("") | Some("all") => None,
+            Some(_) => Some(Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?),
+        };
+        tasks.stats(explicit.as_deref(), self_pane_id).await
+    }
+
+    /// `task_heartbeat`: extend the caller's lease. `caller` is `current_caller()` (pid, start,
+    /// name), which the per-request caller context supplies (t1347), so it is a parameter.
+    /// Returns `(expires_at, lease_seconds)`.
+    pub async fn task_heartbeat(
+        &self,
+        task_id: &str,
+        lease_seconds: Option<f64>,
+        caller: Option<(i64, Option<String>, Option<String>)>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(f64, f64), DunkError> {
+        let pane = self_pane_id.filter(|p| !p.is_empty()).ok_or_else(|| {
+            DunkError::Refused("task heartbeat requires a known caller pane".into())
+        })?;
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await?;
+        tasks.heartbeat(task_id, pane, lease_seconds, caller).await
+    }
+
+    /// `task_release`: give the caller's claim back.
+    pub async fn task_release(
+        &self,
+        task_id: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<Task, DunkError> {
+        let pane = self_pane_id.filter(|p| !p.is_empty()).ok_or_else(|| {
+            DunkError::Refused("task release requires a known caller pane".into())
+        })?;
+        let tasks = self.task_store()?;
+        self.visible_task(&tasks, task_id, self_pane_id).await?;
+        tasks.release(task_id, pane).await
+    }
+
     /// `task_read`: the task, if the caller may see it.
     pub async fn task_read(
         &self,
@@ -452,6 +498,72 @@ mod commands_tasks_tests;
 mod list_tests {
     use super::*;
     use crate::flock::panes::Stores;
+
+    async fn flock_with(tag: &str) -> (Flock, Arc<Tasks>) {
+        let dir = std::env::temp_dir().join(format!("ds-ct-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tasks.db");
+        let _ = std::fs::remove_file(&path);
+        let tasks = Arc::new(Tasks::open(&path).await.unwrap());
+        let flock = Flock::new(dir.join("l.json"), dir.join("n.json"), false);
+        flock.attach_stores(Stores {
+            tasks: Some(tasks.clone()),
+            ..Default::default()
+        });
+        (flock, tasks)
+    }
+
+    #[tokio::test]
+    async fn task_stats_counts_by_status_for_visible_scopes() {
+        let (flock, tasks) = flock_with("stats").await;
+        let a = tasks.add("global", "a", "").await.unwrap();
+        tasks.add("global", "b", "").await.unwrap();
+        tasks.add("w1:p1", "c", "").await.unwrap();
+        tasks.add("w2:p2", "hidden", "").await.unwrap();
+        tasks.complete(&a.id).await.unwrap();
+        let got = flock.task_stats(None, Some("w1:p1")).await.unwrap();
+        assert_eq!(serde_json::json!(["global", "w1:p1"]), got["scopes"]);
+        assert_eq!(serde_json::json!(1), got["by_scope"]["global"]["done"]);
+        assert_eq!(serde_json::json!(1), got["by_scope"]["global"]["open"]);
+        assert_eq!(serde_json::json!(2), got["totals"]["open"]);
+        assert_eq!(serde_json::json!(0), got["totals"]["blocked"]);
+        assert!(got["by_scope"].get("w2:p2").is_none());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_and_release_need_a_pane_and_a_lease() {
+        let (flock, tasks) = flock_with("lease").await;
+        let t = tasks.add("global", "t", "").await.unwrap();
+        let err = flock
+            .task_heartbeat(&t.id, None, None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a known caller pane"), "{err}");
+        let err = flock
+            .task_release(&t.id, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires a known caller pane"), "{err}");
+        let err = flock
+            .task_heartbeat(&t.id, None, None, Some("w1:p1"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no active lease for w1:p1"), "{err}");
+        tasks
+            .claim_next("global", "w1:p1", Default::default())
+            .await
+            .unwrap();
+        let (_, lease) = flock
+            .task_heartbeat(&t.id, Some(60.0), None, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(60.0, lease);
+        let released = flock.task_release(&t.id, Some("w1:p1")).await.unwrap();
+        assert_eq!("open", released.status);
+    }
 
     #[tokio::test]
     async fn task_list_reports_visible_or_the_explicit_scope_and_enforces_privacy() {

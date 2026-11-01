@@ -1102,24 +1102,7 @@ impl Tasks {
         kind: Option<&str>,
         needs_owner: bool,
     ) -> Result<Vec<Decorated>, DunkError> {
-        let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
-        let scopes: Vec<String> = match scope.map(str::trim) {
-            None | Some("") | Some("all") => {
-                let mut v = vec!["global".to_string()];
-                v.extend(pane.map(String::from));
-                v
-            }
-            Some("self") => match pane {
-                Some(p) => vec!["global".into(), p.into()],
-                None => {
-                    return Err(DunkError::Refused(
-                        "scope 'self' requires a known pane id".into(),
-                    ))
-                }
-            },
-            Some("global") => vec!["global".into()],
-            Some(other) => vec!["global".into(), validate_scope(other)?],
-        };
+        let scopes = visible_scopes(scope, pane_id)?;
         let status = match status.filter(|s| !s.is_empty()) {
             Some(s) => Some(validate_status(s)?),
             None => None,
@@ -1171,6 +1154,44 @@ impl Tasks {
                 Ok(out)
             })
             .await
+    }
+
+    /// `Tasks.stats`: counts by status, per visible scope and in total.
+    pub async fn stats(
+        &self,
+        scope: Option<&str>,
+        pane_id: Option<&str>,
+    ) -> Result<serde_json::Value, DunkError> {
+        let scopes = visible_scopes(scope, pane_id)?;
+        let wanted = scopes.clone();
+        let rows: Vec<(String, String, i64)> = self
+            .writer
+            .call(move |conn| {
+                let marks = vec!["?"; wanted.len()].join(",");
+                let sql = format!(
+                    "SELECT scope, status, COUNT(*) FROM tasks WHERE scope IN ({marks}) GROUP BY scope, status"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(wanted.iter()), |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+            })
+            .await?;
+        let zero = || -> serde_json::Map<String, serde_json::Value> {
+            STATUSES.iter().map(|s| (s.to_string(), json!(0))).collect()
+        };
+        let mut by_scope: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut totals = zero();
+        for (scope, status, n) in rows {
+            let bucket = by_scope.entry(scope).or_insert_with(|| json!(zero()));
+            bucket[&status] = json!(n);
+            let total = totals.get(&status).and_then(|v| v.as_i64()).unwrap_or(0);
+            totals.insert(status, json!(total + n));
+        }
+        Ok(json!({"scopes": scopes, "by_scope": by_scope, "totals": totals}))
     }
 
     /// Record a review verdict (`dunk_tasks.set_verdict`, t662).
@@ -1638,6 +1659,29 @@ pub struct Decorated {
     pub deps: DependencyState,
     pub claimable: bool,
     pub eligible: bool,
+}
+
+/// `_visible_scopes`: which scopes a caller may see. Global is visible to everyone; a pane
+/// sees its own queue; naming a pane sees global plus that pane; `global` sees only global.
+fn visible_scopes(scope: Option<&str>, pane_id: Option<&str>) -> Result<Vec<String>, DunkError> {
+    let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
+    Ok(match scope.map(str::trim) {
+        None | Some("") | Some("all") => {
+            let mut v = vec!["global".to_string()];
+            v.extend(pane.map(String::from));
+            v
+        }
+        Some("self") => match pane {
+            Some(p) => vec!["global".into(), p.into()],
+            None => {
+                return Err(DunkError::Refused(
+                    "scope 'self' requires a known pane id".into(),
+                ))
+            }
+        },
+        Some("global") => vec!["global".into()],
+        Some(other) => vec!["global".into(), validate_scope(other)?],
+    })
 }
 
 /// `json.dumps(list)`: `", "` between items, as the Python writes assignees and depends_on.
