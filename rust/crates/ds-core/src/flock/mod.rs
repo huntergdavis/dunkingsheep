@@ -450,9 +450,9 @@ pub mod views;
 #[cfg(test)]
 mod commands_inbox_tests;
 #[cfg(test)]
-mod commands_turns_tests;
-#[cfg(test)]
 mod commands_owner_views_tests;
+#[cfg(test)]
+mod commands_turns_tests;
 #[cfg(test)]
 mod dunks_tests;
 #[cfg(test)]
