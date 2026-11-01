@@ -226,11 +226,11 @@ mod tests {
         let owner_calls = Cell::new(0);
         let vp_calls = Cell::new(0);
         let notify = |pane, generation, signature, now| {
-            let mut owner = |_| {
+            let mut owner = |_: &str| {
                 owner_calls.set(owner_calls.get() + 1);
                 Ok(SinkDelivery::Delivered)
             };
-            let mut vp = |_| {
+            let mut vp = |_: &str| {
                 vp_calls.set(vp_calls.get() + 1);
                 Ok(SinkDelivery::Delivered)
             };
