@@ -2,7 +2,7 @@
 //! the ownership authority; registration and offers are explicit contracts, never inferred
 //! from task prose. This slice: the schema, `tags`, `register`, `status`, `offer`.
 //!
-//! NOT in this slice: `review` (one canonical review per source), `allocate` (the one
+//! Slice 2 adds `review`. NOT yet: `allocate` (the one
 //! transaction that assigns an offered task to an idle registered worker), and the
 //! `Allocator.tick` watchdog pass (needs the Flock: lanes, turns, outbox, inbox, delivery
 //! state, next-job materialisation).
@@ -13,7 +13,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
-use super::next_job::handoffs_in;
+use super::next_job::{handoffs_in, record_in};
 use super::{decorate_conn, Tasks};
 use crate::db;
 use crate::error::DunkError;
@@ -185,6 +185,157 @@ fn offer_in(
     )
 }
 
+fn full_revision(revision: &str) -> bool {
+    (40..=64).contains(&revision.len())
+        && revision.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// `AllocationStore.review` inside the caller's transaction: one canonical review task per
+/// source, an immutable author exclusion, and an idempotent same-revision resubmission. A new
+/// revision reopens the SAME completed review task, but cannot replace a revision that is
+/// being reviewed or is in delivery. Returns the review task's id.
+#[allow(clippy::too_many_arguments)]
+fn review_in(
+    conn: &Connection,
+    source_id: &str,
+    revision: &str,
+    body: &str,
+    pool: &str,
+    requires: &Value,
+    author: &str,
+    now: f64,
+) -> Result<String, DunkError> {
+    let body = format!("Frozen revision: {revision}\nSource task: {source_id}\n\n{body}");
+    let source: (String, String, String, String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT scope, title, priority, assignees, created_by, completed_by FROM tasks WHERE id = ?",
+            params![source_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?
+        .ok_or_else(|| DunkError::Refused(format!("no task with id {source_id:?}")))?;
+    let (scope, title, priority, assignees_raw, created_by, completed_by) = source;
+    let assignees: Vec<String> = serde_json::from_str(&assignees_raw).unwrap_or_default();
+    if scope != "global" || !assignees.iter().any(|a| a == author) {
+        return refuse("only source owner may submit global work for review");
+    }
+    let old: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT task_id, revision, author FROM allocation_reviews WHERE source_id=?",
+            params![source_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?;
+    if let Some((_, _, old_author)) = &old {
+        if old_author != author {
+            return refuse("review author changed; operator reconciliation required");
+        }
+    }
+    if let Some((old_task, old_revision, _)) = &old {
+        if old_revision == revision {
+            return Ok(old_task.clone());
+        }
+    }
+    let task_id = if let Some((old_task, _, _)) = &old {
+        let previous: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?",
+                params![old_task],
+                |r| r.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        if previous != "done" {
+            return refuse("prior review is not finished");
+        }
+        // Completion is durable; retained terminal leases are not active review work and
+        // must not delay a corrected revision for 30 minutes.
+        conn.execute("DELETE FROM task_leases WHERE task_id=?", params![old_task])
+            .map_err(db::map_sqlite)?;
+        conn.execute(
+            "UPDATE tasks SET status='open',body=?,assignees=?,updated_at=?,completed_at=NULL,completed_by=NULL WHERE id=?",
+            params![body, json!([author]).to_string(), now, old_task],
+        )
+        .map_err(db::map_sqlite)?;
+        old_task.clone()
+    } else {
+        let next: i64 = conn
+            .query_row(
+                "INSERT INTO counters (name, value) VALUES ('task', 1) ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db::map_sqlite)?;
+        let id = format!("t{next}");
+        conn.execute(
+            "INSERT INTO tasks (id,scope,title,body,status,priority,parent_id,assignees,created_at,updated_at,created_by) VALUES (?,'global',?,?,'open',?,?,?,?,?,?)",
+            params![id, format!("Review: {title}"), body, priority, source_id, json!([author]).to_string(), now, now, author],
+        )
+        .map_err(db::map_sqlite)?;
+        conn.execute(
+            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to) VALUES (?,?,?,?,?,?,?)",
+            params![id, "created", now, author, "global", priority, "open"],
+        )
+        .map_err(db::map_sqlite)?;
+        id
+    };
+    // Cancel only a terminal review's historical intents before reopening.
+    if old.is_some() {
+        for handoff in handoffs_in(conn, None)? {
+            if handoff.get("task_id").and_then(Value::as_str) == Some(task_id.as_str())
+                && handoff.get("state").and_then(Value::as_str) != Some("cancelled")
+            {
+                let mut details = handoff.clone();
+                details.insert("state".into(), json!("cancelled"));
+                details.insert("reason".into(), json!("review_revision_superseded"));
+                let pane = handoff.get("pane_id").and_then(Value::as_str).unwrap_or("");
+                let from_task = handoff.get("from_task").and_then(Value::as_str);
+                record_in(
+                    conn, &task_id, pane, from_task, None, 0, None, now, &details,
+                )?;
+            }
+        }
+    }
+    let mut excluded: Vec<String> = assignees.clone();
+    excluded.extend(
+        [created_by, completed_by]
+            .into_iter()
+            .flatten()
+            .filter(|p| !p.is_empty()),
+    );
+    let prior: Option<String> = conn
+        .query_row(
+            "SELECT excluded FROM allocation_offers WHERE task_id=?",
+            params![task_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db::map_sqlite)?;
+    if let Some(raw) = prior {
+        excluded.extend(serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default());
+    }
+    excluded.sort();
+    excluded.dedup();
+    offer_in(
+        conn, &task_id, pool, "reviewer", requires, &excluded, author, now,
+    )?;
+    conn.execute(
+        "INSERT INTO allocation_reviews VALUES (?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET revision=excluded.revision",
+        params![source_id, task_id, revision, author],
+    )
+    .map_err(db::map_sqlite)?;
+    record(
+        conn,
+        source_id,
+        "review_submitted",
+        author,
+        &json!({"review_task": task_id, "revision": revision}),
+        now,
+    )?;
+    Ok(task_id)
+}
+
 impl Tasks {
     /// `AllocationStore.__init__`: create the allocation tables (idempotent).
     pub async fn allocation_init(&self) -> Result<(), DunkError> {
@@ -279,6 +430,44 @@ impl Tasks {
             })
             .await?;
         self.get(&wanted).await
+    }
+    /// `AllocationStore.review`: submit a source task's work for canonical review. The
+    /// revision must be a full hash and the body real evidence/acceptance text.
+    pub async fn allocation_review(
+        &self,
+        source_id: &str,
+        revision: &str,
+        body: &str,
+        pool: &str,
+        requires: &Value,
+        author: &str,
+    ) -> Result<super::Task, DunkError> {
+        if !full_revision(revision) || body.trim().is_empty() {
+            return refuse("review requires full revision hash and evidence/acceptance body");
+        }
+        let (source, revision, body, pool, requires, author) = (
+            source_id.to_string(),
+            revision.to_string(),
+            body.to_string(),
+            pool.to_string(),
+            requires.clone(),
+            author.to_string(),
+        );
+        let now = crate::clock::now_s();
+        let task_id = self
+            .writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let id = review_in(
+                    &tx, &source, &revision, &body, &pool, &requires, &author, now,
+                )?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(id)
+            })
+            .await?;
+        self.get(&task_id).await
     }
 }
 
