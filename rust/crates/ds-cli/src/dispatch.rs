@@ -757,6 +757,52 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_inbox_list(result)
                 })
             }
+            "read" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "limit".into(),
+                    ns.get("limit").cloned().unwrap_or(Value::from(10)),
+                );
+                args.insert(
+                    "peek".into(),
+                    Value::Bool(matches!(ns.get("peek"), Some(Value::Bool(true)))),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_read", args, |result| {
+                    crate::render_print::render_inbox_read(result)
+                })
+            }
+            "recover" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_recover", args, |result| {
+                    crate::render_print::render_inbox_recover(result)
+                })
+            }
+            "status" => {
+                let mut args = Map::new();
+                args.insert(
+                    "message_id".into(),
+                    ns.get("message_id").cloned().unwrap_or(Value::Null),
+                );
+                let stamp = |at: f64| {
+                    use chrono::TimeZone;
+                    chrono::Local
+                        .timestamp_opt(at.floor() as i64, 0)
+                        .single()
+                        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default()
+                };
+                crate::daemon_cmd::run_command(ns, "inbox_status", args, |result| {
+                    crate::render_print::render_inbox_status(result, &stamp)
+                })
+            }
             _ => not_ported("inbox"),
         },
         "task" => match text(ns, "task_command").unwrap_or("") {
