@@ -119,6 +119,15 @@ impl Flock {
         info
     }
 
+    /// `self._role_pane_cache.pop(pane_id)`: a registration change must not be served stale.
+    pub(crate) fn forget_role_pane(&self, pane_id: &str) {
+        self.role_panes
+            .lock()
+            .expect("role pane lock")
+            .cache
+            .remove(pane_id);
+    }
+
     /// Attach the opened stores (`Flock.__init__`'s `self.tasks` / `self.inbox`).
     pub fn attach_stores(&self, stores: Stores) {
         *self.stores.lock().expect("stores lock") = stores;
