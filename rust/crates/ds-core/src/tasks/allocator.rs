@@ -2,7 +2,7 @@
 //! the ownership authority; registration and offers are explicit contracts, never inferred
 //! from task prose. This slice: the schema, `tags`, `register`, `status`, `offer`.
 //!
-//! Slice 2 adds `review`. NOT yet: `allocate` (the one
+//! Slice 2 adds `review`, slice 3 `allocate`. NOT yet: (the one
 //! transaction that assigns an offered task to an idle registered worker), and the
 //! `Allocator.tick` watchdog pass (needs the Flock: lanes, turns, outbox, inbox, delivery
 //! state, next-job materialisation).
@@ -14,9 +14,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
 use super::next_job::{handoffs_in, record_in};
-use super::{decorate_conn, Tasks};
+use super::{decorate_conn, default_lease_s, order_key, Tasks};
 use crate::db;
 use crate::error::DunkError;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const ALLOCATION_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS allocation_workers (
@@ -336,6 +337,294 @@ fn review_in(
     Ok(task_id)
 }
 
+/// `"nj-" + uuid.uuid4().hex`: 32 hex characters, unique per call (time, pid, a counter, hashed).
+fn new_message_id() -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seed = format!(
+        "{nanos}:{}:{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("nj-{hex}")
+}
+
+fn json_list(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
+}
+
+struct Worker {
+    pane_id: String,
+    pools: Vec<String>,
+    roles: Vec<String>,
+    skills: Vec<String>,
+}
+
+struct Offer {
+    pool: String,
+    role: String,
+    requires: Vec<String>,
+    excluded: Vec<String>,
+    owners: Vec<String>,
+}
+
+/// `AllocationStore.allocate` inside the caller's IMMEDIATE transaction. `idle` is the fresh,
+/// process-verified idle snapshot (pane -> caller) supplied by the guarded daemon; SQLite
+/// serialises registration, reassignments and claims with this pass. Capacity is one: manual
+/// assigned work and existing intents take precedence. The claim, the delivery intent, the
+/// offer/worker updates and the event are one transaction.
+fn allocate_in(
+    conn: &Connection,
+    idle: &BTreeMap<String, Value>,
+    now: f64,
+) -> Result<Vec<Value>, DunkError> {
+    let workers: Vec<Worker> = {
+        let mut stmt = conn
+            .prepare("SELECT pane_id, pools, roles, skills FROM allocation_workers WHERE enabled=1 ORDER BY last_assigned, pane_id")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Worker {
+                    pane_id: r.get(0)?,
+                    pools: json_list(&r.get::<_, String>(1)?),
+                    roles: json_list(&r.get::<_, String>(2)?),
+                    skills: json_list(&r.get::<_, String>(3)?),
+                })
+            })
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    // Private queues are included for CAPACITY only; they are never offers and their contents
+    // are not exposed by allocation status.
+    let ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM tasks WHERE status NOT IN ('done','cancelled')")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in &ids {
+        tasks.push(decorate_conn(conn, id, None, now)?);
+    }
+    let offers: BTreeMap<String, Offer> = {
+        let mut stmt = conn
+            .prepare("SELECT task_id, pool, role, requires, excluded, owners FROM allocation_offers WHERE state='ready'")
+            .map_err(db::map_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    Offer {
+                        pool: r.get(1)?,
+                        role: r.get(2)?,
+                        requires: json_list(&r.get::<_, String>(3)?),
+                        excluded: json_list(&r.get::<_, String>(4)?),
+                        owners: json_list(&r.get::<_, String>(5)?),
+                    },
+                ))
+            })
+            .map_err(db::map_sqlite)?;
+        rows.collect::<Result<_, _>>().map_err(db::map_sqlite)?
+    };
+    let mut candidates: Vec<usize> = (0..tasks.len())
+        .filter(|i| offers.contains_key(&tasks[*i].task.id))
+        .collect();
+    candidates.sort_by_key(|i| {
+        order_key(
+            &tasks[*i].task.priority,
+            tasks[*i].task.created_at,
+            &tasks[*i].task.id,
+        )
+    });
+    let all_ids: BTreeSet<String> = ids.iter().cloned().collect();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut results = Vec::new();
+    for index in candidates {
+        let offer = &offers[&tasks[index].task.id];
+        let (status, scope, id) = (
+            tasks[index].task.status.clone(),
+            tasks[index].task.scope.clone(),
+            tasks[index].task.id.clone(),
+        );
+        let mut owners_now = tasks[index].assignees.clone();
+        owners_now.sort();
+        if status != "open"
+            || !tasks[index].deps.blocked_by.is_empty()
+            || tasks[index]
+                .task
+                .block_reason
+                .as_deref()
+                .is_some_and(|r| !r.is_empty())
+            || !tasks[index].leases.is_empty()
+            || scope != "global"
+            || owners_now != offer.owners
+        {
+            continue;
+        }
+        for worker in &workers {
+            let pane = &worker.pane_id;
+            if !idle.contains_key(pane) || used.contains(pane) || offer.excluded.contains(pane) {
+                continue;
+            }
+            if !worker.pools.contains(&offer.pool)
+                || !worker.roles.contains(&offer.role)
+                || !offer.requires.iter().all(|r| worker.skills.contains(r))
+            {
+                continue;
+            }
+            let busy: Option<String> = conn
+                .query_row(
+                    "SELECT DISTINCT lease.task_id FROM task_leases AS lease JOIN tasks AS task ON task.id = lease.task_id \
+                     WHERE lease.pane_id = ? AND lease.expires_at > ? AND task.status = 'in_progress' ORDER BY lease.task_id LIMIT 1",
+                    params![pane, now],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(db::map_sqlite)?;
+            if busy.is_some() {
+                continue;
+            }
+            let owned = tasks.iter().any(|x| {
+                x.assignees.contains(pane)
+                    && !x.allocation_waiting
+                    && (x.task.status == "in_progress"
+                        || (x.task.status == "open"
+                            && x.deps.blocked_by.is_empty()
+                            && !x
+                                .task
+                                .block_reason
+                                .as_deref()
+                                .is_some_and(|r| !r.is_empty())))
+            });
+            let intents = handoffs_in(conn, Some(pane))?.into_iter().any(|h| {
+                h.get("task_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| all_ids.contains(t))
+                    && h.get("state")
+                        .and_then(Value::as_str)
+                        .is_none_or(|s| s != "cancelled")
+            });
+            if owned || intents {
+                continue;
+            }
+            // An offered item is released by its current owners for allocation.
+            conn.execute(
+                "UPDATE tasks SET assignees=? WHERE id=?",
+                params![json!([pane]).to_string(), id],
+            )
+            .map_err(db::map_sqlite)?;
+            tasks[index].assignees = vec![pane.clone()];
+            let caller = idle[pane].clone();
+            claim_locked_in(conn, &tasks[index], pane, default_lease_s(), &caller, now)?;
+            let message_id = new_message_id();
+            let mut handoff = Map::new();
+            for (key, value) in [
+                ("from_task", Value::Null),
+                ("completion_at", Value::Null),
+                ("message_id", json!(message_id)),
+                ("attempt", json!(0)),
+                ("reason", Value::Null),
+                ("state", json!("pending")),
+                ("trigger", json!("allocation")),
+                ("caller", caller),
+            ] {
+                handoff.insert(key.into(), value);
+            }
+            record_in(conn, &id, pane, None, None, 0, None, now, &handoff)?;
+            conn.execute(
+                "UPDATE allocation_offers SET state='assigned' WHERE task_id=?",
+                params![id],
+            )
+            .map_err(db::map_sqlite)?;
+            conn.execute(
+                "UPDATE allocation_workers SET last_assigned=? WHERE pane_id=?",
+                params![now, pane],
+            )
+            .map_err(db::map_sqlite)?;
+            record(
+                conn,
+                &id,
+                "allocated",
+                pane,
+                &json!({"pool": offer.pool, "role": offer.role, "previous_owners": offer.owners, "message_id": message_id}),
+                now,
+            )?;
+            let mut result = handoff;
+            result.insert("task_id".into(), json!(id));
+            result.insert("pane_id".into(), json!(pane));
+            results.push(Value::Object(result));
+            used.insert(pane.clone());
+            break;
+        }
+    }
+    Ok(results)
+}
+
+/// `_claim_locked`: the shared atomic lease write (the caller owns the transaction): the lease,
+/// the status, the attempt and the `claimed` event. `caller` carries `pid`, `start`, `name`.
+/// (`claim_next` writes the same three statements inline; this is the same SQL.)
+fn claim_locked_in(
+    conn: &Connection,
+    task: &super::Decorated,
+    pane: &str,
+    lease_s: f64,
+    caller: &Value,
+    now: f64,
+) -> Result<(), DunkError> {
+    let mut assignees = task.assignees.clone();
+    let added = !assignees.iter().any(|a| a == pane);
+    if added {
+        assignees.push(pane.to_string());
+    }
+    let (pid, start, name) = (
+        caller.get("pid").cloned(),
+        caller.get("start").cloned(),
+        caller.get("name").cloned(),
+    );
+    let text = |v: &Option<Value>| {
+        v.as_ref().and_then(|x| {
+            if x.is_null() {
+                None
+            } else {
+                Some(match x {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+            }
+        })
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO task_leases (task_id, pane_id, claimed_at, heartbeat_at, expires_at, caller_pid, caller_start, caller_name, assignee_added) VALUES (?,?,?,?,?,?,?,?,?)",
+        params![task.task.id, pane, now, now, now + lease_s, pid.as_ref().and_then(Value::as_i64), text(&start), text(&name), added as i64],
+    )
+    .map_err(db::map_sqlite)?;
+    conn.execute(
+        "UPDATE tasks SET status = 'in_progress', assignees = ?, attempts = attempts + 1, updated_at = ?, block_reason = NULL WHERE id = ?",
+        params![json!(assignees).to_string(), now, task.task.id],
+    )
+    .map_err(db::map_sqlite)?;
+    conn.execute(
+        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        params![
+            task.task.id, "claimed", now, pane, task.task.scope, task.task.priority, task.task.status, "in_progress",
+            ((now - task.task.created_at) * 1000.0) as i64,
+            json!({"lease_seconds": lease_s, "caller_pid": pid, "caller_name": name}).to_string()
+        ],
+    )
+    .map_err(db::map_sqlite)?;
+    Ok(())
+}
+
 impl Tasks {
     /// `AllocationStore.__init__`: create the allocation tables (idempotent).
     pub async fn allocation_init(&self) -> Result<(), DunkError> {
@@ -468,6 +757,25 @@ impl Tasks {
             })
             .await?;
         self.get(&task_id).await
+    }
+    /// `AllocationStore.allocate`: one pass of registered, deterministic allocation over a fresh
+    /// idle snapshot (pane -> caller `{pid, start, name}`). Returns one handoff per allocation.
+    pub async fn allocation_allocate(
+        &self,
+        idle: &BTreeMap<String, Value>,
+    ) -> Result<Vec<Value>, DunkError> {
+        let idle = idle.clone();
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(db::map_sqlite)?;
+                let results = allocate_in(&tx, &idle, now)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(results)
+            })
+            .await
     }
 }
 

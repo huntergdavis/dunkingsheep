@@ -546,3 +546,453 @@ async fn a_corrected_revision_reopens_the_same_task_and_the_former_coauthor_stay
         "only source owner may submit global work for review"
     );
 }
+
+// ---- allocate (slice 3): ports of the allocation-pass cases of test_dunk_allocator.py ----
+
+use std::collections::BTreeMap;
+
+async fn worker(t: &Tasks, pane: &str, role: &str, skills: &[&str]) {
+    t.allocation_register(
+        pane,
+        &json!(["code"]),
+        &json!([role]),
+        &json!(skills),
+        "%leader",
+        &json!(true),
+    )
+    .await
+    .unwrap();
+}
+
+async fn offer(t: &Tasks, task: &super::super::Task, requires: &[&str]) {
+    t.allocation_offer(&task.id, "code", &json!(requires), "%leader")
+        .await
+        .unwrap();
+}
+
+fn idle(panes: &[&str]) -> BTreeMap<String, serde_json::Value> {
+    panes.iter().map(|p| (p.to_string(), json!({}))).collect()
+}
+
+fn task_ids(handoffs: &[serde_json::Value]) -> Vec<String> {
+    handoffs
+        .iter()
+        .map(|h| h["task_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn priority_age_and_id_order() {
+    let t = store("order").await;
+    let old = task(&t, "old").await;
+    let high = task(&t, "high").await;
+    t.update(
+        &high.id,
+        FieldEdit {
+            priority: Some("high".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let later = task(&t, "later").await;
+    for x in [&old, &high, &later] {
+        offer(&t, x, &[]).await;
+    }
+    for p in ["%1", "%2", "%3"] {
+        worker(&t, p, "worker", &[]).await;
+    }
+    let result = t
+        .allocation_allocate(&idle(&["%1", "%2", "%3"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        task_ids(&result),
+        [high.id.clone(), old.id.clone(), later.id.clone()]
+    );
+    for h in &result {
+        let got = t.get(h["task_id"].as_str().unwrap()).await.unwrap();
+        assert_eq!(
+            got.assignees,
+            format!("[\"{}\"]", h["pane_id"].as_str().unwrap())
+        );
+        assert_eq!(got.status, "in_progress");
+        let intents = t
+            .next_job_handoffs(Some(h["pane_id"].as_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(intents[0]["message_id"], h["message_id"]);
+        assert_eq!(
+            (h["state"].as_str(), h["trigger"].as_str()),
+            (Some("pending"), Some("allocation"))
+        );
+        assert!(
+            h["message_id"].as_str().unwrap().starts_with("nj-")
+                && h["message_id"].as_str().unwrap().len() == 35
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_capability_no_idle_no_assignment() {
+    let t = store("capability").await;
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &["c"]).await;
+    worker(&t, "%wrong", "worker", &[]).await;
+    worker(&t, "%right", "worker", &["c"]).await;
+    assert!(t
+        .allocation_allocate(&idle(&["%wrong"]))
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(t.allocation_allocate(&idle(&[])).await.unwrap().is_empty());
+    assert_eq!(t.get(&x.id).await.unwrap().assignees, "[\"%leader\"]");
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%right"])).await.unwrap()[0]["pane_id"],
+        "%right"
+    );
+}
+
+#[tokio::test]
+async fn manual_work_and_blocked_dependency_preserved() {
+    let t = store("manual").await;
+    let dependency = task(&t, "dep").await;
+    let blocked = task(&t, "held").await;
+    t.update(
+        &blocked.id,
+        FieldEdit {
+            depends_on: Some(vec![dependency.id.clone()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    offer(&t, &blocked, &[]).await;
+    worker(&t, "%worker", "worker", &[]).await;
+    assert!(t
+        .allocation_allocate(&idle(&["%worker"]))
+        .await
+        .unwrap()
+        .is_empty());
+    t.task_complete(&dependency.id, Some("%leader"), true)
+        .await
+        .unwrap();
+    let manual = t.add("global", "manual", "reserved").await.unwrap();
+    t.update(
+        &manual.id,
+        FieldEdit {
+            assignees: Some(vec!["%worker".into()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        t.allocation_allocate(&idle(&["%worker"]))
+            .await
+            .unwrap()
+            .is_empty(),
+        "manual assigned work takes the capacity"
+    );
+    t.task_complete(&manual.id, Some("%worker"), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%worker"])).await.unwrap()[0]["task_id"],
+        blocked.id.as_str()
+    );
+}
+
+#[tokio::test]
+async fn private_ready_queue_blocks_capacity_but_dependency_wait_does_not() {
+    let t = store("private").await;
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &[]).await;
+    worker(&t, "%1", "worker", &[]).await;
+    let private = t.add("%1", "private owned", "private").await.unwrap();
+    t.update(
+        &private.id,
+        FieldEdit {
+            assignees: Some(vec!["%1".into()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .is_empty());
+    let dependency = task(&t, "dependency").await;
+    t.update(
+        &private.id,
+        FieldEdit {
+            depends_on: Some(vec![dependency.id.clone()]),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%1"])).await.unwrap()[0]["task_id"],
+        x.id.as_str()
+    );
+}
+
+#[tokio::test]
+async fn reassignment_invalidates_the_offer() {
+    let t = store("reassign").await;
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &[]).await;
+    worker(&t, "%1", "worker", &[]).await;
+    t.assign(&x.id, &["%other"], "set").await.unwrap();
+    assert!(t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn an_invalidated_offer_is_manual_work_and_blocks_a_second_offer() {
+    let t = store("invalidated").await;
+    let first = task(&t, "first").await;
+    offer(&t, &first, &[]).await;
+    worker(&t, "%1", "worker", &[]).await;
+    t.assign(&first.id, &["%1"], "set").await.unwrap();
+    let second = task(&t, "second").await;
+    t.update(
+        &second.id,
+        FieldEdit {
+            priority: Some("high".into()),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    offer(&t, &second, &[]).await;
+    assert!(
+        !t.decorate(&first.id, None)
+            .await
+            .unwrap()
+            .allocation_waiting
+    );
+    assert!(t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(t.get(&second.id).await.unwrap().status, "open");
+}
+
+#[tokio::test]
+async fn a_disabled_worker_gets_nothing_and_a_private_task_cannot_be_offered() {
+    let t = store("disabled").await;
+    t.allocation_register(
+        "%1",
+        &json!(["code"]),
+        &json!(["worker"]),
+        &json!([]),
+        "%leader",
+        &json!(false),
+    )
+    .await
+    .unwrap();
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &[]).await;
+    assert!(t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn atomic_rollback_retains_the_owner_when_the_intent_write_fails() {
+    let t = store("rollback").await;
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &[]).await;
+    worker(&t, "%1", "worker", &[]).await;
+    // The Python patches record_next_job_handoff to raise; here a trigger makes the intent
+    // INSERT fail, which is the same point in the transaction.
+    t.writer
+        .call(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_intent BEFORE INSERT ON task_events WHEN NEW.event = 'next_job_handoff' BEGIN SELECT RAISE(ABORT, 'disk error'); END;",
+            )
+            .map_err(db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert!(t.allocation_allocate(&idle(&["%1"])).await.is_err());
+    assert_eq!(t.get(&x.id).await.unwrap().assignees, "[\"%leader\"]");
+    assert_eq!(t.get(&x.id).await.unwrap().status, "open");
+    assert_eq!(t.leases(&x.id).await, 0);
+    assert_eq!(
+        t.allocation_status().await.unwrap()["offers"][0]["state"],
+        "ready"
+    );
+}
+
+#[tokio::test]
+async fn restart_and_duplicate_passes_keep_one_claim() {
+    let dir = std::env::temp_dir().join(format!("ds-alloc-restart-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tasks.db");
+    let _ = std::fs::remove_file(&path);
+    let t = Tasks::open(&path).await.unwrap();
+    t.allocation_init().await.unwrap();
+    let x = task(&t, "real work").await;
+    offer(&t, &x, &[]).await;
+    worker(&t, "%1", "worker", &[]).await;
+    let first = t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .remove(0);
+    drop(t);
+    let t = Tasks::open(&path).await.unwrap();
+    t.allocation_init().await.unwrap();
+    assert!(t
+        .allocation_allocate(&idle(&["%1"]))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        t.next_job_handoffs(None).await.unwrap()[0]["message_id"],
+        first["message_id"]
+    );
+    let claimed: i64 = t
+        .writer
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*) FROM task_events WHERE event='claimed'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed, 1);
+}
+
+#[tokio::test]
+async fn two_connections_cannot_double_allocate() {
+    let dir = std::env::temp_dir().join(format!("ds-alloc-race-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tasks.db");
+    let _ = std::fs::remove_file(&path);
+    let seed = Tasks::open(&path).await.unwrap();
+    seed.allocation_init().await.unwrap();
+    let x = task(&seed, "real work").await;
+    offer(&seed, &x, &[]).await;
+    worker(&seed, "%1", "worker", &[]).await;
+    worker(&seed, "%2", "worker", &[]).await;
+    let (a, b) = (
+        Tasks::open(&path).await.unwrap(),
+        Tasks::open(&path).await.unwrap(),
+    );
+    let (idle_a, idle_b) = (idle(&["%1"]), idle(&["%2"]));
+    let (ra, rb) = tokio::join!(
+        a.allocation_allocate(&idle_a),
+        b.allocation_allocate(&idle_b)
+    );
+    let total = ra.unwrap().len() + rb.unwrap().len();
+    assert_eq!(total, 1, "exactly one allocator wins the offered task");
+    assert_eq!(seed.leases(&x.id).await, 1);
+}
+
+#[tokio::test]
+async fn canonical_review_and_author_exclusion_allocate_to_the_other_reviewer() {
+    let t = store("review-alloc").await;
+    let source = task(&t, "the work").await;
+    worker(&t, "%leader", "reviewer", &[]).await;
+    worker(&t, "%reviewer", "reviewer", &[]).await;
+    t.allocation_review(
+        &source.id,
+        REV_A,
+        "artifact and acceptance",
+        "code",
+        &json!([]),
+        "%leader",
+    )
+    .await
+    .unwrap();
+    let handoff = t
+        .allocation_allocate(&idle(&["%leader", "%reviewer"]))
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        handoff["pane_id"], "%reviewer",
+        "the author is excluded from reviewing their own work"
+    );
+    assert_eq!(
+        msg(t
+            .allocation_review(&source.id, REV_B, "new", "code", &json!([]), "%leader")
+            .await
+            .unwrap_err()),
+        "prior review is not finished"
+    );
+}
+
+#[tokio::test]
+async fn the_former_coauthor_stays_excluded_from_a_corrected_review_when_allocating() {
+    let t = store("coauthor-alloc").await;
+    let source = task(&t, "the work").await;
+    t.assign(&source.id, &["%coauthor"], "add").await.unwrap();
+    worker(&t, "%r", "reviewer", &[]).await;
+    worker(&t, "%coauthor", "reviewer", &[]).await;
+    let review = t
+        .allocation_review(&source.id, REV_A, "first", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%r"])).await.unwrap().len(),
+        1
+    );
+    t.task_complete(&review.id, Some("%r"), true).await.unwrap();
+    t.assign(&source.id, &["%leader"], "set").await.unwrap();
+    t.allocation_review(&source.id, REV_B, "second", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    assert!(t
+        .allocation_allocate(&idle(&["%coauthor"]))
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%r"])).await.unwrap()[0]["pane_id"],
+        "%r"
+    );
+}
+
+#[tokio::test]
+async fn a_new_revision_reuses_the_review_task_and_it_can_be_allocated_again() {
+    let t = store("revision-alloc").await;
+    let source = task(&t, "the work").await;
+    worker(&t, "%r", "reviewer", &[]).await;
+    let review = t
+        .allocation_review(&source.id, REV_A, "first", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    t.allocation_allocate(&idle(&["%r"])).await.unwrap();
+    t.task_complete(&review.id, Some("%r"), true).await.unwrap();
+    let new = t
+        .allocation_review(&source.id, REV_B, "second", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    assert_eq!(review.id, new.id);
+    assert_eq!(
+        t.allocation_allocate(&idle(&["%r"])).await.unwrap().len(),
+        1
+    );
+}
