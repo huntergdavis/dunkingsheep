@@ -272,3 +272,73 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_15_allocation() {
+    let status = run_daemon_cli(
+        &["allocation", "status"],
+        "allocation",
+        json!({"action": "status"}),
+        json!({"workers": [], "offers": []}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"workers\": [],\n  \"offers\": []\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let registered = run_daemon_cli(
+        &[
+            "--json",
+            "allocation",
+            "register",
+            "--pane-id",
+            "%42",
+            "--pool",
+            "compute",
+            "--pools",
+            "cpu",
+            "--pools",
+            "gpu",
+            "--roles",
+            "worker",
+            "--roles",
+            "reviewer",
+            "--skills",
+            "rust",
+            "--skills",
+            "cli",
+            "--requires",
+            "linux",
+            "--task-id",
+            "t8",
+            "--revision",
+            "main",
+            "--body",
+            "checked body",
+            "--disable",
+        ],
+        "allocation",
+        json!({
+            "action": "register",
+            "pane_id": "%42",
+            "pool": "compute",
+            "pools": ["cpu", "gpu"],
+            "roles": ["worker", "reviewer"],
+            "skills": ["rust", "cli"],
+            "requires": ["linux"],
+            "task_id": "t8",
+            "revision": "main",
+            "body": "checked body",
+            "enabled": false
+        }),
+        json!({"action": "registered", "pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), registered.status.code());
+    assert_eq!(
+        "{\n  \"action\": \"registered\",\n  \"pane_id\": \"%42\"\n}\n",
+        String::from_utf8(registered.stdout).unwrap()
+    );
+    assert!(registered.stderr.is_empty());
+}
