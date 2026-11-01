@@ -272,3 +272,73 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_13_load_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let config = temp.path().join("config");
+    let policy_file = temp.path().join("policies.json");
+    let state_file = temp.path().join("load-state.json");
+    std::fs::write(&policy_file, "not json").unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let result = if request["cmd"] == "status" {
+                json!({})
+            } else {
+                assert_eq!("task_list", request["cmd"]);
+                assert_eq!(json!({"limit": 500}), request["args"]);
+                json!({"tasks": [{"caller_pid": 2147483647_i64,
+                    "caller_start": 10, "caller_name": "fixture"}]})
+            };
+            let response = json!({"ok": true, "result": result});
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+        }
+    });
+
+    let run_load = |json_output: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+        command
+            .args(["--socket", &socket_text, "--self-pane", "%99", "load"])
+            .args(["--policies", policy_file.to_str().unwrap()])
+            .env("HOME", temp.path())
+            .env("DUNKINGSHEEP_DIR", &config)
+            .env("DUNKINGSHEEP_LOAD_STATE", &state_file)
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE");
+        if json_output {
+            command.arg("--json");
+        }
+        command.output().expect("run Rust CLI load")
+    };
+
+    let human = run_load(false);
+    assert_eq!(Some(0), human.status.code());
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(human_stdout.starts_with("window None s | host load1 "));
+    assert!(human_stdout.contains("fixture"));
+    assert!(human_stdout.contains("skipped: process gone\n"));
+    assert!(human.stderr.is_empty());
+
+    let raw = run_load(true);
+    assert_eq!(Some(0), raw.status.code());
+    assert!(raw.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&raw.stdout).unwrap();
+    assert_eq!("fixture", report["skipped"][0]["name"]);
+    assert_eq!("process gone", report["skipped"][0]["reason"]);
+    assert_eq!(json!([]), report["would_kill"]);
+    let state: Value = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    assert!(state.get("at").is_some());
+    assert_eq!(json!({}), state["callers"]);
+    daemon.join().unwrap();
+}

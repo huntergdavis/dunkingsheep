@@ -546,6 +546,74 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn load_report(ns: &Map<String, Value>) -> Outcome {
+    let mut client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let mut args = Map::new();
+    args.insert("limit".into(), Value::from(500));
+    let result = match crate::daemon_cmd::call(&mut client, "task_list", args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+    let tasks = result
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let callers = ds_core::load::registered_callers(tasks);
+    let policies_path = text(ns, "policies").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(".config/dunkingsheep/load-policies.json")
+    });
+    let policies = std::fs::read(&policies_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| {
+            let agents = value
+                .get("agents")
+                .filter(|v| v.as_object().is_some_and(|object| !object.is_empty()));
+            agents.or(Some(&value)).and_then(Value::as_object).cloned()
+        });
+    let env = ds_core::config::Env::from_process();
+    let state_path = match ds_core::load::default_state_path(&env) {
+        Ok(path) => path,
+        Err(error) => return load_failure(error.to_string(), 3),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64());
+    let evaluate = |sample: &Map<String, Value>, policy: &Map<String, Value>| {
+        ds_core::policy::evaluate(sample, policy).map_err(|error| error.to_string())
+    };
+    let report =
+        match ds_core::load::collect(&callers, now, policies.as_ref(), &evaluate, &state_path) {
+            Ok(report) => report,
+            Err(error) => return load_failure(error.to_string(), error.exit_code().max(2)),
+        };
+    if matches!(ns.get("json"), Some(Value::Bool(true))) {
+        Outcome {
+            stdout: format!("{}\n", crate::usage_cmd::ordered_json(&report)),
+            stderr: String::new(),
+            code: 0,
+        }
+    } else {
+        Outcome {
+            stdout: crate::render_print::render_load(&report),
+            stderr: String::new(),
+            code: 0,
+        }
+    }
+}
+
+fn load_failure(message: String, code: i32) -> Outcome {
+    Outcome {
+        stdout: String::new(),
+        stderr: format!("error: {message}\n"),
+        code,
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -570,6 +638,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "load" => load_report(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
