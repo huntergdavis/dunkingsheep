@@ -405,9 +405,12 @@ impl Tasks {
                 // the guard must be the WHERE clause, not a read-then-write check - the
                 // Python's update() refuses with this sentence and backs it with
                 // `WHERE id = ? AND status = ?` so a concurrent cancel still wins.
-                let current: String = conn
-                    .query_row("SELECT status FROM tasks WHERE id = ?", params![id],
-                               |row| row.get(0))
+                let (current, scope, priority): (String, String, String) = conn
+                    .query_row(
+                        "SELECT status, scope, priority FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
                     .optional()
                     .map_err(db::map_sqlite)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
@@ -466,9 +469,9 @@ impl Tasks {
                     None
                 };
                 conn.execute(
-                    "INSERT INTO task_events (task_id, event, at, actor, status_from, \
-                     status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?)",
-                    params![id, event, now, actor, current, status, duration_ms,
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
+                     status_from, status_to, duration_ms, meta) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    params![id, event, now, actor, scope, priority, current, status, duration_ms,
                             reason.clone().map(|r| json!({"reason": r}).to_string())],
                 )
                 .map_err(db::map_sqlite)?;
@@ -2979,6 +2982,69 @@ mod tests {
             .await
             .unwrap();
         assert!(cancelled_at.is_some(), "cancelled_at is written");
+    }
+
+    #[tokio::test]
+    async fn set_status_event_preserves_task_scope_and_priority() {
+        let tasks = store("set-status-event-context").await;
+        let task = tasks
+            .add_with(
+                "%9",
+                "pane task",
+                "",
+                AddOptions {
+                    priority: Some("urgent".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        tasks
+            .set_status(&task.id, "in_progress", None, Some("%4"))
+            .await
+            .unwrap();
+        let event: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = tasks
+            .writer
+            .call({
+                let id = task.id.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT actor, scope, priority, status_from, status_to \
+                             FROM task_events WHERE task_id = ? AND event = 'status'",
+                        params![id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .map_err(db::map_sqlite)
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (
+                Some("%4".into()),
+                Some("%9".into()),
+                Some("urgent".into()),
+                Some("open".into()),
+                Some("in_progress".into()),
+            ),
+            event
+        );
     }
 
     /// t1018 finding 3: a multi-line reason is VALID json (the normal shape of an
