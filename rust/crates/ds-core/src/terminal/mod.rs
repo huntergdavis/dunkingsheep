@@ -290,7 +290,9 @@ pub trait Terminal: std::fmt::Debug {
 
 #[cfg(test)]
 mod tests {
-    use super::{fakes::FakeTerminal, Pane, Terminal, TerminalError};
+    use super::{
+        fakes::FakeTerminal, AgentSpec, Pane, Resize, Tab, Terminal, TerminalError, Workspace,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -304,11 +306,132 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FakeGroupedPaneAdapter(Result<BTreeMap<String, Vec<Pane>>, TerminalError>);
+    struct FakeGroupedPaneAdapter {
+        inner: FakeTerminal,
+        grouped_result: Result<BTreeMap<String, Vec<Pane>>, TerminalError>,
+    }
 
-    impl FakeGroupedPaneAdapter {
+    impl Terminal for FakeGroupedPaneAdapter {
+        fn version(&self) -> String {
+            self.inner.version()
+        }
+
+        fn is_available(&self) -> bool {
+            self.inner.is_available()
+        }
+
+        fn server_error_hint(&self) -> String {
+            self.inner.server_error_hint()
+        }
+
+        fn list_panes(&self) -> Vec<Pane> {
+            self.inner.list_panes()
+        }
+
+        fn get_pane(&self, pane_id: &str) -> Option<Pane> {
+            self.inner.get_pane(pane_id)
+        }
+
+        fn list_tabs(&self) -> Vec<Tab> {
+            self.inner.list_tabs()
+        }
+
+        fn list_workspaces(&self) -> Vec<Workspace> {
+            self.inner.list_workspaces()
+        }
+
+        fn list_panes_grouped(&self) -> BTreeMap<String, Vec<Pane>> {
+            self.inner.list_panes_grouped()
+        }
+
         fn try_list_panes_grouped(&self) -> Result<BTreeMap<String, Vec<Pane>>, TerminalError> {
-            self.0.clone()
+            self.grouped_result.clone()
+        }
+
+        fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError> {
+            self.inner.agent_child_pids(pane_pid)
+        }
+
+        fn create_workspace(
+            &mut self,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Workspace, TerminalError> {
+            self.inner.create_workspace(label, cwd, focus)
+        }
+
+        fn create_tab(
+            &mut self,
+            workspace_id: Option<&str>,
+            label: Option<&str>,
+            cwd: Option<&str>,
+            focus: bool,
+        ) -> Result<Tab, TerminalError> {
+            self.inner.create_tab(workspace_id, label, cwd, focus)
+        }
+
+        fn split_pane(
+            &mut self,
+            pane_id: &str,
+            direction: &str,
+            cwd: Option<&str>,
+        ) -> Result<Pane, TerminalError> {
+            self.inner.split_pane(pane_id, direction, cwd)
+        }
+
+        fn start_agent(&mut self, spec: &AgentSpec) -> Result<Pane, TerminalError> {
+            self.inner.start_agent(spec)
+        }
+
+        fn rename(
+            &mut self,
+            kind: &str,
+            target_id: &str,
+            label: &str,
+        ) -> Result<(), TerminalError> {
+            self.inner.rename(kind, target_id, label)
+        }
+
+        fn close(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.inner.close(kind, target_id)
+        }
+
+        fn focus(&mut self, kind: &str, target_id: &str) -> Result<(), TerminalError> {
+            self.inner.focus(kind, target_id)
+        }
+
+        fn run_command(&mut self, pane_id: &str, command: &str) -> Result<(), TerminalError> {
+            self.inner.run_command(pane_id, command)
+        }
+
+        fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.inner.send_text(pane_id, text)
+        }
+
+        fn send_text_and_enter(&mut self, pane_id: &str, text: &str) -> Result<(), TerminalError> {
+            self.inner.send_text_and_enter(pane_id, text)
+        }
+
+        fn send_keys(&mut self, pane_id: &str, keys: &[&str]) -> Result<(), TerminalError> {
+            self.inner.send_keys(pane_id, keys)
+        }
+
+        fn read_pane(
+            &self,
+            pane_id: &str,
+            lines: i64,
+            ansi: bool,
+        ) -> Result<Option<String>, TerminalError> {
+            self.inner.read_pane(pane_id, lines, ansi)
+        }
+
+        fn agent_status(&self, pane_id: &str) -> Option<String> {
+            self.inner.agent_status(pane_id)
+        }
+
+        fn resize(&mut self, pane_id: &str, cols: i64, rows: i64) -> Result<Resize, TerminalError> {
+            self.inner.resize(pane_id, cols, rows)
         }
     }
 
@@ -320,11 +443,20 @@ mod tests {
             ..Pane::default()
         };
         let panes = BTreeMap::from([("w3".to_string(), vec![pane])]);
-        let adapter = FakeGroupedPaneAdapter(Ok(panes.clone()));
-        assert_eq!(Ok(panes.clone()), adapter.try_list_panes_grouped());
+        let adapter = FakeGroupedPaneAdapter {
+            inner: FakeTerminal::new(),
+            grouped_result: Ok(panes.clone()),
+        };
+        assert_eq!(
+            Ok(panes.clone()),
+            Terminal::try_list_panes_grouped(&adapter)
+        );
 
-        let adapter = FakeGroupedPaneAdapter(Err(TerminalError::unavailable("offline")));
-        let error = adapter.try_list_panes_grouped().unwrap_err();
+        let adapter = FakeGroupedPaneAdapter {
+            inner: FakeTerminal::new(),
+            grouped_result: Err(TerminalError::unavailable("offline")),
+        };
+        let error = Terminal::try_list_panes_grouped(&adapter).unwrap_err();
         assert_eq!("offline", error.message);
         assert!(error.backend_unavailable);
     }
