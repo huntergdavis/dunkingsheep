@@ -382,7 +382,7 @@ async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults()
 // -- task_add ------------------------------------------------------------------------
 
 #[tokio::test]
-async fn task_add_defaults_to_global_medium_open_and_unowned() {
+async fn task_add_defaults_to_global_low_open_and_unowned() {
     let (flock, _tasks) = flock_with_store("add-default").await;
     let t = flock
         .task_add(
@@ -396,7 +396,7 @@ async fn task_add_defaults_to_global_medium_open_and_unowned() {
         .await
         .unwrap();
     assert_eq!(
-        ("global", "medium", "open"),
+        ("global", "low", "open"),
         (t.scope.as_str(), t.priority.as_str(), t.status.as_str())
     );
     assert_eq!(
@@ -623,5 +623,96 @@ fn check_task_add_returns_the_resolved_owners_for_the_store_write() {
     assert_eq!(
         owners(&[WORKER]),
         Flock::check_task_add("global", &["me"], "worker", None, None, Some(WORKER)).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
+    let (flock, tasks) = flock_with_store("add-review").await;
+    let args = TaskAddArgs {
+        kind: Some("review"),
+        author: Some("w7:p7"),
+        repo: Some("o/r"),
+        pr: Some("5"),
+        head: Some("abcdef1234567890"),
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("review it", None, None, args, "system", None)
+        .await
+        .unwrap();
+    assert_eq!("review", t.kind);
+    let again = flock
+        .task_add("again", None, None, args, "system", None)
+        .await;
+    let err = again.unwrap_err().to_string();
+    assert!(
+        err.contains("a live review task for o/r#5@abcdef123456 already exists"),
+        "{err}"
+    );
+    assert!(err.contains(&format!("({})", t.id)), "{err}");
+    let bare = TaskAddArgs {
+        kind: Some("review"),
+        ..Default::default()
+    };
+    let err = flock
+        .task_add("x", None, None, bare, "system", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("needs repo, pr and head"), "{err}");
+    let bad = TaskAddArgs {
+        pr: Some("five"),
+        ..Default::default()
+    };
+    let err = flock
+        .task_add("x", None, None, bad, "owner", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("pr must be a number; got 'five'"), "{err}");
+    let (_, listed) = flock
+        .task_list(None, None, None, true, 0, None, Some("review"), false)
+        .await
+        .unwrap();
+    assert_eq!(1, listed.len());
+    drop(tasks);
+}
+
+#[tokio::test]
+async fn task_add_deduplicates_assignees_and_task_list_filters_needs_owner() {
+    let (flock, _tasks) = flock_with_store("add-dedupe").await;
+    let args = TaskAddArgs {
+        assignees: &["w1:p1", "w1:p1", " "],
+        ..Default::default()
+    };
+    let t = flock
+        .task_add("d", None, None, args, "owner", None)
+        .await
+        .unwrap();
+    assert_eq!(r#"["w1:p1"]"#, t.assignees);
+    let q = flock
+        .task_add("q", None, None, TaskAddArgs::default(), "owner", None)
+        .await
+        .unwrap();
+    flock
+        .task_block(&q.id, Some("needs-owner: which port?"), None)
+        .await
+        .unwrap();
+    let w = flock
+        .task_add("w", None, None, TaskAddArgs::default(), "owner", None)
+        .await
+        .unwrap();
+    flock
+        .task_block(&w.id, Some("waiting on PR"), None)
+        .await
+        .unwrap();
+    let (_, asked) = flock
+        .task_list(None, None, None, true, 0, None, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![q.id],
+        asked.into_iter().map(|d| d.task.id).collect::<Vec<_>>()
     );
 }

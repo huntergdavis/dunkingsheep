@@ -35,6 +35,11 @@ pub struct TaskAddArgs<'a> {
     pub status: Option<&'a str>,
     pub priority: Option<&'a str>,
     pub kind: Option<&'a str>,
+    pub author: Option<&'a str>,
+    pub repo: Option<&'a str>,
+    /// Text, as the Python takes it (`pr must be a number` is the store's refusal).
+    pub pr: Option<&'a str>,
+    pub head: Option<&'a str>,
     pub assignees: &'a [&'a str],
     pub parent_id: Option<&'a str>,
     pub depends_on: &'a [&'a str],
@@ -206,10 +211,9 @@ impl Flock {
     }
 
     /// `task_add`: resolve scope and owners, apply the pre-write refusals, then one store
-    /// write. Unassigned work stays unowned (`default_task_owner`); a Flock-level priority
-    /// of `medium` is the Python's default (the store's own default is `low`). `role` is the
-    /// caller's role (`caller_role`, not ported); `kind` is checked here but the store has
-    /// no `kind` argument in the Python either, so it is not written.
+    /// write. Unassigned work stays unowned (`default_task_owner`); the default priority is `low`
+    /// (`dunk_core.task_add`: `priority or "low"`). `role` is the
+    /// caller's role (`caller_role`, not ported); kind, author, repo, pr and head go to the store.
     #[allow(clippy::too_many_arguments)]
     pub async fn task_add(
         &self,
@@ -246,12 +250,17 @@ impl Flock {
                 body.unwrap_or(""),
                 AddOptions {
                     status: Some(non_empty(opts.status, "open")),
-                    priority: Some(non_empty(opts.priority, "medium")),
+                    priority: Some(non_empty(opts.priority, "low")),
                     assignees: owners,
                     parent_id: opts.parent_id.map(str::to_string),
                     depends_on: opts.depends_on.iter().map(|d| d.to_string()).collect(),
                     created_by: self_pane_id.filter(|p| !p.is_empty()).map(str::to_string),
                     multi_assignee: opts.multi_assignee,
+                    kind: Some(non_empty(opts.kind, "work")),
+                    author: opts.author.map(str::to_string),
+                    repo: opts.repo.map(str::to_string),
+                    pr: opts.pr.map(str::to_string),
+                    head: opts.head.map(str::to_string),
                 },
             )
             .await
@@ -268,6 +277,8 @@ impl Flock {
         include_done: bool,
         limit: usize,
         self_pane_id: Option<&str>,
+        kind: Option<&str>,
+        needs_owner: bool,
     ) -> Result<(Option<String>, Vec<Decorated>), DunkError> {
         let tasks = self.task_store()?;
         let explicit = match scope.map(str::trim) {
@@ -283,6 +294,8 @@ impl Flock {
                 include_done,
                 limit,
                 self_pane_id,
+                kind,
+                needs_owner,
             )
             .await?;
         Ok((explicit, rows))
@@ -455,17 +468,35 @@ mod list_tests {
         tasks.add("global", "g", "").await.unwrap();
         tasks.add("w1:p1", "p", "").await.unwrap();
         let (scope, rows) = flock
-            .task_list(None, None, None, true, 0, Some("w1:p1"))
+            .task_list(None, None, None, true, 0, Some("w1:p1"), None, false)
             .await
             .unwrap();
         assert_eq!((None, 2), (scope, rows.len()));
         let (scope, rows) = flock
-            .task_list(Some("global"), None, None, true, 0, Some("w1:p1"))
+            .task_list(
+                Some("global"),
+                None,
+                None,
+                true,
+                0,
+                Some("w1:p1"),
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!((Some("global".to_string()), 1), (scope, rows.len()));
         assert!(flock
-            .task_list(Some("w2:p2"), None, None, true, 0, Some("w1:p1"))
+            .task_list(
+                Some("w2:p2"),
+                None,
+                None,
+                true,
+                0,
+                Some("w1:p1"),
+                None,
+                false
+            )
             .await
             .is_err());
     }

@@ -236,24 +236,50 @@ impl Tasks {
                 .filter(|s| !s.is_empty())
                 .unwrap_or(DEFAULT_PRIORITY),
         )?;
+        let kind = validate_kind(opts.kind.as_deref().unwrap_or(""))?;
+        let clean = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .map(String::from)
+        };
+        let (author, repo, head) = (clean(&opts.author), clean(&opts.repo), clean(&opts.head));
+        let pr: Option<i64> = match opts.pr.as_deref() {
+            None | Some("") => None,
+            Some(raw) => Some(raw.trim().parse::<i64>().map_err(|_| {
+                DunkError::Refused(format!(
+                    "pr must be a number; got {}",
+                    crate::context::store::py_repr(raw)
+                ))
+            })?),
+        };
+        if kind == "review" && !(repo.is_some() && pr.is_some_and(|n| n != 0) && head.is_some()) {
+            return Err(DunkError::Refused(
+                "a review task needs repo, pr and head (the exact commit under review); the verdict is bound to that head".into(),
+            ));
+        }
         let parent = opts
             .parent_id
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .map(String::from);
-        let deps: Vec<String> = opts
-            .depends_on
-            .iter()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
-        let assignees: Vec<String> = opts
-            .assignees
-            .iter()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
+        // `_as_list` strips and drops blanks; `_encode` de-duplicates, keeping first order.
+        let dedupe = |list: &[String]| -> Vec<String> {
+            let mut seen: Vec<String> = Vec::new();
+            for item in list
+                .iter()
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty())
+            {
+                if !seen.contains(&item) {
+                    seen.push(item);
+                }
+            }
+            seen
+        };
+        let deps = dedupe(&opts.depends_on);
+        let assignees = dedupe(&opts.assignees);
         let body = body.to_string();
         let created_by = opts.created_by.clone();
         let multi = opts.multi_assignee;
@@ -287,14 +313,41 @@ impl Tasks {
                 )
                 .map_err(db::map_sqlite)?;
             let id = format!("t{next}");
-            tx.execute(
-                "INSERT INTO tasks (id, scope, title, body, status, priority, parent_id, multi_assignee, assignees, depends_on, created_at, updated_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            let inserted = tx.execute(
+                "INSERT INTO tasks (id, scope, title, body, status, priority, parent_id, multi_assignee, assignees, depends_on, created_at, updated_at, created_by, kind, author, repo, pr, head) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![id, scope, title, body, status, priority, parent, multi as i64,
-                        json!(assignees).to_string(), json!(deps).to_string(), now, now, created_by],
-            ).map_err(db::map_sqlite)?;
+                        py_json_list(&assignees), py_json_list(&deps), now, now, created_by,
+                        kind, author, repo, pr, head],
+            );
+            if let Err(error) = inserted {
+                if error.to_string().contains("UNIQUE constraint failed: tasks.kind") {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT id FROM tasks WHERE kind = 'review' AND repo = ? AND pr = ? AND head = ? AND status IN ('open', 'in_progress', 'blocked')",
+                            params![repo, pr, head], |row| row.get(0))
+                        .optional()
+                        .map_err(db::map_sqlite)?;
+                    let short: String = head.clone().unwrap_or_default().chars().take(12).collect();
+                    return Err(DunkError::Refused(format!(
+                        "a live review task for {}#{}@{short} already exists{}",
+                        repo.clone().unwrap_or_default(),
+                        pr.unwrap_or_default(),
+                        existing.map(|e| format!(" ({e})")).unwrap_or_default()
+                    )));
+                }
+                return Err(db::map_sqlite(error));
+            }
+            // `meta={"kind": kind, "author": author}` only when it says something, as json.dumps writes it.
+            let meta: Option<String> = (kind != "work" || author.is_some()).then(|| {
+                format!(
+                    "{{\"kind\": {}, \"author\": {}}}",
+                    json!(kind),
+                    author.as_ref().map(|a| json!(a).to_string()).unwrap_or_else(|| "null".into())
+                )
+            });
             tx.execute(
-                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to) VALUES (?,?,?,?,?,?,?)",
-                params![id, "created", now, created_by, scope, priority, status],
+                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to, meta) VALUES (?,?,?,?,?,?,?,?)",
+                params![id, "created", now, created_by, scope, priority, status, meta],
             ).map_err(db::map_sqlite)?;
             tx.commit().map_err(db::map_sqlite)?;
             Ok(id)
@@ -1046,6 +1099,8 @@ impl Tasks {
         include_done: bool,
         limit: usize,
         pane_id: Option<&str>,
+        kind: Option<&str>,
+        needs_owner: bool,
     ) -> Result<Vec<Decorated>, DunkError> {
         let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
         let scopes: Vec<String> = match scope.map(str::trim) {
@@ -1074,6 +1129,10 @@ impl Tasks {
             .filter(|a| !a.is_empty())
             .map(String::from);
         let pane = pane_id.map(String::from);
+        let kind = match kind.filter(|k| !k.is_empty()) {
+            Some(k) => Some(validate_kind(k)?),
+            None => None,
+        };
         let now = crate::clock::now_s();
         self.writer
             .call(move |conn| {
@@ -1085,6 +1144,14 @@ impl Tasks {
                     binds.push(status.clone());
                 } else if !include_done {
                     sql.push_str(" AND status NOT IN ('done', 'cancelled')");
+                }
+                if let Some(kind) = &kind {
+                    sql.push_str(" AND kind = ?");
+                    binds.push(kind.clone());
+                }
+                if needs_owner {
+                    // The one way a lane asks the owner anything (FLAT_FLEET.md 5).
+                    sql.push_str(" AND status = 'blocked' AND block_reason LIKE 'needs-owner:%'");
                 }
                 let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
                 let ids: Vec<String> = stmt
@@ -1482,6 +1549,13 @@ pub struct AddOptions {
     pub depends_on: Vec<String>,
     pub created_by: Option<String>,
     pub multi_assignee: bool,
+    /// work | review | verify | report; None is `work`.
+    pub kind: Option<String>,
+    pub author: Option<String>,
+    pub repo: Option<String>,
+    /// Kept as text so `pr must be a number` is the store's refusal, as in the Python.
+    pub pr: Option<String>,
+    pub head: Option<String>,
 }
 
 /// `update`'s field edits (t786 slice 5). A status change is `set_status`, which carries
@@ -1564,6 +1638,12 @@ pub struct Decorated {
     pub deps: DependencyState,
     pub claimable: bool,
     pub eligible: bool,
+}
+
+/// `json.dumps(list)`: `", "` between items, as the Python writes assignees and depends_on.
+fn py_json_list(items: &[String]) -> String {
+    let parts: Vec<String> = items.iter().map(|i| json!(i).to_string()).collect();
+    format!("[{}]", parts.join(", "))
 }
 
 fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, DunkError> {
@@ -1948,7 +2028,7 @@ mod tests {
         store.complete(&low.id).await.unwrap();
         let ids = |v: Vec<Decorated>| v.into_iter().map(|d| d.task.id).collect::<Vec<_>>();
         let all = store
-            .list_visible(None, None, None, true, 200, Some("w1:p1"))
+            .list_visible(None, None, None, true, 200, Some("w1:p1"), None, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1956,39 +2036,48 @@ mod tests {
             ids(all)
         );
         let open = store
-            .list_visible(None, None, None, false, 200, Some("w1:p1"))
+            .list_visible(None, None, None, false, 200, Some("w1:p1"), None, false)
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone(), mine.id.clone()], ids(open));
         let done = store
-            .list_visible(None, Some("done"), None, false, 200, None)
+            .list_visible(None, Some("done"), None, false, 200, None, None, false)
             .await
             .unwrap();
         assert_eq!(vec![low.id.clone()], ids(done));
         let by = store
-            .list_visible(None, None, Some("w1:p1"), true, 200, Some("w1:p1"))
+            .list_visible(
+                None,
+                None,
+                Some("w1:p1"),
+                true,
+                200,
+                Some("w1:p1"),
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(vec![hi.id.clone()], ids(by));
         let named = store
-            .list_visible(Some("w2:p2"), None, None, true, 200, None)
+            .list_visible(Some("w2:p2"), None, None, true, 200, None, None, false)
             .await
             .unwrap();
         assert!(ids(named).contains(&theirs.id));
         assert_eq!(
             1,
             store
-                .list_visible(None, None, None, true, 1, None)
+                .list_visible(None, None, None, true, 1, None, None, false)
                 .await
                 .unwrap()
                 .len()
         );
         assert!(store
-            .list_visible(None, Some("bogus"), None, true, 1, None)
+            .list_visible(None, Some("bogus"), None, true, 1, None, None, false)
             .await
             .is_err());
         assert!(store
-            .list_visible(Some("self"), None, None, true, 1, None)
+            .list_visible(Some("self"), None, None, true, 1, None, None, false)
             .await
             .is_err());
     }
