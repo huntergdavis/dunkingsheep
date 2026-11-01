@@ -166,7 +166,7 @@ fn guard_install_tmux() -> Result<Value, String> {
     let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
     let template = "os.path.expanduser(\n    \"~/.local/bin/dunkingsheep\")";
     let rendered = source.replace(template, &format!("{:?}", cli.to_string_lossy()));
-    std::fs::write(&target, rendered).map_err(|e| e.to_string())?;
+    std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -193,7 +193,7 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
     let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
     let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
-    std::fs::write(&target, rendered).map_err(|e| e.to_string())?;
+    std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
