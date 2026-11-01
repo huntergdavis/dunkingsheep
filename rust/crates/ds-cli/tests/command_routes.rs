@@ -224,6 +224,40 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_04_dunk_edit_lifecycle_b() {
+    let stopped = run_daemon_cli(
+        &["stop", "d1"],
+        "stop_dunk",
+        json!({"id": "d1"}),
+        json!({"id": "d1", "running": false, "status": "stopped"}),
+    );
+    assert_eq!(0, stopped.status.code().unwrap());
+    assert_eq!(
+        "id               d1\nstatus           stopped\nskip_if_unconsumed None\nhold_while_typing None\n",
+        String::from_utf8(stopped.stdout).unwrap()
+    );
+    assert!(stopped.stderr.is_empty());
+
+    let toggled = run_daemon_cli(
+        &["toggle", "d2"],
+        "toggle_dunk",
+        json!({"id": "d2"}),
+        json!({"id": "d2", "running": true, "status": "active"}),
+    );
+    assert_eq!(0, toggled.status.code().unwrap());
+    assert_eq!(
+        "id               d2\nrunning          True\nstatus           active\nskip_if_unconsumed None\nhold_while_typing None\n",
+        String::from_utf8(toggled.stdout).unwrap()
+    );
+    assert!(toggled.stderr.is_empty());
+
+    let stopped_all = run_daemon_cli(&["stop-all"], "stop_all", json!({}), json!({"dunks": []}));
+    assert_eq!(0, stopped_all.status.code().unwrap());
+    assert_eq!("no dunks\n", String::from_utf8(stopped_all.stdout).unwrap());
+    assert!(stopped_all.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
