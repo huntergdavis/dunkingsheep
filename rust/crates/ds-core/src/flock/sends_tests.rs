@@ -1,13 +1,13 @@
 //! Tests for `sends.rs`, ported by name from tests/test_busy_native_queue.py,
 //! tests/test_codex_ambiguous_composer.py (the `_box_holds` / `send_blocker` halves) and
-//! tests/test_dunk_core.py (the `_clear_to_send` tests). The scripted pane below is the
-//! `FakeHerdr` surface those tests drive. NOT ported (later slices): everything that goes through
+//! tests/test_dunk_core.py (the `_clear_to_send` and `_press_until_submitted` tests). The scripted
+//! pane below is the `FakeHerdr` surface those tests drive. NOT ported (later slices):
 //! `submit_text`/`send_guarded`/`flush_box`/`delivery_state`, and the thread-timing assertions of
 //! the clear-to-send tests (the settle wait is injected, so wall-clock is not asserted).
 
 use super::sends::*;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Default)]
 struct Pane {
@@ -18,11 +18,20 @@ struct Pane {
     federated: bool,
     keys: Vec<(String, String)>,
     reads: RefCell<Vec<(String, bool)>>,
+    screen_script: RefCell<VecDeque<Option<String>>>,
+    status_script: RefCell<VecDeque<Option<String>>>,
+    now: f64,
+    sleeps: Vec<f64>,
+    remembered: BTreeMap<String, String>,
+    submit_metrics: Vec<(String, String, usize, usize)>,
 }
 
 impl SendEnv for Pane {
     fn read_pane(&self, pane_id: &str, _lines: i64, ansi: bool) -> Option<String> {
         self.reads.borrow_mut().push((pane_id.to_string(), ansi));
+        if let Some(screen) = self.screen_script.borrow_mut().pop_front() {
+            return screen;
+        }
         self.screens.get(pane_id).cloned()
     }
     fn pane_harness(&self, pane_id: &str) -> Option<String> {
@@ -32,6 +41,9 @@ impl SendEnv for Pane {
         self.gone
     }
     fn read_status(&self, pane_id: &str) -> Option<String> {
+        if let Some(status) = self.status_script.borrow_mut().pop_front() {
+            return status;
+        }
         self.statuses.get(pane_id).cloned()
     }
     fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
@@ -40,6 +52,45 @@ impl SendEnv for Pane {
     }
     fn federated_input(&self) -> bool {
         self.federated
+    }
+}
+
+impl SubmitEnv for Pane {
+    fn sleep_s(&mut self, seconds: f64) {
+        self.sleeps.push(seconds);
+        self.now += seconds;
+    }
+
+    fn now_s(&mut self) -> f64 {
+        self.now
+    }
+
+    fn send_submit_key_guarded(
+        &mut self,
+        pane_id: &str,
+        fallback: &str,
+        busy_hint: bool,
+    ) -> (bool, String, Option<String>) {
+        send_submit_key(self, pane_id, fallback, busy_hint)
+    }
+
+    fn remembered_submit_key(&self, pane_id: &str) -> Option<String> {
+        self.remembered.get(pane_id).cloned()
+    }
+
+    fn remember_submit_key(&mut self, pane_id: &str, key: &str) {
+        self.remembered.insert(pane_id.to_string(), key.to_string());
+    }
+
+    fn record_submit_attempt(
+        &mut self,
+        pane_id: &str,
+        outcome: &str,
+        attempts: usize,
+        bytes: usize,
+    ) {
+        self.submit_metrics
+            .push((pane_id.to_string(), outcome.to_string(), attempts, bytes));
     }
 }
 
@@ -54,6 +105,341 @@ fn busy_codex() -> Pane {
         "\u{2022} Working (1m \u{b7} esc to interrupt)\n\u{203a} Ask Codex to do anything\n".into(),
     );
     pane
+}
+
+fn submit_live_screen() -> String {
+    hint_screen()
+}
+
+fn submit_pending_screen(text: &str) -> String {
+    format!("\u{2502} \u{276f} {text}\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n")
+}
+
+fn submit_modal_screen() -> String {
+    "Press Enter to confirm or Esc to cancel\n".to_string()
+}
+
+fn submit_pane(status: &str) -> Pane {
+    let mut pane = Pane::default();
+    pane.harness.insert(P.into(), "claude".into());
+    pane.statuses.insert(P.into(), status.into());
+    pane.screen_script
+        .borrow_mut()
+        .push_back(Some(submit_live_screen())); // dead-session check
+    pane
+}
+
+fn queue_submit_attempt(
+    pane: &Pane,
+    key_screen: Option<String>,
+    hold_reads: &[Option<bool>],
+    text: &str,
+) {
+    if let Some(screen) = key_screen {
+        pane.screen_script.borrow_mut().push_back(Some(screen));
+    }
+    for hold in hold_reads {
+        pane.screen_script.borrow_mut().push_back(match hold {
+            Some(true) => Some(submit_pending_screen(text)),
+            Some(false) => Some(submit_live_screen()),
+            None => None,
+        });
+    }
+}
+
+fn repeated_hold(hold: Option<bool>) -> [Option<bool>; SUBMIT_POLL_S.len()] {
+    [hold; SUBMIT_POLL_S.len()]
+}
+
+fn submit(pane: &mut Pane, text: &str, baseline: StatusBaseline) -> (bool, String) {
+    press_until_submitted(pane, P, text, false, false, baseline)
+}
+
+fn queue_clear_confirmation(pane: &Pane, text: &str) {
+    queue_submit_attempt(
+        pane,
+        Some(submit_live_screen()),
+        &[Some(false), Some(false), Some(false)],
+        text,
+    );
+}
+
+fn queue_stuck_attempt(pane: &Pane, text: &str) {
+    queue_submit_attempt(
+        pane,
+        Some(submit_live_screen()),
+        &repeated_hold(Some(true)),
+        text,
+    );
+}
+
+mod press_until_submitted_tests {
+    use super::*;
+
+    #[test]
+    fn test_one_enter_is_enough_when_it_works() {
+        let mut pane = submit_pane("idle");
+        queue_clear_confirmation(&pane, "hello");
+
+        assert_eq!(
+            (true, "sent".to_string()),
+            submit(&mut pane, "hello", StatusBaseline::ReadNow)
+        );
+        assert_eq!(vec![(P.to_string(), "Enter".to_string())], pane.keys);
+        assert_eq!(
+            vec![(P.to_string(), "ok".to_string(), 1, 5)],
+            pane.submit_metrics
+        );
+    }
+
+    #[test]
+    fn test_a_busy_lane_confirms_by_the_turn_it_started() {
+        let mut pane = submit_pane("idle");
+        pane.status_script
+            .borrow_mut()
+            .extend([Some("idle".into()), Some("working".into())]);
+        queue_stuck_attempt(&pane, "a nudge");
+
+        let (ok, detail) = submit(&mut pane, "a nudge", StatusBaseline::ReadNow);
+        assert!(ok, "{detail}");
+        assert_eq!("sent (confirmed by the turn it started)", detail);
+        assert_eq!(1, pane.keys.len());
+        assert_eq!("ok-turn", pane.submit_metrics[0].1);
+    }
+
+    #[test]
+    fn test_a_composer_that_needs_carriage_return_still_submits() {
+        let mut pane = submit_pane("idle");
+        queue_stuck_attempt(&pane, "a nudge");
+        queue_stuck_attempt(&pane, "a nudge");
+        queue_clear_confirmation(&pane, "a nudge");
+
+        let (ok, detail) = submit(&mut pane, "a nudge", StatusBaseline::ReadNow);
+        assert!(ok, "{detail}");
+        assert_eq!("sent (C-m x3)", detail);
+        assert_eq!(
+            vec!["Enter", "Enter", "C-m"],
+            pane.keys
+                .iter()
+                .map(|(_, key)| key.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(Some(&"C-m".to_string()), pane.remembered.get(P));
+    }
+
+    #[test]
+    fn test_a_pane_that_needs_two_enters_still_submits() {
+        let mut pane = submit_pane("idle");
+        queue_stuck_attempt(&pane, "a long message");
+        queue_clear_confirmation(&pane, "a long message");
+
+        assert_eq!(
+            (true, "sent (Enter x2)".to_string()),
+            submit(&mut pane, "a long message", StatusBaseline::ReadNow)
+        );
+        assert_eq!(2, pane.keys.len());
+        assert_eq!(Some(&"Enter".to_string()), pane.remembered.get(P));
+        assert_eq!(2, pane.submit_metrics[0].2);
+    }
+
+    #[test]
+    fn test_a_box_that_reads_clear_then_fills_again_is_not_counted_as_sent() {
+        let mut pane = submit_pane("idle");
+        queue_submit_attempt(
+            &pane,
+            Some(submit_live_screen()),
+            &[Some(false), Some(true)],
+            "fragile",
+        );
+        for _ in 0..SUBMIT_ATTEMPTS - 1 {
+            queue_stuck_attempt(&pane, "fragile");
+        }
+
+        let (ok, detail) = submit(&mut pane, "fragile", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert!(detail.contains("did not submit"), "{detail}");
+        assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+        assert!(pane.submit_metrics.is_empty());
+    }
+
+    #[test]
+    fn test_delayed_redraw_after_two_clear_reads_is_not_sent() {
+        let mut pane = submit_pane("idle");
+        queue_submit_attempt(
+            &pane,
+            Some(submit_live_screen()),
+            &[Some(false), Some(false), Some(true)],
+            "delayed",
+        );
+        for _ in 0..SUBMIT_ATTEMPTS - 1 {
+            queue_stuck_attempt(&pane, "delayed");
+        }
+
+        let (ok, detail) = submit(&mut pane, "delayed", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert!(detail.contains("did not submit"), "{detail}");
+        assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+    }
+
+    #[test]
+    fn test_unreadable_box_does_not_claim_success() {
+        let mut pane = submit_pane("idle");
+        for _ in 0..SUBMIT_ATTEMPTS {
+            queue_submit_attempt(
+                &pane,
+                Some(submit_live_screen()),
+                &repeated_hold(None),
+                "unconfirmed",
+            );
+        }
+
+        let (ok, detail) = submit(&mut pane, "unconfirmed", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert_eq!(
+        format!("submission unconfirmed: input box unreadable or changing after {SUBMIT_ATTEMPTS} presses; the lane may or may not have taken it - check the pane before resending"),
+        detail
+    );
+        assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+    }
+
+    #[test]
+    fn test_text_that_never_submits_is_reported_as_failed_not_sent() {
+        let mut pane = submit_pane("idle");
+        for _ in 0..SUBMIT_ATTEMPTS {
+            queue_stuck_attempt(&pane, "stubborn");
+        }
+
+        let (ok, detail) = submit(&mut pane, "stubborn", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert_eq!(
+        format!("text did not submit after {SUBMIT_ATTEMPTS} Enter presses; it is still in the pane's input box"),
+        detail
+    );
+        assert_eq!(
+            vec!["Enter", "Enter", "C-m", "Enter"],
+            pane.keys
+                .iter()
+                .map(|(_, key)| key.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(pane.submit_metrics.is_empty());
+    }
+
+    #[test]
+    fn test_a_dead_agent_session_is_refused_before_any_enter() {
+        let mut pane = Pane::default();
+        pane.screen_script.borrow_mut().push_back(Some(
+            "\u{25a0} Server connection could not be restored\n".into(),
+        ));
+
+        let (ok, detail) = submit(&mut pane, "a message", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert!(detail.starts_with("agent session is dead"), "{detail}");
+        assert!(pane.keys.is_empty());
+    }
+
+    #[test]
+    fn submit_ladder_dialog_opening_before_retry_gets_no_key() {
+        let mut pane = submit_pane("idle");
+        queue_stuck_attempt(&pane, "a message");
+        queue_submit_attempt(&pane, Some(submit_modal_screen()), &[], "a message");
+
+        let (ok, detail) = submit(&mut pane, "a message", StatusBaseline::ReadNow);
+        assert!(!ok);
+        assert_eq!("submission held: a dialog opened before the key", detail);
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn test_a_slash_command_that_opens_a_panel_counts_as_submitted() {
+        let mut pane = submit_pane("idle");
+        queue_submit_attempt(&pane, Some(submit_live_screen()), &[], "/usage");
+        for _ in 0..3 {
+            pane.screen_script
+                .borrow_mut()
+                .push_back(Some(submit_modal_screen()));
+        }
+
+        let (ok, detail) = submit(&mut pane, "/usage", StatusBaseline::ReadNow);
+        assert!(ok, "{detail}");
+        assert_eq!("sent", detail);
+        assert_eq!(1, pane.keys.len());
+    }
+
+    #[test]
+    fn first_pressed_does_not_send_a_duplicate_key() {
+        let mut pane = submit_pane("idle");
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_live_screen()),
+            Some(submit_live_screen()),
+            Some(submit_live_screen()),
+        ]);
+
+        assert_eq!(
+            (true, "sent".to_string()),
+            press_until_submitted(
+                &mut pane,
+                P,
+                "already pressed",
+                true,
+                false,
+                StatusBaseline::Captured(Some("idle".into()))
+            )
+        );
+        assert!(pane.keys.is_empty());
+    }
+
+    #[test]
+    fn captured_unreadable_baseline_does_not_confirm_turn() {
+        let mut pane = submit_pane("working");
+        pane.status_script
+            .borrow_mut()
+            .push_back(Some("working".into()));
+        for _ in 0..SUBMIT_ATTEMPTS {
+            queue_stuck_attempt(&pane, "captured unreadable");
+        }
+
+        let (ok, detail) = press_until_submitted(
+            &mut pane,
+            P,
+            "captured unreadable",
+            false,
+            false,
+            StatusBaseline::Captured(None),
+        );
+        assert!(!ok);
+        assert!(!detail.contains("confirmed by the turn"), "{detail}");
+        assert!(detail.contains("did not submit"), "{detail}");
+        assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+        assert_eq!(
+            1,
+            pane.status_script.borrow().len(),
+            "unreadable baseline is not upgraded by a later read"
+        );
+    }
+
+    #[test]
+    fn captured_working_baseline_does_not_confirm_an_existing_turn() {
+        let mut pane = submit_pane("working");
+        for _ in 0..SUBMIT_ATTEMPTS {
+            queue_stuck_attempt(&pane, "old turn");
+        }
+
+        let (ok, detail) = press_until_submitted(
+            &mut pane,
+            P,
+            "old turn",
+            false,
+            false,
+            StatusBaseline::Captured(Some("working".into())),
+        );
+        assert!(!ok);
+        assert!(
+            detail.contains("already working before this send"),
+            "{detail}"
+        );
+        assert_eq!(SUBMIT_ATTEMPTS, pane.keys.len());
+    }
 }
 
 // --- test_busy_native_queue.py ---------------------------------------------------------------
