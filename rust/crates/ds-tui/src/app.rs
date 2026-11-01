@@ -16,9 +16,8 @@ pub trait TuiLoopIo<C: RpcClient> {
     fn read_key(&mut self, timeout: Duration) -> Result<Option<char>, Self::Error>;
 
     /// Forward keys not consumed by the event loop to the command adapter.
-    fn handle_key(&mut self, _model: &mut TuiModel<C>, _key: char) -> Result<(), Self::Error> {
-        Ok(())
-    }
+    /// Every adapter must define this behavior; silently dropping commands is invalid.
+    fn handle_key(&mut self, model: &mut TuiModel<C>, key: char) -> Result<(), Self::Error>;
 
     /// Re-establish the daemon connection after the model's retry threshold.
     fn reconnect(&mut self, _model: &mut TuiModel<C>, _now: f64) {}
@@ -228,6 +227,14 @@ mod tests {
             }
             fn read_key(&mut self, _: Duration) -> Result<Option<char>, Self::Error> {
                 Ok(None)
+            }
+            fn handle_key(
+                &mut self,
+                _: &mut TuiModel<FakeClient>,
+                _: char,
+            ) -> Result<(), Self::Error> {
+                // This explicit no-op is unreachable because draw fails first.
+                Ok(())
             }
         }
 
