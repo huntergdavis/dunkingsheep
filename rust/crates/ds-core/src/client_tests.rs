@@ -1140,12 +1140,22 @@ fn spawn_detached_returns_at_once_and_the_child_gets_the_environment_and_the_log
         remove: vec!["HERDR_PANE_ID".into()],
     };
     // `sh -c` instead of a script file: no file is written and exec'd by a parallel test thread.
-    let script = "sleep 0.2; echo \"sock=$DUNKINGSHEEP_SOCKET pane=${HERDR_PANE_ID-unset} cwd=$(pwd)\"; echo oops >&2";
+    //
+    // t1495: this used to `sleep 0.2` in the child and assert the spawn returned in under
+    // 150 ms of wall clock. On a loaded host the fork and exec alone can take longer than that
+    // (measured: 1 failure in 150 runs at nice 19 on an 8-core host at load 20-29, panic "the
+    // spawn must not wait for the child"). The child now BLOCKS on a gate file the test controls:
+    // if `spawn_detached` returns while the child is provably still blocked, it did not wait for
+    // it, and no clock is involved. The valve (30 s) turns a spawn that WAITS into a failed
+    // assertion below instead of a hang.
+    let gate = dir.path().join("go");
+    let script = "n=0; while [ ! -e \"$1\" ]; do n=$((n+1)); \
+        if [ $n -gt 3000 ]; then echo gave-up >&2; exit 3; fi; sleep 0.01; done; \
+        echo \"sock=$DUNKINGSHEEP_SOCKET pane=${HERDR_PANE_ID-unset} cwd=$(pwd)\"; echo oops >&2";
     std::env::set_var("HERDR_PANE_ID", "w9:pH");
-    let started = std::time::Instant::now();
     let pid = spawn_detached(
         std::path::Path::new("/bin/sh"),
-        &["-c", script],
+        &["-c", script, "sh", gate.to_str().unwrap()],
         &spec,
         &log,
         dir.path(),
@@ -1153,11 +1163,14 @@ fn spawn_detached_returns_at_once_and_the_child_gets_the_environment_and_the_log
     .expect("spawn");
     std::env::remove_var("HERDR_PANE_ID");
     assert!(pid > 0);
+    // Back from the spawn with the child still blocked on the gate: it did not wait for it.
+    let early = std::fs::read_to_string(&log).unwrap_or_default();
     assert!(
-        started.elapsed() < Duration::from_millis(150),
-        "the spawn must not wait for the child"
+        !early.contains("sock=") && !early.contains("gave-up"),
+        "the spawn must not wait for the child: {early}"
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    std::fs::write(&gate, "").unwrap(); // let the child go
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let text = loop {
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         if text.contains("oops") || std::time::Instant::now() > deadline {
