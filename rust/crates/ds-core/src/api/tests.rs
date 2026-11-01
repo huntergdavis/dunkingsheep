@@ -8,11 +8,13 @@ use serde_json::json;
 use std::cell::Cell;
 use std::sync::Mutex;
 
+use crate::config::Env;
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
+use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
 
@@ -262,6 +264,139 @@ fn flock() -> (tempfile::TempDir, Flock) {
         false,
     );
     (dir, flock)
+}
+
+fn superuser_fixture() -> (tempfile::TempDir, Flock, Dispatcher) {
+    const OWNER: &str = "w1:p2";
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("role registry");
+    roles
+        .register(OWNER, "owner", None, None, None, None, None, None)
+        .expect("owner registration");
+    flock.attach_roles(roles, None);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_superuser_status_add_remove();
+    (dir, flock, dispatcher)
+}
+
+fn dispatch_superuser(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    name: &str,
+    args: Option<Args>,
+    pane: Option<&str>,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let request = RequestCtx {
+        self_pane_id: pane.map(str::to_owned),
+        ..RequestCtx::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.dispatch(&context, &gate, name, args)
+}
+
+#[test]
+fn h_superuser_status_matches_python() {
+    let (_dir, flock, dispatcher) = superuser_fixture();
+    let result = dispatch_superuser(&dispatcher, &flock, "superuser_status", None, Some("w1:p2"))
+        .expect("status");
+    assert_eq!(result["superuser"], true);
+    assert_eq!(result["pane_id"], "w1:p2");
+    assert_eq!(result["role"], "owner");
+    assert_eq!(result["default"], "anonymous");
+    assert!(result["lanes"]["w1:p2"].is_object());
+}
+
+#[test]
+fn h_superuser_add_matches_python() {
+    let (_dir, flock, dispatcher) = superuser_fixture();
+    let result = dispatch_superuser(
+        &dispatcher,
+        &flock,
+        "superuser_add",
+        args(json!({"entry": "w2:p9"})),
+        Some("w1:p2"),
+    )
+    .expect("add");
+    assert_eq!(result["added"], "w2:p9");
+    assert_eq!(result["superuser"], true);
+    assert_eq!(result["entry"]["role"], "owner");
+
+    assert!(matches!(
+        dispatch_superuser(
+            &dispatcher,
+            &flock,
+            "superuser_add",
+            args(json!({"entry": "owner name"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message.starts_with("superuser add takes a pane id;")
+    ));
+}
+
+#[test]
+fn h_superuser_remove_matches_python() {
+    let (_dir, flock, dispatcher) = superuser_fixture();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(
+            flock
+                .lane_registry_path
+                .parent()
+                .unwrap()
+                .join("roles.json"),
+        ),
+        Some(
+            flock
+                .lane_registry_path
+                .parent()
+                .unwrap()
+                .join("tokens.json"),
+        ),
+        None,
+    )
+    .expect("role registry");
+    roles
+        .register("w2:p9", "owner", None, None, None, None, None, None)
+        .expect("second owner registration");
+    flock.attach_roles(roles, None);
+    let result = dispatch_superuser(
+        &dispatcher,
+        &flock,
+        "superuser_remove",
+        args(json!({"entry": "w2:p9"})),
+        Some("w1:p2"),
+    )
+    .expect("remove");
+    assert_eq!(result["removed"], true);
+    assert_eq!(result["entry"], "w2:p9");
+    assert_eq!(result["superuser"], true);
+
+    assert!(matches!(
+        dispatch_superuser(
+            &dispatcher,
+            &flock,
+            "superuser_remove",
+            args(json!({"entry": "w1:p2"})),
+            Some("w1:p2"),
+        ),
+        Err(DunkError::Refused(message)) if message == "refusing to remove the last owner"
+    ));
 }
 
 fn refusal(result: Result<Value, DunkError>) -> String {

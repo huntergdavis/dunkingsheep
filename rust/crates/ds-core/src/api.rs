@@ -220,6 +220,13 @@ impl Dispatcher {
         self.register("turn_start", h_turn_start);
     }
 
+    /// Register only the T39 superuser status/add/remove handler leaf.
+    pub fn register_superuser_status_add_remove(&mut self) {
+        self.register("superuser_status", h_superuser_status);
+        self.register("superuser_add", h_superuser_add);
+        self.register("superuser_remove", h_superuser_remove);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -293,6 +300,35 @@ impl Dispatcher {
 /// `dunk_api.h_whoami`.
 pub fn h_whoami(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
     context.flock.whoami(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_status`.
+pub fn h_superuser_status(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context
+        .flock
+        .superuser_status(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_add`.
+pub fn h_superuser_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let entry = args
+        .get("entry")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("superuser_add: entry must be a string".into()))?;
+    context
+        .flock
+        .superuser_add(entry, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_remove`.
+pub fn h_superuser_remove(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let entry = args
+        .get("entry")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("superuser_remove: entry must be a string".into()))?;
+    context
+        .flock
+        .superuser_remove(entry, context.self_pane_id(), context.env)
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
