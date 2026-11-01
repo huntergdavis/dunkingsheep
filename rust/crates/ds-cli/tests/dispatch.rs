@@ -2,16 +2,20 @@
 //! CLI printed. Replays the recorded `context` steps (tests/context_cmd.json, built by
 //! tools/gen_context_cmd_fixture.py from the real Python) through the WHOLE path, so a parser
 //! or namespace mistake that the `context_read` differential cannot see shows up here.
-//! One test fn: cwd and environment are process-wide.
+//! Environment and cwd are process-wide, so the fixtures that change them share a lock.
 
 use ds_cli::args::try_parse;
 use ds_cli::dispatch::run;
 use serde_json::Value;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 const FIXTURE: &str = include_str!("context_cmd.json");
 
 #[test]
 fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture");
     let base = tempfile::tempdir().expect("tempdir");
     for (relative, text) in fixture["files"].as_object().unwrap() {
@@ -87,6 +91,7 @@ fn commands_without_a_body_say_so_and_exit_1_and_writes_are_not_ported() {
 /// `secrets-check` through argv -> parser -> dispatch, against real temporary git repositories.
 #[test]
 fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     use std::process::Command;
     let git = |dir: &std::path::Path, args: &[&str]| {
         let done = Command::new("git")
@@ -152,6 +157,7 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
 /// throwaway GIT_CONFIG_GLOBAL, a temp bin dir); and `github protect` stays honest.
 #[test]
 fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let real_dir = t.path().join("realbin");
@@ -167,6 +173,7 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
     .unwrap();
     std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
     let old_path = std::env::var("PATH").unwrap_or_default();
+    let old_git_config = std::env::var_os("GIT_CONFIG_GLOBAL");
     std::env::set_var("PATH", format!("{}:/usr/bin:/bin", real_dir.display()));
     let bin = t.path().join("bin").display().to_string();
     let ns = try_parse([
@@ -179,6 +186,10 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
     .unwrap();
     let out = run(&ns);
     std::env::set_var("PATH", old_path);
+    match old_git_config {
+        Some(v) => std::env::set_var("GIT_CONFIG_GLOBAL", v),
+        None => std::env::remove_var("GIT_CONFIG_GLOBAL"),
+    }
     assert_eq!(0, out.code, "{}", out.stderr);
     assert!(
         out.stdout.starts_with("gh_wrapper           "),
@@ -208,6 +219,7 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
 /// covers both the helper selection and generated wrapper without launching tmux.
 #[test]
 fn guard_install_actions_write_only_to_sandbox_and_keep_tmux_helper() {
+    let _env_lock = ENV_LOCK.lock().unwrap();
     use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
