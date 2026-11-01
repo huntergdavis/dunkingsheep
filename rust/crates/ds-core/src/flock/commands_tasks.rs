@@ -673,17 +673,9 @@ impl Flock {
             multi_assignee: args.multi_assignee,
             block_reason: args.block_reason.map(|r| r.map(own)),
         };
-        let mut task = tasks.update(task_id, edit, self_pane_id).await?;
-        if let Some(status) = args.status {
-            let reason = match args.block_reason {
-                Some(Some(r)) => Some(r),
-                _ => None,
-            };
-            task = tasks
-                .set_status(task_id, status, reason, self_pane_id)
-                .await?;
-        }
-        Ok(task)
+        tasks
+            .update_with_status(task_id, edit, args.status, self_pane_id)
+            .await
     }
 
     /// `task_block`.

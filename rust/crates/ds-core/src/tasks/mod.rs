@@ -930,6 +930,18 @@ impl Tasks {
         edit: FieldEdit,
         actor: Option<&str>,
     ) -> Result<Task, DunkError> {
+        self.update_with_status(id, edit, None, actor).await
+    }
+
+    /// Apply field edits and an optional status transition in the same transaction.
+    /// A refused status must not commit fields that precede it in `Tasks.update`.
+    pub async fn update_with_status(
+        &self,
+        id: &str,
+        edit: FieldEdit,
+        status: Option<&str>,
+        actor: Option<&str>,
+    ) -> Result<Task, DunkError> {
         if let Some(title) = &edit.title {
             if title.trim().is_empty() {
                 return Err(DunkError::Refused("a task needs a title".into()));
@@ -941,6 +953,7 @@ impl Tasks {
         };
         let wanted = id.trim().to_string();
         let actor = actor.map(|a| a.to_string());
+        let requested_status = status.map(str::to_string);
         let now = crate::clock::now_s();
         let edit_for_call = edit.clone();
         self.writer
@@ -949,15 +962,36 @@ impl Tasks {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(db::map_sqlite)?;
                 let id = wanted.clone();
-                let (scope, old_priority, old_deps, old_assignees): (String, String, Option<String>, Option<String>) = tx
+                let (scope, old_priority, old_deps, old_assignees, old_status, created_at):
+                    (String, String, Option<String>, Option<String>, String, f64) = tx
                     .query_row(
-                        "SELECT scope, priority, depends_on, assignees FROM tasks WHERE id = ?",
+                        "SELECT scope, priority, depends_on, assignees, status, created_at FROM tasks WHERE id = ?",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
                     .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                let parent_after = if let Some(parent) = &edit_for_call.parent_id {
+                    let parent = parent.as_deref().map(str::trim).filter(|p| !p.is_empty());
+                    if let Some(parent) = parent {
+                        if parent == id {
+                            return Err(DunkError::Refused(
+                                "a task cannot be its own parent".into(),
+                            ));
+                        }
+                        let found: Option<String> = tx
+                            .query_row("SELECT id FROM tasks WHERE id = ?", params![parent], |row| row.get(0))
+                            .optional()
+                            .map_err(db::map_sqlite)?;
+                        if found.is_none() {
+                            return Err(DunkError::Refused(format!("no task with id {parent:?}")));
+                        }
+                    }
+                    Some(parent.map(str::to_string))
+                } else {
+                    None
+                };
                 let mut deps_after: Option<Vec<String>> = None;
                 if let Some(deps) = &edit_for_call.depends_on {
                     let deps: Vec<String> = deps.iter().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).collect();
@@ -975,30 +1009,27 @@ impl Tasks {
                     }
                     deps_after = Some(deps);
                 }
-                let mut changed = false;
-                if let Some(parent) = &edit_for_call.parent_id {
-                    let parent = parent.as_deref().map(str::trim).filter(|p| !p.is_empty());
-                    if let Some(parent) = parent {
-                        if parent == id {
-                            return Err(DunkError::Refused("a task cannot be its own parent".into()));
-                        }
-                        let found: Option<String> = tx
-                            .query_row("SELECT id FROM tasks WHERE id = ?", params![parent], |row| row.get(0))
-                            .optional()
-                            .map_err(db::map_sqlite)?;
-                        if found.is_none() {
-                            return Err(DunkError::Refused(format!("no task with id {parent:?}")));
-                        }
+                let status_after = requested_status
+                    .as_deref()
+                    .map(validate_status)
+                    .transpose()?;
+                if let Some(status) = &status_after {
+                    if is_terminal(&old_status) && *status != old_status {
+                        return Err(DunkError::Refused(format!(
+                            "task {id} is {old_status}; a finished task is not reopened by an edit (t854)"
+                        )));
                     }
+                }
+                let mut changed = false;
+                let mut assigned_event: Option<Vec<String>> = None;
+                let mut priority_event: Option<String> = None;
+                let mut depends_event: Option<(Vec<String>, Vec<String>)> = None;
+                if let Some(parent) = parent_after {
                     tx.execute("UPDATE tasks SET parent_id = ? WHERE id = ?", params![parent, id]).map_err(db::map_sqlite)?;
                     changed = true;
                 }
                 if let Some(flag) = edit_for_call.multi_assignee {
                     tx.execute("UPDATE tasks SET multi_assignee = ? WHERE id = ?", params![flag as i64, id]).map_err(db::map_sqlite)?;
-                    changed = true;
-                }
-                if let Some(reason) = &edit_for_call.block_reason {
-                    tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
                     changed = true;
                 }
                 if let Some(list) = &edit_for_call.assignees {
@@ -1007,11 +1038,7 @@ impl Tasks {
                     tx.execute("UPDATE tasks SET assignees = ? WHERE id = ?", params![json!(after).to_string(), id]).map_err(db::map_sqlite)?;
                     changed = true;
                     if before != after {
-                        tx.execute(
-                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                            params![id, "assigned", now, actor, scope, old_priority,
-                                    json!({ "assignees": after }).to_string()],
-                        ).map_err(db::map_sqlite)?;
+                        assigned_event = Some(after);
                     }
                 }
                 if let Some(title) = &edit_for_call.title {
@@ -1026,11 +1053,7 @@ impl Tasks {
                     tx.execute("UPDATE tasks SET priority = ? WHERE id = ?", params![new, id]).map_err(db::map_sqlite)?;
                     changed = true;
                     if *new != old_priority {
-                        tx.execute(
-                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                            params![id, "priority", now, actor, scope, new,
-                                    json!({ "from": old_priority, "to": new }).to_string()],
-                        ).map_err(db::map_sqlite)?;
+                        priority_event = Some(new.clone());
                     }
                 }
                 if let Some(after) = &deps_after {
@@ -1039,16 +1062,118 @@ impl Tasks {
                     tx.execute("UPDATE tasks SET depends_on = ? WHERE id = ?", params![encoded, id]).map_err(db::map_sqlite)?;
                     changed = true;
                     if before != *after {
+                        depends_event = Some((before, after.clone()));
+                    }
+                }
+                if let Some(status) = &status_after {
+                    let status_rows = match status.as_str() {
+                        "done" => {
+                            tx.execute(
+                                "UPDATE tasks SET status = ?, completed_by = ?, completed_at = ?, \
+                                 cancelled_at = NULL, block_reason = NULL WHERE id = ? AND status = ?",
+                                params![status, actor, now, id, old_status],
+                            ).map_err(db::map_sqlite)?
+                        }
+                        "cancelled" => {
+                            tx.execute(
+                                "UPDATE tasks SET status = ?, cancelled_at = ?, block_reason = NULL \
+                                 WHERE id = ? AND status = ?",
+                                params![status, now, id, old_status],
+                            ).map_err(db::map_sqlite)?
+                        }
+                        "blocked" => {
+                            tx.execute(
+                                "UPDATE tasks SET status = ?, completed_by = NULL, completed_at = NULL, \
+                                 cancelled_at = NULL WHERE id = ? AND status = ?",
+                                params![status, id, old_status],
+                            ).map_err(db::map_sqlite)?
+                        }
+                        _ => {
+                            tx.execute(
+                                "UPDATE tasks SET status = ?, completed_by = NULL, completed_at = NULL, \
+                                 cancelled_at = NULL, block_reason = NULL WHERE id = ? AND status = ?",
+                                params![status, id, old_status],
+                            ).map_err(db::map_sqlite)?
+                        }
+                    };
+                    if status_rows == 0 {
+                        let current: String = tx
+                            .query_row("SELECT status FROM tasks WHERE id = ?", params![id], |row| row.get(0))
+                            .optional()
+                            .map_err(db::map_sqlite)?
+                            .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))?;
+                        if is_terminal(&current) {
+                            return Err(DunkError::Refused(format!(
+                                "task {id} is {current}; a finished task is not reopened by an edit (t854)"
+                            )));
+                        }
+                        return Err(DunkError::Retryable(format!(
+                            "task {id} changed to {current} while this edit was applied; read it again (t854)"
+                        )));
+                    }
+                    changed = true;
+                    if status != &old_status {
+                        if ends_claim(status) {
+                            let removed = tx
+                                .execute("DELETE FROM task_leases WHERE task_id = ?", params![id])
+                                .map_err(db::map_sqlite)?;
+                            if removed > 0 {
+                                tx.execute(
+                                    "INSERT INTO task_events (task_id, event, at, actor, scope, \
+                                     priority, status_to, meta) VALUES (?,?,?,?,?,?,?,?)",
+                                    params![id, "lease_released", now, actor, scope,
+                                            priority.as_deref().unwrap_or(&old_priority), status,
+                                            json!({ "reason": format!("status became {status}"),
+                                                    "leases_removed": removed }).to_string()],
+                                ).map_err(db::map_sqlite)?;
+                            }
+                        }
+                        let event = match status.as_str() {
+                            "done" => "completed",
+                            "cancelled" => "cancelled",
+                            "blocked" => "blocked",
+                            "open" if old_status == "blocked" => "unblocked",
+                            _ => "status",
+                        };
+                        let duration_ms =
+                            (status == "done").then(|| ((now - created_at) * 1000.0) as i64);
                         tx.execute(
-                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
-                            params![id, "depends", now, actor, scope, old_priority,
-                                    json!({
-                                        "removed": before.iter().filter(|d| !after.contains(d)).collect::<Vec<_>>(),
-                                        "added": after.iter().filter(|d| !before.contains(d)).collect::<Vec<_>>(),
-                                        "depends_on": after,
-                                    }).to_string()],
+                            "INSERT INTO task_events (task_id, event, at, actor, scope, priority, \
+                             status_from, status_to, duration_ms) VALUES (?,?,?,?,?,?,?,?,?)",
+                            params![id, event, now, actor, scope,
+                                    priority.as_deref().unwrap_or(&old_priority), old_status,
+                                    status, duration_ms],
                         ).map_err(db::map_sqlite)?;
                     }
+                }
+                if let Some(reason) = &edit_for_call.block_reason {
+                    tx.execute("UPDATE tasks SET block_reason = ? WHERE id = ?", params![reason, id]).map_err(db::map_sqlite)?;
+                    changed = true;
+                }
+                if let Some(new) = priority_event {
+                    tx.execute(
+                        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                        params![id, "priority", now, actor, scope, new,
+                                json!({ "from": old_priority, "to": new }).to_string()],
+                    ).map_err(db::map_sqlite)?;
+                }
+                if let Some((before, after)) = depends_event {
+                    tx.execute(
+                        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                        params![id, "depends", now, actor, scope, old_priority,
+                                json!({
+                                    "removed": before.iter().filter(|d| !after.contains(d)).collect::<Vec<_>>(),
+                                    "added": after.iter().filter(|d| !before.contains(d)).collect::<Vec<_>>(),
+                                    "depends_on": after,
+                                }).to_string()],
+                    ).map_err(db::map_sqlite)?;
+                }
+                if let Some(after) = assigned_event {
+                    tx.execute(
+                        "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) VALUES (?,?,?,?,?,?,?)",
+                        params![id, "assigned", now, actor, scope, old_priority,
+                                json!({ "assignees": after }).to_string()],
+                    ).map_err(db::map_sqlite)?;
                 }
                 if changed {
                     tx.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", params![now, id]).map_err(db::map_sqlite)?;
@@ -1735,9 +1860,8 @@ pub struct AddOptions {
     pub head: Option<String>,
 }
 
-/// `update`'s field edits (t786 slice 5). A status change is `set_status`, which carries
-/// the t854/t891 guards; this edits title, body, priority and dependencies only, in ONE
-/// immediate transaction, and writes the `priority` and `depends` events the Python writes.
+/// `update`'s field edits (t786 slice 5). `update_with_status` applies these together with
+/// an optional status transition in one immediate transaction.
 #[derive(Debug, Default, Clone)]
 pub struct FieldEdit {
     pub title: Option<String>,
@@ -3101,6 +3225,30 @@ mod tests {
             3,
             "a refused edit writes nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn task_update_status_fields_are_atomic_on_refusal() {
+        let tasks = store("update-status-atomic").await;
+        let task = tasks.add("global", "before", "").await.unwrap();
+        let event_count = tasks.events(&task.id).await;
+        let edit = FieldEdit {
+            title: Some("after".into()),
+            priority: Some("urgent".into()),
+            ..Default::default()
+        };
+
+        let error = tasks
+            .update_with_status(&task.id, edit, Some("invalid-status"), Some("%1"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("status must be one of"), "{error}");
+
+        let unchanged = tasks.get(&task.id).await.unwrap();
+        assert_eq!("before", unchanged.title);
+        assert_eq!("low", unchanged.priority);
+        assert_eq!(event_count, tasks.events(&task.id).await);
     }
 
     #[test]
