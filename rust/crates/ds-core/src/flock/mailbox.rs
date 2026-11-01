@@ -38,7 +38,7 @@ fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
 }
 
 /// `_PANE_ID_RE`, `_TERM_ID_RE`, `_HERDR_ID_RE`: the id fast path.
-fn is_id(spec: &str) -> bool {
+pub(super) fn is_id(spec: &str) -> bool {
     static PANE: OnceLock<Regex> = OnceLock::new();
     static TERM: OnceLock<Regex> = OnceLock::new();
     static HERDR: OnceLock<Regex> = OnceLock::new();

@@ -10,6 +10,20 @@ use super::ContextError;
 
 pub const CLASSES: [&str; 4] = ["ground-truth", "fact", "provisional", "history"];
 pub const AUTHORITIES: [&str; 3] = ["owner", "measured", "agent"];
+/// `TYPES`.
+pub const TYPES: [&str; 8] = [
+    "principle",
+    "decision",
+    "reference",
+    "lesson",
+    "measurement",
+    "incident",
+    "rule",
+    "wiki",
+];
+/// Types only the owner may write (docs/FLAT_FLEET.md 8): a rule is a standing instruction,
+/// and standing instructions come from one person.
+pub const OWNER_ONLY_TYPES: [&str; 2] = ["rule", "principle"];
 
 /// Front-matter keys in the order `_render` writes them.
 const RENDER_KEYS: [&str; 12] = [
@@ -442,5 +456,299 @@ impl Store {
             }
         }
         out
+    }
+}
+
+// -- write side (slice 3) ---------------------------------------------------------------
+
+use super::ledger::Ledger;
+
+/// `date.today().isoformat()`.
+fn today() -> String {
+    chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn io_error(path: &Path, error: std::io::Error) -> ContextError {
+    ContextError(format!("{}: {error}", path.display()))
+}
+
+/// `add`'s keyword arguments. `authority` defaults to `agent` in the Python.
+#[derive(Debug, Clone, Default)]
+pub struct AddArgs<'a> {
+    pub cls: &'a str,
+    pub subject: &'a str,
+    pub type_: &'a str,
+    pub authority: Option<&'a str>,
+    pub source: &'a str,
+    pub stated: Option<&'a str>,
+    pub recheck_after: Option<&'a str>,
+    pub supersedes: Option<&'a str>,
+    pub slug: Option<&'a str>,
+    pub by: Option<&'a str>,
+}
+
+/// `supersede`'s `**meta`: only the keys the caller passed override the old entry's.
+#[derive(Debug, Clone, Default)]
+pub struct SupersedeMeta<'a> {
+    pub authority: Option<&'a str>,
+    pub source: Option<&'a str>,
+    /// `Some(None)` = passed as `None` (explicitly cleared), `None` = not passed.
+    pub recheck_after: Option<Option<&'a str>>,
+}
+
+/// What `add` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    pub slug: String,
+    pub path: PathBuf,
+    pub cls: String,
+}
+
+impl Store {
+    /// `_record`: log what the daemon just wrote, when a ledger is attached.
+    fn record_write(
+        &self,
+        ledger: &mut Option<&mut Ledger>,
+        path: &Path,
+        slug: &str,
+        meta: &Meta,
+        by: Option<&str>,
+    ) {
+        if let Some(ledger) = ledger.as_deref_mut() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let get = |key: &str| meta.get(key).and_then(|v| v.as_deref());
+                let _ = ledger.record(&self.root, slug, &text, get("class"), get("authority"), by);
+            }
+        }
+    }
+
+    /// `adopt`: bootstrap, record every live entry as-is. The owner's one-shot.
+    pub fn adopt(&self, ledger: &mut Ledger, by: &str) -> Vec<String> {
+        let mut adopted = Vec::new();
+        for entry in self.live_entries() {
+            let Ok(text) = std::fs::read_to_string(&entry.path) else {
+                continue;
+            };
+            let recorded = ledger.record(
+                &self.root,
+                &entry.slug,
+                &text,
+                entry.get("class"),
+                entry.get("authority"),
+                Some(by),
+            );
+            if recorded.is_ok() {
+                adopted.push(entry.slug.clone());
+            }
+        }
+        adopted
+    }
+
+    /// `ensure`: create the root, the four class directories and the README.
+    pub fn ensure(&self) -> Result<&Path, ContextError> {
+        std::fs::create_dir_all(&self.root).map_err(|e| io_error(&self.root, e))?;
+        for name in CLASSES {
+            let dir = self.root.join(name);
+            if !dir.is_dir() {
+                std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+            }
+        }
+        let readme = self.root.join("README.md");
+        if !readme.exists() {
+            std::fs::write(
+                &readme,
+                "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+            )
+            .map_err(|e| io_error(&readme, e))?;
+        }
+        Ok(&self.root)
+    }
+
+    /// `add`. A ground truth has authority owner: an agent proposes a fact and the owner
+    /// promotes it.
+    pub fn add(
+        &self,
+        body: &str,
+        args: &AddArgs,
+        mut ledger: Option<&mut Ledger>,
+    ) -> Result<Added, ContextError> {
+        let authority = args.authority.unwrap_or("agent");
+        if !CLASSES.contains(&args.cls) {
+            return Err(ContextError(format!(
+                "class must be one of {}",
+                tuple_repr(&CLASSES)
+            )));
+        }
+        if !AUTHORITIES.contains(&authority) {
+            return Err(ContextError(format!(
+                "authority must be one of {}",
+                tuple_repr(&AUTHORITIES)
+            )));
+        }
+        if !TYPES.contains(&args.type_) {
+            return Err(ContextError(format!(
+                "type must be one of {}; got {}",
+                tuple_repr(&TYPES),
+                py_repr(args.type_)
+            )));
+        }
+        if args.cls == "ground-truth" && authority != "owner" {
+            return Err(ContextError(
+                "a ground truth has authority owner; an agent proposes a fact and the owner \
+                 promotes it"
+                    .to_string(),
+            ));
+        }
+        self.ensure()?;
+        let stated = args.stated.filter(|s| !s.is_empty()).map(str::to_string);
+        let mut slug_text = match args.slug.filter(|s| !s.is_empty()) {
+            Some(slug) => slug.to_string(),
+            None => format!(
+                "{}-{}",
+                stated.clone().unwrap_or_else(today),
+                slug(args.subject)
+            ),
+        };
+        let folder = self.root.join(args.cls);
+        std::fs::create_dir_all(&folder).map_err(|e| io_error(&folder, e))?;
+        let mut path = folder.join(format!("{slug_text}.md"));
+        let mut supersedes = args
+            .supersedes
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if path.exists() {
+            // A supersede on the same day derives the same slug, so the guarantee
+            // "supersession is the only way an entry changes" was unimplementable within a
+            // day: the new file collided with the old one. A superseding entry gets a
+            // distinct, deterministic slug instead.
+            if supersedes.is_none() {
+                return Err(ContextError(format!("entry {slug_text} already exists")));
+            }
+            let mut counter = 2;
+            while folder.join(format!("{slug_text}-{counter}.md")).exists() {
+                counter += 1;
+            }
+            slug_text = format!("{slug_text}-{counter}");
+            path = folder.join(format!("{slug_text}.md"));
+        }
+        if let Some(target) = supersedes.clone() {
+            let Some(old) = self.resolve(&target)? else {
+                return Err(ContextError(format!("supersede target {target} not found")));
+            };
+            supersedes = Some(old.slug.clone());
+            let mut meta = old.meta.clone();
+            meta.insert("superseded_by".into(), Some(slug_text.clone()));
+            std::fs::write(&old.path, render(&meta, &old.body))
+                .map_err(|e| io_error(&old.path, e))?;
+            self.record_write(&mut ledger, &old.path, &old.slug, &meta, args.by);
+        }
+        let mut meta = Meta::new();
+        let put = |meta: &mut Meta, key: &str, value: Option<String>| {
+            meta.insert(key.to_string(), value);
+        };
+        put(&mut meta, "class", Some(args.cls.to_string()));
+        put(&mut meta, "subject", Some(args.subject.to_string()));
+        put(&mut meta, "type", Some(args.type_.to_string()));
+        put(&mut meta, "scope", Some(self.scope.to_string()));
+        put(&mut meta, "authority", Some(authority.to_string()));
+        put(&mut meta, "stated", Some(stated.unwrap_or_else(today)));
+        put(&mut meta, "source", Some(args.source.to_string()));
+        put(
+            &mut meta,
+            "recheck_after",
+            match args.recheck_after {
+                Some(value) => Some(value.to_string()),
+                None if args.cls == "provisional" => Some("7d".to_string()),
+                None => None,
+            },
+        );
+        put(&mut meta, "supersedes", supersedes);
+        put(&mut meta, "superseded_by", None);
+        std::fs::write(&path, render(&meta, body)).map_err(|e| io_error(&path, e))?;
+        self.record_write(&mut ledger, &path, &slug_text, &meta, args.by);
+        Ok(Added {
+            slug: slug_text,
+            path,
+            cls: args.cls.to_string(),
+        })
+    }
+
+    /// `supersede`: a new entry that replaces `slug`, keeping its class and subject.
+    pub fn supersede(
+        &self,
+        slug_or_subject: &str,
+        new_body: &str,
+        by: Option<&str>,
+        meta: &SupersedeMeta,
+        ledger: Option<&mut Ledger>,
+    ) -> Result<Added, ContextError> {
+        let Some(old) = self.resolve(slug_or_subject)? else {
+            return Err(ContextError(format!("entry {slug_or_subject} not found")));
+        };
+        let class = old.get("class").unwrap_or_default().to_string();
+        let subject = old.get("subject").unwrap_or_default().to_string();
+        let type_ = old
+            .get("type")
+            .filter(|t| !t.is_empty())
+            .unwrap_or("reference")
+            .to_string();
+        let authority = meta
+            .authority
+            .map(str::to_string)
+            .or_else(|| {
+                old.get("authority")
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "agent".to_string());
+        let source = meta
+            .source
+            .filter(|s| !s.is_empty())
+            .or_else(|| old.get("source").filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_string();
+        let recheck = match meta.recheck_after {
+            Some(passed) => passed.map(str::to_string),
+            None => old.get("recheck_after").map(str::to_string),
+        };
+        self.add(
+            new_body,
+            &AddArgs {
+                cls: &class,
+                subject: &subject,
+                type_: &type_,
+                authority: Some(&authority),
+                source: &source,
+                recheck_after: recheck.as_deref(),
+                supersedes: Some(&old.slug),
+                by,
+                ..Default::default()
+            },
+            ledger,
+        )
+    }
+
+    /// `retire`: mark an entry retired and append the reason to its body.
+    pub fn retire(
+        &self,
+        slug_or_subject: &str,
+        reason: &str,
+        by: Option<&str>,
+        mut ledger: Option<&mut Ledger>,
+    ) -> Result<(String, String), ContextError> {
+        let Some(entry) = self.resolve(slug_or_subject)? else {
+            return Err(ContextError(format!("entry {slug_or_subject} not found")));
+        };
+        let mut meta = entry.meta.clone();
+        let day = today();
+        meta.insert("retired_at".into(), Some(day.clone()));
+        meta.insert("retired_reason".into(), Some(reason.replace('\n', " ")));
+        let body = format!("{}\n\n**Retired {day}**: {reason}\n", entry.body);
+        std::fs::write(&entry.path, render(&meta, &body)).map_err(|e| io_error(&entry.path, e))?;
+        self.record_write(&mut ledger, &entry.path, &entry.slug, &meta, by);
+        Ok((entry.slug, reason.to_string()))
     }
 }
