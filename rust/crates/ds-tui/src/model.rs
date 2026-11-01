@@ -115,9 +115,10 @@ impl<C: RpcClient> TuiModel<C> {
     /// Refresh dunks and, when the task view is active, refresh tasks afterward.
     /// Failed RPCs leave the last successful collection intact, matching the Python
     /// UI's early return behavior.
-    pub fn refresh(&mut self, now: f64) {
-        let Some(result) = self.rpc("list_dunks", Value::Null, now).0 else {
-            return;
+    pub fn refresh(&mut self, now: f64) -> bool {
+        let (result, reconnect) = self.rpc("list_dunks", Value::Null, now);
+        let Some(result) = result else {
+            return reconnect;
         };
         self.dunks = result
             .get("dunks")
@@ -142,15 +143,17 @@ impl<C: RpcClient> TuiModel<C> {
         self.global_status = label;
 
         if self.view == View::Tasks {
-            self.refresh_tasks(now);
+            return self.refresh_tasks(now);
         }
+        false
     }
 
     /// Fetch task rows and replace the dunk summary with the task count summary.
-    pub fn refresh_tasks(&mut self, now: f64) {
+    pub fn refresh_tasks(&mut self, now: f64) -> bool {
         let args = serde_json::json!({"include_done": true, "limit": 500});
-        let Some(result) = self.rpc("task_list", args, now).0 else {
-            return;
+        let (result, reconnect) = self.rpc("task_list", args, now);
+        let Some(result) = result else {
+            return reconnect;
         };
         self.tasks = result
             .get("tasks")
@@ -169,6 +172,7 @@ impl<C: RpcClient> TuiModel<C> {
             })
             .count();
         self.global_status = format!("{} tasks ({open_count} open/in-progress)", self.tasks.len());
+        false
     }
 
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
@@ -313,5 +317,36 @@ mod tests {
         model.refresh(1.0);
         assert_eq!(model.selected, 0);
         assert_eq!(model.global_status, "0 dunkers");
+    }
+
+    #[test]
+    fn refresh_propagates_reconnect_request_for_list_dunks_transport_error() {
+        let client = FakeClient {
+            responses: VecDeque::from([Err(RpcError::Transport("gone".into()))]),
+            ..FakeClient::default()
+        };
+        let mut model = TuiModel::connected(client, 1.0);
+
+        assert!(model.refresh(3.001));
+        assert_eq!(model.message, "Daemon error: gone");
+        assert_eq!(model.client.calls[0].0, "list_dunks");
+    }
+
+    #[test]
+    fn refresh_propagates_reconnect_request_for_task_list_transport_error() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(serde_json::json!({"dunks": []})),
+                Err(RpcError::Transport("gone".into())),
+            ]),
+            ..FakeClient::default()
+        };
+        let mut model = TuiModel::connected(client, 1.0);
+        model.view = View::Tasks;
+
+        assert!(model.refresh(3.001));
+        assert_eq!(model.message, "Daemon error: gone");
+        assert_eq!(model.client.calls[0].0, "list_dunks");
+        assert_eq!(model.client.calls[1].0, "task_list");
     }
 }
