@@ -4,6 +4,10 @@
 
 use super::mailbox::*;
 use super::Flock;
+use crate::error::DunkError;
+use crate::flock::lanes::TerminalEnv;
+use crate::terminal::fakes::FakeTerminal;
+use crate::terminal::TerminalError;
 use serde_json::{json, Value};
 
 struct Env {
@@ -42,6 +46,35 @@ fn env() -> Env {
         ],
         registered: None,
     }
+}
+
+#[test]
+fn terminal_env_keeps_grouped_pane_backend_errors_fallible() {
+    let mut terminal = FakeTerminal::new();
+    terminal.fail_grouped_panes = Some(TerminalError::refused("offline"));
+    let registered = |_: &str| (false, false, None);
+    let env = TerminalEnv {
+        terminal: &terminal,
+        registered: &registered,
+    };
+
+    assert!(matches!(
+        MailboxEnv::try_list_panes_grouped(&env),
+        Err(DunkError::Refused(message)) if message == "offline"
+    ));
+}
+
+#[test]
+fn terminal_env_keeps_a_successful_empty_grouped_listing_empty() {
+    let mut terminal = FakeTerminal::new();
+    terminal.panes.clear();
+    let registered = |_: &str| (false, false, None);
+    let env = TerminalEnv {
+        terminal: &terminal,
+        registered: &registered,
+    };
+
+    assert!(MailboxEnv::try_list_panes_grouped(&env).unwrap().is_empty());
 }
 
 fn flock(dir: &tempfile::TempDir) -> Flock {

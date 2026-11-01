@@ -78,27 +78,45 @@ impl MailboxEnv for TerminalEnv<'_> {
             .collect()
     }
     fn list_panes_grouped(&self) -> Vec<Value> {
-        let mut panes = self.list_panes();
-        for pane in &mut panes {
-            // `tab.get("label") or pane.get("tab_id", "?")`, likewise for the workspace.
-            for (label, id) in [("tab_label", "tab_id"), ("workspace_label", "workspace_id")] {
-                if pane[label].as_str().unwrap_or("").is_empty() {
-                    pane[label] = pane[id].clone();
-                }
-            }
-        }
-        // Python's sort is stable on (workspace_number, tab_number).
-        panes.sort_by_key(|p| {
-            (
-                p["workspace_number"].as_i64().unwrap_or(0),
-                p["tab_number"].as_i64().unwrap_or(0),
-            )
-        });
-        panes
+        finish_grouped_panes(self.list_panes())
+    }
+    fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
+        let groups = self
+            .terminal
+            .try_list_panes_grouped()
+            .map_err(|error| DunkError::Refused(error.to_string()))?;
+        let panes = groups
+            .values()
+            .flat_map(|group| group.iter())
+            .map(|pane| {
+                let status = self.terminal.agent_status(&pane.pane_id);
+                pane_to_json(pane, status.as_deref())
+            })
+            .collect();
+        Ok(finish_grouped_panes(panes))
     }
     fn registered_pane(&self, pane_id: &str) -> (bool, bool, Option<String>) {
         (self.registered)(pane_id)
     }
+}
+
+fn finish_grouped_panes(mut panes: Vec<Value>) -> Vec<Value> {
+    for pane in &mut panes {
+        // `tab.get("label") or pane.get("tab_id", "?")`, likewise for the workspace.
+        for (label, id) in [("tab_label", "tab_id"), ("workspace_label", "workspace_id")] {
+            if pane[label].as_str().unwrap_or("").is_empty() {
+                pane[label] = pane[id].clone();
+            }
+        }
+    }
+    // Python's sort is stable on (workspace_number, tab_number).
+    panes.sort_by_key(|p| {
+        (
+            p["workspace_number"].as_i64().unwrap_or(0),
+            p["tab_number"].as_i64().unwrap_or(0),
+        )
+    });
+    panes
 }
 
 impl Flock {
@@ -156,8 +174,10 @@ impl Flock {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         };
-        Ok(env
-            .list_panes_grouped()
+        let panes = env
+            .try_list_panes_grouped()
+            .map_err(|error| DunkError::Refused(format!("cannot list panes: {error}")))?;
+        Ok(panes
             .iter()
             .filter_map(|pane| {
                 let id = text(pane, "pane_id")?;
