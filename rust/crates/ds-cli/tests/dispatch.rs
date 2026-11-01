@@ -317,6 +317,19 @@ fn guard_install_actions_write_only_to_sandbox_and_keep_tmux_helper() {
         status["tmux_guard"]["real_tmux"]
     );
 
+    // Python checks the tmux wrapper and backing binary independently.
+    std::fs::remove_file(config.join("tmux-guard/tmux-real")).unwrap();
+    let ns = try_parse(["dunkingsheep", "guard", "install", "--no-shadow", "--json"]).unwrap();
+    let out = run(&ns);
+    assert_eq!(0, out.code, "{}", out.stderr);
+    let status: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(true, status["tmux_guard"]["installed"]);
+    assert_eq!(
+        config.join("tmux-guard/tmux").to_str().unwrap(),
+        status["tmux_guard"]["wrapper"]
+    );
+    assert_eq!(Value::Null, status["tmux_guard"]["real_tmux"]);
+
     match old_home {
         Some(v) => std::env::set_var("HOME", v),
         None => std::env::remove_var("HOME"),

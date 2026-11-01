@@ -328,8 +328,8 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
         "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
         "tmux_guard": {
             "installed": tmux_installed,
-            "wrapper": if tmux_installed { Some(tmux_wrapper) } else { None::<PathBuf> },
-            "real_tmux": if tmux_installed { Some(tmux_real) } else { None::<PathBuf> },
+            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
+            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
             "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
         },
         "bashrc_updated": updated
