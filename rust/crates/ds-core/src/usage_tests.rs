@@ -158,3 +158,45 @@ fn shlex_matches_python() {
     );
     assert!(shlex_split("a 'b").is_err());
 }
+
+/// Expected values produced by the real Python `shlex.split` (None = ValueError). Added for
+/// the t1348 review: a backslash before `$` or a backtick inside double quotes is KEPT.
+#[test]
+fn shlex_split_matches_pythons_posix_rules_inside_double_quotes_and_elsewhere() {
+    let cases: &[(&str, Option<&[&str]>)] = &[
+        (
+            r#"bash -lc "echo \$HOME""#,
+            Some(&["bash", "-lc", r"echo \$HOME"]),
+        ),
+        (
+            r#"bash -lc "echo \`date\`""#,
+            Some(&["bash", "-lc", r"echo \`date\`"]),
+        ),
+        (r#"a "b\"c" d"#, Some(&["a", r#"b"c"#, "d"])),
+        (r#"a "b\\c" d"#, Some(&["a", r"b\c", "d"])),
+        (r#"a "b\nc""#, Some(&["a", r"b\nc"])),
+        (r#"a "b\xc""#, Some(&["a", r"b\xc"])),
+        (r"a 'b\c' d", Some(&["a", r"b\c", "d"])),
+        (r"a\ b c", Some(&["a b", "c"])),
+        (r#"a "unterminated"#, None),
+        ("a 'unterminated", None),
+        ("a\\", None),
+        (r#""a\$b""#, Some(&[r"a\$b"])),
+        (r#""a\`b""#, Some(&[r"a\`b"])),
+        (r#""a\"b""#, Some(&[r#"a"b"#])),
+        (r#""""#, Some(&[""])),
+        ("''", Some(&[""])),
+        (r#"a""b"#, Some(&["ab"])),
+        (r"x 'a b'\''c'", Some(&["x", "a b'c"])),
+        ("  lead  trail  ", Some(&["lead", "trail"])),
+        (r#"echo "\$" \$"#, Some(&["echo", r"\$", "$"])),
+        (r#"cmd "x\\\\y""#, Some(&["cmd", r"x\\y"])),
+        (r#"a "b\$" c"#, Some(&["a", r"b\$", "c"])),
+        ("tab\tsep  two", Some(&["tab", "sep", "two"])),
+    ];
+    for (input, want) in cases {
+        let got = shlex_split(input).ok();
+        let want = want.map(|w| w.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(want, got, "shlex.split({input:?})");
+    }
+}
