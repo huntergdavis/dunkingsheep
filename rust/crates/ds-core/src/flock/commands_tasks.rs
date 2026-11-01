@@ -8,7 +8,7 @@
 //! `task_list`/`task_read` (need the store's filtered list and `recent_notes`), `task_update`,
 //! `task_complete` (verdict, `_authorize_task_complete`, `_require_completion_binding`, the
 //! github hook), `task_next`/`_claim_filters`, heartbeat/release/follow/unfollow/followers/
-//! stats. The caller's role arrives as a parameter: `caller_role` is not ported.
+//! stats. Caller-sensitive additions resolve role through `PaneInfoEnv` and `caller_role`.
 
 use std::sync::Arc;
 
@@ -213,10 +213,10 @@ impl Flock {
         Ok(task)
     }
 
-    /// `task_add`: resolve scope and owners, apply the pre-write refusals, then one store
-    /// write. Unassigned work stays unowned (`default_task_owner`); the default priority is `low`
-    /// (`dunk_core.task_add`: `priority or "low"`). `role` is the
-    /// caller's role (`caller_role`, not ported); kind, author, repo, pr and head go to the store.
+    /// `task_add`: resolve scope and owners, read the caller role from the request context,
+    /// apply the pre-write refusals, then one store write. Unassigned work stays unowned
+    /// (`default_task_owner`); the default priority is `low` (`dunk_core.task_add`:
+    /// `priority or "low"`). Kind, author, repo, pr and head go to the store.
     #[allow(clippy::too_many_arguments)]
     pub async fn task_add(
         &self,
@@ -224,17 +224,18 @@ impl Flock {
         scope: Option<&str>,
         body: Option<&str>,
         opts: TaskAddArgs<'_>,
-        role: &str,
         self_pane_id: Option<&str>,
+        env: &dyn PaneInfoEnv,
     ) -> Result<Task, DunkError> {
         let tasks = self.task_store()?;
         let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
         let mut owners = Self::task_assignees(opts.assignees, self_pane_id)?;
         let owner_refs: Vec<&str> = owners.iter().map(String::as_str).collect();
+        let role = self.caller_role(self_pane_id, env)?;
         Self::check_task_add(
             &target,
             &owner_refs,
-            role,
+            &role,
             opts.kind,
             opts.status,
             self_pane_id,
