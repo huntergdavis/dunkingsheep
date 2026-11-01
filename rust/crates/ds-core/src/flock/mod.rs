@@ -457,6 +457,7 @@ pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
 pub mod resolve;
+pub mod retire;
 pub mod roles_gate;
 pub mod roster;
 pub mod sends;

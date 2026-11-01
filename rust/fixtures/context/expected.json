@@ -1,0 +1,296 @@
+{
+  "cases": [
+    {
+      "args": {
+        "max_bytes": 8192,
+        "subject": null
+      },
+      "expected": "## Ground truths (2)\n- [prod] Production stays installed.\n- [worktrees] Never edit a shared checkout.\n\n## Relevant\n- [fact/port] The port is 9090.\n- [fact/menu] Café menu rotates weekly; naive text wîth accents to stress the byte cap.\n- [fact/deploy] The deploy takes 4 minutes.\n- [fact/forged] A forged fact.\n- [fact/norecheck] A fact that forgot to say when to look again.\n- [provisional/cache] Maybe the cache is the culprit. (STALE - re-check before trusting)\n- [provisional/cache2] Maybe the cache is fine now.\n",
+      "op": "digest"
+    },
+    {
+      "args": {
+        "max_bytes": 420,
+        "subject": null
+      },
+      "expected": "## Ground truths (2)\n- [prod] Production stays installed.\n- [worktrees] Never edit a shared checkout.\n\n## Relevant\n- [fact/port] The port is 9090.\n- [fact/menu] Café menu rotates weekly; naive text wîth accents to stress the byte cap.\n- [fact/deploy] The deploy takes 4 minutes.\n- [fact/forged] A forged fact.\n- [fact/norecheck] A fact that forgot to say when to look again.\nomitted: 2 entries over the 420-byte cap\n",
+      "op": "digest"
+    },
+    {
+      "args": {
+        "max_bytes": 8192,
+        "subject": "deploy"
+      },
+      "expected": "## Ground truths (2)\n- [prod] Production stays installed.\n- [worktrees] Never edit a shared checkout.\n\n## Relevant\n- [fact/deploy] The deploy takes 4 minutes.\n",
+      "op": "digest"
+    },
+    {
+      "args": {},
+      "expected": [
+        {
+          "body": "An old rule nobody follows.\n\n**Retired 2026-10-31**: owner withdrew it",
+          "class": "ground-truth",
+          "error": null,
+          "slug": "gt-old-rule",
+          "stated": "2020-01-01",
+          "subject": "old-rule"
+        },
+        {
+          "body": "Production stays installed.",
+          "class": "ground-truth",
+          "error": null,
+          "slug": "gt-prod",
+          "stated": "2020-01-01",
+          "subject": "prod"
+        },
+        {
+          "body": "Never edit a shared checkout.\nWork in a worktree.",
+          "class": "ground-truth",
+          "error": null,
+          "slug": "gt-worktrees",
+          "stated": "2020-01-01",
+          "subject": "worktrees"
+        },
+        {
+          "body": "The port is 9090.",
+          "class": "fact",
+          "error": null,
+          "slug": "2026-10-31-port",
+          "stated": "2026-10-31",
+          "subject": "port"
+        },
+        {
+          "body": null,
+          "class": null,
+          "error": "entry has no front matter (must start with ---)",
+          "slug": "fact-broken",
+          "stated": null,
+          "subject": null
+        },
+        {
+          "body": "Café menu rotates weekly; naive text wîth accents to stress the byte cap.\n\nedited by hand",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-cafe",
+          "stated": "2999-01-01",
+          "subject": "menu"
+        },
+        {
+          "body": "The deploy takes 4 minutes.\nMeasured twice.",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-deploy",
+          "stated": "2999-01-01",
+          "subject": "deploy"
+        },
+        {
+          "body": "A forged fact.",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-forged",
+          "stated": "2999-01-01",
+          "subject": "forged"
+        },
+        {
+          "body": "A fact that forgot to say when to look again.",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-norecheck",
+          "stated": "2999-01-01",
+          "subject": "norecheck"
+        },
+        {
+          "body": "The port is 8080.",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-port-old",
+          "stated": "2020-01-01",
+          "subject": "port"
+        },
+        {
+          "body": "retired but searchable\n\n**Retired 2026-10-31**: no longer true",
+          "class": "fact",
+          "error": null,
+          "slug": "fact-retired",
+          "stated": "2999-01-01",
+          "subject": "retired-thing"
+        },
+        {
+          "body": "Maybe the cache is the culprit.",
+          "class": "provisional",
+          "error": null,
+          "slug": "prov-cache",
+          "stated": "2020-01-01",
+          "subject": "cache"
+        },
+        {
+          "body": "Maybe the cache is fine now.",
+          "class": "provisional",
+          "error": null,
+          "slug": "prov-cache2",
+          "stated": "2999-01-01",
+          "subject": "cache2"
+        }
+      ],
+      "op": "entries"
+    },
+    {
+      "args": {
+        "cls": null,
+        "limit": 20,
+        "query": "deploy",
+        "scope": null
+      },
+      "expected": [
+        {
+          "class": "fact",
+          "scope": "project",
+          "slug": "fact-deploy",
+          "subject": "deploy"
+        }
+      ],
+      "op": "search"
+    },
+    {
+      "args": {
+        "cls": "fact",
+        "limit": 20,
+        "query": "port",
+        "scope": null
+      },
+      "expected": [
+        {
+          "class": "fact",
+          "scope": "project",
+          "slug": "fact-port-old",
+          "subject": "port"
+        },
+        {
+          "class": "fact",
+          "scope": "project",
+          "slug": "2026-10-31-port",
+          "subject": "port"
+        }
+      ],
+      "op": "search"
+    },
+    {
+      "args": {
+        "cls": null,
+        "limit": 5,
+        "query": "café OR retired",
+        "scope": null
+      },
+      "expected": [
+        {
+          "class": "fact",
+          "scope": "project",
+          "slug": "fact-cafe",
+          "subject": "menu"
+        },
+        {
+          "class": "fact",
+          "scope": "project",
+          "slug": "fact-retired",
+          "subject": "retired-thing"
+        },
+        {
+          "class": "ground-truth",
+          "scope": "project",
+          "slug": "gt-old-rule",
+          "subject": "old-rule"
+        }
+      ],
+      "op": "search"
+    },
+    {
+      "args": {
+        "cls": null,
+        "limit": 20,
+        "query": "nothingmatchesthis",
+        "scope": null
+      },
+      "expected": [],
+      "op": "search"
+    },
+    {
+      "args": {},
+      "expected": {
+        "counts": {
+          "fact": 7,
+          "ground-truth": 3,
+          "history": 0,
+          "provisional": 2
+        },
+        "problems": [
+          {
+            "problem": "entry has no front matter (must start with ---)",
+            "slug": "fact-broken"
+          },
+          {
+            "problem": "edited on disk after the daemon wrote it; NOT injected",
+            "slug": "fact-cafe"
+          },
+          {
+            "problem": "not written by the daemon (no ledger row); a ground truth here is NOT injected",
+            "slug": "fact-forged"
+          },
+          {
+            "problem": "fact has no recheck_after",
+            "slug": "fact-norecheck"
+          },
+          {
+            "problem": "stale: past recheck_after 7d",
+            "slug": "fact-port-old",
+            "warning": true
+          },
+          {
+            "problem": "stale: past recheck_after 7d",
+            "slug": "prov-cache",
+            "warning": true
+          }
+        ],
+        "refusals": [
+          {
+            "problem": "entry has no front matter (must start with ---)",
+            "slug": "fact-broken"
+          },
+          {
+            "problem": "edited on disk after the daemon wrote it; NOT injected",
+            "slug": "fact-cafe"
+          },
+          {
+            "problem": "not written by the daemon (no ledger row); a ground truth here is NOT injected",
+            "slug": "fact-forged"
+          },
+          {
+            "problem": "fact has no recheck_after",
+            "slug": "fact-norecheck"
+          }
+        ],
+        "stale": [
+          {
+            "problem": "stale: past recheck_after 7d",
+            "slug": "fact-port-old",
+            "warning": true
+          },
+          {
+            "problem": "stale: past recheck_after 7d",
+            "slug": "prov-cache",
+            "warning": true
+          }
+        ]
+      },
+      "op": "check"
+    }
+  ],
+  "ledger": {
+    "modified": [
+      "fact-cafe"
+    ],
+    "unrecorded": [
+      "fact-forged",
+      "fact-broken"
+    ]
+  }
+}
