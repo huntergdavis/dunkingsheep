@@ -101,9 +101,12 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
             String::from_utf8_lossy(&done.stderr)
         );
     };
-    let dir = std::env::temp_dir().join(format!("ds-dispatch-secrets-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    // t1490: removed when the test ends, not left in the temp dir by every run.
+    let scratch = tempfile::Builder::new()
+        .prefix("ds-dispatch-secrets-")
+        .tempdir()
+        .expect("scratch dir");
+    let dir = scratch.path().to_path_buf();
     git(&dir, &["init", "-q", "-b", "main"]);
     git(&dir, &["config", "user.email", "t@example.com"]);
     git(&dir, &["config", "user.name", "t"]);
