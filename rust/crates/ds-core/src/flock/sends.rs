@@ -61,7 +61,7 @@ pub fn pane_generation(env: &dyn PaneInfoEnv, pane_id: &str) -> Option<String> {
     pane_generation_with(&pane, crate::proc::process_start)
 }
 
-fn pane_generation_with(
+pub(super) fn pane_generation_with(
     pane: &Value,
     process_start: impl FnOnce(i64) -> Option<String>,
 ) -> Option<String> {
