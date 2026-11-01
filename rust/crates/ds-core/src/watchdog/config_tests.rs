@@ -270,3 +270,22 @@ fn extra_an_older_rule_that_goes_missing_still_fails_loudly() {
         .remove("delivery.ambiguous_queued");
     assert!(validate_config(&mut config).is_ok());
 }
+
+#[test]
+fn extra_each_of_the_three_pane_sources_is_accepted_and_others_refused() {
+    // review t1430: the first port accepted only herdr and none; the Python enum is
+    // ('herdr', 'daemon', 'none'), so a daemon-sourced config was refused.
+    for source in ["herdr", "daemon", "none"] {
+        let mut config = example();
+        config["panes"]["source"] = json!(source);
+        assert!(validate_config(&mut config).is_ok(), "{source}");
+    }
+    let mut config = example();
+    config["panes"]["source"] = json!("tmux");
+    let error = validate_config(&mut config).unwrap_err();
+    assert_eq!("panes.source", error.key);
+    assert_eq!(
+        "must be one of ['herdr', 'daemon', 'none'], got 'tmux'",
+        error.reason
+    );
+}

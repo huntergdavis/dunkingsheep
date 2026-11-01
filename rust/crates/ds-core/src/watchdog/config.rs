@@ -533,11 +533,8 @@ fn top_spec() -> Vec<(String, Spec)> {
         group(
             "panes",
             vec![
-                leaf(
-                    "source",
-                    // `_enum("herdr", "none")`
-                    enumeration(&["herdr", "none"]),
-                ),
+                // `_enum("herdr", "daemon", "none")` (dunk_watchdog.py)
+                leaf("source", enumeration(&["herdr", "daemon", "none"])),
                 leaf("pane_id_pattern", regex_check()),
             ],
         ),
