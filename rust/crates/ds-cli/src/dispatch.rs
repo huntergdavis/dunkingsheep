@@ -1734,6 +1734,31 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     )
                 })
             }
+            "unfollow" => {
+                crate::daemon_cmd::run_command(ns, "task_unfollow", Map::new(), |result| {
+                    if matches!(result.get("was_following"), Some(Value::Bool(true))) {
+                        "stopped following\n".into()
+                    } else {
+                        "was not following\n".into()
+                    }
+                })
+            }
+            "followers" => crate::daemon_cmd::run_command(
+                ns,
+                "task_followers",
+                Map::new(),
+                crate::render_print::render_task_followers,
+            ),
+            "stats" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "task_stats", args, |result| {
+                    crate::render_print::render_task_stats(result)
+                })
+            }
             _ => not_ported("task"),
         },
         "stop" | "toggle" => {
