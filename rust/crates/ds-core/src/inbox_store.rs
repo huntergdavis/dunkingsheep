@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
-use crate::db::{map_sqlite, SyncWriter};
+use crate::db::{map_sqlite, ReadPool, SyncWriter, DEFAULT_READ_POOL};
 use crate::error::DunkError;
 use crate::inbox::{
     check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
@@ -52,6 +52,7 @@ pub struct Blob {
 
 pub struct Store {
     writer: SyncWriter,
+    readers: ReadPool,
     blob_dir: PathBuf,
 }
 
@@ -89,11 +90,27 @@ impl Store {
             }
             Ok(())
         })?;
-        Ok(Store { writer, blob_dir })
+        let readers = ReadPool::open(path, DEFAULT_READ_POOL)?;
+        Ok(Store {
+            writer,
+            readers,
+            blob_dir,
+        })
     }
 
     pub fn path(&self) -> &Path {
         self.writer.path()
+    }
+
+    /// Every mailbox associated with a pane, including names that outlive its pane id.
+    pub fn mailboxes_for_pane(&self, pane_id: &str) -> Result<Vec<String>, DunkError> {
+        crate::inbox::mailboxes_for_pane(&self.readers, pane_id)
+    }
+
+    /// The queued-message count for a pane-keyed mailbox, matching `inbox.count(pane_id)`.
+    pub fn unread_for_pane(&self, pane_id: &str) -> Result<i64, DunkError> {
+        let counts = crate::inbox::count(&self.readers, pane_id, &[], now_s())?;
+        Ok(counts.unread)
     }
 
     /// `send`: put a message in a mailbox. Returns its id (`i<N>`); read the row back with
