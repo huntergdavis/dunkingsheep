@@ -53,6 +53,45 @@ pub fn harness_queues_while_busy(harness: Option<&str>) -> bool {
     matches!(harness, Some("claude" | "pi" | "codex"))
 }
 
+/// `_pane_generation`: bind a pane to both its pid and the kernel process start time.
+///
+/// A pid can be reused after a pane is replaced, so missing process evidence fails closed.
+pub fn pane_generation(env: &dyn PaneInfoEnv, pane_id: &str) -> Option<String> {
+    let pane = env.get_pane(pane_id)?;
+    pane_generation_with(&pane, crate::proc::process_start)
+}
+
+fn pane_generation_with(
+    pane: &Value,
+    process_start: impl FnOnce(i64) -> Option<String>,
+) -> Option<String> {
+    let pid_value = pane
+        .get("pane_pid")
+        .filter(|value| json_truthy(value))
+        .or_else(|| pane.get("pid").filter(|value| json_truthy(value)))?;
+    let pid = match pid_value {
+        Value::Null | Value::Array(_) | Value::Object(_) => return None,
+        Value::Bool(value) => i64::from(*value),
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|n| i64::try_from(n).ok()))?,
+        Value::String(value) => value.trim().parse::<i64>().ok()?,
+    };
+    let start = process_start(pid).filter(|start| !start.is_empty())?;
+    Some(format!("pid:{pid}:start:{start}"))
+}
+
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
+}
+
 /// What the send decisions read from outside the pane text.
 pub trait SendEnv {
     /// `herdr.read_pane(pane_id, lines, source="visible", ansi)`; `None` = unreadable.
