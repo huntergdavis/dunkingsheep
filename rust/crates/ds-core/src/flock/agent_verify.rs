@@ -95,6 +95,11 @@ fn repr_str(s: &str) -> String {
     out
 }
 
+/// Python `repr(name)` for messages outside this module.
+pub fn repr_name(name: &str) -> String {
+    repr_str(name)
+}
+
 /// `captured.strip()[:200]`.
 fn head200(captured: &str) -> String {
     captured.trim().chars().take(200).collect()

@@ -257,6 +257,57 @@ impl LayoutBackend for FakeLayout {
         ]);
         Ok(json!({"type": "pane_info", "pane": pane}))
     }
+    fn start_agent(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
+        cwd: Option<&str>,
+        _focus: bool,
+    ) -> Result<Value, String> {
+        if let Some(m) = self.failed() {
+            return Err(m);
+        }
+        let (workspace_id, tab_id) = if let Some(tab_id) = tab_id {
+            let tab = self
+                .tabs
+                .iter()
+                .find(|t| text(t, "tab_id") == tab_id)
+                .ok_or_else(|| format!("tab {tab_id} not found"))?;
+            (text(tab, "workspace_id"), tab_id.to_string())
+        } else {
+            let workspace_id = workspace_id
+                .map(str::to_string)
+                .unwrap_or_else(|| text(&self.workspaces[0], "workspace_id"));
+            let created = self.create_tab(Some(&workspace_id), Some(name), cwd, false)?;
+            let tab_id = text(&created["tab"], "tab_id");
+            let root = text(&created["root_pane"], "pane_id");
+            self.panes.retain(|p| text(p, "pane_id") != root);
+            (workspace_id, tab_id)
+        };
+        let pane = self.new_pane(&workspace_id, &tab_id, cwd);
+        let pid = text(&pane, "pane_id");
+        for stored in self.panes.iter_mut() {
+            if text(stored, "pane_id") == pid {
+                stored["label"] = json!(name);
+                stored["agent"] = json!(name);
+                stored["agent_status"] = json!("idle");
+            }
+        }
+        self.layout_calls.push(vec![
+            json!("start_agent"),
+            json!(name),
+            json!(argv),
+            json!(workspace_id),
+            json!(tab_id),
+            json!(split),
+        ]);
+        let mut agent = self.get_pane(&pid).unwrap();
+        agent["name"] = json!(name);
+        Ok(json!({"type": "agent_started", "agent": agent, "argv": argv}))
+    }
     fn rename(&mut self, kind: &str, target_id: &str, label: &str) -> Result<Value, String> {
         if let Some(m) = self.failed() {
             return Err(m);
@@ -537,4 +588,258 @@ fn the_sandbox_workspace_is_found_case_insensitively_else_created() {
         error.contains("could not create sandbox workspace \"other\": limit"),
         "{error}"
     );
+}
+
+fn flock_for_tests(tag: &str) -> Flock {
+    let dir = std::env::temp_dir().join(format!("ds-layout-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false)
+}
+
+fn no_verify() -> impl FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError> {
+    |_, _, _| Ok(None)
+}
+
+fn no_register(
+) -> impl FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError> {
+    |_, _, _, _, _| Ok(Value::Null)
+}
+
+#[test]
+fn test_start_agent_registers_by_name_and_places_it() {
+    let mut herdr = FakeLayout::new();
+    let flock = flock_for_tests("start-by-name");
+    let (mut verify, mut register) = (no_verify(), no_register());
+    let started = start_agent(
+        &mut herdr,
+        &flock,
+        "writer",
+        "claude --model opus",
+        Some("beta"),
+        None,
+        None,
+        Some("/home/x/site"),
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap();
+    assert_eq!("writer", started["name"]);
+    assert_eq!(json!(["claude", "--model", "opus"]), started["argv"]);
+    let call = herdr.layout_calls.last().unwrap();
+    assert_eq!(json!("start_agent"), call[0]);
+    assert_eq!(
+        (
+            json!("writer"),
+            json!(["claude", "--model", "opus"]),
+            json!("w2")
+        ),
+        (call[1].clone(), call[2].clone(), call[3].clone())
+    );
+    // The backend now lists it as an agent pane, so it resolves as a target by name.
+    let panes = herdr.list_panes();
+    let hint = herdr.server_error_hint();
+    assert_eq!(
+        started["pane_id"],
+        json!(text(
+            resolve_target(&panes, "writer", None, &hint).unwrap(),
+            "pane_id"
+        ))
+    );
+    let (mut verify, mut register) = (no_verify(), no_register());
+    let e = start_agent(
+        &mut herdr,
+        &flock,
+        "x",
+        "",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("command is required"), "{e}");
+    let e = start_agent(
+        &mut herdr,
+        &flock,
+        "x",
+        "claude",
+        None,
+        Some("Sheep"),
+        Some("left"),
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("split must be"), "{e}");
+}
+
+#[test]
+fn test_start_agent_into_a_tab_with_split() {
+    let mut herdr = FakeLayout::new();
+    let flock = flock_for_tests("start-split");
+    let (mut verify, mut register) = (no_verify(), no_register());
+    let started = start_agent(
+        &mut herdr,
+        &flock,
+        "helper",
+        "codex",
+        None,
+        Some("Sheep"),
+        Some("right"),
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap();
+    assert_eq!("w2:t2", started["agent"]["tab_id"]);
+    let call = herdr.layout_calls.last().unwrap();
+    assert_eq!(json!("w2:t2"), call[4]);
+    assert_eq!(json!("right"), call[5]);
+}
+
+#[test]
+fn start_agent_failure_and_the_sandbox_default_and_the_launch_record() {
+    // The start_agent line of test_herdr_failures_become_dunk_errors, the default-to-sandbox
+    // rule (2026-10-18) and role registration. (The launch record it also writes has no
+    // public reader on Flock yet, so it is not asserted here.)
+    let mut herdr = FakeLayout::new();
+    let flock = flock_for_tests("start-misc");
+    let (mut verify, mut register) = (no_verify(), no_register());
+    herdr.fail_layout = Some("nope".into());
+    let e = start_agent(
+        &mut herdr,
+        &flock,
+        "a",
+        "claude",
+        Some("beta"),
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("could not start agent 'a': nope"), "{e}");
+    // No tab and no workspace: the sandbox workspace is created and used.
+    let mut seen = Vec::new();
+    let mut verify = |name: &str, pane: Option<&str>, kind: &str| {
+        seen.push((name.to_string(), pane.map(str::to_string), kind.to_string()));
+        Ok(Some(4242))
+    };
+    let mut registered = Vec::new();
+    let mut register =
+        |pane: &str, role: &str, provider: Option<&str>, model: Option<&str>, label: &str| {
+            registered.push((
+                pane.to_string(),
+                role.to_string(),
+                provider.map(str::to_string),
+                model.map(str::to_string),
+                label.to_string(),
+            ));
+            Ok(json!({"role": role}))
+        };
+    let started = start_agent(
+        &mut herdr,
+        &flock,
+        "  scribe ",
+        "/opt/bin/pi --offline",
+        None,
+        None,
+        None,
+        Some("/tmp"),
+        false,
+        None,
+        Some("worker"),
+        Some("p"),
+        Some("m"),
+        Some("scratch"),
+        StartHooks {
+            verify: &mut verify,
+            lane_register: &mut register,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        json!(["create_workspace"]),
+        json!([herdr
+            .layout_calls
+            .iter()
+            .find(|c| c[0] == json!("create_workspace"))
+            .unwrap()[0]])
+    );
+    assert_eq!(4242, started["child_pid"]);
+    assert_eq!(json!({"role": "worker"}), started["role"]);
+    assert_eq!(
+        vec![(
+            "scribe".to_string(),
+            started["pane_id"].as_str().map(str::to_string),
+            "pi".to_string()
+        )],
+        seen
+    );
+    assert_eq!(1, registered.len());
+    assert_eq!(
+        ("worker", Some("p"), Some("m"), "scribe"),
+        (
+            registered[0].1.as_str(),
+            registered[0].2.as_deref(),
+            registered[0].3.as_deref(),
+            registered[0].4.as_str()
+        )
+    );
+}
+
+#[test]
+fn shlex_join_matches_pythons_quote_rules() {
+    let join = |a: &[&str]| shlex_join(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!("claude --model opus", join(&["claude", "--model", "opus"]));
+    assert_eq!("a,b x_y", join(&["a,b", "x_y"])); // ',' and '_' are safe in Python
+    assert_eq!("'it'\"'\"'s' ''", join(&["it's", ""]));
+    assert_eq!("'a b' 'c$d'", join(&["a b", "c$d"]));
 }

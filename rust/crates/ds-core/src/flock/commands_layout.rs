@@ -9,13 +9,16 @@
 //! reads from `self` besides the backend is passed in: `submit` stands for `submit_text`
 //! (the confirmed send), `self_pane_id` for the caller.
 //!
+//! Slice 3 adds `start_agent` (its start verification is `agent_verify.rs`, injected).
+//!
 //! NOT in this slice: `close_target` (it halts dunkers, which `Flock` does not hold yet),
-//! `start_agent` + `_verify_agent_started`, `respawn_pane`, `retire_pane`, the `mailbox` /
+//! `respawn_pane`, `retire_pane`, the `mailbox` /
 //! `role` write-back of `create_workspace` (needs `lane_register`), and `last_message`.
 
 use serde_json::{json, Map, Value};
 
 use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
+use super::Flock;
 use crate::error::DunkError;
 
 /// The calls `Flock` makes on `self.herdr` for layout. Mutations return the backend's
@@ -45,6 +48,17 @@ pub trait LayoutBackend {
         &mut self,
         pane_id: &str,
         direction: &str,
+        cwd: Option<&str>,
+        focus: bool,
+    ) -> Result<Value, String>;
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent(
+        &mut self,
+        name: &str,
+        argv: &[String],
+        workspace_id: Option<&str>,
+        tab_id: Option<&str>,
+        split: Option<&str>,
         cwd: Option<&str>,
         focus: bool,
     ) -> Result<Value, String>;
@@ -271,6 +285,166 @@ pub fn resolve_kind(
         }
         _ => refused("kind must be 'workspace', 'tab' or 'pane'".into()),
     }
+}
+
+/// Python `shlex.quote`: `[A-Za-z0-9_@%+=:,./-]` is safe, anything else is single-quoted
+/// with `'` written as `'"'"'` (byte-for-byte what the launch record keeps).
+fn shlex_quote(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+    {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\"'\"'"))
+}
+
+/// Python `shlex.join`.
+pub fn shlex_join(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| shlex_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `start_agent` needs besides the layout backend: the start check (`agent_verify`),
+/// the lane registration (`lane_register`, unported) and the launch record.
+pub struct StartHooks<'a> {
+    /// `_verify_agent_started(name, pane_id, kind)`: the confirmed child pid, or `None`.
+    pub verify: &'a mut dyn FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError>,
+    /// `lane_register(pane, role, provider, model, label)`; only called when `role` is given.
+    pub lane_register:
+        &'a mut dyn FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError>,
+}
+
+/// `start_agent`: launch `command` in a new pane registered by name. Placement: inside `tab`
+/// (splitting it when `split` is right/down), else in `workspace` (id, label or 'self'),
+/// else in the dedicated sandbox workspace (`sandbox_label` is
+/// `$DUNKINGSHEEP_SANDBOX_WORKSPACE`).
+#[allow(clippy::too_many_arguments)]
+pub fn start_agent(
+    backend: &mut dyn LayoutBackend,
+    flock: &Flock,
+    name: &str,
+    command: &str,
+    workspace: Option<&str>,
+    tab: Option<&str>,
+    split: Option<&str>,
+    cwd: Option<&str>,
+    focus: bool,
+    self_pane_id: Option<&str>,
+    role: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+    sandbox_label: Option<&str>,
+    hooks: StartHooks<'_>,
+) -> Result<Value, DunkError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return refused("agent name is required".into());
+    }
+    let argv = crate::usage::shlex_split(command)
+        .map_err(|e| DunkError::Refused(format!("No closing quotation: {e}")))?;
+    if argv.is_empty() {
+        return refused("command is required (e.g. 'claude' or 'codex --model gpt-5')".into());
+    }
+    let (mut workspace_id, mut tab_id): (Option<String>, Option<String>) = (None, None);
+    let tab = tab.filter(|t| !t.is_empty());
+    let workspace = workspace.filter(|w| !w.is_empty());
+    if let Some(spec) = tab {
+        let tabs = backend.list_tabs();
+        let hint = backend.server_error_hint();
+        let found = resolve_tab(&tabs, spec, || self_pane(backend, self_pane_id), &hint)?;
+        tab_id = Some(text(found, "tab_id"));
+    }
+    if let Some(spec) = workspace {
+        let workspaces = backend.list_workspaces();
+        let hint = backend.server_error_hint();
+        let found = resolve_workspace(
+            &workspaces,
+            spec,
+            || self_pane(backend, self_pane_id),
+            &hint,
+        )?;
+        workspace_id = Some(text(found, "workspace_id"));
+    }
+    if tab.is_none() && workspace.is_none() {
+        workspace_id = Some(sandbox_workspace_id(backend, sandbox_label)?);
+    }
+    let split = split.filter(|s| !s.is_empty());
+    if let Some(split) = split {
+        if split != "right" && split != "down" {
+            return refused("split must be 'right' or 'down'".into());
+        }
+    }
+    let result = backend
+        .start_agent(
+            name,
+            &argv,
+            workspace_id.as_deref(),
+            tab_id.as_deref(),
+            split,
+            cwd,
+            focus,
+        )
+        .map_err(|m| {
+            DunkError::Refused(format!(
+                "the terminal backend could not start agent {}: {m}",
+                super::agent_verify::repr_name(name)
+            ))
+        })?;
+    let agent = result.get("agent").cloned().unwrap_or_else(|| json!({}));
+    let pane_id = agent
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    // VERIFY BEFORE CLAIMING "STARTED" (t215): `kind` is the argv0 basename, deliberately NOT
+    // resolved via the caller's PATH (the pane inherits the tmux server's environment).
+    let kind = argv[0].rsplit('/').next().unwrap_or(&argv[0]).to_string();
+    let child_pid = (hooks.verify)(name, pane_id.as_deref(), &kind)?;
+    let session = agent
+        .get("agent_session")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let cwd_value = match cwd.filter(|c| !c.is_empty()) {
+        Some(c) => json!(c),
+        None => agent.get("cwd").cloned().unwrap_or(Value::Null),
+    };
+    if let Some(id) = pane_id.as_deref() {
+        flock.record_launch(
+            id,
+            &[
+                ("agent", json!(name)),
+                ("argv", json!(argv)),
+                ("command", json!(shlex_join(&argv))),
+                ("cwd", cwd_value),
+                (
+                    "session",
+                    session.get("value").cloned().unwrap_or(Value::Null),
+                ),
+                (
+                    "session_kind",
+                    session.get("kind").cloned().unwrap_or(Value::Null),
+                ),
+                ("name", json!(name)),
+                ("source", json!("start_agent")),
+            ],
+        );
+    }
+    let mut registered = Value::Null;
+    if let (Some(role), Some(id)) = (role.filter(|r| !r.is_empty()), pane_id.as_deref()) {
+        // Bind the role to the pane's root process now, from the daemon's own launch record.
+        registered = (hooks.lane_register)(id, role, provider, model, name)?;
+    }
+    Ok(json!({
+        "agent": agent,
+        "pane_id": pane_id,
+        "name": name,
+        "argv": result.get("argv").filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).cloned().unwrap_or_else(|| json!(argv)),
+        "child_pid": child_pid,
+        "role": registered,
+    }))
 }
 
 /// `rename`.
