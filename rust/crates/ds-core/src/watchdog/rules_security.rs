@@ -20,6 +20,17 @@ use crate::error::DunkError;
 /// `(kind, id, text)`: one piece of scanned content.
 pub type Record = (String, String, String);
 
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+    }
+}
+
 /// Python's `str.splitlines()`: splits on `\n`, `\r`, `\r\n`, `\v`, `\f`, `\x1c`-`\x1e`, `\x85`,
 /// ` ` and ` `, and drops a trailing empty line. Rust's `str::lines` splits only on `\n`
 /// and `\r\n`, which would let a credential hide behind a form feed.
@@ -112,14 +123,35 @@ pub fn text_records(
             format!("{}\n{}", field("title"), field("body")),
         ));
     }
-    let mut dunks = load_dunks(dunks_json)?;
-    dunks.sort_by_key(|d| d["id"].as_str().unwrap_or("").to_string());
-    for dunk in &dunks {
-        out.push((
-            "dunk".into(),
-            dunk["id"].as_str().unwrap_or("").to_string(),
-            dunk["text"].as_str().unwrap_or("").to_string(),
-        ));
+    let dunks = load_dunks(dunks_json)?;
+    let mut dunk_records = Vec::with_capacity(dunks.len());
+    for (index, dunk) in dunks.into_iter().enumerate() {
+        let object = dunk
+            .as_object()
+            .ok_or_else(|| DunkError::Refused(format!("dunk record {index} is not an object")))?;
+        let id = object
+            .get("id")
+            .ok_or_else(|| DunkError::Refused(format!("dunk record {index} has no id")))?
+            .as_str()
+            .ok_or_else(|| DunkError::Refused(format!("dunk record {index} id is not a string")))?
+            .to_string();
+        let text = match object.get("text") {
+            None => String::new(),
+            Some(value) if !json_truthy(value) => String::new(),
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
+                return Err(DunkError::Refused(format!(
+                    "dunk record {index} text is not a string"
+                )))
+            }
+        };
+        dunk_records.push((id, text));
+    }
+    // Python sorts by the original ID values. Requiring string IDs preserves that ordering for
+    // valid records and avoids converting malformed IDs to the same empty key.
+    dunk_records.sort_by(|left, right| left.0.cmp(&right.0));
+    for (id, text) in dunk_records {
+        out.push(("dunk".into(), id, text));
     }
     Ok(out)
 }

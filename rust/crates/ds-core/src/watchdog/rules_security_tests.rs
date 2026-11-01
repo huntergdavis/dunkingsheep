@@ -94,17 +94,23 @@ impl Fleet {
         .unwrap();
     }
 
+    fn records(&self, since: f64) -> Result<Vec<Record>, DunkError> {
+        text_records(
+            &self.path("inbox.db"),
+            &self.path("tasks.db"),
+            &self.path("dunks.json"),
+            since,
+            NOW,
+        )
+    }
+
+    fn scan_result(&self, rule: &Value) -> Result<Vec<Value>, DunkError> {
+        let read = |since: f64| self.records(since);
+        rule_security_secret_text(&read, rule, NOW)
+    }
+
     fn scan(&self, rule: &Value) -> Vec<Value> {
-        let read = |since: f64| {
-            text_records(
-                &self.path("inbox.db"),
-                &self.path("tasks.db"),
-                &self.path("dunks.json"),
-                since,
-                NOW,
-            )
-        };
-        rule_security_secret_text(&read, rule, NOW).unwrap()
+        self.scan_result(rule).unwrap()
     }
 }
 
@@ -206,6 +212,84 @@ fn extra_nonempty_string_dunkers_is_an_error_instead_of_an_empty_security_scan()
         NOW,
     )
     .is_err());
+}
+
+#[test]
+fn extra_scalar_dunk_record_is_an_error_instead_of_an_empty_security_record() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!([17]));
+    assert!(fleet
+        .scan_result(&rule())
+        .unwrap_err()
+        .to_string()
+        .contains("dunk record 0 is not an object"));
+}
+
+#[test]
+fn extra_dunk_without_an_id_is_an_error() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!([{"text": FAKE_TOKEN}]));
+    assert!(fleet
+        .scan_result(&rule())
+        .unwrap_err()
+        .to_string()
+        .contains("dunk record 0 has no id"));
+}
+
+#[test]
+fn extra_nonstring_dunk_id_is_rejected_instead_of_coerced_to_empty() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!([{"id": 7, "text": FAKE_TOKEN}]));
+    assert!(fleet
+        .scan_result(&rule())
+        .unwrap_err()
+        .to_string()
+        .contains("dunk record 0 id is not a string"));
+}
+
+#[test]
+fn extra_truthy_nonstring_dunk_text_is_an_error_instead_of_a_clean_scan() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!([{"id": "d1", "text": 123}]));
+    assert!(fleet
+        .scan_result(&rule())
+        .unwrap_err()
+        .to_string()
+        .contains("dunk record 0 text is not a string"));
+}
+
+#[test]
+fn extra_falsey_dunk_text_keeps_python_empty_default_and_string_id_order() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!([
+        {"id": "d2", "text": null},
+        {"id": "d10", "text": false},
+        {"id": "d4", "text": 0},
+        {"id": "d3", "text": 0.0},
+        {"id": "d1", "text": ""},
+        {"id": "d5", "text": []},
+        {"id": "d6", "text": {}},
+        {"id": "d0"}
+    ]));
+    let records = fleet.records(NOW - 24.0 * HOUR).unwrap();
+    let dunks: Vec<(&str, &str)> = records
+        .iter()
+        .filter(|(kind, _, _)| kind == "dunk")
+        .map(|(_, id, text)| (id.as_str(), text.as_str()))
+        .collect();
+    assert_eq!(
+        vec![
+            ("d0", ""),
+            ("d1", ""),
+            ("d10", ""),
+            ("d2", ""),
+            ("d3", ""),
+            ("d4", ""),
+            ("d5", ""),
+            ("d6", "")
+        ],
+        dunks
+    );
 }
 
 #[test]
