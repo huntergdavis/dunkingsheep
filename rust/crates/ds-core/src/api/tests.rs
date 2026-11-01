@@ -17,6 +17,7 @@ use crate::proc::Caller;
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
+use std::path::Path;
 
 struct FixedRole(&'static str, bool);
 
@@ -526,6 +527,94 @@ fn h_lane_handlers_refuse_non_string_pane_values() {
         "worker",
         "invalid pane input must not remove a role"
     );
+}
+
+static CONTEXT_LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+struct ContextLedgerEnv(Option<std::ffi::OsString>);
+
+impl ContextLedgerEnv {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("DUNKINGSHEEP_CONTEXT_LEDGER");
+        std::env::set_var("DUNKINGSHEEP_CONTEXT_LEDGER", path);
+        Self(previous)
+    }
+}
+
+impl Drop for ContextLedgerEnv {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            std::env::set_var("DUNKINGSHEEP_CONTEXT_LEDGER", previous);
+        } else {
+            std::env::remove_var("DUNKINGSHEEP_CONTEXT_LEDGER");
+        }
+    }
+}
+
+fn context_flock(root: &Path) -> Flock {
+    let flock = Flock::new(root.join("launches.json"), root.join("lanes.json"), false);
+    let mut roles = Roles::new(
+        &crate::config::Env::default(),
+        Some(root.join("roles.json")),
+        Some(root.join("tokens.json")),
+        None,
+    )
+    .expect("roles");
+    roles
+        .register("w1:p1", "owner", None, None, None, None, None, None)
+        .expect("owner");
+    roles
+        .register("w1:p2", "worker", None, None, None, None, None, None)
+        .expect("worker");
+    flock.attach_roles(roles, None);
+    flock
+}
+
+fn seed_context_entry(root: &Path, cls: &str, authority: &str) -> crate::context::store::Added {
+    let store = crate::context::store::Store::new(Some(root), false);
+    let mut ledger = crate::context::ledger::Ledger::new(Some(&root.join("ledger.db")));
+    store
+        .add(
+            "old context body",
+            &crate::context::store::AddArgs {
+                cls,
+                subject: "api-leaf",
+                type_: "measurement",
+                authority: Some(authority),
+                source: "api test",
+                stated: Some("2026-11-01"),
+                recheck_after: None,
+                supersedes: None,
+                slug: Some("api-leaf-entry"),
+                by: Some("test"),
+            },
+            Some(&mut ledger),
+        )
+        .expect("seed entry")
+}
+
+fn dispatch_context_command(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &TestEnv,
+    role: &'static str,
+    pane: &'static str,
+    name: &str,
+    input: Value,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx {
+        self_pane_id: Some(pane.to_string()),
+        ..RequestCtx::default()
+    };
+    dispatch_with_env(
+        dispatcher,
+        flock,
+        &FixedRole(role, role == "owner"),
+        name,
+        args(input),
+        &request,
+        env,
+    )
 }
 
 fn refusal(result: Result<Value, DunkError>) -> String {
@@ -1181,6 +1270,124 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         ),
         Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
     ));
+}
+
+#[test]
+fn h_context_supersede_matches_python() {
+    let _serial = CONTEXT_LEDGER_TEST_LOCK.lock().expect("ledger test lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger_env = ContextLedgerEnv::set(&dir.path().join("context-ledger.db"));
+    let project = dir.path().join("project-store");
+    std::fs::create_dir_all(&project).expect("project store root");
+    let old = seed_context_entry(&project, "fact", "agent");
+    let flock = context_flock(dir.path());
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_supersede_retire();
+
+    let result = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_supersede",
+        json!({
+            "slug": old.slug,
+            "body": "replacement context body",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["class"], "fact");
+    assert_ne!(result["slug"], "api-leaf-entry");
+    assert!(Path::new(result["path"].as_str().unwrap()).is_file());
+    let store = crate::context::store::Store::new(Some(&project), false);
+    let original = store.find("api-leaf-entry").expect("old entry");
+    assert!(original.get("superseded_by").is_some());
+    assert_eq!(
+        store.resolve("api-leaf-entry").unwrap().unwrap().body,
+        "replacement context body"
+    );
+
+    let rule = seed_context_entry(&project, "ground-truth", "owner");
+    let refused = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_supersede",
+        json!({
+            "slug": rule.slug,
+            "body": "worker cannot replace owner rule",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(refused, DunkError::Refused(message) if message == "only the owner supersedes a rule")
+    );
+    drop(ledger_env);
+}
+
+#[test]
+fn h_context_retire_matches_python() {
+    let _serial = CONTEXT_LEDGER_TEST_LOCK.lock().expect("ledger test lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger_env = ContextLedgerEnv::set(&dir.path().join("context-ledger.db"));
+    let project = dir.path().join("project-store");
+    std::fs::create_dir_all(&project).expect("project store root");
+    let old = seed_context_entry(&project, "fact", "agent");
+    let flock = context_flock(dir.path());
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_supersede_retire();
+
+    let denied = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_retire",
+        json!({
+            "slug": old.slug,
+            "reason": "obsolete",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap_err();
+    assert!(matches!(denied, DunkError::Refused(_)));
+
+    let result = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner",
+        "w1:p1",
+        "context_retire",
+        json!({
+            "slug": old.slug,
+            "reason": "obsolete",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({"slug": "api-leaf-entry", "retired": true, "reason": "obsolete"})
+    );
+    let entry = crate::context::store::Store::new(Some(&project), false)
+        .find("api-leaf-entry")
+        .expect("retired entry");
+    assert!(entry.get("retired_at").is_some());
+    assert_eq!(entry.get("retired_reason"), Some("obsolete"));
+    drop(ledger_env);
 }
 
 #[test]
