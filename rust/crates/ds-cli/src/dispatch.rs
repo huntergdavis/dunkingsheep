@@ -20,6 +20,15 @@ fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
 }
 
+fn task_stamp(at: f64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(at.floor() as i64, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
@@ -749,6 +758,33 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 })
             }
             _ => not_ported("inbox"),
+        },
+        "task" => match text(ns, "task_command").unwrap_or("") {
+            "block" | "cancel" => {
+                let sub = text(ns, "task_command").unwrap_or("");
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "reason".into(),
+                    ns.get("reason").cloned().unwrap_or(Value::Null),
+                );
+                let method = if sub == "block" {
+                    "task_block"
+                } else {
+                    "task_cancel"
+                };
+                crate::daemon_cmd::run_command(ns, method, args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "unblock" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_unblock", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            _ => not_ported("task"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
