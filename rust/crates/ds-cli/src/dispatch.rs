@@ -525,6 +525,139 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
+fn python_json_string(text: &str, out: &mut String) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ' '..='\u{7f}' => out.push(c),
+            other => {
+                let mut units = [0u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out.push('"');
+}
+
+fn python_compact_json(value: &Value) -> String {
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => match value.as_f64().filter(|_| value.is_f64()) {
+                Some(number) => out.push_str(&ds_core::usage::py_float_repr(number)),
+                None => out.push_str(&value.to_string()),
+            },
+            Value::String(text) => python_json_string(text, out),
+            Value::Array(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            Value::Object(object) => {
+                out.push('{');
+                for (index, (key, item)) in object.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    python_json_string(key, out);
+                    out.push_str(": ");
+                    write(item, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    write(value, &mut out);
+    out
+}
+
+fn pm(ns: &Map<String, Value>) -> Outcome {
+    let Some(subcommand) = text(ns, "pm_command") else {
+        return not_ported("pm");
+    };
+    if subcommand == "routing" {
+        return crate::daemon_cmd::run_command(
+            ns,
+            "pm_routing",
+            Map::new(),
+            crate::render_print::render_pm_routing,
+        );
+    }
+    if subcommand != "digest" {
+        return not_ported(&format!("pm {subcommand}"));
+    }
+    let mut raw = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut raw) {
+        return Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: 3,
+        };
+    }
+    if matches!(ns.get("demo"), Some(Value::Bool(true))) {
+        let mut payload = if raw.trim_start().starts_with('{') {
+            serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_else(|| {
+                    let mut object = Map::new();
+                    object.insert("note".into(), Value::String(raw.clone()));
+                    object
+                })
+        } else {
+            let mut object = Map::new();
+            object.insert("note".into(), Value::String(raw));
+            object
+        };
+        payload.insert("demo".into(), Value::Bool(true));
+        raw = python_compact_json(&Value::Object(payload));
+    }
+    let mut args = Map::new();
+    args.insert(
+        "project".into(),
+        ns.get("project").cloned().unwrap_or(Value::Null),
+    );
+    args.insert("payload".into(), Value::String(raw));
+    args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
+    let mut client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let result = match crate::daemon_cmd::call(&mut client, "pm_digest", args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+    Outcome {
+        stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
+            format!("{}\n", crate::usage_cmd::ordered_json(&result))
+        } else {
+            crate::render_print::render_pm_digest(&result)
+        },
+        stderr: String::new(),
+        code: if result.get("ok") == Some(&Value::Bool(false)) {
+            2
+        } else {
+            0
+        },
+    }
+}
+
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let result = match text(ns, "action").unwrap_or("status") {
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
@@ -579,6 +712,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "pm" => pm(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
