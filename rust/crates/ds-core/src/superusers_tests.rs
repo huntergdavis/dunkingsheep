@@ -5,11 +5,9 @@
 use super::*;
 use serde_json::json;
 
-fn dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-su-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn dir(tag: &str) -> crate::testsupport::Scratch<PathBuf> {
+    let scratch = crate::testsupport::dir(&format!("su-{tag}"));
+    crate::testsupport::Scratch::new(scratch.path().to_path_buf(), scratch)
 }
 
 const VP_PANE: &str = "w9:p8";
@@ -21,7 +19,8 @@ fn test_defaults_are_the_vp_and_owner_and_file_is_private() {
     std::env::remove_var("DUNKINGSHEEP_OWNER_NAME");
     std::env::remove_var("DUNKINGSHEEP_VP_PANE");
     std::env::remove_var("DUNKINGSHEEP_OWNER_PANE");
-    let path = dir("defaults").join("superusers.json");
+    let scratch = dir("defaults");
+    let path = scratch.join("superusers.json");
     let store = Superusers::new(&path, true).unwrap();
     assert!(store.names.contains("VP of agentry"));
     assert!(store.names.contains("owner"));
@@ -32,7 +31,8 @@ fn test_defaults_are_the_vp_and_owner_and_file_is_private() {
 
 #[test]
 fn test_add_and_remove_panes() {
-    let path = dir("addremove").join("superusers.json");
+    let scratch = dir("addremove");
+    let path = scratch.join("superusers.json");
     let mut store = Superusers::new(&path, true).unwrap();
     store.add(VP_PANE).unwrap();
     assert!(store.is_superuser(VP_PANE, None));
@@ -218,7 +218,8 @@ fn a_store_that_seeded_itself_does_not_notice_a_later_deletion_like_the_python()
     // (Verified against the real dunk_superusers.) Changing it is a behaviour decision.
     std::env::remove_var("DUNKINGSHEEP_VP_PANE");
     std::env::remove_var("DUNKINGSHEEP_OWNER_PANE");
-    let path = dir("seeded-then-deleted").join("superusers.json");
+    let scratch = dir("seeded-then-deleted");
+    let path = scratch.join("superusers.json");
     let mut store = Superusers::new(&path, true).unwrap();
     store.add("w9:p8").unwrap();
     std::fs::remove_file(&path).unwrap();

@@ -193,10 +193,9 @@ mod registry {
     const DESK: &str = "w2:p1";
     const OTHER: &str = "w2:p9";
 
-    fn fresh(tag: &str) -> (std::path::PathBuf, Roles) {
-        let dir = std::env::temp_dir().join(format!("ds-roles-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn fresh(tag: &str) -> (crate::testsupport::Scratch<std::path::PathBuf>, Roles) {
+        let scratch = crate::testsupport::dir(&format!("roles-{tag}"));
+        let dir = scratch.path().to_path_buf();
         let roles = Roles::new(
             &Env::default(),
             Some(dir.join("roles.json")),
@@ -204,7 +203,7 @@ mod registry {
             None,
         )
         .unwrap();
-        (dir, roles)
+        (crate::testsupport::Scratch::new(dir, scratch), roles)
     }
 
     fn reopen(roles: &Roles) -> Roles {
@@ -399,7 +398,8 @@ mod registry {
 
     #[test]
     fn a_copy_of_the_fixture_roles_file_resolves_every_row() {
-        let dir = std::env::temp_dir().join(format!("ds-roles-fixture-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("roles-fixture");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roles.json");
         std::fs::write(&path, include_str!("../../../fixtures/state/roles.json")).unwrap();
@@ -419,7 +419,8 @@ mod registry {
 
     #[test]
     fn an_unparseable_roles_file_is_a_named_refusal() {
-        let dir = std::env::temp_dir().join(format!("ds-roles-bad-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("roles-bad");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roles.json");
         std::fs::write(&path, "{not json").unwrap();
@@ -436,7 +437,8 @@ mod registry {
     fn a_non_utf8_roles_file_is_refused_not_read_as_empty() {
         // Python: UnicodeDecodeError is a ValueError -> "not valid JSON". An empty registry here
         // would demote every lane AND let the next register() overwrite the corrupt file.
-        let dir = std::env::temp_dir().join(format!("ds-roles-utf8-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("roles-utf8");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roles.json");
         std::fs::write(&path, b"{\"lanes\":\xff\xfe}").unwrap();
@@ -469,7 +471,8 @@ mod registry {
 
     #[test]
     fn an_empty_default_override_is_not_an_override() {
-        let dir = std::env::temp_dir().join(format!("ds-roles-emptydef-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("roles-emptydef");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let roles = Roles::new(
             &Env::default(),

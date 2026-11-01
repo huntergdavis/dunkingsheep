@@ -335,12 +335,10 @@ mod tests {
     use crate::db;
     use rusqlite::params;
 
-    async fn store(tag: &str) -> Tasks {
-        let dir = std::env::temp_dir().join(format!("ds-metrics-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tasks.db");
-        let _ = std::fs::remove_file(&path);
-        Tasks::open(&path).await.unwrap()
+    async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+        let dir = crate::testsupport::dir(&format!("metrics-{tag}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        crate::testsupport::Scratch::new(tasks, dir)
     }
 
     /// Append one `task_events` row (the Python store's `_record`, for the events whose writers
@@ -522,7 +520,8 @@ mod tests {
             &std::fs::read_to_string(root.join("metrics_expected.json")).unwrap(),
         )
         .unwrap();
-        let dir = std::env::temp_dir().join(format!("ds-metrics-golden-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("metrics-golden");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let copy = dir.join("tasks.db");
         std::fs::copy(root.join("metrics.db"), &copy).unwrap();

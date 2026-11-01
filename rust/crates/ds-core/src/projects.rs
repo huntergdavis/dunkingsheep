@@ -453,11 +453,9 @@ mod tests {
         }
     }
 
-    fn root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ds-projects-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn root(tag: &str) -> crate::testsupport::Scratch<PathBuf> {
+        let scratch = crate::testsupport::dir(&format!("projects-{tag}"));
+        crate::testsupport::Scratch::new(scratch.path().to_path_buf(), scratch)
     }
 
     #[test]

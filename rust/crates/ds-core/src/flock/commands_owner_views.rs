@@ -213,12 +213,10 @@ mod tests {
 
     const NOW: f64 = 1_000.0;
 
-    fn store(tag: &str) -> OwnerPush {
-        let dir = std::env::temp_dir().join(format!("ds-owner-views-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("owner-push.db");
-        let _ = std::fs::remove_file(&path);
-        OwnerPush::open(&path).unwrap()
+    fn store(tag: &str) -> crate::testsupport::Scratch<OwnerPush> {
+        let dir = crate::testsupport::dir(&format!("owner-views-{tag}"));
+        let push = OwnerPush::open(dir.path().join("owner-push.db")).unwrap();
+        crate::testsupport::Scratch::new(push, dir)
     }
 
     fn live(target: &str) -> Result<String, DunkError> {
@@ -344,18 +342,24 @@ mod tests {
         );
     }
 
-    fn lane_flock(tag: &str) -> (Flock, crate::terminal::fakes::FakeTerminal) {
-        let dir =
-            std::env::temp_dir().join(format!("ds-owner-views-lanes-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn lane_flock(
+        tag: &str,
+    ) -> (
+        crate::testsupport::Scratch<Flock>,
+        crate::terminal::fakes::FakeTerminal,
+    ) {
+        let scratch = crate::testsupport::dir(&format!("owner-views-lanes-{tag}"));
+        let dir = scratch.path().to_path_buf();
         let mut term = crate::terminal::fakes::FakeTerminal::new();
         term.panes.push(crate::terminal::Pane {
             pane_id: "%7".into(),
             ..Default::default()
         });
         (
-            Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true),
+            crate::testsupport::Scratch::new(
+                Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true),
+                scratch,
+            ),
             term,
         )
     }

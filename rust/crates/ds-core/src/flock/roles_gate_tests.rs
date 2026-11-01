@@ -28,14 +28,12 @@ impl PaneInfoEnv for NoPanes {
     }
 }
 
-fn dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-gate-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn dir(tag: &str) -> crate::testsupport::Scratch<std::path::PathBuf> {
+    let scratch = crate::testsupport::dir(&format!("gate-{tag}"));
+    crate::testsupport::Scratch::new(scratch.path().to_path_buf(), scratch)
 }
 
-fn bare(tag: &str) -> (Flock, std::path::PathBuf) {
+fn bare(tag: &str) -> (Flock, crate::testsupport::Scratch<std::path::PathBuf>) {
     let dir = dir(tag);
     let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
     let roles = Roles::new(
@@ -50,7 +48,7 @@ fn bare(tag: &str) -> (Flock, std::path::PathBuf) {
 }
 
 /// The Python's `make_flock` + the three registrations every `DispatchGateTests` starts with.
-fn staffed(tag: &str) -> Flock {
+fn staffed(tag: &str) -> crate::testsupport::Scratch<Flock> {
     let (flock, dir) = bare(tag);
     let mut roles = Roles::new(
         &Env::default(),
@@ -69,7 +67,8 @@ fn staffed(tag: &str) -> Flock {
         .register(WORKER, "worker", None, None, Some("pi"), None, None, None)
         .unwrap();
     flock.attach_roles(roles, None);
-    flock
+    // The directory must outlive the helper: the roles file the flock reads is in it.
+    dir.map(|_| flock)
 }
 
 fn role(flock: &Flock, pane: Option<&str>) -> String {

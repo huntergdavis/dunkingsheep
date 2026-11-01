@@ -2122,12 +2122,10 @@ pub async fn h_task_complete(
 mod tests {
     use super::*;
 
-    async fn store(tag: &str) -> Tasks {
-        let dir = std::env::temp_dir().join(format!("ds-store-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tasks.db");
-        let _ = std::fs::remove_file(&path);
-        Tasks::open(&path).await.unwrap()
+    async fn store(tag: &str) -> crate::testsupport::Scratch<Tasks> {
+        let dir = crate::testsupport::dir(&format!("store-{tag}"));
+        let tasks = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+        crate::testsupport::Scratch::new(tasks, dir)
     }
 
     #[tokio::test]
@@ -2651,7 +2649,8 @@ mod tests {
         if !live.exists() {
             return; // no live store on this host: nothing to copy, and a skip is honest
         }
-        let dir = std::env::temp_dir().join(format!("ds-store-copy-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("store-copy");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let copy = dir.join("tasks-copy.db");
         let _ = std::fs::remove_file(&copy);
@@ -2722,7 +2721,8 @@ mod tests {
 
     #[tokio::test]
     async fn opening_an_old_database_adds_the_columns_it_is_missing() {
-        let dir = std::env::temp_dir().join(format!("ds-store-old-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("store-old");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.db");
         let _ = std::fs::remove_file(&path);

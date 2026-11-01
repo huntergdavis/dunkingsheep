@@ -24,9 +24,15 @@ impl PaneInfoEnv for Env {
     }
 }
 
-fn flock() -> Flock {
-    let dir = std::env::temp_dir();
-    Flock::new(dir.join("x-launches.json"), dir.join("x-lanes.json"), false)
+fn flock() -> crate::testsupport::Scratch<Flock> {
+    // t1490: a private directory, not files in the shared temp dir that every run reused.
+    let dir = crate::testsupport::dir("panes");
+    let flock = Flock::new(
+        dir.path().join("x-launches.json"),
+        dir.path().join("x-lanes.json"),
+        false,
+    );
+    crate::testsupport::Scratch::new(flock, dir)
 }
 
 #[test]
@@ -89,22 +95,18 @@ fn stores_start_empty_and_can_be_attached() {
     assert!(flock.stores().tasks.is_none());
 }
 
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("ds-obs-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(tag: &str) -> crate::testsupport::Scratch<std::path::PathBuf> {
+    let scratch = crate::testsupport::dir(&format!("obs-{tag}"));
+    crate::testsupport::Scratch::new(scratch.path().to_path_buf(), scratch)
 }
 
 #[test]
 fn a_flock_that_does_not_persist_gets_in_memory_metrics_and_no_memory_store() {
     let flock = flock();
     assert!(flock.stores().metrics.is_none() && flock.stores().memory.is_none());
+    let obs = scratch("mem");
     flock
-        .wire_observability(
-            &scratch("mem"),
-            Some(std::path::Path::new("/nonexistent/m.db")),
-        )
+        .wire_observability(&obs, Some(std::path::Path::new("/nonexistent/m.db")))
         .unwrap();
     let stores = flock.stores();
     assert!(stores.metrics.is_some(), "metrics are always there");
@@ -129,7 +131,8 @@ fn a_persisting_flock_keeps_its_metrics_beside_the_state_file() {
 #[test]
 fn metrics_record_prune_and_earliest() {
     use crate::metrics::{Event, MetricsStore, MAX_EVENTS};
-    let store = MetricsStore::open(scratch("metrics").join("metrics.db")).unwrap();
+    let metrics_dir = scratch("metrics");
+    let store = MetricsStore::open(metrics_dir.join("metrics.db")).unwrap();
     assert_eq!(None, store.earliest().unwrap());
     let now = crate::clock::now_s();
     for (age, kind) in [

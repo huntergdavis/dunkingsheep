@@ -60,10 +60,9 @@ impl ReaperEnv for Fake {
     }
 }
 
-async fn flock_with_tasks(tag: &str) -> (Arc<Flock>, Arc<Tasks>) {
-    let dir = std::env::temp_dir().join(format!("ds-loops-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+async fn flock_with_tasks(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
+    let scratch = crate::testsupport::dir(&format!("loops-{tag}"));
+    let dir = scratch.path().to_path_buf();
     let flock = Arc::new(Flock::new(
         dir.join("launches.json"),
         dir.join("lanes.json"),
@@ -74,12 +73,12 @@ async fn flock_with_tasks(tag: &str) -> (Arc<Flock>, Arc<Tasks>) {
         tasks: Some(tasks.clone()),
         ..Stores::default()
     });
-    (flock, tasks)
+    (flock, tasks, scratch)
 }
 
 #[tokio::test]
 async fn a_fixture_backend_never_reaps_but_still_runs_the_maintenance() {
-    let (flock, tasks) = flock_with_tasks("fixture").await;
+    let (flock, tasks, _dir) = flock_with_tasks("fixture").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     tasks
         .claim_next("global", "%1", ClaimOptions::default())
@@ -106,7 +105,7 @@ async fn a_fixture_backend_never_reaps_but_still_runs_the_maintenance() {
 
 #[tokio::test]
 async fn a_live_backend_requeues_a_dead_callers_claim_and_says_so() {
-    let (flock, tasks) = flock_with_tasks("live").await;
+    let (flock, tasks, _dir) = flock_with_tasks("live").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     // A claim whose recorded caller process is gone: pid 2^31-1 with a start no process has.
     let options = ClaimOptions {
@@ -126,7 +125,7 @@ async fn a_live_backend_requeues_a_dead_callers_claim_and_says_so() {
 
 #[tokio::test]
 async fn a_live_pane_with_a_live_caller_keeps_its_claim() {
-    let (flock, tasks) = flock_with_tasks("alive").await;
+    let (flock, tasks, _dir) = flock_with_tasks("alive").await;
     let task = tasks.add("global", "t", "").await.unwrap();
     tasks
         .claim_next("global", "%1", ClaimOptions::default())
@@ -139,7 +138,7 @@ async fn a_live_pane_with_a_live_caller_keeps_its_claim() {
 
 #[tokio::test]
 async fn a_followers_gone_pane_is_dropped_and_a_listed_one_kept() {
-    let (flock, _tasks) = flock_with_tasks("waiters").await;
+    let (flock, _tasks, _dir) = flock_with_tasks("waiters").await;
     {
         let mut waiters = flock.task_waiters.lock().unwrap();
         waiters.insert("%1".into(), "global".into());
@@ -155,7 +154,7 @@ async fn a_followers_gone_pane_is_dropped_and_a_listed_one_kept() {
 
 #[tokio::test]
 async fn a_failed_pane_listing_does_not_drop_followers_or_stop_the_reap() {
-    let (flock, _tasks) = flock_with_tasks("listing").await;
+    let (flock, _tasks, _dir) = flock_with_tasks("listing").await;
     flock
         .task_waiters
         .lock()
@@ -175,7 +174,7 @@ async fn a_failed_pane_listing_does_not_drop_followers_or_stop_the_reap() {
 
 #[tokio::test]
 async fn the_loop_ticks_and_stops_on_the_signal() {
-    let (flock, _tasks) = flock_with_tasks("runner").await;
+    let (flock, _tasks, _dir) = flock_with_tasks("runner").await;
     let env = Arc::new(Fake::new(&["%1"], true));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let handle = tokio::spawn(run_reaper(

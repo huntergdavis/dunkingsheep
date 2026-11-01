@@ -132,6 +132,8 @@ mod tests {
         superuser: bool,
         boxes: Vec<String>,
         unread: Option<i64>,
+        // Removes the directory when the test is done with the env (t1490).
+        _dir: tempfile::TempDir,
     }
 
     impl RetireEnv for Env {
@@ -162,10 +164,10 @@ mod tests {
     }
 
     fn env(tag: &str) -> Env {
-        let dir = std::env::temp_dir().join(format!("ds-retire-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch = crate::testsupport::dir(&format!("retire-{tag}"));
+        let dir = scratch.path().to_path_buf();
         Env {
+            _dir: scratch,
             path: dir.join("retired-panes.json"),
             panes: vec![
                 json!({"pane_id": "%7", "tab_label": "crackdown", "agent_name": "cd-codex", "label": "lbl", "name": ""}),

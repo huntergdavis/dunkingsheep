@@ -985,7 +985,8 @@ mod list_tests {
 
     #[tokio::test]
     async fn task_list_reports_visible_or_the_explicit_scope_and_enforces_privacy() {
-        let dir = std::env::temp_dir().join(format!("ds-ct-list-{}", std::process::id()));
+        let scratch_dir = crate::testsupport::dir("ct-list");
+        let dir = scratch_dir.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tasks.db");
         let _ = std::fs::remove_file(&path);

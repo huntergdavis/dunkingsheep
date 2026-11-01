@@ -213,7 +213,8 @@ fn extra_load_config_refuses_a_missing_or_unreadable_file_naming_file() {
         ("<file>", "config file not found: "),
         (error.key.as_str(), error.reason.as_str())
     );
-    let dir = std::env::temp_dir().join(format!("ds-wd-config-{}", std::process::id()));
+    let scratch_dir = crate::testsupport::dir("wd-config");
+    let dir = scratch_dir.path().to_path_buf();
     std::fs::create_dir_all(&dir).unwrap();
     let missing = dir.join("nope.json");
     assert_eq!(

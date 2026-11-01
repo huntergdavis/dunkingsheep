@@ -13,10 +13,14 @@ use crate::proc::Caller;
 
 const PANE: &str = "w1:p1";
 
-fn flock() -> Flock {
-    let dir = std::env::temp_dir().join(format!("ds-turns-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false)
+fn flock() -> crate::testsupport::Scratch<Flock> {
+    let dir = crate::testsupport::dir("turns");
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    crate::testsupport::Scratch::new(flock, dir)
 }
 
 fn as_caller(pid: i64, start: &str) -> Value {

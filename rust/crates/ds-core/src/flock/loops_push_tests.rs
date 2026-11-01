@@ -104,10 +104,9 @@ impl PushEnv for Fake {
     }
 }
 
-async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>) {
-    let dir = std::env::temp_dir().join(format!("ds-push-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>, tempfile::TempDir) {
+    let scratch = crate::testsupport::dir(&format!("push-{tag}"));
+    let dir = scratch.path().to_path_buf();
     let flock = Arc::new(Flock::new(
         dir.join("launches.json"),
         dir.join("lanes.json"),
@@ -118,7 +117,7 @@ async fn setup(tag: &str) -> (Arc<Flock>, Arc<Tasks>) {
         tasks: Some(tasks.clone()),
         ..Stores::default()
     });
-    (flock, tasks)
+    (flock, tasks, scratch)
 }
 
 async fn status(tasks: &Tasks, id: &str) -> String {
@@ -149,7 +148,7 @@ fn skip_reasons(decisions: &[PushDecision], pane: &str) -> Vec<String> {
 #[tokio::test]
 async fn test_a_stale_registration_is_not_a_push_target() {
     // t975: a stale binding resolves to "anonymous" through caller_role, so it is no lane.
-    let (flock, tasks) = setup("stale").await;
+    let (flock, tasks, _dir) = setup("stale").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "anonymous");
     let task = tasks.add("global", "waiting work", "").await.unwrap();
@@ -159,7 +158,7 @@ async fn test_a_stale_registration_is_not_a_push_target() {
 
 #[tokio::test]
 async fn test_a_registered_lane_is_pushed_without_ever_calling_follow() {
-    let (flock, tasks) = setup("registered").await;
+    let (flock, tasks, _dir) = setup("registered").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "worker");
     let task = tasks.add("global", "waiting work", "").await.unwrap();
@@ -176,7 +175,7 @@ async fn test_a_registered_lane_is_pushed_without_ever_calling_follow() {
 
 #[tokio::test]
 async fn test_an_unregistered_pane_is_not_pushed() {
-    let (flock, tasks) = setup("unregistered").await;
+    let (flock, tasks, _dir) = setup("unregistered").await;
     let task = tasks.add("global", "waiting work", "").await.unwrap();
     flock.push_tasks(&Fake::standard()).await;
     assert_eq!(status(&tasks, &task.id).await, "open");
@@ -184,7 +183,7 @@ async fn test_an_unregistered_pane_is_not_pushed() {
 
 #[tokio::test]
 async fn test_a_busy_registered_lane_is_skipped() {
-    let (flock, tasks) = setup("busy").await;
+    let (flock, tasks, _dir) = setup("busy").await;
     let fake = Fake::standard();
     fake.register(BUSY_CLAUDE, "worker");
     let task = tasks.add("global", "waiting work", "").await.unwrap();
@@ -195,7 +194,7 @@ async fn test_a_busy_registered_lane_is_skipped() {
 
 #[tokio::test]
 async fn test_a_lane_holding_a_lease_is_not_given_a_second_task() {
-    let (flock, tasks) = setup("holding").await;
+    let (flock, tasks, _dir) = setup("holding").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "worker");
     let first = tasks.add("global", "first", "").await.unwrap();
@@ -217,7 +216,7 @@ async fn test_a_lane_holding_a_lease_is_not_given_a_second_task() {
 
 #[tokio::test]
 async fn test_unread_mail_is_read_before_new_work() {
-    let (flock, tasks) = setup("mail").await;
+    let (flock, tasks, _dir) = setup("mail").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "worker");
     fake.unread.lock().unwrap().insert(IDLE_WORKER.into());
@@ -238,7 +237,7 @@ async fn test_unread_mail_is_read_before_new_work() {
 #[tokio::test]
 async fn test_a_worker_is_never_pushed_a_review() {
     // t595: the push path used to claim without the role->kind filter.
-    let (flock, tasks) = setup("worker-review").await;
+    let (flock, tasks, _dir) = setup("worker-review").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "worker");
     let review = file_review(&tasks, "review something").await;
@@ -248,7 +247,7 @@ async fn test_a_worker_is_never_pushed_a_review() {
 
 #[tokio::test]
 async fn test_a_reviewer_lane_is_pushed_a_review_and_not_work() {
-    let (flock, tasks) = setup("reviewer").await;
+    let (flock, tasks, _dir) = setup("reviewer").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "reviewer");
     fake.may_review.lock().unwrap().insert(IDLE_WORKER.into());
@@ -262,7 +261,7 @@ async fn test_a_reviewer_lane_is_pushed_a_review_and_not_work() {
 #[tokio::test]
 async fn test_a_reviewer_on_a_provider_that_may_not_review_is_skipped() {
     // Free models are the worker tier: a pi reviewer is not handed reviews.
-    let (flock, tasks) = setup("reviewer-pi").await;
+    let (flock, tasks, _dir) = setup("reviewer-pi").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "reviewer");
     let review = file_review(&tasks, "review something").await;
@@ -277,7 +276,7 @@ async fn test_a_reviewer_on_a_provider_that_may_not_review_is_skipped() {
 #[tokio::test]
 async fn test_a_registered_worker_whose_agent_exited_is_not_fed() {
     // Review t1010 finding 1: the wrapper ends in `exec sh`; the sweep must not feed a bare shell.
-    let (flock, tasks) = setup("exited").await;
+    let (flock, tasks, _dir) = setup("exited").await;
     let fake = Fake::standard();
     fake.register(IDLE_SHELL, "worker");
     fake.alive.lock().unwrap().insert(IDLE_SHELL.into(), false);
@@ -289,7 +288,7 @@ async fn test_a_registered_worker_whose_agent_exited_is_not_fed() {
 
 #[tokio::test]
 async fn test_a_worker_with_a_live_agent_is_fed() {
-    let (flock, tasks) = setup("alive").await;
+    let (flock, tasks, _dir) = setup("alive").await;
     let fake = Fake::standard();
     fake.register(IDLE_SHELL, "worker");
     fake.alive.lock().unwrap().insert(IDLE_SHELL.into(), true);
@@ -300,7 +299,7 @@ async fn test_a_worker_with_a_live_agent_is_fed() {
 
 #[tokio::test]
 async fn test_an_unknown_process_table_never_blocks_a_push() {
-    let (flock, tasks) = setup("unknown-proc").await;
+    let (flock, tasks, _dir) = setup("unknown-proc").await;
     let fake = Fake::standard();
     fake.register(IDLE_SHELL, "worker"); // lane_agent_alive -> None: cannot say
     let task = tasks.add("global", "waiting work", "").await.unwrap();
@@ -310,7 +309,7 @@ async fn test_an_unknown_process_table_never_blocks_a_push() {
 
 #[tokio::test]
 async fn test_desk_and_planner_lanes_are_never_pushed_work() {
-    let (flock, tasks) = setup("desk").await;
+    let (flock, tasks, _dir) = setup("desk").await;
     let fake = Fake::standard();
     fake.register(IDLE_SHELL, "desk");
     fake.register(IDLE_WORKER, "planner");
@@ -322,7 +321,7 @@ async fn test_desk_and_planner_lanes_are_never_pushed_work() {
 #[tokio::test]
 async fn test_an_explicit_follower_keeps_its_scope() {
     // `task follow mine` still means mine: the sweep must not widen it.
-    let (flock, tasks) = setup("follower").await;
+    let (flock, tasks, _dir) = setup("follower").await;
     let fake = Fake::standard();
     fake.register(IDLE_WORKER, "worker");
     flock
@@ -359,7 +358,7 @@ fn test_claim_filters_by_role() {
 
 #[tokio::test]
 async fn test_the_loop_recovers_once_then_sweeps_on_wake_and_stops() {
-    let (flock, tasks) = setup("loop").await;
+    let (flock, tasks, _dir) = setup("loop").await;
     let fake = Arc::new(Fake::standard());
     fake.register(IDLE_WORKER, "worker");
     let task = tasks.add("global", "waiting work", "").await.unwrap();
@@ -402,7 +401,7 @@ async fn test_the_loop_recovers_once_then_sweeps_on_wake_and_stops() {
 
 #[tokio::test]
 async fn test_the_loop_also_sweeps_on_the_interval() {
-    let (flock, tasks) = setup("loop-interval").await;
+    let (flock, tasks, _dir) = setup("loop-interval").await;
     let fake = Arc::new(Fake::standard());
     fake.register(IDLE_WORKER, "worker");
     let task = tasks.add("global", "waiting work", "").await.unwrap();

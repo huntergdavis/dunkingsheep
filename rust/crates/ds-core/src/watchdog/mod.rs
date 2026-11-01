@@ -18,7 +18,9 @@ use crate::error::DunkError;
 pub mod config;
 pub mod rules;
 pub mod rules_dunks;
+pub mod rules_host;
 pub mod rules_inbox;
+pub mod rules_lanes;
 
 pub const SOURCE_RULE: &str = "watchdog-rule";
 

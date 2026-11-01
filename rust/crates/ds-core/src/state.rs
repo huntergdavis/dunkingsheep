@@ -7,8 +7,8 @@
 //! reason otherwise - a wrong model in a restore is worse than no model, because it looks like a
 //! decision.
 //!
-//! NOT in this slice (6b/6c): `capture`, `session_of` and the /proc walkers (`_proc_snapshot`,
-//! `_read_bound`, `_still_the_same_process`, `_descendants`, `_env_of`, `_active_session_file`).
+//! Slice 6b adds the /proc side behind a trait ([`proc`]) and `session_of` ([`session`]).
+//! NOT yet (6c): `capture` (needs the flock lanes, activity and tasks).
 //!
 //! The `argv` column is written as compact JSON (`["a","b"]`); the Python writes `json.dumps`
 //! with spaces. Both read back identically.
@@ -18,6 +18,9 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
+
+pub mod proc;
+pub mod session;
 
 use crate::db;
 use crate::error::DunkError;
@@ -288,5 +291,7 @@ pub fn flag(argv: &[String], names: &[&str]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod session_tests;
 #[cfg(test)]
 mod tests;
