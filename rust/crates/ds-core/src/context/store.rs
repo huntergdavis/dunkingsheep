@@ -1139,3 +1139,178 @@ pub fn report(project_path: Option<&Path>, which: Option<&str>) -> Result<Value,
     }
     Ok(Value::Object(out))
 }
+
+// -- the disposable FTS index (slice 5) --------------------------------------------------
+
+/// `INDEX_COLUMNS`: the columns `search()` reads. Files are truth, the FTS index is a
+/// disposable cache, so a cache carrying anything else is disposable too.
+pub const INDEX_COLUMNS: [&str; 5] = ["slug", "subject", "body", "class", "scope"];
+
+/// `_PROBE`: the one query shape `search()` uses. Probing it is how a cache proves it can
+/// ANSWER; column names alone do not (an ordinary table with the same five columns passes a
+/// column check and then dies on MATCH, CoS review 2026-10-28).
+const PROBE: &str = "SELECT slug FROM entries WHERE entries MATCH ? ORDER BY rank LIMIT 1";
+/// A bare word on purpose: FTS5 parses the MATCH operand as a query, and a hyphen reads as
+/// an operator.
+const PROBE_TERM: &str = "probe";
+
+/// `_FTS5_HEADER`: an FTS5 table is created by exactly this header.
+fn fts5_header() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)^\s*CREATE\s+VIRTUAL\s+TABLE\s+["\[]?entries["\]]?\s+USING\s+fts5\s*\("#)
+            .expect("static regex")
+    })
+}
+
+fn open_readonly(path: &Path) -> Result<rusqlite::Connection, rusqlite::Error> {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA query_only = ON")?;
+    Ok(connection)
+}
+
+fn sql_error(error: rusqlite::Error) -> ContextError {
+    ContextError(error.to_string())
+}
+
+impl Store {
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join(".index.db")
+    }
+
+    /// `index_compatible`: true only when the cached index is an FTS5 table that can answer
+    /// the search query this code runs. Three bounded controls (the fts5 creation header, the
+    /// exact column tuple, one probe of the MATCH/rank shape), and any doubt rebuilds: a cache
+    /// another schema built is disposable. Drift is ordinary (an older release, another lane's
+    /// build, a half-written file) and the answer is always a rebuild, never an error.
+    pub fn index_compatible(&self, path: &Path) -> bool {
+        let check = || -> Result<bool, rusqlite::Error> {
+            let connection = open_readonly(path)?;
+            let sql: Option<Option<String>> = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            match sql.flatten() {
+                Some(sql) if !sql.is_empty() && fts5_header().is_match(&sql) => {}
+                _ => return Ok(false),
+            }
+            let mut statement = connection.prepare("PRAGMA table_info(entries)")?;
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            if columns != INDEX_COLUMNS {
+                return Ok(false);
+            }
+            let mut probe = connection.prepare(PROBE)?;
+            let _ = probe
+                .query_map([PROBE_TERM], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(true)
+        };
+        check().unwrap_or(false)
+    }
+
+    /// `index`: rebuild the cache from the files. Returns `(indexed, path)`; a ground truth
+    /// whose authority is not owner is refused by the indexer, not downgraded.
+    pub fn index(&self) -> Result<(usize, PathBuf), ContextError> {
+        self.ensure()?;
+        let path = self.index_path();
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
+        }
+        let connection = rusqlite::Connection::open(&path).map_err(sql_error)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql_error)?;
+        let _: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, \
+                 class UNINDEXED, scope UNINDEXED)",
+            )
+            .map_err(sql_error)?;
+        let entries = self.entries();
+        for entry in &entries {
+            if entry.error.is_some() {
+                continue;
+            }
+            if entry.get("class") == Some("ground-truth") && entry.get("authority") != Some("owner")
+            {
+                continue;
+            }
+            connection
+                .execute(
+                    "INSERT INTO entries(slug, subject, body, class, scope) VALUES (?,?,?,?,?)",
+                    rusqlite::params![
+                        entry.slug,
+                        entry.get("subject"),
+                        entry.body,
+                        entry.get("class"),
+                        entry.get("scope"),
+                    ],
+                )
+                .map_err(sql_error)?;
+        }
+        drop(connection);
+        let indexed = entries.iter().filter(|e| e.error.is_none()).count();
+        Ok((indexed, path))
+    }
+
+    /// `search`: rebuild first when the cache is missing or cannot answer, then MATCH.
+    pub fn search(
+        &self,
+        query: &str,
+        cls: Option<&str>,
+        scope: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Value>, ContextError> {
+        let path = self.index_path();
+        if !path.exists() || !self.index_compatible(&path) {
+            self.index()?;
+        }
+        let connection = open_readonly(&path).map_err(sql_error)?;
+        let mut sql =
+            "SELECT slug, subject, class, scope FROM entries WHERE entries MATCH ?".to_string();
+        let mut params: Vec<rusqlite::types::Value> = vec![query.to_string().into()];
+        if let Some(cls) = cls.filter(|c| !c.is_empty()) {
+            sql.push_str(" AND class = ?");
+            params.push(cls.to_string().into());
+        }
+        if let Some(scope) = scope.filter(|s| !s.is_empty()) {
+            sql.push_str(" AND scope = ?");
+            params.push(scope.to_string().into());
+        }
+        sql.push_str(" ORDER BY rank LIMIT ?");
+        params.push(limit.into());
+        let run = || -> Result<Vec<[Option<String>; 4]>, rusqlite::Error> {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+            })?;
+            rows.collect()
+        };
+        let rows = run().map_err(|e| ContextError(format!("index search failed: {e}")))?;
+        for row in &rows {
+            if let Some(slug) = &row[0] {
+                self.log_access(slug, None, "read");
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|r| json!({"slug": r[0], "subject": r[1], "class": r[2], "scope": r[3]}))
+            .collect())
+    }
+}

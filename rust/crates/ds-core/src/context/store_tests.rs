@@ -1005,3 +1005,247 @@ fn test_chain_head_is_the_only_entry_in_stats() {
         .collect();
     assert_eq!(vec![head.slug], slugs);
 }
+
+// ---- slice 5: the disposable FTS index --------------------------------------------------
+// Ported 1:1 from ContextIndexDriftTests (t123) plus the index half of
+// test_an_agent_ground_truth_is_refused_by_check_and_index.
+
+struct Drift {
+    _dir: tempfile::TempDir,
+    store: Store,
+    slug: String,
+    path: PathBuf,
+}
+
+use std::path::PathBuf;
+
+fn drift() -> Drift {
+    let (dir, store) = store();
+    let entry = store
+        .add(
+            "the wiki artefact pattern is a durable design rule",
+            &args("fact", "wiki-artefact-pattern", "reference", "measured"),
+            None,
+        )
+        .unwrap();
+    let path = store.index_path();
+    Drift {
+        _dir: dir,
+        store,
+        slug: entry.slug,
+        path,
+    }
+}
+
+impl Drift {
+    fn plant(&self, schema: &str, insert: Option<&str>) {
+        if self.path.exists() {
+            std::fs::remove_file(&self.path).unwrap();
+        }
+        let connection = rusqlite::Connection::open(&self.path).unwrap();
+        connection.execute_batch(schema).unwrap();
+        if let Some(insert) = insert {
+            connection.execute_batch(insert).unwrap();
+        }
+    }
+
+    fn found(&self) -> Vec<String> {
+        self.store
+            .search("artefact", None, None, 20)
+            .unwrap()
+            .iter()
+            .map(|r| r["slug"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+#[test]
+fn test_an_agent_ground_truth_is_not_indexed() {
+    let (_dir, store) = store();
+    store.ensure().unwrap();
+    write(
+        &store,
+        "ground-truth",
+        "2026-10-29-authority",
+        &[
+            ("class", "ground-truth"),
+            ("type", "principle"),
+            ("authority", "agent"),
+        ],
+        "agents may propose but never promote",
+    );
+    let (indexed, _) = store.index().unwrap();
+    assert_eq!(
+        1, indexed,
+        "the file counts as indexed-over, the row is refused"
+    );
+    assert!(store.search("promote", None, None, 20).unwrap().is_empty());
+}
+
+#[test]
+fn test_context_search_survives_a_stale_cache_and_a_fresh_search_finds_the_entry() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body)",
+        Some("INSERT INTO entries VALUES ('drifted','drifted','body')"),
+    );
+    assert_eq!(vec![d.slug.clone()], d.found());
+}
+
+#[test]
+fn test_a_cache_from_an_older_schema_is_rebuilt_not_reported() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body)",
+        Some("INSERT INTO entries VALUES ('old','old','old')"),
+    );
+    assert_eq!(vec![d.slug.clone()], d.found());
+    assert!(
+        d.store.index_compatible(&d.path),
+        "the cache must be healed"
+    );
+}
+
+#[test]
+fn test_a_cache_carrying_a_model_column_does_not_break_search() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, class, model)",
+        Some("INSERT INTO entries VALUES ('m','m','m','fact','none')"),
+    );
+    assert_eq!(vec![d.slug.clone()], d.found());
+}
+
+#[test]
+fn test_an_ordinary_table_with_the_same_columns_is_rebuilt() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT, class TEXT, scope TEXT)",
+        Some("INSERT INTO entries VALUES ('plain','plain','plain','fact','global')"),
+    );
+    assert!(!d.store.index_compatible(&d.path));
+    assert_eq!(vec![d.slug.clone()], d.found());
+    assert!(
+        d.store.index_compatible(&d.path),
+        "the cache must be healed"
+    );
+}
+
+#[test]
+fn test_an_ordinary_table_with_fewer_columns_is_rebuilt() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE TABLE entries(slug TEXT, subject TEXT, body TEXT)",
+        Some("INSERT INTO entries VALUES ('plain','plain','plain')"),
+    );
+    assert_eq!(vec![d.slug.clone()], d.found());
+}
+
+#[test]
+fn test_an_fts_cache_with_the_wrong_engine_is_rebuilt() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE VIRTUAL TABLE entries USING fts4(slug, subject, body, class, scope)",
+        Some("INSERT INTO entries VALUES ('old','old','old','fact','global')"),
+    );
+    assert!(
+        !d.store.index_compatible(&d.path),
+        "no rank column: the probe catches it"
+    );
+    assert_eq!(vec![d.slug.clone()], d.found());
+}
+
+#[test]
+fn test_an_empty_fts_cache_is_still_compatible() {
+    let d = drift();
+    d.store.index().unwrap();
+    d.plant(
+        "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, class UNINDEXED, scope UNINDEXED)",
+        None,
+    );
+    assert!(d.store.index_compatible(&d.path));
+    let rows = d.store.search("artefact", None, None, 20);
+    // an empty-but-compatible cache is NOT rebuilt, so the entry is not found (as in Python)
+    assert_eq!(0, rows.unwrap().len());
+}
+
+#[test]
+fn test_an_unreadable_cache_is_rebuilt() {
+    let d = drift();
+    d.store.index().unwrap();
+    std::fs::write(&d.path, b"").unwrap();
+    assert_eq!(vec![d.slug.clone()], d.found());
+}
+
+#[test]
+fn test_a_compatible_cache_is_left_alone() {
+    use std::os::unix::fs::MetadataExt;
+    let d = drift();
+    d.store.index().unwrap();
+    let stat = |p: &PathBuf| {
+        let m = std::fs::metadata(p).unwrap();
+        (m.ino(), m.mtime_nsec(), m.mtime())
+    };
+    let before = stat(&d.path);
+    for _ in 0..3 {
+        d.store.search("artefact", None, None, 20).unwrap();
+    }
+    assert_eq!(before, stat(&d.path));
+}
+
+#[test]
+fn test_the_expected_columns_are_declared_once() {
+    assert_eq!(
+        ["slug", "subject", "body", "class", "scope"],
+        super::INDEX_COLUMNS
+    );
+}
+
+#[test]
+fn search_filters_by_class_and_scope_logs_a_read_and_names_a_bad_query() {
+    let d = drift();
+    d.store
+        .add(
+            "an artefact in history",
+            &args("history", "hist", "reference", "agent"),
+            None,
+        )
+        .unwrap();
+    let all = d.store.search("artefact", None, None, 20).unwrap();
+    assert_eq!(2, all.len());
+    let only_fact = d.store.search("artefact", Some("fact"), None, 20).unwrap();
+    assert_eq!(1, only_fact.len());
+    assert_eq!("fact", only_fact[0]["class"]);
+    assert_eq!(
+        1,
+        d.store
+            .search("artefact", None, Some("project"), 1)
+            .unwrap()
+            .len(),
+        "limit"
+    );
+    assert_eq!(
+        0,
+        d.store
+            .search("artefact", None, Some("global"), 20)
+            .unwrap()
+            .len()
+    );
+    assert!(d
+        .store
+        .reads()
+        .iter()
+        .any(|r| r["slug"] == d.slug.as_str() && r["kind"] == "read"));
+    let err = d
+        .store
+        .search("\"unterminated", None, None, 20)
+        .unwrap_err()
+        .0;
+    assert!(err.starts_with("index search failed: "), "{err}");
+}

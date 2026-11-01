@@ -157,7 +157,3 @@ pub async fn run_reaper(
         }
     }
 }
-
-#[cfg(test)]
-#[path = "loops_tests.rs"]
-mod loops_tests;
