@@ -1194,6 +1194,70 @@ impl Tasks {
         Ok(json!({"scopes": scopes, "by_scope": by_scope, "totals": totals}))
     }
 
+    /// `Tasks.notes`: every `note` event on a task, oldest first. The text is the meta's
+    /// `reason`, else `text`, else `note`, else empty (t621: a verdict reads this evidence).
+    pub async fn notes(&self, id: &str) -> Result<Vec<TaskNote>, DunkError> {
+        let id = id.trim().to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT at, actor, meta FROM task_events WHERE task_id = ? AND event = 'note' ORDER BY at, id")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id], |r| {
+                        Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let (at, actor, meta) = row.map_err(db::map_sqlite)?;
+                    let meta: serde_json::Value = serde_json::from_str(meta.as_deref().filter(|m| !m.is_empty()).unwrap_or("{}"))
+                        .ok()
+                        .filter(serde_json::Value::is_object)
+                        .unwrap_or_else(|| json!({}));
+                    let text = ["reason", "text", "note"]
+                        .iter()
+                        .filter_map(|k| meta.get(*k))
+                        .find(|v| !v.is_null() && v.as_str() != Some("") && *v != &json!(false) && *v != &json!(0))
+                        .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+                        .unwrap_or_default();
+                    out.push(TaskNote { at, actor, text });
+                }
+                Ok(out)
+            })
+            .await
+    }
+
+    /// `Tasks.authors_of`: panes that WORKED on (repo, pr) from the non-review tasks: their
+    /// assignees, completer and recorded author (t723). Sorted, de-duplicated.
+    pub async fn authors_of(&self, repo: &str, pr: i64) -> Result<Vec<String>, DunkError> {
+        if repo.is_empty() || pr <= 0 {
+            return Ok(Vec::new());
+        }
+        let repo = repo.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT assignees, completed_by, author FROM tasks WHERE repo = ? AND pr = ? AND kind != 'review'")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![repo, pr], |r| {
+                        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut panes = std::collections::BTreeSet::new();
+                for row in rows {
+                    let (assignees, completed_by, author) = row.map_err(db::map_sqlite)?;
+                    panes.extend(decode_list(assignees.as_deref()).into_iter().filter(|p| !p.is_empty()));
+                    for who in [completed_by, author].into_iter().flatten().filter(|p| !p.is_empty()) {
+                        panes.insert(who);
+                    }
+                }
+                Ok(panes.into_iter().collect())
+            })
+            .await
+    }
+
     /// The review columns `Task` does not carry (author, repo, pr, verdict) for one task.
     pub async fn review_facts(&self, id: &str) -> Result<ReviewFacts, DunkError> {
         let wanted = id.trim().to_string();
@@ -1583,6 +1647,14 @@ pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
         "verdict must be one of {}; got {verdict:?}",
         VERDICTS.join(", ")
     )))
+}
+
+/// One `note` event, as `Tasks.notes` returns it (the meta is folded into `text`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskNote {
+    pub at: f64,
+    pub actor: Option<String>,
+    pub text: String,
 }
 
 /// The review columns of a task row that `Task` does not carry.

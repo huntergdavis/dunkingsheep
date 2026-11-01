@@ -221,3 +221,127 @@ async fn a_done_or_cancelled_review_takes_no_second_verdict_and_work_takes_none(
         Flock::check_task_completion_gates(&wd, &wf, None, &who).unwrap()
     );
 }
+
+#[tokio::test]
+async fn a_verdict_needs_a_note_by_the_same_lane_written_after_the_claim() {
+    let (_flock, tasks) = setup("evidence").await;
+    let t = tasks.add("global", "review", "").await.unwrap();
+    // a note by another lane, and an empty one, do not count
+    tasks
+        .note(&t.id, "note", "w9:p9", Some("someone else's finding"))
+        .await
+        .unwrap();
+    let err = Flock::require_review_evidence(&tasks, &t, Some("w2:p2"), "reviewer")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("a verdict needs evidence"), "{err}");
+    assert!(err.contains(&format!("task note {}", t.id)), "{err}");
+    tasks.note(&t.id, "note", "w2:p2", None).await.unwrap();
+    assert!(
+        Flock::require_review_evidence(&tasks, &t, Some("w2:p2"), "reviewer")
+            .await
+            .is_err()
+    );
+    tasks
+        .note(
+            &t.id,
+            "note",
+            "w2:p2",
+            Some("ran cargo test; did NOT run clippy"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        Flock::require_review_evidence(&tasks, &t, Some("w2:p2"), "reviewer")
+            .await
+            .is_ok()
+    );
+    // owner/system with no lease is exempt; an anonymous caller is not
+    let bare = tasks.add("global", "bare", "").await.unwrap();
+    assert!(
+        Flock::require_review_evidence(&tasks, &bare, Some("w1:p1"), "owner")
+            .await
+            .is_ok()
+    );
+    assert!(
+        Flock::require_review_evidence(&tasks, &bare, None, "anonymous")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_note_written_before_the_claim_is_a_plan_not_evidence() {
+    let (_flock, tasks) = setup("evidence-claim").await;
+    let t = tasks.add("global", "review", "").await.unwrap();
+    tasks
+        .note(&t.id, "note", "w2:p2", Some("my plan"))
+        .await
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    tasks
+        .claim_next("global", "w2:p2", Default::default())
+        .await
+        .unwrap();
+    let err = Flock::require_review_evidence(&tasks, &t, Some("w2:p2"), "reviewer")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("one written before you claimed, does not count"),
+        "{err}"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    tasks
+        .note(&t.id, "note", "w2:p2", Some("what I ran"))
+        .await
+        .unwrap();
+    assert!(
+        Flock::require_review_evidence(&tasks, &t, Some("w2:p2"), "reviewer")
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn authors_of_names_the_lanes_that_worked_a_pr_but_not_its_reviews() {
+    let (_flock, tasks) = setup("authors").await;
+    let work = |assignee: &str, author: Option<&str>| AddOptions {
+        assignees: vec![assignee.into()],
+        author: author.map(Into::into),
+        repo: Some("o/r".into()),
+        pr: Some("5".into()),
+        ..Default::default()
+    };
+    tasks
+        .add_with("global", "fix", "", work("w1:p1", Some("w4:p4")))
+        .await
+        .unwrap();
+    tasks
+        .add_with("global", "fix2", "", work("w3:p3", None))
+        .await
+        .unwrap();
+    tasks
+        .add_with(
+            "global",
+            "review",
+            "",
+            AddOptions {
+                kind: Some("review".into()),
+                assignees: vec!["w2:p2".into()],
+                repo: Some("o/r".into()),
+                pr: Some("5".into()),
+                head: Some("abc".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        vec!["w1:p1", "w3:p3", "w4:p4"],
+        tasks.authors_of("o/r", 5).await.unwrap()
+    );
+    assert!(tasks.authors_of("o/r", 0).await.unwrap().is_empty());
+    assert!(tasks.authors_of("", 5).await.unwrap().is_empty());
+}

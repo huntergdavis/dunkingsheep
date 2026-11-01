@@ -10,7 +10,7 @@ use super::panes::PaneInfoEnv;
 use super::Flock;
 use crate::error::DunkError;
 use crate::proc::{caller_pane_auth_failure, Caller};
-use crate::tasks::{validate_verdict, Decorated, ReviewFacts};
+use crate::tasks::{validate_verdict, Decorated, ReviewFacts, Task, Tasks};
 
 fn refuse<T>(text: impl Into<String>) -> Result<T, DunkError> {
     Err(DunkError::Refused(text.into()))
@@ -144,6 +144,48 @@ impl Flock {
             } else {
                 &named
             }
+        ))
+    }
+
+    /// `_require_review_evidence`: refuse a verdict unless this pane noted its evidence AFTER it
+    /// claimed (a note written before the review started is a plan, not a finding). An owner
+    /// or system caller with no lease is exempt: it is not the lane that judged the work.
+    /// `role` is the caller's already-resolved role (`anonymous` with no pane).
+    pub async fn require_review_evidence(
+        tasks: &Tasks,
+        task: &Task,
+        self_pane_id: Option<&str>,
+        role: &str,
+    ) -> Result<(), DunkError> {
+        let pane = self_pane_id.filter(|p| !p.is_empty());
+        let mut lease = None;
+        if let Some(pane) = pane {
+            lease = tasks
+                .leases_for_pane(pane, None)
+                .await?
+                .into_iter()
+                .find(|l| l.task_id == task.id);
+        }
+        if lease.is_none() && matches!(role, "owner" | "system") {
+            return Ok(());
+        }
+        let claimed_at = lease
+            .as_ref()
+            .map(|l| l.claimed_at)
+            .unwrap_or(task.created_at);
+        let noted =
+            tasks.notes(&task.id).await?.into_iter().any(|n| {
+                n.actor.as_deref() == pane && n.at >= claimed_at && !n.text.trim().is_empty()
+            });
+        if noted {
+            return Ok(());
+        }
+        refuse(format!(
+            "a verdict needs evidence: record what you ran and what you did NOT verify first, \
+             with `dunkingsheep task note {} --reason \"<commands, head sha, what is not \
+             verified>\"`. A note by another lane, or one written before you claimed, does not \
+             count.",
+            task.id
         ))
     }
 
