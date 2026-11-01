@@ -48,7 +48,7 @@ impl Flock {
         };
     }
 
-    fn with_roles<T>(
+    pub(crate) fn with_roles<T>(
         &self,
         work: impl FnOnce(&mut Roles, Option<&Superusers>) -> Result<T, DunkError>,
     ) -> Result<T, DunkError> {

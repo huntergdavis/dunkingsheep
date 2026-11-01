@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use super::Flock;
 use crate::error::DunkError;
+use crate::flock::panes::PaneInfoEnv;
 use crate::tasks::{AddOptions, Decorated, FieldEdit, Task, Tasks};
+use crate::tasks::{ClaimOptions, ClaimOutcome};
 
 /// `TASK_GLOBAL`.
 pub const TASK_GLOBAL: &str = "global";
@@ -347,6 +349,200 @@ impl Flock {
         tasks.release(task_id, pane).await
     }
 
+    /// `_claim_filters`: `(kinds, exclude_author)` for a claim, from the caller's role. A
+    /// reviewer pulls only `review` tasks it did not author; the owner is unrestricted;
+    /// everyone else pulls everything but reviews.
+    pub fn claim_filters(
+        &self,
+        env: &dyn PaneInfoEnv,
+        self_pane_id: Option<&str>,
+    ) -> Result<(Option<Vec<String>>, Option<String>), DunkError> {
+        let pane = self_pane_id.filter(|p| !p.is_empty());
+        let role = match pane {
+            Some(p) => self.caller_role(Some(p), env)?,
+            None => "anonymous".to_string(),
+        };
+        Ok(match role.as_str() {
+            "reviewer" => (Some(vec!["review".to_string()]), pane.map(str::to_string)),
+            "owner" => (None, None),
+            _ => (
+                Some(["work", "verify", "report"].map(String::from).to_vec()),
+                None,
+            ),
+        })
+    }
+
+    /// `current_caller()` as the `(pid, start, name)` the store records on a lease.
+    fn caller_identity(&self) -> Option<(i64, Option<String>, Option<String>)> {
+        let caller = self.current_caller()?;
+        let pid = caller.get("pid").and_then(serde_json::Value::as_i64)?;
+        let text = |key: &str| {
+            caller
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(String::from)
+        };
+        Some((pid, text("start"), text("name")))
+    }
+
+    /// `task_next`: atomically claim the next task; an empty queue (or a refusal) subscribes
+    /// the pane for a later push (`following`). Returns the outcome and whether it follows.
+    pub async fn task_next(
+        &self,
+        env: &dyn PaneInfoEnv,
+        scope: Option<&str>,
+        lease_seconds: Option<f64>,
+        allow_busy: bool,
+        self_pane_id: Option<&str>,
+    ) -> Result<(ClaimOutcome, bool), DunkError> {
+        let tasks = self.task_store()?;
+        let pane = self_pane_id.filter(|p| !p.is_empty());
+        let caller = self.caller_identity();
+        let role = match pane {
+            Some(p) => self.caller_role(Some(p), env)?,
+            None => "anonymous".to_string(),
+        };
+        if role == "reviewer" {
+            let pane = pane.unwrap_or_default();
+            let (may, provider, allowed) = self.with_roles(|roles, _| {
+                Ok((
+                    roles.may_review(pane, Some(&role))?,
+                    roles.provider_of(pane)?,
+                    roles.reviewer_providers.join(", "),
+                ))
+            })?;
+            if !may {
+                return Err(DunkError::Refused(format!(
+                    "{pane} is a reviewer lane on a provider that may not review ({}; allowed: \
+                     {allowed}). Free models are the worker tier.",
+                    provider.unwrap_or_else(|| "unknown".into())
+                )));
+            }
+        }
+        let value = scope.map(str::trim).unwrap_or("");
+        let mut follow_scope = TASK_GLOBAL.to_string();
+        let target = match value {
+            "" | "global" => TASK_GLOBAL.to_string(),
+            "self" => {
+                let pane = pane.ok_or_else(|| {
+                    DunkError::Refused("scope 'self' requires a known caller pane".into())
+                })?;
+                follow_scope = pane.to_string();
+                pane.to_string()
+            }
+            "auto" => {
+                if let Some(pane) = pane {
+                    let (kinds, exclude_author) = self.claim_filters(env, Some(pane))?;
+                    let local = tasks
+                        .claim_next(
+                            pane,
+                            pane,
+                            ClaimOptions {
+                                lease_seconds,
+                                caller: caller.clone(),
+                                allow_busy,
+                                kinds,
+                                exclude_author,
+                            },
+                        )
+                        .await?;
+                    if matches!(local, ClaimOutcome::Claimed { .. }) {
+                        return Ok((local, false));
+                    }
+                }
+                TASK_GLOBAL.to_string()
+            }
+            "mine" => {
+                if pane.is_none() {
+                    return Err(DunkError::Refused(
+                        "scope 'mine' requires a known caller pane".into(),
+                    ));
+                }
+                follow_scope = "mine".to_string();
+                "mine".to_string()
+            }
+            other => {
+                let resolved = Self::task_scope(Some(other), self_pane_id, TASK_GLOBAL)?;
+                follow_scope = resolved.clone();
+                resolved
+            }
+        };
+        let (kinds, exclude_author) = self.claim_filters(env, self_pane_id)?;
+        let outcome = tasks
+            .claim_next(
+                &target,
+                pane.unwrap_or(""),
+                ClaimOptions {
+                    lease_seconds,
+                    caller,
+                    allow_busy,
+                    kinds,
+                    exclude_author,
+                },
+            )
+            .await?;
+        let mut following = false;
+        if !matches!(outcome, ClaimOutcome::Claimed { .. }) {
+            if let Some(pane) = pane {
+                self.task_waiters
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(pane.to_string(), follow_scope);
+                following = true;
+            }
+        }
+        Ok((outcome, following))
+    }
+
+    /// `task_follow`: ask the daemon to push the next task when this pane is idle. Returns
+    /// `(scope, all followers)`.
+    pub fn task_follow(
+        &self,
+        scope: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<(String, Vec<String>), DunkError> {
+        let pane = self_pane_id
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| DunkError::Refused("task follow requires a known caller pane".into()))?;
+        let target = if scope.map(str::trim) == Some("mine") {
+            "mine".to_string()
+        } else {
+            Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?
+        };
+        let mut waiters = self
+            .task_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        waiters.insert(pane.to_string(), target.clone());
+        Ok((target, waiters.keys().cloned().collect()))
+    }
+
+    /// `task_unfollow`: `(was_following, remaining followers)`.
+    pub fn task_unfollow(
+        &self,
+        self_pane_id: Option<&str>,
+    ) -> Result<(bool, Vec<String>), DunkError> {
+        let pane = self_pane_id.filter(|p| !p.is_empty()).ok_or_else(|| {
+            DunkError::Refused("task unfollow requires a known caller pane".into())
+        })?;
+        let mut waiters = self
+            .task_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let existed = waiters.remove(pane).is_some();
+        Ok((existed, waiters.keys().cloned().collect()))
+    }
+
+    /// `task_followers`: `(pane, scope)` sorted by pane.
+    pub fn task_followers(&self) -> Vec<(String, String)> {
+        self.task_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(pane, scope)| (pane.clone(), scope.clone()))
+            .collect()
+    }
+
     /// `task_read`: the task, if the caller may see it.
     pub async fn task_read(
         &self,
@@ -497,6 +693,7 @@ mod commands_tasks_tests;
 #[cfg(test)]
 mod list_tests {
     use super::*;
+    use crate::flock::panes::PaneInfoEnv;
     use crate::flock::panes::Stores;
 
     async fn flock_with(tag: &str) -> (Flock, Arc<Tasks>) {
@@ -528,6 +725,139 @@ mod list_tests {
         assert_eq!(serde_json::json!(2), got["totals"]["open"]);
         assert_eq!(serde_json::json!(0), got["totals"]["blocked"]);
         assert!(got["by_scope"].get("w2:p2").is_none());
+    }
+
+    struct NoPanes;
+    impl PaneInfoEnv for NoPanes {
+        fn list_panes_grouped(&self) -> Vec<serde_json::Value> {
+            Vec::new()
+        }
+        fn get_pane(&self, _: &str) -> Option<serde_json::Value> {
+            None
+        }
+    }
+
+    async fn staffed(tag: &str) -> (Flock, Arc<Tasks>) {
+        let (flock, tasks) = flock_with(tag).await;
+        let dir = std::env::temp_dir().join(format!("ds-ct-{tag}-{}", std::process::id()));
+        let mut roles = crate::roles::Roles::new(
+            &crate::config::Env::default(),
+            Some(dir.join("roles.json")),
+            Some(dir.join("tokens.json")),
+            None,
+        )
+        .unwrap();
+        roles
+            .register("w1:p1", "worker", None, None, Some("pi"), None, None, None)
+            .unwrap();
+        roles
+            .register(
+                "w2:p2",
+                "reviewer",
+                None,
+                None,
+                Some("pi"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        roles
+            .register(
+                "w3:p3",
+                "reviewer",
+                None,
+                None,
+                Some("claude"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        flock.attach_roles(roles, None);
+        (flock, tasks)
+    }
+
+    #[tokio::test]
+    async fn task_next_filters_by_role_and_follows_on_an_empty_queue() {
+        let (flock, tasks) = staffed("next").await;
+        let review = tasks
+            .add_with(
+                "global",
+                "review",
+                "",
+                AddOptions {
+                    kind: Some("review".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("1".into()),
+                    head: Some("abc".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // a worker never pulls the review, so the queue is empty for it and it follows
+        let (outcome, following) = flock
+            .task_next(&NoPanes, None, None, false, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ClaimOutcome::Refused { .. }));
+        assert!(following);
+        assert_eq!(
+            vec![("w1:p1".to_string(), "global".to_string())],
+            flock.task_followers()
+        );
+        let (was, left) = flock.task_unfollow(Some("w1:p1")).unwrap();
+        assert!(was && left.is_empty());
+        assert!(!flock.task_unfollow(Some("w1:p1")).unwrap().0);
+        // a reviewer on a provider that may review pulls it
+        let (outcome, following) = flock
+            .task_next(&NoPanes, None, None, false, Some("w3:p3"))
+            .await
+            .unwrap();
+        assert!(!following);
+        match outcome {
+            ClaimOutcome::Claimed { task, .. } => assert_eq!(review.id, task.id),
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_next_refuses_a_reviewer_on_a_provider_that_may_not_review() {
+        let (flock, _tasks) = staffed("next-free").await;
+        let err = flock
+            .task_next(&NoPanes, None, None, false, Some("w2:p2"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("w2:p2 is a reviewer lane on a provider that may not review (pi;"),
+            "{err}"
+        );
+        let err = flock
+            .task_next(&NoPanes, Some("self"), None, false, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("scope 'self' requires a known caller pane"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_follow_scopes_and_needs_a_pane() {
+        let (flock, _tasks) = staffed("follow").await;
+        assert!(flock.task_follow(None, None).is_err());
+        assert_eq!(
+            ("global".to_string(), vec!["w1:p1".to_string()]),
+            flock.task_follow(None, Some("w1:p1")).unwrap()
+        );
+        assert_eq!(
+            "mine",
+            flock.task_follow(Some("mine"), Some("w1:p1")).unwrap().0
+        );
+        assert!(flock.task_follow(Some("w9:p9"), Some("w1:p1")).is_err());
     }
 
     #[tokio::test]
