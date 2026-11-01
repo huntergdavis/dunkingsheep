@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::error::DunkError;
 
 pub mod rules;
+pub mod rules_dunks;
 
 pub const SOURCE_RULE: &str = "watchdog-rule";
 
