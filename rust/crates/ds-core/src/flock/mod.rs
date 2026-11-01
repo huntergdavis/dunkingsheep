@@ -429,8 +429,11 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
+pub mod agent_verify;
 pub mod commands_inbox;
+pub mod commands_layout;
 pub mod commands_owner_views;
+pub mod commands_tasks;
 pub mod commands_turns;
 pub mod dunks;
 pub mod lane_registry_rows;
