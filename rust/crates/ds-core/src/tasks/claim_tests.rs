@@ -590,10 +590,10 @@ fn live(panes: &[&str]) -> Option<Vec<String>> {
 #[tokio::test]
 async fn test_priority_order_then_age() {
     let tasks = store("py-priority-order").await;
-    let low = tasks.add("global", "low", "low").await.unwrap();
-    let urgent = tasks.add("global", "urgent", "urgent").await.unwrap();
-    let high = tasks.add("global", "high", "high").await.unwrap();
-    let medium = tasks.add("global", "medium", "medium").await.unwrap();
+    let low = add_with(&tasks, "low", Some("low"), &[], &[], false).await;
+    let urgent = add_with(&tasks, "urgent", Some("urgent"), &[], &[], false).await;
+    let high = add_with(&tasks, "high", Some("high"), &[], &[], false).await;
+    let medium = add_with(&tasks, "medium", Some("medium"), &[], &[], false).await;
     let order: Vec<_> = tasks
         .list_visible(Some("global"), None, None, false, 100, None, None, false)
         .await
@@ -609,10 +609,7 @@ async fn test_default_low_oldest_first_and_explicit_priority_preserved() {
     let tasks = store("py-default-priority").await;
     let older = tasks.add("global", "older", "").await.unwrap();
     let newer = tasks.add("global", "newer", "").await.unwrap();
-    let explicit = tasks
-        .add("global", "explicit medium", "medium")
-        .await
-        .unwrap();
+    let explicit = add_with(&tasks, "explicit medium", Some("medium"), &[], &[], false).await;
     tasks.assign(&older.id, &["w1:p1"], "add").await.unwrap();
     tasks.assign(&newer.id, &["w1:p1"], "add").await.unwrap();
     assert_eq!("low", older.priority);
