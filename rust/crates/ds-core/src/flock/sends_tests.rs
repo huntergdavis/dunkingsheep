@@ -6,6 +6,7 @@
 //! the clear-to-send tests (the settle wait is injected, so wall-clock is not asserted).
 
 use super::sends::*;
+use super::Flock;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -95,6 +96,158 @@ impl SubmitEnv for Pane {
 }
 
 const P: &str = "w2:p1";
+
+#[test]
+fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
+    use std::sync::{Arc, Mutex, TryLockError};
+
+    #[derive(Default)]
+    struct Events {
+        order: Mutex<Vec<&'static str>>,
+        saved: Mutex<Vec<BTreeMap<String, Vec<Message>>>>,
+    }
+
+    impl OutboxWake for Events {
+        fn ensure_worker(
+            &self,
+            flock: &Flock,
+            pane_id: &str,
+        ) -> Result<(), crate::error::DunkError> {
+            assert!(matches!(
+                flock.outbox.try_lock(),
+                Err(TryLockError::WouldBlock)
+            ));
+            assert_eq!("pane-a", pane_id);
+            self.order.lock().unwrap().push("wake");
+            Ok(())
+        }
+    }
+
+    impl SnapshotStore for Events {
+        fn save(&self, flock: &Flock) -> Result<(), crate::error::DunkError> {
+            let outbox = flock.outbox.try_lock().map_err(|_| {
+                crate::error::DunkError::Refused("outbox lock held during snapshot save".into())
+            })?;
+            self.saved.lock().unwrap().push(outbox.clone());
+            self.order.lock().unwrap().push("save");
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = flock
+        .new_message("pane-a", "Agent A", "check the queue", "t1944")
+        .unwrap();
+    message.kind = "keys".into();
+    message.hold_while_typing = false;
+    message.press_enter = false;
+    message.is_notice = true;
+    message.notify_for = vec!["i7".into(), "i8".into()];
+    message.created_at = 1234.5;
+    let expected = message.clone();
+    let events = Arc::new(Events::default());
+
+    flock
+        .enqueue(message, events.as_ref(), events.as_ref())
+        .unwrap();
+
+    assert_eq!(vec!["wake", "save"], *events.order.lock().unwrap());
+    let snapshots = events.saved.lock().unwrap();
+    assert_eq!(1, snapshots.len());
+    let saved = &snapshots[0]["pane-a"][0];
+    assert_eq!(expected.id, saved.id);
+    assert_eq!(expected.source, saved.source);
+    assert_eq!(expected.kind, saved.kind);
+    assert_eq!(expected.hold_while_typing, saved.hold_while_typing);
+    assert_eq!(expected.press_enter, saved.press_enter);
+    assert_eq!(expected.is_notice, saved.is_notice);
+    assert_eq!(expected.notify_for, saved.notify_for);
+    assert_eq!(expected.created_at, saved.created_at);
+}
+
+#[test]
+fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() {
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, TryLockError};
+
+    struct Wake;
+    impl OutboxWake for Wake {
+        fn ensure_worker(&self, flock: &Flock, _: &str) -> Result<(), crate::error::DunkError> {
+            assert!(matches!(
+                flock.outbox.try_lock(),
+                Err(TryLockError::WouldBlock)
+            ));
+            Ok(())
+        }
+    }
+
+    struct Store(AtomicUsize);
+    impl SnapshotStore for Store {
+        fn save(&self, flock: &Flock) -> Result<(), crate::error::DunkError> {
+            assert!(flock.outbox.try_lock().is_ok());
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Arc::new(Flock::new(
+        dir.path().join("launches.json"),
+        dir.path(),
+        false,
+    ));
+    let wake = Arc::new(Wake);
+    let store = Arc::new(Store(AtomicUsize::new(0)));
+    let mut producers = Vec::new();
+    for producer in 0..4 {
+        let flock = flock.clone();
+        let wake = wake.clone();
+        let store = store.clone();
+        producers.push(std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for sequence in 0..8 {
+                let message = flock
+                    .new_message(
+                        "pane-a",
+                        "Agent A",
+                        &format!("{producer}:{sequence}"),
+                        "test",
+                    )
+                    .unwrap();
+                ids.push(message.id.clone());
+                flock
+                    .enqueue(message, wake.as_ref(), store.as_ref())
+                    .unwrap();
+            }
+            ids
+        }));
+    }
+    let producer_ids: Vec<Vec<String>> = producers
+        .into_iter()
+        .map(|producer| producer.join().unwrap())
+        .collect();
+
+    let queue = flock.outbox_snapshot();
+    let messages = &queue["pane-a"];
+    assert_eq!(32, messages.len());
+    assert_eq!(32, store.0.load(Ordering::SeqCst));
+    let ids: HashSet<&str> = messages.iter().map(|message| message.id.as_str()).collect();
+    assert_eq!(32, ids.len());
+    for sequence in producer_ids {
+        let positions: Vec<usize> = sequence
+            .iter()
+            .map(|id| {
+                messages
+                    .iter()
+                    .position(|message| &message.id == id)
+                    .unwrap()
+            })
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}
 
 fn busy_codex() -> Pane {
     let mut pane = Pane::default();
