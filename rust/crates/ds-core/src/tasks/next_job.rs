@@ -10,6 +10,8 @@
 //! plus `task_id`, `pane_id` and `at` from the row, so it is a JSON map like the Python's
 //! dict.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
@@ -192,6 +194,48 @@ impl Tasks {
         let pane = pane_id.map(str::to_string);
         self.writer
             .call(move |conn| handoffs_in(conn, pane.as_deref()))
+            .await
+    }
+
+    /// `NextJobs.recover`: latest decision metadata per nonempty actor, ordered by
+    /// each actor's first decision event.
+    pub async fn next_job_decisions(&self) -> Result<Vec<(String, Value)>, DunkError> {
+        self.writer
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT actor, meta FROM task_events \
+                         WHERE event = 'next_job_decision' ORDER BY id",
+                    )
+                    .map_err(db::map_sqlite)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut decisions = Vec::<(String, Value)>::new();
+                let mut positions = HashMap::<String, usize>::new();
+                for row in rows {
+                    let (actor, meta) = row.map_err(db::map_sqlite)?;
+                    let Some(actor) = actor.filter(|actor| !actor.is_empty()) else {
+                        continue;
+                    };
+                    let meta = meta.ok_or_else(|| {
+                        DunkError::Refused("next-job decision metadata is missing".into())
+                    })?;
+                    let value = serde_json::from_str::<Value>(&meta).map_err(DunkError::from)?;
+                    if let Some(position) = positions.get(&actor).copied() {
+                        decisions[position].1 = value;
+                    } else {
+                        positions.insert(actor.clone(), decisions.len());
+                        decisions.push((actor, value));
+                    }
+                }
+                Ok(decisions)
+            })
             .await
     }
 
