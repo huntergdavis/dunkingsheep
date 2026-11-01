@@ -1362,8 +1362,10 @@ pub fn validate_scope(scope: &str) -> Result<String, DunkError> {
     if scope == "global" || pane.is_match(scope) {
         return Ok(scope.to_string());
     }
+    // Python's `{scope!r}`, NOT Rust's `{:?}`: quote choice and escapes differ (t1373).
     Err(DunkError::Refused(format!(
-        "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {scope:?})"
+        "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {})",
+        crate::context::store::py_repr(scope)
     )))
 }
 
@@ -2529,10 +2531,24 @@ mod tests {
         let refused = validate_scope("nowhere").unwrap_err().to_string();
         assert!(
             refused.contains(
-                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got \"nowhere\")"
+                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got 'nowhere')"
             ),
             "{refused}"
         );
+        // Python repr, case by case (expected texts produced by the real validate_scope):
+        // a quote inside switches the quoting; control characters escape; printable
+        // non-ASCII stays as is; surrounding whitespace was stripped before the message.
+        let want = [
+            ("it's", "(got \"it's\")"),
+            ("say \"hi\"", "(got 'say \"hi\"')"),
+            ("tab\there", "(got 'tab\\there')"),
+            ("na\u{ef}ve", "(got 'na\u{ef}ve')"),
+            ("", "(got '')"),
+        ];
+        for (input, expected) in want {
+            let text = validate_scope(input).unwrap_err().to_string();
+            assert!(text.ends_with(expected), "{input:?} -> {text}");
+        }
     }
 
     #[tokio::test]
