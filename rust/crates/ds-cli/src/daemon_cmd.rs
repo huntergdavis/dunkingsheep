@@ -17,7 +17,7 @@ use ds_core::client::{connect_or_start_system, ClientError, FlockClient, UnixTra
 use ds_core::error::DunkError;
 use serde_json::{json, Map, Value};
 
-use crate::usage_cmd::{sorted_json, Outcome};
+use crate::usage_cmd::{ordered_json, Outcome};
 
 fn fail(text: String, code: i32) -> Outcome {
     Outcome {
@@ -236,11 +236,11 @@ pub fn call(
 }
 
 /// The generic tail of the Python `main()` once the daemon has answered: `--json` prints the RAW
-/// result (sorted keys: see `dispatch`), otherwise the command's printer; and THE EXIT CODE IS A
+/// result in daemon insertion order, otherwise the command's printer; and THE EXIT CODE IS A
 /// CONTRACT: anything the daemon answers with `ok: false` is exit 2, whatever the prose says.
 fn finish(ns: &Map<String, Value>, result: &Value, printer: &dyn Fn(&Value) -> String) -> Outcome {
     let stdout = if matches!(ns.get("json"), Some(Value::Bool(true))) {
-        format!("{}\n", sorted_json(result))
+        format!("{}\n", ordered_json(result))
     } else {
         printer(result)
     };
@@ -318,7 +318,7 @@ pub fn gh_token(ns: &Map<String, Value>) -> Outcome {
     };
     if matches!(ns.get("json"), Some(Value::Bool(true))) {
         return Outcome {
-            stdout: format!("{}\n", sorted_json(&result)),
+            stdout: format!("{}\n", ordered_json(&result)),
             stderr: String::new(),
             code: 0,
         };
