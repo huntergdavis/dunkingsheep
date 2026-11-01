@@ -3,6 +3,7 @@
 //! `Namespace` shape recovered from the matches. Command bodies land in T43 onwards.
 pub mod args;
 pub mod cli_table;
+pub mod context_cmd;
 pub mod local;
 pub mod render;
 pub mod render_fleet;
