@@ -163,10 +163,10 @@ fn fallible_listing_preserves_the_exact_tmux_failure() {
     let dir = tempdir();
     let fake = fake_tmux(&dir.path().to_path_buf(), "pane listing is offline", 7);
     let backend = TmuxBackend::new(fake);
-    let expected = Err(TerminalError::refused("pane listing is offline"));
+    let expected = TerminalError::refused("pane listing is offline");
 
-    assert_eq!(expected, backend.try_list_panes());
-    assert_eq!(expected, backend.try_list_panes_grouped());
+    assert_eq!(Err(expected.clone()), backend.try_list_panes());
+    assert_eq!(Err(expected), backend.try_list_panes_grouped());
 }
 
 #[test]
