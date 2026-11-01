@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 ds-core = { path = "../ds-core" }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 # context digest takes `now` (NaiveDateTime); the same pinned chrono ds-core uses.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 

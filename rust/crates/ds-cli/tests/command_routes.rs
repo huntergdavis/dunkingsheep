@@ -397,6 +397,15 @@ fn cli_route_14_pm() {
                 json!({"action":"updated", "digest_id":"d3", "destination":"%3", "state":"stored", "body_bytes":12}),
             ),
             (
+                "pm_digest",
+                json!({
+                    "project": "delta",
+                    "payload": "{\"n\": 18446744073709551617, \"demo\": true}",
+                    "to": null
+                }),
+                json!({"action":"updated", "digest_id":"d4", "destination":"%4", "state":"stored", "body_bytes":41}),
+            ),
+            (
                 "pm_routing",
                 json!({}),
                 json!({"registry":"/tmp/registry", "routing":{"alpha":{"pm":"%1", "mode":"digest", "members":["%2"]}}}),
@@ -452,6 +461,16 @@ fn cli_route_14_pm() {
         String::from_utf8(raw.stdout).unwrap()
     );
     assert!(raw.stderr.is_empty());
+
+    let large_integer = run_cli_with_stdin(
+        &socket_text,
+        &["pm", "digest", "delta", "--demo", "--json"],
+        "{\"n\":18446744073709551617}",
+    );
+    assert_eq!(Some(0), large_integer.status.code());
+    assert!(large_integer.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&large_integer.stdout).unwrap();
+    assert_eq!("d4", result["digest_id"]);
 
     let routing = run_cli(&socket_text, &["pm", "routing"]);
     assert_eq!(Some(0), routing.status.code());
