@@ -57,6 +57,66 @@ fn a_write_through_the_store_is_visible_to_a_fresh_read_pool() {
 }
 
 #[test]
+fn store_lists_distinct_mailboxes_owned_by_a_pane() {
+    let fixture = Fixture::new();
+    for (mailbox, body) in [
+        ("alice", "first"),
+        ("crackdown-codex", "second"),
+        ("alice", "third"),
+    ] {
+        fixture
+            .store
+            .send(&Outgoing {
+                mailbox,
+                body: Some(body),
+                pane_id: Some("%1"),
+                ..Default::default()
+            })
+            .expect("send pane mail");
+    }
+    fixture
+        .store
+        .send(&Outgoing {
+            mailbox: "other",
+            body: Some("not owned by %1"),
+            pane_id: Some("%2"),
+            ..Default::default()
+        })
+        .expect("send other pane mail");
+
+    assert_eq!(
+        fixture.store.mailboxes_for_pane("%1").expect("mailboxes"),
+        ["alice", "crackdown-codex"]
+    );
+    assert!(fixture
+        .store
+        .mailboxes_for_pane("%404")
+        .expect("unknown pane")
+        .is_empty());
+}
+
+#[test]
+fn store_unread_for_pane_counts_only_queued_mail() {
+    let fixture = Fixture::new();
+    fixture
+        .store
+        .send(&Outgoing {
+            mailbox: "%1",
+            body: Some("queued"),
+            pane_id: Some("%1"),
+            ..Default::default()
+        })
+        .expect("send queued mail");
+    assert_eq!(fixture.store.unread_for_pane("%1").expect("unread"), 1);
+
+    fixture
+        .store
+        .archive("%1", None, None)
+        .expect("archive queued mail");
+    assert_eq!(fixture.store.unread_for_pane("%1").expect("unread"), 0);
+}
+
+#[test]
 fn ids_count_up_from_one_and_survive_a_restart() {
     let fixture = Fixture::new();
     assert_eq!("i1", fixture.send("writer", "one"));
