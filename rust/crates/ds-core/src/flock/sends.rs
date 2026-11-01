@@ -7,7 +7,7 @@
 //! The Python reaches the backend, the lease table and the clock through `self`; here they are
 //! [`SendEnv`], so every decision is testable with a scripted pane. NOT in this slice (next
 //! NOT in these slices (later t801 work): `send_now`/`send_keys_now`, `_enqueue`/`_deliver` and
-//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, flush/clear_box.
+//! the per-pane outbox task, `submit_text`/`press_keys`, `_flush_once`, clear_box.
 //!
 //! POLICY (owner, 2026-10-23/24) kept verbatim: a busy agent is NOT a hold reason, and there
 //! is NO "a human is typing" hold - every message goes through this daemon, so a non-empty box
@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
 
+use super::panes::PaneInfoEnv;
+use super::resolve::{resolve_target, resolve_target_dict};
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
@@ -99,6 +101,80 @@ pub trait SubmitEnv: SendEnv {
         !is_working_status(Some(baseline))
             && is_working_status(self.read_status(pane_id).as_deref())
     }
+}
+
+/// Pane resolution and the submit ladder needed by the explicit stranded-text flush.
+/// Production command wiring is supplied by a later runtime leaf.
+pub trait FlushEnv: SubmitEnv + PaneInfoEnv {
+    /// `herdr.server_error_hint()` for an empty pane listing.
+    fn server_error_hint(&self) -> String;
+}
+
+/// `Flock.flush_box`: explicitly submit the text already present in one pane's composer.
+/// The initial composer screen is read exactly once; later reads belong to the existing
+/// submission-confirmation ladder.
+pub fn flush_box(
+    env: &mut dyn FlushEnv,
+    target: &Value,
+    self_pane_id: Option<&str>,
+) -> Result<Value, DunkError> {
+    let panes = env.list_panes_grouped();
+    let pane = if target.is_object() {
+        resolve_target_dict(&panes, target)?
+    } else {
+        let spec = match target {
+            Value::Null => String::new(),
+            Value::String(spec) => spec.clone(),
+            Value::Bool(value) => if *value { "True" } else { "False" }.to_string(),
+            other => other.to_string(),
+        };
+        resolve_target(&panes, &spec, self_pane_id, &env.server_error_hint())?.clone()
+    };
+    let pane_id = pane
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (screen, shown, detail) = read_box(env, pane_id);
+    if screen.is_none() {
+        return Err(DunkError::Refused(format!(
+            "could not read the input box of {pane_id}"
+        )));
+    }
+    let label = pane
+        .get("tab_label")
+        .and_then(Value::as_str)
+        .filter(|label| !label.is_empty())
+        .unwrap_or(pane_id);
+    if detail.starts_with(AMBIGUOUS_COMPOSER) {
+        return Ok(json!({
+            "pane_id": pane_id,
+            "target_label": label,
+            "flushed": false,
+            "state": "unknown",
+            "text": Value::Null,
+            "detail": detail,
+            "message": format!("refused to submit: {detail}"),
+        }));
+    }
+    if shown.is_empty() {
+        return Ok(json!({
+            "pane_id": pane_id,
+            "target_label": label,
+            "flushed": false,
+            "text": Value::Null,
+            "detail": detail,
+            "message": format!("nothing to submit: {detail}"),
+        }));
+    }
+    let (flushed, message) =
+        press_until_submitted(env, pane_id, &shown, false, false, StatusBaseline::ReadNow);
+    Ok(json!({
+        "pane_id": pane_id,
+        "target_label": label,
+        "flushed": flushed,
+        "text": shown,
+        "message": message,
+    }))
 }
 
 /// Statuses that mean the lane was already running a turn before this send.

@@ -2,11 +2,12 @@
 //! tests/test_codex_ambiguous_composer.py (the `_box_holds` / `send_blocker` halves) and
 //! tests/test_dunk_core.py (the `_clear_to_send` and `_press_until_submitted` tests). The scripted
 //! pane below is the `FakeHerdr` surface those tests drive. NOT ported (later slices):
-//! `submit_text`/`send_guarded`/`flush_box`/`delivery_state`, and the thread-timing assertions of
-//! the clear-to-send tests (the settle wait is injected, so wall-clock is not asserted).
+//! `submit_text`/`send_guarded`/`delivery_state`, and the thread-timing assertions of the
+//! clear-to-send tests (the settle wait is injected, so wall-clock is not asserted).
 
 use super::sends::*;
 use super::Flock;
+use crate::flock::panes::PaneInfoEnv;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -25,6 +26,8 @@ struct Pane {
     sleeps: Vec<f64>,
     remembered: BTreeMap<String, String>,
     submit_metrics: Vec<(String, String, usize, usize)>,
+    panes: Vec<serde_json::Value>,
+    hint: String,
 }
 
 impl SendEnv for Pane {
@@ -92,6 +95,25 @@ impl SubmitEnv for Pane {
     ) {
         self.submit_metrics
             .push((pane_id.to_string(), outcome.to_string(), attempts, bytes));
+    }
+}
+
+impl PaneInfoEnv for Pane {
+    fn list_panes_grouped(&self) -> Vec<serde_json::Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<serde_json::Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane_id))
+            .cloned()
+    }
+}
+
+impl FlushEnv for Pane {
+    fn server_error_hint(&self) -> String {
+        self.hint.clone()
     }
 }
 
@@ -920,5 +942,98 @@ fn test_message_outcomes_and_wire_form() {
     assert_eq!("unconfirmed", message.outcome());
     for outcome in ["ok", "queued", "unconfirmed", "refused"] {
         assert!(OUTCOMES.contains(&outcome));
+    }
+}
+
+mod flush_box_tests {
+    use super::*;
+
+    fn pane() -> Pane {
+        Pane {
+            panes: vec![serde_json::json!({
+                "pane_id": P,
+                "tab_label": "Sheep",
+                "label": "Sheep shell",
+                "agent": "claude"
+            })],
+            hint: "no backend panes".into(),
+            ..Pane::default()
+        }
+    }
+
+    #[test]
+    fn flush_box_errors_when_the_input_box_cannot_be_read() {
+        let mut pane = pane();
+        pane.screen_script.borrow_mut().push_back(None);
+
+        let error = flush_box(&mut pane, &serde_json::json!(P), None).unwrap_err();
+
+        assert_eq!("could not read the input box of w2:p1", error.to_string());
+        assert!(pane.keys.is_empty());
+        assert_eq!(1, pane.reads.borrow().len());
+    }
+
+    #[test]
+    fn flush_box_refuses_an_ambiguous_composer_without_a_key() {
+        let mut pane = pane();
+        pane.screen_script.borrow_mut().push_back(Some(
+            "❯ possible transcript text\n\n\nstatus · ready\n".into(),
+        ));
+
+        let result = flush_box(&mut pane, &serde_json::json!(P), None).unwrap();
+
+        assert_eq!(serde_json::json!(false), result["flushed"]);
+        assert_eq!(serde_json::json!("unknown"), result["state"]);
+        assert!(result["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with(crate::terminal::screen::AMBIGUOUS_COMPOSER));
+        assert!(pane.keys.is_empty());
+        assert_eq!(1, pane.reads.borrow().len());
+    }
+
+    #[test]
+    fn test_flush_says_what_it_read_when_there_is_nothing_to_submit() {
+        let mut pane = pane();
+        pane.screen_script
+            .borrow_mut()
+            .push_back(Some(hint_screen()));
+
+        let result = flush_box(&mut pane, &serde_json::json!({"pane_id": P}), None).unwrap();
+
+        assert_eq!(serde_json::json!(false), result["flushed"]);
+        assert_eq!(serde_json::Value::Null, result["text"]);
+        assert!(result["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("nothing to submit: "));
+        assert_eq!(
+            format!("nothing to submit: {}", result["detail"].as_str().unwrap()),
+            result["message"].as_str().unwrap()
+        );
+        assert_eq!(serde_json::json!("Sheep"), result["target_label"]);
+        assert!(pane.keys.is_empty());
+        assert_eq!(1, pane.reads.borrow().len());
+    }
+
+    #[test]
+    fn test_flush_reports_the_evidence_when_the_box_reads_clear() {
+        let mut pane = pane();
+        pane.statuses.insert(P.into(), "idle".into());
+        pane.screen_script.borrow_mut().extend([
+            Some(submit_pending_screen("stranded text")), // initial flush read
+            Some(submit_live_screen()),                   // dead-session check
+        ]);
+        queue_clear_confirmation(&pane, "stranded text");
+
+        let result = flush_box(&mut pane, &serde_json::json!("Sheep"), None).unwrap();
+
+        assert_eq!(serde_json::json!(P), result["pane_id"]);
+        assert_eq!(serde_json::json!("Sheep"), result["target_label"]);
+        assert_eq!(serde_json::json!(true), result["flushed"]);
+        assert_eq!(serde_json::json!("stranded text"), result["text"]);
+        assert_eq!(serde_json::json!("sent"), result["message"]);
+        assert_eq!(vec![(P.to_string(), "Enter".to_string())], pane.keys);
+        assert_eq!(6, pane.reads.borrow().len());
     }
 }
