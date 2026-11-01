@@ -748,6 +748,52 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_inbox_list(result)
                 })
             }
+            "archive" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "before".into(),
+                    ns.get("before").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "state".into(),
+                    ns.get("state")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("queued,acked".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_archive", args, |result| {
+                    crate::render_print::render_inbox_archive(result)
+                })
+            }
+            "stats" => crate::daemon_cmd::run_command(
+                ns,
+                "inbox_stats",
+                Map::new(),
+                crate::render_fleet::render_inbox_stats,
+            ),
+            "fetch" => {
+                let mut args = Map::new();
+                args.insert(
+                    "attachment_id".into(),
+                    ns.get("attachment_id").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "dest".into(),
+                    ns.get("dest")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(".".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_fetch", args, |result| {
+                    format!(
+                        "wrote {} ({} bytes)\n",
+                        crate::render_fleet::py_str(&result["path"]),
+                        crate::render_fleet::py_str(&result["size"])
+                    )
+                })
+            }
             _ => not_ported("inbox"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
