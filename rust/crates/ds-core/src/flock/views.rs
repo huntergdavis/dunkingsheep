@@ -262,37 +262,44 @@ pub fn app_messages(app_db: &Path, channel: Option<&str>, limit: i64) -> Value {
 }
 
 /// `git_merges`: recent merges for one repository, with its own as_of. Deterministic.
+/// `git log` runs under the Python's 10 s deadline (`subprocess.run(..., timeout=10)`); a
+/// stuck git is a named reason, never a blocked caller.
 pub fn git_merges(repo: &str, limit: i64) -> Value {
+    git_merges_with(repo, limit, "git", 10.0)
+}
+
+/// `git_merges` with the program and deadline as parameters (the test uses a fake git).
+pub fn git_merges_with(repo: &str, limit: i64, program: &str, timeout_s: f64) -> Value {
     let path = expand_home(repo);
     if !Path::new(&path).join(".git").is_dir() {
         return json!({"repo": path, "merges": [], "as_of": null, "reason": format!("{path} is not a git repository")});
     }
-    let out = Command::new("git")
-        .args([
-            "-C",
-            &path,
-            "log",
-            "--merges",
-            &format!("-n{limit}"),
-            "--format=%h%x1f%s%x1f%cI",
-        ])
-        .output();
-    let out = match out {
-        Ok(o) => o,
+    let n = format!("-n{limit}");
+    let args = [
+        "-C",
+        path.as_str(),
+        "log",
+        "--merges",
+        n.as_str(),
+        "--format=%h%x1f%s%x1f%cI",
+    ];
+    let (code, stdout, stderr) = match crate::usage_providers::run_captured(
+        program, &args, timeout_s,
+    ) {
+        Ok(out) => out,
         Err(error) => {
             return json!({"repo": path, "merges": [], "as_of": null, "reason": format!("git log failed: {error}")})
         }
     };
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err = if err.trim().is_empty() {
+    if code != 0 {
+        let err = if stderr.trim().is_empty() {
             "git log failed".to_string()
         } else {
-            err.trim().chars().take(200).collect()
+            stderr.trim().chars().take(200).collect()
         };
         return json!({"repo": path, "merges": [], "as_of": null, "reason": err});
     }
-    let merges: Vec<Value> = String::from_utf8_lossy(&out.stdout)
+    let merges: Vec<Value> = stdout
         .lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\u{1f}').collect();
@@ -489,6 +496,42 @@ mod tests {
             .unwrap()
             .contains("is not a git repository"));
         assert_eq!(out["merges"], json!([]));
+    }
+
+    #[test]
+    fn a_stuck_git_times_out_with_the_pythons_reason() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ds-views-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let fake = dir.join("fakegit");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let out = git_merges_with(dir.to_str().unwrap(), 10, fake.to_str().unwrap(), 0.3);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the deadline killed the fake git"
+        );
+        assert!(out["merges"].as_array().unwrap().is_empty());
+        assert!(out["as_of"].is_null());
+        let reason = out["reason"].as_str().unwrap();
+        assert!(
+            reason.starts_with("git log failed: Command '[")
+                && reason.ends_with("timed out after 0.3 seconds"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_missing_git_binary_is_a_named_reason() {
+        let dir = std::env::temp_dir().join(format!("ds-views-nogit-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let out = git_merges_with(dir.to_str().unwrap(), 10, "/nonexistent/git", 5.0);
+        assert!(out["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("git log failed: "));
     }
 
     #[test]
