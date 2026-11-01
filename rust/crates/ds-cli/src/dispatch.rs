@@ -63,10 +63,15 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     }
 }
 
-/// `github wrappers [--bin-dir DIR]` (the owner's one-shot setup). `github protect` needs
-/// `dunk_github` (unported) and keeps the not-ported answer.
+/// `github wrappers [--bin-dir DIR]` and `github protect` (the owner's one-shot setup).
 fn github(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "github_command") {
+        Some("protect") => crate::github_cmd::protect(
+            text(ns, "repo").unwrap_or(""),
+            ns.get("approvals").and_then(Value::as_i64).unwrap_or(1),
+            matches!(ns.get("bypass_reviewer_app"), Some(Value::Bool(true))),
+            matches!(ns.get("dry_run"), Some(Value::Bool(true))),
+        ),
         Some("wrappers") => {
             let bin_dir = text(ns, "bin_dir").unwrap_or("~/.local/bin");
             let path = std::env::var("PATH").unwrap_or_default();
