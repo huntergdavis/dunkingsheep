@@ -1,0 +1,24 @@
+[1;2m› [0m[inbox] new message for codex-poolrad from %19. Read it with: dunkingsheep i…
+
+[2m• [0m[2026-10-25 06:50:45 PDT] Inbox checked: no unread messages. Both review heads
+  remain unchanged.
+
+[2m  Worked for 10s • 6:50 AM
+[0m
+
+[1;2m› [0mVP probe 06:50 (2.70.22): composer-fix check, no action needed; continue your
+  queue.
+
+
+[1m[38;5;2m•[0m [1mRan[0m [38;2;137;180;250mdate[38;2;205;214;244m [38;2;166;227;161m'+%Y-%m-%d %H:%M:%S %Z'[39m
+[2m  └ 2026-10-25 06:52:10 PDT[0m
+
+[2m• [0m[2026-10-25 06:52:10 PDT] Queue submitted through t24. t74 is accepted; t24
+  awaits review. Both heads remain
+
+
+[1m›[0m VP probe 2 06:52: idle-frame check, no action needed.
+
+
+  [38;2;246;226;183mGPT-6-Astra high[39m · [38;2;171;223;167m~/workspace/poolrad-codex-a[39m · [38;2;243;139;168mImplement t81 handoff[39m
+  [1mtab[0m to queue message

@@ -127,6 +127,7 @@ the TUI and the web desk. The Python tree is deleted only after phase 3.
 | --- | --- | --- |
 | `tokio` (rt-multi-thread, net, sync, time, process, signal, io-util) | runtime, unix socket, timers, subprocess | the standard; one runtime for everything |
 | `serde`, `serde_json` | wire protocol, JSON files | byte-compatible output with `json.dumps` when `serde_json::to_string` is used with `BTreeMap`-ordered keys where the Python used sorted keys (`sort_keys=True` sites are named in MANIFEST) |
+| `indexmap` (via serde_json `preserve_order`) | object key order | owner-approved 2026-10-31: `serde_json::Map` keeps insertion order like a Python dict; code that must match `sort_keys=True` sorts explicitly |
 | `rusqlite` (bundled, `fts5`) | all six databases | same SQLite, same WAL; bundled so the host's library version never matters; FTS5 for memory |
 | `clap` (derive) | CLI | subcommands generated from the registry at build time (`build.rs`) |
 | `tracing`, `tracing-subscriber` | logs | same texts as today |

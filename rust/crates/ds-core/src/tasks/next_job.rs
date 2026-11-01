@@ -41,7 +41,7 @@ pub struct HandoffRecord {
     pub at: f64,
 }
 
-fn record_in(
+pub(super) fn record_in(
     conn: &Connection,
     task_id: &str,
     pane_id: &str,
@@ -91,7 +91,10 @@ fn record_in(
 
 /// Latest durable state of each handoff, oldest first by first appearance (a Python dict
 /// keeps a key's first position when its value is replaced).
-fn handoffs_in(conn: &Connection, pane_id: Option<&str>) -> Result<Vec<Handoff>, DunkError> {
+pub(super) fn handoffs_in(
+    conn: &Connection,
+    pane_id: Option<&str>,
+) -> Result<Vec<Handoff>, DunkError> {
     let mut stmt = conn
         .prepare("SELECT task_id, actor, at, meta FROM task_events WHERE event = ? ORDER BY id")
         .map_err(db::map_sqlite)?;

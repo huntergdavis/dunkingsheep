@@ -489,6 +489,177 @@ pub fn get(pool: &ReadPool, message_id: &str, now: f64) -> Result<(Summary, Stri
     })
 }
 
+/// `status(id)`: where one message is and why, with no body or subject in it (a status
+/// board shows this without leaking contents).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Status {
+    pub message_id: String,
+    pub state: String,
+    pub mailbox: String,
+    pub destination: String,
+    pub pane_id: Option<String>,
+    pub sender: Option<String>,
+    pub created_at: f64,
+    pub read_at: Option<f64>,
+    pub acked_at: Option<f64>,
+    pub archived_at: Option<f64>,
+    pub cancelled_at: Option<f64>,
+    pub waiting_s: Option<i64>,
+    pub body_bytes: i64,
+    pub attachments: i64,
+    pub attachment_bytes: i64,
+    pub reason: Option<String>,
+    pub notify_state: Option<String>,
+    pub notify_reason: Option<String>,
+    pub notify_at: Option<f64>,
+    pub notify_transport_id: Option<String>,
+    pub notify_attempt: Option<i64>,
+}
+
+pub fn status(pool: &ReadPool, message_id: &str, now: f64) -> Result<Status, DunkError> {
+    let sql = "SELECT id, state, mailbox, mailbox_label, pane_id, sender, created_at, read_at, \
+               acked_at, archived_at, cancelled_at, length(CAST(body AS BLOB)) AS body_bytes, \
+               reason, notify_state, notify_reason, notify_at, notify_transport_id, \
+               notify_attempt, \
+               (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) AS n, \
+               (SELECT COALESCE(SUM(size), 0) FROM attachments a \
+                WHERE a.message_id = messages.id) AS bytes \
+               FROM messages WHERE id = ?";
+    pool.with(|connection: &Connection| {
+        let mut statement = connection.prepare(sql).map_err(map_sqlite)?;
+        let mut rows = statement
+            .query_map([message_id], |row| {
+                let state: String = row.get("state")?;
+                let created_at: f64 = row.get("created_at")?;
+                let mailbox: String = row.get("mailbox")?;
+                let label: Option<String> = row.get("mailbox_label")?;
+                Ok(Status {
+                    message_id: row.get("id")?,
+                    destination: label
+                        .filter(|l| !l.is_empty())
+                        .unwrap_or_else(|| mailbox.clone()),
+                    mailbox,
+                    pane_id: row.get("pane_id")?,
+                    sender: row.get("sender")?,
+                    created_at,
+                    read_at: row.get("read_at")?,
+                    acked_at: row.get("acked_at")?,
+                    archived_at: row.get("archived_at")?,
+                    cancelled_at: row.get("cancelled_at")?,
+                    waiting_s: if state == UNREAD {
+                        Some((now - created_at) as i64)
+                    } else {
+                        None
+                    },
+                    body_bytes: row.get("body_bytes")?,
+                    attachments: row.get("n")?,
+                    attachment_bytes: row.get("bytes")?,
+                    reason: row.get("reason")?,
+                    notify_state: row.get("notify_state")?,
+                    notify_reason: row.get("notify_reason")?,
+                    notify_at: row.get("notify_at")?,
+                    notify_transport_id: row.get("notify_transport_id")?,
+                    notify_attempt: row.get("notify_attempt")?,
+                    state,
+                })
+            })
+            .map_err(map_sqlite)?;
+        match rows.next() {
+            Some(row) => row.map_err(map_sqlite),
+            None => Err(DunkError::Refused(format!(
+                "no message with id {message_id:?}"
+            ))),
+        }
+    })
+}
+
+/// One row of `stats()`: every non-cancelled mailbox, most unread first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MailboxStats {
+    pub mailbox: String,
+    pub destination: String,
+    pub unread: i64,
+    pub total: i64,
+    pub archived: i64,
+    pub undeliverable: i64,
+    pub oldest_unread_s: Option<i64>,
+}
+
+pub fn stats(pool: &ReadPool, now: f64) -> Result<Vec<MailboxStats>, DunkError> {
+    let sql = "SELECT mailbox, mailbox_label, COUNT(*) AS total, \
+               SUM(state = 'queued') AS unread, SUM(state = 'archived') AS archived, \
+               SUM(state = 'undeliverable') AS undeliverable, \
+               MIN(CASE WHEN state = 'queued' THEN created_at END) AS oldest \
+               FROM messages WHERE state != 'cancelled' \
+               GROUP BY mailbox ORDER BY unread DESC, mailbox";
+    pool.with(|connection: &Connection| {
+        let mut statement = connection.prepare(sql).map_err(map_sqlite)?;
+        let rows = statement
+            .query_map([], |row| {
+                let mailbox: String = row.get("mailbox")?;
+                let label: Option<String> = row.get("mailbox_label")?;
+                let oldest: Option<f64> = row.get("oldest")?;
+                Ok(MailboxStats {
+                    destination: label
+                        .filter(|l| !l.is_empty())
+                        .unwrap_or_else(|| mailbox.clone()),
+                    mailbox,
+                    unread: row.get::<_, Option<i64>>("unread")?.unwrap_or(0),
+                    total: row.get::<_, Option<i64>>("total")?.unwrap_or(0),
+                    archived: row.get::<_, Option<i64>>("archived")?.unwrap_or(0),
+                    undeliverable: row.get::<_, Option<i64>>("undeliverable")?.unwrap_or(0),
+                    // Python: `if row["oldest"]` - a 0.0 timestamp is falsy too.
+                    oldest_unread_s: oldest.filter(|o| *o != 0.0).map(|o| (now - o) as i64),
+                })
+            })
+            .map_err(map_sqlite)?;
+        rows.map(|row| row.map_err(map_sqlite)).collect()
+    })
+}
+
+/// `pending_delivery(mailbox)`: the recovery receipt, or `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Receipt {
+    pub mailbox: String,
+    pub message_ids: Vec<String>,
+    pub delivered_at: f64,
+}
+
+pub fn pending_delivery(pool: &ReadPool, mailbox: &str) -> Result<Option<Receipt>, DunkError> {
+    pool.with(|connection| receipt_of(connection, mailbox))
+}
+
+pub(crate) fn receipt_of(
+    connection: &Connection,
+    mailbox: &str,
+) -> Result<Option<Receipt>, DunkError> {
+    let mut statement = connection
+        .prepare("SELECT mailbox, message_ids, delivered_at FROM deliveries WHERE mailbox = ?")
+        .map_err(map_sqlite)?;
+    let mut rows = statement
+        .query_map([mailbox], |row| {
+            Ok((
+                row.get::<_, String>("mailbox")?,
+                row.get::<_, String>("message_ids")?,
+                row.get::<_, f64>("delivered_at")?,
+            ))
+        })
+        .map_err(map_sqlite)?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => {
+            let (mailbox, ids, delivered_at) = row.map_err(map_sqlite)?;
+            let message_ids = serde_json::from_str::<Vec<String>>(&ids)
+                .map_err(|e| DunkError::Refused(format!("deliveries.message_ids: {e}")))?;
+            Ok(Some(Receipt {
+                mailbox,
+                message_ids,
+                delivered_at,
+            }))
+        }
+    }
+}
+
 // ---- T15a leftovers (t1113): the pure helpers main did not have, from PR #199 ----------
 //
 // Added to this module rather than as a second `inbox.rs`: main's SCHEMA (the fixture,
