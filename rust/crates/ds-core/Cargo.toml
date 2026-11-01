@@ -10,7 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 # T02: the pinned crates from RUST_PORT.md section 3 that these six modules need.
 thiserror = "2"
-nix = { version = "0.29", features = ["fs", "process", "signal"] }
+nix = { version = "0.29", features = ["fs", "process", "signal", "socket"] }
 # T05 (db.rs): RUST_PORT.md section 3 pins these two for the writer actor and the
 # read pool - rusqlite bundled (same SQLite everywhere, FTS5 for memory later) and
 # tokio's sync/runtime for the actor + oneshot replies.
@@ -23,6 +23,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 regex = "1"
 # T51 (memory/ingest.rs): chunk dedupe digests; `sha2` is on the RUST_PORT.md section 3 list.
 sha2 = "0.10"
+# T40 (server.rs): `tracing` is on the RUST_PORT.md section 3 list and rule 7 requires it for the
+# daemon log texts; no subscriber is installed here (the daemon binary owns that).
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
