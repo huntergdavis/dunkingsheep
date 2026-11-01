@@ -83,3 +83,64 @@ fn commands_without_a_body_say_so_and_exit_1_and_writes_are_not_ported() {
         );
     }
 }
+
+/// `secrets-check` through argv -> parser -> dispatch, against real temporary git repositories.
+#[test]
+fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
+    use std::process::Command;
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let done = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            done.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    };
+    let dir = std::env::temp_dir().join(format!("ds-dispatch-secrets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    git(&dir, &["config", "user.email", "t@example.com"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("README.md"), "base\n").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "base"]);
+    git(&dir, &["checkout", "-q", "-b", "lane/leak"]);
+    let d = dir.display().to_string();
+    let check = || {
+        let ns = try_parse([
+            "dunkingsheep",
+            "secrets-check",
+            "--cwd",
+            d.as_str(),
+            "--base",
+            "main",
+            "--quiet",
+        ])
+        .unwrap();
+        run(&ns)
+    };
+    assert_eq!(0, check().code, "clean");
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::write(dir.join("data/owner-credentials"), "Password: hunter2\n").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "oops"]);
+    let refused = check();
+    assert_eq!(1, refused.code);
+    assert_eq!("", refused.stdout);
+    assert!(
+        refused.stderr.contains("data/owner-credentials"),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("must never leave this host"),
+        "{}",
+        refused.stderr
+    );
+}
