@@ -85,6 +85,9 @@ pub struct Flock {
     stores: Mutex<panes::Stores>,
     /// The role registry and the legacy allowlist (T31), attached after construction.
     pub(crate) role_stores: roles_gate::RoleStoresCell,
+    /// pane_id -> its full turn (turn_id, caller, handoff; T36). `turns` above is the
+    /// activity view `lane_activity` reads; `commands_turns` keeps the two in step.
+    pub(crate) turn_states: Mutex<commands_turns::Turns>,
 }
 
 impl Flock {
@@ -104,6 +107,7 @@ impl Flock {
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
             role_stores: Mutex::new(roles_gate::RoleStores::default()),
+            turn_states: Mutex::new(commands_turns::Turns::new()),
         };
         flock.load_launches();
         flock
@@ -427,6 +431,7 @@ fn truthy(value: &Value) -> bool {
 
 pub mod commands_inbox;
 pub mod commands_owner_views;
+pub mod commands_turns;
 pub mod dunks;
 pub mod lanes;
 pub mod mailbox;
@@ -437,6 +442,8 @@ pub mod views;
 
 #[cfg(test)]
 mod commands_inbox_tests;
+#[cfg(test)]
+mod commands_turns_tests;
 #[cfg(test)]
 mod lanes_tests;
 #[cfg(test)]
