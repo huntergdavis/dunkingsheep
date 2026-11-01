@@ -1,0 +1,9 @@
+[package]
+name = "ds-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md section 2)."
+
+[dependencies]
+axum.workspace = true

@@ -11,6 +11,7 @@ members = [
     "crates/ds-cli",
     "crates/ds-mcp",
     "crates/ds-tui",
+    "crates/ds-web",
 ]
 
 [workspace.package]
