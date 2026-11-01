@@ -213,6 +213,13 @@ impl Dispatcher {
         self.handlers.insert(name, handler);
     }
 
+    /// Register only the T39 status, identity and turn-start handler leaf.
+    pub fn register_status_whoami_turn_start(&mut self) {
+        self.register("status", h_status);
+        self.register("whoami", h_whoami);
+        self.register("turn_start", h_turn_start);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -303,6 +310,25 @@ fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
     }
 }
 
+fn python_float(value: &Value) -> Result<f64, DunkError> {
+    match value {
+        Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| DunkError::Refused("number is outside float range".into())),
+        Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
+        Value::String(value) => value.parse::<f64>().map_err(|_| {
+            DunkError::Refused(format!("could not convert string to float: '{value}'"))
+        }),
+        Value::Null => Ok(0.0),
+        Value::Array(_) => Err(DunkError::Refused(
+            "float() argument must be a string or a real number, not 'list'".into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "float() argument must be a string or a real number, not 'dict'".into(),
+        )),
+    }
+}
+
 /// `dunk_api.h_status`.
 pub fn h_status(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     crate::flock::status::h_status(
@@ -335,7 +361,11 @@ pub fn h_turn_start(context: &HandlerContext<'_>, args: Args) -> Result<Value, D
         context.request.caller.as_ref(),
     )?;
 
-    let ttl_s = args.get("ttl_s").and_then(Value::as_f64);
+    let ttl_s = args
+        .get("ttl_s")
+        .filter(|value| !value.is_null())
+        .map(python_float)
+        .transpose()?;
     let source = args.get("source").and_then(Value::as_str);
     let handoff_id = args.get("handoff_id").and_then(Value::as_str);
     context.flock.turn_start(

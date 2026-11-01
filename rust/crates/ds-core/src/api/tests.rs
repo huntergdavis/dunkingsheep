@@ -566,7 +566,7 @@ fn test_a_registered_handler_gets_the_pane_and_args() {
 fn h_whoami_matches_python() {
     let (_dir, flock) = flock();
     let mut d = Dispatcher::new();
-    d.register("whoami", h_whoami);
+    d.register_status_whoami_turn_start();
 
     let got = dispatch(
         &d,
@@ -601,7 +601,7 @@ fn h_status_matches_python() {
         ..RequestCtx::default()
     };
     let mut d = Dispatcher::new();
-    d.register("status", h_status);
+    d.register_status_whoami_turn_start();
 
     let cached = dispatch_with_env(
         &d,
@@ -639,6 +639,19 @@ fn h_status_matches_python() {
     assert_eq!(full["inbox_unread"], 7);
     assert_eq!(full["tasks"], json!({"open": 2}));
     assert_eq!(env.probes.get(), 1, "full Python status probes the backend");
+
+    let checked = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("anonymous", false),
+        "status",
+        args(json!({"check_herdr": "yes", "fresh": true})),
+        &request,
+        &env,
+    )
+    .expect("explicit availability probe");
+    assert_eq!(checked["herdr_available"], true);
+    assert_eq!(env.probes.get(), 2);
 }
 
 #[test]
@@ -660,7 +673,7 @@ fn h_turn_start_matches_python() {
     };
     let env = ParityEnv::new(Some(pid));
     let mut d = Dispatcher::new();
-    d.register("turn_start", h_turn_start);
+    d.register_status_whoami_turn_start();
 
     let result = dispatch_with_env(
         &d,
@@ -668,7 +681,7 @@ fn h_turn_start_matches_python() {
         &FixedRole("worker", false),
         "turn_start",
         args(json!({
-            "ttl_s": 60,
+            "ttl_s": "60",
             "source": "pi",
             "handoff_id": format!("nj-{}", "a".repeat(32)),
         })),
@@ -682,6 +695,52 @@ fn h_turn_start_matches_python() {
     assert_eq!(result["source"], "pi");
     assert_eq!(result["turn_id"].as_str().unwrap().len(), 32);
     assert_eq!(env.turn_calls.lock().unwrap().len(), 2);
+
+    let wrong_pane = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"pane": "w1:p9"})),
+        &request,
+        &env,
+    );
+    assert!(matches!(
+        wrong_pane,
+        Err(DunkError::Refused(message)) if message == "turn event must target the caller's own pane"
+    ));
+    let invalid_handoff = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"handoff_id": "nj-nope"})),
+        &request,
+        &env,
+    );
+    assert!(matches!(
+        invalid_handoff,
+        Err(DunkError::Refused(message)) if message == "invalid next-job handoff id"
+    ));
+    assert_eq!(
+        env.turn_calls.lock().unwrap().len(),
+        2,
+        "refusals have no hooks"
+    );
+    let invalid_ttl = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({"ttl_s": "not-a-number"})),
+        &request,
+        &env,
+    );
+    assert!(matches!(
+        invalid_ttl,
+        Err(DunkError::Refused(message))
+            if message == "could not convert string to float: 'not-a-number'"
+    ));
 }
 
 #[test]
@@ -689,6 +748,8 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
     let (_dir, flock) = flock();
     let request = RequestCtx::default();
     let env = TestEnv::default();
+    let mut d = Dispatcher::new();
+    d.register_status_whoami_turn_start();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("runtime");
@@ -698,6 +759,10 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         env: &env,
         runtime: runtime.handle(),
     };
+    assert!(matches!(
+        d.dispatch(&context, &FixedRole("anonymous", false), "status", None),
+        Err(DunkError::Refused(message)) if message == "status command adapter is not wired"
+    ));
     assert!(matches!(
         h_status(&context, Args::new()),
         Err(DunkError::Refused(message)) if message == "status command adapter is not wired"
@@ -736,7 +801,12 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         runtime: runtime.handle(),
     };
     assert!(matches!(
-        h_turn_start(&context, Args::new()),
+        d.dispatch(
+            &context,
+            &FixedRole("worker", false),
+            "turn_start",
+            None,
+        ),
         Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
     ));
 }
