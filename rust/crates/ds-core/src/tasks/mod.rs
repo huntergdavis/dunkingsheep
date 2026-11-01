@@ -1102,24 +1102,7 @@ impl Tasks {
         kind: Option<&str>,
         needs_owner: bool,
     ) -> Result<Vec<Decorated>, DunkError> {
-        let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
-        let scopes: Vec<String> = match scope.map(str::trim) {
-            None | Some("") | Some("all") => {
-                let mut v = vec!["global".to_string()];
-                v.extend(pane.map(String::from));
-                v
-            }
-            Some("self") => match pane {
-                Some(p) => vec!["global".into(), p.into()],
-                None => {
-                    return Err(DunkError::Refused(
-                        "scope 'self' requires a known pane id".into(),
-                    ))
-                }
-            },
-            Some("global") => vec!["global".into()],
-            Some(other) => vec!["global".into(), validate_scope(other)?],
-        };
+        let scopes = visible_scopes(scope, pane_id)?;
         let status = match status.filter(|s| !s.is_empty()) {
             Some(s) => Some(validate_status(s)?),
             None => None,
@@ -1169,6 +1152,174 @@ impl Tasks {
                 out.sort_by_key(|d| order_key(&d.task.priority, d.task.created_at, &d.task.id));
                 out.truncate(limit);
                 Ok(out)
+            })
+            .await
+    }
+
+    /// `Tasks.stats`: counts by status, per visible scope and in total.
+    pub async fn stats(
+        &self,
+        scope: Option<&str>,
+        pane_id: Option<&str>,
+    ) -> Result<serde_json::Value, DunkError> {
+        let scopes = visible_scopes(scope, pane_id)?;
+        let wanted = scopes.clone();
+        let rows: Vec<(String, String, i64)> = self
+            .writer
+            .call(move |conn| {
+                let marks = vec!["?"; wanted.len()].join(",");
+                let sql = format!(
+                    "SELECT scope, status, COUNT(*) FROM tasks WHERE scope IN ({marks}) GROUP BY scope, status"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(wanted.iter()), |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+            })
+            .await?;
+        let zero = || -> serde_json::Map<String, serde_json::Value> {
+            STATUSES.iter().map(|s| (s.to_string(), json!(0))).collect()
+        };
+        let mut by_scope: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let mut totals = zero();
+        for (scope, status, n) in rows {
+            let bucket = by_scope.entry(scope).or_insert_with(|| json!(zero()));
+            bucket[&status] = json!(n);
+            let total = totals.get(&status).and_then(|v| v.as_i64()).unwrap_or(0);
+            totals.insert(status, json!(total + n));
+        }
+        Ok(json!({"scopes": scopes, "by_scope": by_scope, "totals": totals}))
+    }
+
+    /// `Tasks.notes`: every `note` event on a task, oldest first. The text is the meta's
+    /// `reason`, else `text`, else `note`, else empty (t621: a verdict reads this evidence).
+    pub async fn notes(&self, id: &str) -> Result<Vec<TaskNote>, DunkError> {
+        let id = id.trim().to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT at, actor, meta FROM task_events WHERE task_id = ? AND event = 'note' ORDER BY at, id")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id], |r| {
+                        Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let (at, actor, meta) = row.map_err(db::map_sqlite)?;
+                    let meta: serde_json::Value = serde_json::from_str(meta.as_deref().filter(|m| !m.is_empty()).unwrap_or("{}"))
+                        .ok()
+                        .filter(serde_json::Value::is_object)
+                        .unwrap_or_else(|| json!({}));
+                    let text = ["reason", "text", "note"]
+                        .iter()
+                        .filter_map(|k| meta.get(*k))
+                        .find(|v| !v.is_null() && v.as_str() != Some("") && *v != &json!(false) && *v != &json!(0))
+                        .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+                        .unwrap_or_default();
+                    out.push(TaskNote { at, actor, text });
+                }
+                Ok(out)
+            })
+            .await
+    }
+
+    /// `Tasks.authors_of`: panes that WORKED on (repo, pr) from the non-review tasks: their
+    /// assignees, completer and recorded author (t723). Sorted, de-duplicated.
+    pub async fn authors_of(&self, repo: &str, pr: i64) -> Result<Vec<String>, DunkError> {
+        if repo.is_empty() || pr <= 0 {
+            return Ok(Vec::new());
+        }
+        let repo = repo.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT assignees, completed_by, author FROM tasks WHERE repo = ? AND pr = ? AND kind != 'review'")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![repo, pr], |r| {
+                        Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut panes = std::collections::BTreeSet::new();
+                for row in rows {
+                    let (assignees, completed_by, author) = row.map_err(db::map_sqlite)?;
+                    panes.extend(decode_list(assignees.as_deref()).into_iter().filter(|p| !p.is_empty()));
+                    for who in [completed_by, author].into_iter().flatten().filter(|p| !p.is_empty()) {
+                        panes.insert(who);
+                    }
+                }
+                Ok(panes.into_iter().collect())
+            })
+            .await
+    }
+
+    /// `Tasks.recent_notes`: the last `limit` events that carry a reason, oldest first (t605).
+    /// Read only; a limit of 0 gives none.
+    pub async fn recent_notes(&self, id: &str, limit: usize) -> Result<Vec<RecentNote>, DunkError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let id = id.trim().to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT event, at, actor, meta FROM task_events WHERE task_id = ? AND meta IS NOT NULL ORDER BY id DESC LIMIT ?")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id, (limit * 4) as i64], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let (event, at, actor, meta) = row.map_err(db::map_sqlite)?;
+                    let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                        continue;
+                    };
+                    let reason = match meta.get("reason") {
+                        Some(serde_json::Value::String(r)) => r.trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if reason.is_empty() {
+                        continue;
+                    }
+                    out.push(RecentNote { event, at, actor, reason });
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+                out.reverse();
+                Ok(out)
+            })
+            .await
+    }
+
+    /// The review columns `Task` does not carry (author, repo, pr, verdict) for one task.
+    pub async fn review_facts(&self, id: &str) -> Result<ReviewFacts, DunkError> {
+        let wanted = id.trim().to_string();
+        let id = wanted.clone();
+        self.writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT author, repo, pr, verdict FROM tasks WHERE id = ?",
+                    params![id],
+                    |row| {
+                        Ok(ReviewFacts {
+                            author: row.get(0)?,
+                            repo: row.get(1)?,
+                            pr: row.get(2)?,
+                            verdict: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(db::map_sqlite)?
+                .ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))
             })
             .await
     }
@@ -1539,6 +1690,32 @@ pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
     )))
 }
 
+/// One entry of `Tasks.recent_notes`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentNote {
+    pub event: String,
+    pub at: f64,
+    pub actor: Option<String>,
+    pub reason: String,
+}
+
+/// One `note` event, as `Tasks.notes` returns it (the meta is folded into `text`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskNote {
+    pub at: f64,
+    pub actor: Option<String>,
+    pub text: String,
+}
+
+/// The review columns of a task row that `Task` does not carry.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReviewFacts {
+    pub author: Option<String>,
+    pub repo: Option<String>,
+    pub pr: Option<i64>,
+    pub verdict: Option<String>,
+}
+
 /// `add`'s optional arguments (t1313 slice 2); `Default` is the Python's defaults.
 #[derive(Debug, Default, Clone)]
 pub struct AddOptions {
@@ -1638,6 +1815,29 @@ pub struct Decorated {
     pub deps: DependencyState,
     pub claimable: bool,
     pub eligible: bool,
+}
+
+/// `_visible_scopes`: which scopes a caller may see. Global is visible to everyone; a pane
+/// sees its own queue; naming a pane sees global plus that pane; `global` sees only global.
+fn visible_scopes(scope: Option<&str>, pane_id: Option<&str>) -> Result<Vec<String>, DunkError> {
+    let pane = pane_id.filter(|p| !p.is_empty() && *p != "global");
+    Ok(match scope.map(str::trim) {
+        None | Some("") | Some("all") => {
+            let mut v = vec!["global".to_string()];
+            v.extend(pane.map(String::from));
+            v
+        }
+        Some("self") => match pane {
+            Some(p) => vec!["global".into(), p.into()],
+            None => {
+                return Err(DunkError::Refused(
+                    "scope 'self' requires a known pane id".into(),
+                ))
+            }
+        },
+        Some("global") => vec!["global".into()],
+        Some(other) => vec!["global".into(), validate_scope(other)?],
+    })
 }
 
 /// `json.dumps(list)`: `", "` between items, as the Python writes assignees and depends_on.
