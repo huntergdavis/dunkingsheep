@@ -441,6 +441,7 @@ pub mod lane_registry_rows;
 pub mod lanes;
 pub mod mailbox;
 pub mod panes;
+pub mod project_summary;
 pub mod resolve;
 pub mod roles_gate;
 pub mod roster;
