@@ -175,6 +175,31 @@ impl<C: RpcClient> TuiModel<C> {
         false
     }
 
+    /// Return the currently selected dunk, if the selection is in range.
+    pub fn current(&self) -> Option<&Value> {
+        self.dunks.get(self.selected)
+    }
+
+    /// Return the selected dunk's id, flashing when there is no selected dunk.
+    pub fn current_id(&mut self, now: f64) -> Option<&str> {
+        if self.current().is_none() {
+            self.flash("No dunker selected - press a", now, 4.0);
+            return None;
+        }
+        self.current()
+            .and_then(|dunk| dunk.get("id"))
+            .and_then(Value::as_str)
+    }
+
+    /// Return the currently selected task, flashing when the task list is empty.
+    pub fn current_task(&mut self, now: f64) -> Option<&Value> {
+        if self.tasks.is_empty() {
+            self.flash("No task selected", now, 4.0);
+            return None;
+        }
+        self.tasks.get(self.task_selected)
+    }
+
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
         self.message = text.into();
         self.message_until = now + seconds;
@@ -317,6 +342,41 @@ mod tests {
         model.refresh(1.0);
         assert_eq!(model.selected, 0);
         assert_eq!(model.global_status, "0 dunkers");
+    }
+
+    #[test]
+    fn current_and_current_task_return_the_selected_items() {
+        let mut model = TuiModel::connected(FakeClient::default(), 0.0);
+        model.dunks = vec![
+            serde_json::json!({"id": "d1"}),
+            serde_json::json!({"id": "d2"}),
+        ];
+        model.selected = 1;
+        assert_eq!(Some(&serde_json::json!({"id": "d2"})), model.current());
+        assert_eq!(Some("d2"), model.current_id(1.0));
+
+        model.tasks = vec![
+            serde_json::json!({"id": "t1"}),
+            serde_json::json!({"id": "t2"}),
+        ];
+        model.task_selected = 1;
+        assert_eq!(
+            Some(&serde_json::json!({"id": "t2"})),
+            model.current_task(2.0)
+        );
+    }
+
+    #[test]
+    fn current_id_and_current_task_flash_when_their_lists_are_empty() {
+        let mut model = TuiModel::connected(FakeClient::default(), 0.0);
+        assert_eq!(None, model.current());
+        assert_eq!(None, model.current_id(1.0));
+        assert_eq!(model.message, "No dunker selected - press a");
+        assert_eq!(model.message_until, 5.0);
+
+        assert_eq!(None, model.current_task(3.0));
+        assert_eq!(model.message, "No task selected");
+        assert_eq!(model.message_until, 7.0);
     }
 
     #[test]
