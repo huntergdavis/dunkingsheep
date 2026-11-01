@@ -460,7 +460,11 @@ fn after_lease_change(
             r.get(0)
         })
         .map_err(db::map_sqlite)?;
-    if status != "done" && status != "cancelled" && remaining == 0 {
+    // t872 (Python PR #166): only a task that is being WORKED reopens when its last lease
+    // goes. Blocked, cancelled and done keep their status: before this, a blocked task
+    // whose lease survived was reaped back to `open` and re-claimed by the push loop, so a
+    // blocked duplicate could never stay blocked (measured three times on t872).
+    if status == "in_progress" && remaining == 0 {
         status = "open".into();
     }
     tx.execute(

@@ -965,3 +965,57 @@ async fn test_multi_assignee_allows_parallel_claims() {
 //    a test cannot capture them without a logging crate (RUST_PORT.md 7 says `tracing`).
 //  - test_claim_requires_a_pane: Python passes `None`; `claim_next(&str)` cannot be given
 //    one, so the case does not exist in the Rust types.
+
+// t872 (Python PR #166), ported by name: blocking ends the claim, and the reaper never
+// resurrects a blocked task.
+
+#[tokio::test]
+async fn blocking_deletes_the_lease() {
+    let tasks = store("t872-block").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(tasks.leases_for(&task.id, None).await.unwrap().len(), 1);
+    tasks.block(&task.id, "waiting").await.unwrap();
+    assert!(tasks.leases_for(&task.id, None).await.unwrap().is_empty());
+    assert_eq!(tasks.get(&task.id).await.unwrap().status, "blocked");
+}
+
+#[tokio::test]
+async fn the_reaper_does_not_reopen_a_blocked_task() {
+    let tasks = store("t872-reap-blocked").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    tasks.block(&task.id, "waiting").await.unwrap();
+    // Put a lease back by hand, exactly as the old block() left it.
+    tasks.claim_for_test(&task.id, "%1").await;
+    let later = crate::clock::now_s() + 4000.0;
+    tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(
+        tasks.get(&task.id).await.unwrap().status,
+        "blocked",
+        "t872: a blocked task stays blocked when its last lease is reaped"
+    );
+}
+
+#[tokio::test]
+async fn the_reaper_still_reopens_an_in_progress_task() {
+    let tasks = store("t872-reap-working").await;
+    let task = tasks.add("global", "t", "").await.unwrap();
+    tasks
+        .claim_next("global", "%1", ClaimOptions::default())
+        .await
+        .unwrap();
+    let later = crate::clock::now_s() + 4000.0;
+    tasks.reap(None, None, Some(later), None).await.unwrap();
+    assert_eq!(
+        tasks.get(&task.id).await.unwrap().status,
+        "open",
+        "the rule is not 'never reopen': a worked task whose claim expires goes back to open"
+    );
+}
