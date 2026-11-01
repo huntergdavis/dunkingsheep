@@ -129,6 +129,101 @@ fn cli_route_02_dunk_create_read() {
 }
 
 #[test]
+fn cli_route_06_inbox_read_a() {
+    let count = run_daemon_cli(
+        &["inbox", "count", "reviewer"],
+        "inbox_count",
+        json!({"mailbox": "reviewer"}),
+        json!({"mailbox": "reviewer", "unread": 2, "total": 5}),
+    );
+    assert_eq!(0, count.status.code().unwrap());
+    assert_eq!(
+        "reviewer: 2 unread of 5\n",
+        String::from_utf8(count.stdout).unwrap()
+    );
+    assert!(count.stderr.is_empty());
+
+    let sent = run_daemon_cli(
+        &[
+            "inbox",
+            "send",
+            "%155",
+            "Please",
+            "review",
+            "PR",
+            "#432",
+            "-s",
+            "Review",
+            "--attach",
+            "diff-a",
+            "--attach",
+            "diff-b",
+            "--no-notify",
+        ],
+        "inbox_send",
+        json!({
+            "to": "%155",
+            "body": "Please review PR #432",
+            "subject": "Review",
+            "attach": "diff-a,diff-b",
+            "notify": false
+        }),
+        json!({
+            "message_id": "i900",
+            "destination": "%155",
+            "attachments": ["diff-a", "diff-b"],
+            "notified": false
+        }),
+    );
+    assert_eq!(0, sent.status.code().unwrap());
+    assert_eq!(
+        "i900 -> %155 with 2 attachment(s); no nudge\n",
+        String::from_utf8(sent.stdout).unwrap()
+    );
+    assert!(sent.stderr.is_empty());
+
+    let body_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(body_file.path(), "file body\n").unwrap();
+    let body_file_path = body_file.path().to_str().unwrap();
+    let sent_file = run_daemon_cli(
+        &["inbox", "send", "%155", "--body-file", body_file_path],
+        "inbox_send",
+        json!({
+            "to": "%155",
+            "body": "file body\n",
+            "subject": null,
+            "attach": null,
+            "notify": true
+        }),
+        json!({
+            "message_id": "i901",
+            "destination": "%155",
+            "attachments": [],
+            "notified": true
+        }),
+    );
+    assert_eq!(0, sent_file.status.code().unwrap());
+    assert_eq!(
+        "i901 -> %155; recipient nudged\n",
+        String::from_utf8(sent_file.stdout).unwrap()
+    );
+    assert!(sent_file.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["inbox", "list", "--all", "--limit", "5"],
+        "inbox_list",
+        json!({"mailbox": null, "unread_only": false, "limit": 5}),
+        json!({"mailbox": "reviewer", "messages": []}),
+    );
+    assert_eq!(0, listed.status.code().unwrap());
+    assert_eq!(
+        "mailbox reviewer\nno messages\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");

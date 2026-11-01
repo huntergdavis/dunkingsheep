@@ -638,6 +638,118 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 crate::render_print::render_dunk(result)
             })
         }
+        "inbox" => match text(ns, "inbox_command").unwrap_or("") {
+            "count" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_count", args, |result| {
+                    crate::render_print::render_inbox_count(result)
+                })
+            }
+            "send" => {
+                let body_values = ns.get("body").and_then(Value::as_array);
+                let body_words = body_values
+                    .map(|words| {
+                        words
+                            .iter()
+                            .map(crate::render_fleet::py_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let body = if let Some(body_file) = text(ns, "body_file").filter(|p| !p.is_empty())
+                {
+                    if body_values.is_some_and(|words| !words.is_empty()) {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: "inbox send: pass a body or --body-file, not both\n".into(),
+                            code: 2,
+                        };
+                    }
+                    if body_file == "-" {
+                        let mut body = String::new();
+                        if let Err(error) =
+                            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut body)
+                        {
+                            return Outcome {
+                                stdout: String::new(),
+                                stderr: format!("{error}\n"),
+                                code: 3,
+                            };
+                        }
+                        body
+                    } else {
+                        match std::fs::read_to_string(body_file) {
+                            Ok(body) => body,
+                            Err(error) => {
+                                return Outcome {
+                                    stdout: String::new(),
+                                    stderr: format!("{error}\n"),
+                                    code: 3,
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    body_words
+                };
+                let mut args = Map::new();
+                args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
+                args.insert("body".into(), Value::String(body));
+                args.insert(
+                    "subject".into(),
+                    ns.get("subject").cloned().unwrap_or(Value::Null),
+                );
+                let attachments = ns
+                    .get("attach")
+                    .and_then(Value::as_array)
+                    .map(|paths| {
+                        paths
+                            .iter()
+                            .map(crate::render_fleet::py_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                args.insert(
+                    "attach".into(),
+                    if attachments.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(attachments)
+                    },
+                );
+                args.insert(
+                    "notify".into(),
+                    Value::Bool(!matches!(ns.get("no_notify"), Some(Value::Bool(true)))),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_send", args, |result| {
+                    crate::render_print::render_inbox_sent(result)
+                })
+            }
+            "list" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "unread_only".into(),
+                    Value::Bool(!matches!(ns.get("all"), Some(Value::Bool(true)))),
+                );
+                args.insert(
+                    "limit".into(),
+                    ns.get("limit").cloned().unwrap_or(Value::from(50)),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_list", args, |result| {
+                    crate::render_print::render_inbox_list(result)
+                })
+            }
+            _ => not_ported("inbox"),
+        },
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
         "status" => {
