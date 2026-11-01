@@ -272,3 +272,44 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_19_task_edit_c() {
+    let deleted = run_daemon_cli(
+        &["task", "delete", "t9"],
+        "task_delete",
+        json!({"id":"t9"}),
+        json!({"deleted":true}),
+    );
+    assert_eq!(0, deleted.status.code().unwrap());
+    assert_eq!("deleted True\n", String::from_utf8(deleted.stdout).unwrap());
+    assert!(deleted.stderr.is_empty());
+
+    let noted = run_daemon_cli(
+        &[
+            "task", "note", "t9", "--event", "review", "--reason", "checked",
+        ],
+        "task_note",
+        json!({"id":"t9", "event":"review", "reason":"checked"}),
+        json!({"noted":true, "event":"review"}),
+    );
+    assert_eq!(0, noted.status.code().unwrap());
+    assert_eq!(
+        "noted True: review\n",
+        String::from_utf8(noted.stdout).unwrap()
+    );
+    assert!(noted.stderr.is_empty());
+
+    let next = run_daemon_cli(
+        &["task", "next", "mine", "--lease", "90.5", "--allow-busy"],
+        "task_next",
+        json!({"scope":"mine", "lease_seconds":90.5, "allow_busy":true}),
+        json!({"task":null, "refused":{"reason":"empty"}, "following":true}),
+    );
+    assert_eq!(0, next.status.code().unwrap());
+    assert_eq!(
+        "no eligible task: the queue is empty for this scope\nfollowing the queue: the daemon will push the next task when this pane is idle\n",
+        String::from_utf8(next.stdout).unwrap()
+    );
+    assert!(next.stderr.is_empty());
+}
