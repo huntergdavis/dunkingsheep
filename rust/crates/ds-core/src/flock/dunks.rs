@@ -750,6 +750,29 @@ impl DunkList {
         }
     }
 
+    /// The dunker-halting half of `close_target`: every RUNNING dunker aimed at a pane in
+    /// `doomed` stops with status `Target closed` and no next send. Returns their ids in list
+    /// order. (The Python also cancels the per-dunk timer thread, `_halt`; there is none here,
+    /// so the persisted fields are the whole stop. A stopped dunk therefore can never report
+    /// itself as scheduled again: nothing is left to overwrite the status.)
+    pub fn halt_aimed_at(&self, doomed: &[String]) -> Vec<String> {
+        let mut state = self.state();
+        let mut stopped = Vec::new();
+        for dunker in state.dunkers.iter_mut() {
+            let aimed = dunker
+                .target_pane_id
+                .as_deref()
+                .is_some_and(|pane| doomed.iter().any(|d| d == pane));
+            if dunker.running && aimed {
+                dunker.running = false;
+                dunker.next_send_at = None;
+                dunker.status = "Target closed".into();
+                stopped.push(dunker.id.clone());
+            }
+        }
+        stopped
+    }
+
     /// `Flock.stop_all`.
     pub fn stop_all(&self) -> Vec<Map<String, Value>> {
         let mut state = self.state();
