@@ -80,7 +80,7 @@ fn typing_timeout() -> Duration {
     let seconds = std::env::var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
-        .filter(|seconds| seconds.is_finite() && *seconds > 0.0 && *seconds <= 86_400.0)
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds <= 86_400.0)
         .unwrap_or(DEFAULT_TYPING_LOCK_TIMEOUT_S);
     Duration::from_secs_f64(seconds)
 }
@@ -399,7 +399,21 @@ pub fn press_until_submitted(
 #[cfg(test)]
 mod send_lock_tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::TryLockError;
+
+    static TYPING_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RestoreTypingTimeout(Option<OsString>);
+
+    impl Drop for RestoreTypingTimeout {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", value),
+                None => std::env::remove_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S"),
+            }
+        }
+    }
 
     fn test_flock() -> (Arc<Flock>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -484,6 +498,46 @@ mod send_lock_tests {
             .to_string()
             .contains("refusing to type concurrently"));
 
+        assert_eq!(0, action_runs.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn public_typing_guard_honors_zero_environment_timeout() {
+        let _env_lock = TYPING_TIMEOUT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = RestoreTypingTimeout(std::env::var_os("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S"));
+        std::env::set_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "0");
+
+        let (flock, _dir) = test_flock();
+        let held = flock.typing_guard("w1:p1").unwrap();
+        let other_flock = flock.clone();
+        let action_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let other_action_runs = action_runs.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = other_flock
+                .typing_guard("w1:p2")
+                .map(|guard| {
+                    other_action_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(guard);
+                })
+                .map_err(|error| error.to_string());
+            sent.send(result).unwrap();
+        });
+
+        let received = received.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        waiter.join().unwrap();
+        drop(restore);
+        let result =
+            received.expect("a zero timeout must refuse immediately rather than use the default");
+
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("the typing lock was held for more than 0s by ('w1:p1',"),
+            "unexpected refusal: {error}"
+        );
         assert_eq!(0, action_runs.load(std::sync::atomic::Ordering::SeqCst));
     }
 
