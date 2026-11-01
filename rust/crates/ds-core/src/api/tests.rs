@@ -10,11 +10,12 @@ use std::sync::Mutex;
 
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
-use crate::flock::panes::PaneInfoEnv;
+use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
+use std::sync::Arc;
 
 struct FixedRole(&'static str, bool);
 
@@ -856,6 +857,153 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         ),
         Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
     ));
+}
+
+fn memory_api_fixture() -> (tempfile::TempDir, Flock, TestEnv) {
+    const NOW: f64 = 1_800_000_000.0;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+    let connection = crate::db::open_writer(&path).expect("writer");
+    crate::memory::recall::apply_schema(&connection).expect("schema");
+    connection
+        .execute(
+            "INSERT INTO sessions (id, harness, project, cwd, title, started_at, updated_at) \
+             VALUES ('session-1', 'codex', 'demo', '/tmp/demo', 'Rust API', ?1, ?1)",
+            [NOW - 60.0],
+        )
+        .expect("session");
+    connection
+        .execute(
+            "INSERT INTO chunks (id, session_id, ordinal, role, kind, text, sha256, created_at) \
+             VALUES (1, 'session-1', 0, 'assistant', 'message', \
+                     'rust api uses a stable adapter boundary for recall', 'sha-session-1-0', ?1)",
+            [NOW - 60.0],
+        )
+        .expect("chunk");
+    drop(connection);
+    let pool = crate::db::ReadPool::open(&path, 1).expect("read pool");
+    let (_dir, flock) = flock();
+    flock.attach_stores(Stores {
+        memory: Some(Arc::new(pool)),
+        ..Stores::default()
+    });
+    (dir, flock, TestEnv::default())
+}
+
+fn dispatch_memory(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &TestEnv,
+    name: &str,
+    input: Value,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx::default();
+    dispatch_with_env(
+        dispatcher,
+        flock,
+        &FixedRole("worker", false),
+        name,
+        args(input),
+        &request,
+        env,
+    )
+}
+
+#[test]
+fn h_memory_recall_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let hits = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query": "adapter", "limit": 1, "harness": "codex", "project": "demo"}),
+    )
+    .unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["session_id"], "session-1");
+    assert_eq!(hits[0]["harness"], "codex");
+    assert_eq!(hits[0]["project"], "demo");
+    assert_eq!(
+        hits[0]["text"],
+        "rust api uses a stable adapter boundary for recall"
+    );
+}
+
+#[test]
+fn h_memory_search_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let hits = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query": "adapter", "limit": 1, "harness": "claude"}),
+    )
+    .unwrap();
+    assert_eq!(hits, json!([]));
+}
+
+#[test]
+fn h_memory_context_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let context = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query": "adapter", "sessions": 1}),
+    )
+    .unwrap();
+    assert_eq!(context["query"], "adapter");
+    assert_eq!(context["generated_at"], 1_800_000_000.0);
+    assert_eq!(context["counts"], json!({"sessions": 1, "snippets": 1}));
+    assert_eq!(context["sessions"][0]["session_id"], "session-1");
+    assert_eq!(
+        context["text"],
+        "[codex] demo | Rust API\n  - rust api uses a stable adapter boundary for recall"
+    );
+}
+
+#[test]
+fn h_memory_context_negative_sessions_matches_python_slice() {
+    let (dir, flock, env) = memory_api_fixture();
+    let connection = crate::db::open_writer(&dir.path().join("memory.db")).expect("writer");
+    connection
+        .execute(
+            "INSERT INTO sessions (id, harness, project, cwd, title, started_at, updated_at) \
+             VALUES ('session-2', 'codex', 'demo', '/tmp/demo', 'Other API', 1799999940, 1799999940)",
+            [],
+        )
+        .expect("second session");
+    connection
+        .execute(
+            "INSERT INTO chunks (id, session_id, ordinal, role, kind, text, sha256, created_at) \
+             VALUES (2, 'session-2', 0, 'assistant', 'message', \
+                     'adapter memory context second result', 'sha-session-2-0', 1799999940)",
+            [],
+        )
+        .expect("second chunk");
+    drop(connection);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let context = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query": "adapter", "sessions": -1}),
+    )
+    .unwrap();
+    assert_eq!(context["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(context["counts"]["sessions"], 1);
 }
 
 #[test]

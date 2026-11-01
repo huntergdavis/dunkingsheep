@@ -220,6 +220,13 @@ impl Dispatcher {
         self.register("turn_start", h_turn_start);
     }
 
+    /// Register only the T39 memory recall, search and context handlers.
+    pub fn register_memory_recall_search_context(&mut self) {
+        self.register("memory_recall", h_memory_recall);
+        self.register("memory_search", h_memory_search);
+        self.register("memory_context", h_memory_context);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -293,6 +300,99 @@ impl Dispatcher {
 /// `dunk_api.h_whoami`.
 pub fn h_whoami(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
     context.flock.whoami(context.self_pane_id(), context.env)
+}
+
+fn memory_pool(
+    context: &HandlerContext<'_>,
+) -> Result<std::sync::Arc<crate::db::ReadPool>, DunkError> {
+    context.flock.stores().memory.ok_or_else(|| {
+        DunkError::Refused(
+            "memory service is not enabled; start the daemon with persistence".into(),
+        )
+    })
+}
+
+fn memory_arg_string<'a>(args: &'a Args, key: &str) -> Result<&'a str, DunkError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused(format!("'{key}' is required")))
+}
+
+fn memory_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => py_int(value).ok_or_else(|| match value {
+            Value::String(value) => DunkError::Refused(format!(
+                "invalid literal for int() with base 10: '{}'",
+                value
+            )),
+            Value::Array(_) => DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                    .into(),
+            ),
+            Value::Object(_) => DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                    .into(),
+            ),
+            _ => DunkError::Refused("cannot convert value to int".into()),
+        }),
+    }
+}
+
+fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkError> {
+    let harness = args
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let project = args
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let since = args
+        .get("since")
+        .filter(|value| truthy(value))
+        .map(python_float)
+        .transpose()?;
+    Ok(crate::memory::recall::Filters {
+        harness,
+        project,
+        since,
+    })
+}
+
+fn memory_recall(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
+    let query = memory_arg_string(args, "query")?;
+    let limit = memory_int_arg(args, "limit", 10)?.max(0) as usize;
+    let pool = memory_pool(context)?;
+    let rows = crate::memory::recall::recall(
+        pool.as_ref(),
+        query,
+        limit,
+        &memory_filters(args)?,
+        context.env.now_s(),
+        1200,
+    )?;
+    serde_json::to_value(rows).map_err(|error| DunkError::Refused(error.to_string()))
+}
+
+/// `dunk_api.h_memory_recall`.
+pub fn h_memory_recall(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    memory_recall(context, &args)
+}
+
+/// `dunk_api.h_memory_search`.
+pub fn h_memory_search(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    memory_recall(context, &args)
+}
+
+/// `dunk_api.h_memory_context`.
+pub fn h_memory_context(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let query = memory_arg_string(&args, "query")?;
+    let sessions = memory_int_arg(&args, "sessions", 5)?;
+    let pool = memory_pool(context)?;
+    crate::memory::queries::context(pool.as_ref(), query, sessions, 2, context.env.now_s())
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
