@@ -26,6 +26,7 @@ pub mod fallback;
 pub mod flock;
 pub mod health;
 pub mod help;
+pub mod http;
 pub mod inbox;
 pub mod inbox_store;
 pub mod load;
