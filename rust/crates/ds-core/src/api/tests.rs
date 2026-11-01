@@ -5,9 +5,14 @@
 
 use super::*;
 use serde_json::json;
+use std::cell::Cell;
 use std::sync::Mutex;
 
+use crate::flock::commands_turns::{TurnHooks, TurnState};
+use crate::flock::dunks::DunkList;
 use crate::flock::panes::PaneInfoEnv;
+use crate::flock::status::{StatusEnv, ViewCache};
+use crate::proc::Caller;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
 
@@ -75,6 +80,143 @@ impl CommandEnv for CompletionEnv {
     }
 }
 
+struct ParityEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    dunks: DunkList,
+    view_cache: ViewCache,
+    now_s: f64,
+    pane_pid: Option<i64>,
+    probes: Cell<u32>,
+    turn_calls: Mutex<Vec<String>>,
+}
+
+impl ParityEnv {
+    fn new(pane_pid: Option<i64>) -> Self {
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            dunks: DunkList::new(),
+            view_cache: ViewCache::new(),
+            now_s: 1_800_000_100.0,
+            pane_pid,
+            probes: Cell::new(0),
+            turn_calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl PaneInfoEnv for ParityEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.pane_pid
+            .map(|pid| json!({"pane_id": pane_id, "pane_pid": pid}))
+    }
+}
+
+impl StatusEnv for ParityEnv {
+    fn version(&self) -> String {
+        "2.99.0".into()
+    }
+    fn federated_input(&self) -> Value {
+        json!(false)
+    }
+    fn code_status(&self) -> serde_json::Map<String, Value> {
+        serde_json::Map::from_iter([
+            ("code_hash".into(), json!("abc")),
+            ("code_stale".into(), json!(false)),
+        ])
+    }
+    fn dunks(&self) -> &DunkList {
+        &self.dunks
+    }
+    fn started_at(&self) -> f64 {
+        1_800_000_000.0
+    }
+    fn pid(&self) -> u32 {
+        42
+    }
+    fn now(&self) -> f64 {
+        self.now_s
+    }
+    fn queued_messages(&self) -> usize {
+        3
+    }
+    fn inbox_unread(&self) -> Result<i64, DunkError> {
+        Ok(7)
+    }
+    fn task_totals(&self) -> Result<Value, DunkError> {
+        Ok(json!({"open": 2}))
+    }
+    fn task_followers(&self) -> usize {
+        1
+    }
+    fn quarantined_mailboxes(&self) -> Option<Value> {
+        None
+    }
+    fn last_message(&self) -> String {
+        "idle".into()
+    }
+    fn herdr_available(&self) -> bool {
+        self.probes.set(self.probes.get() + 1);
+        true
+    }
+    fn herdr_hint(&self) -> String {
+        "start herdr".into()
+    }
+    fn state_file(&self) -> Option<String> {
+        Some("/tmp/dunks.json".into())
+    }
+    fn inbox_count(&self, pane: &str) -> Result<Value, String> {
+        Ok(json!({"mailbox": pane, "unread": 1}))
+    }
+}
+
+impl TurnHooks for ParityEnv {
+    fn record(
+        &self,
+        kind: &str,
+        pane_id: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        outcome: &str,
+        _: f64,
+        _: Option<i64>,
+    ) {
+        self.turn_calls
+            .lock()
+            .unwrap()
+            .push(format!("record {kind} {pane_id} {outcome}"));
+    }
+    fn observe_turn(&self, pane_id: &str, state: &TurnState) {
+        self.turn_calls
+            .lock()
+            .unwrap()
+            .push(format!("observe {pane_id} {}", state.turn_id.len()));
+    }
+    fn dispatch_on_turn_end(&self, pane_id: &str) -> Value {
+        json!({"trigger": "turn.end", "action": "skip", "reason": pane_id, "delivered": false})
+    }
+}
+
+impl CommandEnv for ParityEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+    fn now_s(&self) -> f64 {
+        self.now_s
+    }
+    fn status_env(&self) -> Result<&dyn StatusEnv, DunkError> {
+        Ok(self)
+    }
+    fn view_cache(&self) -> Result<&ViewCache, DunkError> {
+        Ok(&self.view_cache)
+    }
+    fn turn_hooks(&self) -> Result<&dyn TurnHooks, DunkError> {
+        Ok(self)
+    }
+}
+
 fn dispatch<G: CallerGate + ?Sized>(
     dispatcher: &Dispatcher,
     flock: &Flock,
@@ -83,18 +225,30 @@ fn dispatch<G: CallerGate + ?Sized>(
     args: Option<Args>,
     self_pane_id: Option<&str>,
 ) -> Result<Value, DunkError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("runtime");
     let env = TestEnv::default();
     let request = RequestCtx {
         self_pane_id: self_pane_id.map(str::to_owned),
         ..RequestCtx::default()
     };
+    dispatch_with_env(dispatcher, flock, gate, name, args, &request, &env)
+}
+
+fn dispatch_with_env<G: CallerGate + ?Sized>(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    gate: &G,
+    name: &str,
+    args: Option<Args>,
+    request: &RequestCtx,
+    env: &dyn CommandEnv,
+) -> Result<Value, DunkError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
     let context = HandlerContext {
         flock,
-        request: &request,
-        env: &env,
+        request,
+        env,
         runtime: runtime.handle(),
     };
     dispatcher.dispatch(&context, gate, name, args)
@@ -406,6 +560,185 @@ fn test_a_registered_handler_gets_the_pane_and_args() {
     )
     .expect("handler runs");
     assert_eq!(got, json!({"pane": "%9", "args": {"id": "d1"}}));
+}
+
+#[test]
+fn h_whoami_matches_python() {
+    let (_dir, flock) = flock();
+    let mut d = Dispatcher::new();
+    d.register("whoami", h_whoami);
+
+    let got = dispatch(
+        &d,
+        &flock,
+        &FixedRole("anonymous", false),
+        "whoami",
+        None,
+        None,
+    )
+    .expect("anonymous whoami");
+
+    assert_eq!(
+        got,
+        json!({
+            "pane_id": null,
+            "role": "anonymous",
+            "registered": null,
+            "via_token": false,
+            "caller": {"pid": null, "start": null, "name": null, "source": null},
+            "bound": null,
+            "binding_note": null,
+        })
+    );
+}
+
+#[test]
+fn h_status_matches_python() {
+    let (_dir, flock) = flock();
+    let env = ParityEnv::new(None);
+    let request = RequestCtx {
+        self_pane_id: Some("w1:p1".into()),
+        ..RequestCtx::default()
+    };
+    let mut d = Dispatcher::new();
+    d.register("status", h_status);
+
+    let cached = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("anonymous", false),
+        "status",
+        None,
+        &request,
+        &env,
+    )
+    .expect("cached status");
+    assert_eq!(cached["version"], "2.99.0");
+    assert_eq!(cached["self_pane_id"], "w1:p1");
+    assert_eq!(cached["herdr_available"], Value::Null);
+    assert_eq!(cached["herdr_hint"], Value::Null);
+    assert_eq!(
+        cached.get("inbox_unread"),
+        None,
+        "cached view is the cheap status"
+    );
+    assert_eq!(env.probes.get(), 0, "default status skips backend probing");
+
+    let full = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("anonymous", false),
+        "status",
+        args(json!({"full": true})),
+        &request,
+        &env,
+    )
+    .expect("full status");
+    assert_eq!(full["self_pane_id"], "w1:p1");
+    assert_eq!(full["herdr_available"], true);
+    assert_eq!(full["inbox_unread"], 7);
+    assert_eq!(full["tasks"], json!({"open": 2}));
+    assert_eq!(env.probes.get(), 1, "full Python status probes the backend");
+}
+
+#[test]
+fn h_turn_start_matches_python() {
+    let (_dir, flock) = flock();
+    let pane_id = "w1:p1";
+    let pid = std::process::id() as i64;
+    let caller = Caller::new(
+        Some(pid),
+        crate::proc::process_start(pid),
+        None,
+        Some(pane_id.into()),
+        "peer",
+    );
+    let request = RequestCtx {
+        self_pane_id: Some(pane_id.into()),
+        caller: Some(caller),
+        ..RequestCtx::default()
+    };
+    let env = ParityEnv::new(Some(pid));
+    let mut d = Dispatcher::new();
+    d.register("turn_start", h_turn_start);
+
+    let result = dispatch_with_env(
+        &d,
+        &flock,
+        &FixedRole("worker", false),
+        "turn_start",
+        args(json!({
+            "ttl_s": 60,
+            "source": "pi",
+            "handoff_id": format!("nj-{}", "a".repeat(32)),
+        })),
+        &request,
+        &env,
+    )
+    .expect("authenticated turn start");
+
+    assert_eq!(result["pane_id"], pane_id);
+    assert_eq!(result["ttl_s"], 60.0);
+    assert_eq!(result["source"], "pi");
+    assert_eq!(result["turn_id"].as_str().unwrap().len(), 32);
+    assert_eq!(env.turn_calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn api_handlers_refuse_when_required_adapters_are_not_wired() {
+    let (_dir, flock) = flock();
+    let request = RequestCtx::default();
+    let env = TestEnv::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    assert!(matches!(
+        h_status(&context, Args::new()),
+        Err(DunkError::Refused(message)) if message == "status command adapter is not wired"
+    ));
+    assert!(matches!(
+        env.view_cache(),
+        Err(DunkError::Refused(message)) if message == "status view cache is not wired"
+    ));
+    assert!(matches!(
+        env.turn_hooks(),
+        Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
+    ));
+
+    let pane_id = "w1:p1";
+    let pid = std::process::id() as i64;
+    let caller = Caller::new(
+        Some(pid),
+        crate::proc::process_start(pid),
+        None,
+        Some(pane_id.into()),
+        "peer",
+    );
+    let request = RequestCtx {
+        self_pane_id: Some(pane_id.into()),
+        caller: Some(caller),
+        ..RequestCtx::default()
+    };
+    let env = CompletionEnv(TestEnv::default());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let context = HandlerContext {
+        flock: &flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    assert!(matches!(
+        h_turn_start(&context, Args::new()),
+        Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
+    ));
 }
 
 #[test]

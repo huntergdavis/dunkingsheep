@@ -34,6 +34,24 @@ pub trait CommandEnv: PaneInfoEnv {
 
     /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
     fn now_s(&self) -> f64;
+
+    /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
+    /// production dispatch must supply the real daemon snapshot.
+    fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
+        Err(DunkError::Refused(
+            "status command adapter is not wired".into(),
+        ))
+    }
+
+    /// The daemon-owned cache shared by status/view calls.
+    fn view_cache(&self) -> Result<&crate::flock::status::ViewCache, DunkError> {
+        Err(DunkError::Refused("status view cache is not wired".into()))
+    }
+
+    /// Real turn side effects (metrics and next-job observation).
+    fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
+        Err(DunkError::Refused("turn hooks are not wired".into()))
+    }
 }
 
 /// Context shared by every handler in one synchronous request. The server must keep this whole
@@ -263,6 +281,71 @@ impl Dispatcher {
             result
         })
     }
+}
+
+/// `dunk_api.h_whoami`.
+pub fn h_whoami(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context.flock.whoami(context.self_pane_id(), context.env)
+}
+
+fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
+    match args.get(key) {
+        None | Some(Value::Null) => default,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        ),
+        Some(value) => matches!(
+            value.to_string().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        ),
+    }
+}
+
+/// `dunk_api.h_status`.
+pub fn h_status(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    crate::flock::status::h_status(
+        context.env.status_env()?,
+        context.env.view_cache()?,
+        python_bool_arg(&args, "full", false),
+        python_bool_arg(&args, "fresh", false),
+        python_bool_arg(&args, "check_herdr", false),
+        context.self_pane_id(),
+    )
+}
+
+/// `dunk_api.h_turn_start`.
+pub fn h_turn_start(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let self_pane_id = context.self_pane_id();
+    let requested = args.get("pane");
+    if requested.is_some_and(|value| truthy(value) && value.as_str().is_none()) {
+        return Err(DunkError::Refused(
+            "turn event must target the caller's own pane".into(),
+        ));
+    }
+    let pane = requested.and_then(Value::as_str);
+    let pane_pid = self_pane_id
+        .and_then(|id| context.env.get_pane(id))
+        .and_then(|info| info.get("pane_pid").and_then(Value::as_i64));
+    context.flock.require_turn_caller(
+        pane,
+        self_pane_id,
+        pane_pid,
+        context.request.caller.as_ref(),
+    )?;
+
+    let ttl_s = args.get("ttl_s").and_then(Value::as_f64);
+    let source = args.get("source").and_then(Value::as_str);
+    let handoff_id = args.get("handoff_id").and_then(Value::as_str);
+    context.flock.turn_start(
+        pane,
+        ttl_s,
+        source,
+        self_pane_id,
+        handoff_id,
+        context.env.turn_hooks()?,
+    )
 }
 
 /// The named refusal for a registered command with no Rust handler yet.
