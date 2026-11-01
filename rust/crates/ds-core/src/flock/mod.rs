@@ -78,6 +78,11 @@ pub struct Flock {
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
+    /// The in-memory dunk list and next_id slot. Whole-state persistence is owned by the
+    /// later snapshot leaf; this leaf only loads/extracts dunk fields and invokes its seam.
+    #[allow(dead_code)]
+    // Snapshot and runtime dunk CRUD callers are assigned to dependent leaves.
+    pub(crate) dunks: dunks::DunkList,
     /// pane_id -> FIFO messages waiting for the pane's outbox worker.
     pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
     /// Next direct-message identity, matching `_new_message`'s monotonic `mN` allocation.
@@ -115,6 +120,7 @@ impl Flock {
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
+            dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),

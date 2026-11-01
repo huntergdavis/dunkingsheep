@@ -2,16 +2,16 @@
 //! Ports `dunk_core.Dunker` (fields, `__init__` defaults, `target_label`, `set_target`,
 //! `to_dict`, `from_dict`), `format_interval`, `parse_interval`, `expand_template`.
 //!
-//! NOT in this slice (tracked on t800): the `Flock` dunk methods (add/update/remove/start/
-//! stop/toggle/stop_all/fire/list/get), `_save`/`_load` of `dunks.json`, the per-dunk tokio
-//! timer, idle gating and the skip/hold backpressure. Those need the outbox and stuck state
-//! that have no Rust owner yet.
+//! This slice adds the `Flock` dunk state slot, load/extract helpers and whole-Flock
+//! `SnapshotStore` facade. It does NOT add runtime dunk CRUD, a dunk-only writer, whole-state
+//! file restore/save, or the per-dunk timer, idle gating and skip/hold backpressure.
 
 use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
+use super::{sends::SnapshotStore, Flock};
 use crate::clock;
 use crate::error::DunkError;
 
@@ -780,6 +780,22 @@ impl DunkList {
             stop_fields(dunker);
         }
         state.dunkers.iter().map(Dunker::to_dict).collect()
+    }
+}
+
+impl Flock {
+    /// Extract the dunk-owned fields from the already-decoded whole-state payload.
+    /// The whole-Flock loader owns file reads and calls this after parsing succeeds.
+    #[allow(dead_code)] // The whole-state restore caller is assigned to t1753.
+    pub(crate) fn _load_dunks(&self, payload: &Map<String, Value>) {
+        self.dunks.load(payload);
+    }
+
+    /// Route a dunk mutation through the whole-Flock snapshot seam. This module does not write
+    /// an independent dunk-only file; the store decides how the complete state is persisted.
+    #[allow(dead_code)] // Dunk CRUD callers will use this facade in following assigned leaves.
+    pub(crate) fn _save_dunks(&self, store: &dyn SnapshotStore) -> Result<(), DunkError> {
+        store.save(self)
     }
 }
 
