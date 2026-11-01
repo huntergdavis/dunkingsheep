@@ -447,6 +447,7 @@ pub mod resolve;
 pub mod roles_gate;
 pub mod roster;
 pub mod sends;
+pub mod status;
 pub mod views;
 
 #[cfg(test)]
@@ -471,5 +472,7 @@ mod resolve_tests;
 mod roles_gate_tests;
 #[cfg(test)]
 mod sends_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod tests;
