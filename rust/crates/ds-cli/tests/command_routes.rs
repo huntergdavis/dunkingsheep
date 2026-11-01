@@ -229,11 +229,17 @@ fn cli_route_04_dunk_edit_lifecycle_b() {
         &["stop", "d1"],
         "stop_dunk",
         json!({"id": "d1"}),
-        json!({"id": "d1", "running": false, "status": "stopped"}),
+        json!({
+            "id": "d1",
+            "running": false,
+            "status": "stopped",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": true
+        }),
     );
     assert_eq!(0, stopped.status.code().unwrap());
     assert_eq!(
-        "id               d1\nstatus           stopped\nskip_if_unconsumed None\nhold_while_typing None\n",
+        "id               d1\nstatus           stopped\nskip_if_unconsumed False\nhold_while_typing True\n",
         String::from_utf8(stopped.stdout).unwrap()
     );
     assert!(stopped.stderr.is_empty());
@@ -242,11 +248,17 @@ fn cli_route_04_dunk_edit_lifecycle_b() {
         &["toggle", "d2"],
         "toggle_dunk",
         json!({"id": "d2"}),
-        json!({"id": "d2", "running": true, "status": "active"}),
+        json!({
+            "id": "d2",
+            "running": true,
+            "status": "active",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": true
+        }),
     );
     assert_eq!(0, toggled.status.code().unwrap());
     assert_eq!(
-        "id               d2\nrunning          True\nstatus           active\nskip_if_unconsumed None\nhold_while_typing None\n",
+        "id               d2\nrunning          True\nstatus           active\nskip_if_unconsumed False\nhold_while_typing True\n",
         String::from_utf8(toggled.stdout).unwrap()
     );
     assert!(toggled.stderr.is_empty());
