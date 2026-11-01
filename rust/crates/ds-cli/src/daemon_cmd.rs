@@ -87,6 +87,40 @@ pub fn call(
     client.call(cmd, args).map_err(|e| call_failure(e, timeout))
 }
 
+/// The generic tail of the Python `main()`: connect, one daemon call, then `--json` (the whole
+/// result, sorted keys: see `dispatch`) or the command's printer; and THE EXIT CODE IS A
+/// CONTRACT: anything the daemon answers with `ok: false` is exit 2, whatever the prose says.
+pub fn run_command(
+    ns: &Map<String, Value>,
+    cmd: &str,
+    args: Map<String, Value>,
+    printer: fn(&Value) -> String,
+) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let result = match call(&mut client, cmd, args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+    let stdout = if matches!(ns.get("json"), Some(Value::Bool(true))) {
+        format!("{}\n", sorted_json(&result))
+    } else {
+        printer(&result)
+    };
+    let code = if result.get("ok") == Some(&Value::Bool(false)) {
+        2
+    } else {
+        0
+    };
+    Outcome {
+        stdout,
+        stderr: String::new(),
+        code,
+    }
+}
+
 /// `gh-token [--kind author|reviewer] [--quiet]`: the token on stdout, or (unless `--quiet`) why
 /// there is none on stderr; exit 0 either way.
 pub fn gh_token(ns: &Map<String, Value>) -> Outcome {
