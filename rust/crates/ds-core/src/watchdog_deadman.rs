@@ -5,13 +5,112 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::Utf8Error;
+use std::time::UNIX_EPOCH;
 
 use crate::error::DunkError;
 
 /// The recorded cadence may widen the unit cadence by at most six times.
 pub const CLAMP_FACTOR: f64 = 6.0;
+
+/// Return the daemon-path configuration problem, or `None` when the socket path is usable.
+pub fn daemon_path_problem(
+    daemon_path: Option<&str>,
+    expected_dir: Option<&Path>,
+) -> Option<String> {
+    let Some(daemon_path) = daemon_path.filter(|path| !path.trim().is_empty()) else {
+        return Some("daemon path is empty".into());
+    };
+    let parent = absolute_path(Path::new(daemon_path))
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .to_path_buf();
+    if !parent.is_dir() {
+        return Some(format!(
+            "daemon path parent {} does not exist or is not a directory",
+            parent.display()
+        ));
+    }
+    let expected_dir = expected_dir.filter(|path| !path.as_os_str().is_empty());
+    if expected_dir.and_then(|expected| fs::canonicalize(expected).ok())
+        != fs::canonicalize(&parent).ok()
+    {
+        return Some(format!(
+            "daemon path parent {} is not the expected directory {}",
+            parent.display(),
+            expected_dir
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        ));
+    }
+    None
+}
+
+/// Classify transport errors without treating ambiguous failures as proof the daemon is down.
+/// `error_filename` carries the optional filename exposed by Python's `OSError.filename`.
+pub fn classify_daemon_error(
+    error: &io::Error,
+    error_filename: Option<&Path>,
+    daemon_path: Option<&str>,
+    expected_dir: Option<&Path>,
+) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => "daemon_down",
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
+            if daemon_path_problem(daemon_path, expected_dir).is_some() {
+                return "config_bad";
+            }
+            if let (Some(named), Some(daemon_path)) = (error_filename, daemon_path) {
+                if absolute_path(named) != absolute_path(Path::new(daemon_path)) {
+                    return "config_bad";
+                }
+            }
+            if error.kind() == io::ErrorKind::NotADirectory {
+                "config_bad"
+            } else {
+                "daemon_down"
+            }
+        }
+        _ => "other",
+    }
+}
+
+/// Seconds since the heartbeat timestamp, or `None` when it does not exist.
+pub fn heartbeat_age(path: impl AsRef<Path>, now: f64) -> io::Result<Option<f64>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let modified = metadata.modified()?;
+    let modified_s = match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64(),
+        Err(error) => -error.duration().as_secs_f64(),
+    };
+    Ok(Some(now - modified_s))
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
 
 /// `(cadence_minutes, problem)` from the heartbeat body.
 ///
@@ -240,7 +339,10 @@ fn unicode_decode_error(bytes: &[u8], error: Utf8Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_cadence, load, read_text_prefix_from, recorded_cadence};
+    use super::{
+        classify_daemon_error, daemon_path_problem, effective_cadence, heartbeat_age, load,
+        read_text_prefix_from, recorded_cadence,
+    };
     use serde_json::{json, Value};
     use std::fs;
     use std::io::{self, Cursor, Read};
@@ -334,6 +436,103 @@ mod tests {
         assert_eq!(16_384, prefix.len());
         assert_eq!(4096, std::str::from_utf8(&prefix).unwrap().chars().count());
         assert!(bytes_read.load(Ordering::Relaxed) <= 16_384);
+    }
+
+    #[test]
+    fn watchdog_deadman_daemon_path_problem_classifies_empty_missing_and_unexpected_parents() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Some("daemon path is empty".into()),
+            daemon_path_problem(Some("  "), Some(directory.path()))
+        );
+        assert_eq!(
+            Some(format!(
+                "daemon path parent {} does not exist or is not a directory",
+                directory.path().join("gone").display()
+            )),
+            daemon_path_problem(
+                Some(directory.path().join("gone/socket").to_str().unwrap()),
+                Some(directory.path())
+            )
+        );
+        let other = directory.path().join("other");
+        fs::create_dir(&other).unwrap();
+        assert_eq!(
+            Some(format!(
+                "daemon path parent {} is not the expected directory {}",
+                other.display(),
+                directory.path().display()
+            )),
+            daemon_path_problem(
+                Some(other.join("socket").to_str().unwrap()),
+                Some(directory.path())
+            )
+        );
+        assert_eq!(
+            None,
+            daemon_path_problem(
+                Some(directory.path().join("socket").to_str().unwrap()),
+                Some(directory.path())
+            )
+        );
+    }
+
+    #[test]
+    fn watchdog_deadman_classifies_daemon_errors_without_directing_ambiguous_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon_path = directory.path().join("socket");
+        let daemon_text = daemon_path.to_str().unwrap();
+        let expected = directory.path();
+        let classify = |kind, filename: Option<&std::path::Path>| {
+            classify_daemon_error(
+                &io::Error::from(kind),
+                filename,
+                Some(daemon_text),
+                Some(expected),
+            )
+        };
+
+        assert_eq!(
+            "daemon_down",
+            classify(io::ErrorKind::ConnectionRefused, None)
+        );
+        assert_eq!("daemon_down", classify(io::ErrorKind::NotFound, None));
+        assert_eq!(
+            "config_bad",
+            classify(
+                io::ErrorKind::NotFound,
+                Some(&directory.path().join("other-socket"))
+            )
+        );
+        assert_eq!(
+            "config_bad",
+            classify(io::ErrorKind::NotADirectory, Some(&daemon_path))
+        );
+        assert_eq!("other", classify(io::ErrorKind::TimedOut, None));
+    }
+
+    #[test]
+    fn watchdog_deadman_heartbeat_age_distinguishes_fresh_aged_and_missing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("heartbeat");
+        fs::write(&path, "").unwrap();
+        let modified = fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        assert_eq!(Some(30.0), heartbeat_age(&path, modified + 30.0).unwrap());
+        assert_eq!(
+            Some(1801.0),
+            heartbeat_age(&path, modified + 30.0 * 60.0 + 1.0).unwrap()
+        );
+        assert_eq!(
+            None,
+            heartbeat_age(directory.path().join("missing"), modified).unwrap()
+        );
     }
 
     #[test]
