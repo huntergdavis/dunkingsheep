@@ -8,7 +8,7 @@
 //! decision.
 //!
 //! Slice 6b adds the /proc side behind a trait ([`proc`]) and `session_of` ([`session`]).
-//! NOT yet (6c): `capture` (needs the flock lanes, activity and tasks).
+//! Slice 6c adds `capture` ([`capture`]), over a `CaptureEnv` for the flock-side reads.
 //!
 //! The `argv` column is written as compact JSON (`["a","b"]`); the Python writes `json.dumps`
 //! with spaces. Both read back identically.
@@ -19,6 +19,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
 
+pub mod capture;
 pub mod proc;
 pub mod session;
 
@@ -291,6 +292,8 @@ pub fn flag(argv: &[String], names: &[&str]) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod capture_tests;
 #[cfg(test)]
 mod session_tests;
 #[cfg(test)]
