@@ -355,3 +355,135 @@ fn test_is_our_send_recognises_our_prefix_and_collapsed_pastes() {
     assert!(!is_our_send("[Pasted text #1 +75 lines]", None, false));
     assert!(is_our_send("[Pasted text #1 +75 lines]", None, true));
 }
+
+// --- slice 3: classify_delivery ----------------------------------------------------------
+// Ported from tests/test_dunk_delivery.py (ClassifyDeliveryTests, PlaceholderTests),
+// test_dunk_codex_composer.py (the classify assertion) and test_dunk_inbox.py's
+// WORKING_SCREEN case.
+
+const LIVE: &str = "\u{2502} \u{25cf} wrote the phrase \"server connection could not be restored\" into a test file\n\u{2502} \u{2500}\u{2500} Working \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{2502} ~/workspace/dunkingsheep (main)\n";
+const DEAD: &str = "\u{2502} \u{25a0} Server connection could not be restored\n\u{2502} \u{2022} Reconnect failed - check the endpoint, then relaunch (41h 22m)\n\u{2502} \u{203a} [inbox] new message\n\u{2502}   ^c quit\n";
+const PAUSED: &str = "\u{2502} \u{273b} Reading files\n\u{2502} GPT-6-Astra high \u{b7} ~/workspace/crackdown-switch \u{b7} Port Crackdown   Goal paused (/goal resume)\n";
+const CONTEXT_FULL: &str =
+    "\u{2502} \u{273b} Working\n\u{2502} Context limit reached. Run /clear to continue.\n";
+const HINT_GREY_RGB: &str = "\x1b[38;2;153;153;153mnew task? \x1b[0m\x1b[38;2;177;185;249m/clear\x1b[0m\x1b[38;2;153;153;153m to save 497.4k tokens\x1b[0m";
+const HINT_DIM: &str = "\x1b[2mnew task? /clear to save 497.4k tokens\x1b[0m";
+
+fn classify(screen: &str, status: &str) -> (&'static str, Option<String>) {
+    classify_delivery(screen, Some(status), None, None, false)
+}
+
+#[test]
+fn test_a_live_pane_that_quotes_the_marker_is_not_dead() {
+    assert_eq!(("ready", None), classify(LIVE, "idle"));
+}
+
+#[test]
+fn test_a_banner_line_is_a_dead_session() {
+    let (state, reason) = classify(DEAD, "idle");
+    assert_eq!("dead", state);
+    assert!(reason
+        .unwrap()
+        .contains("server connection could not be restored"));
+}
+
+#[test]
+fn test_escape_sequences_do_not_hide_a_banner() {
+    let (state, _) = classify(
+        "\x1b[31m\u{25a0} Server connection could not be restored\x1b[0m\n",
+        "idle",
+    );
+    assert_eq!(
+        "dead", state,
+        "a colour code before the glyph hid the banner"
+    );
+}
+
+#[test]
+fn test_a_paused_goal_blocks_delivery_and_says_so() {
+    let (state, reason) = classify(PAUSED, "idle");
+    assert_eq!("blocked", state);
+    assert!(reason.unwrap().contains("paused goal"));
+}
+
+#[test]
+fn test_a_full_context_blocks_delivery_and_names_the_fix() {
+    let (state, reason) = classify(CONTEXT_FULL, "idle");
+    assert_eq!("blocked", state);
+    assert!(reason.unwrap().contains("/clear"));
+}
+
+#[test]
+fn test_a_draft_in_the_box_no_longer_blocks_delivery() {
+    // Policy 2026-10-24: the text is preserved at send time, not refused.
+    let (state, reason) = classify_delivery(
+        "\u{2502} \u{203a} half a sentence",
+        Some("idle"),
+        Some("half a sentence"),
+        None,
+        false,
+    );
+    assert_eq!("ready", state);
+    assert_eq!(None, reason);
+}
+
+#[test]
+fn test_working_is_not_ready_and_not_blocked() {
+    assert_eq!(
+        ("working", Some("working".to_string())),
+        classify("\u{2502} \u{273b} Working", "working")
+    );
+}
+
+#[test]
+fn test_the_hint_is_not_a_state_however_it_is_drawn() {
+    for (label, screen) in [("grey rgb", HINT_GREY_RGB), ("dim", HINT_DIM)] {
+        assert_eq!(
+            ("ready", None),
+            classify(&format!("\u{276f}\u{a0}\n{screen}\n"), "idle"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn test_the_hint_does_not_mask_a_real_draft() {
+    let screen = format!("\u{276f} half a sentence\n{HINT_GREY_RGB}\n");
+    assert_eq!("half a sentence", box_text(&screen).0);
+    let (state, _) = classify_delivery(&screen, Some("idle"), Some("half a sentence"), None, false);
+    assert_eq!("ready", state, "a draft is preserved, not a refusal");
+}
+
+#[test]
+fn test_a_real_full_context_banner_still_blocks() {
+    let (state, reason) = classify(
+        "\u{2502} Context limit reached. Run /clear to continue\n",
+        "idle",
+    );
+    assert_eq!("blocked", state);
+    assert!(reason.unwrap().contains("/clear"));
+}
+
+#[test]
+fn test_the_captured_screen_is_deliverable_and_not_foreign() {
+    let typed = typed_text(TRANSCRIPT_PLUS_HINT);
+    assert_eq!(Some(String::new()), typed);
+    assert_eq!(
+        ("ready", None),
+        classify_delivery(
+            TRANSCRIPT_PLUS_HINT,
+            Some("idle"),
+            typed.as_deref(),
+            None,
+            false
+        )
+    );
+}
+
+#[test]
+fn test_the_working_status_is_information_not_a_refusal() {
+    let screen = "\u{2502} \u{273b} Working (55m) \u{b7} esc to interrupt\n\u{276f}\u{a0}\n\x1b[2mAsk Pi to do anything\x1b[0m\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n";
+    let (state, reason) = classify(screen, "working");
+    assert_eq!("working", state);
+    assert!(!matches!(reason.as_deref(), Some("blocked") | Some("dead")));
+}

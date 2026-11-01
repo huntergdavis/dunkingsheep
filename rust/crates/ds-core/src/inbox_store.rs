@@ -589,6 +589,37 @@ impl Store {
     }
 }
 
+impl Store {
+    /// `record_notify`: how the nudge for a message went. `transport_id` and `attempt` keep
+    /// their old value when `None` (the Python's `COALESCE`).
+    pub fn record_notify(
+        &self,
+        message_id: &str,
+        state: &str,
+        reason: Option<&str>,
+        transport_id: Option<&str>,
+        attempt: Option<i64>,
+    ) -> Result<(), DunkError> {
+        let (id, state, reason) = (
+            message_id.to_string(),
+            state.to_string(),
+            reason.map(str::to_string),
+        );
+        let (transport_id, attempt, now) = (transport_id.map(str::to_string), attempt, now_s());
+        self.writer.call(move |connection| {
+            connection
+                .execute(
+                    "UPDATE messages SET notify_state = ?, notify_reason = ?, notify_at = ?, \
+                     notify_transport_id = COALESCE(?, notify_transport_id), \
+                     notify_attempt = COALESCE(?, notify_attempt) WHERE id = ?",
+                    rusqlite::params![state, reason, now, transport_id, attempt, id],
+                )
+                .map_err(map_sqlite)?;
+            Ok(())
+        })
+    }
+}
+
 /// What `ack`/`cancel` did: `_transition`'s `{state, changed, unchanged}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {

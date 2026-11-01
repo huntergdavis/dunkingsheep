@@ -29,6 +29,7 @@ use crate::db;
 use crate::error::DunkError;
 
 pub mod advance;
+pub mod allocator;
 mod claim;
 pub mod next_job;
 pub use claim::{
@@ -635,6 +636,34 @@ impl Tasks {
             })
             .await
             .unwrap_or(-1)
+    }
+
+    /// `Tasks.cancel`'s `blocked_dependents` (t878): the sorted ids of the open, in-progress or
+    /// blocked tasks that depend on `id`. A cancelled dependency can never be satisfied by work,
+    /// so naming these is the only warning the caller gets.
+    pub async fn blocked_dependents(&self, id: &str) -> Result<Vec<String>, DunkError> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT id, depends_on FROM tasks WHERE status IN ('open', 'in_progress', 'blocked')")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut found = Vec::new();
+                for row in rows {
+                    let (other, raw) = row.map_err(db::map_sqlite)?;
+                    if decode_list(raw.as_deref()).contains(&id) {
+                        found.push(other);
+                    }
+                }
+                found.sort();
+                Ok(found)
+            })
+            .await
     }
 
     /// The event names recorded for a task, oldest first (test helper).
@@ -1482,8 +1511,10 @@ pub fn validate_scope(scope: &str) -> Result<String, DunkError> {
     if scope == "global" || pane.is_match(scope) {
         return Ok(scope.to_string());
     }
+    // Python's `{scope!r}`, NOT Rust's `{:?}`: quote choice and escapes differ (t1373).
     Err(DunkError::Refused(format!(
-        "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {scope:?})"
+        "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got {})",
+        crate::context::store::py_repr(scope)
     )))
 }
 
@@ -2792,10 +2823,24 @@ mod tests {
         let refused = validate_scope("nowhere").unwrap_err().to_string();
         assert!(
             refused.contains(
-                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got \"nowhere\")"
+                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got 'nowhere')"
             ),
             "{refused}"
         );
+        // Python repr, case by case (expected texts produced by the real validate_scope):
+        // a quote inside switches the quoting; control characters escape; printable
+        // non-ASCII stays as is; surrounding whitespace was stripped before the message.
+        let want = [
+            ("it's", "(got \"it's\")"),
+            ("say \"hi\"", "(got 'say \"hi\"')"),
+            ("tab\there", "(got 'tab\\there')"),
+            ("na\u{ef}ve", "(got 'na\u{ef}ve')"),
+            ("", "(got '')"),
+        ];
+        for (input, expected) in want {
+            let text = validate_scope(input).unwrap_err().to_string();
+            assert!(text.ends_with(expected), "{input:?} -> {text}");
+        }
     }
 
     #[tokio::test]

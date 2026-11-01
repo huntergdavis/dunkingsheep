@@ -203,9 +203,8 @@ impl Replies {
                 None
             }
             Event::End { number, flags } => {
-                let mut pending = self.pending.remove(number)?;
+                let pending = self.pending.remove(number)?;
                 let _ = flags;
-                pending.failed = pending.failed;
                 Some(Reply {
                     number: pending.number,
                     command: pending.command,

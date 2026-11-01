@@ -10,7 +10,7 @@ const OWNER: &str = "w2:p1";
 const WORKER: &str = "w2:p2";
 const OTHER: &str = "w9:p9";
 
-fn refused(result: Result<(), DunkError>) -> String {
+fn refused<T: std::fmt::Debug>(result: Result<T, DunkError>) -> String {
     result.expect_err("expected a refusal").to_string()
 }
 
@@ -117,28 +117,19 @@ fn a_task_with_no_assignee_has_no_default_owner() {
 fn a_worker_may_only_self_assign() {
     let error = refused(Flock::check_task_add(
         "global",
-        &owners(&[OTHER]),
+        &[OTHER],
         "worker",
         None,
         None,
         Some(WORKER),
     ));
     assert!(error.contains("only to yourself"), "{error}");
-    assert!(Flock::check_task_add(
-        "global",
-        &owners(&[WORKER]),
-        "worker",
-        None,
-        None,
-        Some(WORKER)
-    )
-    .is_ok());
+    assert!(Flock::check_task_add("global", &[WORKER], "worker", None, None, Some(WORKER)).is_ok());
 }
 
 #[test]
 fn pane_caller_assigning_another_lane_on_global_needs_the_owner_role() {
-    let args =
-        |role| Flock::check_task_add("global", &owners(&[OTHER]), role, None, None, Some(OWNER));
+    let args = |role| Flock::check_task_add("global", &[OTHER], role, None, None, Some(OWNER));
     assert!(refused(args("worker")).contains("only to yourself"));
     assert!(args("owner").is_ok());
 }
@@ -158,9 +149,7 @@ fn anonymous_caller_cannot_create_in_another_panes_private_queue() {
         "the workaround is named: {error}"
     );
     // The legitimate path: a no-pane caller creating a GLOBAL task and assigning a lane.
-    assert!(
-        Flock::check_task_add("global", &owners(&[WORKER]), "anonymous", None, None, None).is_ok()
-    );
+    assert!(Flock::check_task_add("global", &[WORKER], "anonymous", None, None, None).is_ok());
 }
 
 #[test]
@@ -281,6 +270,7 @@ async fn block_unblock_cancel_and_delete_go_through_the_store() {
             .task_cancel(&task.id, Some("no"), Some(WORKER))
             .await
             .unwrap()
+            .task
             .status
     );
     let gone = tasks.add("global", "gone", "").await.unwrap();
@@ -360,7 +350,8 @@ async fn a_reasonless_block_or_cancel_stores_null_not_an_empty_string() {
     let got = flock
         .task_cancel(&cancelled.id, None, Some(WORKER))
         .await
-        .unwrap();
+        .unwrap()
+        .task;
     assert_eq!("cancelled", got.status);
     assert_eq!(None, got.block_reason);
     // A given reason is still kept verbatim.
@@ -516,4 +507,121 @@ async fn task_update_edits_fields_resolves_self_and_moves_status() {
         .task_update(&private.id, TaskUpdateArgs::default(), Some("w4:p4"))
         .await
         .is_err());
+}
+
+async fn depends_on(tasks: &Tasks, task: &str, deps: &[&str]) {
+    tasks
+        .update(
+            task,
+            crate::tasks::FieldEdit {
+                depends_on: Some(deps.iter().map(|d| d.to_string()).collect()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cancel_names_the_dependents_it_strands() {
+    // tests/test_dunk_tasks.py test_cancel_names_the_dependents_it_strands (t878).
+    let (flock, tasks) = flock_with_store("strands").await;
+    let dep = tasks.add("global", "the dependency", "").await.unwrap();
+    let row = tasks.add("global", "waits on it", "").await.unwrap();
+    depends_on(&tasks, &row.id, &[&dep.id]).await;
+    let cancelled = flock
+        .task_cancel(&dep.id, Some("duplicate"), Some(WORKER))
+        .await
+        .unwrap();
+    assert_eq!(vec![row.id.clone()], cancelled.blocked_dependents);
+    assert_eq!("cancelled", cancelled.task.status);
+}
+
+#[tokio::test]
+async fn only_live_dependents_are_named_and_the_ids_are_sorted() {
+    let (flock, tasks) = flock_with_store("strands-live").await;
+    let dep = tasks.add("global", "dep", "").await.unwrap();
+    let blocked = tasks.add("global", "blocked", "").await.unwrap();
+    let open = tasks.add("global", "open", "").await.unwrap();
+    let done = tasks.add("global", "done", "").await.unwrap();
+    let unrelated = tasks.add("global", "unrelated", "").await.unwrap();
+    for t in [&blocked, &open, &done] {
+        depends_on(&tasks, &t.id, &[&dep.id]).await;
+    }
+    tasks.block(&blocked.id, "x").await.unwrap();
+    tasks.complete(&done.id).await.unwrap();
+    let _ = unrelated;
+    let cancelled = flock
+        .task_cancel(&dep.id, None, Some(WORKER))
+        .await
+        .unwrap();
+    let mut want = vec![blocked.id.clone(), open.id.clone()];
+    want.sort();
+    assert_eq!(
+        want, cancelled.blocked_dependents,
+        "done dependents are not stranded"
+    );
+    let none = tasks.add("global", "alone", "").await.unwrap();
+    assert!(flock
+        .task_cancel(&none.id, None, None)
+        .await
+        .unwrap()
+        .blocked_dependents
+        .is_empty());
+}
+
+#[test]
+fn a_no_pane_caller_with_a_private_scope_and_self_gets_the_t278_refusal_first() {
+    // Review t1365 finding 1: Python runs t278 BEFORE `_task_assignees`, so this caller is told
+    // about the private queue, not "self-assign requires a known caller pane".
+    for assignees in [&["self"][..], &["me", "w2:p2"][..], &[][..]] {
+        let error = refused(Flock::check_task_add(
+            "w2:p2",
+            assignees,
+            "anonymous",
+            None,
+            None,
+            None,
+        ));
+        assert!(error.contains("--scope global"), "{assignees:?}: {error}");
+        assert!(!error.contains("self-assign"), "{assignees:?}: {error}");
+    }
+    // On the global queue the same caller reaches the assignee expansion and is told that.
+    let error = refused(Flock::check_task_add(
+        "global",
+        &["self"],
+        "anonymous",
+        None,
+        None,
+        None,
+    ));
+    assert!(
+        error.contains("self-assign requires a known caller pane"),
+        "{error}"
+    );
+}
+
+#[test]
+fn check_task_add_returns_the_resolved_owners_for_the_store_write() {
+    let resolved = Flock::check_task_add(
+        "global",
+        &["self", " ", "w9:p9"],
+        "owner",
+        None,
+        None,
+        Some(OWNER),
+    )
+    .unwrap();
+    assert_eq!(owners(&[OWNER, OTHER]), resolved);
+    assert!(
+        Flock::check_task_add("global", &[], "worker", None, None, Some(WORKER))
+            .unwrap()
+            .is_empty()
+    );
+    // A lane role may self-assign through `self`, which resolves to its own pane.
+    assert_eq!(
+        owners(&[WORKER]),
+        Flock::check_task_add("global", &["me"], "worker", None, None, Some(WORKER)).unwrap()
+    );
 }
