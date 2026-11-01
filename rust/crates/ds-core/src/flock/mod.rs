@@ -408,8 +408,8 @@ pub mod lanes;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
-pub mod views;
 pub mod roles_gate;
+pub mod views;
 
 #[cfg(test)]
 mod commands_inbox_tests;
