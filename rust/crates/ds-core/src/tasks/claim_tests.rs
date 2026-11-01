@@ -595,11 +595,11 @@ async fn test_priority_order_then_age() {
     let high = tasks.add("global", "high", "high").await.unwrap();
     let medium = tasks.add("global", "medium", "medium").await.unwrap();
     let order: Vec<_> = tasks
-        .list("global")
+        .list_visible(Some("global"), None, None, false, 100, None, None, false)
         .await
         .unwrap()
         .into_iter()
-        .map(|task| task.id)
+        .map(|task| task.task.id)
         .collect();
     assert_eq!(vec![urgent.id, high.id, medium.id, low.id], order);
 }
@@ -619,11 +619,11 @@ async fn test_default_low_oldest_first_and_explicit_priority_preserved() {
     assert_eq!("low", newer.priority);
     assert_eq!("medium", explicit.priority);
     let order: Vec<_> = tasks
-        .list("global")
+        .list_visible(Some("global"), None, None, false, 100, None, None, false)
         .await
         .unwrap()
         .into_iter()
-        .map(|task| task.id)
+        .map(|task| task.task.id)
         .collect();
     assert_eq!(
         vec![explicit.id.clone(), older.id.clone(), newer.id.clone()],
