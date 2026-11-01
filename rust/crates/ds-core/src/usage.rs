@@ -62,7 +62,11 @@ pub fn shlex_split(text: &str) -> Result<Vec<String>, String> {
                     match chars.next() {
                         Some('"') => break,
                         Some('\\') => match chars.next() {
-                            Some(x @ ('"' | '\\' | '$' | '`')) => cur.push(x),
+                            // POSIX shlex unescapes ONLY `"` and `\` inside double quotes and keeps
+                            // the backslash before anything else (`$`, a backtick): bash's rule is
+                            // wider, and the difference changes what a pane would execute (t805
+                            // review t1348).
+                            Some(x @ ('"' | '\\')) => cur.push(x),
                             Some(x) => {
                                 cur.push('\\');
                                 cur.push(x);
