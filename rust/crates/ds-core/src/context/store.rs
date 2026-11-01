@@ -752,3 +752,565 @@ impl Store {
         Ok((entry.slug, reason.to_string()))
     }
 }
+
+// -- check / stats / entry_stats / digest / report (slice 4) ----------------------------
+
+use serde_json::{json, Map, Value};
+
+fn problem(slug: &str, text: &str) -> Value {
+    json!({"slug": slug, "problem": text})
+}
+
+/// `{"slug", "warning": True, "problem"}` (the key order three call sites use).
+fn warning(slug: &str, text: &str) -> Value {
+    json!({"slug": slug, "warning": true, "problem": text})
+}
+
+/// Python `round()`: ties go to the even integer.
+fn round_half_even(value: f64) -> i64 {
+    let floor = value.floor();
+    let diff = value - floor;
+    let base = floor as i64;
+    if (diff - 0.5).abs() < f64::EPSILON {
+        if base % 2 == 0 {
+            base
+        } else {
+            base + 1
+        }
+    } else {
+        value.round() as i64
+    }
+}
+
+/// `pct(values, q)` over a sorted list.
+fn pct(values: &[i64], q: f64) -> Value {
+    if values.is_empty() {
+        return Value::Null;
+    }
+    let last = values.len() as i64 - 1;
+    let index = round_half_even(q * last as f64).min(last).max(0);
+    json!(values[index as usize])
+}
+
+fn kind_of(record: &Value) -> &str {
+    record.get("kind").and_then(Value::as_str).unwrap_or("read")
+}
+
+fn slug_of(record: &Value) -> Option<&str> {
+    record.get("slug").and_then(Value::as_str)
+}
+
+fn at_of(record: &Value) -> f64 {
+    record.get("at").and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+impl Store {
+    fn ledger_err(error: rusqlite::Error) -> ContextError {
+        ContextError(error.to_string())
+    }
+
+    /// `check`: refusals (hard) and warnings over every entry.
+    pub fn check(&self, ledger: &mut Ledger) -> Result<Value, ContextError> {
+        use super::digest::parse_stated;
+        let mut problems: Vec<Value> = Vec::new();
+        let mut counts: BTreeMap<&str, i64> = CLASSES.iter().map(|c| (*c, 0)).collect();
+        if ledger.count().map_err(Self::ledger_err)? == 0 {
+            problems.push(warning(
+                "-",
+                "ledger is empty (bootstrap): every entry is trusted until `dunkingsheep \
+                 context ledger adopt` runs",
+            ));
+        }
+        let now = chrono::Local::now().naive_local();
+        for entry in self.entries() {
+            if let Some(error) = &entry.error {
+                problems.push(problem(&entry.slug, error));
+                continue;
+            }
+            let class = entry.get("class").unwrap_or_default();
+            *counts.entry(class_static(class)).or_insert(0) += 1;
+            let authority = entry.get("authority");
+            let type_ = entry.get("type");
+            let recheck = entry.get("recheck_after");
+            if class == "ground-truth" && authority != Some("owner") {
+                problems.push(problem(
+                    &entry.slug,
+                    "ground truth with authority != owner (refused)",
+                ));
+            }
+            if class == "ground-truth"
+                && !type_.is_some_and(|t| OWNER_ONLY_TYPES.contains(&t) || t == "decision")
+            {
+                let shown = type_.map(py_repr).unwrap_or_else(|| "None".to_string());
+                problems.push(warning(
+                    &entry.slug,
+                    &format!("ground truth typed {shown}; expected rule/principle/decision"),
+                ));
+            }
+            if class == "ground-truth"
+                && recheck.is_none_or(str::is_empty)
+                && !Store::is_retired(&entry)
+            {
+                problems.push(warning(
+                    &entry.slug,
+                    "ground truth has no recheck_after (rules go stale too)",
+                ));
+            }
+            let text = fs::read_to_string(&entry.path).map_err(|e| io_error(&entry.path, e))?;
+            match ledger
+                .status(&self.root, &entry.slug, &text)
+                .map_err(Self::ledger_err)?
+                .as_str()
+            {
+                "unrecorded" => problems.push(problem(
+                    &entry.slug,
+                    "not written by the daemon (no ledger row); a ground truth here is NOT injected",
+                )),
+                "modified" => problems.push(problem(
+                    &entry.slug,
+                    "edited on disk after the daemon wrote it; NOT injected",
+                )),
+                _ => {}
+            }
+            if class == "fact" && recheck.is_none_or(str::is_empty) {
+                problems.push(problem(&entry.slug, "fact has no recheck_after"));
+            }
+            if let Some(target) = entry.get("supersedes").filter(|s| !s.is_empty()) {
+                if !self.root.join(class).join(format!("{target}.md")).exists() {
+                    problems.push(problem(
+                        &entry.slug,
+                        &format!("supersedes missing entry {target}"),
+                    ));
+                }
+            }
+            if class != "ground-truth" {
+                if let Some(count) = days(recheck).filter(|n| *n > 0) {
+                    match entry.get("stated").and_then(parse_stated) {
+                        Some(stated) => {
+                            let horizon =
+                                stated.checked_add_signed(chrono::Duration::days(count as i64));
+                            if horizon.is_some_and(|h| now > h) {
+                                problems.push(json!({
+                                    "slug": entry.slug,
+                                    "problem": format!(
+                                        "stale: past recheck_after {}",
+                                        recheck.unwrap_or_default()
+                                    ),
+                                    "warning": true,
+                                }));
+                            }
+                        }
+                        None => problems.push(problem(&entry.slug, "unparseable stated date")),
+                    }
+                }
+            }
+        }
+        let is_warning = |p: &&Value| p.get("warning").is_some();
+        let refusals: Vec<&Value> = problems.iter().filter(|p| !is_warning(p)).collect();
+        let stale: Vec<&Value> = problems.iter().filter(is_warning).collect();
+        let mut counts_json = Map::new();
+        for class in CLASSES {
+            counts_json.insert(class.to_string(), json!(counts[class]));
+        }
+        Ok(json!({
+            "counts": counts_json,
+            "problems": problems,
+            "refusals": refusals,
+            "stale": stale,
+        }))
+    }
+
+    /// `stats`: per-class counts and ages, access totals, never-read and never-delivered.
+    pub fn stats(&self) -> Result<Value, ContextError> {
+        let entries = self.live_entries();
+        let today = chrono::Local::now().date_naive();
+        let mut counts = Map::new();
+        let mut ages = Map::new();
+        for class in CLASSES {
+            let of_class: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| e.get("class") == Some(class))
+                .collect();
+            counts.insert(class.to_string(), json!(of_class.len()));
+            let mut days_old = Vec::new();
+            for entry in of_class {
+                let stated = entry.get("stated").unwrap_or_default();
+                let date = chrono::NaiveDate::parse_from_str(stated, "%Y-%m-%d").map_err(|_| {
+                    ContextError(format!("Invalid isoformat string: {}", py_repr(stated)))
+                })?;
+                days_old.push((today - date).num_days());
+            }
+            days_old.sort_unstable();
+            ages.insert(
+                class.to_string(),
+                json!({"median": pct(&days_old, 0.5), "p90": pct(&days_old, 0.9)}),
+            );
+        }
+        let reads = self.reads();
+        let now = crate::clock::now_s();
+        let window = now - 7.0 * 86400.0;
+        let recent = reads
+            .iter()
+            .filter(|r| at_of(r) >= window && kind_of(r) == "read")
+            .count();
+        let injected = reads
+            .iter()
+            .filter(|r| at_of(r) >= window && kind_of(r) == "injected")
+            .count();
+        let read_count = reads.iter().filter(|r| kind_of(r) == "read").count();
+        let seen: BTreeSet<Option<&str>> = reads
+            .iter()
+            .filter(|r| kind_of(r) == "read")
+            .map(|r| slug_of(r))
+            .collect();
+        let delivered: BTreeSet<Option<&str>> = reads.iter().map(|r| slug_of(r)).collect();
+        let mut never_read: Vec<&str> = entries
+            .iter()
+            .filter(|e| !seen.contains(&Some(e.slug.as_str())))
+            .map(|e| e.slug.as_str())
+            .collect();
+        never_read.sort_unstable();
+        let mut never_delivered: Vec<&str> = entries
+            .iter()
+            .filter(|e| !delivered.contains(&Some(e.slug.as_str())))
+            .map(|e| e.slug.as_str())
+            .collect();
+        never_delivered.sort_unstable();
+        Ok(json!({
+            "counts": counts,
+            "age_days": ages,
+            "reads_7d": recent,
+            "reads_total": reads.len(),
+            "injected_7d": injected,
+            "injected_total": reads.len() - read_count,
+            "never_read": never_read,
+            "never_read_count": never_read.len(),
+            "never_delivered": never_delivered,
+            "never_delivered_count": never_delivered.len(),
+        }))
+    }
+
+    /// `entry_stats`: per-article access counts: what was delivered, what was opened, when.
+    pub fn entry_stats(&self, ledger: &mut Ledger) -> Result<Vec<Value>, ContextError> {
+        #[derive(Default)]
+        struct Slot {
+            reads: i64,
+            injected: i64,
+            last_read: Option<f64>,
+            last_injected: Option<f64>,
+        }
+        let mut counters: BTreeMap<String, Slot> = BTreeMap::new();
+        for record in self.reads() {
+            let Some(slug) = slug_of(&record).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let slot = counters.entry(slug.to_string()).or_default();
+            let injected = kind_of(&record) == "injected";
+            let at = record
+                .get("at")
+                .and_then(Value::as_f64)
+                .filter(|a| *a != 0.0);
+            let (count, last) = if injected {
+                (&mut slot.injected, &mut slot.last_injected)
+            } else {
+                (&mut slot.reads, &mut slot.last_read)
+            };
+            *count += 1;
+            if let Some(at) = at {
+                if last.is_none_or(|current| at > current) {
+                    *last = Some(at);
+                }
+            }
+        }
+        let stale_slugs: BTreeSet<String> = self.check(ledger)?["stale"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("slug").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut rows = Vec::new();
+        for entry in self.live_entries() {
+            let empty = Slot::default();
+            let slot = counters.get(&entry.slug).unwrap_or(&empty);
+            rows.push(json!({
+                "slug": entry.slug,
+                "class": entry.get("class"),
+                "subject": entry.get("subject"),
+                "authority": entry.get("authority"),
+                "stated": entry.get("stated"),
+                "reads": slot.reads,
+                "injected": slot.injected,
+                "last_read": slot.last_read,
+                "last_injected": slot.last_injected,
+                "stale": stale_slugs.contains(&entry.slug),
+            }));
+        }
+        Ok(rows)
+    }
+
+    /// `Store.digest`: the single-store digest (`digest_both` is the multi-store one).
+    pub fn digest(&self, max_bytes: usize, subject: Option<&str>) -> String {
+        use super::digest::{first_line, stale_mark};
+        let entries = self.live_entries();
+        let truths: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.get("class") == Some("ground-truth"))
+            .collect();
+        let others: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| {
+                e.get("class") != Some("ground-truth")
+                    && (subject.is_none() || e.get("subject") == subject)
+            })
+            .collect();
+        let mut included: Vec<&Entry> = truths.clone();
+        let mut parts = vec![format!("## Ground truths ({})", truths.len())];
+        if truths.is_empty() {
+            parts.push("- none".to_string());
+        }
+        for entry in &truths {
+            parts.push(format!(
+                "- [{}] {}",
+                entry.get("subject").unwrap_or("None"),
+                first_line(&entry.body)
+            ));
+        }
+        parts.push(String::new());
+        parts.push("## Relevant".to_string());
+        let mut used = parts.join("\n").len();
+        let mut omitted = 0;
+        let now = chrono::Local::now().naive_local();
+        for entry in others {
+            let line = format!(
+                "- [{}/{}] {}",
+                entry.get("class").unwrap_or("None"),
+                entry.get("subject").unwrap_or("None"),
+                first_line(&entry.body)
+            );
+            let size = line.len() + 1;
+            let stale = stale_mark(entry, now);
+            if used + size + stale.len() > max_bytes {
+                omitted += 1;
+                continue;
+            }
+            parts.push(format!("{line}{stale}"));
+            included.push(entry);
+            used += size + stale.len();
+        }
+        if omitted > 0 {
+            parts.push(format!(
+                "omitted: {omitted} entries over the {max_bytes}-byte cap"
+            ));
+        }
+        let text = format!("{}\n", parts.join("\n"));
+        for entry in included {
+            self.log_access(&entry.slug, None, "injected");
+        }
+        text
+    }
+}
+
+/// The `&'static str` of a validated class name (entries are validated at parse time).
+fn class_static(class: &str) -> &'static str {
+    CLASSES
+        .iter()
+        .copied()
+        .find(|c| *c == class)
+        .unwrap_or("fact")
+}
+
+/// `report`: stats/check/entry count over every selected store, always labelled.
+pub fn report(project_path: Option<&Path>, which: Option<&str>) -> Result<Value, ContextError> {
+    let mut out = Map::new();
+    for (name, store) in super::digest::select_stores(project_path, which) {
+        let mut ledger = Ledger::new(None);
+        let check = store.check(&mut ledger)?;
+        out.insert(
+            name,
+            json!({
+                "path": store.root.display().to_string(),
+                "stats": store.stats()?,
+                "check": check,
+                "entries": store.live_entries().len(),
+            }),
+        );
+    }
+    Ok(Value::Object(out))
+}
+
+// -- the disposable FTS index (slice 5) --------------------------------------------------
+
+/// `INDEX_COLUMNS`: the columns `search()` reads. Files are truth, the FTS index is a
+/// disposable cache, so a cache carrying anything else is disposable too.
+pub const INDEX_COLUMNS: [&str; 5] = ["slug", "subject", "body", "class", "scope"];
+
+/// `_PROBE`: the one query shape `search()` uses. Probing it is how a cache proves it can
+/// ANSWER; column names alone do not (an ordinary table with the same five columns passes a
+/// column check and then dies on MATCH, CoS review 2026-10-28).
+const PROBE: &str = "SELECT slug FROM entries WHERE entries MATCH ? ORDER BY rank LIMIT 1";
+/// A bare word on purpose: FTS5 parses the MATCH operand as a query, and a hyphen reads as
+/// an operator.
+const PROBE_TERM: &str = "probe";
+
+/// `_FTS5_HEADER`: an FTS5 table is created by exactly this header.
+fn fts5_header() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i)^\s*CREATE\s+VIRTUAL\s+TABLE\s+["\[]?entries["\]]?\s+USING\s+fts5\s*\("#)
+            .expect("static regex")
+    })
+}
+
+fn open_readonly(path: &Path) -> Result<rusqlite::Connection, rusqlite::Error> {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA query_only = ON")?;
+    Ok(connection)
+}
+
+fn sql_error(error: rusqlite::Error) -> ContextError {
+    ContextError(error.to_string())
+}
+
+impl Store {
+    pub fn index_path(&self) -> PathBuf {
+        self.root.join(".index.db")
+    }
+
+    /// `index_compatible`: true only when the cached index is an FTS5 table that can answer
+    /// the search query this code runs. Three bounded controls (the fts5 creation header, the
+    /// exact column tuple, one probe of the MATCH/rank shape), and any doubt rebuilds: a cache
+    /// another schema built is disposable. Drift is ordinary (an older release, another lane's
+    /// build, a half-written file) and the answer is always a rebuild, never an error.
+    pub fn index_compatible(&self, path: &Path) -> bool {
+        let check = || -> Result<bool, rusqlite::Error> {
+            let connection = open_readonly(path)?;
+            let sql: Option<Option<String>> = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            match sql.flatten() {
+                Some(sql) if !sql.is_empty() && fts5_header().is_match(&sql) => {}
+                _ => return Ok(false),
+            }
+            let mut statement = connection.prepare("PRAGMA table_info(entries)")?;
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<_, _>>()?;
+            if columns != INDEX_COLUMNS {
+                return Ok(false);
+            }
+            let mut probe = connection.prepare(PROBE)?;
+            let _ = probe
+                .query_map([PROBE_TERM], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(true)
+        };
+        check().unwrap_or(false)
+    }
+
+    /// `index`: rebuild the cache from the files. Returns `(indexed, path)`; a ground truth
+    /// whose authority is not owner is refused by the indexer, not downgraded.
+    pub fn index(&self) -> Result<(usize, PathBuf), ContextError> {
+        self.ensure()?;
+        let path = self.index_path();
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| io_error(&path, e))?;
+        }
+        let connection = rusqlite::Connection::open(&path).map_err(sql_error)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql_error)?;
+        let _: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .map_err(sql_error)?;
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE entries USING fts5(slug, subject, body, \
+                 class UNINDEXED, scope UNINDEXED)",
+            )
+            .map_err(sql_error)?;
+        let entries = self.entries();
+        for entry in &entries {
+            if entry.error.is_some() {
+                continue;
+            }
+            if entry.get("class") == Some("ground-truth") && entry.get("authority") != Some("owner")
+            {
+                continue;
+            }
+            connection
+                .execute(
+                    "INSERT INTO entries(slug, subject, body, class, scope) VALUES (?,?,?,?,?)",
+                    rusqlite::params![
+                        entry.slug,
+                        entry.get("subject"),
+                        entry.body,
+                        entry.get("class"),
+                        entry.get("scope"),
+                    ],
+                )
+                .map_err(sql_error)?;
+        }
+        drop(connection);
+        let indexed = entries.iter().filter(|e| e.error.is_none()).count();
+        Ok((indexed, path))
+    }
+
+    /// `search`: rebuild first when the cache is missing or cannot answer, then MATCH.
+    pub fn search(
+        &self,
+        query: &str,
+        cls: Option<&str>,
+        scope: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Value>, ContextError> {
+        let path = self.index_path();
+        if !path.exists() || !self.index_compatible(&path) {
+            self.index()?;
+        }
+        let connection = open_readonly(&path).map_err(sql_error)?;
+        let mut sql =
+            "SELECT slug, subject, class, scope FROM entries WHERE entries MATCH ?".to_string();
+        let mut params: Vec<rusqlite::types::Value> = vec![query.to_string().into()];
+        if let Some(cls) = cls.filter(|c| !c.is_empty()) {
+            sql.push_str(" AND class = ?");
+            params.push(cls.to_string().into());
+        }
+        if let Some(scope) = scope.filter(|s| !s.is_empty()) {
+            sql.push_str(" AND scope = ?");
+            params.push(scope.to_string().into());
+        }
+        sql.push_str(" ORDER BY rank LIMIT ?");
+        params.push(limit.into());
+        let run = || -> Result<Vec<[Option<String>; 4]>, rusqlite::Error> {
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?])
+            })?;
+            rows.collect()
+        };
+        let rows = run().map_err(|e| ContextError(format!("index search failed: {e}")))?;
+        for row in &rows {
+            if let Some(slug) = &row[0] {
+                self.log_access(slug, None, "read");
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|r| json!({"slug": r[0], "subject": r[1], "class": r[2], "scope": r[3]}))
+            .collect())
+    }
+}
