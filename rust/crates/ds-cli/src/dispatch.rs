@@ -126,6 +126,30 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             crate::render_fleet::render_workspaces,
         ),
         "whoami" => crate::daemon_cmd::whoami(ns),
+        // `client.call("status", check_herdr=args.check_herdr), print_status`
+        "status" => {
+            let mut args = Map::new();
+            args.insert(
+                "check_herdr".into(),
+                Value::Bool(matches!(ns.get("check_herdr"), Some(Value::Bool(true)))),
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            // `time.strftime(..., time.localtime(at))`: the host's zone, via chrono's Local.
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "status", args, |result| {
+                crate::render_print::render_status(result, &stamp, now)
+            })
+        }
         // `client.call("doctor"), print_doctor`
         "doctor" => crate::daemon_cmd::run_command(
             ns,

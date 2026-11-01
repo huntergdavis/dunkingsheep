@@ -261,7 +261,7 @@ pub fn run_command(
     ns: &Map<String, Value>,
     cmd: &str,
     args: Map<String, Value>,
-    printer: fn(&Value) -> String,
+    printer: impl Fn(&Value) -> String,
 ) -> Outcome {
     let mut client = match connect(ns) {
         Ok(client) => client,
