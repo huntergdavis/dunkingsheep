@@ -223,7 +223,15 @@ impl Flock {
         let tasks = self.task_store()?;
         let target = Self::task_scope(scope, self_pane_id, TASK_GLOBAL)?;
         let mut owners = Self::task_assignees(opts.assignees, self_pane_id)?;
-        Self::check_task_add(&target, &owners, role, opts.kind, opts.status, self_pane_id)?;
+        let owner_refs: Vec<&str> = owners.iter().map(String::as_str).collect();
+        Self::check_task_add(
+            &target,
+            &owner_refs,
+            role,
+            opts.kind,
+            opts.status,
+            self_pane_id,
+        )?;
         if owners.is_empty() {
             owners = Self::default_task_owner(self_pane_id);
         }
