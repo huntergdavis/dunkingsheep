@@ -11,6 +11,7 @@
 //! json.dumps printers pending the owner's `preserve_order` decision.
 
 use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{sorted_json, usage_command, Outcome};
@@ -88,6 +89,287 @@ fn github(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn guard_config_dir() -> PathBuf {
+    std::env::var_os("DUNKINGSHEEP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/dunkingsheep")
+        })
+}
+
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+fn file_has_marker(path: &Path, marker: &[u8]) -> bool {
+    std::fs::read(path)
+        .map(|bytes| bytes.windows(marker.len()).any(|window| window == marker))
+        .unwrap_or(false)
+}
+
+/// Python `_resolve_real_herdr()`: ignore the config wrapper directory and, when
+/// PATH already contains a shadow wrapper, return its adjacent real executable.
+fn resolve_real_herdr(guard_dir: &Path, home: &Path) -> (PathBuf, PathBuf) {
+    let guard_real = std::fs::canonicalize(guard_dir).ok();
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            if directory.as_os_str().is_empty()
+                || std::fs::canonicalize(&directory).ok() == guard_real
+            {
+                continue;
+            }
+            let candidate = directory.join("herdr");
+            if !executable(&candidate) {
+                continue;
+            }
+            let sibling = candidate.with_file_name("herdr-real");
+            if file_has_marker(&candidate, b"dunkingsheep-herdr-guard") {
+                if sibling.is_file() {
+                    return (candidate, sibling);
+                }
+                continue;
+            }
+            return (candidate, sibling);
+        }
+    }
+    let fallback = home.join(".local/bin/herdr");
+    (fallback.clone(), fallback.with_file_name("herdr-real"))
+}
+
+fn real_tmux(guard_dir: &Path) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("DUNKINGSHEEP_TMUX_BIN") {
+        candidates.push(PathBuf::from(path));
+    }
+    candidates.push(guard_dir.join("tmux-real"));
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(
+            std::env::split_paths(&path)
+                .filter(|p| std::fs::canonicalize(p).ok() != std::fs::canonicalize(guard_dir).ok())
+                .map(|p| p.join("tmux")),
+        );
+    }
+    for path in candidates {
+        let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+        if executable(&resolved) {
+            let is_guard = std::fs::read(&resolved)
+                .map(|b| {
+                    b.windows(b"dunkingsheep-tmux-guard".len())
+                        .any(|w| w == b"dunkingsheep-tmux-guard")
+                })
+                .unwrap_or(false);
+            if !is_guard {
+                return Ok(resolved);
+            }
+        }
+    }
+    Err("no executable non-guard tmux found; configure DUNKINGSHEEP_TMUX_BIN or install tmux on PATH".into())
+}
+
+fn guard_install_tmux() -> Result<Value, String> {
+    let dir = guard_config_dir().join("tmux-guard");
+    let real = real_tmux(&dir)?;
+    let target = dir.join("tmux");
+    if std::fs::canonicalize(&target)
+        .ok()
+        .is_some_and(|p| p == real)
+    {
+        return Err("cannot replace the selected real tmux with its guard".into());
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let link = dir.join("tmux-real");
+    let existing_copy = link.is_file()
+        && !std::fs::symlink_metadata(&link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        && std::fs::canonicalize(&link).ok().as_ref() == Some(&real);
+    if !existing_copy {
+        if std::fs::symlink_metadata(&link).is_ok() {
+            std::fs::remove_file(&link).map_err(|e| e.to_string())?;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link)
+            .or_else(|_| std::fs::copy(&real, &link).map(|_| ()))
+            .map_err(|e| e.to_string())?;
+    }
+    let source = include_str!("../../../../dunk_tmux_guard.py");
+    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
+    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let template = "os.path.expanduser(\n    \"~/.local/bin/dunkingsheep\")";
+    let rendered = source.replace(template, &format!("{:?}", cli.to_string_lossy()));
+    std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "wrapper": target,
+        "real_tmux": real,
+        "guard_dir": dir,
+        "note": "agent panes started by the tmux backend get this first on PATH; the user's shell is untouched"
+    }))
+}
+
+fn guard_install(no_shadow: bool) -> Result<Value, String> {
+    // The wrapper and shell setup are confined to the caller's config directory.
+    // Shadowing herdr is intentionally only requested by the default install form.
+    let dir = guard_config_dir();
+    let guard_dir = dir.join("bin");
+    std::fs::create_dir_all(&guard_dir).map_err(|e| e.to_string())?;
+    let target = guard_dir.join("herdr");
+    let source = include_str!("../../../../dunk_guard_wrapper.py");
+    let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../dunkingsheep");
+    let cli = std::fs::canonicalize(&cli).unwrap_or(cli);
+    let rendered = source.replace("__DUNKINGSHEEP__", &format!("{:?}", cli.to_string_lossy()));
+    std::fs::write(&target, &rendered).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    let bashrc = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".bashrc");
+    let marker = "# dunkingsheep herdr guard";
+    let already = std::fs::read_to_string(&bashrc)
+        .map(|s| s.contains(marker))
+        .unwrap_or(false);
+    let updated = if already {
+        false
+    } else {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&bashrc)
+            .map_err(|e| e.to_string())?;
+        writeln!(file, "\n{marker} (routes agent typing through the daemon; dunkingsheep guard uninstall to remove)\nexport PATH=\"{}:$PATH\"", guard_dir.display()).map_err(|e| e.to_string())?;
+        true
+    };
+    let mut shadow_error = None;
+    if !no_shadow {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let (herdr, sibling) = resolve_real_herdr(&guard_dir, &home);
+        if executable(&herdr) {
+            let is_guard = file_has_marker(&herdr, b"dunkingsheep-herdr-guard");
+            let shadow_result = if is_guard {
+                if executable(&sibling) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "cannot find the herdr binary (looked at {})",
+                        sibling.display()
+                    ))
+                }
+            } else if sibling.exists() {
+                Err(format!(
+                    "{} already exists; move it aside first",
+                    sibling.display()
+                ))
+            } else {
+                std::fs::rename(&herdr, &sibling).map_err(|e| e.to_string())
+            };
+            match shadow_result {
+                Ok(()) => {
+                    if let Err(e) = std::fs::write(&herdr, &rendered) {
+                        shadow_error = Some(e.to_string());
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if let Err(e) = std::fs::set_permissions(
+                                &herdr,
+                                std::fs::Permissions::from_mode(0o755),
+                            ) {
+                                shadow_error = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) => shadow_error = Some(e),
+            }
+        } else {
+            shadow_error = Some(format!(
+                "cannot find the herdr binary (looked at {})",
+                herdr.display()
+            ));
+        }
+    }
+    let resolved = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|p| p.join("herdr"))
+        .find(|p| executable(p));
+    let bashrc_configured = std::fs::read_to_string(&bashrc)
+        .map(|s| s.contains(marker))
+        .unwrap_or(false);
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let (herdr_path, herdr_real_path) = resolve_real_herdr(&guard_dir, &home);
+    let shadowing =
+        file_has_marker(&herdr_path, b"dunkingsheep-herdr-guard") && herdr_real_path.exists();
+    let real_herdr = if shadowing {
+        herdr_real_path
+    } else {
+        herdr_path
+    };
+    let tmux_dir = dir.join("tmux-guard");
+    let tmux_wrapper = tmux_dir.join("tmux");
+    let tmux_real = tmux_dir.join("tmux-real");
+    let tmux_installed = tmux_wrapper.exists();
+    let mut value = serde_json::json!({
+        "installed": true, "wrapper": target, "shell_configured": bashrc_configured,
+        "active_in_this_shell": resolved.as_ref().is_some_and(|p| p.parent() == Some(guard_dir.as_path())),
+        "shadowing_herdr": shadowing, "covers_agents_started_by_herdr": shadowing,
+        "herdr_resolves_to": resolved, "real_herdr": real_herdr,
+        "guarded_commands": ["pane run", "pane send-text", "pane send-keys", "agent send", "pane close", "pane kill", "tab close", "workspace close", "pane split/rename/focus", "tab create/rename/focus", "workspace create/rename/focus", "agent start"],
+        "tmux_guard": {
+            "installed": tmux_installed,
+            "wrapper": if tmux_wrapper.exists() { Some(tmux_wrapper) } else { None::<PathBuf> },
+            "real_tmux": if tmux_real.exists() { Some(tmux_real) } else { None::<PathBuf> },
+            "covers": "agent panes started by TmuxBackend (PATH prefix); user shells untouched"
+        },
+        "bashrc_updated": updated
+    });
+    if let Some(error) = shadow_error {
+        value["shadow_error"] = Value::String(error);
+    }
+    Ok(value)
+}
+
+fn guard(ns: &Map<String, Value>) -> Outcome {
+    let result = match text(ns, "action").unwrap_or("status") {
+        "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
+        "install-tmux" => guard_install_tmux(),
+        other => return not_ported(&format!("guard {other}")),
+    };
+    match result {
+        Ok(value) if matches!(ns.get("json"), Some(Value::Bool(true))) => Outcome {
+            stdout: crate::render_print::render_json_indent2(&value),
+            stderr: String::new(),
+            code: 0,
+        },
+        Ok(value) => Outcome {
+            stdout: value
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| format!("{k:<22} {v}\n"))
+                .collect(),
+            stderr: String::new(),
+            code: 0,
+        },
+        Err(message) => Outcome {
+            stdout: String::new(),
+            stderr: format!("{message}\n"),
+            code: 1,
+        },
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -110,6 +392,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             )
         }
         "github" => github(ns),
+        "guard" => guard(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
