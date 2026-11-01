@@ -7,3 +7,5 @@ description = "Dunking Sheep terminal UI (T61). Slices so far: text editor buffe
 
 [dependencies]
 serde_json.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
