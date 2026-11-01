@@ -182,8 +182,8 @@ async fn claim_next_takes_the_highest_priority_then_oldest_and_records_the_claim
     assert_eq!(tasks.leases_for(&urgent.id, None).await.unwrap().len(), 1);
     assert_eq!(
         tasks.events(&urgent.id).await,
-        2,
-        "the priority edit and the claim"
+        3,
+        "created, the priority edit and the claim"
     );
     // t145: a pane holding in-progress work is refused a second task.
     match tasks

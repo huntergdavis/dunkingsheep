@@ -382,5 +382,8 @@ async fn an_explicit_empty_note_event_is_kept_and_only_an_omitted_one_defaults()
         .await
         .unwrap();
     let events = tasks.events_named(&task.id).await;
-    assert_eq!(vec!["note".to_string(), "".to_string()], events);
+    assert_eq!(
+        vec!["created".to_string(), "note".to_string(), "".to_string()],
+        events
+    );
 }

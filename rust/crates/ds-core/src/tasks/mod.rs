@@ -202,21 +202,83 @@ impl Tasks {
         &self.path
     }
 
-    /// Add a task with the Python's defaults.
+    /// `Tasks.add` with the defaults.
     pub async fn add(&self, scope: &str, title: &str, body: &str) -> Result<Task, DunkError> {
+        self.add_with(scope, title, body, AddOptions::default())
+            .await
+    }
+
+    /// `Tasks.add` with every argument (t1313 slice 2): status, priority, assignees,
+    /// parent, dependencies, creator and multi-assignee, in ONE immediate transaction that
+    /// also writes the `created` event, as the Python does.
+    pub async fn add_with(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        opts: AddOptions,
+    ) -> Result<Task, DunkError> {
+        let scope = validate_scope(scope)?;
         let title = title.trim().to_string();
         if title.is_empty() {
             return Err(DunkError::Refused("a task needs a title".into()));
         }
-        let scope = scope.to_string();
+        let status = validate_status(
+            opts.status
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_STATUS),
+        )?;
+        let priority = validate_priority(
+            opts.priority
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_PRIORITY),
+        )?;
+        let parent = opts
+            .parent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(String::from);
+        let deps: Vec<String> = opts
+            .depends_on
+            .iter()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
+        let assignees: Vec<String> = opts
+            .assignees
+            .iter()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
         let body = body.to_string();
+        let created_by = opts.created_by.clone();
+        let multi = opts.multi_assignee;
         let now = crate::clock::now_s();
         let id = self.writer.call(move |conn| {
-            // t1018 finding 5: ONE statement allocates and returns the number, which is
-            // exactly the Python's F1 fix ("the old SELECT-then-upsert let two processes
-            // compute the same number"). The SELECT-MAX form the slice used is the pattern
-            // that comment names.
-            let next: i64 = conn
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(db::map_sqlite)?;
+            let require = |wanted: &str| -> Result<(), DunkError> {
+                let found: Option<String> = tx
+                    .query_row("SELECT id FROM tasks WHERE id = ?", params![wanted], |row| row.get(0))
+                    .optional()
+                    .map_err(db::map_sqlite)?;
+                found.map(|_| ()).ok_or_else(|| DunkError::Refused(format!("no task with id {wanted:?}")))
+            };
+            if let Some(parent) = &parent {
+                require(parent)?;
+            }
+            for dep in &deps {
+                if Some(dep) == parent.as_ref() {
+                    return Err(DunkError::Refused("a task cannot depend on its parent".into()));
+                }
+                require(dep)?;
+            }
+            // t1018 finding 5: ONE statement allocates and returns the number.
+            let next: i64 = tx
                 .query_row(
                     "INSERT INTO counters (name, value) VALUES ('task', 1) \
                      ON CONFLICT(name) DO UPDATE SET value = value + 1 RETURNING value",
@@ -224,11 +286,16 @@ impl Tasks {
                 )
                 .map_err(db::map_sqlite)?;
             let id = format!("t{next}");
-            conn.execute(
-                "INSERT INTO tasks (id, scope, title, body, status, priority, kind, assignees, depends_on, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                params![id, scope, title, body, DEFAULT_STATUS, DEFAULT_PRIORITY,
-                        DEFAULT_KIND, "[]", "[]", now, now],
+            tx.execute(
+                "INSERT INTO tasks (id, scope, title, body, status, priority, parent_id, multi_assignee, assignees, depends_on, created_at, updated_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![id, scope, title, body, status, priority, parent, multi as i64,
+                        json!(assignees).to_string(), json!(deps).to_string(), now, now, created_by],
             ).map_err(db::map_sqlite)?;
+            tx.execute(
+                "INSERT INTO task_events (task_id, event, at, actor, scope, priority, status_to) VALUES (?,?,?,?,?,?,?)",
+                params![id, "created", now, created_by, scope, priority, status],
+            ).map_err(db::map_sqlite)?;
+            tx.commit().map_err(db::map_sqlite)?;
             Ok(id)
         }).await?;
         self.fire(&id, "created", None, None);
@@ -1306,6 +1373,18 @@ pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
     )))
 }
 
+/// `add`'s optional arguments (t1313 slice 2); `Default` is the Python's defaults.
+#[derive(Debug, Default, Clone)]
+pub struct AddOptions {
+    pub status: Option<String>,
+    pub priority: Option<String>,
+    pub assignees: Vec<String>,
+    pub parent_id: Option<String>,
+    pub depends_on: Vec<String>,
+    pub created_by: Option<String>,
+    pub multi_assignee: bool,
+}
+
 /// `update`'s field edits (t786 slice 5). A status change is `set_status`, which carries
 /// the t854/t891 guards; this edits title, body, priority and dependencies only, in ONE
 /// immediate transaction, and writes the `priority` and `depends` events the Python writes.
@@ -1671,6 +1750,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_with_stores_every_field_and_records_a_created_event() {
+        let store = store("addwith").await;
+        let parent = store.add("global", "parent", "").await.unwrap();
+        let dep = store.add("global", "dep", "").await.unwrap();
+        let t = store
+            .add_with(
+                "global",
+                "  child  ",
+                "body",
+                AddOptions {
+                    priority: Some("high".into()),
+                    assignees: vec!["w1:p1".into()],
+                    parent_id: Some(parent.id.clone()),
+                    depends_on: vec![dep.id.clone()],
+                    created_by: Some("w9:p9".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!("child", t.title);
+        assert_eq!("high", t.priority);
+        assert_eq!(r#"["w1:p1"]"#, t.assignees);
+        assert_eq!(format!(r#"["{}"]"#, dep.id), t.depends_on);
+        let events: i64 = store
+            .writer
+            .call({
+                let id = t.id.clone();
+                move |c| {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event='created' AND actor='w9:p9' AND priority='high' AND status_to='open'",
+                        params![id], |r| r.get(0)).map_err(db::map_sqlite)
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(1, events);
+    }
+
+    #[tokio::test]
+    async fn add_with_refuses_bad_parents_dependencies_and_values() {
+        let store = store("addbad").await;
+        let p = store.add("global", "p", "").await.unwrap();
+        let bad = |o: AddOptions| store.add_with("global", "x", "", o);
+        assert!(bad(AddOptions {
+            parent_id: Some("t999".into()),
+            ..Default::default()
+        })
+        .await
+        .is_err());
+        assert!(bad(AddOptions {
+            depends_on: vec!["t999".into()],
+            ..Default::default()
+        })
+        .await
+        .is_err());
+        let both = AddOptions {
+            parent_id: Some(p.id.clone()),
+            depends_on: vec![p.id.clone()],
+            ..Default::default()
+        };
+        let err = bad(both).await.unwrap_err().to_string();
+        assert!(err.contains("cannot depend on its parent"), "{err}");
+        assert!(bad(AddOptions {
+            status: Some("nope".into()),
+            ..Default::default()
+        })
+        .await
+        .is_err());
+        assert!(store.add("global", "  ", "").await.is_err());
+        // a refused add allocates no number
+        let next = store.add("global", "n", "").await.unwrap();
+        assert_eq!("t2", next.id);
+    }
+
+    #[tokio::test]
     async fn a_terminal_status_ends_the_claim() {
         // t872/PR166 in the Python: block and complete both left the lease behind, the
         // reaper reopened the task and the push loop re-claimed it.
@@ -1724,9 +1879,9 @@ mod tests {
             .unwrap();
         assert_eq!(Some(true), store.landed_of(&task.id).await.unwrap());
         assert_eq!(
-            3,
+            4,
             store.events(&task.id).await,
-            "complete + unlanded + landed"
+            "created + complete + unlanded + landed"
         );
     }
 
@@ -1998,7 +2153,7 @@ mod tests {
             .note(&task.id, "note", "w2:p1", Some("ran ctest"))
             .await
             .unwrap();
-        assert_eq!(1, store.events(&task.id).await);
+        assert_eq!(2, store.events(&task.id).await);
     }
 
     #[tokio::test]
@@ -2219,7 +2374,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            vec!["completed".to_string()],
+            vec!["created".to_string(), "completed".to_string()],
             events,
             "exactly one event row per transition, named as the Python names it"
         );
@@ -2264,7 +2419,7 @@ mod tests {
                 move |conn| {
                     Ok(conn
                         .query_row(
-                            "SELECT meta FROM task_events WHERE task_id = ?",
+                            "SELECT meta FROM task_events WHERE task_id = ? AND meta IS NOT NULL",
                             params![id],
                             |row| row.get(0),
                         )
@@ -2286,7 +2441,7 @@ mod tests {
                 move |conn| {
                     Ok(conn
                         .query_row(
-                            "SELECT meta FROM task_events WHERE task_id = ?",
+                            "SELECT meta FROM task_events WHERE task_id = ? AND meta IS NOT NULL",
                             params![id],
                             |row| row.get(0),
                         )
@@ -2387,7 +2542,7 @@ mod tests {
         assert_eq!(decode_list(Some(&c.assignees)), vec!["%1", "%3"]);
         let d = tasks.assign(&task.id, &["%9"], "set").await.unwrap();
         assert_eq!(decode_list(Some(&d.assignees)), vec!["%9"]);
-        assert_eq!(tasks.events(&task.id).await, 4);
+        assert_eq!(tasks.events(&task.id).await, 5);
         assert!(tasks.assign(&task.id, &[" "], "add").await.is_err());
         assert!(tasks.assign(&task.id, &["%1"], "bogus").await.is_err());
         assert!(tasks.assign("t999", &["%1"], "add").await.is_err());
@@ -2420,7 +2575,7 @@ mod tests {
         );
         assert_eq!(tasks.delete(&second.id).await.unwrap(), second.id);
         assert!(tasks.get(&second.id).await.is_err());
-        assert_eq!(tasks.events(&second.id).await, 1);
+        assert_eq!(tasks.events(&second.id).await, 2);
         assert_eq!(tasks.delete(&first.id).await.unwrap(), first.id);
     }
 
@@ -2463,7 +2618,7 @@ mod tests {
             ("renamed", "new", "urgent")
         );
         assert_eq!(decode_list(Some(&got.depends_on)), vec![a.id.clone()]);
-        assert_eq!(tasks.events(&b.id).await, 2);
+        assert_eq!(tasks.events(&b.id).await, 3);
         let own = FieldEdit {
             depends_on: Some(vec![b.id.clone()]),
             ..Default::default()
@@ -2486,7 +2641,7 @@ mod tests {
         assert!(tasks.update(&b.id, blank, None).await.is_err());
         assert_eq!(
             tasks.events(&b.id).await,
-            2,
+            3,
             "a refused edit writes nothing"
         );
     }
@@ -2523,8 +2678,8 @@ mod tests {
         assert_eq!(got.block_reason.as_deref(), Some("waiting"));
         assert_eq!(
             tasks.events(&b.id).await,
-            1,
-            "assignment is the only event-worthy change"
+            2,
+            "created + assignment (the only event-worthy change)"
         );
         let own = FieldEdit {
             parent_id: Some(Some(b.id.clone())),
