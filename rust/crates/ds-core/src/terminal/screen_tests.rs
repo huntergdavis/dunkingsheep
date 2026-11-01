@@ -294,7 +294,7 @@ fn test_typed_text_tells_a_draft_from_a_dim_hint() {
     assert_eq!(None, typed_text(shell));
     assert!(box_text(shell).1.contains("no input box found"));
     assert_eq!(None, typed_text(""));
-    assert!(box_text("").1.contains("no input box found"));
+    assert_eq!("the pane could not be read", box_text("").1);
 }
 
 #[test]
