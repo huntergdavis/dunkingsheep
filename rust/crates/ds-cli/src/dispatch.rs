@@ -585,6 +585,59 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Map::new(),
             crate::render_fleet::render_workspaces,
         ),
+        "list" | "ls" => crate::daemon_cmd::run_command(ns, "list_dunks", Map::new(), |result| {
+            crate::render_print::render_dunks(result["dunks"].as_array().map_or(&[], Vec::as_slice))
+        }),
+        "get" => {
+            let mut args = Map::new();
+            args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+            crate::daemon_cmd::run_command(ns, "get_dunk", args, |result| {
+                crate::render_print::render_dunk(result)
+            })
+        }
+        "add" => {
+            let mut args = Map::new();
+            args.insert(
+                "text".into(),
+                ns.get("text")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("continue".into())),
+            );
+            args.insert(
+                "interval_minutes".into(),
+                ns.get("every")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("10".into())),
+            );
+            args.insert(
+                "start".into(),
+                Value::Bool(!matches!(ns.get("no_start"), Some(Value::Bool(true)))),
+            );
+            if let Some(target) = text(ns, "target").filter(|value| !value.is_empty()) {
+                args.insert("target".into(), Value::String(target.to_string()));
+            }
+            if let Some(name) = text(ns, "name").filter(|value| !value.is_empty()) {
+                args.insert("name".into(), Value::String(name.to_string()));
+            }
+            if matches!(ns.get("only_idle"), Some(Value::Bool(true))) {
+                args.insert("only_when".into(), Value::String("idle".into()));
+            }
+            if let Some(max_sends) = ns
+                .get("max_sends")
+                .filter(|value| crate::render_print::truthy(value))
+            {
+                args.insert("max_sends".into(), max_sends.clone());
+            }
+            if matches!(ns.get("skip_if_unconsumed"), Some(Value::Bool(true))) {
+                args.insert("skip_if_unconsumed".into(), Value::Bool(true));
+            }
+            if matches!(ns.get("ignore_typing"), Some(Value::Bool(true))) {
+                args.insert("hold_while_typing".into(), Value::Bool(false));
+            }
+            crate::daemon_cmd::run_command(ns, "add_dunk", args, |result| {
+                crate::render_print::render_dunk(result)
+            })
+        }
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
         "status" => {
