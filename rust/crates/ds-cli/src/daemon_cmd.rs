@@ -87,9 +87,28 @@ pub fn call(
     client.call(cmd, args).map_err(|e| call_failure(e, timeout))
 }
 
-/// The generic tail of the Python `main()`: connect, one daemon call, then `--json` (the whole
-/// result, sorted keys: see `dispatch`) or the command's printer; and THE EXIT CODE IS A
+/// The generic tail of the Python `main()` once the daemon has answered: `--json` prints the RAW
+/// result (sorted keys: see `dispatch`), otherwise the command's printer; and THE EXIT CODE IS A
 /// CONTRACT: anything the daemon answers with `ok: false` is exit 2, whatever the prose says.
+fn finish(ns: &Map<String, Value>, result: &Value, printer: &dyn Fn(&Value) -> String) -> Outcome {
+    let stdout = if matches!(ns.get("json"), Some(Value::Bool(true))) {
+        format!("{}\n", sorted_json(result))
+    } else {
+        printer(result)
+    };
+    let code = if result.get("ok") == Some(&Value::Bool(false)) {
+        2
+    } else {
+        0
+    };
+    Outcome {
+        stdout,
+        stderr: String::new(),
+        code,
+    }
+}
+
+/// Connect, one daemon call, then [`finish`].
 pub fn run_command(
     ns: &Map<String, Value>,
     cmd: &str,
@@ -104,21 +123,31 @@ pub fn run_command(
         Ok(result) => result,
         Err(outcome) => return outcome,
     };
-    let stdout = if matches!(ns.get("json"), Some(Value::Bool(true))) {
-        format!("{}\n", sorted_json(&result))
-    } else {
-        printer(&result)
+    finish(ns, &result, &printer)
+}
+
+/// `whoami`: the daemon knows the pane (or its absence), the client knows WHY there is none, so
+/// the client's identity note travels with the HUMAN output (`setdefault`: the daemon's own value
+/// wins). `--json` prints the RAW daemon result, as the Python's `main()` does: the note is added
+/// only inside the Python's `_whoami` printer (review t1503).
+pub fn whoami(ns: &Map<String, Value>) -> Outcome {
+    let mut client = match connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
     };
-    let code = if result.get("ok") == Some(&Value::Bool(false)) {
-        2
-    } else {
-        0
+    let result = match call(&mut client, "whoami", Map::new()) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
     };
-    Outcome {
-        stdout,
-        stderr: String::new(),
-        code,
-    }
+    let note = client.identity_note.clone();
+    finish(ns, &result, &|raw| {
+        let mut map = raw.as_object().cloned().unwrap_or_default();
+        if !note.is_empty() {
+            map.entry("identity_note")
+                .or_insert_with(|| Value::String(note.clone()));
+        }
+        crate::render_fleet::render_whoami(&Value::Object(map))
+    })
 }
 
 /// `gh-token [--kind author|reviewer] [--quiet]`: the token on stdout, or (unless `--quiet`) why
