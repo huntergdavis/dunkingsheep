@@ -1258,6 +1258,47 @@ impl Tasks {
             .await
     }
 
+    /// `Tasks.recent_notes`: the last `limit` events that carry a reason, oldest first (t605).
+    /// Read only; a limit of 0 gives none.
+    pub async fn recent_notes(&self, id: &str, limit: usize) -> Result<Vec<RecentNote>, DunkError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let id = id.trim().to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT event, at, actor, meta FROM task_events WHERE task_id = ? AND meta IS NOT NULL ORDER BY id DESC LIMIT ?")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id, (limit * 4) as i64], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    let (event, at, actor, meta) = row.map_err(db::map_sqlite)?;
+                    let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                        continue;
+                    };
+                    let reason = match meta.get("reason") {
+                        Some(serde_json::Value::String(r)) => r.trim().to_string(),
+                        _ => String::new(),
+                    };
+                    if reason.is_empty() {
+                        continue;
+                    }
+                    out.push(RecentNote { event, at, actor, reason });
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+                out.reverse();
+                Ok(out)
+            })
+            .await
+    }
+
     /// The review columns `Task` does not carry (author, repo, pr, verdict) for one task.
     pub async fn review_facts(&self, id: &str) -> Result<ReviewFacts, DunkError> {
         let wanted = id.trim().to_string();
@@ -1647,6 +1688,15 @@ pub fn validate_verdict(verdict: &str) -> Result<String, DunkError> {
         "verdict must be one of {}; got {verdict:?}",
         VERDICTS.join(", ")
     )))
+}
+
+/// One entry of `Tasks.recent_notes`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecentNote {
+    pub event: String,
+    pub at: f64,
+    pub actor: Option<String>,
+    pub reason: String,
 }
 
 /// One `note` event, as `Tasks.notes` returns it (the meta is folded into `text`).

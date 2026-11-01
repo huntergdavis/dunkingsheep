@@ -15,7 +15,8 @@ use std::sync::Arc;
 use super::Flock;
 use crate::error::DunkError;
 use crate::flock::panes::PaneInfoEnv;
-use crate::tasks::{AddOptions, Decorated, FieldEdit, Task, Tasks};
+use crate::tasks::metrics::MetricsOptions;
+use crate::tasks::{AddOptions, Decorated, FieldEdit, RecentNote, Task, Tasks};
 use crate::tasks::{ClaimOptions, ClaimOutcome};
 
 /// `TASK_GLOBAL`.
@@ -543,6 +544,58 @@ impl Flock {
             .collect()
     }
 
+    /// `task_read` with the last three note reasons attached (t605); a read view never fails
+    /// on its evidence, so a notes error is an empty list.
+    pub async fn task_read_with_notes(
+        &self,
+        task_id: &str,
+        self_pane_id: Option<&str>,
+    ) -> Result<(Task, Vec<RecentNote>), DunkError> {
+        let tasks = self.task_store()?;
+        let task = self.visible_task(&tasks, task_id, self_pane_id).await?;
+        let notes = tasks.recent_notes(&task.id, 3).await.unwrap_or_default();
+        Ok((task, notes))
+    }
+
+    /// `task_metrics`: scopes by caller (a pane sees global plus its own, a caller with no pane
+    /// sees all), then the store's metrics over the window.
+    pub async fn task_metrics(
+        &self,
+        window_s: Option<f64>,
+        since: Option<f64>,
+        until: Option<f64>,
+        scope: Option<&str>,
+        bucket: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<serde_json::Value, DunkError> {
+        let tasks = self.task_store()?;
+        let pane = self_pane_id.filter(|p| !p.is_empty());
+        let (scopes, label) = match scope.map(str::trim).unwrap_or("") {
+            "" | "all" => match pane {
+                Some(p) => (
+                    Some(vec![TASK_GLOBAL.to_string(), p.to_string()]),
+                    "visible".to_string(),
+                ),
+                None => (None, "all".to_string()),
+            },
+            "global" => (Some(vec![TASK_GLOBAL.to_string()]), "global".to_string()),
+            other => {
+                let target = Self::task_scope(Some(other), self_pane_id, TASK_GLOBAL)?;
+                (Some(vec![target.clone()]), target)
+            }
+        };
+        tasks
+            .metrics(MetricsOptions {
+                window_s: window_s.unwrap_or(3600.0),
+                since,
+                until,
+                scopes,
+                bucket: bucket.unwrap_or("hour").to_string(),
+                scope_label: label,
+            })
+            .await
+    }
+
     /// `task_read`: the task, if the caller may see it.
     pub async fn task_read(
         &self,
@@ -858,6 +911,41 @@ mod list_tests {
             flock.task_follow(Some("mine"), Some("w1:p1")).unwrap().0
         );
         assert!(flock.task_follow(Some("w9:p9"), Some("w1:p1")).is_err());
+    }
+
+    #[tokio::test]
+    async fn task_read_attaches_the_last_three_note_reasons_and_metrics_pick_scopes() {
+        let (flock, tasks) = flock_with("readnotes").await;
+        let t = tasks.add("global", "t", "").await.unwrap();
+        for n in 1..=4 {
+            tasks
+                .note(&t.id, "note", "w1:p1", Some(&format!("evidence {n}")))
+                .await
+                .unwrap();
+        }
+        tasks.note(&t.id, "note", "w1:p1", None).await.unwrap();
+        let (task, notes) = flock
+            .task_read_with_notes(&t.id, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(t.id, task.id);
+        let reasons: Vec<&str> = notes.iter().map(|n| n.reason.as_str()).collect();
+        assert_eq!(vec!["evidence 2", "evidence 3", "evidence 4"], reasons);
+        assert!(tasks.recent_notes(&t.id, 0).await.unwrap().is_empty());
+        let visible = flock
+            .task_metrics(None, None, None, None, None, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert_eq!(serde_json::json!("visible"), visible["scope"]);
+        let all = flock
+            .task_metrics(None, None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::json!("all"), all["scope"]);
+        assert!(flock
+            .task_metrics(None, None, None, Some("w2:p2"), None, Some("w1:p1"))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
