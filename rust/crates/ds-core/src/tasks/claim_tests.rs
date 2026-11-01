@@ -612,6 +612,7 @@ async fn test_default_low_oldest_first_and_explicit_priority_preserved() {
     let explicit = add_with(&tasks, "explicit medium", Some("medium"), &[], &[], false).await;
     tasks.assign(&older.id, &["w1:p1"], "add").await.unwrap();
     tasks.assign(&newer.id, &["w1:p1"], "add").await.unwrap();
+    tasks.assign(&explicit.id, &["w1:p1"], "add").await.unwrap();
     assert_eq!("low", older.priority);
     assert_eq!("low", newer.priority);
     assert_eq!("medium", explicit.priority);
