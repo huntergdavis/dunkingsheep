@@ -1565,6 +1565,51 @@ impl Tasks {
         self.get(&wanted).await
     }
 
+    /// `set_accounting_pr` (FLAT_FLEET 6.4): record the accounting PR a review's accept verdict
+    /// opened. The body PR stays in `pr`; both numbers are then on the one review task. One
+    /// `accounting` event carries the task's scope and priority and
+    /// `{"accounting_pr", "body_pr"}`; like the Python's `_record` call it has no actor.
+    /// Returns the number. An unknown id is a refusal.
+    pub async fn set_accounting_pr(&self, id: &str, number: i64) -> Result<i64, DunkError> {
+        let id = id.to_string();
+        let now = crate::clock::now_s();
+        self.writer
+            .call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(db::map_sqlite)?;
+                let (scope, priority, body_pr): (String, String, Option<i64>) = tx
+                    .query_row(
+                        "SELECT scope, priority, pr FROM tasks WHERE id = ?",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(db::map_sqlite)?
+                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                tx.execute(
+                    "UPDATE tasks SET accounting_pr = ?, updated_at = ? WHERE id = ?",
+                    params![number, now, id],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.execute(
+                    "INSERT INTO task_events (task_id, event, at, actor, scope, priority, meta) \
+                     VALUES (?,?,?,?,?,?,?)",
+                    params![
+                        id,
+                        "accounting",
+                        now,
+                        Option::<String>::None,
+                        scope,
+                        priority,
+                        json!({"accounting_pr": number, "body_pr": body_pr}).to_string()
+                    ],
+                )
+                .map_err(db::map_sqlite)?;
+                tx.commit().map_err(db::map_sqlite)?;
+                Ok(number)
+            })
+            .await
+    }
+
     /// `mark_landed_for_pr` (t906): flip every finished task that names `repo#pr` to
     /// landed, returning the ids it flipped.
     pub async fn mark_landed_for_pr(
@@ -2683,6 +2728,129 @@ mod tests {
             .set_landed("t999", true, None, None, None)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn set_accounting_pr_persists_the_number_and_writes_one_accounting_event() {
+        let store = store("accounting-pr").await;
+        let review = store.add("global", "review", "").await.unwrap();
+        store
+            .writer
+            .call({
+                let id = review.id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET pr = 41, priority = 'high' WHERE id = ?",
+                        params![id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let id = review.id.clone();
+        assert_eq!(52, store.set_accounting_pr(&id, 52).await.unwrap());
+        let (accounting_pr, pr, events, event): (Option<i64>, Option<i64>, i64, (String, Option<String>, String, String, String)) = store
+            .writer
+            .call({
+                let id = id.clone();
+                move |conn| {
+                    let accounting_pr = conn
+                        .query_row("SELECT accounting_pr, pr FROM tasks WHERE id = ?", params![id], |r| {
+                            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+                        })
+                        .map_err(db::map_sqlite)?;
+                    let events: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND event = 'accounting'",
+                            params![id],
+                            |r| r.get(0),
+                        )
+                        .map_err(db::map_sqlite)?;
+                    let event = conn
+                        .query_row(
+                            "SELECT event, actor, scope, priority, meta FROM task_events \
+                             WHERE task_id = ? AND event = 'accounting'",
+                            params![id],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                        )
+                        .map_err(db::map_sqlite)?;
+                    Ok((accounting_pr.0, accounting_pr.1, events, event))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(Some(52), accounting_pr);
+        assert_eq!(Some(41), pr, "the body PR stays where it was");
+        assert_eq!(1, events);
+        assert_eq!(
+            (
+                "accounting".to_string(),
+                None,
+                "global".to_string(),
+                "high".to_string()
+            ),
+            (event.0, event.1, event.2, event.3)
+        );
+        let meta: serde_json::Value = serde_json::from_str(&event.4).unwrap();
+        assert_eq!(json!({"accounting_pr": 52, "body_pr": 41}), meta);
+    }
+
+    #[tokio::test]
+    async fn set_accounting_pr_with_no_body_pr_records_a_null_and_a_second_call_replaces_the_number(
+    ) {
+        let store = store("accounting-pr-null").await;
+        let review = store.add("global", "review", "").await.unwrap();
+        store.set_accounting_pr(&review.id, 7).await.unwrap();
+        store.set_accounting_pr(&review.id, 9).await.unwrap();
+        let (number, metas): (Option<i64>, Vec<String>) = store
+            .writer
+            .call({
+                let id = review.id.clone();
+                move |conn| {
+                    let number = conn
+                        .query_row("SELECT accounting_pr FROM tasks WHERE id = ?", params![id], |r| r.get(0))
+                        .map_err(db::map_sqlite)?;
+                    let mut statement = conn
+                        .prepare("SELECT meta FROM task_events WHERE task_id = ? AND event = 'accounting' ORDER BY id")
+                        .map_err(db::map_sqlite)?;
+                    let metas = statement
+                        .query_map(params![id], |r| r.get::<_, String>(0))
+                        .map_err(db::map_sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(db::map_sqlite)?;
+                    Ok((number, metas))
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(Some(9), number, "the column holds the latest number");
+        assert_eq!(2, metas.len(), "every call is an event: history is kept");
+        assert_eq!(
+            json!({"accounting_pr": 7, "body_pr": null}).to_string(),
+            metas[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_accounting_pr_on_an_unknown_id_is_a_refusal_and_writes_nothing() {
+        let store = store("accounting-pr-unknown").await;
+        let err = store.set_accounting_pr("t999", 5).await.unwrap_err();
+        assert_eq!("no task with id \"t999\"", err.to_string());
+        let events: i64 = store
+            .writer
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM task_events WHERE event = 'accounting'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap();
+        assert_eq!(0, events);
     }
 
     #[tokio::test]
