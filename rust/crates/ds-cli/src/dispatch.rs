@@ -748,9 +748,6 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_inbox_list(result)
                 })
             }
-            _ => not_ported("inbox"),
-        },
-        "inbox" => match text(ns, "inbox_command").unwrap_or("") {
             "archive" => {
                 let mut args = Map::new();
                 args.insert(
