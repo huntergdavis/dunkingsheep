@@ -949,15 +949,16 @@ mod flush_box_tests {
     use super::*;
 
     fn pane() -> Pane {
-        let mut pane = Pane::default();
-        pane.panes = vec![serde_json::json!({
-            "pane_id": P,
-            "tab_label": "Sheep",
-            "label": "Sheep shell",
-            "agent": "claude"
-        })];
-        pane.hint = "no backend panes".into();
-        pane
+        Pane {
+            panes: vec![serde_json::json!({
+                "pane_id": P,
+                "tab_label": "Sheep",
+                "label": "Sheep shell",
+                "agent": "claude"
+            })],
+            hint: "no backend panes".into(),
+            ..Pane::default()
+        }
     }
 
     #[test]
