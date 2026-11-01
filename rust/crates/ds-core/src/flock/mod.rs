@@ -401,6 +401,7 @@ pub mod dunks;
 pub mod mailbox;
 pub mod panes;
 pub mod resolve;
+pub mod views;
 
 #[cfg(test)]
 mod mailbox_tests;
