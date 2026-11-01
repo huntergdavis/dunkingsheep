@@ -1006,7 +1006,10 @@ mod flush_box_tests {
             .as_str()
             .unwrap()
             .starts_with("nothing to submit: "));
-        assert!(result["detail"].as_str().unwrap().contains("composer"));
+        assert_eq!(
+            format!("nothing to submit: {}", result["detail"].as_str().unwrap()),
+            result["message"].as_str().unwrap()
+        );
         assert_eq!(serde_json::json!("Sheep"), result["target_label"]);
         assert!(pane.keys.is_empty());
         assert_eq!(1, pane.reads.borrow().len());
