@@ -62,6 +62,7 @@ pub(crate) mod testsupport;
 pub mod usage;
 pub mod usage_providers;
 pub mod watchdog;
+pub mod watchdog_deadman;
 
 pub use error::{refusal, DunkError};
 
