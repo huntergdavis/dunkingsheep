@@ -3,14 +3,16 @@
 //! `_own_mailbox`, `_mailbox_or_self` (incl. the `own_only` lock), `inbox_count`,
 //! `inbox_list`, `inbox_status`, `inbox_stats`, `inbox_recover`.
 //!
+//! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`.
+//!
 //! NOT in this slice (tracked on t802): `inbox_send` (PM redirect, system_sender gate,
-//! notice folding: needs the outbox and `send_now`), `inbox_read` (needs the tasks view and
-//! metrics), `inbox_ack`/`archive`/`cancel`/`delete`/`fetch` (the store has no write side
-//! for them yet). `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
+//! notice folding: needs the outbox and `send_now`) and `inbox_read` (needs the tasks view). `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
 
 use crate::error::DunkError;
 use crate::inbox::{self, Counts, MailboxStats, Status, Summary};
-use crate::inbox_store::{Message, Store};
+use std::path::Path;
+
+use crate::inbox_store::{Archived, Fetched, Message, Store, Transition};
 
 use super::mailbox::MailboxEnv;
 use super::Flock;
@@ -28,6 +30,26 @@ pub trait InboxEnv: MailboxEnv {
     fn pool(&self) -> &crate::db::ReadPool;
     fn store(&self) -> &Store;
     fn now(&self) -> f64;
+    /// `self.metrics.record(kind, pane_id=.., mailbox=.., sender=.., source="inbox",
+    /// outcome="ok", duration_ms=..)`. Metrics have no Rust owner yet, so the daemon wiring
+    /// supplies this.
+    fn record_metric(
+        &self,
+        kind: &str,
+        pane_id: Option<&str>,
+        mailbox: &str,
+        sender: Option<&str>,
+        duration_ms: Option<i64>,
+    );
+}
+
+/// `inbox_ack`'s result: `_transition`'s fields plus `acked_in` and `still_pending`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AckResult {
+    pub transition: Transition,
+    pub acked_in: Option<String>,
+    /// `Some` only when a mailbox scoped the ack (t128: what a recovered batch still holds).
+    pub still_pending: Option<Vec<String>>,
 }
 
 fn refused(text: String) -> DunkError {
@@ -175,6 +197,108 @@ impl Flock {
         let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, false)?;
         let messages = env.store().recover_delivery(&key)?;
         Ok((key, messages))
+    }
+}
+
+impl Flock {
+    /// `inbox_ack`: ack only messages in the caller's own mailbox. Sender is irrelevant; an
+    /// id from another mailbox is refused, never marked read there. The no-mailbox,
+    /// no-caller call (tests, in-process) keeps the old unscoped behaviour.
+    pub fn inbox_ack(
+        &self,
+        env: &dyn InboxEnv,
+        message_ids: &[String],
+        mailbox: Option<&str>,
+        self_pane_id: Option<&str>,
+    ) -> Result<AckResult, DunkError> {
+        let scoped =
+            mailbox.is_some_and(|m| !m.is_empty()) || self_pane_id.is_some_and(|p| !p.is_empty());
+        let key = if scoped {
+            Some(self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?)
+        } else {
+            None
+        };
+        let mut before = std::collections::BTreeMap::new();
+        for id in message_ids {
+            if let Ok(status) = inbox::status(env.pool(), id, env.now()) {
+                before.insert(id.clone(), status);
+            }
+        }
+        let transition = env.store().ack(message_ids, key.as_deref())?;
+        // t128: shrink the delivery receipt to what is still unacked, so a recovered batch
+        // stops replaying once it has been displayed+acked.
+        let still_pending = match &key {
+            Some(key) => Some(env.store().note_acked(key)?),
+            None => None,
+        };
+        for id in &transition.changed {
+            let Some(was) = before.get(id) else { continue };
+            let started = was.read_at.unwrap_or(was.created_at);
+            let after = inbox::status(env.pool(), id, env.now())
+                .ok()
+                .and_then(|s| s.read_at);
+            let duration = after.map(|read| ((read - started) * 1000.0) as i64);
+            env.record_metric(
+                "inbox.acked",
+                was.pane_id.as_deref(),
+                key.as_deref().unwrap_or(""),
+                was.sender.as_deref(),
+                duration,
+            );
+        }
+        Ok(AckResult {
+            transition,
+            acked_in: key,
+            still_pending,
+        })
+    }
+
+    /// `inbox_cancel`.
+    pub fn inbox_cancel(
+        &self,
+        env: &dyn InboxEnv,
+        message_ids: &[String],
+    ) -> Result<Transition, DunkError> {
+        env.store().cancel(message_ids)
+    }
+
+    /// `inbox_delete`.
+    pub fn inbox_delete(
+        &self,
+        env: &dyn InboxEnv,
+        message_ids: &[String],
+    ) -> Result<Vec<String>, DunkError> {
+        env.store().delete(message_ids)
+    }
+
+    /// `inbox_archive`: bulk-retire a mailbox (mark read and archived, never delete).
+    pub fn inbox_archive(
+        &self,
+        env: &dyn InboxEnv,
+        mailbox: &str,
+        before: Option<f64>,
+        states: Option<&[String]>,
+    ) -> Result<Archived, DunkError> {
+        env.store().archive(mailbox, before, states)
+    }
+
+    /// `inbox_fetch`: `dest` defaults to the caller's working directory.
+    pub fn inbox_fetch(
+        &self,
+        env: &dyn InboxEnv,
+        attachment_id: &str,
+        dest: Option<&Path>,
+    ) -> Result<Fetched, DunkError> {
+        let cwd;
+        let dest = match dest.filter(|d| !d.as_os_str().is_empty()) {
+            Some(dest) => dest,
+            None => {
+                cwd = std::env::current_dir()
+                    .map_err(|e| DunkError::Refused(format!("no working directory: {e}")))?;
+                &cwd
+            }
+        };
+        env.store().fetch(attachment_id, dest)
     }
 }
 
