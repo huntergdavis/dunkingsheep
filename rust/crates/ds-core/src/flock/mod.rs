@@ -78,6 +78,11 @@ pub struct Flock {
     pub persist_enabled: bool,
     /// pane_id -> {agent, session, session_kind, cwd, argv, command, source, recorded_at}
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
+    /// One whole-send lock per pane (`Flock._lock_for`). The `Arc` lets a caller keep the
+    /// selected lock alive while holding its mutex guard.
+    pub(crate) pane_send_locks: Mutex<BTreeMap<String, Arc<Mutex<()>>>>,
+    /// The reentrant, fleet-wide keystroke-burst lock (`Flock._typing`).
+    pub(crate) typing_lock: sends::TypingLock,
     /// Which flock this is, for the per-thread caller state below.
     id: u64,
     /// pane_id -> the scope it follows for the next task (`self.task_waiters`).
@@ -109,6 +114,8 @@ impl Flock {
             lane_registry_path: lane_registry_path.into(),
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
+            pane_send_locks: Mutex::new(BTreeMap::new()),
+            typing_lock: sends::TypingLock::default(),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
             task_waiters: Mutex::new(BTreeMap::new()),
             push_wake: Arc::new(tokio::sync::Notify::new()),
