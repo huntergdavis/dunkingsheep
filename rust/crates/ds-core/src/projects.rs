@@ -58,6 +58,9 @@ pub enum State {
     /// Steps remain (a step failed; calling `spawn` again resumes).
     Partial,
     Live,
+    /// Stopped by the owner (`project_stop`): its agents and workspace are closed, its directory
+    /// is kept. A stopped name is never silently revived by `spawn`.
+    Stopped,
 }
 
 /// One project in the registry.
@@ -234,6 +237,94 @@ impl Projects {
             .count()
     }
 
+    /// `project_stop`: close a project's agents and workspace. OWNER-ONLY (docs/PROJECTS.md): the
+    /// desk can start a project but closing and stopping the fleet stays with a human; the caller
+    /// (the daemon's role check) supplies `is_owner`, the desk never can. Every close is an event.
+    /// An agent whose pane is closed is dropped from the record, so a retry after a failure closes
+    /// only what is left. The project DIRECTORY (BRIEF.md, the repo, the owner's work) is kept.
+    /// Idempotent: stopping a stopped project closes nothing more.
+    pub fn stop(
+        &mut self,
+        terminal: &mut dyn Terminal,
+        name: &str,
+        is_owner: bool,
+    ) -> Result<Project, DunkError> {
+        if !is_owner {
+            return Err(DunkError::Refused(
+                "project_stop is owner-only: closing and stopping the fleet stays with a human in a terminal".into(),
+            ));
+        }
+        let Some(index) = self.projects.iter().position(|p| p.name == name) else {
+            return Err(DunkError::Refused(format!("no project named {name:?}")));
+        };
+        let project = &mut self.projects[index];
+        if project.state == State::Stopped {
+            return Ok(project.clone());
+        }
+        let mut failures = Vec::new();
+        for (role, pane_id) in project.agents.clone() {
+            match terminal.close("pane", &pane_id) {
+                Ok(()) => {
+                    project.agents.retain(|(_, p)| *p != pane_id);
+                    log(
+                        project,
+                        "stop_agent",
+                        true,
+                        format!("closed {role}={pane_id}"),
+                    );
+                }
+                Err(error) => {
+                    log(
+                        project,
+                        "stop_agent",
+                        false,
+                        format!("{role}={pane_id}: {error}"),
+                    );
+                    failures.push(format!("{role}={pane_id}: {error}"));
+                }
+            }
+        }
+        if failures.is_empty() {
+            if let Some(workspace) = project.workspace_id.clone() {
+                match terminal.close("workspace", &workspace) {
+                    Ok(()) => {
+                        project.workspace_id = None;
+                        log(
+                            project,
+                            "stop_workspace",
+                            true,
+                            format!("closed {workspace}"),
+                        );
+                    }
+                    Err(error) => {
+                        log(
+                            project,
+                            "stop_workspace",
+                            false,
+                            format!("{workspace}: {error}"),
+                        );
+                        failures.push(format!("workspace {workspace}: {error}"));
+                    }
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(DunkError::Refused(format!(
+                "project {name}: stop incomplete ({}); calling project_stop again retries what is left",
+                failures.join("; ")
+            )));
+        }
+        project.state = State::Stopped;
+        let kept = project.dir.display().to_string();
+        log(
+            project,
+            "stopped",
+            true,
+            format!("agents and workspace closed; directory kept at {kept}"),
+        );
+        Ok(project.clone())
+    }
+
     /// `project_spawn`: validate, guard, approve, then run the steps that are not done.
     /// Idempotent by name: a live project is returned untouched; a partial one resumes.
     pub fn spawn(
@@ -259,6 +350,13 @@ impl Projects {
             )));
         }
         if let Some(existing) = self.get(&name) {
+            if existing.state == State::Stopped {
+                // Its steps are all "done", so resuming would flip it to Live with no agent
+                // running: a stopped project must never look started.
+                return Err(DunkError::Refused(format!(
+                    "project {name:?} was stopped by the owner (its directory is kept); start a new project under another name"
+                )));
+            }
             if existing.state == State::Live {
                 return Ok(existing.clone());
             }
@@ -1119,5 +1217,172 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reporter.sent.lock().unwrap().len(), 1);
+    }
+
+    fn live_project(
+        tag: &str,
+    ) -> (
+        FakeTerminal,
+        Projects,
+        crate::testsupport::Scratch<PathBuf>,
+        Project,
+    ) {
+        let (mut term, mut projects, root) = (FakeTerminal::new(), Projects::new(), root(tag));
+        let live = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        (term, projects, root, live)
+    }
+
+    #[test]
+    fn the_owner_can_stop_a_project_and_its_directory_is_kept() {
+        let (mut term, mut projects, root, live) = live_project("stop-ok");
+        let pane = live.agents[0].1.clone();
+        let workspace = live.workspace_id.clone().unwrap();
+        let stopped = projects.stop(&mut term, "app", true).unwrap();
+        assert_eq!(State::Stopped, stopped.state);
+        assert!(stopped.agents.is_empty() && stopped.workspace_id.is_none());
+        assert!(
+            term.layout_calls
+                .contains(&("close".to_string(), pane.clone())),
+            "the agent pane was closed"
+        );
+        assert!(
+            term.layout_calls
+                .contains(&("close".to_string(), workspace)),
+            "the workspace was closed"
+        );
+        assert!(
+            root.join("app/BRIEF.md").exists() && root.join("app/.git").exists(),
+            "the owner's work is kept"
+        );
+        let steps: Vec<(&str, bool)> = stopped
+            .events
+            .iter()
+            .rev()
+            .take(3)
+            .map(|e| (e.step.as_str(), e.ok))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("stopped", true),
+                ("stop_workspace", true),
+                ("stop_agent", true)
+            ]
+        );
+        // idempotent: nothing more is closed
+        let calls = term.layout_calls.len();
+        assert_eq!(
+            State::Stopped,
+            projects.stop(&mut term, "app", true).unwrap().state
+        );
+        assert_eq!(calls, term.layout_calls.len());
+    }
+
+    #[test]
+    fn project_stop_is_owner_only_and_refuses_before_closing_anything() {
+        let (mut term, mut projects, _root, _live) = live_project("stop-gate");
+        let calls = term.layout_calls.len();
+        let err = projects
+            .stop(&mut term, "app", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("project_stop is owner-only"), "{err}");
+        assert_eq!(calls, term.layout_calls.len(), "nothing was closed");
+        assert_eq!(State::Live, projects.get("app").unwrap().state);
+        assert!(projects
+            .stop(&mut term, "nope", true)
+            .unwrap_err()
+            .to_string()
+            .contains("no project named \"nope\""));
+    }
+
+    #[test]
+    fn a_failed_close_leaves_the_project_live_and_a_retry_closes_what_is_left() {
+        let (mut term, mut projects, _root, live) = live_project("stop-retry");
+        term.fail_layout = Some("tmux gone".into());
+        let err = projects
+            .stop(&mut term, "app", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("stop incomplete") && err.contains("tmux gone"),
+            "{err}"
+        );
+        let after = projects.get("app").unwrap();
+        assert_eq!(
+            State::Live,
+            after.state,
+            "a project whose agent could not be closed is not stopped"
+        );
+        assert_eq!(
+            after.agents, live.agents,
+            "the unclosed agent is still on the record"
+        );
+        assert!(after.events.iter().any(|e| e.step == "stop_agent" && !e.ok));
+        let stopped = projects.stop(&mut term, "app", true).unwrap();
+        assert_eq!(State::Stopped, stopped.state);
+    }
+
+    #[test]
+    fn a_stopped_name_is_never_silently_revived_and_frees_its_live_slot() {
+        let (mut term, mut projects, root, _live) = live_project("stop-revive");
+        projects.stop(&mut term, "app", true).unwrap();
+        let err = projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(true),
+                &Usage::Percent(10.0),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("was stopped by the owner") && err.contains("another name"),
+            "{err}"
+        );
+        assert_eq!(
+            State::Stopped,
+            projects.get("app").unwrap().state,
+            "still stopped, no agent started"
+        );
+        // a stopped project no longer counts against MAX_LIVE_PROJECTS
+        for index in 0..MAX_LIVE_PROJECTS {
+            projects
+                .spawn(
+                    &mut term,
+                    &root,
+                    &request(&format!("p{index}x")),
+                    &authority(true),
+                    &Usage::Percent(1.0),
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_project_still_waiting_for_the_owner_stops_without_touching_the_terminal() {
+        let (mut term, mut projects, root) =
+            (FakeTerminal::new(), Projects::new(), root("stop-waiting"));
+        projects
+            .spawn(
+                &mut term,
+                &root,
+                &request("app"),
+                &authority(false),
+                &Usage::Percent(10.0),
+            )
+            .unwrap();
+        let stopped = projects.stop(&mut term, "app", true).unwrap();
+        assert_eq!(State::Stopped, stopped.state);
+        assert!(term.layout_calls.is_empty());
     }
 }
