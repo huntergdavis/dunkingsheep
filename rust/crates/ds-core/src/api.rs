@@ -7,13 +7,15 @@
 //! command-group slices (T34..T38) only call [`Dispatcher::register`].
 //!
 //! NOT in this slice: the handlers themselves; the real per-request caller context
-//! (t1347, #305): [`CallerGate`] and [`RequestCtx`] are thin stand-ins to be adapted to it.
+//! (t1347): [`RequestCtx`] is a thin stand-in to be adapted to it; [`FlockGate`] wires the
+//! merged flock/roles_gate.rs (#305) into [`CallerGate`].
 
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 
 use crate::error::DunkError;
+use crate::flock::panes::PaneInfoEnv;
 use crate::flock::Flock;
 use crate::{registry, roles};
 
@@ -34,6 +36,22 @@ pub type Handler = fn(&Flock, &RequestCtx, Args) -> Result<Value, DunkError>;
 pub trait CallerGate {
     fn caller_role(&self, self_pane_id: Option<&str>) -> Result<String, DunkError>;
     fn require_superuser(&self, self_pane_id: Option<&str>, name: &str) -> Result<(), DunkError>;
+}
+
+/// The real gate: the flock's own `caller_role` / `require_superuser` (flock/roles_gate.rs)
+/// over the pane-info environment of the request.
+pub struct FlockGate<'a> {
+    pub flock: &'a Flock,
+    pub env: &'a dyn PaneInfoEnv,
+}
+
+impl CallerGate for FlockGate<'_> {
+    fn caller_role(&self, self_pane_id: Option<&str>) -> Result<String, DunkError> {
+        self.flock.caller_role(self_pane_id, self.env)
+    }
+    fn require_superuser(&self, self_pane_id: Option<&str>, name: &str) -> Result<(), DunkError> {
+        self.flock.require_superuser(self_pane_id, name, self.env)
+    }
 }
 
 /// `dunk_roles.DESK_LIMIT`.
