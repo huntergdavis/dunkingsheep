@@ -10,7 +10,7 @@ const OWNER: &str = "w2:p1";
 const WORKER: &str = "w2:p2";
 const OTHER: &str = "w9:p9";
 
-fn refused(result: Result<(), DunkError>) -> String {
+fn refused<T: std::fmt::Debug>(result: Result<T, DunkError>) -> String {
     result.expect_err("expected a refusal").to_string()
 }
 
@@ -117,28 +117,19 @@ fn a_task_with_no_assignee_has_no_default_owner() {
 fn a_worker_may_only_self_assign() {
     let error = refused(Flock::check_task_add(
         "global",
-        &owners(&[OTHER]),
+        &[OTHER],
         "worker",
         None,
         None,
         Some(WORKER),
     ));
     assert!(error.contains("only to yourself"), "{error}");
-    assert!(Flock::check_task_add(
-        "global",
-        &owners(&[WORKER]),
-        "worker",
-        None,
-        None,
-        Some(WORKER)
-    )
-    .is_ok());
+    assert!(Flock::check_task_add("global", &[WORKER], "worker", None, None, Some(WORKER)).is_ok());
 }
 
 #[test]
 fn pane_caller_assigning_another_lane_on_global_needs_the_owner_role() {
-    let args =
-        |role| Flock::check_task_add("global", &owners(&[OTHER]), role, None, None, Some(OWNER));
+    let args = |role| Flock::check_task_add("global", &[OTHER], role, None, None, Some(OWNER));
     assert!(refused(args("worker")).contains("only to yourself"));
     assert!(args("owner").is_ok());
 }
@@ -158,9 +149,7 @@ fn anonymous_caller_cannot_create_in_another_panes_private_queue() {
         "the workaround is named: {error}"
     );
     // The legitimate path: a no-pane caller creating a GLOBAL task and assigning a lane.
-    assert!(
-        Flock::check_task_add("global", &owners(&[WORKER]), "anonymous", None, None, None).is_ok()
-    );
+    assert!(Flock::check_task_add("global", &[WORKER], "anonymous", None, None, None).is_ok());
 }
 
 #[test]
@@ -447,4 +436,59 @@ async fn only_live_dependents_are_named_and_the_ids_are_sorted() {
         .unwrap()
         .blocked_dependents
         .is_empty());
+}
+
+#[test]
+fn a_no_pane_caller_with_a_private_scope_and_self_gets_the_t278_refusal_first() {
+    // Review t1365 finding 1: Python runs t278 BEFORE `_task_assignees`, so this caller is told
+    // about the private queue, not "self-assign requires a known caller pane".
+    for assignees in [&["self"][..], &["me", "w2:p2"][..], &[][..]] {
+        let error = refused(Flock::check_task_add(
+            "w2:p2",
+            assignees,
+            "anonymous",
+            None,
+            None,
+            None,
+        ));
+        assert!(error.contains("--scope global"), "{assignees:?}: {error}");
+        assert!(!error.contains("self-assign"), "{assignees:?}: {error}");
+    }
+    // On the global queue the same caller reaches the assignee expansion and is told that.
+    let error = refused(Flock::check_task_add(
+        "global",
+        &["self"],
+        "anonymous",
+        None,
+        None,
+        None,
+    ));
+    assert!(
+        error.contains("self-assign requires a known caller pane"),
+        "{error}"
+    );
+}
+
+#[test]
+fn check_task_add_returns_the_resolved_owners_for_the_store_write() {
+    let resolved = Flock::check_task_add(
+        "global",
+        &["self", " ", "w9:p9"],
+        "owner",
+        None,
+        None,
+        Some(OWNER),
+    )
+    .unwrap();
+    assert_eq!(owners(&[OWNER, OTHER]), resolved);
+    assert!(
+        Flock::check_task_add("global", &[], "worker", None, None, Some(WORKER))
+            .unwrap()
+            .is_empty()
+    );
+    // A lane role may self-assign through `self`, which resolves to its own pane.
+    assert_eq!(
+        owners(&[WORKER]),
+        Flock::check_task_add("global", &["me"], "worker", None, None, Some(WORKER)).unwrap()
+    );
 }

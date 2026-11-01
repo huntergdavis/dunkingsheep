@@ -108,17 +108,20 @@ impl Flock {
     }
 
     /// The refusals of `task_add` that precede the store write, in the Python's order: the
-    /// t278 no-pane/private-queue rule, the owner-only assignment rule, the kind rules and the
-    /// open-status rule. `target` is the resolved scope, `owners` the resolved assignees and
-    /// `role` the caller's role (`caller_role`, not ported).
+    /// t278 no-pane/private-queue rule, THEN the expansion of `self`/`me` in the assignees
+    /// (`_task_assignees`), the owner-only assignment rule, the kind rules and the open-status
+    /// rule. `assignees` are the RAW ones: resolving them first would answer "self-assign
+    /// requires a known caller pane" to a no-pane caller that Python refuses with the t278 text
+    /// (review t1365). Returns the resolved owners for the store write. `target` is the resolved
+    /// scope and `role` the caller's role (`caller_role`, not ported).
     pub fn check_task_add(
         target: &str,
-        owners: &[String],
+        assignees: &[&str],
         role: &str,
         kind: Option<&str>,
         status: Option<&str>,
         self_pane_id: Option<&str>,
-    ) -> Result<(), DunkError> {
+    ) -> Result<Vec<String>, DunkError> {
         let self_pane = self_pane_id.filter(|p| !p.is_empty());
         // t278: anonymous creation in another pane's PRIVATE queue is refused, naming the
         // workaround. (A pane caller is already refused by `task_scope`.)
@@ -130,6 +133,7 @@ impl Flock {
                  pane itself."
             )));
         }
+        let owners = Self::task_assignees(assignees, self_pane_id)?;
         let kind = kind.filter(|k| !k.is_empty()).unwrap_or("work");
         let lane_role = LANE_ROLES.contains(&role);
         if !owners.is_empty() && lane_role && owners.iter().any(|o| Some(o.as_str()) != self_pane) {
@@ -153,7 +157,7 @@ impl Flock {
                 "role {role} files open tasks; status moves through next/complete/block"
             )));
         }
-        Ok(())
+        Ok(owners)
     }
 
     fn task_store(&self) -> Result<Arc<Tasks>, DunkError> {
