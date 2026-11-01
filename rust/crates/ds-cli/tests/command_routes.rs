@@ -255,11 +255,16 @@ fn cli_route_03_dunk_edit_lifecycle_a() {
             "skip_if_unconsumed": false,
             "hold_while_typing": false
         }),
-        json!({"id": "d1", "text": "updated"}),
+        json!({
+            "id": "d1",
+            "text": "updated",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": false
+        }),
     );
     assert_eq!(0, updated.status.code().unwrap());
     assert_eq!(
-        "id               d1\nskip_if_unconsumed None\nhold_while_typing None\ntext             'updated'\n",
+        "id               d1\nskip_if_unconsumed False\nhold_while_typing False\ntext             'updated'\n",
         String::from_utf8(updated.stdout).unwrap()
     );
     assert!(updated.stderr.is_empty());
@@ -278,11 +283,17 @@ fn cli_route_03_dunk_edit_lifecycle_a() {
         &["start", "d3"],
         "start_dunk",
         json!({"id": "d3"}),
-        json!({"id": "d3", "running": true, "status": "active"}),
+        json!({
+            "id": "d3",
+            "running": true,
+            "status": "active",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": true
+        }),
     );
     assert_eq!(0, started.status.code().unwrap());
     assert_eq!(
-        "id               d3\nrunning          True\nstatus           active\nskip_if_unconsumed None\nhold_while_typing None\n",
+        "id               d3\nrunning          True\nstatus           active\nskip_if_unconsumed False\nhold_while_typing True\n",
         String::from_utf8(started.stdout).unwrap()
     );
     assert!(started.stderr.is_empty());
