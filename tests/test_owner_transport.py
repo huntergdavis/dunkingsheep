@@ -57,6 +57,10 @@ class OwnerTransportTests(unittest.TestCase):
         self.assertEqual("owner", question["mailbox"])
         self.assertEqual("telegram", question["transport"])
         self.assertEqual("telegram:1", question["external_id"])
+        self.assertIsNone(
+            question["sender"],
+            "transport ingest records a human-origin question without a sender pane",
+        )
         self.assertIsNone(question["reply_to"])
 
     def test_a_redelivered_update_does_not_become_a_second_question(self):

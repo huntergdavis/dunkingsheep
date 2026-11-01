@@ -61,6 +61,16 @@ class OwnerSend(unittest.TestCase):
             desk.CHANNEL_INDEX.update(index)
             desk.app.dependency_overrides.clear()
 
+    def read_thread_with(self, fake):
+        """Call the route function directly; the owner-thread regression needs no ASGI client."""
+        from web import app as desk
+        saved = desk._flock
+        desk._flock = lambda: fake
+        try:
+            return desk.api_owner_thread("owner", limit=50)
+        finally:
+            desk._flock = saved
+
     def test_a_web_message_lands_in_the_owner_mailbox_and_is_typed_straight_to_the_desk(self):
         fake = Fake()
         reply = self.run_with(fake, lambda c: c.post("/api/owner-send", json={"text": "hello desk"}))
@@ -141,17 +151,33 @@ class OwnerSend(unittest.TestCase):
 
     def test_the_thread_shows_questions_and_the_desks_replies_in_order(self):
         rows = [
-            {"id": "i5", "body": "q1", "created_at": 1000.0, "transport": "web", "reply_to": None, "answered": True},
-            {"id": "i6", "body": "a1", "created_at": 1010.0, "transport": "web", "reply_to": "i5"},
-            {"id": "i9", "body": "q2", "created_at": 1020.0, "transport": "telegram", "reply_to": None, "answered": False},
+            # A human-origin question is ingested without a sender pane.
+            {"id": "i5", "body": "q1", "created_at": 1000.0, "transport": "web", "sender": None, "reply_to": None, "answered": True},
+            # A desk-authored answer has both a sender pane and a reply edge.
+            {"id": "i6", "body": "a1", "created_at": 1010.0, "transport": "web", "sender": "%133", "reply_to": "i5"},
+            # Agent mail to the desk is a top-level message, not a human question.
+            {"id": "i9", "body": "agent report", "created_at": 1020.0, "transport": None, "sender": "%21", "reply_to": None, "answered": False},
+            # A human-origin reply still has no sender pane; reply_to does not make it agent-authored.
+            {"id": "i10", "body": "human follow-up", "created_at": 1030.0, "transport": "web", "sender": None, "reply_to": "i9"},
+            # A legacy row with neither author nor transport provenance stays unattributed.
+            {"id": "i11", "body": "legacy row", "created_at": 1040.0, "transport": None, "sender": None, "reply_to": None},
+            # A report transport is not assumed to be human-origin without proof.
+            {"id": "i12", "body": "generated report", "created_at": 1050.0, "transport": "report", "sender": None, "reply_to": None},
         ]
-        data = self.run_with(Fake(conversation=rows), lambda c: c.get("/api/owner-thread")).json()
+        data = self.read_thread_with(Fake(conversation=rows))
         items = data["items"]
-        self.assertEqual([5, 6, 9], [i["id"] for i in items])
-        self.assertEqual(["owner", "agent", "owner"], [i["role"] for i in items])
+        self.assertEqual([5, 6, 9, 10, 11, 12], [i["id"] for i in items])
+        self.assertEqual(["owner", "agent", "agent", "owner", "unknown", "unknown"], [i["role"] for i in items])
+        self.assertEqual([None, "%133", "%21", None, None, None], [i["sender"] for i in items],
+                         "the API keeps the source sender as explicit attribution evidence")
         self.assertEqual("answered", items[0]["outcome"])
-        self.assertIn("waiting for the desk", items[2]["outcome"])
+        self.assertNotIn("outcome", items[2], "agent-authored mail has no owner delivery outcome")
         self.assertNotIn("delivery", items[1], "a desk reply carries no delivery state")
+        self.assertNotIn("delivery", items[2], "agent-authored mail is not an owner delivery")
+        self.assertIn("waiting for the desk", items[3]["outcome"])
+        self.assertIn("delivery", items[3], "a human-origin reply retains owner-side delivery state")
+        self.assertNotIn("delivery", items[4], "ambiguous legacy attribution is not guessed as owner mail")
+        self.assertNotIn("delivery", items[5], "report transport is not assumed to be a human sender")
 
 
 if __name__ == "__main__":

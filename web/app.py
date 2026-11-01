@@ -704,15 +704,26 @@ async def api_owner_send(request: Request, _: Annotated[str, Depends(require_aut
 
 def _owner_thread_item(row):
     """One owner-mailbox row in the shape the thread already renders."""
-    reply = bool(row.get("reply_to"))
+    # `reply_to` is the conversation edge, not the author. Agent/desk sends to
+    # the owner mailbox carry their sending pane in `sender`; human-origin
+    # messages ingested from a known transport have no sender pane. Preserve
+    # both provenance fields and leave rows with neither source unattributed.
+    sender = row.get("sender")
+    transport = row.get("transport")
+    if sender:
+        role = "agent"
+    elif transport in {"web", "telegram"}:
+        role = "owner"
+    else:
+        role = "unknown"
     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(row.get("created_at") or 0)))
     # The thread sorts and keys by a NUMBER (mergeMessages); the mailbox id is `i<N>` from
     # one counter, so N keeps creation order across both transports.
     number = int(str(row["id"]).lstrip("i") or 0) if str(row["id"]).lstrip("i").isdigit() else 0
-    item = {"id": number, "message_id": row["id"], "role": "agent" if reply else "owner", "body": row.get("body") or "",
-            "created_at": stamp, "transport": row.get("transport"), "reply_to": row.get("reply_to"),
+    item = {"id": number, "message_id": row["id"], "role": role, "sender": sender, "body": row.get("body") or "",
+            "created_at": stamp, "transport": transport, "reply_to": row.get("reply_to"),
             "attachments": []}
-    if not reply:
+    if role == "owner":
         answered = bool(row.get("answered"))
         item["delivery"] = "acked" if answered else "stored"
         item["outcome"] = "answered" if answered else "stored in the owner mailbox · waiting for the desk"
