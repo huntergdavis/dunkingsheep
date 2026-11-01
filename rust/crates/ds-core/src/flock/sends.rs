@@ -112,7 +112,7 @@ impl TypingLock {
         loop {
             match state.owner.as_ref() {
                 None => {
-                    state.owner = Some(thread_id.clone());
+                    state.owner = Some(thread_id);
                     state.depth = 1;
                     break;
                 }
