@@ -815,6 +815,101 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task(task, &task_stamp)
                 })
             }
+            "add" => {
+                let mut args = Map::new();
+                for (key, value) in [
+                    ("title", ns.get("title").cloned().unwrap_or(Value::Null)),
+                    ("scope", ns.get("scope").cloned().unwrap_or(Value::Null)),
+                    (
+                        "body",
+                        ns.get("body")
+                            .cloned()
+                            .unwrap_or(Value::String(String::new())),
+                    ),
+                    (
+                        "status",
+                        ns.get("status")
+                            .cloned()
+                            .unwrap_or(Value::String("open".into())),
+                    ),
+                    (
+                        "priority",
+                        ns.get("priority")
+                            .cloned()
+                            .unwrap_or(Value::String("low".into())),
+                    ),
+                    (
+                        "assignees",
+                        ns.get("assign").cloned().unwrap_or(Value::Null),
+                    ),
+                    (
+                        "depends_on",
+                        ns.get("depends_on").cloned().unwrap_or(Value::Null),
+                    ),
+                    (
+                        "parent_id",
+                        ns.get("parent").cloned().unwrap_or(Value::Null),
+                    ),
+                    (
+                        "multi_assignee",
+                        Value::Bool(matches!(ns.get("multi"), Some(Value::Bool(true)))),
+                    ),
+                    (
+                        "kind",
+                        ns.get("kind")
+                            .cloned()
+                            .unwrap_or(Value::String("work".into())),
+                    ),
+                    ("author", ns.get("author").cloned().unwrap_or(Value::Null)),
+                    ("repo", ns.get("repo").cloned().unwrap_or(Value::Null)),
+                    ("pr", ns.get("pr").cloned().unwrap_or(Value::Null)),
+                    ("head", ns.get("head").cloned().unwrap_or(Value::Null)),
+                ] {
+                    args.insert(key.into(), value);
+                }
+                crate::daemon_cmd::run_command(ns, "task_add", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "list" | "ls" => {
+                let mut args = Map::new();
+                for (key, value) in [
+                    ("scope", ns.get("scope").cloned().unwrap_or(Value::Null)),
+                    ("status", ns.get("status").cloned().unwrap_or(Value::Null)),
+                    (
+                        "assignee",
+                        ns.get("assignee").cloned().unwrap_or(Value::Null),
+                    ),
+                    (
+                        "include_done",
+                        Value::Bool(matches!(ns.get("all"), Some(Value::Bool(true)))),
+                    ),
+                    (
+                        "limit",
+                        ns.get("limit").cloned().unwrap_or(Value::from(200)),
+                    ),
+                    ("kind", ns.get("kind").cloned().unwrap_or(Value::Null)),
+                    (
+                        "needs_owner",
+                        Value::Bool(matches!(ns.get("needs_owner"), Some(Value::Bool(true)))),
+                    ),
+                ] {
+                    args.insert(key.into(), value);
+                }
+                crate::daemon_cmd::run_command(
+                    ns,
+                    "task_list",
+                    args,
+                    crate::render_print::render_task_list,
+                )
+            }
+            "read" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_read", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
             _ => not_ported("task"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
