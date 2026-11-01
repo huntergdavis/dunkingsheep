@@ -312,7 +312,6 @@ fn enter_waits_for_the_text_to_settle() {
 fn read_pane_strips_leading_newlines() {
     let _serial = serial();
     let dir = tempdir();
-    let fake = fake_tmux(&dir.path().to_path_buf(), "", 0);
     let listing = pane_line("%2", "$2", "@2", "bash", "2202");
     let script = dir.path().join("tmux2");
     // One script that answers list-panes with the pane, capture-pane with a blank first line.

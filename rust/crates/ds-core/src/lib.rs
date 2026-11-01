@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod activity;
+pub mod api;
 pub mod atomic_json;
 pub mod client;
 pub mod clock;
@@ -29,6 +30,7 @@ pub mod metrics;
 pub mod owner;
 pub mod pane_record;
 pub mod panes;
+pub mod policy;
 pub mod proc;
 pub mod projects;
 pub mod protocol;

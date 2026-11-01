@@ -4,8 +4,6 @@
 //! texts are already redacted, so a port that forgets a SECRET_PATTERNS entry shows
 //! up here as a diff - which is the point of the corpus.
 
-use std::path::Path;
-
 use super::*;
 use crate::memory::pure::redact;
 

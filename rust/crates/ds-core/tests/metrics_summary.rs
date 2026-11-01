@@ -65,7 +65,6 @@ fn a_tally_counts_every_value_and_orders_by_name() {
         event("dunk.sent", None),
     ];
     let tally = metrics::tally(&events, "kind");
-    let ordered: Vec<(&String, &i64)> = tally.iter().collect();
     // The Python sorts by frequency then name; a BTreeMap cannot express that by key,
     // so this port returns NAME order (t979 defect 3). The counts are identical; the
     // ORDER is a real difference a consumer comparing serialised output would see, so

@@ -10,6 +10,20 @@ use super::ContextError;
 
 pub const CLASSES: [&str; 4] = ["ground-truth", "fact", "provisional", "history"];
 pub const AUTHORITIES: [&str; 3] = ["owner", "measured", "agent"];
+/// `TYPES`.
+pub const TYPES: [&str; 8] = [
+    "principle",
+    "decision",
+    "reference",
+    "lesson",
+    "measurement",
+    "incident",
+    "rule",
+    "wiki",
+];
+/// Types only the owner may write (docs/FLAT_FLEET.md 8): a rule is a standing instruction,
+/// and standing instructions come from one person.
+pub const OWNER_ONLY_TYPES: [&str; 2] = ["rule", "principle"];
 
 /// Front-matter keys in the order `_render` writes them.
 const RENDER_KEYS: [&str; 12] = [
@@ -443,4 +457,685 @@ impl Store {
         }
         out
     }
+}
+
+// -- write side (slice 3) ---------------------------------------------------------------
+
+use super::ledger::Ledger;
+
+/// `date.today().isoformat()`.
+fn today() -> String {
+    chrono::Local::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn io_error(path: &Path, error: std::io::Error) -> ContextError {
+    ContextError(format!("{}: {error}", path.display()))
+}
+
+/// `add`'s keyword arguments. `authority` defaults to `agent` in the Python.
+#[derive(Debug, Clone, Default)]
+pub struct AddArgs<'a> {
+    pub cls: &'a str,
+    pub subject: &'a str,
+    pub type_: &'a str,
+    pub authority: Option<&'a str>,
+    pub source: &'a str,
+    pub stated: Option<&'a str>,
+    pub recheck_after: Option<&'a str>,
+    pub supersedes: Option<&'a str>,
+    pub slug: Option<&'a str>,
+    pub by: Option<&'a str>,
+}
+
+/// `supersede`'s `**meta`: only the keys the caller passed override the old entry's.
+#[derive(Debug, Clone, Default)]
+pub struct SupersedeMeta<'a> {
+    pub authority: Option<&'a str>,
+    pub source: Option<&'a str>,
+    /// `Some(None)` = passed as `None` (explicitly cleared), `None` = not passed.
+    pub recheck_after: Option<Option<&'a str>>,
+}
+
+/// What `add` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Added {
+    pub slug: String,
+    pub path: PathBuf,
+    pub cls: String,
+}
+
+impl Store {
+    /// `_record`: log what the daemon just wrote, when a ledger is attached.
+    fn record_write(
+        &self,
+        ledger: &mut Option<&mut Ledger>,
+        path: &Path,
+        slug: &str,
+        meta: &Meta,
+        by: Option<&str>,
+    ) {
+        if let Some(ledger) = ledger.as_deref_mut() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                let get = |key: &str| meta.get(key).and_then(|v| v.as_deref());
+                let _ = ledger.record(&self.root, slug, &text, get("class"), get("authority"), by);
+            }
+        }
+    }
+
+    /// `adopt`: bootstrap, record every live entry as-is. The owner's one-shot.
+    pub fn adopt(&self, ledger: &mut Ledger, by: &str) -> Vec<String> {
+        let mut adopted = Vec::new();
+        for entry in self.live_entries() {
+            let Ok(text) = std::fs::read_to_string(&entry.path) else {
+                continue;
+            };
+            let recorded = ledger.record(
+                &self.root,
+                &entry.slug,
+                &text,
+                entry.get("class"),
+                entry.get("authority"),
+                Some(by),
+            );
+            if recorded.is_ok() {
+                adopted.push(entry.slug.clone());
+            }
+        }
+        adopted
+    }
+
+    /// `ensure`: create the root, the four class directories and the README.
+    pub fn ensure(&self) -> Result<&Path, ContextError> {
+        std::fs::create_dir_all(&self.root).map_err(|e| io_error(&self.root, e))?;
+        for name in CLASSES {
+            let dir = self.root.join(name);
+            if !dir.is_dir() {
+                std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+            }
+        }
+        let readme = self.root.join("README.md");
+        if !readme.exists() {
+            std::fs::write(
+                &readme,
+                "# .dunkingsheep context store\n\nDeprecated: see vp-of-agentry/docs/CONTEXT_STORE.md.\n",
+            )
+            .map_err(|e| io_error(&readme, e))?;
+        }
+        Ok(&self.root)
+    }
+
+    /// `add`. A ground truth has authority owner: an agent proposes a fact and the owner
+    /// promotes it.
+    pub fn add(
+        &self,
+        body: &str,
+        args: &AddArgs,
+        mut ledger: Option<&mut Ledger>,
+    ) -> Result<Added, ContextError> {
+        let authority = args.authority.unwrap_or("agent");
+        if !CLASSES.contains(&args.cls) {
+            return Err(ContextError(format!(
+                "class must be one of {}",
+                tuple_repr(&CLASSES)
+            )));
+        }
+        if !AUTHORITIES.contains(&authority) {
+            return Err(ContextError(format!(
+                "authority must be one of {}",
+                tuple_repr(&AUTHORITIES)
+            )));
+        }
+        if !TYPES.contains(&args.type_) {
+            return Err(ContextError(format!(
+                "type must be one of {}; got {}",
+                tuple_repr(&TYPES),
+                py_repr(args.type_)
+            )));
+        }
+        if args.cls == "ground-truth" && authority != "owner" {
+            return Err(ContextError(
+                "a ground truth has authority owner; an agent proposes a fact and the owner \
+                 promotes it"
+                    .to_string(),
+            ));
+        }
+        self.ensure()?;
+        let stated = args.stated.filter(|s| !s.is_empty()).map(str::to_string);
+        let mut slug_text = match args.slug.filter(|s| !s.is_empty()) {
+            Some(slug) => slug.to_string(),
+            None => format!(
+                "{}-{}",
+                stated.clone().unwrap_or_else(today),
+                slug(args.subject)
+            ),
+        };
+        let folder = self.root.join(args.cls);
+        std::fs::create_dir_all(&folder).map_err(|e| io_error(&folder, e))?;
+        let mut path = folder.join(format!("{slug_text}.md"));
+        let mut supersedes = args
+            .supersedes
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if path.exists() {
+            // A supersede on the same day derives the same slug, so the guarantee
+            // "supersession is the only way an entry changes" was unimplementable within a
+            // day: the new file collided with the old one. A superseding entry gets a
+            // distinct, deterministic slug instead.
+            if supersedes.is_none() {
+                return Err(ContextError(format!("entry {slug_text} already exists")));
+            }
+            let mut counter = 2;
+            while folder.join(format!("{slug_text}-{counter}.md")).exists() {
+                counter += 1;
+            }
+            slug_text = format!("{slug_text}-{counter}");
+            path = folder.join(format!("{slug_text}.md"));
+        }
+        if let Some(target) = supersedes.clone() {
+            let Some(old) = self.resolve(&target)? else {
+                return Err(ContextError(format!("supersede target {target} not found")));
+            };
+            supersedes = Some(old.slug.clone());
+            let mut meta = old.meta.clone();
+            meta.insert("superseded_by".into(), Some(slug_text.clone()));
+            std::fs::write(&old.path, render(&meta, &old.body))
+                .map_err(|e| io_error(&old.path, e))?;
+            self.record_write(&mut ledger, &old.path, &old.slug, &meta, args.by);
+        }
+        let mut meta = Meta::new();
+        let put = |meta: &mut Meta, key: &str, value: Option<String>| {
+            meta.insert(key.to_string(), value);
+        };
+        put(&mut meta, "class", Some(args.cls.to_string()));
+        put(&mut meta, "subject", Some(args.subject.to_string()));
+        put(&mut meta, "type", Some(args.type_.to_string()));
+        put(&mut meta, "scope", Some(self.scope.to_string()));
+        put(&mut meta, "authority", Some(authority.to_string()));
+        put(&mut meta, "stated", Some(stated.unwrap_or_else(today)));
+        put(&mut meta, "source", Some(args.source.to_string()));
+        put(
+            &mut meta,
+            "recheck_after",
+            match args.recheck_after {
+                Some(value) => Some(value.to_string()),
+                None if args.cls == "provisional" => Some("7d".to_string()),
+                None => None,
+            },
+        );
+        put(&mut meta, "supersedes", supersedes);
+        put(&mut meta, "superseded_by", None);
+        std::fs::write(&path, render(&meta, body)).map_err(|e| io_error(&path, e))?;
+        self.record_write(&mut ledger, &path, &slug_text, &meta, args.by);
+        Ok(Added {
+            slug: slug_text,
+            path,
+            cls: args.cls.to_string(),
+        })
+    }
+
+    /// `supersede`: a new entry that replaces `slug`, keeping its class and subject.
+    pub fn supersede(
+        &self,
+        slug_or_subject: &str,
+        new_body: &str,
+        by: Option<&str>,
+        meta: &SupersedeMeta,
+        ledger: Option<&mut Ledger>,
+    ) -> Result<Added, ContextError> {
+        let Some(old) = self.resolve(slug_or_subject)? else {
+            return Err(ContextError(format!("entry {slug_or_subject} not found")));
+        };
+        let class = old.get("class").unwrap_or_default().to_string();
+        let subject = old.get("subject").unwrap_or_default().to_string();
+        let type_ = old
+            .get("type")
+            .filter(|t| !t.is_empty())
+            .unwrap_or("reference")
+            .to_string();
+        let authority = meta
+            .authority
+            .map(str::to_string)
+            .or_else(|| {
+                old.get("authority")
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "agent".to_string());
+        let source = meta
+            .source
+            .filter(|s| !s.is_empty())
+            .or_else(|| old.get("source").filter(|s| !s.is_empty()))
+            .unwrap_or("")
+            .to_string();
+        let recheck = match meta.recheck_after {
+            Some(passed) => passed.map(str::to_string),
+            None => old.get("recheck_after").map(str::to_string),
+        };
+        self.add(
+            new_body,
+            &AddArgs {
+                cls: &class,
+                subject: &subject,
+                type_: &type_,
+                authority: Some(&authority),
+                source: &source,
+                recheck_after: recheck.as_deref(),
+                supersedes: Some(&old.slug),
+                by,
+                ..Default::default()
+            },
+            ledger,
+        )
+    }
+
+    /// `retire`: mark an entry retired and append the reason to its body.
+    pub fn retire(
+        &self,
+        slug_or_subject: &str,
+        reason: &str,
+        by: Option<&str>,
+        mut ledger: Option<&mut Ledger>,
+    ) -> Result<(String, String), ContextError> {
+        let Some(entry) = self.resolve(slug_or_subject)? else {
+            return Err(ContextError(format!("entry {slug_or_subject} not found")));
+        };
+        let mut meta = entry.meta.clone();
+        let day = today();
+        meta.insert("retired_at".into(), Some(day.clone()));
+        meta.insert("retired_reason".into(), Some(reason.replace('\n', " ")));
+        let body = format!("{}\n\n**Retired {day}**: {reason}\n", entry.body);
+        std::fs::write(&entry.path, render(&meta, &body)).map_err(|e| io_error(&entry.path, e))?;
+        self.record_write(&mut ledger, &entry.path, &entry.slug, &meta, by);
+        Ok((entry.slug, reason.to_string()))
+    }
+}
+
+// -- check / stats / entry_stats / digest / report (slice 4) ----------------------------
+
+use serde_json::{json, Map, Value};
+
+fn problem(slug: &str, text: &str) -> Value {
+    json!({"slug": slug, "problem": text})
+}
+
+/// `{"slug", "warning": True, "problem"}` (the key order three call sites use).
+fn warning(slug: &str, text: &str) -> Value {
+    json!({"slug": slug, "warning": true, "problem": text})
+}
+
+/// Python `round()`: ties go to the even integer.
+fn round_half_even(value: f64) -> i64 {
+    let floor = value.floor();
+    let diff = value - floor;
+    let base = floor as i64;
+    if (diff - 0.5).abs() < f64::EPSILON {
+        if base % 2 == 0 {
+            base
+        } else {
+            base + 1
+        }
+    } else {
+        value.round() as i64
+    }
+}
+
+/// `pct(values, q)` over a sorted list.
+fn pct(values: &[i64], q: f64) -> Value {
+    if values.is_empty() {
+        return Value::Null;
+    }
+    let last = values.len() as i64 - 1;
+    let index = round_half_even(q * last as f64).min(last).max(0);
+    json!(values[index as usize])
+}
+
+fn kind_of(record: &Value) -> &str {
+    record.get("kind").and_then(Value::as_str).unwrap_or("read")
+}
+
+fn slug_of(record: &Value) -> Option<&str> {
+    record.get("slug").and_then(Value::as_str)
+}
+
+fn at_of(record: &Value) -> f64 {
+    record.get("at").and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+impl Store {
+    fn ledger_err(error: rusqlite::Error) -> ContextError {
+        ContextError(error.to_string())
+    }
+
+    /// `check`: refusals (hard) and warnings over every entry.
+    pub fn check(&self, ledger: &mut Ledger) -> Result<Value, ContextError> {
+        use super::digest::parse_stated;
+        let mut problems: Vec<Value> = Vec::new();
+        let mut counts: BTreeMap<&str, i64> = CLASSES.iter().map(|c| (*c, 0)).collect();
+        if ledger.count().map_err(Self::ledger_err)? == 0 {
+            problems.push(warning(
+                "-",
+                "ledger is empty (bootstrap): every entry is trusted until `dunkingsheep \
+                 context ledger adopt` runs",
+            ));
+        }
+        let now = chrono::Local::now().naive_local();
+        for entry in self.entries() {
+            if let Some(error) = &entry.error {
+                problems.push(problem(&entry.slug, error));
+                continue;
+            }
+            let class = entry.get("class").unwrap_or_default();
+            *counts.entry(class_static(class)).or_insert(0) += 1;
+            let authority = entry.get("authority");
+            let type_ = entry.get("type");
+            let recheck = entry.get("recheck_after");
+            if class == "ground-truth" && authority != Some("owner") {
+                problems.push(problem(
+                    &entry.slug,
+                    "ground truth with authority != owner (refused)",
+                ));
+            }
+            if class == "ground-truth"
+                && !type_.is_some_and(|t| OWNER_ONLY_TYPES.contains(&t) || t == "decision")
+            {
+                let shown = type_.map(py_repr).unwrap_or_else(|| "None".to_string());
+                problems.push(warning(
+                    &entry.slug,
+                    &format!("ground truth typed {shown}; expected rule/principle/decision"),
+                ));
+            }
+            if class == "ground-truth"
+                && recheck.is_none_or(str::is_empty)
+                && !Store::is_retired(&entry)
+            {
+                problems.push(warning(
+                    &entry.slug,
+                    "ground truth has no recheck_after (rules go stale too)",
+                ));
+            }
+            let text = fs::read_to_string(&entry.path).map_err(|e| io_error(&entry.path, e))?;
+            match ledger
+                .status(&self.root, &entry.slug, &text)
+                .map_err(Self::ledger_err)?
+                .as_str()
+            {
+                "unrecorded" => problems.push(problem(
+                    &entry.slug,
+                    "not written by the daemon (no ledger row); a ground truth here is NOT injected",
+                )),
+                "modified" => problems.push(problem(
+                    &entry.slug,
+                    "edited on disk after the daemon wrote it; NOT injected",
+                )),
+                _ => {}
+            }
+            if class == "fact" && recheck.is_none_or(str::is_empty) {
+                problems.push(problem(&entry.slug, "fact has no recheck_after"));
+            }
+            if let Some(target) = entry.get("supersedes").filter(|s| !s.is_empty()) {
+                if !self.root.join(class).join(format!("{target}.md")).exists() {
+                    problems.push(problem(
+                        &entry.slug,
+                        &format!("supersedes missing entry {target}"),
+                    ));
+                }
+            }
+            if class != "ground-truth" {
+                if let Some(count) = days(recheck).filter(|n| *n > 0) {
+                    match entry.get("stated").and_then(parse_stated) {
+                        Some(stated) => {
+                            let horizon =
+                                stated.checked_add_signed(chrono::Duration::days(count as i64));
+                            if horizon.is_some_and(|h| now > h) {
+                                problems.push(json!({
+                                    "slug": entry.slug,
+                                    "problem": format!(
+                                        "stale: past recheck_after {}",
+                                        recheck.unwrap_or_default()
+                                    ),
+                                    "warning": true,
+                                }));
+                            }
+                        }
+                        None => problems.push(problem(&entry.slug, "unparseable stated date")),
+                    }
+                }
+            }
+        }
+        let is_warning = |p: &&Value| p.get("warning").is_some();
+        let refusals: Vec<&Value> = problems.iter().filter(|p| !is_warning(p)).collect();
+        let stale: Vec<&Value> = problems.iter().filter(is_warning).collect();
+        let mut counts_json = Map::new();
+        for class in CLASSES {
+            counts_json.insert(class.to_string(), json!(counts[class]));
+        }
+        Ok(json!({
+            "counts": counts_json,
+            "problems": problems,
+            "refusals": refusals,
+            "stale": stale,
+        }))
+    }
+
+    /// `stats`: per-class counts and ages, access totals, never-read and never-delivered.
+    pub fn stats(&self) -> Result<Value, ContextError> {
+        let entries = self.live_entries();
+        let today = chrono::Local::now().date_naive();
+        let mut counts = Map::new();
+        let mut ages = Map::new();
+        for class in CLASSES {
+            let of_class: Vec<&Entry> = entries
+                .iter()
+                .filter(|e| e.get("class") == Some(class))
+                .collect();
+            counts.insert(class.to_string(), json!(of_class.len()));
+            let mut days_old = Vec::new();
+            for entry in of_class {
+                let stated = entry.get("stated").unwrap_or_default();
+                let date = chrono::NaiveDate::parse_from_str(stated, "%Y-%m-%d").map_err(|_| {
+                    ContextError(format!("Invalid isoformat string: {}", py_repr(stated)))
+                })?;
+                days_old.push((today - date).num_days());
+            }
+            days_old.sort_unstable();
+            ages.insert(
+                class.to_string(),
+                json!({"median": pct(&days_old, 0.5), "p90": pct(&days_old, 0.9)}),
+            );
+        }
+        let reads = self.reads();
+        let now = crate::clock::now_s();
+        let window = now - 7.0 * 86400.0;
+        let recent = reads
+            .iter()
+            .filter(|r| at_of(r) >= window && kind_of(r) == "read")
+            .count();
+        let injected = reads
+            .iter()
+            .filter(|r| at_of(r) >= window && kind_of(r) == "injected")
+            .count();
+        let read_count = reads.iter().filter(|r| kind_of(r) == "read").count();
+        let seen: BTreeSet<Option<&str>> = reads
+            .iter()
+            .filter(|r| kind_of(r) == "read")
+            .map(|r| slug_of(r))
+            .collect();
+        let delivered: BTreeSet<Option<&str>> = reads.iter().map(|r| slug_of(r)).collect();
+        let mut never_read: Vec<&str> = entries
+            .iter()
+            .filter(|e| !seen.contains(&Some(e.slug.as_str())))
+            .map(|e| e.slug.as_str())
+            .collect();
+        never_read.sort_unstable();
+        let mut never_delivered: Vec<&str> = entries
+            .iter()
+            .filter(|e| !delivered.contains(&Some(e.slug.as_str())))
+            .map(|e| e.slug.as_str())
+            .collect();
+        never_delivered.sort_unstable();
+        Ok(json!({
+            "counts": counts,
+            "age_days": ages,
+            "reads_7d": recent,
+            "reads_total": reads.len(),
+            "injected_7d": injected,
+            "injected_total": reads.len() - read_count,
+            "never_read": never_read,
+            "never_read_count": never_read.len(),
+            "never_delivered": never_delivered,
+            "never_delivered_count": never_delivered.len(),
+        }))
+    }
+
+    /// `entry_stats`: per-article access counts: what was delivered, what was opened, when.
+    pub fn entry_stats(&self, ledger: &mut Ledger) -> Result<Vec<Value>, ContextError> {
+        #[derive(Default)]
+        struct Slot {
+            reads: i64,
+            injected: i64,
+            last_read: Option<f64>,
+            last_injected: Option<f64>,
+        }
+        let mut counters: BTreeMap<String, Slot> = BTreeMap::new();
+        for record in self.reads() {
+            let Some(slug) = slug_of(&record).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let slot = counters.entry(slug.to_string()).or_default();
+            let injected = kind_of(&record) == "injected";
+            let at = record
+                .get("at")
+                .and_then(Value::as_f64)
+                .filter(|a| *a != 0.0);
+            let (count, last) = if injected {
+                (&mut slot.injected, &mut slot.last_injected)
+            } else {
+                (&mut slot.reads, &mut slot.last_read)
+            };
+            *count += 1;
+            if let Some(at) = at {
+                if last.is_none_or(|current| at > current) {
+                    *last = Some(at);
+                }
+            }
+        }
+        let stale_slugs: BTreeSet<String> = self.check(ledger)?["stale"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("slug").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut rows = Vec::new();
+        for entry in self.live_entries() {
+            let empty = Slot::default();
+            let slot = counters.get(&entry.slug).unwrap_or(&empty);
+            rows.push(json!({
+                "slug": entry.slug,
+                "class": entry.get("class"),
+                "subject": entry.get("subject"),
+                "authority": entry.get("authority"),
+                "stated": entry.get("stated"),
+                "reads": slot.reads,
+                "injected": slot.injected,
+                "last_read": slot.last_read,
+                "last_injected": slot.last_injected,
+                "stale": stale_slugs.contains(&entry.slug),
+            }));
+        }
+        Ok(rows)
+    }
+
+    /// `Store.digest`: the single-store digest (`digest_both` is the multi-store one).
+    pub fn digest(&self, max_bytes: usize, subject: Option<&str>) -> String {
+        use super::digest::{first_line, stale_mark};
+        let entries = self.live_entries();
+        let truths: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.get("class") == Some("ground-truth"))
+            .collect();
+        let others: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| {
+                e.get("class") != Some("ground-truth")
+                    && (subject.is_none() || e.get("subject") == subject)
+            })
+            .collect();
+        let mut included: Vec<&Entry> = truths.clone();
+        let mut parts = vec![format!("## Ground truths ({})", truths.len())];
+        if truths.is_empty() {
+            parts.push("- none".to_string());
+        }
+        for entry in &truths {
+            parts.push(format!(
+                "- [{}] {}",
+                entry.get("subject").unwrap_or("None"),
+                first_line(&entry.body)
+            ));
+        }
+        parts.push(String::new());
+        parts.push("## Relevant".to_string());
+        let mut used = parts.join("\n").len();
+        let mut omitted = 0;
+        let now = chrono::Local::now().naive_local();
+        for entry in others {
+            let line = format!(
+                "- [{}/{}] {}",
+                entry.get("class").unwrap_or("None"),
+                entry.get("subject").unwrap_or("None"),
+                first_line(&entry.body)
+            );
+            let size = line.len() + 1;
+            let stale = stale_mark(entry, now);
+            if used + size + stale.len() > max_bytes {
+                omitted += 1;
+                continue;
+            }
+            parts.push(format!("{line}{stale}"));
+            included.push(entry);
+            used += size + stale.len();
+        }
+        if omitted > 0 {
+            parts.push(format!(
+                "omitted: {omitted} entries over the {max_bytes}-byte cap"
+            ));
+        }
+        let text = format!("{}\n", parts.join("\n"));
+        for entry in included {
+            self.log_access(&entry.slug, None, "injected");
+        }
+        text
+    }
+}
+
+/// The `&'static str` of a validated class name (entries are validated at parse time).
+fn class_static(class: &str) -> &'static str {
+    CLASSES
+        .iter()
+        .copied()
+        .find(|c| *c == class)
+        .unwrap_or("fact")
+}
+
+/// `report`: stats/check/entry count over every selected store, always labelled.
+pub fn report(project_path: Option<&Path>, which: Option<&str>) -> Result<Value, ContextError> {
+    let mut out = Map::new();
+    for (name, store) in super::digest::select_stores(project_path, which) {
+        let mut ledger = Ledger::new(None);
+        let check = store.check(&mut ledger)?;
+        out.insert(
+            name,
+            json!({
+                "path": store.root.display().to_string(),
+                "stats": store.stats()?,
+                "check": check,
+                "entries": store.live_entries().len(),
+            }),
+        );
+    }
+    Ok(Value::Object(out))
 }

@@ -7,8 +7,10 @@
 //! The edges the Python reaches through `self` are a trait here ([`TurnHooks`]): the metrics
 //! recorder, `next_jobs.observe_turn`, and the turn-end dispatch. `NoHooks` is the default.
 //!
+//! Slice 2: `turn_active` and `turn_expire` (the crashed-turn path).
+//!
 //! NOT PORTED yet (next T36 slices): `_dispatch_on_turn_end` / `_dispatch_claimed_turn_end` (the
-//! guardrails and the send), `turn_expire`, and the loops (`_task_reaper_loop`,
+//! guardrails and the send), and the loops (`_task_reaper_loop`,
 //! `_task_push_loop`, `_stuck_observer_loop`, the next-job wake) in `flock/loops.rs`.
 
 use std::collections::BTreeMap;
@@ -263,5 +265,74 @@ impl Flock {
             skip("turn.end", "unauthenticated")
         };
         Ok(json!({ "pane_id": pane_id, "ended": true, "reason": reason, "dispatch": dispatch }))
+    }
+    /// `turn_active`: true only for an unexpired declared turn. Expiry is the safety.
+    pub fn turn_active(&self, pane_id: &str) -> bool {
+        self.turn_states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(pane_id)
+            .is_some_and(|state| state.expires_at > crate::clock::now_s())
+    }
+
+    /// `turn_expire`: release expired turns and record why. This is the crashed-turn path: no
+    /// `turn_end` arrived, so the TTL fires, mail is released, and the event says so. The caller
+    /// pid's liveness is RECORDED, never used to extend the hold: a live pid does not prove the
+    /// turn is still running after the declared deadline.
+    ///
+    /// Like the Python, an ENDED turn (`expires_at` zeroed) is swept here too, after it has served
+    /// as idleness evidence. Both turn tables lose the pane.
+    pub fn turn_expire(&self, now: Option<f64>, hooks: &dyn TurnHooks) -> Vec<Value> {
+        let now = now
+            .filter(|n| *n != 0.0)
+            .unwrap_or_else(crate::clock::now_s);
+        let released: Vec<(String, TurnState)> = {
+            let mut states = self
+                .turn_states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let expired: Vec<String> = states
+                .iter()
+                .filter(|(_, state)| state.expires_at <= now)
+                .map(|(pane, _)| pane.clone())
+                .collect();
+            expired
+                .into_iter()
+                .filter_map(|pane| states.remove(&pane).map(|state| (pane, state)))
+                .collect()
+        };
+        for (pane_id, _) in &released {
+            self.turns
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(pane_id);
+        }
+        for (pane_id, state) in &released {
+            let caller = state.caller.as_ref();
+            let pid = caller
+                .and_then(|c| c.get("pid"))
+                .and_then(Value::as_i64)
+                .filter(|p| *p != 0);
+            let start = caller.and_then(|c| c.get("start")).and_then(Value::as_str);
+            let alive = pid.is_some_and(|pid| crate::proc::process_alive(pid, start));
+            eprintln!(
+                "turn expired on {pane_id} after {:.0}s (ttl {:.0}s); releasing hold (caller pid {pid:?} alive={alive})",
+                now - state.started_at,
+                state.ttl_s
+            );
+            hooks.record(
+                "turn.expired",
+                pane_id,
+                None,
+                Some("ttl"),
+                "released",
+                now,
+                Some(((now - state.started_at) * 1000.0) as i64),
+            );
+        }
+        released
+            .iter()
+            .map(|(pane_id, state)| json!({ "pane_id": pane_id, "ttl_s": state.ttl_s, "reason": "ttl" }))
+            .collect()
     }
 }
