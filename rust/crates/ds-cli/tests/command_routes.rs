@@ -224,6 +224,90 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_05_dunk_send() {
+    let fired = run_daemon_cli(
+        &["test", "d1"],
+        "fire_dunk",
+        json!({"id": "d1", "countdown_s": 0, "wait": true}),
+        json!({
+            "id": "d1",
+            "queued": true,
+            "ok": true,
+            "message_id": "m1",
+            "message": "someone is typing"
+        }),
+    );
+    assert_eq!(0, fired.status.code().unwrap());
+    assert_eq!(
+        "d1: queued (someone is typing)\n",
+        String::from_utf8(fired.stdout).unwrap()
+    );
+    assert!(fired.stderr.is_empty());
+
+    let sent = run_daemon_cli(
+        &[
+            "send",
+            "Pane A",
+            "hello",
+            "from",
+            "Rust",
+            "--wait",
+            "0.25",
+            "--ignore-typing",
+            "--desk-token",
+            "ticket-9",
+            "--no-enter",
+        ],
+        "send_text",
+        json!({
+            "target": "Pane A",
+            "text": "hello from Rust",
+            "hold_while_typing": false,
+            "wait_s": 0.25,
+            "desk_token": "ticket-9",
+            "press_enter": false
+        }),
+        json!({
+            "queued": true,
+            "ok": true,
+            "message_id": "m2",
+            "target_label": "Pane A",
+            "pane_id": "%42"
+        }),
+    );
+    assert_eq!(0, sent.status.code().unwrap());
+    assert_eq!(
+        "m2 queued for Pane A (%42): someone is typing\n",
+        String::from_utf8(sent.stdout).unwrap()
+    );
+    assert!(sent.stderr.is_empty());
+
+    let keys = run_daemon_cli(
+        &["send-keys", "Pane B", "C-x", "Enter"],
+        "send_keys",
+        json!({
+            "target": "Pane B",
+            "keys": "C-x Enter",
+            "hold_while_typing": true,
+            "wait_s": 10.0,
+            "desk_token": null
+        }),
+        json!({
+            "queued": false,
+            "ok": true,
+            "target_label": "Pane B",
+            "pane_id": "%43"
+        }),
+    );
+    assert_eq!(0, keys.status.code().unwrap());
+    assert_eq!(
+        "sent to Pane B (%43)\n",
+        String::from_utf8(keys.stdout).unwrap()
+    );
+    assert!(keys.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
