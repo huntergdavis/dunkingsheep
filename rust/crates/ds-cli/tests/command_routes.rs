@@ -325,7 +325,7 @@ fn cli_route_13_load_report() {
     let human = run_load(false);
     assert_eq!(Some(0), human.status.code());
     let human_stdout = String::from_utf8_lossy(&human.stdout);
-    assert!(human_stdout.starts_with("window None s | host load1 "));
+    assert!(human_stdout.starts_with("window Nones | host load1 "));
     assert!(human_stdout.contains("fixture"));
     assert!(human_stdout.contains("skipped: process gone\n"));
     assert!(human.stderr.is_empty());
