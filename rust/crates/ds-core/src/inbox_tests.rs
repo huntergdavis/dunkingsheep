@@ -678,3 +678,34 @@ fn the_sweep_gate_feeds_a_lane_whose_only_mail_expired() {
         sweep_gate(&mixed, "w", None, 1_601.0).expect("gate")
     );
 }
+
+#[test]
+fn mailboxes_for_pane_lists_each_name_a_pane_owns_once() {
+    let (_dir, path) = seeded();
+    // i1 is the only seeded row filed under pane %1 (mailbox 'alice'); the rest carry no pane.
+    let writer = crate::db::open_writer(&path).expect("writer");
+    writer
+        .execute(
+            "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, body, state, created_at) \
+             VALUES ('i9','crackdown-codex','crackdown-codex','%1','w1:p1','later','read',1200.0)",
+            [],
+        )
+        .expect("a second mailbox for the same pane");
+    writer
+        .execute(
+            "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, body, state, created_at) \
+             VALUES ('i10','alice','alice','%1','w1:p1','again','read',1300.0)",
+            [],
+        )
+        .expect("a repeat of an existing mailbox");
+    drop(writer);
+    let pool = crate::db::ReadPool::open(&path, 2).expect("pool");
+    assert_eq!(
+        mailboxes_for_pane(&pool, "%1").expect("query"),
+        ["alice", "crackdown-codex"]
+    );
+    assert!(
+        mailboxes_for_pane(&pool, "%404").expect("query").is_empty(),
+        "an unknown pane owns nothing"
+    );
+}

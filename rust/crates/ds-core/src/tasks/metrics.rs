@@ -383,11 +383,6 @@ mod tests {
         store.add("global", "second", "").await.unwrap();
         let third = store.add("global", "third", "").await.unwrap();
         let now = crate::clock::now_s();
-        // The Python `add` records a `created` event; the Rust one does not yet (T11 gap, filed),
-        // so seed them: this test is about what metrics() does with the log.
-        for id in [&one.id, &third.id, "t2"] {
-            event(&store, id, "created", now, None, None).await;
-        }
         event(&store, &third.id, "claimed", now, Some("w1:p1"), Some(5)).await;
         store.complete(&third.id).await.unwrap();
         event(&store, &third.id, "completed", now, Some("w1:p1"), Some(7)).await;
@@ -465,20 +460,8 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_bucket_throughput_by_hour() {
         let store = store("bucket").await;
-        let one = store.add("global", "one", "").await.unwrap();
-        let two = store.add("global", "two", "").await.unwrap();
-        // Seeded: the Rust `add` records no `created` event yet (T11 gap, filed).
-        for task in [&one, &two] {
-            event(
-                &store,
-                &task.id,
-                "created",
-                crate::clock::now_s(),
-                None,
-                None,
-            )
-            .await;
-        }
+        store.add("global", "one", "").await.unwrap();
+        store.add("global", "two", "").await.unwrap();
         let metrics = store.metrics(global_only()).await.unwrap();
         assert_eq!(3600, metrics["window"]["bucket_seconds"]);
         assert_eq!(

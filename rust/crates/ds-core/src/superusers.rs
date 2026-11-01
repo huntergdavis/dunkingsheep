@@ -159,7 +159,7 @@ pub fn match_allowlist(
         .any(|field| {
             let value = pane_info
                 .and_then(|info| info.get(field))
-                .filter(|v| !v.is_null() && py_text(v) != "")
+                .filter(|v| !v.is_null() && !py_text(v).is_empty())
                 .map(|v| py_text(v).trim().to_lowercase())
                 .unwrap_or_default();
             !value.is_empty() && wanted.contains(&value)

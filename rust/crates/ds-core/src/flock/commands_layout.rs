@@ -15,8 +15,8 @@
 //! through `DunkList::halt_aimed_at`; the backend's `close` is the [`CloseBackend`] extension
 //! trait so existing `LayoutBackend` implementors are untouched.
 //!
-//! NOT in this slice: `respawn_pane`, `retire_pane`, the `mailbox` /
-//! `role` write-back of `create_workspace` (needs `lane_register`), and `last_message`.
+//! The `mailbox`/`role` write-back of `create_workspace` is `Flock::create_workspace_with_lane`
+//! (t1420). NOT in this slice: `respawn_pane`, `retire_pane` and `last_message`.
 
 use serde_json::{json, Map, Value};
 
@@ -167,8 +167,68 @@ pub fn create_workspace(
     after_create(result, command, &what, submit)
 }
 
+/// `_title_pane`: best effort, put the lane name in the pane title too. A title is a courtesy
+/// (the agent may replace it); the registry is the record. A failed rename is `false`, never an
+/// error, and never undoes the registration that preceded it.
+pub fn title_pane(backend: &mut dyn LayoutBackend, pane_id: &str, mailbox: &str) -> bool {
+    backend.rename("pane", pane_id, mailbox).is_ok()
+}
+
+impl Flock {
+    /// `create_workspace` with its `mailbox`/`role` write-back. `mailbox` names the lane the new
+    /// pane IS and is written into the lane registry as soon as the pane exists (declared), the
+    /// write-back a backend flip needs: without it the only record of the lane is a title the
+    /// agent may overwrite, and a restore produces a pane nobody can address. `role` registers
+    /// the pane through `lane_register` (owner/system only) and reports under `out["role"]`; a
+    /// refusal there propagates AFTER the workspace exists, as in the Python.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_workspace_with_lane(
+        &self,
+        backend: &mut dyn LayoutBackend,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        command: Option<&str>,
+        focus: bool,
+        mailbox: Option<&str>,
+        role: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        self_pane_id: Option<&str>,
+        submit: Submit<'_>,
+        env: &dyn super::panes::PaneInfoEnv,
+    ) -> Result<Value, DunkError> {
+        let mut out = create_workspace(backend, label, cwd, command, focus, submit)?;
+        let pane_id = out
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        // `if mailbox and out.get("pane_id")`: truthiness of the raw string, then `.strip()`.
+        let mailbox = mailbox.filter(|m| !m.is_empty());
+        if let (Some(mailbox), Some(pane)) = (mailbox, pane_id.as_deref()) {
+            self.remember_lane(pane, mailbox.trim(), true);
+            title_pane(backend, pane, mailbox);
+        }
+        if let (Some(role), Some(pane)) = (role.filter(|r| !r.is_empty()), pane_id.as_deref()) {
+            let lane_label = mailbox.or(label.filter(|l| !l.is_empty()));
+            let registered = self.lane_register(
+                Some(pane),
+                Some(role),
+                provider,
+                model,
+                lane_label,
+                self_pane_id,
+                env,
+            )?;
+            out["role"] = registered;
+        }
+        Ok(out)
+    }
+}
+
 /// `create_tab`: `workspace` is an id, label or 'self'; omitted means the caller's own
 /// workspace when known, else the backend's focused one.
+#[allow(clippy::too_many_arguments)]
 pub fn create_tab(
     backend: &mut dyn LayoutBackend,
     workspace: Option<&str>,
@@ -200,6 +260,7 @@ pub fn create_tab(
 }
 
 /// `split_pane`: split an existing pane (any pane target) right or down.
+#[allow(clippy::too_many_arguments)]
 pub fn split_pane(
     backend: &mut dyn LayoutBackend,
     target: &str,
@@ -312,14 +373,21 @@ pub fn shlex_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// `_verify_agent_started(name, pane_id, kind)`: the confirmed child pid, or `None`.
+pub type VerifyHook<'a> =
+    &'a mut dyn FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError>;
+
+/// `lane_register(pane, role, provider, model, label)`.
+pub type RegisterHook<'a> =
+    &'a mut dyn FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError>;
+
 /// What `start_agent` needs besides the layout backend: the start check (`agent_verify`),
 /// the lane registration (`lane_register`, unported) and the launch record.
 pub struct StartHooks<'a> {
-    /// `_verify_agent_started(name, pane_id, kind)`: the confirmed child pid, or `None`.
-    pub verify: &'a mut dyn FnMut(&str, Option<&str>, &str) -> Result<Option<i64>, DunkError>,
-    /// `lane_register(pane, role, provider, model, label)`; only called when `role` is given.
-    pub lane_register:
-        &'a mut dyn FnMut(&str, &str, Option<&str>, Option<&str>, &str) -> Result<Value, DunkError>,
+    /// The start check (`agent_verify`).
+    pub verify: VerifyHook<'a>,
+    /// Only called when `role` is given.
+    pub lane_register: RegisterHook<'a>,
 }
 
 /// `start_agent`: launch `command` in a new pane registered by name. Placement: inside `tab`

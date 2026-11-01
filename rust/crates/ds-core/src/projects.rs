@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::DunkError;
+use crate::fallback::{tier_headroom, tier_state, Credit, RESERVE_PERCENT};
 use crate::terminal::{AgentSpec, Terminal};
 
 /// Max agents one project may own (named in the refusal text). docs/PROJECTS.md leaves the
@@ -138,6 +139,59 @@ pub fn usage_gate(usage: &Usage) -> Result<(), DunkError> {
             "five-hour usage is unknown ({why}); an unknown reading is never headroom"
         ))),
     }
+}
+
+/// The role of a project agent, for choosing what to launch it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Research,
+    Worker,
+    Reviewer,
+}
+
+/// Tier order for workers and reviewers: the cheap lane first. The owner's order (docs/PROJECTS.md):
+/// the newest deepseek flash, then codex when that is out of budget, then claude. The `pi` tier
+/// reads the `opencode-go` rows, which is where deepseek runs (`fallback::tier_providers`).
+/// Reviewers follow the worker order: the owner's words name only workers and research agents.
+pub const WORKER_TIER_ORDER: [&str; 3] = ["pi", "codex", "claude"];
+
+/// Tier order for research agents: the reverse (claude, then codex, then the cheap lane).
+pub const RESEARCH_TIER_ORDER: [&str; 3] = ["claude", "codex", "pi"];
+
+/// Choose the tier to launch a project agent on, by REAL usage headroom: the first tier in the
+/// role's order that is positively available AND has finite headroom strictly above the reserve
+/// (`fallback::RESERVE_PERCENT`, the same number the model-fallback planner uses). Unknown credit
+/// is not credit and a missing headroom number is not headroom, so a tier is never chosen on
+/// absence of evidence. No tier qualifies -> a refusal naming every tier's state, so the owner
+/// can see why nothing was started.
+pub fn pick_tier(role: Role, credit: &Credit) -> Result<&'static str, DunkError> {
+    let order: &[&str] = if role == Role::Research {
+        &RESEARCH_TIER_ORDER
+    } else {
+        &WORKER_TIER_ORDER
+    };
+    let mut why = Vec::new();
+    for tier in order {
+        let state = tier_state(credit, tier);
+        match (state, tier_headroom(credit, tier)) {
+            ("available", Some(left)) if left > RESERVE_PERCENT => return Ok(tier),
+            ("available", Some(left)) => why.push(format!(
+                "{tier} available ({left:?}% left, not above the {RESERVE_PERCENT} reserve)"
+            )),
+            ("available", None) => why.push(format!("{tier} available (headroom unknown)")),
+            (other, Some(left)) => why.push(format!("{tier} {other} ({left:?}% left)")),
+            (other, None) => why.push(format!("{tier} {other}")),
+        }
+    }
+    let who = match role {
+        Role::Research => "a research agent",
+        Role::Worker => "a worker",
+        Role::Reviewer => "a reviewer",
+    };
+    Err(DunkError::Refused(format!(
+        "no tier has usable headroom for {who}: {}",
+        why.join("; ")
+    )))
 }
 
 impl Projects {
@@ -755,5 +809,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(waiting.soft_cap, Some(25.0));
+    }
+
+    fn credit(states: &[(&str, &str)], headroom: &[(&str, f64)]) -> Credit {
+        let mut c = Credit::default();
+        for (k, v) in states {
+            c.states.insert((*k).into(), (*v).into());
+        }
+        for (k, v) in headroom {
+            c.headroom.insert((*k).into(), *v);
+        }
+        c
+    }
+
+    fn all_available() -> Credit {
+        credit(
+            &[
+                ("claude", "available"),
+                ("codex", "available"),
+                ("opencode-go", "available"),
+            ],
+            &[("claude", 90.0), ("codex", 80.0), ("opencode-go", 70.0)],
+        )
+    }
+
+    #[test]
+    fn workers_take_the_cheap_lane_first_and_research_takes_claude_first() {
+        let c = all_available();
+        assert_eq!(pick_tier(Role::Worker, &c).unwrap(), "pi");
+        assert_eq!(
+            pick_tier(Role::Reviewer, &c).unwrap(),
+            "pi",
+            "reviewers follow the worker order"
+        );
+        assert_eq!(pick_tier(Role::Research, &c).unwrap(), "claude");
+    }
+
+    #[test]
+    fn an_exhausted_or_unknown_tier_is_skipped_in_each_orders_direction() {
+        // deepseek (opencode-go) spent: workers move to codex, then claude
+        let mut c = all_available();
+        c.states.insert("opencode-go".into(), "exhausted".into());
+        assert_eq!(pick_tier(Role::Worker, &c).unwrap(), "codex");
+        c.states.insert("codex".into(), "unknown".into());
+        assert_eq!(pick_tier(Role::Worker, &c).unwrap(), "claude");
+        // claude spent: research moves to codex, then the cheap lane
+        let mut r = all_available();
+        r.states.insert("claude".into(), "exhausted".into());
+        assert_eq!(pick_tier(Role::Research, &r).unwrap(), "codex");
+        r.states.insert("codex".into(), "exhausted".into());
+        assert_eq!(pick_tier(Role::Research, &r).unwrap(), "pi");
+    }
+
+    #[test]
+    fn the_reserve_is_strict_and_a_missing_number_is_not_headroom() {
+        let at_five = credit(
+            &[("opencode-go", "available"), ("codex", "available")],
+            &[("opencode-go", 5.0), ("codex", 5.1)],
+        );
+        assert_eq!(
+            pick_tier(Role::Worker, &at_five).unwrap(),
+            "codex",
+            "exactly 5% is refused, 5.1% is allowed"
+        );
+        let no_numbers = credit(&[("opencode-go", "available")], &[]);
+        let err = pick_tier(Role::Worker, &no_numbers)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pi available (headroom unknown)"), "{err}");
+        let nan = credit(
+            &[("opencode-go", "available")],
+            &[("opencode-go", f64::NAN)],
+        );
+        assert!(
+            pick_tier(Role::Worker, &nan).is_err(),
+            "a NaN is not headroom"
+        );
+    }
+
+    #[test]
+    fn nothing_usable_is_a_refusal_that_names_every_tier() {
+        let spent = credit(
+            &[
+                ("claude", "exhausted"),
+                ("codex", "available"),
+                ("opencode-go", "unknown"),
+            ],
+            &[("claude", 0.0), ("codex", 3.0)],
+        );
+        let err = pick_tier(Role::Worker, &spent).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "no tier has usable headroom for a worker: pi unknown; codex available (3.0% left, not above the 5 reserve); claude exhausted (0.0% left)"
+        );
+        let research = pick_tier(Role::Research, &spent).unwrap_err().to_string();
+        assert!(
+            research
+                .starts_with("no tier has usable headroom for a research agent: claude exhausted"),
+            "{research}"
+        );
+        assert!(
+            pick_tier(Role::Worker, &Credit::default()).is_err(),
+            "an empty snapshot picks nothing"
+        );
+    }
+
+    #[test]
+    fn a_free_tier_is_never_a_project_target() {
+        // Even a funded free row is outside both orders: a project agent is not placed on a
+        // resource nobody measured for this purpose.
+        let c = credit(&[("free", "available")], &[("free", 100.0)]);
+        assert!(pick_tier(Role::Worker, &c).is_err());
+        assert!(!WORKER_TIER_ORDER.contains(&"free") && !RESEARCH_TIER_ORDER.contains(&"free"));
     }
 }

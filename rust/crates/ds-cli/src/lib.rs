@@ -4,6 +4,9 @@
 pub mod args;
 pub mod cli_table;
 pub mod context_cmd;
+pub mod daemon_cmd;
+pub mod dispatch;
+pub mod github_cmd;
 pub mod local;
 pub mod render;
 pub mod render_fleet;
