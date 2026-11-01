@@ -14,11 +14,12 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
 use crate::clock::now_s;
-use crate::db::{map_sqlite, SyncWriter};
+use crate::db::{map_sqlite, ReadPool, SyncWriter};
 use crate::error::DunkError;
 use crate::inbox::{
     check_sizes, mailbox_where, next_message_number, normalise_mailbox, receipt_of,
@@ -180,6 +181,62 @@ impl Store {
             transaction.commit().map_err(map_sqlite)?;
             Ok(message_id)
         })
+    }
+
+    /// Materialise one committed next-job intent without replacing its recipient or receipt.
+    pub fn ensure_next_job(
+        &self,
+        message_id: &str,
+        mailbox: &str,
+        pane_id: &str,
+        body: &str,
+        subject: &str,
+    ) -> Result<crate::inbox::Status, DunkError> {
+        if !message_id.starts_with("nj-") {
+            return Err(refuse("next-job message id must start with nj-"));
+        }
+
+        let (message_id, mailbox, pane_id, body, subject) = (
+            message_id.to_owned(),
+            mailbox.to_owned(),
+            pane_id.to_owned(),
+            body.to_owned(),
+            subject.to_owned(),
+        );
+        let status_id = message_id.clone();
+        self.writer.call(move |connection| {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO messages \
+                     (id,mailbox,mailbox_label,pane_id,sender,subject,body,state,created_at) \
+                     VALUES (?,?,?,?,?,?,?,'queued',?)",
+                    rusqlite::params![
+                        message_id,
+                        mailbox,
+                        mailbox,
+                        pane_id,
+                        "next-job",
+                        subject,
+                        body,
+                        now_s()
+                    ],
+                )
+                .map_err(map_sqlite)?;
+            let (stored_mailbox, stored_pane): (String, Option<String>) = connection
+                .query_row(
+                    "SELECT mailbox,pane_id FROM messages WHERE id = ?",
+                    [&message_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(map_sqlite)?;
+            if stored_mailbox != mailbox || stored_pane.as_deref() != Some(pane_id.as_str()) {
+                return Err(refuse("next-job recipient changed"));
+            }
+            Ok(())
+        })?;
+
+        let pool = ReadPool::open(self.writer.path(), 1)?;
+        crate::inbox::status(&pool, &status_id, now_s())
     }
 
     /// `_store_blob`: hash the file, keep ONE copy per sha256 under the blob dir (mode
@@ -587,6 +644,20 @@ impl Store {
     pub fn shutdown(self) {
         self.writer.shutdown();
     }
+}
+
+/// Run a synchronous inbox-store operation on Tokio's blocking pool.
+///
+/// `SyncWriter::call` drives its own current-thread runtime, so callers already on Tokio
+/// must leave the async worker before invoking it.
+pub async fn with_sync_store<T, F>(store: Arc<Store>, call: F) -> Result<T, DunkError>
+where
+    T: Send + 'static,
+    F: FnOnce(&Store) -> Result<T, DunkError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || call(&store))
+        .await
+        .map_err(|error| refuse(format!("inbox store blocking worker failed: {error}")))?
 }
 
 impl Store {
