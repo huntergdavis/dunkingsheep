@@ -6,9 +6,7 @@
 //! resolves to a NAMED refusal ("command <x> is not ported yet"), never a guess, so the later
 //! command-group slices (T34..T38) only call [`Dispatcher::register`].
 //!
-//! NOT in this slice: the handlers themselves; the real per-request caller context
-//! (t1347): [`RequestCtx`] is a thin stand-in to be adapted to it; [`FlockGate`] wires the
-//! merged flock/roles_gate.rs (#305) into [`CallerGate`].
+//! NOT in this slice: the handlers themselves.
 
 use std::collections::HashMap;
 
@@ -22,14 +20,10 @@ use crate::{registry, roles};
 /// A request's arguments (the Python `args` dict; insertion-ordered).
 pub type Args = Map<String, Value>;
 
-/// Per-request caller context handed to every handler. Thin stand-in for t1347's type.
-#[derive(Debug, Clone, Default)]
-pub struct RequestCtx {
-    pub self_pane_id: Option<String>,
-}
-
-/// A handler: `command.handler(flock, args, self_pane_id)` in the Python.
-pub type Handler = fn(&Flock, &RequestCtx, Args) -> Result<Value, DunkError>;
+/// A handler: `command.handler(flock, args, self_pane_id)` in the Python. The per-request
+/// caller state is the flock's own thread-local (`Flock::set_caller`, #305): a request runs on
+/// ONE thread with no `.await` between `set_caller` and `clear_caller`.
+pub type Handler = fn(&Flock, Args, Option<&str>) -> Result<Value, DunkError>;
 
 /// The two caller-identity calls `dispatch` makes on the flock (`Flock.caller_role`,
 /// `Flock.require_superuser`). A trait so this slice does not wait for flock/roles_gate.rs.
@@ -182,11 +176,8 @@ impl Dispatcher {
                 unknown.join(", ")
             )));
         }
-        let ctx = RequestCtx {
-            self_pane_id: self_pane_id.map(str::to_string),
-        };
         let result = match self.handlers.get(command.name) {
-            Some(handler) => handler(flock, &ctx, args)?,
+            Some(handler) => handler(flock, args, self_pane_id)?,
             None => return Err(not_ported(command.name)),
         };
         Ok(if role == "desk" {

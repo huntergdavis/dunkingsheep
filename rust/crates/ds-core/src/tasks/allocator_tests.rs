@@ -359,3 +359,190 @@ async fn a_task_with_a_live_delivery_intent_cannot_be_offered_and_a_canonical_re
         "canonical review cannot be reoffered as worker work"
     );
 }
+
+const REV_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const REV_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[tokio::test]
+async fn a_review_is_one_canonical_task_per_source_and_resubmitting_the_same_revision_is_idempotent(
+) {
+    let t = store("review").await;
+    let source = task(&t, "the work").await;
+    let review = t
+        .allocation_review(
+            &source.id,
+            REV_A,
+            "artifact and acceptance",
+            "code",
+            &json!([]),
+            "%leader",
+        )
+        .await
+        .unwrap();
+    assert_eq!(review.title, "Review: the work");
+    assert_eq!(
+        review.body,
+        format!(
+            "Frozen revision: {REV_A}\nSource task: {}\n\nartifact and acceptance",
+            source.id
+        )
+    );
+    assert_eq!(
+        (review.scope.as_str(), review.status.as_str()),
+        ("global", "open")
+    );
+    assert_eq!(review.assignees, "[\"%leader\"]");
+    let again = t
+        .allocation_review(
+            &source.id,
+            REV_A,
+            "artifact and acceptance",
+            "code",
+            &json!([]),
+            "%leader",
+        )
+        .await
+        .unwrap();
+    assert_eq!(review.id, again.id, "same revision: idempotent");
+    // the offer carries the reviewer role and excludes the author
+    let status = t.allocation_status().await.unwrap();
+    let o = &status["offers"][0];
+    assert_eq!(
+        (
+            o["task_id"].as_str(),
+            o["role"].as_str(),
+            o["offered_by"].as_str()
+        ),
+        (Some(review.id.as_str()), Some("reviewer"), Some("%leader"))
+    );
+    assert_eq!(o["excluded"], "[\"%leader\"]");
+    // a new revision cannot replace one that has not finished (test_canonical_review_and_author_exclusion)
+    assert_eq!(
+        msg(t
+            .allocation_review(&source.id, REV_B, "new", "code", &json!([]), "%leader")
+            .await
+            .unwrap_err()),
+        "prior review is not finished"
+    );
+    // the review task cannot be re-offered as worker work
+    assert_eq!(
+        msg(t
+            .allocation_offer(&review.id, "code", &json!([]), "%leader")
+            .await
+            .unwrap_err()),
+        "canonical review cannot be reoffered as worker work"
+    );
+}
+
+#[tokio::test]
+async fn review_input_and_ownership_are_validated() {
+    let t = store("review-validate").await;
+    let source = task(&t, "the work").await;
+    let refused = |r: Result<super::super::Task, DunkError>| msg(r.unwrap_err());
+    for rev in ["abc", &"A".repeat(40), &"g".repeat(40), &"a".repeat(65)] {
+        assert_eq!(
+            refused(
+                t.allocation_review(&source.id, rev, "body", "code", &json!([]), "%leader")
+                    .await
+            ),
+            "review requires full revision hash and evidence/acceptance body",
+            "{rev}"
+        );
+    }
+    assert_eq!(
+        refused(
+            t.allocation_review(&source.id, REV_A, "  ", "code", &json!([]), "%leader")
+                .await
+        ),
+        "review requires full revision hash and evidence/acceptance body"
+    );
+    assert_eq!(
+        refused(
+            t.allocation_review(&source.id, REV_A, "body", "code", &json!([]), "%stranger")
+                .await
+        ),
+        "only source owner may submit global work for review"
+    );
+    let private = t.add("%1", "private", "body").await.unwrap();
+    assert_eq!(
+        refused(
+            t.allocation_review(&private.id, REV_A, "body", "code", &json!([]), "%1")
+                .await
+        ),
+        "only source owner may submit global work for review"
+    );
+    assert!(t
+        .allocation_review("t999", REV_A, "body", "code", &json!([]), "%leader")
+        .await
+        .is_err());
+    // a bad pool is refused and rolls the whole review back: no task, no review row
+    let before = t.list("global").await.unwrap().len();
+    assert!(t
+        .allocation_review(&source.id, REV_A, "body", "bad pool", &json!([]), "%leader")
+        .await
+        .is_err());
+    assert_eq!(
+        t.list("global").await.unwrap().len(),
+        before,
+        "the failed review left no task behind"
+    );
+}
+
+#[tokio::test]
+async fn a_corrected_revision_reopens_the_same_task_and_the_former_coauthor_stays_excluded() {
+    let t = store("review-revise").await;
+    let source = task(&t, "the work").await;
+    let coauthor = FieldEdit {
+        assignees: Some(vec!["%leader".into(), "%coauthor".into()]),
+        ..Default::default()
+    };
+    t.update(&source.id, coauthor, None).await.unwrap();
+    let review = t
+        .allocation_review(&source.id, REV_A, "first", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    let first_excluded = &t.allocation_status().await.unwrap()["offers"][0]["excluded"];
+    assert_eq!(first_excluded, "[\"%coauthor\",\"%leader\"]");
+    t.claim_for_test(&review.id, "%r").await;
+    t.task_complete(&review.id, Some("%r"), true).await.unwrap();
+    // the coauthor leaves the source; the exclusion must remain for the corrected review
+    let solo = FieldEdit {
+        assignees: Some(vec!["%leader".into()]),
+        ..Default::default()
+    };
+    t.update(&source.id, solo, None).await.unwrap();
+    let new = t
+        .allocation_review(&source.id, REV_B, "second", "code", &json!([]), "%leader")
+        .await
+        .unwrap();
+    assert_eq!(review.id, new.id, "the same review task is reused");
+    assert_eq!(new.status, "open");
+    assert!(new.body.contains(REV_B) && new.body.ends_with("second"));
+    assert_eq!(
+        t.leases(&new.id).await,
+        0,
+        "terminal leases do not delay a corrected revision"
+    );
+    let o = &t.allocation_status().await.unwrap()["offers"][0];
+    // The exclusion is the SOURCE's assignees/creator/completer plus the prior exclusion: the
+    // former coauthor stays, and %r - who completed the REVIEW, not the source - is not excluded.
+    assert_eq!(
+        o["excluded"], "[\"%coauthor\",\"%leader\"]",
+        "the former coauthor stays excluded; the review's own completer does not"
+    );
+    // a different author cannot take over the canonical review
+    assert_eq!(
+        msg(t
+            .allocation_review(
+                &source.id,
+                "c".repeat(40).as_str(),
+                "x",
+                "code",
+                &json!([]),
+                "%coauthor"
+            )
+            .await
+            .unwrap_err()),
+        "only source owner may submit global work for review"
+    );
+}
