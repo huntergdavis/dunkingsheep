@@ -226,10 +226,31 @@ fn extra_load_dunks_reads_the_dunkers_list_and_refuses_a_missing_or_bad_file() {
     );
     std::fs::write(&path, "{not json").unwrap();
     assert!(load_dunks(&path).is_err());
+    std::fs::write(&path, r#"[]"#).unwrap();
+    assert!(
+        load_dunks(&path).is_err(),
+        "the JSON root must be an object"
+    );
     std::fs::write(&path, r#"{"version": 1, "next_id": 1}"#).unwrap();
+    assert!(load_dunks(&path).unwrap().is_empty());
+    std::fs::write(&path, r#"{"dunkers": []}"#).unwrap();
     assert!(load_dunks(&path).unwrap().is_empty());
     std::fs::write(&path, r#"{"dunkers": [{"id": "d1"}]}"#).unwrap();
     assert_eq!(vec![json!({"id": "d1"})], load_dunks(&path).unwrap());
+    for malformed in [
+        json!("not-a-list"),
+        json!(""),
+        json!(null),
+        json!(0),
+        json!(false),
+        json!({}),
+    ] {
+        std::fs::write(&path, json!({"dunkers": malformed}).to_string()).unwrap();
+        assert!(
+            load_dunks(&path).is_err(),
+            "present non-array dunkers must be rejected"
+        );
+    }
 }
 
 #[test]

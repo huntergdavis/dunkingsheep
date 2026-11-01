@@ -195,6 +195,20 @@ fn extra_a_credential_behind_a_form_feed_or_bare_cr_is_still_found() {
 }
 
 #[test]
+fn extra_nonempty_string_dunkers_is_an_error_instead_of_an_empty_security_scan() {
+    let fleet = Fleet::new();
+    fleet.dunks(json!("not-a-list"));
+    assert!(text_records(
+        &fleet.path("inbox.db"),
+        &fleet.path("tasks.db"),
+        &fleet.path("dunks.json"),
+        NOW - 24.0 * HOUR,
+        NOW,
+    )
+    .is_err());
+}
+
+#[test]
 fn extra_dunk_texts_and_task_titles_are_scanned_and_clean_content_is_quiet() {
     let fleet = Fleet::new();
     fleet.dunks(json!([{"id": "d2", "text": format!("run it with {FAKE_TOKEN}")}, {"id": "d1", "text": "all fine"}]));
