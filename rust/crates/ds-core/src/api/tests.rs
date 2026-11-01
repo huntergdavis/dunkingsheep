@@ -406,6 +406,138 @@ fn refusal(result: Result<Value, DunkError>) -> String {
     }
 }
 
+fn recovery_token_fixture(owner: Option<&str>) -> (tempfile::TempDir, Flock, Dispatcher) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join("roles.json")),
+        Some(dir.path().join("tokens.json")),
+        None,
+    )
+    .expect("role registry");
+    if let Some(owner) = owner {
+        roles
+            .register(owner, "owner", None, None, None, None, None, None)
+            .expect("owner registration");
+    }
+    flock.attach_roles(roles, None);
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_superuser_recover_tokens();
+    (dir, flock, dispatcher)
+}
+
+fn dispatch_recovery_token(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    name: &str,
+    args: Option<Args>,
+    pane: Option<&str>,
+) -> Result<Value, DunkError> {
+    let env = TestEnv::default();
+    let request = RequestCtx {
+        self_pane_id: pane.map(str::to_owned),
+        ..RequestCtx::default()
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env: &env,
+        runtime: runtime.handle(),
+    };
+    let gate = FlockGate(&context);
+    dispatcher.dispatch(&context, &gate, name, args)
+}
+
+#[test]
+fn h_superuser_recover_matches_python() {
+    let (_dir, flock, dispatcher) = recovery_token_fixture(None);
+    let result = dispatch_recovery_token(
+        &dispatcher,
+        &flock,
+        "superuser_recover",
+        args(json!({"name": "ignored by recovery"})),
+        Some("w1:p2"),
+    )
+    .expect("bootstrap caller as owner");
+    assert_eq!(result["recovered"], true);
+    assert_eq!(result["pane_id"], "w1:p2");
+    assert_eq!(result["superuser"], true);
+    assert_eq!(result["entry"]["role"], "owner");
+
+    assert!(matches!(
+        dispatch_recovery_token(&dispatcher, &flock, "superuser_recover", None, None),
+        Err(DunkError::Refused(message))
+            if message == "superuser recover requires a known caller pane"
+    ));
+}
+
+#[test]
+fn h_token_issue_matches_python() {
+    let (_dir, flock, dispatcher) = recovery_token_fixture(Some("w1:p2"));
+    let result = dispatch_recovery_token(
+        &dispatcher,
+        &flock,
+        "token_issue",
+        args(json!({"role": "web", "label": "owner transport"})),
+        Some("w1:p2"),
+    )
+    .expect("issue token");
+    assert_eq!(result["role"], "web");
+    assert_eq!(result["label"], "owner transport");
+    assert!(!result["token"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(
+        result["note"],
+        "shown once; store it in the service's 0600 token file"
+    );
+
+    assert!(matches!(
+        dispatch_recovery_token(
+            &dispatcher,
+            &flock,
+            "token_issue",
+            args(json!({"role": "web"})),
+            Some("w2:p9"),
+        ),
+        Err(DunkError::Refused(message)) if message.contains("requires a superuser")
+    ));
+}
+
+#[test]
+fn h_token_revoke_matches_python() {
+    let (_dir, flock, dispatcher) = recovery_token_fixture(Some("w1:p2"));
+    let issued = dispatch_recovery_token(
+        &dispatcher,
+        &flock,
+        "token_issue",
+        args(json!({"role": "system", "label": "watchdog"})),
+        Some("w1:p2"),
+    )
+    .expect("issue token");
+    assert!(!issued["token"].as_str().unwrap_or_default().is_empty());
+    let revoked = dispatch_recovery_token(
+        &dispatcher,
+        &flock,
+        "token_revoke",
+        args(json!({"label": "watchdog"})),
+        Some("w1:p2"),
+    )
+    .expect("revoke token");
+    assert_eq!(revoked, json!({"label": "watchdog", "revoked": true}));
+
+    let again = dispatch_recovery_token(
+        &dispatcher,
+        &flock,
+        "token_revoke",
+        args(json!({"label": "watchdog"})),
+        Some("w1:p2"),
+    )
+    .expect("idempotent revoke");
+    assert_eq!(again, json!({"label": "watchdog", "revoked": false}));
+}
+
 fn args(value: Value) -> Option<Args> {
     value.as_object().cloned()
 }
