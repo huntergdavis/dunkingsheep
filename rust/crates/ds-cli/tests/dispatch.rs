@@ -11,11 +11,17 @@ use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const FIXTURE: &str = include_str!("context_cmd.json");
 
 #[test]
 fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _env_lock = lock_env();
     let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture");
     let base = tempfile::tempdir().expect("tempdir");
     for (relative, text) in fixture["files"].as_object().unwrap() {
@@ -23,6 +29,9 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, text.as_str().unwrap()).unwrap();
     }
+    let old_cwd = std::env::current_dir().unwrap();
+    let old_config = std::env::var_os("DUNKINGSHEEP_DIR");
+    let old_self = std::env::var_os("DUNKINGSHEEP_SELF");
     std::env::set_var("DUNKINGSHEEP_DIR", base.path().join("cfg"));
     std::env::set_var("DUNKINGSHEEP_SELF", "fixture");
     std::env::set_current_dir(base.path().join("proj")).unwrap();
@@ -59,7 +68,7 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
         bad.join("\n")
     );
 
-    // --json is valid JSON of the same result (key order differs from Python: documented).
+    // --json preserves Python's insertion order and remains valid JSON.
     let ns = try_parse(["dunkingsheep", "context", "stats", "--json"]).unwrap();
     let out = run(&ns);
     assert_eq!(0, out.code);
@@ -68,6 +77,15 @@ fn recorded_context_steps_run_end_to_end_through_the_parser_and_dispatch() {
         parsed["global"]["counts"]["ground-truth"].is_number(),
         "{parsed}"
     );
+    std::env::set_current_dir(old_cwd).unwrap();
+    match old_config {
+        Some(v) => std::env::set_var("DUNKINGSHEEP_DIR", v),
+        None => std::env::remove_var("DUNKINGSHEEP_DIR"),
+    }
+    match old_self {
+        Some(v) => std::env::set_var("DUNKINGSHEEP_SELF", v),
+        None => std::env::remove_var("DUNKINGSHEEP_SELF"),
+    }
 }
 
 #[test]
@@ -91,7 +109,7 @@ fn commands_without_a_body_say_so_and_exit_1_and_writes_are_not_ported() {
 /// `secrets-check` through argv -> parser -> dispatch, against real temporary git repositories.
 #[test]
 fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _env_lock = lock_env();
     use std::process::Command;
     let git = |dir: &std::path::Path, args: &[&str]| {
         let done = Command::new("git")
@@ -157,7 +175,7 @@ fn secrets_check_runs_end_to_end_and_its_exit_code_is_what_hooks_branch_on() {
 /// throwaway GIT_CONFIG_GLOBAL, a temp bin dir); and `github protect` stays honest.
 #[test]
 fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _env_lock = lock_env();
     use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let real_dir = t.path().join("realbin");
@@ -219,7 +237,7 @@ fn github_wrappers_runs_end_to_end_in_a_sandbox_and_protect_is_not_ported() {
 /// covers both the helper selection and generated wrapper without launching tmux.
 #[test]
 fn guard_install_actions_write_only_to_sandbox_and_keep_tmux_helper() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
+    let _env_lock = lock_env();
     use std::os::unix::fs::PermissionsExt;
     let t = tempfile::tempdir().unwrap();
     let home = t.path().join("home");
@@ -274,6 +292,30 @@ fn guard_install_actions_write_only_to_sandbox_and_keep_tmux_helper() {
     let wrapper = std::fs::read_to_string(config.join("tmux-guard/tmux")).unwrap();
     assert!(wrapper.contains("dunkingsheep-tmux-guard"));
     assert!(!wrapper.contains("os.path.expanduser(\n    \"~/.local/bin/dunkingsheep\")"));
+
+    // Python `install()` returns the complete current status, including an existing
+    // tmux guard and the real herdr resolved from PATH, even in --no-shadow mode.
+    let ns = try_parse(["dunkingsheep", "guard", "install", "--no-shadow", "--json"]).unwrap();
+    let out = run(&ns);
+    assert_eq!(0, out.code, "{}", out.stderr);
+    let status: Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(
+        herdr.canonicalize().unwrap().to_str().unwrap(),
+        status["real_herdr"]
+    );
+    assert_eq!(
+        herdr.canonicalize().unwrap().to_str().unwrap(),
+        status["herdr_resolves_to"]
+    );
+    assert_eq!(true, status["tmux_guard"]["installed"]);
+    assert_eq!(
+        config.join("tmux-guard/tmux").to_str().unwrap(),
+        status["tmux_guard"]["wrapper"]
+    );
+    assert_eq!(
+        config.join("tmux-guard/tmux-real").to_str().unwrap(),
+        status["tmux_guard"]["real_tmux"]
+    );
 
     match old_home {
         Some(v) => std::env::set_var("HOME", v),
