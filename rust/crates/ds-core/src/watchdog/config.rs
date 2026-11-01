@@ -362,6 +362,15 @@ fn rule_common() -> Vec<(String, Spec)> {
 fn rule_params() -> Vec<(&'static str, Vec<(String, Spec)>)> {
     vec![
         (
+            "fleet.assignment_starvation",
+            vec![
+                leaf("quiet_minutes", positive()),
+                leaf("min_empty_workers", positive_int()),
+                leaf("worker_panes", str_list()),
+                leaf("superuser_panes", str_list()),
+            ],
+        ),
+        (
             "task.blocked_stale",
             vec![leaf("threshold_minutes", positive())],
         ),
@@ -383,6 +392,16 @@ fn rule_params() -> Vec<(&'static str, Vec<(String, Spec)>)> {
             ],
         ),
         ("dunk.overdue", vec![leaf("missed_intervals", positive())]),
+        // t409: how old and how often refused before this is worth saying. Both are read from the
+        // t269 budget that already exists (HOLD_ATTEMPT_LIMIT attempts over the backoff), not new
+        // policy.
+        (
+            "delivery.ambiguous_queued",
+            vec![
+                leaf("min_holds", positive_int()),
+                leaf("min_age_minutes", positive()),
+            ],
+        ),
         // Above the 24h auto-archive: a page must mean "the archive did not catch this", not "the
         // archive is about to catch this".
         (
@@ -565,6 +584,60 @@ fn top_spec() -> Vec<(String, Spec)> {
     ]
 }
 
+/// The t269 budget, mirrored so the watchdog can default the new rule without importing the daemon's
+/// (the two are separate deployments and a test asserts they agree).
+pub const HOLD_ATTEMPT_LIMIT_DEFAULT: i64 = 10;
+
+/// Rules added AFTER a config was written. Only these are filled in when absent; every older rule
+/// stays REQUIRED, so a config that accidentally loses one still fails loudly.
+pub const RULE_ADDITIONS: [&str; 2] = ["delivery.ambiguous_queued", "fleet.assignment_starvation"];
+
+/// Shipped defaults for the rules that can be added to an existing config. Only the ones whose
+/// presence is a judgement need an entry; everything else defaults to 1.
+fn rule_example_default(rule_id: &str, key: &str) -> Value {
+    match (rule_id, key) {
+        ("fleet.assignment_starvation", "quiet_minutes") => json!(10),
+        ("fleet.assignment_starvation", "min_empty_workers") => json!(2),
+        ("fleet.assignment_starvation", "worker_panes") => json!(["configure-worker-pane"]),
+        ("fleet.assignment_starvation", "superuser_panes") => json!(["configure-superuser-pane"]),
+        ("delivery.ambiguous_queued", "min_holds") => json!(HOLD_ATTEMPT_LIMIT_DEFAULT),
+        ("delivery.ambiguous_queued", "min_age_minutes") => json!(20),
+        _ => json!(1),
+    }
+}
+
+/// Fill in rules a config predates, DISABLED, so an old config keeps behaving exactly as it did
+/// (preserve deployed policy) and enabling the new rule is an explicit edit. Returns the added ids.
+pub fn migrate_config(config: &mut Value) -> Vec<String> {
+    let Some(rules) = config.get_mut("rules").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let mut added = Vec::new();
+    for rule_id in RULE_ADDITIONS {
+        if rules.contains_key(rule_id) {
+            continue;
+        }
+        let params = rule_params()
+            .into_iter()
+            .find(|(name, _)| *name == rule_id)
+            .map(|(_, params)| params)
+            .unwrap_or_default();
+        let mut block = Map::new();
+        // RULE_DEFAULTS
+        block.insert("severity".into(), json!("warning"));
+        block.insert("class".into(), json!("ops"));
+        block.insert("cooldown_minutes".into(), json!(240));
+        block.insert("must_hold_runs".into(), json!(1));
+        block.insert("enabled".into(), json!(false));
+        for (key, _) in params {
+            block.insert(key.clone(), rule_example_default(rule_id, &key));
+        }
+        rules.insert(rule_id.to_string(), Value::Object(block));
+        added.push(rule_id.to_string());
+    }
+    added
+}
+
 fn validate_node(spec: &[(String, Spec)], value: &Value, prefix: &str) -> Result<(), ConfigError> {
     let Some(map) = value.as_object() else {
         let key = prefix.trim_end_matches('.');
@@ -608,8 +681,10 @@ fn flag(map: &Map<String, Value>, key: &str) -> bool {
     map.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// Return the config unchanged, or the `ConfigError` naming the FIRST bad key.
-pub fn validate_config(config: &Value) -> Result<&Value, ConfigError> {
+/// Migrate (rules added after the config was written are filled in disabled), then return `Ok` or
+/// the `ConfigError` naming the FIRST bad key. Like the Python, the migration edits `config` in place.
+pub fn validate_config(config: &mut Value) -> Result<(), ConfigError> {
+    migrate_config(config);
     validate_node(&top_spec(), config, "")?;
     // Past the schema every key above exists with the right type, so these lookups cannot miss.
     let root = config.as_object().expect("validated as an object");
@@ -679,7 +754,7 @@ pub fn validate_config(config: &Value) -> Result<&Value, ConfigError> {
             ));
         }
     }
-    Ok(config)
+    Ok(())
 }
 
 /// Read, parse and validate a config file. A bad file refuses to start and the error is the

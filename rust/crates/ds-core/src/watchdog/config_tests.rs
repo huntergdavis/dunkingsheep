@@ -15,14 +15,14 @@ fn example() -> Value {
 fn named(mutate: impl FnOnce(&mut Value), key: &str) {
     let mut config = example();
     mutate(&mut config);
-    let error = validate_config(&config).expect_err("the mutation must be refused");
+    let error = validate_config(&mut config).expect_err("the mutation must be refused");
     assert_eq!(key, error.key, "{error}");
 }
 
 #[test]
 fn test_example_config_is_valid_and_quiet() {
-    let config = example();
-    validate_config(&config).unwrap();
+    let mut config = example();
+    validate_config(&mut config).unwrap();
     assert_eq!(config["enabled"], json!(false));
     assert_eq!(config["dry_run"], json!(true));
     assert_eq!(config["escalation"]["owner"]["enabled"], json!(false));
@@ -118,7 +118,7 @@ fn test_owner_paging_requires_an_approver() {
 fn reason(mutate: impl FnOnce(&mut Value)) -> String {
     let mut config = example();
     mutate(&mut config);
-    validate_config(&config).expect_err("refused").reason
+    validate_config(&mut config).expect_err("refused").reason
 }
 
 #[test]
@@ -159,15 +159,15 @@ fn extra_unknown_keys_are_named_before_missing_ones_and_sorted() {
     config["zzz"] = json!(1);
     config["aaa"] = json!(1);
     config.as_object_mut().unwrap().remove("enabled");
-    assert_eq!("aaa", validate_config(&config).unwrap_err().key);
+    assert_eq!("aaa", validate_config(&mut config).unwrap_err().key);
 }
 
 #[test]
 fn extra_a_non_object_names_the_path_or_root() {
-    assert_eq!("<root>", validate_config(&json!([1])).unwrap_err().key);
+    assert_eq!("<root>", validate_config(&mut json!([1])).unwrap_err().key);
     let mut config = example();
     config["stores"] = json!(3);
-    let error = validate_config(&config).unwrap_err();
+    let error = validate_config(&mut config).unwrap_err();
     assert_eq!(
         ("stores", "must be an object"),
         (error.key.as_str(), error.reason.as_str())
@@ -230,4 +230,43 @@ fn extra_load_config_refuses_a_missing_or_unreadable_file_naming_file() {
     let good = dir.join("good.json");
     std::fs::write(&good, EXAMPLE_TEXT).unwrap();
     assert_eq!(example(), load_config(good.to_str().unwrap()).unwrap());
+}
+
+#[test]
+fn extra_a_config_that_predates_the_newer_rules_is_migrated_disabled() {
+    let mut config = example();
+    let rules = config["rules"].as_object_mut().unwrap();
+    rules.remove("delivery.ambiguous_queued");
+    rules.remove("fleet.assignment_starvation");
+    let added = migrate_config(&mut config);
+    assert_eq!(
+        vec!["delivery.ambiguous_queued", "fleet.assignment_starvation"],
+        added
+    );
+    let block = &config["rules"]["delivery.ambiguous_queued"];
+    assert_eq!(block["enabled"], json!(false));
+    assert_eq!(block["min_holds"], json!(HOLD_ATTEMPT_LIMIT_DEFAULT));
+    assert_eq!(block["min_age_minutes"], json!(20));
+    assert_eq!(
+        config["rules"]["fleet.assignment_starvation"]["worker_panes"],
+        json!(["configure-worker-pane"])
+    );
+    validate_config(&mut config).unwrap();
+    // a second run adds nothing
+    assert!(migrate_config(&mut config).is_empty());
+}
+
+#[test]
+fn extra_an_older_rule_that_goes_missing_still_fails_loudly() {
+    // migrate only fills RULE_ADDITIONS: losing host.load is an error, not a default.
+    named(
+        |c| drop(c["rules"].as_object_mut().unwrap().remove("host.load")),
+        "rules.host.load",
+    );
+    let mut config = example();
+    config["rules"]
+        .as_object_mut()
+        .unwrap()
+        .remove("delivery.ambiguous_queued");
+    assert!(validate_config(&mut config).is_ok());
 }

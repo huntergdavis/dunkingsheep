@@ -42,8 +42,8 @@ fn args(value: Value) -> Option<Args> {
     value.as_object().cloned()
 }
 
-fn echo(_: &Flock, ctx: &RequestCtx, args: Args) -> Result<Value, DunkError> {
-    Ok(json!({"pane": ctx.self_pane_id, "args": args}))
+fn echo(_: &Flock, args: Args, pane: Option<&str>) -> Result<Value, DunkError> {
+    Ok(json!({"pane": pane, "args": args}))
 }
 
 #[test]
@@ -286,7 +286,7 @@ fn test_desk_args_are_clamped_before_the_argument_checks() {
 #[test]
 fn test_desk_results_are_clamped_and_other_roles_are_not() {
     let (_dir, flock) = flock();
-    fn big(_: &Flock, _: &RequestCtx, _: Args) -> Result<Value, DunkError> {
+    fn big(_: &Flock, _: Args, _: Option<&str>) -> Result<Value, DunkError> {
         Ok(json!({"blob": "x".repeat(10_000)}))
     }
     let mut d = Dispatcher::new();
