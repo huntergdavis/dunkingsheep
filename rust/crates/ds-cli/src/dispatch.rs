@@ -818,6 +818,66 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             _ => not_ported("task"),
         },
         "whoami" => crate::daemon_cmd::whoami(ns),
+        "turn" => match text(ns, "turn_command") {
+            Some("start") => {
+                let mut args = Map::new();
+                for key in ["pane", "ttl_s", "source", "handoff_id"] {
+                    args.insert(key.to_string(), ns.get(key).cloned().unwrap_or(Value::Null));
+                }
+                crate::daemon_cmd::run_command(ns, "turn_start", args, |result| {
+                    format!(
+                        "turn start {} ttl {}s\n",
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        crate::render_fleet::py_str(&result["ttl_s"])
+                    )
+                })
+            }
+            Some("end") => {
+                let mut args = Map::new();
+                for key in ["pane", "reason", "turn_id"] {
+                    args.insert(key.to_string(), ns.get(key).cloned().unwrap_or(Value::Null));
+                }
+                crate::daemon_cmd::run_command(
+                    ns,
+                    "turn_end",
+                    args,
+                    crate::render_fleet::render_turn_end,
+                )
+            }
+            Some(other) => not_ported(&format!("turn {other}")),
+            None => not_ported("turn"),
+        },
+        "poll" => {
+            let mut args = Map::new();
+            for (key, value) in [
+                ("limit", ns.get("limit").cloned().unwrap_or(Value::from(5))),
+                (
+                    "panes",
+                    Value::Bool(matches!(ns.get("panes"), Some(Value::Bool(true)))),
+                ),
+                (
+                    "tasks",
+                    Value::Bool(matches!(ns.get("tasks"), Some(Value::Bool(true)))),
+                ),
+                (
+                    "include_done",
+                    Value::Bool(matches!(ns.get("include_done"), Some(Value::Bool(true)))),
+                ),
+                (
+                    "check_herdr",
+                    Value::Bool(matches!(ns.get("check_herdr"), Some(Value::Bool(true)))),
+                ),
+            ] {
+                args.insert(key.to_string(), value);
+            }
+            if let Some(mailbox) = text(ns, "mailbox").filter(|value| !value.is_empty()) {
+                args.insert("mailbox".into(), Value::String(mailbox.to_string()));
+            }
+            if let Some(task_scope) = text(ns, "task_scope").filter(|value| !value.is_empty()) {
+                args.insert("task_scope".into(), Value::String(task_scope.to_string()));
+            }
+            crate::daemon_cmd::run_command(ns, "poll", args, crate::render_fleet::render_poll)
+        }
         // `client.call("status", check_herdr=args.check_herdr), print_status`
         "status" => {
             let mut args = Map::new();

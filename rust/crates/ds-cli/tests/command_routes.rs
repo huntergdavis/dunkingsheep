@@ -224,6 +224,137 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_01_dunk_read_batch() {
+    let turn_start = run_daemon_cli(
+        &[
+            "turn",
+            "start",
+            "--pane",
+            "%44",
+            "--ttl-s",
+            "30",
+            "--source",
+            "hook",
+            "--handoff-id",
+            "nj-0123456789abcdef0123456789abcdef",
+            "--json",
+        ],
+        "turn_start",
+        json!({
+            "pane": "%44",
+            "ttl_s": 30.0,
+            "source": "hook",
+            "handoff_id": "nj-0123456789abcdef0123456789abcdef"
+        }),
+        json!({
+            "ok": true,
+            "pane_id": "%44",
+            "started_at": 1.5,
+            "expires_at": 31.5,
+            "ttl_s": 30.0,
+            "source": "hook",
+            "turn_id": "gen-1"
+        }),
+    );
+    assert_eq!(0, turn_start.status.code().unwrap());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"pane_id\": \"%44\",\n  \"started_at\": 1.5,\n  \"expires_at\": 31.5,\n  \"ttl_s\": 30.0,\n  \"source\": \"hook\",\n  \"turn_id\": \"gen-1\"\n}\n",
+        String::from_utf8(turn_start.stdout).unwrap()
+    );
+    assert!(turn_start.stderr.is_empty());
+
+    let turn_start_text = run_daemon_cli(
+        &["turn", "start", "--pane", "%44", "--ttl-s", "30"],
+        "turn_start",
+        json!({"pane": "%44", "ttl_s": 30.0, "source": null, "handoff_id": null}),
+        json!({"ok": true, "pane_id": "%44", "ttl_s": 30.0}),
+    );
+    assert_eq!(0, turn_start_text.status.code().unwrap());
+    assert_eq!(
+        "turn start %44 ttl 30.0s\n",
+        String::from_utf8(turn_start_text.stdout).unwrap()
+    );
+    assert!(turn_start_text.stderr.is_empty());
+
+    let turn_end = run_daemon_cli(
+        &[
+            "turn",
+            "end",
+            "--pane",
+            "%44",
+            "--reason",
+            "done",
+            "--turn-id",
+            "gen-1",
+        ],
+        "turn_end",
+        json!({"pane": "%44", "reason": "done", "turn_id": "gen-1"}),
+        json!({
+            "ok": true,
+            "pane_id": "%44",
+            "ended": true,
+            "dispatch": {
+                "action": "nudge",
+                "task_id": "task-7",
+                "delivered": false,
+                "outcome": "hold_typing"
+            }
+        }),
+    );
+    assert_eq!(0, turn_end.status.code().unwrap());
+    assert_eq!(
+        "turn end %44 (ended=True); trigger=turn.end nudged task-7: HELD, not delivered (hold_typing)\n",
+        String::from_utf8(turn_end.stdout).unwrap()
+    );
+    assert!(turn_end.stderr.is_empty());
+
+    let poll = run_daemon_cli(
+        &[
+            "poll",
+            "--mailbox",
+            "lane-box",
+            "--limit",
+            "2",
+            "--panes",
+            "--tasks",
+            "--task-scope",
+            "self",
+            "--include-done",
+            "--check-herdr",
+        ],
+        "poll",
+        json!({
+            "limit": 2,
+            "panes": true,
+            "tasks": true,
+            "include_done": true,
+            "check_herdr": true,
+            "mailbox": "lane-box",
+            "task_scope": "self"
+        }),
+        json!({
+            "status": {
+                "self_pane_id": "%99",
+                "version": "2.71.4",
+                "running": 2,
+                "dunkers": 4
+            },
+            "inbox_count": {"unread": 1, "total": 3},
+            "dunks": {
+                "messages": [{"message_id": "m1", "sender": "hunter", "subject": "Review"}],
+                "dunks": [{"id": "d1", "running": true, "interval_minutes": 5, "target_label": "Writer"}]
+            }
+        }),
+    );
+    assert_eq!(0, poll.status.code().unwrap());
+    assert_eq!(
+        "self %99  v2.71.4  dunks 2/4 running  inbox 1 unread / 3\n  #m1 hunter: Review\n  d1 running every 5m -> Writer\n",
+        String::from_utf8(poll.stdout).unwrap()
+    );
+    assert!(poll.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
