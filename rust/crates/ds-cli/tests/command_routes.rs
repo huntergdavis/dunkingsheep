@@ -45,7 +45,7 @@ fn cli_route_56_mcp_setup() {
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
     let original_path = std::env::var("PATH").unwrap_or_default();
     let path = std::env::join_paths(
-        std::iter::once(bin.as_path()).chain(std::env::split_paths(&original_path)),
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&original_path)),
     )
     .unwrap();
     let executable = std::fs::canonicalize(env!("CARGO_BIN_EXE_dunkingsheep"))
