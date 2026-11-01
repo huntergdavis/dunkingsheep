@@ -220,6 +220,13 @@ impl Dispatcher {
         self.register("turn_start", h_turn_start);
     }
 
+    /// Register only the T39 superuser recovery and service-token handler leaf.
+    pub fn register_superuser_recover_tokens(&mut self) {
+        self.register("superuser_recover", h_superuser_recover);
+        self.register("token_issue", h_token_issue);
+        self.register("token_revoke", h_token_revoke);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -293,6 +300,36 @@ impl Dispatcher {
 /// `dunk_api.h_whoami`.
 pub fn h_whoami(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
     context.flock.whoami(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_recover`.
+pub fn h_superuser_recover(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context
+        .flock
+        .superuser_recover(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_token_issue`.
+pub fn h_token_issue(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = args
+        .get("role")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("token_issue: role must be a string".into()))?;
+    let label = args.get("label").and_then(Value::as_str);
+    context
+        .flock
+        .token_issue(role, label, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_token_revoke`.
+pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let label = args
+        .get("label")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("token_revoke: label must be a string".into()))?;
+    context
+        .flock
+        .token_revoke(label, context.self_pane_id(), context.env)
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
