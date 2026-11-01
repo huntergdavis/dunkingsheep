@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 use std::fs;
-use std::io;
+use std::io::{self, BufReader, Read};
 use std::path::Path;
 use std::str::Utf8Error;
 
@@ -19,7 +19,7 @@ pub const CLAMP_FACTOR: f64 = 6.0;
 /// uses the unit cadence and returns a problem for the caller to report.
 pub fn recorded_cadence(path: impl AsRef<Path>) -> (Option<Value>, Option<String>) {
     let path = path.as_ref();
-    let bytes = match fs::read(path) {
+    let bytes = match read_text_prefix(path, 4096) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return (None, None),
         Err(error) => {
@@ -33,8 +33,8 @@ pub fn recorded_cadence(path: impl AsRef<Path>) -> (Option<Value>, Option<String
             )
         }
     };
-    let decoded = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text.to_string(),
         Err(error) => {
             return (
                 None,
@@ -45,7 +45,6 @@ pub fn recorded_cadence(path: impl AsRef<Path>) -> (Option<Value>, Option<String
             )
         }
     };
-    let text = decoded.chars().take(4096).collect::<String>();
     if text.trim().is_empty() {
         return (None, None);
     }
@@ -126,9 +125,84 @@ fn python_repr(value: &Value) -> String {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::String(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
+        Value::String(text) => python_string_repr(text),
         other => other.to_string(),
     }
+}
+
+fn python_string_repr(text: &str) -> String {
+    use std::fmt::Write as _;
+
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut repr = String::with_capacity(text.len() + 2);
+    repr.push(quote);
+    for character in text.chars() {
+        match character {
+            '\\' => repr.push_str("\\\\"),
+            '\n' => repr.push_str("\\n"),
+            '\r' => repr.push_str("\\r"),
+            '\t' => repr.push_str("\\t"),
+            character if character == quote => {
+                repr.push('\\');
+                repr.push(character);
+            }
+            character if character.is_control() => {
+                let codepoint = character as u32;
+                if codepoint <= 0xff {
+                    write!(repr, "\\x{codepoint:02x}").expect("writing to String");
+                } else if codepoint <= 0xffff {
+                    write!(repr, "\\u{codepoint:04x}").expect("writing to String");
+                } else {
+                    write!(repr, "\\U{codepoint:08x}").expect("writing to String");
+                }
+            }
+            character => repr.push(character),
+        }
+    }
+    repr.push(quote);
+    repr
+}
+
+/// Read at most `max_chars` UTF-8 characters, like Python's text `read(size)`, without
+/// allocating in proportion to the entire heartbeat file. `BufReader` may read ahead by its
+/// fixed buffer size, but the retained text is capped at four bytes per requested character.
+fn read_text_prefix(path: &Path, max_chars: usize) -> io::Result<Vec<u8>> {
+    read_text_prefix_from(fs::File::open(path)?, max_chars)
+}
+
+fn read_text_prefix_from(reader: impl Read, max_chars: usize) -> io::Result<Vec<u8>> {
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::with_capacity(max_chars.min(4096).saturating_mul(4));
+    for _ in 0..max_chars {
+        let start = bytes.len();
+        let mut lead = [0u8; 1];
+        if reader.read(&mut lead)? == 0 {
+            break;
+        }
+        bytes.push(lead[0]);
+        let width = match lead[0] {
+            0x00..=0x7f => 1,
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => return Ok(bytes),
+        };
+        for _ in 1..width {
+            let mut continuation = [0u8; 1];
+            if reader.read(&mut continuation)? == 0 {
+                return Ok(bytes);
+            }
+            bytes.push(continuation[0]);
+        }
+        if std::str::from_utf8(&bytes[start..]).is_err() {
+            return Ok(bytes);
+        }
+    }
+    Ok(bytes)
 }
 
 fn io_error_type(error: &io::Error) -> &'static str {
@@ -166,9 +240,25 @@ fn unicode_decode_error(bytes: &[u8], error: Utf8Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_cadence, load, recorded_cadence};
+    use super::{effective_cadence, load, read_text_prefix_from, recorded_cadence};
     use serde_json::{json, Value};
     use std::fs;
+    use std::io::{self, Cursor, Read};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingReader {
+        inner: Cursor<Vec<u8>>,
+        bytes_read: Arc<AtomicUsize>,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let read = self.inner.read(buffer)?;
+            self.bytes_read.fetch_add(read, Ordering::Relaxed);
+            Ok(read)
+        }
+    }
 
     fn heartbeat(directory: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
         let path = directory.path().join("state/heartbeat.json");
@@ -215,6 +305,35 @@ mod tests {
             assert!(value.is_none(), "{body}");
             assert!(problem.is_some(), "{body}");
         }
+    }
+
+    #[test]
+    fn watchdog_deadman_recorded_cadence_uses_python_repr_for_quotes_and_newlines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = heartbeat(&directory, r#"{"cadence_minutes":"bad'line\nsecond"}"#);
+        let (cadence, problem) = recorded_cadence(path);
+        assert_eq!(None, cadence);
+        assert_eq!(
+            Some(r#"no positive cadence_minutes (got "bad'line\nsecond")"#.into()),
+            problem
+        );
+    }
+
+    #[test]
+    fn watchdog_deadman_recorded_cadence_reads_only_a_bounded_character_prefix() {
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let mut input = "🧵".repeat(4096).into_bytes();
+        input.extend(vec![b' '; 2_000_000]);
+        let reader = CountingReader {
+            inner: Cursor::new(input),
+            bytes_read: Arc::clone(&bytes_read),
+        };
+
+        let prefix = read_text_prefix_from(reader, 4096).unwrap();
+
+        assert_eq!(16_384, prefix.len());
+        assert_eq!(4096, std::str::from_utf8(&prefix).unwrap().chars().count());
+        assert!(bytes_read.load(Ordering::Relaxed) <= 16_384);
     }
 
     #[test]
