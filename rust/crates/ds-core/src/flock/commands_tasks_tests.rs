@@ -50,7 +50,7 @@ async fn flock_with_store(tag: &str) -> (crate::testsupport::Scratch<Flock>, Arc
     (crate::testsupport::Scratch::new(flock, scratch), tasks)
 }
 
-fn register_roles(flock: &Flock, registrations: &[(&str, &str)]) {
+fn register_roles(flock: &crate::testsupport::Scratch<Flock>, registrations: &[(&str, &str)]) {
     let dir = flock.dir().to_path_buf();
     let mut roles = crate::roles::Roles::new(
         &crate::config::Env::default(),
@@ -67,7 +67,7 @@ fn register_roles(flock: &Flock, registrations: &[(&str, &str)]) {
     flock.attach_roles(roles, None);
 }
 
-fn set_service_role(flock: &Flock, role: &str) {
+fn set_service_role(flock: &crate::testsupport::Scratch<Flock>, role: &str) {
     let dir = flock.dir().to_path_buf();
     let mut roles = crate::roles::Roles::new(
         &crate::config::Env::default(),
