@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod owner;
 pub mod pane_record;
 pub mod panes;
+pub mod policy;
 pub mod proc;
 pub mod projects;
 pub mod protocol;

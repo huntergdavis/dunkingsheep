@@ -918,6 +918,9 @@ class Tasks:
         if verdict is not None:
             self.set_verdict(row["id"], verdict, by=by)
         result = self.update(row["id"], status="done", updated_by=by)
+        # t872: a terminal status ENDS the claim (block/cancel/complete each used to
+        # leave a live lease behind, and the reaper requeued the finished work).
+        self._end_claim(row["id"])
         if not landed:
             result = self.set_landed(row["id"], landed=False, by=by)
         self._fire(row["id"], "completed", by=by, kind=row["kind"] if "kind" in row.keys() else None)
@@ -1187,8 +1190,32 @@ class Tasks:
                 self.db.rollback()
                 raise
 
+    def _end_claim(self, task_id):
+        """Delete every lease on a task that has reached a terminal status (t872).
+
+        A lease is the claim. Once the task is blocked, cancelled or done it is not
+        being worked, and a lease left behind is what the reaper requeues and the push
+        loop re-claims - measured three times today: block kept it (t872: blocked ->
+        requeued -> claimed, three rounds), release kept the assignee (t595), and
+        complete leaves it too (t872 completed at 03:05:09 still had one live lease).
+        """
+        with self._lock:
+            self.db.execute("DELETE FROM task_leases WHERE task_id = ?", (str(task_id),))
+            self.db.commit()
+
     def block(self, task_id, reason=None):
-        return self.update(task_id, status="blocked", block_reason=reason)
+        """Block a task and END its claim (t872).
+
+        The claim state has to go with the status. `update(status='blocked')` left the
+        lease behind, and the reaper then found a lease on a task that is not
+        in_progress, requeued it, and the push loop claimed it again - measured on
+        t872: `blocked` 09:06:28, `requeued` 09:35:00, `claimed` 09:35:09, the third
+        round of the same duplicate. A blocked task is not being worked, so its lease
+        is not evidence of anything.
+        """
+        row = self.update(task_id, status="blocked", block_reason=reason)
+        self._end_claim(row["id"])
+        return self.get(row["id"])
 
     def unblock(self, task_id):
         row = self._require(task_id)
@@ -1206,6 +1233,7 @@ class Tasks:
         later.
         """
         row = self.update(task_id, status="cancelled", block_reason=reason)
+        self._end_claim(row["id"])   # t872: cancelling ends the claim
         if isinstance(row, dict):
             rows = self.db.execute(
                 "SELECT id, status, depends_on FROM tasks WHERE status IN "
@@ -1824,7 +1852,10 @@ class Tasks:
             "SELECT COUNT(*) AS n FROM task_leases WHERE task_id = ?", (task_id,)
         ).fetchone()["n"]
         status = row["status"] if row is not None else self._require(task_id)["status"]
-        if status not in ("done", "cancelled") and remaining == 0:
+        # t872: only an IN-PROGRESS task reopens when its last lease ends. A blocked,
+        # cancelled or done task keeps its status - reopening a blocked duplicate is
+        # what made the same body come back three times after it was blocked.
+        if status == "in_progress" and remaining == 0:
             status = "open"
         self.db.execute(
             "UPDATE tasks SET assignees = ?, status = ?, attempts = attempts + 1, "
