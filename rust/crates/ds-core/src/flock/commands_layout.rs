@@ -11,12 +11,16 @@
 //!
 //! Slice 3 adds `start_agent` (its start verification is `agent_verify.rs`, injected).
 //!
-//! NOT in this slice: `close_target` (it halts dunkers, which `Flock` does not hold yet),
-//! `respawn_pane`, `retire_pane` and `last_message`. The `mailbox`/`role` write-back of
-//! `create_workspace` is `Flock::create_workspace_with_lane` (t1420).
+//! Slice 4 adds `close_target` (T37b, t1419): it halts the dunkers aimed at the closed panes
+//! through `DunkList::halt_aimed_at`; the backend's `close` is the [`CloseBackend`] extension
+//! trait so existing `LayoutBackend` implementors are untouched.
+//!
+//! The `mailbox`/`role` write-back of `create_workspace` is `Flock::create_workspace_with_lane`
+//! (t1420). NOT in this slice: `respawn_pane`, `retire_pane` and `last_message`.
 
 use serde_json::{json, Map, Value};
 
+use super::dunks::DunkList;
 use super::resolve::{resolve_tab, resolve_target, resolve_workspace};
 use super::Flock;
 use crate::error::DunkError;
@@ -549,6 +553,81 @@ pub fn focus(
         ))
     })?;
     Ok(json!({"kind": kind, "id": target_id, "focused": true}))
+}
+
+/// `self.herdr.close(kind, target_id)`: the backend's result dict, or its message as `Err`.
+pub trait CloseBackend: LayoutBackend {
+    fn close(&mut self, kind: &str, target_id: &str) -> Result<Value, String>;
+}
+
+/// What `close_target` returns: the wire dict and the `last_message` the Python sets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Closed {
+    pub result: Value,
+    pub last_message: String,
+}
+
+fn id_key(kind: &str) -> &'static str {
+    match kind {
+        "workspace" => "workspace_id",
+        "tab" => "tab_id",
+        _ => "pane_id",
+    }
+}
+
+/// `close_target`: close a workspace, tab or pane, killing whatever runs inside. Refuses to
+/// close the caller's own pane or its containers unless `force` is set, since a process
+/// closing its own terminal is almost always a mistake; do it from another pane. Dunks aimed
+/// into the closed area are stopped. `save` stands for `_save()` (called only when a dunk
+/// was stopped, as in the Python).
+pub fn close_target(
+    backend: &mut dyn CloseBackend,
+    dunks: &DunkList,
+    kind: &str,
+    target: &str,
+    self_pane_id: Option<&str>,
+    force: bool,
+    save: &mut dyn FnMut(),
+) -> Result<Closed, DunkError> {
+    let (kind, target_id, item) = resolve_kind(backend, kind, target, self_pane_id)?;
+    let key = id_key(&kind);
+    let own = self_pane_id
+        .filter(|s| !s.is_empty())
+        .and_then(|id| backend.get_pane(id));
+    if !force && own.is_some_and(|own| text(&own, key) == target_id) {
+        return refused(format!(
+            "refusing to close the {kind} this caller runs in ({target_id}); pass --force \
+             only if you intend to kill your own pane/tab/workspace"
+        ));
+    }
+    let doomed: Vec<String> = backend
+        .list_panes()
+        .iter()
+        .filter(|p| text(p, key) == target_id)
+        .map(|p| text(p, "pane_id"))
+        .collect();
+    backend.close(&kind, &target_id).map_err(|m| {
+        DunkError::Refused(format!(
+            "the terminal backend could not close {kind} {target_id}: {m}"
+        ))
+    })?;
+    let stopped = dunks.halt_aimed_at(&doomed);
+    if !stopped.is_empty() {
+        save();
+    }
+    let label = {
+        let label = text(&item, "label");
+        if label.is_empty() {
+            target_id.clone()
+        } else {
+            label
+        }
+    };
+    Ok(Closed {
+        result: json!({"kind": kind, "id": target_id, "closed_panes": doomed,
+            "stopped_dunks": stopped}),
+        last_message: format!("Closed {kind} {label}"),
+    })
 }
 
 #[cfg(test)]
