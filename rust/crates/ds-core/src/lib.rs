@@ -40,6 +40,7 @@ pub mod registry;
 pub mod retry;
 pub mod review;
 pub mod roles;
+pub mod server;
 pub mod stuck;
 pub mod superusers;
 pub mod tasks;
