@@ -21,18 +21,16 @@ impl PaneInfoEnv for Panes {
     }
 }
 
-async fn setup(tag: &str) -> (Flock, std::sync::Arc<Tasks>) {
-    let dir = std::env::temp_dir().join(format!("ds-tc-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("tasks.db");
-    let _ = std::fs::remove_file(&path);
-    let tasks = std::sync::Arc::new(Tasks::open(&path).await.unwrap());
+async fn setup(tag: &str) -> (crate::testsupport::Scratch<Flock>, std::sync::Arc<Tasks>) {
+    let scratch = crate::testsupport::dir(&format!("tc-{tag}"));
+    let dir = scratch.path().to_path_buf();
+    let tasks = std::sync::Arc::new(Tasks::open(dir.join("tasks.db")).await.unwrap());
     let flock = Flock::new(dir.join("l.json"), dir.join("n.json"), false);
     flock.attach_stores(Stores {
         tasks: Some(tasks.clone()),
         ..Default::default()
     });
-    (flock, tasks)
+    (crate::testsupport::Scratch::new(flock, scratch), tasks)
 }
 
 fn text(result: Result<(), DunkError>) -> String {

@@ -363,18 +363,30 @@ impl Flock {
             Some(p) => self.caller_role(Some(p), env)?,
             None => "anonymous".to_string(),
         };
-        Ok(match role.as_str() {
+        Ok(Self::filters_for_role(&role, pane))
+    }
+
+    /// The pure half of `_claim_filters`: `(kinds, exclude_author)` for a ROLE. It reads no
+    /// request context, so `task_next` can compute it once, before its first await, and reuse it
+    /// for every claim it makes (t1513).
+    pub fn filters_for_role(
+        role: &str,
+        pane: Option<&str>,
+    ) -> (Option<Vec<String>>, Option<String>) {
+        match role {
             "reviewer" => (Some(vec!["review".to_string()]), pane.map(str::to_string)),
             "owner" => (None, None),
             _ => (
                 Some(["work", "verify", "report"].map(String::from).to_vec()),
                 None,
             ),
-        })
+        }
     }
 
-    /// `current_caller()` as the `(pid, start, name)` the store records on a lease.
-    fn caller_identity(&self) -> Option<(i64, Option<String>, Option<String>)> {
+    /// `current_caller()` as the `(pid, start, name)` the store records on a lease. It reads the
+    /// per-request thread-local context, so call it on the request's thread BEFORE the first
+    /// await of an async command and pass the result in (`task_heartbeat`, `task_next`).
+    pub fn caller_identity(&self) -> Option<(i64, Option<String>, Option<String>)> {
         let caller = self.current_caller()?;
         let pid = caller.get("pid").and_then(serde_json::Value::as_i64)?;
         let text = |key: &str| {
@@ -388,21 +400,29 @@ impl Flock {
 
     /// `task_next`: atomically claim the next task; an empty queue (or a refusal) subscribes
     /// the pane for a later push (`following`). Returns the outcome and whether it follows.
+    ///
+    /// THREAD CONTRACT (t1513): the per-request caller context (service token, cached role) is a
+    /// thread-local, and this is an async fn: after an await the future may resume on another
+    /// thread and read ANOTHER request's context. So everything that reads it happens here, before
+    /// the first await: the role is read once, the claim filters are derived from it once and
+    /// reused for the `auto` pane-queue claim and the global claim, and the lease `caller` is
+    /// passed in (like `task_heartbeat`'s) instead of being read from the thread-local.
     pub async fn task_next(
         &self,
         env: &dyn PaneInfoEnv,
         scope: Option<&str>,
         lease_seconds: Option<f64>,
         allow_busy: bool,
+        caller: Option<(i64, Option<String>, Option<String>)>,
         self_pane_id: Option<&str>,
     ) -> Result<(ClaimOutcome, bool), DunkError> {
         let tasks = self.task_store()?;
         let pane = self_pane_id.filter(|p| !p.is_empty());
-        let caller = self.caller_identity();
         let role = match pane {
             Some(p) => self.caller_role(Some(p), env)?,
             None => "anonymous".to_string(),
         };
+        let (kinds, exclude_author) = Self::filters_for_role(&role, pane);
         if role == "reviewer" {
             let pane = pane.unwrap_or_default();
             let (may, provider, allowed) = self.with_roles(|roles, _| {
@@ -433,7 +453,6 @@ impl Flock {
             }
             "auto" => {
                 if let Some(pane) = pane {
-                    let (kinds, exclude_author) = self.claim_filters(env, Some(pane))?;
                     let local = tasks
                         .claim_next(
                             pane,
@@ -442,8 +461,8 @@ impl Flock {
                                 lease_seconds,
                                 caller: caller.clone(),
                                 allow_busy,
-                                kinds,
-                                exclude_author,
+                                kinds: kinds.clone(),
+                                exclude_author: exclude_author.clone(),
                             },
                         )
                         .await?;
@@ -468,7 +487,6 @@ impl Flock {
                 resolved
             }
         };
-        let (kinds, exclude_author) = self.claim_filters(env, self_pane_id)?;
         let outcome = tasks
             .claim_next(
                 &target,
@@ -749,18 +767,16 @@ mod list_tests {
     use crate::flock::panes::PaneInfoEnv;
     use crate::flock::panes::Stores;
 
-    async fn flock_with(tag: &str) -> (Flock, Arc<Tasks>) {
-        let dir = std::env::temp_dir().join(format!("ds-ct-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tasks.db");
-        let _ = std::fs::remove_file(&path);
-        let tasks = Arc::new(Tasks::open(&path).await.unwrap());
+    async fn flock_with(tag: &str) -> (crate::testsupport::Scratch<Flock>, Arc<Tasks>) {
+        let scratch = crate::testsupport::dir(&format!("ct-{tag}"));
+        let dir = scratch.path().to_path_buf();
+        let tasks = Arc::new(Tasks::open(dir.join("tasks.db")).await.unwrap());
         let flock = Flock::new(dir.join("l.json"), dir.join("n.json"), false);
         flock.attach_stores(Stores {
             tasks: Some(tasks.clone()),
             ..Default::default()
         });
-        (flock, tasks)
+        (crate::testsupport::Scratch::new(flock, scratch), tasks)
     }
 
     #[tokio::test]
@@ -790,9 +806,9 @@ mod list_tests {
         }
     }
 
-    async fn staffed(tag: &str) -> (Flock, Arc<Tasks>) {
+    async fn staffed(tag: &str) -> (crate::testsupport::Scratch<Flock>, Arc<Tasks>) {
         let (flock, tasks) = flock_with(tag).await;
-        let dir = std::env::temp_dir().join(format!("ds-ct-{tag}-{}", std::process::id()));
+        let dir = flock.dir().to_path_buf();
         let mut roles = crate::roles::Roles::new(
             &crate::config::Env::default(),
             Some(dir.join("roles.json")),
@@ -851,7 +867,7 @@ mod list_tests {
             .unwrap();
         // a worker never pulls the review, so the queue is empty for it and it follows
         let (outcome, following) = flock
-            .task_next(&NoPanes, None, None, false, Some("w1:p1"))
+            .task_next(&NoPanes, None, None, false, None, Some("w1:p1"))
             .await
             .unwrap();
         assert!(matches!(outcome, ClaimOutcome::Refused { .. }));
@@ -865,7 +881,7 @@ mod list_tests {
         assert!(!flock.task_unfollow(Some("w1:p1")).unwrap().0);
         // a reviewer on a provider that may review pulls it
         let (outcome, following) = flock
-            .task_next(&NoPanes, None, None, false, Some("w3:p3"))
+            .task_next(&NoPanes, None, None, false, None, Some("w3:p3"))
             .await
             .unwrap();
         assert!(!following);
@@ -879,7 +895,7 @@ mod list_tests {
     async fn task_next_refuses_a_reviewer_on_a_provider_that_may_not_review() {
         let (flock, _tasks) = staffed("next-free").await;
         let err = flock
-            .task_next(&NoPanes, None, None, false, Some("w2:p2"))
+            .task_next(&NoPanes, None, None, false, None, Some("w2:p2"))
             .await
             .unwrap_err()
             .to_string();
@@ -888,13 +904,137 @@ mod list_tests {
             "{err}"
         );
         let err = flock
-            .task_next(&NoPanes, Some("self"), None, false, None)
+            .task_next(&NoPanes, Some("self"), None, false, None, None)
             .await
             .unwrap_err()
             .to_string();
         assert!(
             err.contains("scope 'self' requires a known caller pane"),
             "{err}"
+        );
+    }
+
+    fn review_options() -> AddOptions {
+        AddOptions {
+            kind: Some("review".into()),
+            repo: Some("o/r".into()),
+            pr: Some("1".into()),
+            head: Some("abc".into()),
+            ..Default::default()
+        }
+    }
+
+    fn claimed(outcome: ClaimOutcome) -> Task {
+        match outcome {
+            ClaimOutcome::Claimed { task, .. } => *task,
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_next_auto_claims_the_panes_own_queue_first() {
+        let (flock, tasks) = staffed("auto-local").await;
+        let local = tasks.add("w1:p1", "mine", "").await.unwrap();
+        tasks.add("global", "fleet", "").await.unwrap();
+        let (outcome, following) = flock
+            .task_next(&NoPanes, Some("auto"), None, false, None, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert!(!following);
+        assert_eq!(local.id, claimed(outcome).id, "the pane's own queue wins");
+    }
+
+    #[tokio::test]
+    async fn task_next_auto_falls_through_to_global_when_the_pane_queue_is_empty() {
+        let (flock, tasks) = staffed("auto-global").await;
+        let fleet = tasks.add("global", "fleet", "").await.unwrap();
+        let (outcome, following) = flock
+            .task_next(&NoPanes, Some("auto"), None, false, None, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert!(!following);
+        assert_eq!(fleet.id, claimed(outcome).id);
+    }
+
+    #[tokio::test]
+    async fn task_next_auto_applies_the_role_filters_to_both_claims() {
+        // t1513: the role is read ONCE and the same filters serve the pane-queue claim and the
+        // global claim. A reviewer's pane queue holds only `work` (skipped), the global queue a
+        // review (claimed); a worker never pulls that review and follows instead.
+        let (flock, tasks) = staffed("auto-filters").await;
+        tasks.add("w3:p3", "local work", "").await.unwrap();
+        let review = tasks
+            .add_with("global", "review", "", review_options())
+            .await
+            .unwrap();
+        let (outcome, _) = flock
+            .task_next(&NoPanes, Some("auto"), None, false, None, Some("w3:p3"))
+            .await
+            .unwrap();
+        assert_eq!(review.id, claimed(outcome).id);
+        let (outcome, following) = flock
+            .task_next(&NoPanes, Some("auto"), None, false, None, Some("w1:p1"))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ClaimOutcome::Refused { .. }));
+        assert!(following, "an empty claim subscribes the pane");
+    }
+
+    #[test]
+    fn the_claim_filters_are_a_pure_function_of_the_role() {
+        let (kinds, exclude) = Flock::filters_for_role("reviewer", Some("w3:p3"));
+        assert_eq!(
+            (Some(vec!["review".to_string()]), Some("w3:p3".to_string())),
+            (kinds, exclude)
+        );
+        assert_eq!(
+            (None, None),
+            Flock::filters_for_role("owner", Some("w9:p9"))
+        );
+        for role in ["worker", "desk", "planner", "anonymous", "system"] {
+            let (kinds, exclude) = Flock::filters_for_role(role, Some("w1:p1"));
+            assert_eq!(
+                Some(vec![
+                    "work".to_string(),
+                    "verify".to_string(),
+                    "report".to_string()
+                ]),
+                kinds,
+                "{role}"
+            );
+            assert_eq!(None, exclude, "{role}");
+        }
+    }
+
+    #[test]
+    fn task_next_reads_the_request_context_only_before_its_first_await() {
+        // t1513: the per-request caller context (service token, cached role) is a thread-local,
+        // and task_next is async: after an await the future may resume on another thread and read
+        // ANOTHER request's context. A thread hop cannot be forced deterministically, so this pins
+        // the contract at the source: nothing after the first `.await` may read that context.
+        let source = include_str!("commands_tasks.rs");
+        let start = source.find("pub async fn task_next(").expect("task_next");
+        let body = &source[start..];
+        let body = &body[..body.find("/// `task_follow`").expect("end of task_next")];
+        let first_await = body.find(".await").expect("task_next awaits");
+        let (before, after) = body.split_at(first_await);
+        for forbidden in [
+            "caller_role(",
+            "claim_filters(",
+            "caller_identity(",
+            "current_caller(",
+            "with_caller(",
+            "service_token",
+        ] {
+            assert!(
+                !after.contains(forbidden),
+                "task_next reads `{forbidden}` after its first await: another request's context"
+            );
+        }
+        assert_eq!(
+            1,
+            before.matches("caller_role(").count(),
+            "the role is read exactly once, before the first await"
         );
     }
 
