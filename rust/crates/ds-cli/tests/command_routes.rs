@@ -272,3 +272,45 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_21_task_claim_b() {
+    let unfollowed = run_daemon_cli(
+        &["task", "unfollow"],
+        "task_unfollow",
+        json!({}),
+        json!({"was_following":true}),
+    );
+    assert_eq!(0, unfollowed.status.code().unwrap());
+    assert_eq!(
+        "stopped following\n",
+        String::from_utf8(unfollowed.stdout).unwrap()
+    );
+    assert!(unfollowed.stderr.is_empty());
+
+    let followers = run_daemon_cli(
+        &["task", "followers"],
+        "task_followers",
+        json!({}),
+        json!({"followers":[{"pane_id":"%99", "scope":"global"}]}),
+    );
+    assert_eq!(0, followers.status.code().unwrap());
+    assert_eq!(
+        "%99          global\n",
+        String::from_utf8(followers.stdout).unwrap()
+    );
+    assert!(followers.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["task", "stats", "global"],
+        "task_stats",
+        json!({"scope":"global"}),
+        json!({"totals":{"open":2, "done":1}, "by_scope":{"global":{"open":2, "done":0}}}),
+    );
+    assert_eq!(0, stats.status.code().unwrap());
+    assert_eq!(
+        "open=2 done=1\n  global: open=2\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+}
