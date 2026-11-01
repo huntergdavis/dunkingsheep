@@ -67,7 +67,13 @@ fn started(flock: &Flock) -> String {
 }
 
 fn ended_at(flock: &Flock) -> Option<f64> {
-    flock.turns.lock().unwrap().get(PANE).unwrap().ended_at
+    flock
+        .turn_states
+        .lock()
+        .unwrap()
+        .get(PANE)
+        .unwrap()
+        .ended_at
 }
 
 #[test]
@@ -80,7 +86,13 @@ fn turn_start_records_the_turn_and_tells_the_hooks() {
     assert_eq!(out["pane_id"], PANE);
     assert_eq!(out["ttl_s"], 60.0);
     assert_eq!(out["turn_id"].as_str().unwrap().len(), 32);
-    let state = flock.turns.lock().unwrap().get(PANE).cloned().unwrap();
+    let state = flock
+        .turn_states
+        .lock()
+        .unwrap()
+        .get(PANE)
+        .cloned()
+        .unwrap();
     assert_eq!(state.caller, Some(as_caller(41, "100")));
     assert_eq!(
         spy.calls.lock().unwrap().len(),
@@ -119,7 +131,13 @@ fn a_genuine_end_ends_the_turn_and_asks_for_the_dispatch() {
     assert_eq!(out["dispatch"]["action"], "claim");
     assert!(ended_at(&flock).is_some());
     assert_eq!(
-        flock.turns.lock().unwrap().get(PANE).unwrap().expires_at,
+        flock
+            .turn_states
+            .lock()
+            .unwrap()
+            .get(PANE)
+            .unwrap()
+            .expires_at,
         0.0
     );
     assert!(spy
@@ -257,7 +275,7 @@ fn old_token_cannot_end_a_new_turn_from_the_same_process() {
     assert_eq!(out["ended"], false);
     assert_eq!(out["dispatch"]["reason"], "turn_mismatch");
     assert_eq!(
-        flock.turns.lock().unwrap().get(PANE).unwrap().turn_id,
+        flock.turn_states.lock().unwrap().get(PANE).unwrap().turn_id,
         second
     );
     assert!(ended_at(&flock).is_none());
@@ -268,7 +286,7 @@ fn expired_turn_cannot_supply_idle_evidence_or_dispatch() {
     let (flock, spy) = (flock(), Spy::default());
     let token = started(&flock);
     flock
-        .turns
+        .turn_states
         .lock()
         .unwrap()
         .get_mut(PANE)
@@ -302,4 +320,19 @@ fn a_foreign_process_cannot_end_a_turn_it_did_not_start() {
         "no caller pid is foreign too"
     );
     assert!(ended_at(&flock).is_none());
+}
+
+#[test]
+fn the_activity_view_follows_the_turn() {
+    // `lane_activity` reads the activity table; a started turn is busy, an ended one is not.
+    let flock = flock();
+    let token = started(&flock);
+    let live = flock.turns.lock().unwrap().get(PANE).cloned().unwrap();
+    assert!(live.started_at.is_some() && live.ended_at.is_none() && live.expires_at.unwrap() > 0.0);
+    flock
+        .turn_end(None, "turn_end", Some(PANE), Some(&token), true, &NoHooks)
+        .unwrap();
+    let done = flock.turns.lock().unwrap().get(PANE).cloned().unwrap();
+    assert!(done.ended_at.is_some());
+    assert_eq!(done.expires_at, Some(0.0));
 }

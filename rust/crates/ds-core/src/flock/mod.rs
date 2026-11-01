@@ -66,8 +66,9 @@ pub struct Flock {
     role_panes: Mutex<panes::RolePaneCache>,
     turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
-    /// pane_id -> its turn (`self.turns`, T36).
-    pub(crate) turns: Mutex<commands_turns::Turns>,
+    /// pane_id -> its full turn (turn_id, caller, handoff; T36). `turns` above is the
+    /// activity view `lane_activity` reads; `commands_turns` keeps the two in step.
+    pub(crate) turn_states: Mutex<commands_turns::Turns>,
 }
 
 impl Flock {
@@ -86,7 +87,7 @@ impl Flock {
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
-            turns: Mutex::new(commands_turns::Turns::new()),
+            turn_states: Mutex::new(commands_turns::Turns::new()),
         };
         flock.load_launches();
         flock
@@ -413,6 +414,7 @@ pub mod views;
 
 #[cfg(test)]
 mod commands_inbox_tests;
+#[cfg(test)]
 mod commands_turns_tests;
 #[cfg(test)]
 mod lanes_tests;

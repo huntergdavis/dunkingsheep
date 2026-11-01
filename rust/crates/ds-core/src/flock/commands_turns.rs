@@ -17,6 +17,7 @@ use std::io::Read;
 use serde_json::{json, Value};
 
 use super::Flock;
+use crate::activity::Turn;
 use crate::error::DunkError;
 use crate::proc::{caller_pane_auth_failure, Caller};
 
@@ -163,10 +164,18 @@ impl Flock {
             caller: self.current_caller(),
             handoff_id: handoff_id.map(String::from),
         };
-        self.turns
+        self.turn_states
             .lock()
-            .expect("turns lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(pane_id.to_string(), state.clone());
+        self.set_turn(
+            pane_id,
+            Turn {
+                started_at: Some(now),
+                expires_at: Some(now + ttl),
+                ended_at: None,
+            },
+        );
         hooks.record("turn.start", pane_id, source, None, "ok", now, None);
         hooks.observe_turn(pane_id, &state);
         Ok(json!({
@@ -192,7 +201,7 @@ impl Flock {
             .ok_or_else(|| DunkError::Refused("turn end requires a pane".into()))?;
         let now = crate::clock::now_s();
         let state = {
-            let mut turns = self.turns.lock().expect("turns lock");
+            let mut turns = self.turn_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let invalid: Option<&str> = match turns.get(pane_id) {
                 None => Some("no_active_turn"),
                 Some(state) if state.ended_at.is_some() => Some("already_ended"),
@@ -226,6 +235,14 @@ impl Flock {
             state.expires_at = 0.0;
             state.clone()
         };
+        self.set_turn(
+            pane_id,
+            Turn {
+                started_at: Some(state.started_at),
+                expires_at: Some(0.0),
+                ended_at: Some(now),
+            },
+        );
         let duration = ((now - state.started_at) * 1000.0) as i64;
         hooks.record(
             "turn.end",
