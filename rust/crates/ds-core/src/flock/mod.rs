@@ -451,6 +451,7 @@ pub mod lane_registry_rows;
 pub mod lanes;
 pub mod loops;
 pub mod loops_push;
+pub mod loops_stuck;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
@@ -473,6 +474,8 @@ mod dunks_tests;
 mod lanes_tests;
 #[cfg(test)]
 mod loops_push_tests;
+#[cfg(test)]
+mod loops_stuck_tests;
 #[cfg(test)]
 mod loops_tests;
 #[cfg(test)]
