@@ -570,6 +570,52 @@ impl Tasks {
             .unwrap_or(-1)
     }
 
+    /// `Tasks.cancel`'s `blocked_dependents` (t878): the sorted ids of the open, in-progress or
+    /// blocked tasks that depend on `id`. A cancelled dependency can never be satisfied by work,
+    /// so naming these is the only warning the caller gets.
+    pub async fn blocked_dependents(&self, id: &str) -> Result<Vec<String>, DunkError> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT id, depends_on FROM tasks WHERE status IN ('open', 'in_progress', 'blocked')")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                    })
+                    .map_err(db::map_sqlite)?;
+                let mut found = Vec::new();
+                for row in rows {
+                    let (other, raw) = row.map_err(db::map_sqlite)?;
+                    if decode_list(raw.as_deref()).contains(&id) {
+                        found.push(other);
+                    }
+                }
+                found.sort();
+                Ok(found)
+            })
+            .await
+    }
+
+    /// The event names recorded for a task, oldest first (test helper).
+    #[doc(hidden)]
+    pub async fn events_named(&self, id: &str) -> Vec<String> {
+        let id = id.to_string();
+        self.writer
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT event FROM task_events WHERE task_id = ? ORDER BY id")
+                    .map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(params![id], |row| row.get::<_, String>(0))
+                    .map_err(db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+            })
+            .await
+            .unwrap_or_default()
+    }
+
     /// Event count for a task (test helper).
     #[doc(hidden)]
     pub async fn events(&self, id: &str) -> i64 {
