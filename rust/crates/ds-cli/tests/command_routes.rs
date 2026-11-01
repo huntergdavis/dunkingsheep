@@ -272,3 +272,50 @@ fn cli_generic_json_preserves_daemon_insertion_order() {
     );
     daemon.join().unwrap();
 }
+
+#[test]
+fn cli_route_26_reports() {
+    let prose_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(prose_file.path(), "file prose\n").unwrap();
+    let prose_path = prose_file.path().to_str().unwrap();
+    let ran = run_daemon_cli(
+        &[
+            "report",
+            "run",
+            "--no-post",
+            "--prose",
+            "ignored",
+            "--prose-file",
+            prose_path,
+            "--out-dir",
+            "/reports",
+        ],
+        "report_run",
+        json!({"post": false, "prose": "file prose\n", "out_dir": "/reports"}),
+        json!({
+            "path": "/reports/2026-11-01.md",
+            "generated_at": "2026-11-01T12:00:00-08:00",
+            "posted": {"message_id": "i42", "transport": "socket"},
+            "prose_rejected": ["unknown task"]
+        }),
+    );
+    assert_eq!(0, ran.status.code().unwrap());
+    assert_eq!(
+        "report /reports/2026-11-01.md  (generated 2026-11-01T12:00:00-08:00)\nposted to the owner mailbox as i42 (transport socket)\nprose rejected: unknown task\n",
+        String::from_utf8(ran.stdout).unwrap()
+    );
+    assert!(ran.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["report", "list"],
+        "report_list",
+        json!({"out_dir": null}),
+        json!({"count": 0, "dir": "/reports", "reports": []}),
+    );
+    assert_eq!(0, listed.status.code().unwrap());
+    assert_eq!(
+        "0 report(s) in /reports\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+}

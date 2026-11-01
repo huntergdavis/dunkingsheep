@@ -546,6 +546,61 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn report(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "report_command") {
+        Some("list") => {
+            let mut args = Map::new();
+            args.insert(
+                "out_dir".into(),
+                ns.get("out_dir").cloned().unwrap_or(Value::Null),
+            );
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "report_list", args, |result| {
+                crate::render_print::render_report_list(result, &stamp)
+            })
+        }
+        Some("run") => {
+            let prose = if let Some(path) = text(ns, "prose_file").filter(|p| !p.is_empty()) {
+                match std::fs::read_to_string(path) {
+                    Ok(prose) => prose,
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("error: {error}\n"),
+                            code: 3,
+                        }
+                    }
+                }
+            } else {
+                text(ns, "prose").unwrap_or_default().to_string()
+            };
+            let mut args = Map::new();
+            args.insert(
+                "post".into(),
+                Value::Bool(!matches!(ns.get("no_post"), Some(Value::Bool(true)))),
+            );
+            if !prose.is_empty() {
+                args.insert("prose".into(), Value::String(prose));
+            }
+            if let Some(out_dir) = text(ns, "out_dir").filter(|value| !value.is_empty()) {
+                args.insert("out_dir".into(), Value::String(out_dir.to_string()));
+            }
+            crate::daemon_cmd::run_command(ns, "report_run", args, |result| {
+                crate::render_fleet::render_report_run(result)
+            })
+        }
+        Some(other) => not_ported(&format!("report {other}")),
+        None => not_ported("report"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -570,6 +625,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "report" => report(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
