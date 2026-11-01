@@ -21,6 +21,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod error;
+pub mod fallback;
 pub mod flock;
 pub mod inbox;
 pub mod inbox_store;
