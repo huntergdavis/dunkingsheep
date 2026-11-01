@@ -23,6 +23,35 @@ use serde::Serialize;
 use crate::db::{map_sqlite, ReadPool, SyncWriter};
 use crate::error::DunkError;
 
+/// Stable attribution labels for the owner web-thread projection.
+///
+/// The Python web projection (t1983, commit 9c8f919) treats `reply_to` as a
+/// conversation edge and derives authorship from stored sender/transport
+/// provenance. Rust owner-thread consumers should use this same rule rather
+/// than inferring the author from the reply edge or mailbox destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OwnerThreadRole {
+    Owner,
+    Agent,
+    Unknown,
+}
+
+/// Classify an owner-thread row using only its recorded author provenance.
+///
+/// Nonempty `sender` wins over transport. A sender-less web or Telegram row is
+/// human-origin; other sender-less rows remain unattributed. `reply_to` is
+/// deliberately not an input because it describes the conversation link.
+pub fn owner_thread_role(sender: Option<&str>, transport: Option<&str>) -> OwnerThreadRole {
+    if sender.is_some_and(|value| !value.is_empty()) {
+        OwnerThreadRole::Agent
+    } else if matches!(transport, Some("web" | "telegram")) {
+        OwnerThreadRole::Owner
+    } else {
+        OwnerThreadRole::Unknown
+    }
+}
+
 /// The schema, verbatim from `dunk_owner.SCHEMA`.
 pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS owner_push (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -484,4 +513,83 @@ fn row_to_push(row: &rusqlite::Row<'_>) -> rusqlite::Result<Push> {
         taken_at: row.get("taken_at")?,
         taken_by: row.get("taken_by")?,
     })
+}
+
+#[cfg(test)]
+mod owner_thread_role_tests {
+    use super::{owner_thread_role, OwnerThreadRole};
+
+    #[test]
+    fn sender_and_transport_provenance_determine_stable_thread_roles() {
+        // t1983 Python parity: `reply_to` is intentionally absent from this
+        // classifier. In particular, a human reply remains owner-authored.
+        let cases = [
+            (
+                "reported agent-to-desk row",
+                Some("%154"),
+                None,
+                OwnerThreadRole::Agent,
+                "agent",
+            ),
+            (
+                "agent sender overrides human transport",
+                Some("%21"),
+                Some("web"),
+                OwnerThreadRole::Agent,
+                "agent",
+            ),
+            (
+                "human web ingest",
+                None,
+                Some("web"),
+                OwnerThreadRole::Owner,
+                "owner",
+            ),
+            (
+                "human Telegram reply with a reply link",
+                None,
+                Some("telegram"),
+                OwnerThreadRole::Owner,
+                "owner",
+            ),
+            (
+                "empty sender and no transport",
+                Some(""),
+                None,
+                OwnerThreadRole::Unknown,
+                "unknown",
+            ),
+            (
+                "missing sender and no transport",
+                None,
+                None,
+                OwnerThreadRole::Unknown,
+                "unknown",
+            ),
+            (
+                "report transport is not assumed human",
+                None,
+                Some("report"),
+                OwnerThreadRole::Unknown,
+                "unknown",
+            ),
+            (
+                "unrecognized transport is unattributed",
+                None,
+                Some("other"),
+                OwnerThreadRole::Unknown,
+                "unknown",
+            ),
+        ];
+
+        for (case, sender, transport, expected, serialized) in cases {
+            let role = owner_thread_role(sender, transport);
+            assert_eq!(expected, role, "{case}");
+            assert_eq!(
+                serde_json::to_value(role).expect("role serializes"),
+                serde_json::json!(serialized),
+                "stable serialized role for {case}"
+            );
+        }
+    }
 }
