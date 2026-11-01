@@ -257,13 +257,15 @@ function Composer({ channel, onSend, pending, setPending, disabled }) {
 
 function MessageCard({ item, highlight, onSendNow, onInspect }) {
   const owner = item.role === 'owner';
+  const senderLabel = owner ? 'YOU' : item.role === 'agent' ? 'AGENT' : 'SOURCE UNKNOWN';
+  const senderClass = owner ? 'owner' : item.role === 'agent' ? 'agent' : 'unattributed';
   const deliveryLabel = messageDeliveryLabel(item);
   const waitingSeconds = Math.max(0, Math.floor((Date.now() - new Date(item.created_at).getTime()) / 1000));
   const waitingMinutes = Math.floor(waitingSeconds / 60);
   const heldForDraft = item.delivery_detail?.includes('someone is typing') || item.delivery_detail?.includes('input box contains a draft');
-  return <div className={`message-wrap ${owner ? 'owner' : 'agent'} ${highlight ? 'highlight' : ''}`} id={`message-${item.id}`}>
-    <div className="message-meta"><strong>{owner ? 'YOU' : 'AGENT'}</strong><span>{new Date(item.created_at).toLocaleString()}</span>{owner && <span className={`delivery ${item.delivery}`} title={item.delivery_detail}>{deliveryLabel}</span>}</div>
-    <Message model={{ message: '', direction: owner ? 'outgoing' : 'incoming', position: 'single', sender: owner ? 'You' : 'Agent' }}>
+  return <div className={`message-wrap ${senderClass} ${highlight ? 'highlight' : ''}`} id={`message-${item.id}`}>
+    <div className="message-meta"><strong>{senderLabel}</strong><span>{new Date(item.created_at).toLocaleString()}</span>{owner && <span className={`delivery ${item.delivery}`} title={item.delivery_detail}>{deliveryLabel}</span>}</div>
+    <Message model={{ message: '', direction: owner ? 'outgoing' : 'incoming', position: 'single', sender: senderLabel }}>
       <Message.CustomContent><div className="markdown"><ReactMarkdown>{item.body}</ReactMarkdown></div>
         {item.attachments?.length > 0 && <div className="attachments">{item.attachments.map(a => <div key={a.id} className="attachment-card">{['image/png','image/jpeg','image/gif','image/webp'].includes(a.mime) && <a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer"><img src={`/api/uploads/${a.id}?preview=true`} loading="lazy" alt={a.filename} /></a>}<a href={`/api/uploads/${a.id}`} target="_blank" rel="noreferrer">📎 {a.filename}</a></div>)}</div>}</Message.CustomContent>
     </Message>
