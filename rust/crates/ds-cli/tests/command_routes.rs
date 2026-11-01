@@ -282,7 +282,7 @@ fn cli_route_03_dunk_edit_lifecycle_a() {
     );
     assert_eq!(0, started.status.code().unwrap());
     assert_eq!(
-        "id               d3\nrunning          True\nstatus           active\n",
+        "id               d3\nrunning          True\nstatus           active\nskip_if_unconsumed None\nhold_while_typing None\n",
         String::from_utf8(started.stdout).unwrap()
     );
     assert!(started.stderr.is_empty());
