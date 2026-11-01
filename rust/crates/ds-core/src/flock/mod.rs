@@ -460,6 +460,7 @@ pub mod resolve;
 pub mod retire;
 pub mod roles_gate;
 pub mod roster;
+pub mod send_keys;
 pub mod sends;
 pub mod status;
 pub mod views;
