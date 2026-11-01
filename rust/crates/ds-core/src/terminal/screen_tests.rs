@@ -340,6 +340,81 @@ fn test_unreadable_and_boxless_screens() {
 }
 
 #[test]
+fn test_a_draft_whose_text_begins_with_the_sigil_still_reads() {
+    let screen = "❯ ❯ ls\n❯\u{00a0}\n─────────────────────────────────────────────\n";
+    let (text, detail) = box_text(screen);
+    assert_eq!("❯ ls", text);
+    assert!(detail.contains("text starts on row 1"), "{detail}");
+}
+
+#[test]
+fn test_an_empty_box_says_what_it_read() {
+    let screen = "│ doing work\n❯\u{00a0}\n──────────\n";
+    let (text, detail) = box_text(screen);
+    assert_eq!("", text);
+    assert!(detail.contains("nothing after the sigil"), "{detail}");
+    assert!(detail.contains("row 2 of 3"), "{detail}");
+}
+
+#[test]
+fn test_a_draft_above_an_empty_prompt_is_still_found() {
+    let screen = concat!(
+        "│ ❯ check your inbox\n",
+        "│\n",
+        "❯\u{00a0}\n",
+        "─────────────────────────────────────────────\n",
+        "  ⏵⏵ bypass permissions on · 1 shell\n",
+    );
+    let (text, detail) = box_text(screen);
+    assert_eq!("check your inbox", text);
+    assert!(detail.contains("text starts on row 1"), "{detail}");
+}
+
+#[test]
+fn test_a_dim_hint_is_not_a_draft() {
+    let screen = "❯\u{00a0}\n\x1b[2mnew task? /clear to save 1k tokens\x1b[0m\n";
+    let (text, detail) = box_text(screen);
+    assert_eq!("", text, "{detail}");
+    assert!(!detail.is_empty(), "the empty read needs a diagnostic");
+}
+
+#[test]
+fn test_the_reader_still_says_why_it_called_the_box_empty() {
+    let screen = [
+        "› VP keep-moving: continue t81",
+        "",
+        "› VP probe 4 (2.70.24): composer check",
+        "",
+        "› [inbox] new message for codex-poolrad from %19. Read it with: dunki",
+        "",
+        "",
+        "  GPT-6-Astra high · ~/workspace/poolrad-codex-a · Implement t81 handoff",
+        "",
+    ]
+    .join("\n");
+    let (text, detail) = box_text(&screen);
+    assert_eq!("", text);
+    assert!(detail.contains("transcript"), "{detail}");
+}
+
+#[test]
+fn test_the_reader_still_calls_that_frame_inconclusive() {
+    let screen = [
+        "› an earlier instruction",
+        "",
+        "› a nudge",
+        "",
+        "",
+        "  GPT-6-Astra high · ~/workspace/poolrad-codex-a · Implement t81 handoff",
+        "",
+    ]
+    .join("\n");
+    let (text, detail) = box_text(&screen);
+    assert_eq!("", text);
+    assert!(detail.contains("transcript"), "{detail}");
+}
+
+#[test]
 fn test_is_our_send_recognises_our_prefix_and_collapsed_pastes() {
     assert!(is_our_send(
         "check your inbox",
