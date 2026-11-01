@@ -184,14 +184,19 @@ async fn the_loop_ticks_and_stops_on_the_signal() {
         Duration::from_millis(10),
         stop_rx,
     ));
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Wait for the EVENT (a tick), not for a fixed time: an 80 ms sleep was a flake under load
+    // (t1440). The deadline is only a backstop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !env.saw("inbox 1") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the loop never ticked"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     stop_tx.send(true).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), handle)
+    tokio::time::timeout(Duration::from_secs(30), handle)
         .await
         .expect("the loop stops")
         .unwrap();
-    assert!(
-        env.saw("inbox 1"),
-        "it ticked at least once before stopping"
-    );
 }
