@@ -80,6 +80,8 @@ pub struct Flock {
     launches: Mutex<BTreeMap<String, Map<String, Value>>>,
     /// Which flock this is, for the per-thread caller state below.
     id: u64,
+    /// pane_id -> the scope it follows for the next task (`self.task_waiters`).
+    pub(crate) task_waiters: Mutex<BTreeMap<String, String>>,
     role_panes: Mutex<panes::RolePaneCache>,
     turns: Mutex<BTreeMap<String, crate::activity::Turn>>,
     stores: Mutex<panes::Stores>,
@@ -103,6 +105,7 @@ impl Flock {
             persist_enabled: persist,
             launches: Mutex::new(BTreeMap::new()),
             id: NEXT_FLOCK_ID.fetch_add(1, Ordering::Relaxed),
+            task_waiters: Mutex::new(BTreeMap::new()),
             role_panes: Mutex::new(panes::RolePaneCache::default()),
             turns: Mutex::new(BTreeMap::new()),
             stores: Mutex::new(panes::Stores::default()),
@@ -439,6 +442,7 @@ pub mod delivery;
 pub mod dunks;
 pub mod lane_registry_rows;
 pub mod lanes;
+pub mod loops;
 pub mod mailbox;
 pub mod panes;
 pub mod project_summary;
