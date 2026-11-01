@@ -9,12 +9,18 @@
 //! Tasks, panes and plans are JSON objects (insertion-ordered like the Python dicts), the shape the
 //! board and the wire already use.
 //!
-//! NOT in this slice: the sqlite `Queue`, `tick`, the state file and `summary`, `next_job_plan`,
-//! `assigned_open_tasks`, `delivery_retry_plan` (slice 5b).
+//! Slice 5b adds `next_job_plan`, `assigned_open_tasks`, `delivery_retry_plan` here, and the sqlite
+//! [`queue::Queue`] and [`tick`]/`summary` (with the state file) as submodules.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
+
+pub mod queue;
+pub mod tick;
+
+pub use queue::{DispatchError, Queue};
+pub use tick::{dispatched_in_window, load_state, summary, tick, write_state, Tick};
 
 /// `PRIORITY_ORDER`.
 pub fn priority_order(name: &str) -> i64 {
@@ -400,6 +406,153 @@ pub fn turn_end_text(task: &Value) -> String {
         format!("  dunkingsheep task complete {task_id}"),
     ]
     .join("\n")
+}
+
+/// `assigned_open_tasks`: open tasks ASSIGNED to `pane_id`, in board order, excluding blocked or
+/// gated ones.
+///
+/// This is the eligibility the owner's order needs and the CoS ruling withheld: it is used ONLY at
+/// the moment a lane goes free, and the caller then takes the work through the atomic claim
+/// (task_next), so a lane never receives a prompt for work it has not claimed.
+pub fn assigned_open_tasks(tasks: &[Value], pane_id: &str) -> Vec<Value> {
+    let mut out: Vec<&Value> = tasks
+        .iter()
+        .filter(|task| py_str(task.get("status")) == "open")
+        .filter(|task| {
+            !(task.get("blocked_by").is_some_and(truthy)
+                || task.get("block_reason").is_some_and(truthy)
+                || task.get("allocation_waiting").is_some_and(truthy))
+        })
+        .filter(|task| {
+            !pane_id.is_empty()
+                && task
+                    .get("assignees")
+                    .and_then(Value::as_array)
+                    .is_some_and(|list| list.iter().any(|a| py_str(Some(a)) == pane_id))
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        priority_order(&py_str(a.get("priority")))
+            .cmp(&priority_order(&py_str(b.get("priority"))))
+            .then(
+                number(a.get("created_at"))
+                    .partial_cmp(&number(b.get("created_at")))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(py_str(a.get("id")).cmp(&py_str(b.get("id"))))
+    });
+    out.into_iter().cloned().collect()
+}
+
+/// `next_job_plan`'s keyword arguments.
+#[derive(Debug, Clone, Default)]
+pub struct NextJob<'a> {
+    pub trigger: &'a str,
+    pub pane_id: &'a str,
+    pub tasks: &'a [Value],
+    /// `None` means the count could not be established; an unknown is a skip.
+    pub unread: Option<i64>,
+    pub pending_delivery: bool,
+    pub last_nudge_at: Option<f64>,
+    pub task_nudges: BTreeMap<String, f64>,
+    pub now: Option<f64>,
+    pub min_gap_s: Option<f64>,
+    pub task_cooldown_s: Option<f64>,
+    pub dispatch_reason: Option<&'a str>,
+}
+
+/// `next_job_plan`: decide what a lane does the moment it goes free. Pure: everything is
+/// injected.
+///
+/// t372: the TRIGGER changes, not the eligibility rule (pi-review-1 i31321). On a task COMPLETION
+/// (and on a genuine turn end) a lane looks for its next job by calling the existing atomic claim
+/// - it does not get nudged for work it has not claimed.
+///
+/// Returns `{"trigger", "pane_id", "action", "reason", "task_id"}` where action is "claim" or
+/// "skip". Skip reasons are machine-readable and are the contract: `no_pane`; `disabled` /
+/// `not_allowed` / `readiness_unknown` / `unavailable_lane` (the operator controls refuse the
+/// lane or resolution failed closed, passed in as `dispatch_reason`); `unread_unknown`;
+/// `unread_mail`; `pending_delivery`; `no_assigned_work` (clause 5: quiet lanes stay quiet, and
+/// this is recorded - reviewer/CoS/VP lanes with nothing assigned must record explicit no-work
+/// rather than poll); `cooldown`; `task_cooldown`.
+pub fn next_job_plan(input: &NextJob<'_>) -> Value {
+    let now = input.now.unwrap_or_else(crate::clock::now_s);
+    let min_gap_s = input.min_gap_s.unwrap_or_else(turn_end_min_gap_s);
+    let task_cooldown_s = input
+        .task_cooldown_s
+        .unwrap_or_else(turn_end_task_cooldown_s);
+    let mut plan = json!({"trigger": input.trigger, "pane_id": input.pane_id, "action": "skip",
+        "reason": null, "task_id": null});
+    if input.pane_id.is_empty() {
+        plan["reason"] = json!("no_pane");
+        return plan;
+    }
+    if let Some(reason) = input.dispatch_reason.filter(|r| !r.is_empty()) {
+        plan["reason"] = json!(reason);
+        return plan;
+    }
+    let Some(unread) = input.unread else {
+        plan["reason"] = json!("unread_unknown");
+        return plan;
+    };
+    if unread != 0 {
+        plan["reason"] = json!("unread_mail");
+        return plan;
+    }
+    if input.pending_delivery {
+        plan["reason"] = json!("pending_delivery");
+        return plan;
+    }
+    let candidates = assigned_open_tasks(input.tasks, input.pane_id);
+    if candidates.is_empty() {
+        plan["reason"] = json!("no_assigned_work");
+        return plan;
+    }
+    if let Some(last) = input.last_nudge_at {
+        if min_gap_s > 0.0 && now - last < min_gap_s {
+            plan["reason"] = json!("cooldown");
+            return plan;
+        }
+    }
+    let fresh: Vec<&Value> = candidates
+        .iter()
+        .filter(|task| {
+            now - input
+                .task_nudges
+                .get(&py_str(task.get("id")))
+                .copied()
+                .unwrap_or(0.0)
+                >= task_cooldown_s
+        })
+        .collect();
+    let Some(first) = fresh.first() else {
+        plan["reason"] = json!("task_cooldown");
+        return plan;
+    };
+    plan["action"] = json!("claim");
+    plan["task_id"] = json!(py_str(first.get("id")));
+    plan
+}
+
+/// `delivery_retry_plan`: one bounded retry policy, with the dispatch rate floor and submit
+/// ceiling. The caller supplies the attempt ceiling; no second submit ladder lives here. A crash
+/// after reserving an attempt consumes that attempt, never resets it.
+pub fn delivery_retry_plan(
+    attempt: i64,
+    last_at: Option<f64>,
+    now: f64,
+    max_attempts: i64,
+    min_gap_s: Option<f64>,
+) -> Value {
+    let gap = min_gap_s.unwrap_or_else(turn_end_min_gap_s);
+    if attempt >= max_attempts {
+        return json!({"action": "stop", "reason": "retry_exhausted"});
+    }
+    let next_at = last_at.unwrap_or(0.0) + gap.max(0.0) * 2f64.powi((attempt - 1).max(0) as i32);
+    if attempt != 0 && now < next_at {
+        return json!({"action": "wait", "reason": "retry_backoff", "next_at": next_at});
+    }
+    json!({"action": "attempt", "reason": null})
 }
 
 #[cfg(test)]
