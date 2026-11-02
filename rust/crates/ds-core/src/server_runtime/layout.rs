@@ -143,6 +143,9 @@ impl RequestRuntimeAdapter<'_> {
                 .into_iter()
                 .find(|pane| pane.window_id == tab.tab_id)
                 .map(|pane| pane_value(terminal, &pane));
+            let Some(pane) = pane else {
+                return Err("tmux created the window but it is not visible".into());
+            };
             Ok(json!({
                 "tab": tab_value(tab),
                 "root_pane": pane,
@@ -253,6 +256,10 @@ mod tests {
                 .unwrap();
             assert_eq!("notes", tab["tab"]["label"]);
             assert_eq!("w1", tab["tab"]["workspace_id"]);
+            assert_eq!(
+                format!("{}:p1", tab["tab"]["tab_id"].as_str().unwrap()),
+                tab["root_pane"]["pane_id"]
+            );
 
             let pane = adapter
                 .helper_layoutbackend_split_pane("w1:p1", "right", None, false)
@@ -277,6 +284,15 @@ mod tests {
         with_adapter(failed_tab, |adapter| {
             assert_eq!(
                 Err("tab refused".to_string()),
+                adapter.helper_layoutbackend_create_tab(None, None, None, false)
+            );
+        });
+
+        let mut invisible_tab = FakeTerminal::new();
+        invisible_tab.omit_created_tab_pane = true;
+        with_adapter(invisible_tab, |adapter| {
+            assert_eq!(
+                Err("tmux created the window but it is not visible".to_string()),
                 adapter.helper_layoutbackend_create_tab(None, None, None, false)
             );
         });

@@ -122,6 +122,8 @@ pub struct FakeTerminal {
     pub available: bool,
     /// Failure injected by the fallible grouped-pane listing, for propagation tests.
     pub fail_grouped_panes: Option<TerminalError>,
+    /// Simulate tmux briefly omitting the newly created pane from list-panes.
+    pub omit_created_tab_pane: bool,
     /// One entry per layout mutation: `("create_tab", tab_id)` etc., for assertions.
     pub layout_calls: Vec<(String, String)>,
     /// `(pane_id, command)` per `run_command`.
@@ -156,6 +158,7 @@ impl Default for FakeTerminal {
             workspaces: canned_workspaces(),
             available: true,
             fail_grouped_panes: None,
+            omit_created_tab_pane: false,
             layout_calls: Vec::new(),
             runs: Vec::new(),
             fail_layout: None,
@@ -294,6 +297,31 @@ impl Terminal for FakeTerminal {
         };
         self.tabs.push(tab.clone());
         self.record("create_tab", &tab_id);
+        if !self.omit_created_tab_pane {
+            let workspace = self
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.workspace_id == tab.workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            self.panes.push(Pane {
+                pane_id: format!("{tab_id}:p1"),
+                session_id: tab.workspace_id.clone(),
+                window_id: tab.tab_id.clone(),
+                cwd: cwd.unwrap_or("/home/hunter/work").to_string(),
+                command: "bash".into(),
+                title: tab.label.clone(),
+                label: tab.label.clone(),
+                active: focus,
+                workspace: workspace.label,
+                tab: tab.label.clone(),
+                window_index: tab.index,
+                workspace_index: workspace.index,
+                pane_pid: Some(9000 + self.counter),
+                width: 120,
+                height: 40,
+            });
+        }
         let _ = cwd;
         Ok(tab)
     }
