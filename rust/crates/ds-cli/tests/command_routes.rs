@@ -3897,7 +3897,7 @@ fn cli_route_42_retired() {
     );
     assert_eq!(Some(0), retired.status.code());
     assert_eq!(
-        "retired %42 (superseded-by:wW:p7)\n",
+        "retired %42 (superseded-by:wW:p7); 0 unread message(s) kept as the record\n",
         String::from_utf8(retired.stdout).unwrap()
     );
     assert!(retired.stderr.is_empty());
