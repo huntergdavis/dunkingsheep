@@ -469,6 +469,7 @@ dependencies = [
  "axum",
  "serde",
  "serde_json",
+ "tower",
 ]
 
 [[package]]
