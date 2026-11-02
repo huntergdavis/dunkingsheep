@@ -595,12 +595,14 @@ fn pull_detail_preserves_mergeability_and_post_status_limits_description() {
     futuresless_block_on(post_status(
         &*transport,
         DEFAULT_API,
-        "o/r",
-        "abc",
-        "success",
         "token",
-        &description,
-        Some("https://example.test/review"),
+        StatusUpdate {
+            repo: "o/r",
+            sha: "abc",
+            state: "success",
+            description: &description,
+            target_url: Some("https://example.test/review"),
+        },
     ))
     .unwrap();
     let seen = recorded.lock().unwrap();

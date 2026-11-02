@@ -852,31 +852,35 @@ pub async fn pull_detail(
     }))
 }
 
+pub struct StatusUpdate<'a> {
+    pub repo: &'a str,
+    pub sha: &'a str,
+    pub state: &'a str,
+    pub description: &'a str,
+    pub target_url: Option<&'a str>,
+}
+
 pub async fn post_status(
     transport: &dyn GitHubTransport,
     api_root: &str,
-    repo: &str,
-    sha: &str,
-    state: &str,
     token: &str,
-    description: &str,
-    target_url: Option<&str>,
+    update: StatusUpdate<'_>,
 ) -> Result<(u16, Option<Value>), GitHubError> {
     let mut payload = serde_json::Map::from_iter([
-        ("state".into(), Value::String(state.to_owned())),
+        ("state".into(), Value::String(update.state.to_owned())),
         (
             "context".into(),
             Value::String("dunkingsheep/review".into()),
         ),
         (
             "description".into(),
-            Value::String(description.chars().take(140).collect()),
+            Value::String(update.description.chars().take(140).collect()),
         ),
     ]);
-    if let Some(target_url) = target_url.filter(|value| !value.is_empty()) {
+    if let Some(target_url) = update.target_url.filter(|value| !value.is_empty()) {
         payload.insert("target_url".into(), Value::String(target_url.to_owned()));
     }
-    let url = format!("{api_root}/repos/{repo}/statuses/{sha}");
+    let url = format!("{api_root}/repos/{}/statuses/{}", update.repo, update.sha);
     request(
         transport,
         RequestOptions {
