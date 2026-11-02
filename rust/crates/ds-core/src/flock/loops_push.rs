@@ -46,7 +46,7 @@ pub trait PushEnv: Send + Sync {
     /// `self.herdr.list_panes()`.
     fn list_panes(&self) -> Result<Vec<Value>, DunkError>;
     /// `caller_role(pane)`: the RESOLVED role (t975), not the registry string.
-    fn caller_role(&self, pane_id: &str) -> String;
+    fn caller_role(&self, pane_id: &str, pane_info: Option<&Value>) -> String;
     /// `roles.describe()["lanes"]` keys; `None` when the registry is unavailable (followers only).
     fn registered_lanes(&self) -> Option<BTreeSet<String>>;
     /// `roles.may_review(pane, role="reviewer")`.
@@ -103,19 +103,44 @@ impl Flock {
         &self,
         env: &dyn PushEnv,
     ) -> std::collections::BTreeMap<String, (String, Via)> {
+        let panes = env
+            .list_panes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pane| {
+                pane.get("pane_id")
+                    .and_then(Value::as_str)
+                    .map(|id| (id.to_string(), pane))
+            })
+            .collect();
+        self.push_target_map_with_panes(env, &panes)
+    }
+
+    fn push_target_map_with_panes(
+        &self,
+        env: &dyn PushEnv,
+        panes: &std::collections::BTreeMap<String, Value>,
+    ) -> std::collections::BTreeMap<String, (String, Via)> {
         let followers = self
             .task_waiters
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let lanes = env.registered_lanes();
-        push_targets(&followers, lanes.as_ref(), |pane| env.caller_role(pane))
+        push_targets(&followers, lanes.as_ref(), |pane| {
+            env.caller_role(pane, panes.get(pane))
+        })
     }
 
     /// `_may_pull_everything`: true when this pane's role may pull any kind (the owner), or a
     /// reviewer whose provider may review.
-    fn may_pull_everything(&self, env: &dyn PushEnv, pane_id: &str) -> bool {
-        match env.caller_role(pane_id).as_str() {
+    fn may_pull_everything(
+        &self,
+        env: &dyn PushEnv,
+        pane_id: &str,
+        pane_info: Option<&Value>,
+    ) -> bool {
+        match env.caller_role(pane_id, pane_info).as_str() {
             "owner" => true,
             "reviewer" => env.may_review(pane_id),
             _ => false,
@@ -126,10 +151,6 @@ impl Flock {
     /// The gates are the ones the task names and nothing else: role, busy-ness, unread mail.
     pub async fn push_tasks(&self, env: &dyn PushEnv) -> Vec<PushDecision> {
         let mut decisions = Vec::new();
-        let targets = self.push_target_map(env);
-        if targets.is_empty() {
-            return decisions;
-        }
         let panes: std::collections::BTreeMap<String, Value> = match env.list_panes() {
             Ok(list) => list
                 .into_iter()
@@ -144,6 +165,10 @@ impl Flock {
                 return decisions;
             }
         };
+        let targets = self.push_target_map_with_panes(env, &panes);
+        if targets.is_empty() {
+            return decisions;
+        }
         let Some(tasks) = self.stores().tasks else {
             eprintln!("push sweep skipped: no task store is attached");
             return decisions;
@@ -188,7 +213,7 @@ impl Flock {
                 note(pane_id, "skip", "no_live_agent".into());
                 continue;
             }
-            let role = env.caller_role(pane_id);
+            let role = env.caller_role(pane_id, Some(pane));
             if role == "reviewer" && !env.may_review(pane_id) {
                 let provider = env.provider_of(pane_id).unwrap_or_else(|| "unknown".into());
                 note(
@@ -205,7 +230,7 @@ impl Flock {
             // The role->kind filter belongs here as much as in task_next (t595): without it the
             // push path hands a worker a review it cannot complete.
             let (kinds, exclude_author) = claim_filters(&role, pane_id);
-            if kinds.is_none() && !self.may_pull_everything(env, pane_id) {
+            if kinds.is_none() && !self.may_pull_everything(env, pane_id, Some(pane)) {
                 note(pane_id, "skip", format!("no_kind_for_role via={why}"));
                 continue;
             }

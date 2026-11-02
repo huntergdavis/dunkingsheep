@@ -37,10 +37,14 @@ impl LoopRuntimeAdapter {
     }
 
     #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
-    pub(crate) fn helper_pushenv_caller_role(&self, pane_id: &str) -> String {
+    pub(crate) fn helper_pushenv_caller_role(
+        &self,
+        pane_id: &str,
+        pane_info: Option<&Value>,
+    ) -> String {
         self.flock
             .with_roles(|roles, legacy| {
-                let role = roles.role_of(Some(pane_id), None)?;
+                let role = roles.role_of(Some(pane_id), pane_info)?;
                 Ok(
                     if role == roles.default
                         && legacy.is_some_and(|allowlist| allowlist.panes.contains(pane_id))
@@ -93,10 +97,22 @@ mod tests {
         )
         .expect("roles store");
         roles
-            .register("%reviewer", "reviewer", None, None, None, None, None, None)
+            .register(
+                "w2:p2",
+                "reviewer",
+                Some(2202),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .expect("register reviewer");
         roles
-            .register("%worker", "worker", None, None, None, None, None, None)
+            .register("w1:p1", "worker", Some(1101), None, None, None, None, None)
+            .expect("register worker");
+        roles
+            .register("w3:p3", "worker", Some(9999), None, None, None, None, None)
             .expect("register worker");
         flock.attach_roles(roles, None);
 
@@ -115,10 +131,38 @@ mod tests {
                 .expect("concrete terminal pane list");
             assert!(!panes.is_empty());
         });
-        assert_eq!(adapter.helper_pushenv_caller_role("%reviewer"), "reviewer");
+        assert_eq!(
+            adapter.helper_pushenv_caller_role(
+                "w2:p2",
+                panes.iter().find(|p| p["pane_id"] == "w2:p2")
+            ),
+            "reviewer"
+        );
+        assert_eq!(
+            adapter.helper_pushenv_caller_role(
+                "w1:p1",
+                panes.iter().find(|p| p["pane_id"] == "w1:p1")
+            ),
+            "worker"
+        );
         assert_eq!(
             adapter.helper_pushenv_registered_lanes(),
-            Some(BTreeSet::from(["%reviewer".into(), "%worker".into()]))
+            Some(BTreeSet::from([
+                "w1:p1".into(),
+                "w2:p2".into(),
+                "w3:p3".into()
+            ]))
+        );
+        assert_eq!(
+            adapter.helper_pushenv_caller_role(
+                "w3:p3",
+                panes.iter().find(|p| p["pane_id"] == "w3:p3")
+            ),
+            DEFAULT_ROLE
+        );
+        assert_eq!(
+            adapter.helper_pushenv_caller_role("w1:p1", None),
+            DEFAULT_ROLE
         );
 
         let unavailable = LoopRuntimeAdapter::new(
@@ -147,7 +191,7 @@ mod tests {
         );
         assert_eq!(without_registry.helper_pushenv_registered_lanes(), None);
         assert_eq!(
-            without_registry.helper_pushenv_caller_role("%unregistered"),
+            without_registry.helper_pushenv_caller_role("%unregistered", None),
             DEFAULT_ROLE
         );
         let followers = std::collections::BTreeMap::from([("%follow".into(), "global".into())]);
