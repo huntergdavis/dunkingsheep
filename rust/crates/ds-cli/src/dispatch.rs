@@ -757,6 +757,69 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_inbox_list(result)
                 })
             }
+            "ack" | "cancel" | "delete" => {
+                let command = text(ns, "inbox_command").unwrap_or("ack");
+                let ids = ns
+                    .get("message_ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .map(crate::render_fleet::py_str)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
+                let mut args = Map::new();
+                args.insert("message_ids".into(), Value::String(ids));
+                if let Some(mailbox) = text(ns, "mailbox").filter(|mailbox| !mailbox.is_empty()) {
+                    args.insert("mailbox".into(), Value::String(mailbox.into()));
+                }
+                let rpc = format!("inbox_{command}");
+                crate::daemon_cmd::run_command(ns, &rpc, args, |result| {
+                    let state = result
+                        .get("state")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(command.into()));
+                    let changed = ["changed", "deleted"]
+                        .into_iter()
+                        .find_map(|key| {
+                            result
+                                .get(key)
+                                .and_then(Value::as_array)
+                                .filter(|values| !values.is_empty())
+                        })
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(crate::render_fleet::py_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "nothing".into());
+                    let mailbox = result
+                        .get("acked_in")
+                        .filter(|value| crate::render_print::truthy(value))
+                        .map(|value| {
+                            format!(
+                                " in mailbox {}",
+                                crate::render_print::py_repr_str(&crate::render_fleet::py_str(
+                                    value
+                                ))
+                            )
+                        })
+                        .unwrap_or_default();
+                    let unchanged = result
+                        .get("unchanged")
+                        .filter(|value| crate::render_print::truthy(value))
+                        .map(|value| format!("; unchanged {}", crate::render_fleet::py_str(value)))
+                        .unwrap_or_default();
+                    format!(
+                        "{}: {changed}{mailbox}{unchanged}\n",
+                        crate::render_fleet::py_str(&state)
+                    )
+                })
+            }
             _ => not_ported("inbox"),
         },
         "task" => match text(ns, "task_command").unwrap_or("") {
