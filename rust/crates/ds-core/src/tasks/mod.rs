@@ -612,6 +612,9 @@ impl Tasks {
 
     async fn complete_by(&self, id: &str, by: Option<&str>) -> Result<Task, DunkError> {
         let before = self.get(id).await?;
+        if before.status == "done" {
+            return Ok(before);
+        }
         let done = self.set_status(id, "done", None, by).await?;
         // The Python returns early on an already-done task, so it fires nothing.
         if before.status != "done" {
@@ -636,6 +639,10 @@ impl Tasks {
     ) -> Result<Task, DunkError> {
         if landed {
             return self.complete_by(id, by).await;
+        }
+        let before = self.get(id).await?;
+        if before.status == "done" {
+            return Ok(before);
         }
         // t1218: record the work as NOT on main BEFORE completing, because completion
         // opens the tasks that depend on this one (auto-unblock) and they must see

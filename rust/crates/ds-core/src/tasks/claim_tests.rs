@@ -1580,3 +1580,53 @@ async fn test_cancelling_deletes_the_lease() {
     assert!(tasks.leases_for(&task.id, None).await.unwrap().is_empty());
     assert_eq!("cancelled", tasks.get(&task.id).await.unwrap().status);
 }
+
+#[tokio::test]
+async fn test_repeated_completion_preserves_original_audit_state() {
+    async fn audit(tasks: &Tasks, id: &str) -> (Option<String>, Option<f64>, f64, bool) {
+        let id = id.to_string();
+        tasks
+            .writer
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT completed_by, completed_at, updated_at, landed FROM tasks WHERE id = ?",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(crate::db::map_sqlite)
+            })
+            .await
+            .unwrap()
+    }
+    for initially_landed in [true, false] {
+        let tasks = store("repeated-completion-audit").await;
+        let task = tasks.add("global", "finish once", "").await.unwrap();
+        let callbacks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = callbacks.clone();
+        tasks.on_event(Box::new(move |_, event, by, _| {
+            if event == "completed" {
+                sink.lock().unwrap().push(by.map(str::to_string));
+            }
+        }));
+        tasks
+            .task_complete(&task.id, Some("first"), initially_landed)
+            .await
+            .unwrap();
+        let original = audit(&tasks, &task.id).await;
+        let events = tasks.events_named(&task.id).await;
+        assert_eq!(original.0.as_deref(), Some("first"));
+        assert_eq!(original.3, initially_landed);
+        for landed in [true, false] {
+            tasks
+                .task_complete(&task.id, Some("later"), landed)
+                .await
+                .unwrap();
+            assert_eq!(audit(&tasks, &task.id).await, original);
+            assert_eq!(tasks.events_named(&task.id).await, events);
+        }
+        tasks.complete(&task.id).await.unwrap();
+        assert_eq!(audit(&tasks, &task.id).await, original);
+        assert_eq!(tasks.events_named(&task.id).await, events);
+        assert_eq!(*callbacks.lock().unwrap(), vec![Some("first".to_string())]);
+    }
+}
