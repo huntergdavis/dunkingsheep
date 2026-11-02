@@ -324,6 +324,9 @@ async fn task_wire_visibility_missing_and_validation_errors_preserve_order() {
         (Some("self"), Some("bad"), Some("bad")),
         (None, Some("bad"), Some("bad")),
         (None, None, Some("bad")),
+        (None, None, Some(" BAD ")),
+        (None, None, Some("can't")),
+        (None, None, Some("bad\"'\nkind\u{1}")),
     ] {
         let actual = tasks
             .list_visible_wire(scope, status, None, true, Some(0), None, kind, false)
@@ -451,5 +454,31 @@ async fn task_wire_snapshot_keeps_scope_metadata_children_and_notes_on_one_versi
     assert_eq!(
         tasks.get_full_wire("t2", None).await.unwrap().wire["head"],
         "new head"
+    );
+    // Refuse a nested transaction without committing or rolling back somebody else's.
+    tasks
+        .writer
+        .call(|conn| {
+            conn.execute_batch("BEGIN; UPDATE tasks SET title='uncommitted' WHERE id='t1'")
+                .map_err(map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert!(tasks.get_full_wire("t1", None).await.is_err());
+    tasks
+        .writer
+        .call(|conn| {
+            assert!(!conn.is_autocommit());
+            let title: String = conn
+                .query_row("SELECT title FROM tasks WHERE id='t1'", [], |r| r.get(0))
+                .map_err(map_sqlite)?;
+            assert_eq!(title, "uncommitted");
+            conn.execute_batch("ROLLBACK").map_err(map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.get_full_wire("t1", None).await.unwrap().typed.title,
+        "parent"
     );
 }

@@ -1935,8 +1935,9 @@ pub fn validate_kind(kind: &str) -> Result<String, DunkError> {
         return Ok(kind);
     }
     Err(DunkError::Refused(format!(
-        "kind must be one of {}; got {kind:?}",
-        KINDS.join(", ")
+        "kind must be one of {}; got {}",
+        KINDS.join(", "),
+        crate::context::store::py_repr(&kind)
     )))
 }
 
