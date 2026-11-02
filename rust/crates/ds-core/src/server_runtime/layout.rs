@@ -244,7 +244,9 @@ mod tests {
 
     #[test]
     fn production_env_layout_create_uses_concrete_services() {
-        with_adapter(FakeTerminal::new(), |adapter| {
+        let mut visible_pane_terminal = FakeTerminal::new();
+        visible_pane_terminal.show_created_tab_pane = true;
+        with_adapter(visible_pane_terminal, |adapter| {
             let workspace = adapter
                 .helper_layoutbackend_create_workspace(Some("demo"), None, false)
                 .unwrap();
@@ -289,7 +291,6 @@ mod tests {
         });
 
         let mut invisible_tab = FakeTerminal::new();
-        invisible_tab.omit_created_tab_pane = true;
         with_adapter(invisible_tab, |adapter| {
             assert_eq!(
                 Err("tmux created the window but it is not visible".to_string()),

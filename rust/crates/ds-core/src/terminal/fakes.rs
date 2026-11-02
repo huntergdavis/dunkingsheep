@@ -122,8 +122,8 @@ pub struct FakeTerminal {
     pub available: bool,
     /// Failure injected by the fallible grouped-pane listing, for propagation tests.
     pub fail_grouped_panes: Option<TerminalError>,
-    /// Simulate tmux briefly omitting the newly created pane from list-panes.
-    pub omit_created_tab_pane: bool,
+    /// When enabled, include the pane for a newly created tab in list-panes.
+    pub show_created_tab_pane: bool,
     /// One entry per layout mutation: `("create_tab", tab_id)` etc., for assertions.
     pub layout_calls: Vec<(String, String)>,
     /// `(pane_id, command)` per `run_command`.
@@ -158,7 +158,7 @@ impl Default for FakeTerminal {
             workspaces: canned_workspaces(),
             available: true,
             fail_grouped_panes: None,
-            omit_created_tab_pane: false,
+            show_created_tab_pane: false,
             layout_calls: Vec::new(),
             runs: Vec::new(),
             fail_layout: None,
@@ -297,7 +297,7 @@ impl Terminal for FakeTerminal {
         };
         self.tabs.push(tab.clone());
         self.record("create_tab", &tab_id);
-        if !self.omit_created_tab_pane {
+        if self.show_created_tab_pane {
             let workspace = self
                 .workspaces
                 .iter()
