@@ -65,6 +65,21 @@ pub enum View {
     Tasks,
 }
 
+/// Follow-up requested by the key dispatcher for behavior implemented in later
+/// TUI leaves. Returning these keeps key ownership here without duplicating the
+/// modal and target-picker implementations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyDispatch {
+    Handled,
+    Ignored,
+    Quit,
+    QuitAndShutdown,
+    TaskView(KeyEvent),
+    PickTarget,
+    EditInterval,
+    EditText,
+}
+
 /// Result of handling one key in the line-input modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineModalResult {
@@ -1049,6 +1064,124 @@ impl<C: RpcClient> TuiModel<C> {
         .1
     }
 
+    /// Apply the Python dunk-view key map. Actions whose implementations live in
+    /// later TUI leaves are returned to the caller; all actions already represented
+    /// by this model execute through the fakeable RPC and modal interfaces.
+    pub fn handle_key<M: LineModalProvider>(
+        &mut self,
+        key: KeyEvent,
+        modal: &mut M,
+        now: f64,
+    ) -> KeyDispatch {
+        let plain_or_shift =
+            key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT;
+        if key.code == KeyCode::Char('v') && plain_or_shift {
+            self.view = match self.view {
+                View::Dunks => View::Tasks,
+                View::Tasks => View::Dunks,
+            };
+            self.flash(
+                match self.view {
+                    View::Dunks => "Dunks view",
+                    View::Tasks => "Tasks view",
+                },
+                now,
+                4.0,
+            );
+            self.refresh(now);
+            return KeyDispatch::Handled;
+        }
+        if self.view == View::Tasks {
+            return KeyDispatch::TaskView(key);
+        }
+        if !plain_or_shift {
+            return KeyDispatch::Ignored;
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => KeyDispatch::Quit,
+            KeyCode::Char('Q') => {
+                if self.mode == ClientMode::Daemon {
+                    self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
+                }
+                KeyDispatch::QuitAndShutdown
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                KeyDispatch::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = self
+                    .selected
+                    .saturating_add(1)
+                    .min(self.dunks.len().saturating_sub(1));
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('a') => {
+                let (result, _) = self.rpc("add_dunk", serde_json::json!({"start": false}), now);
+                if let Some(result) = result.filter(python_truthy) {
+                    self.refresh(now);
+                    if let Some(id) = result.get("id") {
+                        if let Some(index) = self
+                            .dunks
+                            .iter()
+                            .position(|dunk| dunk.get("id") == Some(id))
+                        {
+                            self.selected = index;
+                        }
+                    }
+                }
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('d') => {
+                if let Some(id) = self.current_id(now).map(str::to_owned) {
+                    self.rpc("remove_dunk", serde_json::json!({"id": id}), now);
+                }
+                KeyDispatch::Handled
+            }
+            KeyCode::Char(' ') | KeyCode::Char('s') => {
+                if let Some(id) = self.current_id(now).map(str::to_owned) {
+                    self.rpc("toggle_dunk", serde_json::json!({"id": id}), now);
+                }
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('c') => KeyDispatch::PickTarget,
+            KeyCode::Char('t') => {
+                if let Some(id) = self.current_id(now).map(str::to_owned) {
+                    self.rpc(
+                        "fire_dunk",
+                        serde_json::json!({"id": id, "countdown_s": 2, "wait": false}),
+                        now,
+                    );
+                }
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('i') => KeyDispatch::EditInterval,
+            KeyCode::Char('e') => KeyDispatch::EditText,
+            KeyCode::Char('n') => {
+                self.edit_name(modal, now);
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('o') => {
+                self.toggle_only_idle(now);
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('u') => {
+                self.toggle_skip_if_unconsumed(now);
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('y') => {
+                self.toggle_hold_while_typing(now);
+                KeyDispatch::Handled
+            }
+            KeyCode::Char('m') => {
+                self.edit_max_sends(modal, now);
+                KeyDispatch::Handled
+            }
+            _ => KeyDispatch::Ignored,
+        }
+    }
+
     /// Prompt for a dunker's display name and update it through the daemon.
     pub fn edit_name<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
         let Some(dunk) = self.current().cloned() else {
@@ -1383,6 +1516,208 @@ mod tests {
         let mut model = TuiModel::connected(client, 0.0);
         model.dunks.push(dunk);
         model
+    }
+
+    #[test]
+    fn key_dispatch_toggles_views_refreshes_and_routes_task_keys() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(serde_json::json!({"dunks": []})),
+                Ok(serde_json::json!({"tasks": []})),
+                Ok(serde_json::json!({"dunks": []})),
+            ]),
+            ..FakeClient::default()
+        };
+        let mut model = TuiModel::connected(client, 0.0);
+        let mut modal = FakeModal::default();
+
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('v')), &mut modal, 1.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(model.view, View::Tasks);
+        assert_eq!(model.message, "Tasks view");
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("list_dunks".into(), Value::Null),
+                (
+                    "task_list".into(),
+                    serde_json::json!({"include_done": true, "limit": 500})
+                )
+            ]
+        );
+
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('q')), &mut modal, 2.0),
+            KeyDispatch::TaskView(key(KeyCode::Char('q')))
+        );
+        let control_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(
+            model.handle_key(control_q, &mut modal, 2.5),
+            KeyDispatch::TaskView(control_q)
+        );
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('v')), &mut modal, 3.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(model.view, View::Dunks);
+        assert_eq!(
+            model.client.calls.last(),
+            Some(&("list_dunks".into(), Value::Null))
+        );
+    }
+
+    #[test]
+    fn key_dispatch_adds_and_selects_the_created_dunker() {
+        let client = FakeClient {
+            responses: VecDeque::from([
+                Ok(serde_json::json!({"id": "d2"})),
+                Ok(serde_json::json!({"dunks": [{"id": "d1"}, {"id": "d2"}]})),
+            ]),
+            ..FakeClient::default()
+        };
+        let mut model = TuiModel::connected(client, 0.0);
+        let mut modal = FakeModal::default();
+
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('a')), &mut modal, 1.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(model.selected, 1);
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("add_dunk".into(), serde_json::json!({"start": false})),
+                ("list_dunks".into(), Value::Null)
+            ]
+        );
+    }
+
+    #[test]
+    fn key_dispatch_routes_remove_toggle_and_fire_to_the_selected_dunker() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1"}),
+            vec![Ok(Value::Null), Ok(Value::Null), Ok(Value::Null)],
+        );
+        let mut modal = FakeModal::default();
+
+        for code in [KeyCode::Char('d'), KeyCode::Char('s'), KeyCode::Char('t')] {
+            assert_eq!(
+                model.handle_key(key(code), &mut modal, 1.0),
+                KeyDispatch::Handled
+            );
+        }
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("remove_dunk".into(), serde_json::json!({"id": "d1"})),
+                ("toggle_dunk".into(), serde_json::json!({"id": "d1"})),
+                (
+                    "fire_dunk".into(),
+                    serde_json::json!({"id": "d1", "countdown_s": 2, "wait": false})
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn key_dispatch_calls_existing_edits_and_returns_unported_edit_actions() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1", "name": "Old", "max_sends": 4}),
+            vec![Ok(Value::Null), Ok(Value::Null)],
+        );
+        let mut modal = FakeModal {
+            responses: VecDeque::from([Some("New".into()), Some("8".into())]),
+            ..FakeModal::default()
+        };
+
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('n')), &mut modal, 1.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('m')), &mut modal, 2.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('i')), &mut modal, 3.0),
+            KeyDispatch::EditInterval
+        );
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('e')), &mut modal, 3.0),
+            KeyDispatch::EditText
+        );
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('c')), &mut modal, 3.0),
+            KeyDispatch::PickTarget
+        );
+        assert_eq!(
+            modal.prompts,
+            vec![
+                ("Dunker name".into(), "Old".into()),
+                ("Max sends (blank = forever)".into(), "4".into())
+            ]
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "name": "New"})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "max_sends": 8})
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn key_dispatch_navigates_quits_and_shutdowns_like_the_python_map() {
+        let mut model = action_model(serde_json::json!({"id": "d1"}), vec![Ok(Value::Null)]);
+        model.dunks.push(serde_json::json!({"id": "d2"}));
+        let mut modal = FakeModal::default();
+
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let control_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(
+            model.handle_key(control_c, &mut modal, 1.0),
+            KeyDispatch::Ignored
+        );
+        assert_eq!(
+            model.handle_key(control_a, &mut modal, 1.0),
+            KeyDispatch::Ignored
+        );
+        assert!(model.client.calls.is_empty());
+
+        assert_eq!(
+            model.handle_key(key(KeyCode::Down), &mut modal, 1.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(model.selected, 1);
+        assert_eq!(
+            model.handle_key(key(KeyCode::Char('k')), &mut modal, 1.0),
+            KeyDispatch::Handled
+        );
+        assert_eq!(model.selected, 0);
+        assert_eq!(
+            model.handle_key(key(KeyCode::Esc), &mut modal, 1.0),
+            KeyDispatch::Quit
+        );
+        assert_eq!(
+            model.handle_key(
+                KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+                &mut modal,
+                1.0,
+            ),
+            KeyDispatch::QuitAndShutdown
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![("shutdown".into(), serde_json::json!({"stop_all": true}))]
+        );
     }
 
     #[test]
