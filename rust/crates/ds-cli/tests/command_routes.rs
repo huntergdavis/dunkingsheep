@@ -497,6 +497,78 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_14_pm_nonfinite_demo() {
+    // Golden payloads reproduced with the Python CLI's json.loads/json.dumps path.
+    for (raw, expected) in [
+        (r###"{"note": NaN}"###, r###"{"note": NaN, "demo": true}"###),
+        (
+            r###"{"a": [NaN, Infinity, -Infinity], "nested": {"n": NaN}, "demo": false}"###,
+            r###"{"a": [NaN, Infinity, -Infinity], "nested": {"n": NaN}, "demo": true}"###,
+        ),
+        (
+            r###"{"literal": "NaN Infinity -Infinity", "escaped": "\"NaN\"", "unicode": "café"}"###,
+            r###"{"literal": "NaN Infinity -Infinity", "escaped": "\"NaN\"", "unicode": "caf\u00e9", "demo": true}"###,
+        ),
+        (
+            r###"{"collision": ["\u005f_dunk_pm_nonfinite_NaN"], "n": NaN}"###,
+            r###"{"collision": ["__dunk_pm_nonfinite_NaN"], "n": NaN, "demo": true}"###,
+        ),
+        (
+            r###"{NaN: 1}"###,
+            r###"{"note": "{NaN: 1}", "demo": true}"###,
+        ),
+        (
+            r###"{"n": NaNwat}"###,
+            r###"{"note": "{\"n\": NaNwat}", "demo": true}"###,
+        ),
+        (
+            r###"{"n":1e400,"negative":-1e400,"zero":-0,"floatzero":-0.0}"###,
+            r###"{"n": Infinity, "negative": -Infinity, "zero": 0, "floatzero": -0.0, "demo": true}"###,
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("daemon.sock");
+        let socket_text = socket.display().to_string();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let expected = expected.to_string();
+        let daemon = std::thread::spawn(move || {
+            for (command, args, result) in [
+                ("status", json!({}), json!({})),
+                (
+                    "pm_digest",
+                    json!({"project": "nonfinite", "payload": expected, "to": null}),
+                    json!({"ok": true}),
+                ),
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(command, request["cmd"]);
+                assert_eq!(args, request["args"]);
+                assert_eq!("%99", request["self_pane_id"]);
+                let response = json!({"ok": true, "result": result});
+                (&stream)
+                    .write_all(format!("{response}\n").as_bytes())
+                    .unwrap();
+            }
+        });
+        let output = run_cli_with_stdin(
+            &socket_text,
+            &["pm", "digest", "nonfinite", "--demo", "--json"],
+            raw,
+        );
+        daemon.join().unwrap();
+        assert_eq!(Some(0), output.status.code(), "{raw}");
+        assert!(output.stderr.is_empty(), "{raw}");
+        assert_eq!(
+            json!({"ok": true}),
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()
+        );
+    }
+}
+
+#[test]
 fn cli_route_14_pm() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
@@ -1345,4 +1417,3 @@ fn cli_route_07_inbox_read_b() {
     );
     assert!(status.stderr.is_empty());
 }
-

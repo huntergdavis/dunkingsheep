@@ -738,23 +738,108 @@ fn python_json_string(text: &str, out: &mut String) {
     out.push('"');
 }
 
-fn python_compact_json(value: &Value) -> String {
-    fn write(value: &Value, out: &mut String) {
+// Python json.loads accepts these constants, while serde_json deliberately rejects them.
+// Encode them as uniquely marked arrays for the strict parser, then restore only those
+// arrays when writing Python JSON. Arrays cannot accidentally make an invalid object key valid.
+type PythonJsonConstants = Vec<(String, &'static str)>;
+
+fn python_demo_object(raw: &str) -> Option<(Map<String, Value>, PythonJsonConstants)> {
+    fn string_end(bytes: &[u8], start: usize) -> usize {
+        let mut at = start + 1;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'"' => return at + 1,
+                _ => at += 1,
+            }
+        }
+        bytes.len()
+    }
+    let bytes = raw.as_bytes();
+    let mut strings = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'"' {
+            let end = string_end(bytes, at);
+            if let Ok(value) = serde_json::from_str::<String>(&raw[at..end]) {
+                strings.push(value);
+            }
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    let mut prefix = "__dunk_pm_nonfinite_".to_string();
+    while strings.iter().any(|value| value.starts_with(&prefix)) {
+        prefix.push('_');
+    }
+    let constants: Vec<_> = ["NaN", "Infinity", "-Infinity"]
+        .into_iter()
+        .map(|token| (format!("{prefix}{token}"), token))
+        .collect();
+    let mut rewritten = String::new();
+    at = 0;
+    let mut copied = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'"' {
+            at = string_end(bytes, at);
+        } else if let Some((marker, token)) = constants
+            .iter()
+            .find(|(_, token)| raw[at..].starts_with(*token))
+        {
+            rewritten.push_str(&raw[copied..at]);
+            rewritten.push('[');
+            python_json_string(marker, &mut rewritten);
+            rewritten.push(']');
+            at += token.len();
+            copied = at;
+        } else {
+            // Advance a Unicode character, keeping every later slice on a UTF-8 boundary.
+            at += raw[at..].chars().next()?.len_utf8();
+        }
+    }
+    rewritten.push_str(&raw[copied..]);
+    let value: Value = serde_json::from_str(&rewritten).ok()?;
+    Some((value.as_object()?.clone(), constants))
+}
+
+fn python_compact_json(value: &Value, constants: &[(String, &str)]) -> String {
+    fn write(value: &Value, constants: &[(String, &str)], out: &mut String) {
         match value {
             Value::Null => out.push_str("null"),
             Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-            Value::Number(value) => match value.as_f64().filter(|_| value.is_f64()) {
-                Some(number) => out.push_str(&ds_core::usage::py_float_repr(number)),
-                None => out.push_str(&value.to_string()),
-            },
+            Value::Number(value) => {
+                let raw = value.to_string();
+                if raw.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                    match raw.parse::<f64>() {
+                        Ok(number) if number.is_infinite() => {
+                            out.push_str(if number.is_sign_negative() {
+                                "-Infinity"
+                            } else {
+                                "Infinity"
+                            });
+                        }
+                        Ok(number) => out.push_str(&ds_core::usage::py_float_repr(number)),
+                        Err(_) => out.push_str(&raw),
+                    }
+                } else {
+                    out.push_str(if raw == "-0" { "0" } else { &raw });
+                }
+            }
             Value::String(text) => python_json_string(text, out),
             Value::Array(items) => {
+                if let [Value::String(marker)] = items.as_slice() {
+                    if let Some((_, token)) = constants.iter().find(|(name, _)| name == marker) {
+                        out.push_str(token);
+                        return;
+                    }
+                }
                 out.push('[');
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
                         out.push_str(", ");
                     }
-                    write(item, out);
+                    write(item, constants, out);
                 }
                 out.push(']');
             }
@@ -766,14 +851,14 @@ fn python_compact_json(value: &Value) -> String {
                     }
                     python_json_string(key, out);
                     out.push_str(": ");
-                    write(item, out);
+                    write(item, constants, out);
                 }
                 out.push('}');
             }
         }
     }
     let mut out = String::new();
-    write(value, &mut out);
+    write(value, constants, &mut out);
     out
 }
 
@@ -801,22 +886,19 @@ fn pm(ns: &Map<String, Value>) -> Outcome {
         };
     }
     if matches!(ns.get("demo"), Some(Value::Bool(true))) {
-        let mut payload = if raw.trim_start().starts_with('{') {
-            serde_json::from_str::<Value>(&raw)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .unwrap_or_else(|| {
-                    let mut object = Map::new();
-                    object.insert("note".into(), Value::String(raw.clone()));
-                    object
-                })
+        let (mut payload, constants) = if raw.trim_start().starts_with('{') {
+            python_demo_object(&raw).unwrap_or_else(|| {
+                let mut object = Map::new();
+                object.insert("note".into(), Value::String(raw.clone()));
+                (object, Vec::new())
+            })
         } else {
             let mut object = Map::new();
             object.insert("note".into(), Value::String(raw));
-            object
+            (object, Vec::new())
         };
         payload.insert("demo".into(), Value::Bool(true));
-        raw = python_compact_json(&Value::Object(payload));
+        raw = python_compact_json(&Value::Object(payload), &constants);
     }
     let mut args = Map::new();
     args.insert(
