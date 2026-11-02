@@ -638,7 +638,7 @@ fn python_quote(value: &str) -> String {
                 output.push('\\');
                 output.push(ch);
             }
-            ch if ch.is_control() => {
+            ch if python_non_printable(ch) => {
                 use std::fmt::Write as _;
                 let code = ch as u32;
                 if code <= 0xff {
@@ -654,6 +654,36 @@ fn python_quote(value: &str) -> String {
     }
     output.push(quote);
     output
+}
+
+fn python_non_printable(ch: char) -> bool {
+    let code = ch as u32;
+    ch.is_control()
+        || (ch.is_whitespace() && ch != ' ')
+        || matches!(
+            code,
+            0x00ad
+                | 0x0600..=0x0605
+                | 0x061c
+                | 0x06dd
+                | 0x070f
+                | 0x0890..=0x0891
+                | 0x08e2
+                | 0x180e
+                | 0x200b..=0x200f
+                | 0x202a..=0x202e
+                | 0x2060..=0x2064
+                | 0x2066..=0x206f
+                | 0xfeff
+                | 0xfff9..=0xfffb
+                | 0x110bd
+                | 0x110cd
+                | 0x13430..=0x1343f
+                | 0x1bca0..=0x1bca3
+                | 0x1d173..=0x1d17a
+                | 0xe0001
+                | 0xe0020..=0xe007f
+        )
 }
 
 fn truncate_chars(value: &str, count: usize) -> String {
@@ -676,8 +706,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
-    use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     fn full_report() -> Value {
         serde_json::from_str(include_str!("../tests/fixtures/report-full.json")).unwrap()
@@ -735,6 +764,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_python_repr_escapes_nbsp_and_format_characters() {
+        assert_eq!(
+            python_str(&json!({"watchdog": "a\u{00a0}b"})),
+            "{'watchdog': 'a\\xa0b'}"
+        );
+        assert_eq!(python_str(&json!("a\u{200b}b")), "'a\\u200bb'");
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+
+    #[test]
     fn writes_timestamped_files_without_overwriting_and_lists_markdown_newest_first() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -743,16 +789,19 @@ mod tests {
         let report = json!({"generated_at": 1_700_000_000});
         let first = write_report(&paths, &report, "first\n").unwrap();
         let second = write_report(&paths, &report, "second\n").unwrap();
+        set_modified(&first, 100);
+        set_modified(&second, 100);
         assert_eq!(first.file_name().unwrap(), "20231114T221320Z.md");
         assert_eq!(second.file_name().unwrap(), "20231114T221320Z-2.md");
         assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
         assert_eq!(fs::read_to_string(second).unwrap(), "second\n");
 
         fs::write(output.join("ignored.txt"), "not a report").unwrap();
-        thread::sleep(Duration::from_millis(20));
         fs::write(output.join("newest.md"), "newest").unwrap();
+        set_modified(&output.join("newest.md"), 300);
         fs::write(output.join("tie-b.md"), "tie").unwrap();
         fs::hard_link(output.join("tie-b.md"), output.join("tie-a.md")).unwrap();
+        set_modified(&output.join("tie-b.md"), 200);
         let listing = list_reports(&paths).unwrap();
         assert_eq!(listing.dir, "~/reports");
         assert_eq!(listing.count, 5);

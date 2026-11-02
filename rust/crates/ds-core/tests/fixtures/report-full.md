@@ -33,3 +33,4 @@ Deterministic block: every number below was read from the stores at generation t
 - heartbeat age -
 - running: True
 - stale: False
+- nested: {'watchdog': 'a\xa0b'}
