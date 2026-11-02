@@ -330,10 +330,58 @@ pub fn task_body(row: &Value, base: &str, _repo: impl AsRef<Path>) -> Result<Str
 fn prior_translation(row: &Value) -> String {
     let value = row.get("prior_translation").unwrap_or(&Value::Null);
     if python_truthy(value) {
-        py_str(value)
+        py_repr(value)
     } else {
         "none".to_owned()
     }
+}
+
+fn py_repr(value: &Value) -> String {
+    match value {
+        Value::Array(values) => format!(
+            "[{}]",
+            values.iter().map(py_repr).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{}: {}", py_quote(key), py_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::String(value) => py_quote(value),
+        _ => py_str(value),
+    }
+}
+
+fn py_quote(value: &str) -> String {
+    let quote = if value.contains('\'') && !value.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push(quote);
+    for ch in value.chars() {
+        match ch {
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch == quote => {
+                output.push('\\');
+                output.push(ch);
+            }
+            ch if ch.is_control() => {
+                use std::fmt::Write as _;
+                write!(&mut output, "\\x{:02x}", ch as u32).expect("writing to String");
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push(quote);
+    output
 }
 
 fn counts_summary(counts: &Value) -> (String, String) {
@@ -1488,6 +1536,18 @@ mod tests {
         assert!(body.contains("callees: ready 2 of 3 (a=2, z=1)"));
         assert!(body.contains("filed-key: poolrad-strict:OVL_0001_0001@abc123"));
         assert!(body.contains("filed by backlog-sync at "));
+    }
+
+    #[test]
+    fn task_body_formats_prior_translation_objects_like_python_dicts() {
+        let row = json!({
+            "id": "OVL_0001_0002",
+            "prior_translation": {"status": "source_mention"}
+        });
+
+        let body = task_body(&row, "abc123", "/ignored").unwrap();
+
+        assert!(body.contains("prior translation: {'status': 'source_mention'}"));
     }
 
     #[test]
