@@ -29,6 +29,19 @@ fn task_stamp(at: f64) -> String {
         .unwrap_or_default()
 }
 
+fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
+    ns.get(key)
+        .and_then(Value::as_array)
+        .map(|words| {
+            words
+                .iter()
+                .map(crate::render_fleet::py_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
@@ -525,6 +538,183 @@ fn guard_install(no_shadow: bool) -> Result<Value, String> {
     Ok(value)
 }
 
+fn owner_command(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "owner_command") {
+        Some("push") => {
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("body".into(), Value::String(joined_words(ns, "body")));
+            args.insert(
+                "subject".into(),
+                ns.get("subject").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "owner_push", args, |result| {
+                format!(
+                    "pushed owner message {} for {} (no inbox row, nothing typed)\n",
+                    crate::render_print::py_str(&result["id"]),
+                    crate::render_print::py_str(&result["pane_id"])
+                )
+            })
+        }
+        Some("poll") => {
+            let mut args = Map::new();
+            args.insert(
+                "pane_id".into(),
+                ns.get("pane_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "by".into(),
+                ns.get("by")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("harness".into())),
+            );
+            crate::daemon_cmd::run_command(ns, "owner_poll", args, |result| {
+                format!(
+                    "poll recorded for {} by {}\n",
+                    crate::render_print::py_str(&result["pane_id"]),
+                    crate::render_print::py_str(&result["by"])
+                )
+            })
+        }
+        Some("take") => {
+            let mut args = Map::new();
+            args.insert(
+                "pane_id".into(),
+                ns.get("pane_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("by".into(), ns.get("by").cloned().unwrap_or(Value::Null));
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|time| time.format("%H:%M:%S").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "owner_take", args, |result| {
+                crate::render_print::render_owner_take(result, &stamp)
+            })
+        }
+        other => not_ported(&format!("owner {}", other.unwrap_or(""))),
+    }
+}
+
+fn read_text_file_universal_newlines(path: &str) -> std::io::Result<String> {
+    std::fs::read_to_string(path).map(|contents| contents.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "owner_command") {
+        Some("conversation") => {
+            let mut args = Map::new();
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::from(50)),
+            );
+            if let Some(before) = ns.get("before").filter(|value| !value.is_null()) {
+                args.insert("before".into(), before.clone());
+            }
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|time| time.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "owner_conversation", args, |result| {
+                crate::render_print::render_owner_conversation(result, &stamp)
+            })
+        }
+        Some("reply") => {
+            let body_file = text(ns, "body_file").filter(|path| !path.is_empty());
+            let has_body = body_file.is_some()
+                || ns
+                    .get("body")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| !items.is_empty());
+            let body = if let Some(path) = body_file {
+                match read_text_file_universal_newlines(path) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("error: {error}\n"),
+                            code: 3,
+                        }
+                    }
+                }
+            } else {
+                joined_words(ns, "body")
+            };
+            if !has_body {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: "owner reply: a body or --body-file is required\n".into(),
+                    code: 1,
+                };
+            }
+            let mut args = Map::new();
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("body".into(), Value::String(body));
+            crate::daemon_cmd::run_command(ns, "owner_reply", args, |result| {
+                let reply = result.get("reply").filter(|value| value.is_object());
+                let transport = result
+                    .get("transport")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("no transport");
+                format!(
+                    "answered {} with {} on {} (question {} acked)\n",
+                    crate::render_print::py_str(&result["question"]),
+                    reply
+                        .map(|value| crate::render_print::py_str(&value["message_id"]))
+                        .unwrap_or_else(|| "None".into()),
+                    transport,
+                    crate::render_print::py_str(&result["acked"])
+                )
+            })
+        }
+        Some("ingest") => {
+            let body = if let Some(path) = text(ns, "body_file").filter(|path| !path.is_empty()) {
+                match read_text_file_universal_newlines(path) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("error: {error}\n"),
+                            code: 3,
+                        }
+                    }
+                }
+            } else {
+                joined_words(ns, "body")
+            };
+            let mut args = Map::new();
+            args.insert(
+                "transport".into(),
+                ns.get("transport").cloned().unwrap_or(Value::Null),
+            );
+            args.insert("body".into(), Value::String(body));
+            for key in ["external_id", "subject", "attach"] {
+                if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+                    args.insert(key.to_string(), value.clone());
+                }
+            }
+            crate::daemon_cmd::run_command(ns, "owner_ingest", args, |result| {
+                crate::render_print::render_view(result)
+            })
+        }
+        other => not_ported(&format!("owner {}", other.unwrap_or(""))),
+    }
+}
+
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let result = match text(ns, "action").unwrap_or("status") {
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
@@ -555,6 +745,44 @@ fn guard(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    let (command, printer): (&str, fn(&Value) -> String) = match text(ns, "owner_command") {
+        Some("outbox") => {
+            args.insert(
+                "transport".into(),
+                ns.get("transport").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::from(20)),
+            );
+            (
+                "owner_outbox",
+                crate::render_print::render_view as fn(&Value) -> String,
+            )
+        }
+        Some("delivered") => {
+            args.insert(
+                "message_id".into(),
+                ns.get("message_id").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "transport".into(),
+                ns.get("transport").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(external_id) = ns.get("external_id").filter(|value| !value.is_null()) {
+                args.insert("external_id".into(), external_id.clone());
+            }
+            ("owner_delivered", crate::render_print::render_view)
+        }
+        Some("stats") => ("owner_stats", crate::render_print::render_owner_stats),
+        Some(other) => return not_ported(&format!("owner {other}")),
+        None => ("owner_stats", crate::render_print::render_owner_stats),
+    };
+    crate::daemon_cmd::run_command(ns, command, args, printer)
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -579,6 +807,11 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "owner" => match text(ns, "owner_command") {
+            Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
+            Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
+            _ => owner_command(ns),
+        },
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "panes" => crate::daemon_cmd::run_command(
