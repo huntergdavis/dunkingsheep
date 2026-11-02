@@ -2794,7 +2794,7 @@ fn test_poolrad_sync_files_n_and_never_refiles() {
         "poolrad_sync",
         None,
     ))
-    .contains("needs a superuser"));
+    .contains("requires a superuser"));
 }
 
 #[test]
