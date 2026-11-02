@@ -27,6 +27,27 @@ fn run_cli(socket: &str, command: &[&str]) -> Output {
         .expect("run Rust CLI")
 }
 
+fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--socket", socket, "--self-pane", "%99"])
+        .args(command)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn Rust CLI");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("wait for Rust CLI")
+}
+
 fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Output {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
@@ -350,4 +371,132 @@ fn cli_route_17_task_edit_a() {
         String::from_utf8(completed.stdout).unwrap()
     );
     assert!(completed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_14_pm() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        let expected = [
+            (
+                "pm_digest",
+                json!({"project": "alpha", "payload": "{\"label\": \"caf\\u00e9\", \"demo\": true}", "to": "%1"}),
+                json!({"action":"updated", "digest_id":"d1", "destination":"%1", "state":"stored", "body_bytes":48}),
+            ),
+            (
+                "pm_digest",
+                json!({"project": "beta", "payload": "{\"note\": \"hello\\n\", \"demo\": true}", "to": null}),
+                json!({"action":"updated", "digest_id":"d2", "destination":"%2", "state":"stored", "body_bytes":35}),
+            ),
+            (
+                "pm_digest",
+                json!({"project": "gamma", "payload": "raw payload\n", "to": null}),
+                json!({"action":"updated", "digest_id":"d3", "destination":"%3", "state":"stored", "body_bytes":12}),
+            ),
+            (
+                "pm_digest",
+                json!({
+                    "project": "delta",
+                    "payload": "{\"n\": 18446744073709551617, \"demo\": true}",
+                    "to": null
+                }),
+                json!({"action":"updated", "digest_id":"d4", "destination":"%4", "state":"stored", "body_bytes":41}),
+            ),
+            (
+                "pm_digest",
+                json!({
+                    "project": "epsilon",
+                    "payload": "{\"label\": \"\\u007f\", \"demo\": true}",
+                    "to": null
+                }),
+                json!({"action":"updated", "digest_id":"d5", "destination":"%5", "state":"stored", "body_bytes":33}),
+            ),
+            (
+                "pm_routing",
+                json!({}),
+                json!({"registry":"/tmp/registry", "routing":{"alpha":{"pm":"%1", "mode":"digest", "members":["%2"]}}}),
+            ),
+        ];
+        for (expected_cmd, expected_args, result) in expected {
+            for (cmd, args, result) in [
+                ("status", json!({}), json!({})),
+                (expected_cmd, expected_args, result),
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(cmd, request["cmd"]);
+                assert_eq!(args, request["args"]);
+                assert_eq!("%99", request["self_pane_id"]);
+                let response = json!({"ok": true, "result": result});
+                let mut writer = &stream;
+                writer
+                    .write_all(format!("{response}\n").as_bytes())
+                    .unwrap();
+            }
+        }
+    });
+
+    let demo_json = run_cli_with_stdin(
+        &socket_text,
+        &["pm", "digest", "alpha", "--to", "%1", "--demo"],
+        "{\"label\": \"café\"}",
+    );
+    assert_eq!(Some(0), demo_json.status.code());
+    assert_eq!(
+        "updated d1 -> %1 (stored, 48 bytes)\n",
+        String::from_utf8(demo_json.stdout).unwrap()
+    );
+    assert!(demo_json.stderr.is_empty());
+
+    let demo_note = run_cli_with_stdin(
+        &socket_text,
+        &["pm", "digest", "beta", "--demo", "--json"],
+        "hello\n",
+    );
+    assert_eq!(Some(0), demo_note.status.code());
+    assert!(demo_note.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&demo_note.stdout).unwrap();
+    assert_eq!("d2", result["digest_id"]);
+
+    let raw = run_cli_with_stdin(&socket_text, &["pm", "digest", "gamma"], "raw payload\n");
+    assert_eq!(Some(0), raw.status.code());
+    assert_eq!(
+        "updated d3 -> %3 (stored, 12 bytes)\n",
+        String::from_utf8(raw.stdout).unwrap()
+    );
+    assert!(raw.stderr.is_empty());
+
+    let large_integer = run_cli_with_stdin(
+        &socket_text,
+        &["pm", "digest", "delta", "--demo", "--json"],
+        "{\"n\":18446744073709551617}",
+    );
+    assert_eq!(Some(0), large_integer.status.code());
+    assert!(large_integer.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&large_integer.stdout).unwrap();
+    assert_eq!("d4", result["digest_id"]);
+
+    let del = run_cli_with_stdin(
+        &socket_text,
+        &["pm", "digest", "epsilon", "--demo", "--json"],
+        "{\"label\":\"\u{7f}\"}",
+    );
+    assert_eq!(Some(0), del.status.code());
+    assert!(del.stderr.is_empty());
+    let result: Value = serde_json::from_slice(&del.stdout).unwrap();
+    assert_eq!("d5", result["digest_id"]);
+
+    let routing = run_cli(&socket_text, &["pm", "routing"]);
+    assert_eq!(Some(0), routing.status.code());
+    assert_eq!(
+        "alpha: pm %1  mode digest  lanes %2\n",
+        String::from_utf8(routing.stdout).unwrap()
+    );
+    assert!(routing.stderr.is_empty());
+    daemon.join().unwrap();
 }
