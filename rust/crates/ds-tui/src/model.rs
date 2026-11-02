@@ -468,8 +468,6 @@ impl TargetPicker {
         }
         frame.render_widget(Clear, area);
         frame.render_widget(Block::default().borders(Borders::ALL), area);
-        let inner_x = area.x.saturating_add(1);
-        let inner_width = area.width.saturating_sub(2);
         draw_modal_line(frame, area, 1, "Select target pane", true);
         draw_modal_line(
             frame,
