@@ -204,37 +204,42 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
                     }
                 }
             };
-            store.supersede(
-                text(ns, "slug").unwrap_or(""),
-                &body,
-                None,
-                &SupersedeMeta::default(),
-                None,
-            )
+            let slug = text(ns, "slug").unwrap_or("");
+            match store.resolve(slug) {
+                Ok(Some(entry))
+                    if entry.get("class") == Some("ground-truth")
+                        || entry.get("authority") == Some("owner") =>
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: "refused: local context supersede cannot verify the bound owner role for protected entries; omit --local to use the daemon\n".into(),
+                        code: 2,
+                    };
+                }
+                Err(error) => {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: format!("context: {error}\n"),
+                        code: 2,
+                    };
+                }
+                _ => {}
+            }
+            store.supersede(slug, &body, None, &SupersedeMeta::default(), None)
         }
         "retire" => {
-            let result = store.retire(
-                text(ns, "slug").unwrap_or(""),
-                text(ns, "reason").unwrap_or(""),
-                None,
-                None,
-            );
-            return match result {
-                Ok((slug, reason)) => {
-                    let mut value = Map::new();
-                    value.insert("slug".into(), Value::String(slug.clone()));
-                    value.insert("retired".into(), Value::Bool(true));
-                    value.insert("reason".into(), Value::String(reason));
-                    Outcome {
-                        stdout: if json {
-                            format!("{}\n", ordered_json(&Value::Object(value)))
-                        } else {
-                            format!("retired {slug}\n")
-                        },
-                        stderr: String::new(),
-                        code: 0,
-                    }
-                }
+            let slug = text(ns, "slug").unwrap_or("");
+            return match store.resolve(slug) {
+                Ok(Some(_)) => Outcome {
+                    stdout: String::new(),
+                    stderr: "refused: local context retire cannot verify the bound owner role; omit --local to use the daemon\n".into(),
+                    code: 2,
+                },
+                Ok(None) => Outcome {
+                    stdout: String::new(),
+                    stderr: format!("context: entry {slug} not found\n"),
+                    code: 2,
+                },
                 Err(error) => Outcome {
                     stdout: String::new(),
                     stderr: format!("context: {error}\n"),

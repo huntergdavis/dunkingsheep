@@ -2073,6 +2073,41 @@ fn cli_route_12_context_local_write_b() {
             .unwrap();
     assert!(old.contains(&format!("superseded_by: {replacement_slug}\n")));
 
+    let protected = root.join(".dunkingsheep/ground-truth/2026-01-03-protected-rule.md");
+    std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
+    let protected_contents = "---\nclass: ground-truth\nsubject: protected rule\ntype: principle\nscope: project\nauthority: owner\nstated: 2026-01-03\nsource: fixture\n---\n\nprotected body\n";
+    std::fs::write(&protected, protected_contents).unwrap();
+    let protected_supersede = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-03-protected-rule",
+            body_file.to_str().unwrap(),
+            "--local",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), protected_supersede.status.code());
+    assert!(protected_supersede.stdout.is_empty());
+    assert_eq!(
+        "refused: local context supersede cannot verify the bound owner role for protected entries; omit --local to use the daemon\n",
+        String::from_utf8(protected_supersede.stderr).unwrap()
+    );
+    assert_eq!(
+        protected_contents,
+        std::fs::read_to_string(&protected).unwrap()
+    );
+    assert_eq!(
+        1,
+        std::fs::read_dir(protected.parent().unwrap())
+            .unwrap()
+            .count()
+    );
+
     let stdin_seed = run_local_cli(
         &socket,
         root,
@@ -2141,20 +2176,16 @@ fn cli_route_12_context_local_write_b() {
             "--json",
         ],
         None,
-        None,
+        Some("1"),
     );
-    assert_eq!(Some(0), retired.status.code());
+    assert_eq!(Some(2), retired.status.code());
+    assert!(retired.stdout.is_empty());
     assert_eq!(
-        format!(
-            "{{\n  \"slug\": \"{replacement_slug}\",\n  \"retired\": true,\n  \"reason\": \"obsolete note\"\n}}\n"
-        ),
-        String::from_utf8(retired.stdout).unwrap()
+        "refused: local context retire cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(retired.stderr).unwrap()
     );
-    assert!(retired.stderr.is_empty());
     let retired_article = std::fs::read_to_string(replacement_path).unwrap();
-    assert!(retired_article.contains("retired_reason: obsolete note\n"));
-    assert!(retired_article.contains("\n\n**Retired "));
-    assert!(retired_article.ends_with(": obsolete note\n"));
+    assert_eq!(replacement, retired_article);
     assert!(
         !socket.exists(),
         "local context writes must not create or contact a daemon socket"
