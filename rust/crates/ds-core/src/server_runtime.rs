@@ -415,7 +415,8 @@ mod tests {
         assert!(!federated_input_enabled(Some(OsStr::new(" 1 "))));
 
         let dir = crate::testsupport::dir("runtime-send-state");
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("test runtime");
