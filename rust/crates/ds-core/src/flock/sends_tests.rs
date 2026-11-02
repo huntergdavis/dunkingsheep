@@ -1869,3 +1869,264 @@ fn native_binding_requires_the_original_candidate_and_attempt_generation() {
         flock.stuck_candidates.lock().unwrap()["%4"].native_binding
     );
 }
+
+fn recovery_candidate(flock: &Flock, id: &str, created_at: f64, notify_for: Vec<String>) {
+    let mut message = Message::new(id, "%1", "writer", "stuck body", "send_text");
+    message.created_at = created_at;
+    message.status = "failed".into();
+    message.attempt_generation = Some("pid:45:start:6".into());
+    message.notify_for = notify_for;
+    flock.note_stuck_candidate(&message);
+}
+
+fn persistent_recovery_flock(dir: &std::path::Path, state_path: &std::path::Path) -> Flock {
+    let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), true);
+    flock
+        .attach_status_state(crate::flock::status_runtime::StatusState::at_start(
+            "test",
+            state_path,
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    flock
+}
+
+#[test]
+fn reconcile_stuck_requires_the_live_message_and_created_at_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    recovery_candidate(&flock, "m1", 1.0, Vec::new());
+    let mut newer = Message::new("m2", "%1", "writer", "cancelled", "send_text");
+    newer.created_at = 2.0;
+    newer.status = "cancelled".into();
+    newer.press_enter = false;
+    flock.note_stuck_candidate(&newer);
+
+    flock.reconcile_stuck("%1", "m1", "failed", "old failure", Some(1.0));
+    flock.reconcile_stuck("%1", "m2", "consumed", "missing stamp", None);
+    flock.reconcile_stuck("%1", "m2", "consumed", "wrong stamp", Some(1.0));
+
+    let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!("m2", candidate.message_id);
+    assert_eq!(2.0, candidate.created_at);
+    assert_eq!("cancelled", candidate.status);
+    assert_eq!(None, candidate.recovery_outcome);
+    assert!(!candidate.eligible);
+}
+
+#[test]
+fn reconcile_stuck_retires_consumed_and_exhausted_outcomes() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    recovery_candidate(&flock, "m4", 4.0, Vec::new());
+
+    flock.reconcile_stuck("%1", "m4", "exhausted", "attempts spent", Some(4.0));
+    let exhausted = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!(Some("exhausted"), exhausted.recovery_outcome.as_deref());
+    assert_eq!(Some("attempts spent"), exhausted.recovery_detail.as_deref());
+    assert!(exhausted.recovered_at.is_some());
+    assert!(!exhausted.eligible);
+    assert_eq!("failed", exhausted.status);
+
+    flock.reconcile_stuck("%1", "m4", "consumed", "composer cleared", Some(4.0));
+    let consumed = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!(Some("consumed"), consumed.recovery_outcome.as_deref());
+    assert_eq!("consumed", consumed.status);
+    assert!(!consumed.eligible);
+}
+
+#[test]
+fn consumed_receipt_is_not_published_when_candidate_save_fails() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(
+            "CREATE TABLE notify_updates (count INTEGER NOT NULL);
+             INSERT INTO notify_updates VALUES (0);
+             CREATE TRIGGER count_notify_updates AFTER UPDATE OF notify_state ON messages
+             BEGIN UPDATE notify_updates SET count = count + 1; END;",
+        )
+        .unwrap();
+
+    let state_path = dir.path().join("state.json");
+    std::fs::create_dir(&state_path).unwrap();
+    let flock = persistent_recovery_flock(dir.path(), &state_path);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    recovery_candidate(&flock, "m5", 5.0, vec![inbox_id.clone()]);
+
+    flock.reconcile_stuck("%1", "m5", "consumed", "composer cleared", Some(5.0));
+
+    let status: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&inbox_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let update_count: i64 = observer
+        .query_row("SELECT count FROM notify_updates", [], |row| row.get(0))
+        .unwrap();
+    let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!(None, status);
+    assert_eq!(0, update_count);
+    assert_eq!(Some("consumed"), candidate.recovery_outcome.as_deref());
+    assert_eq!(None, candidate.receipts_reconciled);
+}
+
+#[test]
+fn missing_recovery_detail_leaves_receipt_pending() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    recovery_candidate(&flock, "m7", 7.0, vec![inbox_id.clone()]);
+    {
+        let mut candidates = flock.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.recovery_outcome = Some("consumed".into());
+        candidate.recovery_detail = None;
+        candidate.status = "consumed".into();
+        candidate.eligible = false;
+    }
+    let entry = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+
+    flock.publish_stuck_receipt("%1", &entry);
+
+    let state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&inbox_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(None, state);
+    assert_eq!(
+        None,
+        flock.stuck_candidates.lock().unwrap()["%1"].receipts_reconciled
+    );
+}
+
+#[test]
+fn partial_receipt_failure_stays_pending_and_retry_completes_without_new_recovery() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_ids = (0..2)
+        .map(|index| {
+            inbox
+                .send(&Outgoing {
+                    mailbox: "writer",
+                    body: Some(&format!("notice {index}")),
+                    ..Outgoing::default()
+                })
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_second_notify BEFORE UPDATE OF notify_state ON messages
+             WHEN OLD.id = '{}'
+             BEGIN SELECT RAISE(ABORT, 'store unavailable'); END;",
+            inbox_ids[1]
+        ))
+        .unwrap();
+
+    let state_path = dir.path().join("state.json");
+    let flock = persistent_recovery_flock(dir.path(), &state_path);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    recovery_candidate(&flock, "m6", 6.0, inbox_ids.clone());
+
+    flock.reconcile_stuck("%1", "m6", "consumed", "composer cleared", Some(6.0));
+    let first_state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&inbox_ids[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let second_state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&inbox_ids[1]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Some("sent".into()), first_state);
+    assert_eq!(None, second_state);
+    assert_eq!(
+        None,
+        flock.stuck_candidates.lock().unwrap()["%1"].receipts_reconciled
+    );
+
+    observer
+        .execute_batch("DROP TRIGGER reject_second_notify;")
+        .unwrap();
+    let entry = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    flock.publish_stuck_receipt("%1", &entry);
+
+    for inbox_id in &inbox_ids {
+        let (state, reason): (Option<String>, Option<String>) = observer
+            .query_row(
+                "SELECT notify_state, notify_reason FROM messages WHERE id = ?1",
+                [inbox_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(Some("sent".into()), state);
+        assert_eq!(Some("recovered: composer cleared".into()), reason);
+    }
+    assert_eq!(
+        Some(true),
+        flock.stuck_candidates.lock().unwrap()["%1"].receipts_reconciled
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(
+        true,
+        payload["stuck_candidates"]["%1"]["receipts_reconciled"]
+    );
+}
