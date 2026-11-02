@@ -253,6 +253,13 @@ fn futuresless_block_on<F: std::future::Future>(future: F) -> F::Output {
 fn token_load_filters_bad_entries_and_save_is_private_and_atomic() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("cache.json");
+    let stale_temp = dir.path().join("cache.json.tmp");
+    fs::write(&stale_temp, "stale sentinel, not token data").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stale_temp, fs::Permissions::from_mode(0o644)).unwrap();
+    }
     fs::write(&path, r#"{"tokens":{"good":{"expires_at":9,"token":"x"},"missing":{},"false":{"expires_at":0},"scalar":2}}"#).unwrap();
     let fake = Box::new(FakeTransport::default());
     let mut tokens = Tokens::new(
@@ -267,20 +274,34 @@ fn token_load_filters_bad_entries_and_save_is_private_and_atomic() {
     assert!(tokens.cached("scalar").is_none());
     tokens.cache.get_mut().unwrap().insert(
         "fixture".into(),
-        serde_json::json!({"expires_at":123,"token":"fake"}),
+        serde_json::json!({"expires_at":123,"token":"fixture-secret"}),
     );
     tokens.save().unwrap();
-    assert!(!dir.path().join("cache.json.tmp").exists());
+    assert_eq!(
+        fs::read_to_string(&stale_temp).unwrap(),
+        "stale sentinel, not token data"
+    );
+    assert!(!fs::read_to_string(&stale_temp)
+        .unwrap()
+        .contains("fixture-secret"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&stale_temp).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+        let name = entry.unwrap().file_name();
+        !name.to_string_lossy().starts_with(".cache.json.tmp.")
+    }));
     let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(saved["tokens"]["fixture"]["token"], "fake");
+    assert_eq!(saved["tokens"]["fixture"]["token"], "fixture-secret");
 }
 
 #[test]

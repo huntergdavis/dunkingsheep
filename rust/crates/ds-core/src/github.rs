@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,7 @@ use crate::error::{refusal, DunkError};
 pub const KINDS: [&str; 2] = ["author", "reviewer"];
 pub const DEFAULT_API: &str = "https://api.github.com";
 pub const REFRESH_MARGIN_S: f64 = 600.0;
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubError(pub String);
@@ -363,28 +365,50 @@ impl Tokens {
     pub fn save(&self) -> Result<(), GitHubError> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|e| GitHubError(e.to_string()))?;
-        let temporary = PathBuf::from(format!("{}.tmp", self.path.display()));
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({"tokens": &*cache}))
             .map_err(|e| GitHubError(e.to_string()))?;
         #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let filename = self
+            .path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("github-tokens.json"));
+        let (temporary, mut file) = (0..128)
+            .find_map(|_| {
+                let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let candidate = parent.join(format!(
+                    ".{}.tmp.{}.{}",
+                    filename.to_string_lossy(),
+                    std::process::id(),
+                    sequence
+                ));
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                match options.open(&candidate) {
+                    Ok(file) => Some(Ok((candidate, file))),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(GitHubError(error.to_string()))),
+                }
+            })
+            .unwrap_or_else(|| {
+                Err(GitHubError(
+                    "could not create a unique GitHub token cache file".into(),
+                ))
+            })?;
         #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&temporary)
-            .map_err(|e| GitHubError(e.to_string()))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|e| {
+                let _ = fs::remove_file(&temporary);
+                GitHubError(e.to_string())
+            })?;
         file.write_all(&bytes)
             .map_err(|e| GitHubError(e.to_string()))?;
         file.flush().map_err(|e| GitHubError(e.to_string()))?;
+        drop(file);
         fs::rename(&temporary, &self.path).map_err(|e| GitHubError(e.to_string()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
-        }
         Ok(())
     }
 
