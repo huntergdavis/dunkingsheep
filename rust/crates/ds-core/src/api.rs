@@ -861,6 +861,10 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
     };
     let tokens = context.env.github_tokens()?;
     let entry = context.block_on(tokens.get(kind, None))??;
+    let token = entry
+        .get("token")
+        .cloned()
+        .ok_or_else(|| crate::github::GitHubError("'token'".into()))?;
     if kind == "author" {
         if let Some(pane_id) = context.self_pane_id().filter(|pane| !pane.is_empty()) {
             let now = context.env.now_s();
@@ -870,7 +874,7 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         }
     }
     Ok(json!({
-        "token": entry.get("token").cloned().unwrap_or(Value::Null),
+        "token": token,
         "kind": kind,
         "role": role,
         "slug": entry.get("slug").cloned().unwrap_or(Value::Null),

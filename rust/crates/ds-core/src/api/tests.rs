@@ -353,6 +353,17 @@ fn github_token_flock(tag: &str) -> (tempfile::TempDir, Flock) {
 }
 
 fn github_token_api_env(dir: &Path) -> GithubTokenApiEnv {
+    github_token_api_env_with_author_entry(
+        dir,
+        json!({
+            "token": "fake-author-token",
+            "expires_at": 4_102_444_800.0,
+            "slug": "author-app"
+        }),
+    )
+}
+
+fn github_token_api_env_with_author_entry(dir: &Path, author_entry: Value) -> GithubTokenApiEnv {
     let config_dir = dir.join("github-config");
     std::fs::create_dir_all(&config_dir).unwrap();
     let cache_path = dir.join("github-tokens.json");
@@ -360,11 +371,7 @@ fn github_token_api_env(dir: &Path) -> GithubTokenApiEnv {
         &cache_path,
         serde_json::to_vec(&json!({
             "tokens": {
-                "author": {
-                    "token": "fake-author-token",
-                    "expires_at": 4_102_444_800.0,
-                    "slug": "author-app"
-                },
+                "author": author_entry,
                 "reviewer": {
                     "token": "fake-reviewer-token",
                     "expires_at": 4_102_444_800.0,
@@ -2756,4 +2763,36 @@ fn test_gh_token_follows_the_role() {
     )
     .unwrap_err();
     assert!(bad_owner_kind.to_string().contains("unknown app kind 7"));
+}
+
+#[test]
+fn test_gh_token_rejects_cached_entry_without_token() {
+    let (dir, flock) = github_token_flock("gh-token-missing-cached-token");
+    let env = github_token_api_env_with_author_entry(
+        dir.path(),
+        json!({
+            "expires_at": 4_102_444_800.0,
+            "slug": "author-app"
+        }),
+    );
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_gh_token();
+
+    assert_eq!(
+        "'token'",
+        refusal(dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "gh_token",
+            None,
+        ))
+    );
+    assert!(flock.gh_token_mints.lock().unwrap().is_empty());
+    assert!(!env
+        .tokens
+        .config_dir()
+        .join("github-author-mints.json")
+        .exists());
 }
