@@ -5,9 +5,203 @@
 //! explicitly instead of being silently replaced with tmux.
 
 use std::ffi::OsStr;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+use tokio::runtime::Handle;
+use tokio::task::JoinHandle;
 
 use crate::error::{refusal, DunkError};
+use crate::flock::lanes::TerminalEnv;
+use crate::flock::mailbox::MailboxEnv;
+use crate::flock::panes::PaneInfoEnv;
+use crate::flock::status::ViewCache;
+use crate::flock::Flock;
+use crate::server::RequestCtx;
 use crate::terminal::tmux::TmuxBackend;
+use crate::terminal::Terminal;
+
+/// A request-scoped adapter borrowed on the server's existing connection thread.
+///
+/// It deliberately owns neither the connection nor its terminal: both remain local to
+/// `serve_connection`'s standard thread. The runtime is the daemon runtime's existing
+/// handle, used only for synchronous request work that must drive async stores.
+#[allow(dead_code)] // This adapter is staged for the production dispatcher integration.
+pub(crate) struct RequestRuntimeAdapter<'a> {
+    terminal: TerminalCallAdapter<'a>,
+    request: &'a RequestCtx,
+    runtime: &'a Handle,
+}
+
+/// Terminal access shared by the request and loop adapters. A lock is held only while a
+/// concrete terminal operation runs; it is dropped before the caller continues.
+pub(crate) struct TerminalCallAdapter<'a> {
+    flock: &'a Flock,
+    terminal: &'a Mutex<Box<dyn Terminal>>,
+}
+
+/// Runtime services safe to move into a Tokio blocking worker. The non-Send terminal is
+/// created, wrapped, used, and dropped wholly inside that worker.
+#[allow(dead_code)] // Loop callers are assigned to the dependent runtime leaves.
+pub(crate) struct LoopRuntimeAdapter {
+    flock: Arc<Flock>,
+    terminal_factory: Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>,
+}
+
+impl<'a> RequestRuntimeAdapter<'a> {
+    #[allow(dead_code)] // Wired by the production server dispatcher in the runtime integration.
+    pub(crate) fn new(
+        flock: &'a Flock,
+        request: &'a RequestCtx,
+        runtime: &'a Handle,
+        terminal: &'a Mutex<Box<dyn Terminal>>,
+    ) -> Self {
+        Self {
+            terminal: TerminalCallAdapter { flock, terminal },
+            request,
+            runtime,
+        }
+    }
+
+    #[allow(dead_code)] // Wired by the production server dispatcher in the runtime integration.
+    pub(crate) fn handler_context(&self) -> crate::api::HandlerContext<'_> {
+        crate::api::HandlerContext {
+            flock: self.terminal.flock,
+            request: self.request,
+            env: self,
+            runtime: self.runtime,
+        }
+    }
+}
+
+impl TerminalCallAdapter<'_> {
+    fn with_terminal<T>(&self, call: impl FnOnce(&dyn Terminal) -> T) -> T {
+        let terminal = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        call(terminal.as_ref())
+    }
+
+    fn with_env<T>(&self, call: impl FnOnce(&TerminalEnv<'_>) -> T) -> T {
+        self.with_terminal(|terminal| {
+            let registered = |pane_id: &str| {
+                self.flock
+                    .with_roles(|roles, _| {
+                        let Some(entry) = roles.entry(pane_id)? else {
+                            return Ok((false, false, None));
+                        };
+                        let pid = entry.get("pane_pid").and_then(|value| {
+                            value.as_i64().or_else(|| value.as_str()?.parse().ok())
+                        });
+                        let pid_text = entry.get("pane_pid").and_then(|value| match value {
+                            Value::String(text) if !text.is_empty() && text != "None" => {
+                                Some(text.clone())
+                            }
+                            Value::Number(number) => Some(number.to_string()),
+                            _ => None,
+                        });
+                        let alive = pid.is_some_and(|pid| {
+                            crate::proc::process_alive(
+                                pid,
+                                entry.get("start").and_then(Value::as_str),
+                            )
+                        });
+                        Ok((true, alive, pid_text))
+                    })
+                    .unwrap_or((false, false, None))
+            };
+            let env = TerminalEnv {
+                terminal,
+                registered: &registered,
+            };
+            call(&env)
+        })
+    }
+}
+
+impl PaneInfoEnv for TerminalCallAdapter<'_> {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.with_env(|env| PaneInfoEnv::list_panes_grouped(env))
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.with_env(|env| PaneInfoEnv::get_pane(env, pane_id))
+    }
+}
+
+impl MailboxEnv for TerminalCallAdapter<'_> {
+    fn list_panes(&self) -> Vec<Value> {
+        self.with_env(|env| MailboxEnv::list_panes(env))
+    }
+
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.with_env(|env| MailboxEnv::list_panes_grouped(env))
+    }
+
+    fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
+        self.with_env(|env| MailboxEnv::try_list_panes_grouped(env))
+    }
+
+    fn registered_pane(&self, pane_id: &str) -> (bool, bool, Option<String>) {
+        self.with_env(|env| MailboxEnv::registered_pane(env, pane_id))
+    }
+}
+
+impl PaneInfoEnv for RequestRuntimeAdapter<'_> {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        PaneInfoEnv::list_panes_grouped(&self.terminal)
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        PaneInfoEnv::get_pane(&self.terminal, pane_id)
+    }
+}
+
+impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        self.terminal.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        crate::clock::now_s()
+    }
+
+    fn view_cache(&self) -> Result<&ViewCache, DunkError> {
+        Ok(self.terminal.flock.view_cache())
+    }
+}
+
+impl LoopRuntimeAdapter {
+    #[allow(dead_code)] // Used by the dependent async runtime loop leaves.
+    pub(crate) fn new(
+        flock: Arc<Flock>,
+        terminal_factory: Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            flock,
+            terminal_factory,
+        }
+    }
+
+    #[allow(dead_code)] // Used by the dependent async runtime loop leaves.
+    pub(crate) fn with_loop_terminal<T, F>(&self, call: F) -> JoinHandle<T>
+    where
+        T: Send + 'static,
+        F: for<'a> FnOnce(&'a Flock, &'a TerminalCallAdapter<'a>) -> T + Send + 'static,
+    {
+        let flock = Arc::clone(&self.flock);
+        let factory = Arc::clone(&self.terminal_factory);
+        tokio::task::spawn_blocking(move || {
+            let terminal = Mutex::new(factory());
+            let adapter = TerminalCallAdapter {
+                flock: &flock,
+                terminal: &terminal,
+            };
+            call(&flock, &adapter)
+        })
+    }
+}
 
 pub const TERMINAL_BACKEND_ENV: &str = "DUNKINGSHEEP_TERMINAL_BACKEND";
 pub const DEFAULT_TERMINAL_BACKEND: &str = "tmux";
@@ -61,6 +255,8 @@ fn backend_from_name(configured: Option<&str>) -> Result<TmuxBackend, DunkError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flock::panes::PaneInfoEnv;
+    use crate::terminal::fakes::FakeTerminal;
 
     #[test]
     fn configured_backend_selects_tmux_by_default_and_refuses_retired_or_unknown_names() {
@@ -89,5 +285,56 @@ mod tests {
             error.to_string(),
             "terminal backend setting is not valid UTF-8; expected 'tmux'"
         );
+    }
+
+    #[test]
+    fn production_request_context_keeps_terminal_on_connection_thread() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<LoopRuntimeAdapter>();
+
+        let dir = crate::testsupport::dir("request-runtime-context");
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("roles.json"),
+            false,
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let runtime_handle = runtime.handle().clone();
+        let request = RequestCtx {
+            self_pane_id: Some("w1:p1".into()),
+            ..RequestCtx::default()
+        };
+        let request_flock = Arc::clone(&flock);
+        let connection_thread = std::thread::spawn(move || {
+            let before = std::thread::current().id();
+            let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+            let adapter =
+                RequestRuntimeAdapter::new(&request_flock, &request, &runtime_handle, &terminal);
+            let context = adapter.handler_context();
+            assert_eq!(context.self_pane_id(), Some("w1:p1"));
+            assert!(std::ptr::eq(context.env.terminal(), &terminal));
+            assert!(std::ptr::eq(
+                context.env.view_cache().expect("Flock cache"),
+                request_flock.view_cache()
+            ));
+            let _ = context.env.list_panes_grouped();
+            assert_eq!(before, std::thread::current().id());
+        });
+        connection_thread.join().expect("connection thread");
+
+        let loop_adapter = LoopRuntimeAdapter::new(
+            Arc::clone(&flock),
+            Arc::new(|| Box::new(FakeTerminal::new())),
+        );
+        runtime.block_on(async {
+            let count = loop_adapter
+                .with_loop_terminal(|_, terminal| PaneInfoEnv::list_panes_grouped(terminal).len())
+                .await
+                .expect("blocking terminal worker");
+            assert!(count > 0);
+        });
     }
 }
