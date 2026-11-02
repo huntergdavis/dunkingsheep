@@ -1618,6 +1618,185 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     crate::render_print::render_task(task, &task_stamp)
                 })
             }
+            "block" | "cancel" => {
+                let sub = text(ns, "task_command").unwrap_or("");
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "reason".into(),
+                    ns.get("reason").cloned().unwrap_or(Value::Null),
+                );
+                let method = if sub == "block" {
+                    "task_block"
+                } else {
+                    "task_cancel"
+                };
+                crate::daemon_cmd::run_command(ns, method, args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "unblock" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_unblock", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "delete" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_delete", args, |result| {
+                    format!(
+                        "deleted {}\n",
+                        crate::render_fleet::py_str(&result["deleted"])
+                    )
+                })
+            }
+            "note" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "event".into(),
+                    ns.get("event")
+                        .cloned()
+                        .unwrap_or(Value::String("note".into())),
+                );
+                args.insert(
+                    "reason".into(),
+                    ns.get("reason").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "task_note", args, |result| {
+                    format!(
+                        "noted {}: {}\n",
+                        crate::render_fleet::py_str(&result["noted"]),
+                        crate::render_fleet::py_str(&result["event"])
+                    )
+                })
+            }
+            "next" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "lease_seconds".into(),
+                    ns.get("lease").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "allow_busy".into(),
+                    Value::Bool(matches!(ns.get("allow_busy"), Some(Value::Bool(true)))),
+                );
+                crate::daemon_cmd::run_command(ns, "task_next", args, |result| {
+                    crate::render_print::render_task_next(result, &task_stamp)
+                })
+            }
+            "heartbeat" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                args.insert(
+                    "lease_seconds".into(),
+                    ns.get("lease").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "task_heartbeat", args, |result| {
+                    let seconds = crate::render_print::task_lease_seconds(&result["lease_seconds"]);
+                    format!(
+                        "lease on {} extended ({}s)\n",
+                        crate::render_fleet::py_str(&result["task_id"]),
+                        seconds
+                    )
+                })
+            }
+            "release" => {
+                let mut args = Map::new();
+                args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+                crate::daemon_cmd::run_command(ns, "task_release", args, |task| {
+                    crate::render_print::render_task(task, &task_stamp)
+                })
+            }
+            "follow" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "task_follow", args, |result| {
+                    let followers = result["followers"].as_array().map_or(0, Vec::len);
+                    format!(
+                        "following {} as {} ({} follower(s))\n",
+                        crate::render_fleet::py_str(&result["scope"]),
+                        crate::render_fleet::py_str(&result["pane_id"]),
+                        followers
+                    )
+                })
+            }
+            "unfollow" => {
+                crate::daemon_cmd::run_command(ns, "task_unfollow", Map::new(), |result| {
+                    if matches!(result.get("was_following"), Some(Value::Bool(true))) {
+                        "stopped following\n".into()
+                    } else {
+                        "was not following\n".into()
+                    }
+                })
+            }
+            "followers" => crate::daemon_cmd::run_command(
+                ns,
+                "task_followers",
+                Map::new(),
+                crate::render_print::render_task_followers,
+            ),
+            "stats" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                crate::daemon_cmd::run_command(ns, "task_stats", args, |result| {
+                    crate::render_print::render_task_stats(result)
+                })
+            }
+            "metrics" => {
+                let mut args = Map::new();
+                args.insert(
+                    "scope".into(),
+                    ns.get("scope").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "window_s".into(),
+                    ns.get("window").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "since".into(),
+                    ns.get("since").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "until".into(),
+                    ns.get("until").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "bucket".into(),
+                    ns.get("bucket")
+                        .cloned()
+                        .unwrap_or(Value::String("hour".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "task_metrics", args, |result| {
+                    crate::render_print::render_task_metrics(result, &task_stamp)
+                })
+            }
+            "reap" => crate::daemon_cmd::run_command(ns, "task_reap", Map::new(), |result| {
+                let requeued = result["requeued"].as_array().cloned().unwrap_or_default();
+                let ids = requeued
+                    .iter()
+                    .map(|task| crate::render_fleet::py_str(&task["task_id"]))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let suffix = if ids.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {ids}")
+                };
+                format!("requeued {} lease(s){suffix}\n", requeued.len())
+            }),
             _ => not_ported("task"),
         },
         "stop" | "toggle" => {

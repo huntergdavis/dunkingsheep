@@ -1031,6 +1031,240 @@ fn cli_route_04_dunk_edit_lifecycle_b() {
 }
 
 #[test]
+fn cli_route_18_task_edit_b() {
+    let blocked = run_daemon_cli(
+        &["task", "block", "t8", "--reason", "waiting on input"],
+        "task_block",
+        json!({"id":"t8", "reason":"waiting on input"}),
+        json!({"id":"t8", "priority":"medium", "status":"blocked", "title":"Work", "scope":"global", "block_reason":"waiting on input"}),
+    );
+    assert_eq!(0, blocked.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] blocked  Work\nscope       global\nblocked     waiting on input\n",
+        String::from_utf8(blocked.stdout).unwrap()
+    );
+    assert!(blocked.stderr.is_empty());
+
+    let unblocked = run_daemon_cli(
+        &["task", "unblock", "t8"],
+        "task_unblock",
+        json!({"id":"t8"}),
+        json!({"id":"t8", "priority":"medium", "status":"open", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, unblocked.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] open  Work\nscope       global\n",
+        String::from_utf8(unblocked.stdout).unwrap()
+    );
+    assert!(unblocked.stderr.is_empty());
+
+    let cancelled = run_daemon_cli(
+        &["task", "cancel", "t8"],
+        "task_cancel",
+        json!({"id":"t8", "reason":null}),
+        json!({"id":"t8", "priority":"medium", "status":"cancelled", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, cancelled.status.code().unwrap());
+    assert_eq!(
+        "t8 [medium] cancelled  Work\nscope       global\n",
+        String::from_utf8(cancelled.stdout).unwrap()
+    );
+    assert!(cancelled.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_19_task_edit_c() {
+    let deleted = run_daemon_cli(
+        &["task", "delete", "t9"],
+        "task_delete",
+        json!({"id":"t9"}),
+        json!({"deleted":"t9"}),
+    );
+    assert_eq!(0, deleted.status.code().unwrap());
+    assert_eq!("deleted t9\n", String::from_utf8(deleted.stdout).unwrap());
+    assert!(deleted.stderr.is_empty());
+
+    let noted = run_daemon_cli(
+        &[
+            "task", "note", "t9", "--event", "review", "--reason", "checked",
+        ],
+        "task_note",
+        json!({"id":"t9", "event":"review", "reason":"checked"}),
+        json!({"noted":"t9", "event":"review"}),
+    );
+    assert_eq!(0, noted.status.code().unwrap());
+    assert_eq!(
+        "noted t9: review\n",
+        String::from_utf8(noted.stdout).unwrap()
+    );
+    assert!(noted.stderr.is_empty());
+
+    let next = run_daemon_cli(
+        &["task", "next", "mine", "--lease", "90.5", "--allow-busy"],
+        "task_next",
+        json!({"scope":"mine", "lease_seconds":90.5, "allow_busy":true}),
+        json!({"task":null, "refused":{"reason":"empty"}, "following":true}),
+    );
+    assert_eq!(0, next.status.code().unwrap());
+    assert_eq!(
+        "no eligible task: the queue is empty for this scope\nfollowing the queue: the daemon will push the next task when this pane is idle\n",
+        String::from_utf8(next.stdout).unwrap()
+    );
+    assert!(next.stderr.is_empty());
+
+    for (lease_arg, lease_seconds, rendered) in [
+        ("90.5", json!(90.5), "90"),
+        ("1e20", json!(1e20), "100000000000000000000"),
+    ] {
+        let claimed = run_daemon_cli(
+            &["task", "next", "mine", "--lease", lease_arg],
+            "task_next",
+            json!({"scope":"mine", "lease_seconds":lease_seconds.clone(), "allow_busy":false}),
+            json!({"task":{"id":"t9", "priority":"medium", "status":"in_progress", "title":"Work", "scope":"global"}, "lease_seconds":lease_seconds}),
+        );
+        assert_eq!(Some(0), claimed.status.code());
+        assert_eq!(
+            format!("claimed t9 (lease {rendered}s)\nt9 [medium] in_progress  Work\nscope       global\n"),
+            String::from_utf8(claimed.stdout).unwrap()
+        );
+        assert!(claimed.stderr.is_empty());
+    }
+}
+
+#[test]
+fn cli_route_20_task_claim_a() {
+    let heartbeat = run_daemon_cli(
+        &["task", "heartbeat", "t10", "--lease", "90.5"],
+        "task_heartbeat",
+        json!({"id":"t10", "lease_seconds":90.5}),
+        json!({"task_id":"t10", "lease_seconds":90.5}),
+    );
+    assert_eq!(0, heartbeat.status.code().unwrap());
+    assert_eq!(
+        "lease on t10 extended (90s)\n",
+        String::from_utf8(heartbeat.stdout).unwrap()
+    );
+    assert!(heartbeat.stderr.is_empty());
+
+    let long_heartbeat = run_daemon_cli(
+        &["task", "heartbeat", "t10", "--lease", "1e20"],
+        "task_heartbeat",
+        json!({"id":"t10", "lease_seconds":1e20}),
+        json!({"task_id":"t10", "lease_seconds":1e20}),
+    );
+    assert_eq!(Some(0), long_heartbeat.status.code());
+    assert_eq!(
+        "lease on t10 extended (100000000000000000000s)\n",
+        String::from_utf8(long_heartbeat.stdout).unwrap()
+    );
+    assert!(long_heartbeat.stderr.is_empty());
+
+    let released = run_daemon_cli(
+        &["task", "release", "t10"],
+        "task_release",
+        json!({"id":"t10"}),
+        json!({"id":"t10", "priority":"medium", "status":"open", "title":"Work", "scope":"global"}),
+    );
+    assert_eq!(0, released.status.code().unwrap());
+    assert_eq!(
+        "t10 [medium] open  Work\nscope       global\n",
+        String::from_utf8(released.stdout).unwrap()
+    );
+    assert!(released.stderr.is_empty());
+
+    let followed = run_daemon_cli(
+        &["task", "follow", "self"],
+        "task_follow",
+        json!({"scope":"self"}),
+        json!({"scope":"self", "pane_id":"%99", "followers":["%99", "%98"]}),
+    );
+    assert_eq!(0, followed.status.code().unwrap());
+    assert_eq!(
+        "following self as %99 (2 follower(s))\n",
+        String::from_utf8(followed.stdout).unwrap()
+    );
+    assert!(followed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_21_task_claim_b() {
+    let unfollowed = run_daemon_cli(
+        &["task", "unfollow"],
+        "task_unfollow",
+        json!({}),
+        json!({"was_following":true}),
+    );
+    assert_eq!(0, unfollowed.status.code().unwrap());
+    assert_eq!(
+        "stopped following\n",
+        String::from_utf8(unfollowed.stdout).unwrap()
+    );
+    assert!(unfollowed.stderr.is_empty());
+
+    let followers = run_daemon_cli(
+        &["task", "followers"],
+        "task_followers",
+        json!({}),
+        json!({"followers":[{"pane_id":"%99", "scope":"global"}]}),
+    );
+    assert_eq!(0, followers.status.code().unwrap());
+    assert_eq!(
+        "%99          global\n",
+        String::from_utf8(followers.stdout).unwrap()
+    );
+    assert!(followers.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["task", "stats", "global"],
+        "task_stats",
+        json!({"scope":"global"}),
+        json!({"totals":{"open":2, "done":1}, "by_scope":{"global":{"open":2, "done":0}}}),
+    );
+    assert_eq!(0, stats.status.code().unwrap());
+    assert_eq!(
+        "open=2 done=1\n  global: open=2\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_22_task_metrics() {
+    let metrics = run_daemon_cli(
+        &[
+            "task", "metrics", "global", "--window", "7200.5", "--since", "100.25", "--until",
+            "7300.75", "--bucket", "day",
+        ],
+        "task_metrics",
+        json!({"scope":"global", "window_s":7200.5, "since":100.25, "until":7300.75, "bucket":"day"}),
+        json!({
+            "scope":"global", "window":{"seconds":3600, "bucket":"day"},
+            "current":{"by_status":{"open":2}, "by_priority":{"high":2}, "by_scope":{"global":2, "pane":0}, "leader_held":{"count":0, "oldest_age_s":0}},
+            "throughput":{"created":3, "claimed":1, "completed":1, "cancelled":0, "requeued":1, "buckets":[]}
+        }),
+    );
+    assert_eq!(0, metrics.status.code().unwrap());
+    assert_eq!(
+        "scope global  window 3600s (day buckets)\nstatus:   open=2\npriority: high=2\nscope:    global=2 pane=0\nthroughput: created=3 claimed=1 completed=1 cancelled=0 requeued=1\nleader-held tasks: 0\n",
+        String::from_utf8(metrics.stdout).unwrap()
+    );
+    assert!(metrics.stderr.is_empty());
+
+    let reap = run_daemon_cli(
+        &["task", "reap"],
+        "task_reap",
+        json!({}),
+        json!({"requeued":[{"task_id":"t7"}, {"task_id":"t8"}]}),
+    );
+    assert_eq!(0, reap.status.code().unwrap());
+    assert_eq!(
+        "requeued 2 lease(s): t7, t8\n",
+        String::from_utf8(reap.stdout).unwrap()
+    );
+    assert!(reap.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_16_task_create_read() {
     let added = run_daemon_cli(
         &[

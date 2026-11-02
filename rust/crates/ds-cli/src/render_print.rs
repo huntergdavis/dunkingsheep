@@ -782,6 +782,16 @@ pub fn render_task_list(result: &Value) -> String {
 }
 
 /// `print_task_next`.
+/// Format finite daemon task-lease seconds like Python `int()`, without i64 saturation.
+pub(crate) fn task_lease_seconds(value: &Value) -> String {
+    let seconds = num(value).trunc();
+    if seconds == 0.0 {
+        "0".to_string()
+    } else {
+        format!("{seconds:.0}")
+    }
+}
+
 pub fn render_task_next(result: &Value, stamp: Stamp) -> String {
     let task = get(result, "task");
     if !truthy(task) {
@@ -822,7 +832,7 @@ pub fn render_task_next(result: &Value, stamp: Stamp) -> String {
     format!(
         "claimed {} (lease {}s)\n{}",
         py_str(get(task, "id")),
-        num(get(result, "lease_seconds")) as i64,
+        task_lease_seconds(get(result, "lease_seconds")),
         render_task(task, stamp)
     )
 }
