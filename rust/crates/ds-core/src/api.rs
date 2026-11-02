@@ -818,18 +818,15 @@ fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
     let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
         return Ok(6);
     };
-    let limit = match value {
-        Value::Number(number) => number
-            .as_i64()
-            .or_else(|| number.as_f64().map(|value| value as i64))
-            .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?,
-        Value::Bool(value) => i64::from(*value),
-        Value::String(value) => parse_python_decimal_int(value).ok_or_else(|| {
+    match value {
+        Value::Number(number) => python_number_limit(number),
+        Value::Bool(value) => Ok(usize::from(*value)),
+        Value::String(value) => parse_python_decimal_limit(value).ok_or_else(|| {
             DunkError::Refused(format!(
                 "invalid literal for int() with base 10: {}",
                 py_repr(value)
             ))
-        })?,
+        }),
         Value::Array(_) => {
             return Err(DunkError::Refused(
                 "int() argument must be a string, a bytes-like object or a real number, not 'list'"
@@ -843,31 +840,50 @@ fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
             ));
         }
         Value::Null => unreachable!("falsey limit uses the default"),
-    };
-    if limit <= 0 {
-        // Python's candidates() appends a row before comparing len(picked) to limit,
-        // so any nonpositive converted limit still selects one eligible row.
-        Ok(1)
-    } else {
-        Ok(usize::try_from(limit).unwrap_or(usize::MAX))
     }
 }
 
-fn parse_python_decimal_int(value: &str) -> Option<i64> {
+fn python_number_limit(number: &serde_json::Number) -> Result<usize, DunkError> {
+    if let Some(value) = number.as_i64() {
+        return Ok(if value <= 0 {
+            1
+        } else {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        });
+    }
+    if let Some(value) = number.as_u64() {
+        return Ok(usize::try_from(value).unwrap_or(usize::MAX));
+    }
+    if let Some(value) = number.as_f64() {
+        let integer = value.trunc();
+        return Ok(if integer <= 0.0 {
+            1
+        } else if integer >= usize::MAX as f64 {
+            usize::MAX
+        } else {
+            integer as usize
+        });
+    }
+    Err(DunkError::Refused("cannot convert value to int".into()))
+}
+
+fn parse_python_decimal_limit(value: &str) -> Option<usize> {
     let literal = value.trim();
     let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
-    let (sign, digits) = literal.split_at(sign_len);
+    let negative = literal.as_bytes().first() == Some(&b'-');
+    let (_, digits) = literal.split_at(sign_len);
     if digits.is_empty() {
         return None;
     }
 
     let mut previous_was_digit = false;
-    let mut normalized = String::with_capacity(literal.len());
-    normalized.push_str(sign);
+    let mut magnitude = 0usize;
     let mut chars = digits.chars().peekable();
     while let Some(character) = chars.next() {
         if let Some(digit) = python_decimal_digit(character) {
-            normalized.push(char::from(b'0' + digit));
+            magnitude = magnitude
+                .saturating_mul(10)
+                .saturating_add(usize::from(digit));
             previous_was_digit = true;
         } else if character == '_'
             && previous_was_digit
@@ -881,10 +897,15 @@ fn parse_python_decimal_int(value: &str) -> Option<i64> {
             return None;
         }
     }
-    if previous_was_digit {
-        normalized.parse().ok()
+    if !previous_was_digit {
+        return None;
+    }
+    if negative || magnitude == 0 {
+        // Python's candidates() appends a row before comparing len(picked) to limit,
+        // so any nonpositive converted limit still selects one eligible row.
+        Some(1)
     } else {
-        None
+        Some(magnitude)
     }
 }
 

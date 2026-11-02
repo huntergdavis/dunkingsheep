@@ -2871,6 +2871,94 @@ fn test_poolrad_sync_dry_run_matches_python_bool() {
 }
 
 #[test]
+fn test_poolrad_limit_matches_python_int_oracle() {
+    let missing = args(json!({})).unwrap();
+    assert_eq!(poolrad_limit(&missing).unwrap(), 6);
+
+    let cases = [
+        (json!(null), 6),
+        (json!(false), 6),
+        (json!(true), 1),
+        (json!(0), 6),
+        (json!("0"), 1),
+        (json!(-1), 1),
+        (json!(1.9), 1),
+        (json!(-0.5), 1),
+        (json!("1_0"), 10),
+        (json!("١٢٣"), 123),
+        (json!("１２３"), 123),
+        (json!(" \t+١٢٣ \n"), 123),
+        (json!("999999999999999999999999999999999999"), usize::MAX),
+        (json!("-999999999999999999999999999999999999"), 1),
+        (json!(1e100), usize::MAX),
+        (json!(-1e100), 1),
+        (json!([]), 6),
+        (json!({}), 6),
+        (json!(u64::MAX), usize::MAX),
+    ];
+    for (limit, expected) in cases {
+        assert_eq!(
+            poolrad_limit(&args(json!({"limit": limit})).unwrap()).unwrap(),
+            expected
+        );
+    }
+
+    for (limit, expected_error) in [
+        (
+            json!("bad"),
+            "invalid literal for int() with base 10: 'bad'",
+        ),
+        (
+            json!("1__0"),
+            "invalid literal for int() with base 10: '1__0'",
+        ),
+        (
+            json!([1]),
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'",
+        ),
+        (
+            json!({"x": 1}),
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'",
+        ),
+    ] {
+        assert_eq!(
+            poolrad_limit(&args(json!({"limit": limit})).unwrap())
+                .unwrap_err()
+                .to_string(),
+            expected_error
+        );
+    }
+}
+
+#[test]
+fn test_poolrad_dry_run_bool_matches_python_oracle() {
+    assert!(!poolrad_dry_run(None));
+    let cases = [
+        (json!(null), false),
+        (json!(false), false),
+        (json!(true), true),
+        (json!("false"), false),
+        (json!("no"), false),
+        (json!("yes"), true),
+        (json!("on"), true),
+        (json!("1"), true),
+        (json!("0"), false),
+        (json!(" YES "), true),
+        (json!("2"), false),
+        (json!(0), false),
+        (json!(1), true),
+        (json!(2), false),
+        (json!([]), false),
+        (json!(["yes"]), false),
+        (json!({}), false),
+        (json!({"yes": true}), false),
+    ];
+    for (value, expected) in cases {
+        assert_eq!(poolrad_dry_run(Some(&value)), expected, "{value}");
+    }
+}
+
+#[test]
 fn test_poolrad_progress_reports_the_recorded_count() {
     let (_dir, flock) = staffed_flock("api-poolrad-progress");
     let env = PoolradApiEnv::new();
