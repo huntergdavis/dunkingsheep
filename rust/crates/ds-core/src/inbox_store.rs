@@ -28,6 +28,7 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+mod owner_queries;
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.
