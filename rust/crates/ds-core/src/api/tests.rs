@@ -102,6 +102,7 @@ impl CommandEnv for GithubTokenApiEnv {
     }
 }
 
+#[derive(Default)]
 struct PoolradApiStore {
     tasks: Mutex<Vec<Value>>,
 }

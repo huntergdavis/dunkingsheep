@@ -1016,6 +1016,23 @@ fn python_decimal_digit(character: char) -> Option<u8> {
     })
 }
 
+fn poolrad_dry_run(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => python_bool_string(value),
+        Some(Value::Number(value)) => python_bool_string(&value.to_string()),
+        Some(Value::Array(_) | Value::Object(_)) => false,
+    }
+}
+
+fn python_bool_string(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
+}
+
 /// `dunk_core.Flock.gh_token` through the accepted T52 token cache.
 pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let role = context
@@ -1084,7 +1101,7 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
 /// `dunk_api.h_poolrad_sync` through the accepted T52 Poolrad service.
 pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let limit = poolrad_limit(&args)?;
-    let dry_run = python_bool_arg(&args, "dry_run", false);
+    let dry_run = poolrad_dry_run(args.get("dry_run"));
     context.env.poolrad_sync(limit, dry_run)
 }
 
