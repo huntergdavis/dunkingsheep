@@ -2919,3 +2919,104 @@ fn cli_route_26_reports() {
     );
     assert!(listed.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_32_token() {
+    let issued = run_daemon_cli(
+        &["token", "issue", "--role", "owner"],
+        "token_issue",
+        json!({"role": "owner", "label": null}),
+        json!({"token": "single-use-secret", "role": "owner", "label": null}),
+    );
+    assert_eq!(Some(0), issued.status.code());
+    assert_eq!(
+        "single-use-secret\n",
+        String::from_utf8(issued.stdout).unwrap()
+    );
+    assert!(issued.stderr.is_empty());
+
+    let issued_json = run_daemon_cli(
+        &[
+            "token", "issue", "--role", "web", "--label", "web app", "--json",
+        ],
+        "token_issue",
+        json!({"role": "web", "label": "web app"}),
+        json!({"token": "json-secret", "role": "web", "label": "web app"}),
+    );
+    assert_eq!(Some(0), issued_json.status.code());
+    assert_eq!(
+        "{\n  \"token\": \"json-secret\",\n  \"role\": \"web\",\n  \"label\": \"web app\"\n}\n",
+        String::from_utf8(issued_json.stdout).unwrap()
+    );
+    assert!(issued_json.stderr.is_empty());
+
+    let revoked = run_daemon_cli(
+        &["token", "revoke", "expired-web"],
+        "token_revoke",
+        json!({"label": "expired-web"}),
+        json!({"revoked": 2, "label": "expired-web"}),
+    );
+    assert_eq!(Some(0), revoked.status.code());
+    assert_eq!(
+        "revoked 2 token(s) labelled expired-web\n",
+        String::from_utf8(revoked.stdout).unwrap()
+    );
+    assert!(revoked.stderr.is_empty());
+
+    let revoked_json = run_daemon_cli(
+        &["token", "revoke", "missing", "--json"],
+        "token_revoke",
+        json!({"label": "missing"}),
+        json!({"revoked": 0, "label": "missing"}),
+    );
+    assert_eq!(Some(0), revoked_json.status.code());
+    assert_eq!(
+        "{\n  \"revoked\": 0,\n  \"label\": \"missing\"\n}\n",
+        String::from_utf8(revoked_json.stdout).unwrap()
+    );
+    assert!(revoked_json.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "tokens": [
+                {"label": "web desk", "role": "web"},
+                {"label": "owner", "role": "owner"}
+            ]
+        }),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        format!(
+            "{:<24} {}\n{:<24} {}\n",
+            "web desk", "web", "owner", "owner"
+        ),
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let empty = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": []}),
+    );
+    assert_eq!(Some(0), empty.status.code());
+    assert_eq!("no tokens\n", String::from_utf8(empty.stdout).unwrap());
+    assert!(empty.stderr.is_empty());
+
+    let listed_json = run_daemon_cli(
+        &["token", "list", "--json"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": [{"label": "system", "role": "system"}]}),
+    );
+    assert_eq!(Some(0), listed_json.status.code());
+    assert_eq!(
+        "{\n  \"tokens\": [\n    {\n      \"label\": \"system\",\n      \"role\": \"system\"\n    }\n  ]\n}\n",
+        String::from_utf8(listed_json.stdout).unwrap()
+    );
+    assert!(listed_json.stderr.is_empty());
+}

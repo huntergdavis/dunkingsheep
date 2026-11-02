@@ -1705,6 +1705,62 @@ fn report(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn token(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "token_command") {
+        Some("issue") => {
+            let mut args = Map::new();
+            args.insert(
+                "role".into(),
+                ns.get("role").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_issue", args, |result| {
+                format!("{}\n", crate::render_fleet::py_str(&result["token"]))
+            })
+        }
+        Some("revoke") => {
+            let mut args = Map::new();
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_revoke", args, |result| {
+                format!(
+                    "revoked {} token(s) labelled {}\n",
+                    crate::render_fleet::py_str(&result["revoked"]),
+                    crate::render_fleet::py_str(&result["label"])
+                )
+            })
+        }
+        Some("list") => {
+            crate::daemon_cmd::run_command(ns, "superuser_status", Map::new(), |result| {
+                let rows = result
+                    .get("tokens")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|token| {
+                        let label = crate::render_fleet::py_str(&token["label"]);
+                        let role = crate::render_fleet::py_str(&token["role"]);
+                        let padding = 24usize.saturating_sub(label.chars().count());
+                        format!("{label}{} {role}", " ".repeat(padding))
+                    })
+                    .collect::<Vec<_>>();
+                if rows.is_empty() {
+                    "no tokens\n".to_string()
+                } else {
+                    format!("{}\n", rows.join("\n"))
+                }
+            })
+        }
+        Some(other) => not_ported(&format!("token {other}")),
+        None => not_ported("token"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1739,6 +1795,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "token" => token(ns),
         "review" => review(ns),
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
