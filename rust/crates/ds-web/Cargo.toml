@@ -9,3 +9,6 @@ description = "Dunking Sheep web adapter foundation (docs/rust/RUST_PORT.md sect
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tower = { version = "=0.5.3", features = ["util"] }
