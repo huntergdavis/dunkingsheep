@@ -293,6 +293,32 @@ fn flock_owns_one_shared_view_cache_across_request_borrows() {
 }
 
 #[test]
+fn flock_save_invalidates_shared_view_before_persistence_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = super::Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    let env = Env::new();
+    env.message.replace("before".into());
+    let cached = flock
+        .view_cache()
+        .view(&env, Some("w1:p1"), false, VIEW_CACHE_S);
+    assert_eq!(json!("before"), cached["status"]["message"]);
+    env.message.replace("after".into());
+
+    flock.save().unwrap();
+
+    assert_eq!(
+        json!("after"),
+        flock
+            .view_cache()
+            .view(&env, Some("w1:p1"), false, VIEW_CACHE_S)["status"]["message"]
+    );
+}
+
+#[test]
 fn a_view_carries_dunks_the_pane_and_an_inbox_count_or_its_error() {
     let mut env = Env::new();
     env.dunks.add(None, &AddArgs::default()).unwrap();

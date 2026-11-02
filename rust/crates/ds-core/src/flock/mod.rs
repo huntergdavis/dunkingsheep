@@ -10,7 +10,7 @@
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -88,6 +88,16 @@ pub struct Flock {
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
+    /// Bounded recently decided messages, used by the message-list view.
+    #[allow(dead_code)] // The list consumer is owned by a dependent T33 integration slice.
+    pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
+    /// Bounded id-keyed tombstones preventing decided messages from being restored as queued.
+    #[allow(dead_code)] // Snapshot restore is owned by a dependent T33 integration slice.
+    pub(crate) decided: Mutex<sends::DecidedMessages>,
+    /// Stuck-observer state is persisted with the same whole-Flock snapshot.
+    pub(crate) stuck_tracker: Mutex<crate::stuck::Tracker>,
+    /// Recovery policy persisted alongside the attempt ledger.
+    pub(crate) stuck_config: Mutex<crate::stuck::Config>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
     pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
@@ -117,6 +127,8 @@ pub struct Flock {
     pub(crate) turn_dispatch: Mutex<commands_turns::TurnDispatchState>,
     /// Shared status view cache for requests served by this flock.
     status_view: status::ViewCache,
+    /// Serializes snapshot selection through atomic replacement so an older snapshot cannot win.
+    snapshot_lock: Mutex<()>,
     status_runtime: OnceLock<status_runtime::StatusState>,
     last_message: Mutex<String>,
     /// Per-pane successful retry key, matching Python Flock._submit_key.
@@ -141,6 +153,10 @@ impl Flock {
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
             stuck_candidates: Mutex::new(BTreeMap::new()),
+            message_history: Mutex::new(VecDeque::new()),
+            decided: Mutex::new(sends::DecidedMessages::default()),
+            stuck_tracker: Mutex::new(crate::stuck::Tracker::default()),
+            stuck_config: Mutex::new(crate::stuck::Config::default()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             pane_send_locks: Mutex::new(BTreeMap::new()),
@@ -155,6 +171,7 @@ impl Flock {
             turn_states: Mutex::new(commands_turns::Turns::new()),
             turn_dispatch: Mutex::new(commands_turns::TurnDispatchState::default()),
             status_view: status::ViewCache::new(),
+            snapshot_lock: Mutex::new(()),
             status_runtime: OnceLock::new(),
             last_message: Mutex::new(String::new()),
             learned_submit_keys: Mutex::new(BTreeMap::new()),
@@ -175,6 +192,262 @@ impl Flock {
     #[allow(dead_code)]
     pub(crate) fn invalidate_view(&self) {
         self.status_view.invalidate();
+    }
+
+    /// Capture every durable field owned by this Flock in one consistent JSON value.
+    #[allow(dead_code)] // Used by the shared whole-Flock save and restore seam.
+    pub(crate) fn snapshot(&self) -> Value {
+        let (next_id, dunk_rows) = self.dunks.snapshot();
+        let dunkers = dunk_rows
+            .into_iter()
+            .map(|pairs| {
+                Value::Object(
+                    pairs
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let next_message_id = self.next_message_id.load(Ordering::Relaxed);
+        let outbox = sends::outbox_lock(&self.outbox)
+            .values()
+            .flatten()
+            .filter(|message| message.status == "queued")
+            .map(sends::message_snapshot)
+            .collect::<Vec<_>>();
+        let stuck_candidates = self
+            .stuck_candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(pane, candidate)| (pane.clone(), sends::candidate_snapshot(candidate)))
+            .collect::<Map<String, Value>>();
+        let stuck = self
+            .stuck_tracker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .to_state();
+        let config = *self
+            .stuck_config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (decided, decided_order) = {
+            let decided = self
+                .decided
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let rows = decided
+                .order
+                .iter()
+                .filter_map(|id| {
+                    decided.by_id.get(id).map(|entry| {
+                        (
+                            id.clone(),
+                            json!({"status": entry.status, "created_at": entry.created_at}),
+                        )
+                    })
+                })
+                .collect::<Map<String, Value>>();
+            let order = decided
+                .order
+                .iter()
+                .filter(|id| rows.contains_key(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            (rows, order)
+        };
+        json!({
+            "version": 1,
+            "next_id": next_id,
+            "next_message_id": next_message_id,
+            "dunkers": dunkers,
+            "stuck_candidates": stuck_candidates,
+            "stuck": stuck,
+            "stuck_config": {
+                "enabled": config.enabled,
+                "threshold_s": config.threshold_s,
+                "max_attempts": config.max_attempts,
+                "cooldown_s": config.cooldown_s,
+                "observation_interval_s": config.observation_interval_s,
+            },
+            "outbox": outbox,
+            "decided": decided,
+            "decided_order": decided_order,
+        })
+    }
+
+    /// Atomically persist one whole-Flock snapshot. The serialization guard spans snapshot
+    /// selection and replacement, so an older snapshot cannot become the final file.
+    #[allow(dead_code)] // Send/outbox callers share this persistence edge.
+    pub(crate) fn save(&self) -> Result<(), DunkError> {
+        self.invalidate_view();
+        if !self.persist_enabled {
+            return Ok(());
+        }
+        let _serialized = self
+            .snapshot_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = self.status_state()?.state_file.clone();
+        let payload = self.snapshot();
+        crate::atomic_json::write(&path, &payload)
+    }
+
+    /// Rebuild queued messages from snapshot rows. Inbox read errors keep the original row.
+    #[allow(dead_code)] // Startup restore invokes this as part of whole-state restoration.
+    pub(crate) fn restore_outbox(&self, rows: &[Value]) {
+        let inbox = self.stores().inbox;
+        let decided = self
+            .decided
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_id
+            .clone();
+        let mut restored = BTreeMap::<String, Vec<sends::Message>>::new();
+        for row in rows {
+            let Some(message) = sends::message_from_snapshot(row) else {
+                continue;
+            };
+            if decided.get(&message.id).is_some_and(|entry| {
+                sends::decided_tombstone_matches_row(
+                    entry,
+                    row.get("created_at").and_then(Value::as_f64),
+                )
+            }) {
+                continue;
+            }
+            if !message.notify_for.is_empty() {
+                if let Some(inbox) = inbox.as_ref() {
+                    let statuses = message
+                        .notify_for
+                        .iter()
+                        .map(|id| {
+                            crate::inbox::status(inbox.read_pool(), id, crate::clock::now_s())
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    if let Ok(statuses) = statuses {
+                        let states = statuses
+                            .iter()
+                            .map(|status| status.notify_state.as_deref())
+                            .collect::<Vec<_>>();
+                        let all_arrived = !states.is_empty()
+                            && states
+                                .iter()
+                                .all(|state| matches!(*state, Some("sent" | "cancelled")));
+                        let no_longer_waiting = !states.is_empty()
+                            && states.iter().all(|state| {
+                                matches!(*state, Some("sent" | "failed" | "cancelled"))
+                            })
+                            && statuses.iter().all(|status| status.state != "queued");
+                        if all_arrived || no_longer_waiting {
+                            continue;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "restored queued message {} for {}",
+                message.id, message.pane_id
+            );
+            restored
+                .entry(message.pane_id.clone())
+                .or_default()
+                .push(message);
+        }
+        *sends::outbox_lock(&self.outbox) = restored;
+    }
+
+    /// Restore every field owned by the snapshot leaf after the file is decoded.
+    #[allow(dead_code)] // Startup restore wiring is in the dependent runtime task.
+    pub(crate) fn restore_snapshot(&self, payload: &Value) {
+        let Some(root) = payload.as_object() else {
+            return;
+        };
+        self.dunks.load(root);
+        if let Some(next) = root.get("next_message_id").and_then(Value::as_u64) {
+            self.next_message_id.store(next.max(1), Ordering::Relaxed);
+        }
+        if let Some(rows) = root.get("stuck_candidates").and_then(Value::as_object) {
+            let candidates = rows
+                .iter()
+                .filter_map(|(pane, value)| {
+                    sends::candidate_from_snapshot(value).map(|candidate| (pane.clone(), candidate))
+                })
+                .collect();
+            *self
+                .stuck_candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = candidates;
+        }
+        if let Some(state) = root.get("stuck") {
+            if let Ok(tracker) = crate::stuck::Tracker::from_state(state) {
+                *self
+                    .stuck_tracker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = tracker;
+            }
+        }
+        if let Some(config) = root.get("stuck_config").and_then(Value::as_object) {
+            let raw = crate::stuck::RawConfig {
+                enabled: config.get("enabled").and_then(Value::as_bool),
+                threshold_s: config.get("threshold_s").and_then(Value::as_f64),
+                max_attempts: config.get("max_attempts").and_then(Value::as_i64),
+                cooldown_s: config.get("cooldown_s").and_then(Value::as_f64),
+                observation_interval_s: config
+                    .get("observation_interval_s")
+                    .and_then(Value::as_f64),
+            };
+            if let Ok(config) = crate::stuck::Config::from_raw(&raw) {
+                *self
+                    .stuck_config
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+            }
+        }
+        if let Some(decided) = root.get("decided").and_then(Value::as_object) {
+            let mut state = sends::DecidedMessages::default();
+            for (id, entry) in decided {
+                let (status, created_at) = match entry {
+                    Value::Object(row) => (
+                        row.get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        row.get("created_at").and_then(Value::as_f64),
+                    ),
+                    Value::String(status) => (status.clone(), None),
+                    _ => continue,
+                };
+                state
+                    .by_id
+                    .insert(id.clone(), sends::DecidedTombstone { status, created_at });
+            }
+            if let Some(order) = root.get("decided_order").and_then(Value::as_array) {
+                for id in order.iter().filter_map(Value::as_str) {
+                    if state.by_id.contains_key(id) && !state.order.iter().any(|seen| seen == id) {
+                        state.order.push_back(id.to_string());
+                    }
+                }
+            }
+            for id in state.by_id.keys() {
+                if !state.order.iter().any(|seen| seen == id) {
+                    state.order.push_back(id.clone());
+                }
+            }
+            while state.order.len() > sends::DECIDED_KEPT {
+                if let Some(id) = state.order.pop_front() {
+                    state.by_id.remove(&id);
+                }
+            }
+            *self
+                .decided
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+        }
+        if let Some(rows) = root.get("outbox").and_then(Value::as_array) {
+            self.restore_outbox(rows);
+        }
     }
 
     /// Remember a successful author-App token mint for review attribution.
@@ -557,6 +830,8 @@ mod resolve_tests;
 mod roles_gate_tests;
 #[cfg(test)]
 mod sends_tests;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

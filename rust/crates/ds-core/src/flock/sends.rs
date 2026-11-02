@@ -14,9 +14,9 @@
 //! is not evidence of a person. The only refusals are a DEAD session (read, not claimed) and an
 //! unknowable composer boundary.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 use super::commands_inbox::NOTICE_PREFIX;
@@ -911,10 +911,100 @@ pub fn send_submit_key(
 
 /// The four outcomes a caller can act on, as one machine-readable field (`Message.OUTCOMES`).
 pub const OUTCOMES: [&str; 5] = ["ok", "stored", "queued", "unconfirmed", "refused"];
+#[allow(dead_code)] // Used by the later message-list integration slice.
+const MESSAGE_HISTORY: usize = 50;
+pub(crate) const DECIDED_KEPT: usize = 500;
 
-/// `Message`: one direct message waiting in (or delivered from) a pane's outbox. The `deliver`
-/// callable and `done` event are the outbox task's business (next slice); this is the state and
-/// its wire form.
+#[derive(Debug, Default)]
+struct CompletionState {
+    #[allow(dead_code)] // Read by the later outbox runtime's outcome caller.
+    started: bool,
+    settled: bool,
+}
+
+/// The transient equivalent of Python's `threading.Event` on a message.
+#[derive(Debug, Default)]
+pub struct CompletionWaiter {
+    state: Mutex<CompletionState>,
+    changed: Condvar,
+}
+
+impl CompletionWaiter {
+    #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
+    fn begin(&self) -> bool {
+        let mut state = lock_unpoison(&self.state);
+        if state.started {
+            return false;
+        }
+        state.started = true;
+        true
+    }
+
+    #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
+    fn settle(&self) {
+        let mut state = lock_unpoison(&self.state);
+        if !state.settled {
+            state.settled = true;
+            self.changed.notify_all();
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        lock_unpoison(&self.state).settled
+    }
+
+    pub fn wait(&self) {
+        let mut state = lock_unpoison(&self.state);
+        while !state.settled {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+impl PartialEq for CompletionWaiter {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_set() == other.is_set()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecidedTombstone {
+    pub status: String,
+    pub created_at: Option<f64>,
+}
+
+pub(crate) fn decided_tombstone_matches_row(
+    tombstone: &DecidedTombstone,
+    row_created_at: Option<f64>,
+) -> bool {
+    if !matches!(
+        tombstone.status.as_str(),
+        "sent" | "failed" | "cancelled" | "undeliverable"
+    ) {
+        return false;
+    }
+    let Some(tombstone_created_at) = tombstone.created_at.filter(|stamp| stamp.is_finite()) else {
+        return false;
+    };
+    let Some(row_created_at) = row_created_at.filter(|stamp| stamp.is_finite()) else {
+        return false;
+    };
+    (tombstone_created_at - row_created_at).abs() <= 1e-3
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DecidedMessages {
+    #[allow(dead_code)] // Read by the restore/message-list integration slices.
+    pub by_id: BTreeMap<String, DecidedTombstone>,
+    #[allow(dead_code)] // Preserves Python dict insertion order for bounded eviction.
+    pub(crate) order: VecDeque<String>,
+}
+
+/// `Message`: one direct message waiting in (or delivered from) a pane's outbox. The completion
+/// waiter is transient; the `deliver` callable belongs to the outbox worker slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -932,7 +1022,11 @@ pub struct Message {
     pub press_enter: bool,
     /// True for a timer-triggered send (Python's transient `attempt.scheduled`).
     pub scheduled: bool,
+    /// Original template of a scheduled attempt, retained for post-restart eligibility checks.
+    pub schedule_template: Option<String>,
     pub attempt_generation: Option<String>,
+    /// Time at which the guarded composer write completed, persisted in the stuck candidate.
+    pub typed_at: Option<f64>,
     /// An inbox notice: one per pane, never stacked.
     pub is_notice: bool,
     pub notify_for: Vec<String>,
@@ -942,6 +1036,8 @@ pub struct Message {
     pub hold_signature: Option<String>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
+    /// Completion event shared by clones and deliberately omitted from the wire form.
+    pub done: Arc<CompletionWaiter>,
 }
 
 impl Message {
@@ -957,7 +1053,9 @@ impl Message {
             kind: "text".to_string(),
             press_enter: true,
             scheduled: false,
+            schedule_template: None,
             attempt_generation: None,
+            typed_at: None,
             is_notice: false,
             notify_for: Vec::new(),
             detail: None,
@@ -966,6 +1064,7 @@ impl Message {
             hold_signature: None,
             created_at: clock::now_s(),
             finished_at: None,
+            done: Arc::new(CompletionWaiter::default()),
         }
     }
 
@@ -1044,6 +1143,20 @@ pub(crate) struct StuckCandidate {
     pub eligible: bool,
     pub superseded_by: String,
     pub transcript_texts: Vec<String>,
+    pub typed_at: Option<f64>,
+    pub native_binding: Option<(i64, String, String)>,
+    pub recovery_outcome: Option<String>,
+    pub recovery_detail: Option<String>,
+    pub recovered_at: Option<f64>,
+    pub receipts_reconciled: Option<bool>,
+    pub native_refusal: Option<String>,
+    pub unobservable_logged: Option<bool>,
+    pub native_recovery: Option<bool>,
+    pub schedule_template: Option<String>,
+    pub retired_at: Option<f64>,
+    pub consumed_at: Option<f64>,
+    /// Unknown Python candidate keys are retained at top level for forward-compatible saves.
+    pub extra_fields: Map<String, Value>,
 }
 
 impl StuckCandidate {
@@ -1073,8 +1186,238 @@ impl StuckCandidate {
             eligible,
             superseded_by: message.id.clone(),
             transcript_texts: Vec::new(),
+            typed_at: message.typed_at,
+            native_binding: None,
+            recovery_outcome: None,
+            recovery_detail: None,
+            recovered_at: None,
+            receipts_reconciled: None,
+            native_refusal: None,
+            unobservable_logged: None,
+            native_recovery: None,
+            schedule_template: message.schedule_template.clone(),
+            retired_at: None,
+            consumed_at: None,
+            extra_fields: Map::new(),
         }
     }
+}
+
+const CANDIDATE_SNAPSHOT_FIELDS: &[&str] = &[
+    "message_id",
+    "created_at",
+    "press_enter",
+    "status",
+    "kind",
+    "scheduled",
+    "source",
+    "notify_for",
+    "text",
+    "label",
+    "generation",
+    "eligible",
+    "superseded_by",
+    "transcript_texts",
+    "typed_at",
+    "native_binding",
+    "recovery_outcome",
+    "recovery_detail",
+    "recovered_at",
+    "receipts_reconciled",
+    "native_refusal",
+    "unobservable_logged",
+    "native_recovery",
+    "schedule_template",
+    "retired_at",
+    "consumed_at",
+];
+
+pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
+    let native_binding = candidate
+        .native_binding
+        .as_ref()
+        .map(|(pid, start, session)| json!([pid, start, session]));
+    let known = json!({
+        "message_id": candidate.message_id,
+        "created_at": candidate.created_at,
+        "press_enter": candidate.press_enter,
+        "status": candidate.status,
+        "kind": candidate.kind,
+        "scheduled": candidate.scheduled,
+        "source": candidate.source,
+        "notify_for": candidate.notify_for,
+        "text": candidate.text,
+        "label": candidate.label,
+        "generation": candidate.generation,
+        "eligible": candidate.eligible,
+        "superseded_by": candidate.superseded_by,
+        "transcript_texts": candidate.transcript_texts,
+        "typed_at": candidate.typed_at,
+        "native_binding": native_binding,
+        "recovery_outcome": candidate.recovery_outcome,
+        "recovery_detail": candidate.recovery_detail,
+        "recovered_at": candidate.recovered_at,
+        "receipts_reconciled": candidate.receipts_reconciled,
+        "native_refusal": candidate.native_refusal,
+        "unobservable_logged": candidate.unobservable_logged,
+        "native_recovery": candidate.native_recovery,
+        "schedule_template": candidate.schedule_template,
+        "retired_at": candidate.retired_at,
+        "consumed_at": candidate.consumed_at,
+    });
+    let mut snapshot = candidate.extra_fields.clone();
+    if let Some(fields) = known.as_object() {
+        snapshot.extend(fields.clone());
+    }
+    Value::Object(snapshot)
+}
+
+pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
+    let row = value.as_object()?;
+    let string = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+    let native_binding = row
+        .get("native_binding")
+        .and_then(Value::as_array)
+        .and_then(|parts| {
+            Some((
+                parts.first()?.as_i64()?,
+                parts.get(1)?.as_str()?.to_owned(),
+                parts.get(2)?.as_str()?.to_owned(),
+            ))
+        });
+    let extra_fields = row
+        .iter()
+        .filter(|(key, _)| !CANDIDATE_SNAPSHOT_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Some(StuckCandidate {
+        message_id: string("message_id")?,
+        created_at: row.get("created_at")?.as_f64()?,
+        press_enter: row
+            .get("press_enter")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        status: string("status").unwrap_or_else(|| "unknown".into()),
+        kind: string("kind").unwrap_or_else(|| "text".into()),
+        scheduled: row
+            .get("scheduled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        source: string("source").unwrap_or_default(),
+        notify_for: row
+            .get("notify_for")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        text: string("text").unwrap_or_default(),
+        label: string("label").unwrap_or_default(),
+        generation: string("generation"),
+        eligible: row
+            .get("eligible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        superseded_by: string("superseded_by").unwrap_or_default(),
+        transcript_texts: row
+            .get("transcript_texts")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        typed_at: row.get("typed_at").and_then(Value::as_f64),
+        native_binding,
+        recovery_outcome: string("recovery_outcome"),
+        recovery_detail: string("recovery_detail"),
+        recovered_at: row.get("recovered_at").and_then(Value::as_f64),
+        receipts_reconciled: row.get("receipts_reconciled").and_then(Value::as_bool),
+        native_refusal: string("native_refusal"),
+        unobservable_logged: row.get("unobservable_logged").and_then(Value::as_bool),
+        native_recovery: row.get("native_recovery").and_then(Value::as_bool),
+        schedule_template: string("schedule_template"),
+        retired_at: row.get("retired_at").and_then(Value::as_f64),
+        consumed_at: row.get("consumed_at").and_then(Value::as_f64),
+        extra_fields,
+    })
+}
+
+pub(crate) fn message_snapshot(message: &Message) -> Value {
+    json!({
+        "id": message.id,
+        "pane_id": message.pane_id,
+        "target_label": message.target_label,
+        "text": message.text,
+        "source": message.source,
+        "status": message.status,
+        "hold_while_typing": message.hold_while_typing,
+        "kind": message.kind,
+        "press_enter": message.press_enter,
+        "scheduled": message.scheduled,
+        "schedule_template": message.schedule_template,
+        "attempt_generation": message.attempt_generation,
+        "is_notice": message.is_notice,
+        "notify_for": message.notify_for,
+        "detail": message.detail,
+        "holds": message.holds,
+        "next_attempt_at": message.next_attempt_at,
+        "hold_signature": message.hold_signature,
+        "created_at": message.created_at,
+        "finished_at": message.finished_at,
+        "typed_at": message.typed_at,
+    })
+}
+
+pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
+    let row = value.as_object()?;
+    let field = |key: &str| row.get(key);
+    let string = |key: &str| field(key).and_then(Value::as_str).map(str::to_owned);
+    let id = string("id")?;
+    let pane_id = string("pane_id")?;
+    let target_label = string("target_label").unwrap_or_else(|| pane_id.clone());
+    let text = string("text").unwrap_or_default();
+    let source = string("source").unwrap_or_default();
+    let mut message = Message::new(&id, &pane_id, &target_label, &text, &source);
+    message.status = "queued".into();
+    message.hold_while_typing = field("hold_while_typing")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    message.kind = string("kind").unwrap_or_else(|| "text".into());
+    message.press_enter = field("press_enter")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    message.scheduled = field("scheduled").and_then(Value::as_bool).unwrap_or(false);
+    message.schedule_template = string("schedule_template");
+    message.attempt_generation = string("attempt_generation");
+    message.is_notice = field("is_notice").and_then(Value::as_bool).unwrap_or(false);
+    message.notify_for = field("notify_for")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    message.detail = string("detail");
+    message.holds = field("holds").and_then(Value::as_i64).unwrap_or(0);
+    message.next_attempt_at = field("next_attempt_at").and_then(Value::as_f64);
+    message.hold_signature = string("hold_signature");
+    message.created_at = field("created_at")
+        .and_then(Value::as_f64)
+        .unwrap_or(message.created_at);
+    message.finished_at = field("finished_at").and_then(Value::as_f64);
+    message.typed_at = field("typed_at").and_then(Value::as_f64);
+    Some(message)
 }
 
 #[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
@@ -1122,7 +1465,7 @@ pub trait OutboxWake: Send + Sync {
     fn ensure_worker(&self, flock: &Flock, pane_id: &str) -> Result<(), DunkError>;
 }
 
-fn outbox_lock(
+pub(crate) fn outbox_lock(
     outbox: &Mutex<BTreeMap<String, Vec<Message>>>,
 ) -> MutexGuard<'_, BTreeMap<String, Vec<Message>>> {
     outbox
@@ -1131,13 +1474,121 @@ fn outbox_lock(
 }
 
 impl Flock {
+    /// `_record_delivery_outcome`: record terminal metrics/receipts once and always release
+    /// the message waiter. Store failures are best-effort bookkeeping, never worker failures.
+    #[allow(dead_code)] // Called by a dependent T33 outbox integration slice.
+    pub(crate) fn record_delivery_outcome(
+        &self,
+        message: &Message,
+        ok: bool,
+        detail: Option<&str>,
+        outcome: &str,
+        metric: Option<&str>,
+    ) {
+        if !message.done.begin() {
+            return;
+        }
+
+        let stores = self.stores();
+        if let (Some(kind), Some(metrics)) = (metric, stores.metrics.as_ref()) {
+            let finished_at = message
+                .finished_at
+                .filter(|finished_at| *finished_at != 0.0)
+                .unwrap_or_else(clock::now_s);
+            let duration_ms = ((finished_at - message.created_at) * 1000.0) as i64;
+            metrics.record(&crate::metrics::Event {
+                at: 0.0,
+                kind: if ok {
+                    kind.to_string()
+                } else {
+                    "message.failed".to_string()
+                },
+                pane_id: Some(message.pane_id.clone()),
+                mailbox: Some(message.target_label.clone()),
+                sender: None,
+                source: Some(message.source.clone()),
+                outcome: Some(outcome.to_string()),
+                reason: if ok {
+                    None
+                } else {
+                    Some(
+                        detail
+                            .filter(|detail| !detail.is_empty())
+                            .unwrap_or("unconfirmed")
+                            .to_string(),
+                    )
+                },
+                duration_ms: Some(duration_ms),
+                attempts: (message.holds != 0).then_some(message.holds),
+                bytes: Some(message.text.len() as i64),
+            });
+        }
+
+        if let Some(inbox) = stores.inbox.as_ref() {
+            for inbox_id in &message.notify_for {
+                let _ = inbox.record_notify(
+                    inbox_id,
+                    if ok { "sent" } else { "failed" },
+                    detail,
+                    None,
+                    None,
+                );
+            }
+        }
+
+        message.done.settle();
+    }
+
+    /// `_remember`: retain the decided message, its id-reuse-safe tombstone, and stuck intent.
+    /// Snapshot persistence belongs to the caller after this in-memory transition.
+    #[allow(dead_code)] // Called by dependent T33 delivery and restore integration slices.
+    pub(crate) fn remember(&self, message: &Message) {
+        self.note_stuck_candidate(message);
+
+        let mut history = self
+            .message_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history.push_back(message.clone());
+        while history.len() > MESSAGE_HISTORY {
+            history.pop_front();
+        }
+        drop(history);
+
+        let mut decided = self
+            .decided
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = if message.status.is_empty() {
+            "unknown"
+        } else {
+            message.status.as_str()
+        };
+        let is_new = !decided.by_id.contains_key(&message.id);
+        decided.by_id.insert(
+            message.id.clone(),
+            DecidedTombstone {
+                status: status.to_string(),
+                created_at: Some(message.created_at),
+            },
+        );
+        if is_new {
+            decided.order.push_back(message.id.clone());
+        }
+        while decided.order.len() > DECIDED_KEPT {
+            if let Some(oldest) = decided.order.pop_front() {
+                decided.by_id.remove(&oldest);
+            }
+        }
+    }
+
     /// Keep the pane's latest delivery intent for the stuck observer.
     ///
     /// Completion order is not intent order: a late outcome for an older message cannot
     /// replace a newer send, cancellation, or deliberate no-enter intent. Ineligible
     /// intents are retained as tombstones so that they still supersede older candidates.
     /// This only mutates in-memory state; snapshot persistence has a separate owner.
-    #[allow(dead_code)] // The outcome caller is a separate dependent T33 leaf.
+    #[allow(dead_code)] // Runtime consumers are assigned to dependent T33 integration slices.
     pub(crate) fn note_stuck_candidate(&self, message: &Message) {
         if message.pane_id.is_empty() {
             return;
@@ -1151,6 +1602,30 @@ impl Flock {
             candidates.insert(message.pane_id.clone(), candidate);
             return;
         };
+        if existing.message_id == candidate.message_id
+            && existing.created_at.to_bits() == candidate.created_at.to_bits()
+        {
+            candidate.typed_at = message.typed_at.or(existing.typed_at);
+            candidate.native_binding = existing.native_binding.clone();
+            candidate.recovery_outcome = existing.recovery_outcome.clone();
+            candidate.recovery_detail = existing.recovery_detail.clone();
+            candidate.recovered_at = existing.recovered_at;
+            candidate.receipts_reconciled = existing.receipts_reconciled;
+            candidate.native_refusal = existing.native_refusal.clone();
+            candidate.unobservable_logged = existing.unobservable_logged;
+            candidate.native_recovery = existing.native_recovery;
+            candidate.schedule_template = message
+                .schedule_template
+                .clone()
+                .or_else(|| existing.schedule_template.clone());
+            candidate.retired_at = existing.retired_at;
+            candidate.consumed_at = existing.consumed_at;
+            candidate.extra_fields = existing.extra_fields.clone();
+            if candidate.recovery_outcome.as_deref() == Some("consumed") {
+                candidate.status = "consumed".into();
+                candidate.eligible = false;
+            }
+        }
         if candidate_is_newer(existing, &candidate) {
             return;
         }
@@ -1182,6 +1657,78 @@ impl Flock {
                 .collect();
         }
         candidates.insert(message.pane_id.clone(), candidate);
+    }
+
+    /// Bind native identity only to the exact pre-send candidate and its captured process
+    /// generation. This prevents a resolver result for a replacement pane from being adopted.
+    pub(crate) fn bind_native_candidate(
+        &self,
+        pane_id: &str,
+        message_id: &str,
+        created_at: f64,
+        generation: Option<&str>,
+        binding: &crate::recovery_native::PromptSessionBinding,
+    ) -> bool {
+        let expected_generation = format!("pid:{}:start:{}", binding.pid, binding.start);
+        if generation != Some(expected_generation.as_str()) {
+            return false;
+        }
+        let mut candidates = self
+            .stuck_candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(candidate) = candidates.get_mut(pane_id) else {
+            return false;
+        };
+        if candidate.message_id != message_id
+            || candidate.created_at.to_bits() != created_at.to_bits()
+            || candidate.generation.as_deref() != Some(expected_generation.as_str())
+        {
+            return false;
+        }
+        candidate.native_binding = Some((
+            binding.pid,
+            binding.start.clone(),
+            binding.session_id.clone(),
+        ));
+        true
+    }
+
+    /// Persist typed-attempt authority before the caller sends the first Enter. `pane` is the
+    /// already-resolved pane record from the caller's terminal adapter; native lookup failure
+    /// leaves the strict generation-bound candidate intact and does not block the save.
+    #[allow(dead_code)] // The concrete submit-text caller is a separate runtime slice.
+    pub(crate) fn persist_typed_attempt(
+        &self,
+        message: &mut Message,
+        pane_id: &str,
+        text: &str,
+        press_enter: bool,
+        pane: &Value,
+    ) -> Result<bool, DunkError> {
+        if message.pane_id != pane_id || message.text != text {
+            return Ok(true);
+        }
+        let previous_status = message.status.clone();
+        message.press_enter = press_enter;
+        message.typed_at = Some(clock::now_s());
+        message.status = "typed".into();
+        let result = (|| {
+            self.note_stuck_candidate(message);
+            if let Ok(binding) = crate::recovery_native::resolve_prompt_session(pane) {
+                self.bind_native_candidate(
+                    pane_id,
+                    &message.id,
+                    message.created_at,
+                    message.attempt_generation.as_deref(),
+                    &binding,
+                );
+            }
+            self.save()?;
+            Ok(true)
+        })();
+        message.status = previous_status;
+        result
     }
 
     /// Reconstruct the last candidate only while the pane still has the generation recorded
