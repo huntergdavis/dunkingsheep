@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, usage_command, Outcome};
+use ds_core::context::digest::{digest_both, select_stores, DEFAULT_CAP};
+use ds_core::context::ledger::Ledger;
+use ds_core::context::store::Store;
 
 fn text<'a>(ns: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     ns.get(key).and_then(Value::as_str)
@@ -37,8 +40,146 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
+    let sub = text(ns, "context_command").unwrap_or("");
+    let path = text(ns, "path").map(PathBuf::from);
+    let global = matches!(ns.get("global_store"), Some(Value::Bool(true)));
+    let now = chrono::Local::now().naive_local();
+
+    let outcome = |value: Value, text: String| Outcome {
+        stdout: if json {
+            format!("{}\n", ordered_json(&value))
+        } else {
+            text
+        },
+        stderr: String::new(),
+        code: 0,
+    };
+    let failed = |message: String| Outcome {
+        stdout: String::new(),
+        stderr: format!("{message}\n"),
+        code: 1,
+    };
+
+    match sub {
+        "init" => {
+            let store = Store::new(path.as_deref(), global);
+            match store.ensure() {
+                Ok(root) => {
+                    let root = root.display().to_string();
+                    Some(outcome(
+                        serde_json::json!({"root": root}),
+                        format!("store at {root}\n"),
+                    ))
+                }
+                Err(error) => Some(failed(error.0)),
+            }
+        }
+        "snapshot" => {
+            let as_of = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let selected = if global {
+                Some("global")
+            } else if matches!(ns.get("project"), Some(Value::Bool(true))) {
+                Some("project")
+            } else {
+                None
+            };
+            let mut ledger = Ledger::new(None);
+            let digest = digest_both(
+                path.as_deref(),
+                selected,
+                DEFAULT_CAP,
+                None,
+                false,
+                &mut ledger,
+                now,
+            );
+            let stores = select_stores(path.as_deref(), selected);
+            let mut snapshots = Map::new();
+            for (name, store) in stores {
+                let stats = match store.stats() {
+                    Ok(stats) => stats,
+                    Err(error) => return Some(failed(error.0)),
+                };
+                let entries = match store.entry_stats(&mut ledger) {
+                    Ok(entries) => entries,
+                    Err(error) => return Some(failed(error.0)),
+                };
+                let mut snapshot = Map::new();
+                snapshot.insert(
+                    "status".into(),
+                    Value::String(if store.exists() { "ok" } else { "absent" }.into()),
+                );
+                snapshot.insert(
+                    "path".into(),
+                    Value::String(store.root.display().to_string()),
+                );
+                snapshot.insert(
+                    "counts".into(),
+                    stats.get("counts").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "reads_7d".into(),
+                    stats.get("reads_7d").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "injected_7d".into(),
+                    stats.get("injected_7d").cloned().unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "never_read_count".into(),
+                    stats
+                        .get("never_read_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                snapshot.insert(
+                    "never_delivered_count".into(),
+                    stats
+                        .get("never_delivered_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+                snapshot.insert("entries".into(), Value::Array(entries));
+                snapshots.insert(name, Value::Object(snapshot));
+            }
+            let mut value = Map::new();
+            value.insert("schema".into(), Value::String("context-snapshot/1".into()));
+            value.insert("as_of".into(), Value::from(as_of));
+            value.insert("digest".into(), Value::String(digest));
+            value.insert("stores".into(), Value::Object(snapshots));
+            let value = Value::Object(value);
+            Some(outcome(value.clone(), ordered_json(&value) + "\n"))
+        }
+        "ledger" if text(ns, "action") == Some("adopt") => {
+            if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
+                return Some(failed(
+                    "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal".into(),
+                ));
+            }
+            let store = Store::new(path.as_deref(), global);
+            let mut ledger = Ledger::new(None);
+            let adopted = store.adopt(&mut ledger, "adopt");
+            let ledger_path = ledger.path.display().to_string();
+            let value = serde_json::json!({"adopted": adopted, "ledger": ledger_path});
+            let count = value["adopted"].as_array().map_or(0, Vec::len);
+            Some(outcome(
+                value,
+                format!("adopted {count} entries into {ledger_path}\n"),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
+    if let Some(out) = context_local(ns, json) {
+        return out;
+    }
     // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
     // `--local` writes the files directly, which is not ported.
     if matches!(sub, "add" | "promote" | "supersede" | "retire") {
@@ -59,7 +200,7 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
             stderr: String::new(),
             code: 0,
         },
-        // `context init/add/promote/supersede/retire/ledger adopt` are writes (not ported).
+        // `context add/promote/supersede/retire` local writes are not ported.
         Err(error) if error.to_string().contains("not a read-side command") => {
             not_ported(&format!("context {sub}"))
         }
