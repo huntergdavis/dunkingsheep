@@ -122,12 +122,13 @@ mod tests {
             .expect_err("listing failure is surfaced");
         assert!(error.to_string().contains("tmux server not running"));
 
+        let no_roles_flock = Arc::new(Flock::new(
+            dir.path().join("no-roles-launches.json"),
+            dir.path().join("no-roles.json"),
+            false,
+        ));
         let without_registry = LoopRuntimeAdapter::new(
-            Arc::clone(&Flock::new(
-                dir.path().join("no-roles-launches.json"),
-                dir.path().join("no-roles.json"),
-                false,
-            )),
+            Arc::clone(&no_roles_flock),
             Arc::new(|| Box::new(FakeTerminal::new())),
         );
         assert_eq!(without_registry.helper_pushenv_registered_lanes(), None);
