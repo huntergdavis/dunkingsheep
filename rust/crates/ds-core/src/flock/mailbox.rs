@@ -28,6 +28,11 @@ pub trait MailboxEnv {
     fn list_panes(&self) -> Vec<Value>;
     /// `herdr.list_panes_grouped()`: annotated with `tab_label`/`workspace_label`.
     fn list_panes_grouped(&self) -> Vec<Value>;
+    /// Fallible grouped listing for callers that must distinguish an empty terminal from a
+    /// backend failure. Existing implementations keep their legacy behavior by default.
+    fn try_list_panes_grouped(&self) -> Result<Vec<Value>, DunkError> {
+        Ok(self.list_panes_grouped())
+    }
     /// `_registered_pane`: `(registered, process_alive, pid)` from the role registry; no
     /// backend call.
     fn registered_pane(&self, pane_id: &str) -> (bool, bool, Option<String>);

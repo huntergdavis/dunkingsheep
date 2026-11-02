@@ -270,6 +270,22 @@ pub trait Terminal: std::fmt::Debug {
             .collect()
     }
 
+    /// Fallibly list every pane with its backend status. The default preserves
+    /// backends that expose errors through the grouped listing and obtains status
+    /// through their existing per-pane method. Backends that can include status in
+    /// the listing should override this to avoid one status lookup per pane.
+    fn try_list_panes_with_status(&self) -> Result<Vec<(Pane, Option<String>)>, TerminalError> {
+        Ok(self
+            .try_list_panes_grouped()?
+            .into_values()
+            .flatten()
+            .map(|pane| {
+                let status = self.agent_status(&pane.pane_id);
+                (pane, status)
+            })
+            .collect())
+    }
+
     /// One pane with its status (`get_pane` + `agent_status`); see
     /// [`Terminal::list_panes_with_status`].
     fn get_pane_with_status(&self, pane_id: &str) -> Option<(Pane, Option<String>)> {

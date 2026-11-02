@@ -183,6 +183,17 @@ impl Terminal for TmuxBackend {
         }
     }
 
+    fn try_list_panes(&self) -> Result<Vec<Pane>, TerminalError> {
+        match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
+            Ok(result) if result.code == 0 => Ok(parse_panes(&result.stdout, &|_| None)),
+            Ok(result) if result.is_no_server() => Ok(Vec::new()),
+            Ok(result) => Err(TerminalError::refused(
+                result.message("tmux list-panes failed"),
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
     fn get_pane(&self, pane_id: &str) -> Option<Pane> {
         self.list_panes()
             .into_iter()
@@ -212,6 +223,19 @@ impl Terminal for TmuxBackend {
                 .push(pane);
         }
         grouped
+    }
+
+    fn try_list_panes_grouped(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<Pane>>, TerminalError> {
+        let mut grouped: std::collections::BTreeMap<String, Vec<Pane>> = Default::default();
+        for pane in self.try_list_panes()? {
+            grouped
+                .entry(pane.workspace.clone())
+                .or_default()
+                .push(pane);
+        }
+        Ok(grouped)
     }
 
     fn agent_child_pids(&self, _pane_pid: i64) -> Result<Vec<i64>, TerminalError> {
@@ -546,6 +570,16 @@ impl Terminal for TmuxBackend {
             .into_iter()
             .map(|pane| (pane, Some("unknown".to_string())))
             .collect()
+    }
+
+    fn try_list_panes_with_status(&self) -> Result<Vec<(Pane, Option<String>)>, TerminalError> {
+        // Preserve both the fallible list result and the single-process tmux path.
+        self.try_list_panes().map(|panes| {
+            panes
+                .into_iter()
+                .map(|pane| (pane, Some("unknown".to_string())))
+                .collect()
+        })
     }
 
     fn get_pane_with_status(&self, pane_id: &str) -> Option<(Pane, Option<String>)> {

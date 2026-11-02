@@ -119,6 +119,8 @@ pub struct FakeTerminal {
     pub tabs: Vec<Tab>,
     pub workspaces: Vec<Workspace>,
     pub available: bool,
+    /// Failure injected by the fallible grouped-pane listing, for propagation tests.
+    pub fail_grouped_panes: Option<TerminalError>,
     /// One entry per layout mutation: `("create_tab", tab_id)` etc., for assertions.
     pub layout_calls: Vec<(String, String)>,
     /// `(pane_id, command)` per `run_command`.
@@ -152,6 +154,7 @@ impl Default for FakeTerminal {
             tabs: canned_tabs(),
             workspaces: canned_workspaces(),
             available: true,
+            fail_grouped_panes: None,
             layout_calls: Vec::new(),
             runs: Vec::new(),
             fail_layout: None,
@@ -236,6 +239,13 @@ impl Terminal for FakeTerminal {
                 .push(pane.clone());
         }
         grouped
+    }
+
+    fn try_list_panes_grouped(&self) -> Result<BTreeMap<String, Vec<Pane>>, TerminalError> {
+        if let Some(error) = &self.fail_grouped_panes {
+            return Err(error.clone());
+        }
+        Ok(self.list_panes_grouped())
     }
 
     fn agent_child_pids(&self, pane_pid: i64) -> Result<Vec<i64>, TerminalError> {

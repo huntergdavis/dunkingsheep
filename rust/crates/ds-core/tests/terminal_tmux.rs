@@ -9,6 +9,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use ds_core::flock::lanes::TerminalEnv;
+use ds_core::flock::Flock;
 use ds_core::terminal::tmux::{shell_join, TmuxBackend, PANE_FORMAT};
 use ds_core::terminal::{Terminal, TerminalError};
 
@@ -129,6 +131,42 @@ fn listing_panes_with_their_status_is_one_tmux_process_not_one_per_pane() {
 }
 
 #[test]
+fn fallible_resolve_lanes_preserves_status_with_one_tmux_listing() {
+    let _serial = serial();
+    let dir = tempdir();
+    let listing = (0..6)
+        .map(|n| {
+            pane_line(
+                &format!("%{n}"),
+                "$1",
+                "@1",
+                "claude",
+                &format!("{}", 3000 + n),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fake = fake_tmux(&dir.path().to_path_buf(), &listing, 0);
+    let backend = TmuxBackend::new(fake);
+    let registered = |_: &str| (false, false, None);
+    let env = TerminalEnv {
+        terminal: &backend,
+        registered: &registered,
+    };
+    let flock = Flock::new(
+        dir.path().join("launches.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+
+    let lanes = flock.resolve_lanes(&env, 100.0).unwrap();
+
+    assert_eq!(6, lanes.len());
+    assert!(lanes.iter().all(|lane| lane["agent_status"].is_null()));
+    assert_eq!(1, spawns(dir.path()), "one fallible list for all six panes");
+}
+
+#[test]
 fn one_pane_with_its_status_is_one_tmux_process_and_a_missing_pane_is_none() {
     let _serial = serial();
     let dir = tempdir();
@@ -155,6 +193,35 @@ fn a_missing_server_is_an_empty_world_not_an_error() {
     assert!(backend.list_panes().is_empty());
     assert!(backend.list_tabs().is_empty());
     assert!(backend.list_workspaces().is_empty());
+}
+
+#[test]
+fn fallible_listing_preserves_the_exact_tmux_failure() {
+    let _serial = serial();
+    let dir = tempdir();
+    let fake = fake_tmux(&dir.path().to_path_buf(), "pane listing is offline", 7);
+    let backend = TmuxBackend::new(fake);
+    let expected = TerminalError::refused("pane listing is offline");
+
+    assert_eq!(Err(expected.clone()), backend.try_list_panes());
+    assert_eq!(Err(expected.clone()), backend.try_list_panes_grouped());
+    assert_eq!(Err(expected), backend.try_list_panes_with_status());
+}
+
+#[test]
+fn fallible_listing_keeps_a_missing_server_as_an_empty_world() {
+    let _serial = serial();
+    let dir = tempdir();
+    let fake = fake_tmux(
+        &dir.path().to_path_buf(),
+        "no server running on /tmp/tmux-1000/default",
+        1,
+    );
+    let backend = TmuxBackend::new(fake);
+
+    assert_eq!(Ok(Vec::new()), backend.try_list_panes());
+    assert_eq!(Ok(Default::default()), backend.try_list_panes_grouped());
+    assert_eq!(Ok(Vec::new()), backend.try_list_panes_with_status());
 }
 
 #[test]
