@@ -2335,3 +2335,137 @@ fn h_token_revoke_matches_python() {
     .expect("idempotent revoke");
     assert_eq!(again, json!({"label": "watchdog", "revoked": 0}));
 }
+
+#[test]
+fn h_task_follow_handlers_match_python() {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_follow_unfollow_followers();
+    let gate = FixedRole("worker", false);
+
+    let first = dispatch(
+        &dispatcher,
+        &flock,
+        &gate,
+        "task_follow",
+        args(json!({"scope": "mine"})),
+        Some("w1:p1"),
+    )
+    .expect("first pane follows its own assigned work");
+    assert_eq!(
+        first,
+        json!({
+            "pane_id": "w1:p1",
+            "scope": "mine",
+            "following": true,
+            "followers": ["w1:p1"],
+        })
+    );
+
+    let second = dispatch(
+        &dispatcher,
+        &flock,
+        &gate,
+        "task_follow",
+        None,
+        Some("w1:p2"),
+    )
+    .expect("omitted scope defaults to global");
+    assert_eq!(second["scope"], "global");
+
+    let followers = dispatch(&dispatcher, &flock, &gate, "task_followers", None, None)
+        .expect("read sorted followers");
+    assert_eq!(
+        followers,
+        json!({"followers": [
+            {"pane_id": "w1:p1", "scope": "mine"},
+            {"pane_id": "w1:p2", "scope": "global"},
+        ]})
+    );
+
+    let unfollowed = dispatch(
+        &dispatcher,
+        &flock,
+        &gate,
+        "task_unfollow",
+        None,
+        Some("w1:p1"),
+    )
+    .expect("first pane unfollows");
+    assert_eq!(
+        unfollowed,
+        json!({
+            "pane_id": "w1:p1",
+            "following": false,
+            "was_following": true,
+            "followers": ["w1:p2"],
+        })
+    );
+    let repeated = dispatch(
+        &dispatcher,
+        &flock,
+        &gate,
+        "task_unfollow",
+        None,
+        Some("w1:p1"),
+    )
+    .expect("repeated unfollow is idempotent");
+    assert_eq!(repeated["was_following"], false);
+
+    assert_eq!(
+        refusal(dispatch(
+            &dispatcher,
+            &flock,
+            &gate,
+            "task_follow",
+            None,
+            None,
+        )),
+        "task follow requires a known caller pane"
+    );
+    assert_eq!(
+        refusal(dispatch(
+            &dispatcher,
+            &flock,
+            &gate,
+            "task_follow",
+            args(json!({"scope": "w2:p4"})),
+            Some("w1:p1"),
+        )),
+        "per-pane tasks are private to w2:p4; caller runs in w1:p1"
+    );
+}
+
+#[test]
+fn h_task_follow_rejects_falsey_non_string_scopes() {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_task_follow_unfollow_followers();
+    let gate = FixedRole("worker", false);
+
+    for (scope, rendered) in [
+        (json!(false), "False"),
+        (json!(0), "0"),
+        (json!([]), "[]"),
+        (json!({}), "{}"),
+    ] {
+        let error = dispatch(
+            &dispatcher,
+            &flock,
+            &gate,
+            "task_follow",
+            args(json!({"scope": scope})),
+            Some("w1:p1"),
+        );
+        assert_eq!(
+            refusal(error),
+            format!(
+                "scope must be 'global' or a pane id such as 'w8:p3' or '%4' (got '{rendered}')"
+            )
+        );
+    }
+
+    let followers = dispatch(&dispatcher, &flock, &gate, "task_followers", None, None)
+        .expect("read followers after invalid scopes");
+    assert_eq!(followers, json!({"followers": []}));
+}
