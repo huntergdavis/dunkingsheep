@@ -93,7 +93,8 @@ pub struct Nudge {
 /// `SYSTEM_SENDERS`.
 pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
 
-/// Match final resolved destinations only; silence never changes storage or authority.
+/// Match final recipient identifiers exactly, case-sensitively after trimming.
+/// No case folding: silence never changes durable storage or authority.
 pub fn recipient_is_quiet(
     policy: Option<&str>,
     mailbox: &str,

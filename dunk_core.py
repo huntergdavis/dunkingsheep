@@ -8962,7 +8962,10 @@ def _bright_text(line):
 
 
 def _inbox_recipient_is_quiet(policy, mailbox, label, pane_id):
-    """Recipient policy controls wake notices, never durable mail delivery."""
+    """Match final recipient identifiers exactly, case-sensitively after trimming.
+
+    No case folding: policy controls wake notices, never durable mail delivery.
+    """
     quiet = {entry.strip() for entry in (policy or "").split(",")
              if entry.strip()}
     return any(value and value.strip() in quiet
