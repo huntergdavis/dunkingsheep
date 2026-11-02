@@ -259,6 +259,8 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
                     format!("{}\n", ordered_json(&Value::Object(value)))
                 } else if sub == "promote" {
                     format!("promoted {}\n", added.slug)
+                } else if sub == "supersede" {
+                    format!("superseded by {}\n", added.slug)
                 } else {
                     format!("added {}/{}\n", added.cls, added.slug)
                 },
