@@ -234,7 +234,7 @@ mod tests {
         for pane in &mut fake.panes {
             match pane.pane_id.as_str() {
                 "w1:p1" | "w2:p2" => pane.pane_pid = Some(pid),
-                "w3:p3" => pane.pane_pid = Some(i64::MAX),
+                "w3:p3" => pane.pane_pid = None,
                 _ => {}
             }
         }
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(MailboxEnv::registered_pane(&adapter, "w2:p2").1, true);
         assert_eq!(DeliveryEnv::agent_alive(&adapter, "w2:p2"), Some(false));
         assert_eq!(DeliveryEnv::agent_alive(&adapter, "w1:p1"), Some(false)); // bare shell
-        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w3:p3"), None); // unknown process table
+        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w3:p3"), None); // no pane process id
         assert!(DeliveryEnv::has_web_token(&adapter).expect("valid fixture token store"));
 
         let absent_dir = crate::testsupport::dir("runtime-delivery-no-web-token");
@@ -327,7 +327,7 @@ mod tests {
         )
         .expect("real capability handler");
         assert_eq!(capability["agent"], "claude");
-        assert_eq!(capability["agent_alive"], Value::Null);
+        assert_eq!(capability["agent_alive"], false);
         assert_eq!(capability["desk_credential"], true);
         assert_eq!(capability["desk_can_type"], true);
 
