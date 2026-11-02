@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -15,7 +16,7 @@ import dunk_review  # noqa: E402
 from dunk_core import DunkError, Flock  # noqa: E402
 from dunk_inbox import Inbox  # noqa: E402
 from dunk_roles import Roles  # noqa: E402
-from dunk_tasks import Tasks  # noqa: E402
+from dunk_tasks import TaskError, Tasks  # noqa: E402
 from fakes import FakeHerdr  # noqa: E402
 
 OWNER, WORKER, REVIEWER = "w1:p2", "w2:p3", "w2:p1"
@@ -294,6 +295,49 @@ class TimerTests(unittest.TestCase):
         report = self.sync.run()
         self.assertEqual(1, len(report["filed"]))
         self.assertTrue(any("403" in e for e in report["errors"]))
+
+    def _closed_review_fixture(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        return task
+
+    def _finish_review_fixture(self, task_id):
+        # Another request's completed verdict, only in this test's temporary DB.
+        self.flock.tasks.db.execute(
+            "UPDATE tasks SET status='done', verdict='accept' WHERE id=?", (task_id,))
+        self.flock.tasks.db.commit()
+
+    def test_closed_review_snapshot_completed_before_canonical_check(self):
+        task = self._closed_review_fixture()
+        other = self.flock.tasks.add("global", "another closed review", kind="review",
+                                     repo="o/r", pr=999, head="c" * 40)
+        def pulls(repo, token):
+            self._finish_review_fixture(task["id"])
+            return []
+        with patch.object(self.github, "open_pulls", side_effect=pulls), \
+                patch.object(self.flock.tasks, "cancel", wraps=self.flock.tasks.cancel) as cancel:
+            report = self.sync.run()
+        cancel.assert_called_once_with(other["id"], reason="PR closed or merged on GitHub")
+        self.assertEqual([other["id"]], report["cancelled"])
+        self.assertEqual("accept", self.flock.tasks.get(task["id"])["verdict"])
+
+    def test_closed_review_completion_between_check_and_cancel(self):
+        task = self._closed_review_fixture()
+        original = self.flock.tasks.cancel
+        def cancel(task_id, reason=None):
+            self._finish_review_fixture(task_id)
+            return original(task_id, reason=reason)
+        with patch.object(self.flock.tasks, "cancel", side_effect=cancel):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertEqual("done", self.flock.tasks.get(task["id"])["status"])
+
+    def test_closed_review_unrelated_cancel_error_still_propagates(self):
+        self._closed_review_fixture()
+        with patch.object(self.flock.tasks, "cancel", side_effect=TaskError("unrelated refusal")):
+            with self.assertRaisesRegex(TaskError, "unrelated refusal"):
+                self.sync.run()
 
     def test_accept_posts_success_and_approves_as_the_reviewer_app(self):
         self.sync.run()
