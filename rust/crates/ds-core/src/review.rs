@@ -5,7 +5,268 @@
 //! production writes remain outside this module. The accounting gates below take the
 //! table text read by Python and preserve its refusal text byte-for-byte.
 
+use serde_json::Value;
 use std::collections::BTreeSet;
+
+pub type ReviewPrKey = (Option<Value>, Option<Value>);
+pub type JudgedHeadKey = (Option<Value>, Option<Value>, Option<Value>);
+pub type FinalVerdict = (bool, Vec<String>, Vec<String>, usize);
+
+/// The exact task query used by the review timer, injectable for deterministic tests.
+pub trait ReviewTaskStore {
+    type Error;
+
+    fn list(
+        &self,
+        scope: Option<&str>,
+        include_done: bool,
+        limit: usize,
+        kind: &str,
+    ) -> Result<Vec<Value>, Self::Error>;
+}
+
+/// The one GitHub policy query this pure review slice needs. Production callers
+/// can adapt the API/config source; tests supply a fixture implementation.
+pub trait ReviewPolicy {
+    fn required_verdicts(&self, repo: &str) -> usize;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewPull {
+    pub repo: String,
+    pub number: i64,
+    pub head: String,
+    pub title: String,
+    pub url: String,
+    pub branch: String,
+    pub base: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewDetail {
+    pub additions: Option<i64>,
+    pub deletions: Option<i64>,
+    pub changed_files: Option<i64>,
+    pub body: Option<String>,
+}
+
+/// Rust counterpart of `Sync`: dependencies are supplied at construction so
+/// these helpers never create credentials, make requests, or touch a live store.
+pub struct ReviewSync<S, T, G> {
+    pub flock: S,
+    pub tokens: T,
+    pub github: G,
+}
+
+impl<S, G: Default> ReviewSync<S, (), G> {
+    /// Missing tokens and GitHub adapters use their injected defaults, matching
+    /// Python's `tokens or Tokens()` and `github=dunk_github` constructor values.
+    pub fn new(flock: S, github: Option<G>) -> Self {
+        Self {
+            flock,
+            tokens: (),
+            github: github.unwrap_or_default(),
+        }
+    }
+}
+
+impl<S, T, G> ReviewSync<S, T, G> {
+    /// Construct with an explicitly supplied token source.
+    pub fn with_tokens(flock: S, tokens: T, github: G) -> Self {
+        Self {
+            flock,
+            tokens,
+            github,
+        }
+    }
+}
+
+impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
+    /// Build the live review map, retaining Python's task query and last-value
+    /// replacement behavior while keeping first-insertion order.
+    pub fn _live_reviews(&self) -> Result<Vec<(ReviewPrKey, Value)>, S::Error> {
+        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let mut by_pr: Vec<(ReviewPrKey, Value)> = Vec::new();
+        for task in tasks {
+            let status = task
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(status, "open" | "in_progress" | "blocked") {
+                continue;
+            }
+            let key = (optional_value(&task, "repo"), optional_value(&task, "pr"));
+            insert_replacing(&mut by_pr, key, task);
+        }
+        Ok(by_pr)
+    }
+
+    /// Build the already-judged map. A done review with a falsey verdict is not
+    /// a judgment; duplicate keys keep the last task as Python's dict does.
+    pub fn _judged_heads(&self) -> Result<Vec<(JudgedHeadKey, Value)>, S::Error> {
+        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let mut out: Vec<(JudgedHeadKey, Value)> = Vec::new();
+        for task in tasks {
+            if task.get("status").and_then(Value::as_str) != Some("done")
+                || !task.get("verdict").is_some_and(python_truthy)
+            {
+                continue;
+            }
+            let key = (
+                optional_value(&task, "repo"),
+                optional_value(&task, "pr"),
+                optional_value(&task, "head"),
+            );
+            insert_replacing(&mut out, key, task);
+        }
+        Ok(out)
+    }
+
+    /// Distinct completed reviewer lanes at one repo/head, with an optional PR
+    /// filter. Returned lists use Python's sorted-set order.
+    pub fn head_verdicts(
+        &self,
+        repo: &str,
+        head: &str,
+        number: Option<i64>,
+    ) -> Result<(Vec<String>, Vec<String>), S::Error> {
+        let tasks = self.flock.list(None, true, 1000, "review")?;
+        let mut accepts = BTreeSet::new();
+        let mut needs_fix = BTreeSet::new();
+        for task in tasks {
+            if task.get("repo").and_then(Value::as_str) != Some(repo)
+                || task.get("head").and_then(Value::as_str) != Some(head)
+                || number.is_some_and(|n| task.get("pr").and_then(Value::as_i64) != Some(n))
+                || task.get("status").and_then(Value::as_str) != Some("done")
+            {
+                continue;
+            }
+            let Some(lane) = task.get("completed_by").filter(|lane| python_truthy(lane)) else {
+                continue;
+            };
+            let lane = python_string(lane);
+            match task.get("verdict").and_then(Value::as_str) {
+                Some("accept") => {
+                    accepts.insert(lane);
+                }
+                Some("needs-fix") => {
+                    needs_fix.insert(lane);
+                }
+                _ => {}
+            }
+        }
+        Ok((
+            accepts.into_iter().collect(),
+            needs_fix.into_iter().collect(),
+        ))
+    }
+
+    /// Whether a head is final and the distinct-lane evidence used to decide.
+    pub fn _is_final(
+        &self,
+        repo: &str,
+        head: &str,
+        number: Option<i64>,
+        lane: Option<&str>,
+    ) -> Result<FinalVerdict, S::Error> {
+        let (mut accepts, needs_fix) = self.head_verdicts(repo, head, number)?;
+        if let Some(lane) = lane.filter(|lane| !lane.is_empty()) {
+            if accepts
+                .binary_search_by(|candidate| candidate.as_str().cmp(lane))
+                .is_err()
+            {
+                accepts.push(lane.to_string());
+                accepts.sort();
+            }
+        }
+        let required = self.github.required_verdicts(repo).max(1);
+        let final_verdict = needs_fix.is_empty() && accepts.len() >= required;
+        Ok((final_verdict, accepts, needs_fix, required))
+    }
+}
+
+fn optional_value(task: &Value, key: &str) -> Option<Value> {
+    task.get(key).filter(|value| !value.is_null()).cloned()
+}
+
+fn insert_replacing<K: PartialEq, V>(entries: &mut Vec<(K, V)>, key: K, value: V) {
+    if let Some(index) = entries.iter().position(|(existing, _)| existing == &key) {
+        entries[index].1 = value;
+    } else {
+        entries.push((key, value));
+    }
+}
+
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_i64() != Some(0) && value.as_f64() != Some(0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_string(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+/// Python counterpart of `review_body`; truncation counts Unicode characters,
+/// matching Python string slicing rather than byte slicing.
+pub fn review_body(pr: &ReviewPull, detail: &ReviewDetail, author: Option<&str>) -> String {
+    let author = author
+        .filter(|author| !author.is_empty())
+        .unwrap_or("unknown (not attributable; say so in the verdict)");
+    let mut lines = vec![
+        format!("REVIEW {}#{} @ {}", pr.repo, pr.number, pr.head),
+        format!("title: {}", pr.title),
+        format!("url: {}", pr.url),
+        format!("branch: {} -> {}", pr.branch, pr.base),
+        format!("author lane: {author}"),
+        format!(
+            "opened: {}  updated: {}",
+            pr.created_at.as_deref().unwrap_or("None"),
+            pr.updated_at.as_deref().unwrap_or("None")
+        ),
+        format!(
+            "diff: +{} -{} in {} files",
+            detail
+                .additions
+                .map_or_else(|| "None".to_string(), |n| n.to_string()),
+            detail
+                .deletions
+                .map_or_else(|| "None".to_string(), |n| n.to_string()),
+            detail
+                .changed_files
+                .map_or_else(|| "None".to_string(), |n| n.to_string())
+        ),
+        String::new(),
+        "Verdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` from your"
+            .to_string(),
+        "reviewer lane, with the evidence in `task note` first: commands run, what was".to_string(),
+        "reproduced from the media, what was NOT verified. A verdict is bound to this".to_string(),
+        "exact head; a new push files a new review.".to_string(),
+    ];
+    if let Some(body) = detail
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+    {
+        let excerpt = body.chars().take(4000).collect::<String>();
+        lines.extend([String::new(), "PR body:".to_string(), excerpt]);
+    }
+    lines.join("\n")
+}
 
 /// Pane id of the lane that opened a PR, or `None` when it cannot be
 /// attributed without guessing. `lanes` and `mints` preserve Python mapping

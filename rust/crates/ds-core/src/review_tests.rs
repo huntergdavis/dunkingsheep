@@ -1,6 +1,8 @@
 //! Tests for the accounting gates (dunk_review.py, t752/t841).
 
 use super::*;
+use serde_json::{json, Value};
+use std::cell::RefCell;
 
 const PARTIAL: &str =
     "id,status\nOVL_0038_0775,partial\nOVL_0001_0001, FULL \n,partial\nOVL_0002_0002\n";
@@ -240,4 +242,211 @@ fn choose_row_uses_first_single_source_and_refuses_ambiguity_or_duplicates() {
         )
         .1
     );
+}
+
+#[derive(Default)]
+struct FakeReviewStore {
+    tasks: Vec<Value>,
+    queries: RefCell<Vec<ReviewListQuery>>,
+}
+
+type ReviewListQuery = (Option<String>, bool, usize, String);
+
+impl ReviewTaskStore for FakeReviewStore {
+    type Error = &'static str;
+
+    fn list(
+        &self,
+        scope: Option<&str>,
+        include_done: bool,
+        limit: usize,
+        kind: &str,
+    ) -> Result<Vec<Value>, Self::Error> {
+        self.queries.borrow_mut().push((
+            scope.map(str::to_string),
+            include_done,
+            limit,
+            kind.to_string(),
+        ));
+        Ok(self.tasks.clone())
+    }
+}
+
+#[derive(Default)]
+struct FakeReviewPolicy {
+    required: usize,
+}
+
+impl ReviewPolicy for FakeReviewPolicy {
+    fn required_verdicts(&self, _repo: &str) -> usize {
+        self.required.max(1)
+    }
+}
+
+#[test]
+fn review_sync_injects_dependencies_and_defaults_only_missing_tokens() {
+    let defaulted = ReviewSync::<_, (), FakeReviewPolicy>::new(FakeReviewStore::default(), None);
+    assert_eq!((), defaulted.tokens);
+    let supplied =
+        ReviewSync::with_tokens(FakeReviewStore::default(), 9, FakeReviewPolicy::default());
+    assert_eq!(9, supplied.tokens);
+}
+
+#[test]
+fn live_reviews_requests_the_review_task_set_and_keeps_last_duplicate_value() {
+    let store = FakeReviewStore {
+        tasks: vec![
+            json!({"id":"t1", "repo":"o/r", "pr":7, "status":"open"}),
+            json!({"id":"t2", "repo":"o/r", "pr":8, "status":"done"}),
+            json!({"id":"t3", "repo":"o/r", "pr":9, "status":"in_progress"}),
+            json!({"id":"t4", "repo":"o/r", "pr":7, "status":"blocked"}),
+        ],
+        ..FakeReviewStore::default()
+    };
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
+    let live = sync._live_reviews().unwrap();
+    assert_eq!(2, live.len());
+    assert_eq!(Some(&json!(7)), live[0].0 .1.as_ref());
+    assert_eq!("t4", live[0].1["id"]);
+    assert_eq!(Some(&json!(9)), live[1].0 .1.as_ref());
+    assert_eq!(
+        vec![(None, true, 1000, "review".to_string())],
+        *sync.flock.queries.borrow()
+    );
+}
+
+#[test]
+fn judged_heads_only_include_done_tasks_with_truthy_verdicts_and_replace_duplicates() {
+    let store = FakeReviewStore {
+        tasks: vec![
+            json!({"id":"t1", "repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"accept"}),
+            json!({"id":"t2", "repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"needs-fix"}),
+            json!({"id":"t3", "repo":"o/r", "pr":8, "head":"def", "status":"done", "verdict":""}),
+            json!({"id":"t4", "repo":"o/r", "pr":9, "head":"ghi", "status":"open", "verdict":"accept"}),
+        ],
+        ..FakeReviewStore::default()
+    };
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
+    let judged = sync._judged_heads().unwrap();
+    assert_eq!(1, judged.len());
+    assert_eq!(Some(&json!(7)), judged[0].0 .1.as_ref());
+    assert_eq!(Some(&json!("abc")), judged[0].0 .2.as_ref());
+    assert_eq!("t2", judged[0].1["id"]);
+}
+
+#[test]
+fn head_verdicts_are_distinct_sorted_lane_sets_with_optional_pr_filter() {
+    let store = FakeReviewStore {
+        tasks: vec![
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%2"}),
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%2"}),
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"needs-fix", "completed_by":"%3"}),
+            json!({"repo":"o/r", "pr":8, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%1"}),
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"in_progress", "verdict":"accept", "completed_by":"%0"}),
+            json!({"repo":"o/other", "pr":7, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%4"}),
+        ],
+        ..FakeReviewStore::default()
+    };
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
+    assert_eq!(
+        (vec!["%2".to_string()], vec!["%3".to_string()]),
+        sync.head_verdicts("o/r", "abc", Some(7)).unwrap()
+    );
+    assert_eq!(
+        (
+            vec!["%1".to_string(), "%2".to_string()],
+            vec!["%3".to_string()]
+        ),
+        sync.head_verdicts("o/r", "abc", None).unwrap()
+    );
+}
+
+#[test]
+fn is_final_counts_distinct_accepts_and_any_needs_fix_stops_the_head() {
+    let store = FakeReviewStore {
+        tasks: vec![
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%1"}),
+            json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"accept", "completed_by":"%1"}),
+        ],
+        ..FakeReviewStore::default()
+    };
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy { required: 2 }));
+    assert_eq!(
+        (false, vec!["%1".to_string()], vec![], 2),
+        sync._is_final("o/r", "abc", Some(7), None).unwrap()
+    );
+    assert_eq!(
+        (true, vec!["%1".to_string(), "%2".to_string()], vec![], 2),
+        sync._is_final("o/r", "abc", Some(7), Some("%2")).unwrap()
+    );
+    let mut store = sync.flock;
+    store.tasks.push(json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"needs-fix", "completed_by":"%3"}));
+    let conflicted = ReviewSync::new(store, Some(FakeReviewPolicy { required: 1 }));
+    assert_eq!(
+        (false, vec!["%1".to_string()], vec!["%3".to_string()], 1),
+        conflicted._is_final("o/r", "abc", Some(7), None).unwrap()
+    );
+}
+
+#[test]
+fn review_body_matches_python_lines_unknown_author_and_optional_pr_body() {
+    let pr = ReviewPull {
+        repo: "o/r".to_string(),
+        number: 7,
+        head: "abc123".to_string(),
+        title: "Fix parity".to_string(),
+        url: "https://example.invalid/pr/7".to_string(),
+        branch: "worker/feature".to_string(),
+        base: "main".to_string(),
+        created_at: Some("2026-11-02T00:00:00Z".to_string()),
+        updated_at: None,
+    };
+    let detail = ReviewDetail {
+        additions: Some(3),
+        deletions: Some(2),
+        changed_files: Some(1),
+        body: Some("  body text\n".to_string()),
+    };
+    assert_eq!(
+        concat!(
+            "REVIEW o/r#7 @ abc123\n",
+            "title: Fix parity\n",
+            "url: https://example.invalid/pr/7\n",
+            "branch: worker/feature -> main\n",
+            "author lane: unknown (not attributable; say so in the verdict)\n",
+            "opened: 2026-11-02T00:00:00Z  updated: None\n",
+            "diff: +3 -2 in 1 files\n\n",
+            "Verdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` from your\n",
+            "reviewer lane, with the evidence in `task note` first: commands run, what was\n",
+            "reproduced from the media, what was NOT verified. A verdict is bound to this\n",
+            "exact head; a new push files a new review.\n\n",
+            "PR body:\nbody text"
+        ),
+        review_body(&pr, &detail, None)
+    );
+}
+
+#[test]
+fn review_body_truncates_to_four_thousand_unicode_characters() {
+    let pr = ReviewPull {
+        repo: "o/r".to_string(),
+        number: 1,
+        head: "h".to_string(),
+        title: "t".to_string(),
+        url: "u".to_string(),
+        branch: "b".to_string(),
+        base: "m".to_string(),
+        created_at: None,
+        updated_at: None,
+    };
+    let detail = ReviewDetail {
+        additions: None,
+        deletions: None,
+        changed_files: None,
+        body: Some(format!("{}x", "é".repeat(4000))),
+    };
+    let rendered = review_body(&pr, &detail, Some("%1"));
+    let excerpt = rendered.split("PR body:\n").nth(1).unwrap();
+    assert_eq!(4000, excerpt.chars().count());
+    assert!(excerpt.chars().all(|ch| ch == 'é'));
 }
