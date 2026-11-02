@@ -4,7 +4,9 @@
 //! test_reading_and_acking_a_dead_name_still_works` (the count/read half). NOT a 1:1 port of
 //! the Python harness classes: those drive a whole Flock and belong to the later slices.
 
-use super::commands_inbox::{notice_text, InboxEnv, Nudge, RouteEntry, SendArgs};
+use super::commands_inbox::{
+    notice_text, recipient_is_quiet, InboxEnv, Nudge, RouteEntry, SendArgs,
+};
 use super::mailbox::MailboxEnv;
 use super::Flock;
 use crate::db::ReadPool;
@@ -22,6 +24,8 @@ struct Env {
     panes: Vec<Value>,
     role: &'static str,
     override_name: Option<String>,
+    silent_mailboxes: Option<String>,
+    sent_count: std::sync::atomic::AtomicUsize,
     task_calls: std::sync::atomic::AtomicUsize,
     fail_tasks: bool,
     pool: ReadPool,
@@ -47,6 +51,9 @@ impl InboxEnv for Env {
     }
     fn mailbox_override(&self) -> Option<String> {
         self.override_name.clone()
+    }
+    fn inbox_silent_mailboxes(&self) -> Option<String> {
+        self.silent_mailboxes.clone()
     }
     fn backend_name(&self) -> String {
         "fake".to_string()
@@ -93,7 +100,10 @@ impl InboxEnv for Env {
             message: Some("typed".to_string()),
         })
     }
-    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
+    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {
+        self.sent_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     fn tasks_for_pane(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
         self.task_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -123,6 +133,8 @@ fn env(role: &'static str) -> Env {
         panes: vec![pane("w1:p1", "Mine"), pane("w1:p2", "Other")],
         role,
         override_name: None,
+        silent_mailboxes: None,
+        sent_count: std::sync::atomic::AtomicUsize::new(0),
         task_calls: std::sync::atomic::AtomicUsize::new(0),
         fail_tasks: false,
         pool,
@@ -631,4 +643,103 @@ fn reading_another_lanes_mail_is_refused_before_anything_is_marked() {
             .unwrap()
             .unread
     );
+}
+
+#[test]
+fn quiet_recipient_policy_parses_exact_final_addresses() {
+    for policy in [None, Some(""), Some(" , , ")] {
+        assert!(!recipient_is_quiet(
+            policy,
+            "owner",
+            "Owner (%1)",
+            Some("%1")
+        ));
+    }
+    for policy in [" %1 ,other", " codex-rust-owner ", "Owner (%1)"] {
+        assert!(recipient_is_quiet(
+            Some(policy),
+            "codex-rust-owner",
+            "Owner (%1)",
+            Some("%1")
+        ));
+    }
+    assert!(recipient_is_quiet(Some("Straße"), "Straße", "", None));
+    assert!(!recipient_is_quiet(Some("strasse"), "Straße", "", None));
+    assert!(recipient_is_quiet(
+        Some("\u{1c}%1\u{1f}"),
+        "owner",
+        "",
+        Some("%1")
+    ));
+    assert!(!recipient_is_quiet(
+        Some("owner"),
+        "other-owner",
+        "other",
+        Some("%10")
+    ));
+}
+
+#[test]
+fn quiet_recipient_alias_and_pane_still_store_unread_without_any_notice() {
+    for (target, policy) in [("codex-rust-owner", "%1"), ("%1", "codex-rust-owner")] {
+        let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+        e.panes.push(pane("%1", "codex-rust-owner"));
+        e.silent_mailboxes = Some(policy.into());
+        // Quiet must also skip folding a new delivery into a previously queued wake.
+        e.waiting_notice = Some("previous-notice".into());
+        let f = flock(&d);
+        let sent = f.inbox_send(&e, &send(target, Some("w1:p1"))).unwrap();
+        assert!(!sent.notified);
+        assert_eq!("codex-rust-owner", sent.mailbox);
+        assert_eq!(Some("w1:p1".into()), sent.sender);
+        assert!(e.nudges.lock().unwrap().is_empty());
+        let status = f.inbox_status(&e, &sent.message_id).unwrap();
+        assert_eq!("queued", status.state);
+        assert_eq!(None, status.read_at);
+        assert_eq!(None, status.notify_state);
+        assert_eq!(
+            1,
+            f.inbox_count(&e, Some("codex-rust-owner"), Some("w1:p1"))
+                .unwrap()
+                .unread
+        );
+        assert_eq!(1, e.sent_count.load(std::sync::atomic::Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn quiet_recipient_keeps_other_wakes_and_explicit_notify_false() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    e.silent_mailboxes = Some("codex-rust-owner,%1".into());
+    let f = flock(&d);
+    assert!(
+        f.inbox_send(&e, &send("w1:p2", Some("w1:p1")))
+            .unwrap()
+            .notified
+    );
+    let mut args = send("w1:p2", Some("w1:p1"));
+    args.notify = false;
+    assert!(!f.inbox_send(&e, &args).unwrap().notified);
+    assert_eq!(1, e.nudges.lock().unwrap().len());
+    assert_eq!(2, e.sent_count.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn quiet_recipient_matches_after_redirect_in_both_directions() {
+    for (policy, wakes) in [("w1:p3", true), ("w1:p2", false)] {
+        let (mut e, d) = (env_with_vp("redirect"), tempfile::tempdir().unwrap());
+        e.silent_mailboxes = Some(policy.into());
+        let f = flock(&d);
+        let sent = f.inbox_send(&e, &send("w1:p3", Some("w1:p1"))).unwrap();
+        assert_eq!(wakes, sent.notified);
+        assert_eq!("Other", sent.mailbox);
+        assert!(sent.redirected.is_some());
+        assert_eq!(usize::from(wakes), e.nudges.lock().unwrap().len());
+        assert_eq!(
+            1,
+            f.inbox_count(&e, Some("Other"), Some("w1:p1"))
+                .unwrap()
+                .unread
+        );
+    }
 }
