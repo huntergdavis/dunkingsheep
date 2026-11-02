@@ -4,11 +4,12 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::*;
 
 const NOW: f64 = 1_800_000_000.0;
+type Collected = (Vec<Caller>, Map<String, Value>, PathBuf);
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -73,7 +74,7 @@ fn canned() -> Value {
 #[test]
 fn would_kill_names_the_lane_and_the_task_it_was_doing() {
     let fixture = Fixture::new();
-    let collected: RefCell<Option<(Vec<Caller>, Map<String, Value>, PathBuf)>> = RefCell::new(None);
+    let collected: RefCell<Option<Collected>> = RefCell::new(None);
     let result = rule_resource_would_kill_with(
         &fixture.data,
         &fixture.rule(true),
@@ -176,7 +177,7 @@ fn public_rule_uses_load_collect_with_text_starttime_identity() {
     })];
     let found = rule_resource_would_kill(&data, &fixture.rule(true), NOW).unwrap();
     let state: Value = serde_json::from_slice(&fs::read(&fixture.state).unwrap()).unwrap();
-    assert!(state["callers"].get(&format!("{pid}:{start}")).is_some());
+    assert!(state["callers"].get(format!("{pid}:{start}")).is_some());
     assert_eq!(1, found.len());
     assert_eq!("resource.would_kill", found[0]["rule"]);
     assert_eq!(pid, found[0]["evidence"]["pid"]);

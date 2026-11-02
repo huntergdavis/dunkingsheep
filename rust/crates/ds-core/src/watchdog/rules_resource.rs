@@ -120,7 +120,7 @@ fn rule_resource_would_kill_with(
             .unwrap_or_default();
         let measured = findings
             .iter()
-            .filter(|finding| finding.get("measured").is_some_and(|value| truthy(value)))
+            .filter(|finding| finding.get("measured").is_some_and(truthy))
             .map(|finding| {
                 format!(
                     "{} {} > {} {}",
@@ -132,7 +132,7 @@ fn rule_resource_would_kill_with(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let kill = item.get("kill").is_some_and(|value| truthy(value));
+        let kill = item.get("kill").is_some_and(truthy);
         let dry_run = item.get("dry_run").cloned().unwrap_or(json!(true));
         out.push(finding(
             "resource.would_kill",
