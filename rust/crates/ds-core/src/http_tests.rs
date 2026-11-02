@@ -547,3 +547,19 @@ fn lane_state_unavailable_keeps_python_client_error_prefix() {
         Some("daemon call failed: Dunking Sheep unavailable: no socket")
     );
 }
+
+#[test]
+fn error_repr_escapes_controls_and_backslashes_with_either_quote_style() {
+    for (input, expected) in [
+        ("a'b\n", "\"a'b\\n\""),
+        ("a'b\\c\t", "\"a'b\\\\c\\t\""),
+        ("a\n\r\t\0", "'a\\n\\r\\t\\x00'"),
+        ("a'\"b\\", "'a\\'\"b\\\\'"),
+    ] {
+        assert_eq!(py_repr(input), expected);
+        let backend = FakeBackend::new(vec![]);
+        let error =
+            resize_terminal(input, &json!({"cols":80,"rows":24}), &backend, "now").unwrap_err();
+        assert!(error.message.contains(expected), "{}", error.message);
+    }
+}

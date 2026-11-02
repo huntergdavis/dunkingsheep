@@ -103,11 +103,7 @@ pub trait Backend {
 
 /// Python `repr(str)`.
 fn py_repr(s: &str) -> String {
-    if s.contains('\'') && !s.contains('"') {
-        format!("\"{s}\"")
-    } else {
-        format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
-    }
+    crate::context::store::py_repr(s)
 }
 
 fn text_of(v: Option<&Value>) -> String {
