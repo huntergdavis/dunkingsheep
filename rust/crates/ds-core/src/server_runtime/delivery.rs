@@ -9,7 +9,6 @@ use crate::error::DunkError;
 use crate::flock::delivery::DeliveryEnv;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
-use crate::terminal::Terminal;
 use serde_json::Value;
 
 impl TerminalCallAdapter<'_> {
@@ -104,7 +103,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
-    fn roles(dir: &std::path::Path) -> Roles {
+    fn role_store(dir: &std::path::Path) -> Roles {
         Roles::new(
             &Env::default(),
             Some(dir.join("roles.json")),
@@ -171,7 +170,7 @@ mod tests {
             dir.path().join("lanes.json"),
             false,
         );
-        let mut roles = roles(dir.path());
+        let mut roles = role_store(dir.path());
         let pid = i64::from(std::process::id());
         let start = crate::proc::process_start(pid);
         roles
@@ -221,7 +220,7 @@ mod tests {
             absent_dir.path().join("lanes.json"),
             false,
         );
-        absent_flock.attach_roles(roles(absent_dir.path()), None);
+        absent_flock.attach_roles(role_store(absent_dir.path()), None);
         let absent = request_adapter(&absent_flock, &request, &runtime, &terminal);
         assert!(!DeliveryEnv::has_web_token(&absent).expect("empty fixture token store"));
 
@@ -248,7 +247,7 @@ mod tests {
             dir.path().join("lanes.json"),
             false,
         );
-        let mut role_store = roles(dir.path());
+        let mut role_store = role_store(dir.path());
         role_store
             .register(
                 "w2:p2",
