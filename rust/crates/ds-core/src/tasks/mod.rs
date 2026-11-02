@@ -2851,6 +2851,8 @@ mod tests {
         let store = store("accounting-pr-unknown").await;
         let err = store.set_accounting_pr("t999", 5).await.unwrap_err();
         assert_eq!("no task with id 't999'", err.to_string());
+        let nonprintable = store.set_accounting_pr("t\u{85}", 5).await.unwrap_err();
+        assert_eq!("no task with id 't\\x85'", nonprintable.to_string());
         let events: i64 = store
             .writer
             .call(|conn| {

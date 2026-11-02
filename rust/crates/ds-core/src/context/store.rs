@@ -59,7 +59,7 @@ pub fn py_repr(text: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            c if c.is_control() => {
                 out.push_str(&format!("\\x{:02x}", c as u32));
             }
             c => out.push(c),
