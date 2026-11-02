@@ -6,7 +6,7 @@
 #[path = "unicode_casefold_table.rs"]
 mod table;
 
-pub(crate) fn full_casefold(value: &str) -> String {
+pub fn full_casefold(value: &str) -> String {
     let mut folded = String::with_capacity(value.len());
     for scalar in value.chars() {
         append_casefold(scalar, &mut folded);
