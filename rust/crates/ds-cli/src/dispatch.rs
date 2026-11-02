@@ -536,7 +536,7 @@ fn python_json_string(text: &str, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            ' '..='\u{7f}' => out.push(c),
+            ' '..='\u{7e}' => out.push(c),
             other => {
                 let mut units = [0u16; 2];
                 for unit in other.encode_utf16(&mut units) {
