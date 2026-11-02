@@ -102,11 +102,11 @@
     "watchdog": {
       "heartbeat_age_s": null,
       "state": {
-        "running": true,
-        "stale": false,
         "nested": {
           "watchdog": "a b"
-        }
+        },
+        "running": true,
+        "stale": false
       }
     }
   }

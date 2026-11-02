@@ -769,7 +769,7 @@ mod tests {
             python_str(&json!({"watchdog": "a\u{00a0}b"})),
             "{'watchdog': 'a\\xa0b'}"
         );
-        assert_eq!(python_str(&json!("a\u{200b}b")), "'a\\u200bb'");
+        assert_eq!(python_quote("a\u{200b}b"), "'a\\u200bb'");
     }
 
     fn set_modified(path: &Path, seconds: u64) {
