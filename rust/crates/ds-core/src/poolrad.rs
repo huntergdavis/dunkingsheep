@@ -163,7 +163,7 @@ where
 {
     thread::spawn(move || {
         let mut output = Vec::new();
-        reader.read_to_end(&mut output).map(|()| output)
+        reader.read_to_end(&mut output).map(|_| output)
     })
 }
 
