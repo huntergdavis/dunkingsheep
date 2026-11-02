@@ -4,7 +4,9 @@
 //! operation can cross into Tokio's blocking pool, while the terminal itself is created,
 //! used through its local mutex, and dropped on that worker.
 
+use std::ffi::OsString;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +27,12 @@ pub type LoopTerminalFactory = Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync +
 pub fn configured_loop_terminal_factory() -> Result<LoopTerminalFactory, DunkError> {
     let name = configured_backend_name()?;
     match name.as_str() {
-        DEFAULT_TERMINAL_BACKEND => Ok(Arc::new(|| Box::new(TmuxBackend::default()))),
+        DEFAULT_TERMINAL_BACKEND => {
+            let tmux_bin = tmux_binary_from_override(std::env::var_os("DUNKINGSHEEP_TMUX_BIN"));
+            Ok(Arc::new(move || {
+                Box::new(TmuxBackend::new(tmux_bin.clone()))
+            }))
+        }
         "herdr" => Err(crate::error::refusal(
             "terminal backend 'herdr' is retired; expected 'tmux'",
         )),
@@ -33,6 +40,13 @@ pub fn configured_loop_terminal_factory() -> Result<LoopTerminalFactory, DunkErr
             "unknown terminal backend {name:?}; expected 'tmux'"
         ))),
     }
+}
+
+fn tmux_binary_from_override(override_bin: Option<OsString>) -> PathBuf {
+    override_bin
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("tmux"))
 }
 
 /// Construct a fresh terminal inside a blocking worker and run one synchronous operation
@@ -78,6 +92,23 @@ mod tests {
 
     fn thread_label() -> String {
         format!("{:?}", std::thread::current().id())
+    }
+
+    #[test]
+    fn loop_terminal_factory_uses_configured_tmux_binary() {
+        assert_eq!(
+            tmux_binary_from_override(Some(OsString::from("/opt/ds/tmux-wrapper"))),
+            PathBuf::from("/opt/ds/tmux-wrapper")
+        );
+    }
+
+    #[test]
+    fn loop_terminal_factory_uses_path_lookup_for_empty_or_unset_tmux_binary() {
+        assert_eq!(
+            tmux_binary_from_override(Some(OsString::new())),
+            PathBuf::from("tmux")
+        );
+        assert_eq!(tmux_binary_from_override(None), PathBuf::from("tmux"));
     }
 
     #[derive(Debug)]
