@@ -377,7 +377,7 @@ pub fn plan_swap(
         return Err(FallbackError("pane needs a pane_id".into()));
     }
     let owned = match allowed_panes {
-        Some(allowed) => allowed.iter().any(|p| *p == pane_id),
+        Some(allowed) => allowed.contains(&pane_id),
         None => truthy(pane.get("owned_by_mechanism")),
     };
     if !owned {
