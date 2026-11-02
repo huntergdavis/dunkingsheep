@@ -1115,15 +1115,11 @@ fn test_one_digest_row_per_project_updated_in_place() {
     let up = |body: &str| {
         fixture
             .store
-            .upsert_digest(
-                "w9:pH",
-                "pm-digest:poolrad",
-                body,
-                Some("PM digest: poolrad"),
-                Some("w1:p1"),
-                None,
-                None,
-            )
+            .upsert_digest(DigestUpsert {
+                subject: Some("PM digest: poolrad"),
+                sender: Some("w1:p1"),
+                ..DigestUpsert::new("w9:pH", "pm-digest:poolrad", body)
+            })
             .unwrap()
     };
     let first = up("v1");
@@ -1144,16 +1140,16 @@ fn a_digest_needs_a_body_and_a_new_digest_id_is_a_new_message() {
     let fixture = Fixture::new();
     let err = fixture
         .store
-        .upsert_digest("m", "d1", "  ", None, None, None, None)
+        .upsert_digest(DigestUpsert::new("m", "d1", "  "))
         .unwrap_err();
     assert!(err.to_string().contains("a digest needs a body"), "{err}");
     let a = fixture
         .store
-        .upsert_digest("m", "d1", "x", None, None, None, None)
+        .upsert_digest(DigestUpsert::new("m", "d1", "x"))
         .unwrap();
     let b = fixture
         .store
-        .upsert_digest("m", "d2", "x", None, None, None, None)
+        .upsert_digest(DigestUpsert::new("m", "d2", "x"))
         .unwrap();
     assert_ne!(a, b);
     let c = fixture.send("m", "plain");
