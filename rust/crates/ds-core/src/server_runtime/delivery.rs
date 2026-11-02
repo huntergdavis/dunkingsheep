@@ -245,7 +245,7 @@ mod tests {
             .expect("test runtime");
         let request = RequestCtx::default();
         let adapter = request_adapter(&flock, &request, &runtime, &terminal);
-        assert_eq!(MailboxEnv::registered_pane(&adapter, "w2:p2").1, true);
+        assert!(MailboxEnv::registered_pane(&adapter, "w2:p2").1);
         assert_eq!(DeliveryEnv::agent_alive(&adapter, "w2:p2"), Some(false));
         assert_eq!(DeliveryEnv::agent_alive(&adapter, "w1:p1"), Some(false)); // bare shell
         assert_eq!(DeliveryEnv::agent_alive(&adapter, "w3:p3"), None); // no pane process id
