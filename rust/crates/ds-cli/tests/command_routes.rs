@@ -3230,3 +3230,87 @@ fn cli_route_33_superuser_a() {
     );
     assert!(removed_json.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_35_memory_a() {
+    let recalled = run_daemon_cli(
+        &[
+            "memory",
+            "recall",
+            "CLI routes",
+            "--limit",
+            "2",
+            "--harness",
+            "codex",
+            "--project",
+            "dunkingsheep",
+            "--since",
+            "123.5",
+        ],
+        "memory_recall",
+        json!({
+            "query": "CLI routes",
+            "limit": 2,
+            "harness": "codex",
+            "project": "dunkingsheep",
+            "since": 123.5
+        }),
+        json!([{
+            "score": 2.25,
+            "harness": "codex",
+            "project": "dunkingsheep",
+            "session_id": "s42",
+            "role": "assistant",
+            "snippet": "first line\nsecond line"
+        }]),
+    );
+    assert_eq!(Some(0), recalled.status.code());
+    assert_eq!(
+        format!(
+            "{:.3} {:<8} {:<20} #{} [{}]\n  {}\n",
+            2.25, "codex", "dunkingsheep", "s42", "assistant", "first line second line"
+        ),
+        String::from_utf8(recalled.stdout).unwrap()
+    );
+    assert!(recalled.stderr.is_empty());
+
+    let searched = run_daemon_cli(
+        &["memory", "search", "nothing", "--json"],
+        "memory_search",
+        json!({
+            "query": "nothing",
+            "limit": 10,
+            "harness": null,
+            "project": null,
+            "since": null
+        }),
+        json!([]),
+    );
+    assert_eq!(Some(0), searched.status.code());
+    assert_eq!("[]\n", String::from_utf8(searched.stdout).unwrap());
+    assert!(searched.stderr.is_empty());
+
+    let context = run_daemon_cli(
+        &["memory", "context", "memory plan", "--sessions", "3"],
+        "memory_context",
+        json!({"query": "memory plan", "sessions": 3}),
+        json!({
+            "query": "memory plan",
+            "counts": {"sessions": 1, "snippets": 1},
+            "sessions": [{
+                "harness": "codex",
+                "project": "dunkingsheep",
+                "session_id": "s7",
+                "title": "Saved plan",
+                "score": 1.25,
+                "snippets": [{"snippet": "saved\nline"}]
+            }]
+        }),
+    );
+    assert_eq!(Some(0), context.status.code());
+    assert_eq!(
+        "query 'memory plan'  sessions 1  snippets 1\n- codex dunkingsheep #s7 Saved plan (score 1.250)\n    saved line\n",
+        String::from_utf8(context.stdout).unwrap()
+    );
+    assert!(context.stderr.is_empty());
+}
