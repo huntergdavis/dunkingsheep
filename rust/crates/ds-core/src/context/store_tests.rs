@@ -387,7 +387,7 @@ fn test_supersession_keeps_both_and_links_them() {
     assert!(store.find(&old.slug).is_some());
     assert_eq!(
         Some(old.slug.as_str()),
-        store.find(&new.slug).unwrap().get("supersedes").map(|s| s)
+        store.find(&new.slug).unwrap().get("supersedes")
     );
     assert_eq!(
         Some(new.slug.as_str()),
