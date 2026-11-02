@@ -172,6 +172,154 @@ const WORKING_DRAFT3: &str =
     include_str!("../../tests/fixtures/screen/codex-working-human-draft3.ansi");
 const IDLE_DRAFT3: &str = include_str!("../../tests/fixtures/screen/codex-idle-human-draft3.ansi");
 
+fn claude_frame(box_lines: &[String]) -> String {
+    let esc = "\x1b[";
+    let rule = format!("{esc}0m{esc}38;2;136;136;136m{}{esc}0m", "─".repeat(54));
+    let mut rows = vec![
+        format!("{esc}0m  earlier transcript line"),
+        format!("{esc}0m{esc}38;2;153;153;153m✻ Sautéed for 1m 18s · done 9:17 AM{esc}0m"),
+        String::new(),
+        rule.clone(),
+    ];
+    rows.extend(box_lines.iter().cloned());
+    rows.extend([
+        rule,
+        format!("  {esc}0m{esc}38;2;255;107;128m⏵⏵ bypass permissions on{esc}0m{esc}38;2;153;153;153m (shift+tab to cycle) · ← for agents{esc}0m"),
+    ]);
+    rows.join("\r\n") + "\r\n"
+}
+
+fn claude_typing(text: &str) -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;55;55;55m");
+    claude_frame(&[format!("{esc}0m{esc}38;2;80;80;80m{background}❯ {esc}0m{esc}38;2;255;255;255m{background}{text}{esc}0m{background}                    {esc}0m")])
+}
+
+fn claude_empty() -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;55;55;55m");
+    claude_frame(&[format!("{esc}0m{esc}38;2;80;80;80m{background}❯ {esc}0m{background}                                        {esc}0m")])
+}
+
+fn claude_hint() -> String {
+    let esc = "\x1b[";
+    claude_frame(&[format!("{esc}0m{esc}38;2;153;153;153m❯\u{a0} {esc}0m{esc}2mPress up to edit queued messages{esc}0m")])
+}
+
+fn claude_collapsed(lines: usize) -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;55;55;55m");
+    claude_frame(&[
+        format!("{esc}0m{esc}38;2;80;80;80m{background}❯ {esc}0m{esc}38;2;255;255;255m{background}[Pasted text #1 +{lines} lines]{esc}0m"),
+        format!("{esc}0m{background}  {esc}38;2;153;153;153m+{lines} lines (ctrl+o to expand){esc}0m"),
+    ])
+}
+
+fn codex_typing(text: &str) -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;30;30;30m");
+    let line = format!("{esc}0m{esc}1m{esc}2m{background}› {esc}0m{background}{text}{esc}0m");
+    codex_frame(&line)
+}
+
+fn codex_frame(sigil_line: &str) -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;30;30;30m");
+    [
+        format!("{esc}0m{esc}2m  done 6:03 PM{esc}0m"),
+        " ".to_string(),
+        format!("{esc}0m{esc}38;2;40;40;40m{background}⠁{esc}0m{background}   {esc}0m{esc}38;2;70;70;70m{background}⠈{esc}0m"),
+        sigil_line.to_string(),
+        format!("{esc}0m{background}       {esc}0m{esc}38;2;56;56;56m{background}⢀{esc}0m{background}        {esc}0m"),
+        format!("  {esc}0m{esc}38;2;246;226;183mgpt-6-astra xhigh{esc}0m{esc}2m · {esc}0m{esc}38;2;171;223;167m~/workspace/poolrad-macmaps{esc}0m"),
+    ].join("\r\n") + "\r\n"
+}
+
+fn codex_hint(hint: &str) -> String {
+    let esc = "\x1b[";
+    let background = format!("{esc}48;2;30;30;30m");
+    codex_frame(&format!("{esc}0m{esc}1m{background}›{esc}0m{esc}38;2;49;49;49m{background}⠁{esc}0m{esc}2m{background}{hint}{esc}0m{background}   {esc}0m"))
+}
+
+#[test]
+fn test_typed_text_tells_a_draft_from_a_dim_hint() {
+    let claude_draft = claude_typing("delete numb");
+    assert_eq!(Some("delete numb".to_string()), typed_text(&claude_draft));
+    let (text, detail) = box_text(&claude_draft);
+    assert_eq!("delete numb", text);
+    assert!(
+        detail.contains("read 1 prompt line(s); text starts on row"),
+        "{detail}"
+    );
+
+    let codex_draft = codex_typing("fix the flaky test");
+    assert_eq!(
+        Some("fix the flaky test".to_string()),
+        typed_text(&codex_draft)
+    );
+    let (text, detail) = box_text(&codex_draft);
+    assert_eq!("fix the flaky test", text);
+    assert!(detail.contains("composer: the prompt row at"), "{detail}");
+
+    let claude_empty = claude_empty();
+    assert_eq!(Some(String::new()), typed_text(&claude_empty));
+    assert!(box_text(&claude_empty)
+        .1
+        .contains("nothing after the sigil"));
+    let claude_hint = claude_hint();
+    assert_eq!(Some(String::new()), typed_text(&claude_hint));
+    let (_, detail) = box_text(&claude_hint);
+    assert!(detail.contains("nothing after the sigil"), "{detail}");
+
+    let codex_hint_screen = codex_hint("Ask Codex to do anything");
+    assert_eq!(Some(String::new()), typed_text(&codex_hint_screen));
+    assert!(box_text(&codex_hint_screen).1.contains("hint"));
+    let codex_skills_hint = codex_hint("Use /skills to list available skills");
+    assert_eq!(Some(String::new()), typed_text(&codex_skills_hint));
+    assert!(box_text(&codex_skills_hint).1.contains("hint"));
+
+    let collapsed = claude_collapsed(75);
+    assert_eq!(
+        Some("[Pasted text #1 +75 lines]".to_string()),
+        typed_text(&collapsed)
+    );
+    let (text, detail) = box_text(&collapsed);
+    assert_eq!("[Pasted text #1 +75 lines]", text);
+    assert!(
+        detail.contains("read 1 prompt line(s); text starts on row"),
+        "{detail}"
+    );
+
+    let shell = "hunter@cell:~$ ls\nfoo bar\nhunter@cell:~$ \n";
+    assert_eq!(None, typed_text(shell));
+    assert!(box_text(shell).1.contains("no input box found"));
+    assert_eq!(None, typed_text(""));
+    assert_eq!("the pane could not be read", box_text("").1);
+}
+
+#[test]
+fn test_distant_prompt_does_not_expand_the_guard_input_region() {
+    let screen = [
+        vec!["› old transcript"],
+        vec!["response row"; 20],
+        vec!["  model · /tmp/synthetic-fixture · task"],
+    ]
+    .concat()
+    .join("\n");
+    assert_eq!(
+        None,
+        typed_text(&screen),
+        "prompt outside the last BOX_REGION_ROWS must be ignored"
+    );
+    assert!(box_text(&screen).1.contains("composer: the prompt row at"));
+}
+
+#[test]
+fn test_the_busy_capture_is_not_foreign_text() {
+    assert_eq!(Some(String::new()), typed_text(BUSY_FRAME));
+    assert!(box_text(BUSY_FRAME).1.contains("empty"));
+}
+
 #[test]
 fn test_the_captured_screen_reads_as_an_empty_box() {
     let (text, detail) = box_text(TRANSCRIPT_PLUS_HINT);
