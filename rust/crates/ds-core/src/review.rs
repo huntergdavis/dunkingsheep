@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub type ReviewPrKey = (Option<Value>, Option<Value>);
 pub type JudgedHeadKey = (Option<Value>, Option<Value>, Option<Value>);
+pub type FinalVerdict = (bool, Vec<String>, Vec<String>, usize);
 
 /// The exact task query used by the review timer, injectable for deterministic tests.
 pub trait ReviewTaskStore {
@@ -59,14 +60,25 @@ pub struct ReviewSync<S, T, G> {
     pub github: G,
 }
 
-impl<S, T: Default, G: Default> ReviewSync<S, T, G> {
+impl<S, G: Default> ReviewSync<S, (), G> {
     /// Missing tokens and GitHub adapters use their injected defaults, matching
     /// Python's `tokens or Tokens()` and `github=dunk_github` constructor values.
-    pub fn new(flock: S, tokens: Option<T>, github: Option<G>) -> Self {
+    pub fn new(flock: S, github: Option<G>) -> Self {
         Self {
             flock,
-            tokens: tokens.unwrap_or_default(),
+            tokens: (),
             github: github.unwrap_or_default(),
+        }
+    }
+}
+
+impl<S, T, G> ReviewSync<S, T, G> {
+    /// Construct with an explicitly supplied token source.
+    pub fn with_tokens(flock: S, tokens: T, github: G) -> Self {
+        Self {
+            flock,
+            tokens,
+            github,
         }
     }
 }
@@ -158,7 +170,7 @@ impl<S: ReviewTaskStore, T, G: ReviewPolicy> ReviewSync<S, T, G> {
         head: &str,
         number: Option<i64>,
         lane: Option<&str>,
-    ) -> Result<(bool, Vec<String>, Vec<String>, usize), S::Error> {
+    ) -> Result<FinalVerdict, S::Error> {
         let (mut accepts, needs_fix) = self.head_verdicts(repo, head, number)?;
         if let Some(lane) = lane.filter(|lane| !lane.is_empty()) {
             if accepts

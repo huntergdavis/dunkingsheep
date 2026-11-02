@@ -283,13 +283,10 @@ impl ReviewPolicy for FakeReviewPolicy {
 
 #[test]
 fn review_sync_injects_dependencies_and_defaults_only_missing_tokens() {
-    let defaulted = ReviewSync::new(FakeReviewStore::default(), None, None);
-    assert_eq!(0, defaulted.tokens);
-    let supplied = ReviewSync::new(
-        FakeReviewStore::default(),
-        Some(9),
-        Some(FakeReviewPolicy::default()),
-    );
+    let defaulted = ReviewSync::<_, (), FakeReviewPolicy>::new(FakeReviewStore::default(), None);
+    assert_eq!((), defaulted.tokens);
+    let supplied =
+        ReviewSync::with_tokens(FakeReviewStore::default(), 9, FakeReviewPolicy::default());
     assert_eq!(9, supplied.tokens);
 }
 
@@ -304,7 +301,7 @@ fn live_reviews_requests_the_review_task_set_and_keeps_last_duplicate_value() {
         ],
         ..FakeReviewStore::default()
     };
-    let sync = ReviewSync::new(store, None, Some(FakeReviewPolicy::default()));
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
     let live = sync._live_reviews().unwrap();
     assert_eq!(2, live.len());
     assert_eq!(Some(&json!(7)), live[0].0 .1.as_ref());
@@ -327,7 +324,7 @@ fn judged_heads_only_include_done_tasks_with_truthy_verdicts_and_replace_duplica
         ],
         ..FakeReviewStore::default()
     };
-    let sync = ReviewSync::new(store, None, Some(FakeReviewPolicy::default()));
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
     let judged = sync._judged_heads().unwrap();
     assert_eq!(1, judged.len());
     assert_eq!(Some(&json!(7)), judged[0].0 .1.as_ref());
@@ -348,7 +345,7 @@ fn head_verdicts_are_distinct_sorted_lane_sets_with_optional_pr_filter() {
         ],
         ..FakeReviewStore::default()
     };
-    let sync = ReviewSync::new(store, None, Some(FakeReviewPolicy::default()));
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy::default()));
     assert_eq!(
         (vec!["%2".to_string()], vec!["%3".to_string()]),
         sync.head_verdicts("o/r", "abc", Some(7)).unwrap()
@@ -371,7 +368,7 @@ fn is_final_counts_distinct_accepts_and_any_needs_fix_stops_the_head() {
         ],
         ..FakeReviewStore::default()
     };
-    let sync = ReviewSync::new(store, None, Some(FakeReviewPolicy { required: 2 }));
+    let sync = ReviewSync::new(store, Some(FakeReviewPolicy { required: 2 }));
     assert_eq!(
         (false, vec!["%1".to_string()], vec![], 2),
         sync._is_final("o/r", "abc", Some(7), None).unwrap()
@@ -382,7 +379,7 @@ fn is_final_counts_distinct_accepts_and_any_needs_fix_stops_the_head() {
     );
     let mut store = sync.flock;
     store.tasks.push(json!({"repo":"o/r", "pr":7, "head":"abc", "status":"done", "verdict":"needs-fix", "completed_by":"%3"}));
-    let conflicted = ReviewSync::new(store, None, Some(FakeReviewPolicy { required: 1 }));
+    let conflicted = ReviewSync::new(store, Some(FakeReviewPolicy { required: 1 }));
     assert_eq!(
         (false, vec!["%1".to_string()], vec!["%3".to_string()], 1),
         conflicted._is_final("o/r", "abc", Some(7), None).unwrap()
