@@ -676,6 +676,20 @@ async fn test_global_completion_is_final_for_everyone() {
         .await
         .unwrap();
     assert_eq!("done", done.status);
+    let task_id = task.id.clone();
+    let completed_by = tasks
+        .writer
+        .call(move |conn| {
+            conn.query_row(
+                "SELECT completed_by FROM tasks WHERE id = ?",
+                [task_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(crate::db::map_sqlite)
+        })
+        .await
+        .unwrap();
+    assert_eq!(Some("w1:p1".to_owned()), completed_by);
     assert!(claimed_task(
         tasks
             .claim_next("global", "w2:p2", ClaimOptions::default())
@@ -1130,6 +1144,14 @@ async fn test_reap_records_actual_status_when_another_lease_lives() {
             .collect::<Vec<_>>()
     );
     assert_eq!("in_progress", tasks.get(&task.id).await.unwrap().status);
+    let metrics = tasks
+        .metrics(crate::tasks::metrics::MetricsOptions {
+            scopes: Some(vec!["global".to_owned()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(0, metrics["throughput"]["requeued"].as_i64().unwrap());
 }
 
 #[tokio::test]
@@ -1141,6 +1163,10 @@ async fn test_mine_claims_owned_global_and_skips_unowned_backlog() {
         .claim_next("mine", "w1:p1", lease(300.0))
         .await
         .unwrap();
+    assert!(matches!(
+        &claimed,
+        ClaimOutcome::Claimed { scope, .. } if scope == "mine"
+    ));
     let claimed = claimed_task(claimed).unwrap();
     assert_eq!(owned.id, claimed.id);
     assert_eq!("in_progress", claimed.status);
