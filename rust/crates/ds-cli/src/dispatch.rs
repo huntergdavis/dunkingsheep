@@ -1699,17 +1699,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     ns.get("lease").cloned().unwrap_or(Value::Null),
                 );
                 crate::daemon_cmd::run_command(ns, "task_heartbeat", args, |result| {
-                    let seconds = result["lease_seconds"]
-                        .as_f64()
-                        .map(|seconds| {
-                            let seconds = seconds.trunc();
-                            if seconds == 0.0 {
-                                "0".to_string()
-                            } else {
-                                format!("{seconds:.0}")
-                            }
-                        })
-                        .unwrap_or_else(|| "0".to_string());
+                    let seconds = crate::render_print::task_lease_seconds(&result["lease_seconds"]);
                     format!(
                         "lease on {} extended ({}s)\n",
                         crate::render_fleet::py_str(&result["task_id"]),

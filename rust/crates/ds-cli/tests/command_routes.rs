@@ -1111,6 +1111,24 @@ fn cli_route_19_task_edit_c() {
         String::from_utf8(next.stdout).unwrap()
     );
     assert!(next.stderr.is_empty());
+
+    for (lease_arg, lease_seconds, rendered) in [
+        ("90.5", json!(90.5), "90"),
+        ("1e20", json!(1e20), "100000000000000000000"),
+    ] {
+        let claimed = run_daemon_cli(
+            &["task", "next", "mine", "--lease", lease_arg],
+            "task_next",
+            json!({"scope":"mine", "lease_seconds":lease_seconds.clone(), "allow_busy":false}),
+            json!({"task":{"id":"t9", "priority":"medium", "status":"in_progress", "title":"Work", "scope":"global"}, "lease_seconds":lease_seconds}),
+        );
+        assert_eq!(Some(0), claimed.status.code());
+        assert_eq!(
+            format!("claimed t9 (lease {rendered}s)\nt9 [medium] in_progress  Work\nscope       global\n"),
+            String::from_utf8(claimed.stdout).unwrap()
+        );
+        assert!(claimed.stderr.is_empty());
+    }
 }
 
 #[test]
