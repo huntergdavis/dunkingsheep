@@ -1386,6 +1386,32 @@ fn poolrad(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn review(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "review_command") {
+        Some("sync") => {
+            let mut args = Map::new();
+            args.insert(
+                "dry_run".into(),
+                Value::Bool(matches!(ns.get("dry_run"), Some(Value::Bool(true)))),
+            );
+            crate::daemon_cmd::run_command(
+                ns,
+                "review_sync",
+                args,
+                crate::render_fleet::render_review_sync,
+            )
+        }
+        Some("list") => crate::daemon_cmd::run_command(
+            ns,
+            "review_list",
+            Map::new(),
+            crate::render_fleet::render_review_list,
+        ),
+        Some(other) => not_ported(&format!("review {other}")),
+        None => not_ported("review"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1416,6 +1442,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "review" => review(ns),
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "poolrad" => poolrad(ns),

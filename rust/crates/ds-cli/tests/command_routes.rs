@@ -2416,3 +2416,75 @@ fn cli_route_30_poolrad() {
     );
     assert!(progress_json.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_31_review() {
+    let sync = run_daemon_cli(
+        &["review", "sync"],
+        "review_sync",
+        json!({"dry_run": false}),
+        json!({
+            "repos": [{"repo": "a/b", "open": 2}],
+            "filed": [{"repo": "a/b", "pr": 44, "head": "123456789012abc", "author": null}],
+            "cancelled": ["t1"],
+            "statuses": [{"repo": "a/b", "head": "abcdef", "state": "ok"}],
+            "errors": ["issue"]
+        }),
+    );
+    assert_eq!(Some(0), sync.status.code());
+    assert_eq!(
+        "a/b: 2 open PR(s)\n  filed (dry) a/b#44 @ 123456789012 author ?\n  cancelled t1\n  status a/b@abcdef ok\n  ! issue\n",
+        String::from_utf8(sync.stdout).unwrap()
+    );
+    assert!(sync.stderr.is_empty());
+
+    let sync_dry_run = run_daemon_cli(
+        &["review", "sync", "--dry-run"],
+        "review_sync",
+        json!({"dry_run": true}),
+        json!({"repos": [], "filed": [], "cancelled": [], "statuses": [], "errors": []}),
+    );
+    assert_eq!(Some(0), sync_dry_run.status.code());
+    assert_eq!(
+        "  nothing to do\n",
+        String::from_utf8(sync_dry_run.stdout).unwrap()
+    );
+    assert!(sync_dry_run.stderr.is_empty());
+
+    let review_list = run_daemon_cli(
+        &["review", "list"],
+        "review_list",
+        json!({}),
+        json!({
+            "reviews": [{
+                "task": "t12",
+                "status": "open",
+                "repo": "x/y",
+                "pr": 7,
+                "head": "abcdef0123456789",
+                "author": null,
+                "reviewer": ["revA", "revB"],
+                "age_s": 125
+            }]
+        }),
+    );
+    assert_eq!(Some(0), review_list.status.code());
+    assert_eq!(
+        "t12    open        x/y#7 @ abcdef0123456789 author ?        reviewer revA,revB  age 2m\n",
+        String::from_utf8(review_list.stdout).unwrap()
+    );
+    assert!(review_list.stderr.is_empty());
+
+    let review_list_json = run_daemon_cli(
+        &["review", "list", "--json"],
+        "review_list",
+        json!({}),
+        json!({"reviews": []}),
+    );
+    assert_eq!(Some(0), review_list_json.status.code());
+    assert_eq!(
+        "{\n  \"reviews\": []\n}\n",
+        String::from_utf8(review_list_json.stdout).unwrap()
+    );
+    assert!(review_list_json.stderr.is_empty());
+}
