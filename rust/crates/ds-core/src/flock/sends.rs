@@ -17,11 +17,16 @@
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Mutex, MutexGuard};
 
 use super::commands_inbox::NOTICE_PREFIX;
 use super::panes::PaneInfoEnv;
 use super::resolve::{resolve_target, resolve_target_dict};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::ThreadId;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use super::Flock;
 use crate::clock;
 use crate::error::DunkError;
@@ -31,6 +36,170 @@ use crate::terminal::screen::{
     AMBIGUOUS_COMPOSER, DEAD_SESSION_MARKERS, WORKING_MARKERS,
 };
 use crate::terminal::screen::{collapse, CONSUMPTION_PREFIX_CHARS};
+
+const DEFAULT_TYPING_LOCK_TIMEOUT_S: f64 = 10.0;
+const TYPING_LOCK_POLL: Duration = Duration::from_millis(10);
+
+#[derive(Debug, Default)]
+struct TypingLockState {
+    owner: Option<ThreadId>,
+    depth: usize,
+}
+
+/// The process-wide reentrant typing mutex. Its state is kept separate from the
+/// per-pane locks because only one keystroke burst at a time may type anywhere.
+#[derive(Debug, Default)]
+pub(crate) struct TypingLock {
+    state: Mutex<TypingLockState>,
+    changed: Condvar,
+    owner: Mutex<Option<(String, f64)>>,
+}
+
+/// An acquired global typing lock. Drop restores the previous owner and releases
+/// one reentrant level, including when a burst returns early or unwinds.
+///
+/// This guard is intentionally not `Send`: its destructor must run on the same
+/// thread that acquired the reentrant lock. The type system rejects moving it:
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// fn typing_guard_must_not_be_send() {
+///     require_send::<ds_core::flock::sends::TypingGuard<'static>>();
+/// }
+/// ```
+#[derive(Debug)]
+pub struct TypingGuard<'a> {
+    lock: &'a TypingLock,
+    previous_owner: Option<(String, f64)>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for TypingGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = lock_unpoison(&self.lock.state);
+        let mut owner = lock_unpoison(&self.lock.owner);
+        *owner = self.previous_owner.take();
+        drop(owner);
+
+        debug_assert!(state.depth > 0);
+        state.depth -= 1;
+        if state.depth == 0 {
+            state.owner = None;
+            self.lock.changed.notify_one();
+        }
+    }
+}
+
+fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn typing_timeout() -> Duration {
+    let seconds = std::env::var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0 && *seconds <= 86_400.0)
+        .unwrap_or(DEFAULT_TYPING_LOCK_TIMEOUT_S);
+    Duration::from_secs_f64(seconds)
+}
+
+fn now_seconds() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+fn owner_description(owner: Option<&(String, f64)>) -> String {
+    match owner {
+        Some((pane_id, since)) => format!("('{}', {since})", pane_id.replace('\'', "\\'")),
+        None => "None".into(),
+    }
+}
+
+impl TypingLock {
+    fn acquire(
+        &self,
+        pane_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<(String, f64)>, DunkError> {
+        let started = Instant::now();
+        let deadline = started.checked_add(timeout).unwrap_or(started);
+        let thread_id = std::thread::current().id();
+        let mut state = lock_unpoison(&self.state);
+        loop {
+            match state.owner.as_ref() {
+                None => {
+                    state.owner = Some(thread_id);
+                    state.depth = 1;
+                    break;
+                }
+                Some(owner) if *owner == thread_id => {
+                    state.depth += 1;
+                    break;
+                }
+                Some(_) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        let owner = lock_unpoison(&self.owner);
+                        return Err(DunkError::Refused(format!(
+                            "the typing lock was held for more than {}s by {}; refusing to type concurrently",
+                            timeout.as_secs(),
+                            owner_description(owner.as_ref())
+                        )));
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    let wait = remaining.min(TYPING_LOCK_POLL);
+                    let (next, _) = self
+                        .changed
+                        .wait_timeout(state, wait)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state = next;
+                }
+            }
+        }
+
+        let mut owner = lock_unpoison(&self.owner);
+        let previous = owner.replace((pane_id.to_string(), now_seconds()));
+        drop(owner);
+        drop(state);
+        Ok(previous)
+    }
+}
+
+impl Flock {
+    /// Return the stable mutex for one pane. Acquire this lock before
+    /// [`Flock::typing_guard`] and hold it across the whole send/confirmation path.
+    pub fn send_lock_for(&self, pane_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = lock_unpoison(&self.pane_send_locks);
+        locks
+            .entry(pane_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Acquire the fleet-wide typing lock for one key burst. The guard must be
+    /// dropped before any confirmation wait or retry delay. Callers acquire the
+    /// per-pane send lock first, preserving the Python lock order.
+    pub fn typing_guard(&self, pane_id: &str) -> Result<TypingGuard<'_>, DunkError> {
+        self.typing_guard_with_timeout(pane_id, typing_timeout())
+    }
+
+    fn typing_guard_with_timeout(
+        &self,
+        pane_id: &str,
+        timeout: Duration,
+    ) -> Result<TypingGuard<'_>, DunkError> {
+        let previous_owner = self.typing_lock.acquire(pane_id, timeout)?;
+        Ok(TypingGuard {
+            lock: &self.typing_lock,
+            previous_owner,
+            _not_send: PhantomData,
+        })
+    }
+}
 
 /// `CONSUMPTION_READ_LINES`.
 pub const CONSUMPTION_READ_LINES: i64 = 40;
@@ -361,6 +530,179 @@ pub fn press_until_submitted(
             "text did not submit after {SUBMIT_ATTEMPTS} Enter presses; it is still in the pane's input box"
         ),
     )
+}
+
+#[cfg(test)]
+mod send_lock_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::TryLockError;
+
+    static TYPING_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RestoreTypingTimeout(Option<OsString>);
+
+    impl Drop for RestoreTypingTimeout {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", value),
+                None => std::env::remove_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S"),
+            }
+        }
+    }
+
+    fn test_flock() -> (Arc<Flock>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Arc::new(Flock::new(
+            dir.path().join("launches.json"),
+            dir.path(),
+            false,
+        ));
+        (flock, dir)
+    }
+
+    #[test]
+    fn send_lock_serializes_the_same_pane_and_isolates_different_panes() {
+        let (flock, _dir) = test_flock();
+        let first = flock.send_lock_for("w1:p1");
+        let same_pane = flock.send_lock_for("w1:p1");
+        let other_pane = flock.send_lock_for("w1:p2");
+        assert!(Arc::ptr_eq(&first, &same_pane));
+        assert!(!Arc::ptr_eq(&first, &other_pane));
+
+        let _held = first.lock().unwrap();
+        assert!(matches!(
+            same_pane.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+        assert!(other_pane.try_lock().is_ok());
+    }
+
+    #[test]
+    fn typing_lock_serializes_bursts_but_is_free_during_confirmation() {
+        let (flock, _dir) = test_flock();
+        let pane_send = flock.send_lock_for("w1:p1");
+        let _whole_send = pane_send.lock().unwrap();
+
+        let burst = flock
+            .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
+            .unwrap();
+        let other_flock = flock.clone();
+        let blocked_burst = std::thread::spawn(move || {
+            other_flock
+                .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
+                .unwrap_err()
+                .to_string()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked_burst.contains("the typing lock was held for more than 0s by ('w1:p1',"));
+
+        // Confirmation waits keep the whole-send lock but release the global lock, so
+        // another pane can type its own burst while this pane waits for confirmation.
+        drop(burst);
+        let other_pane_burst = flock
+            .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
+            .unwrap();
+        drop(other_pane_burst);
+        assert!(matches!(
+            pane_send.try_lock(),
+            Err(TryLockError::WouldBlock)
+        ));
+    }
+
+    #[test]
+    fn typing_lock_timeout_refuses_before_the_guarded_action_runs() {
+        let (flock, _dir) = test_flock();
+        let _held = flock
+            .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
+            .unwrap();
+
+        let other_flock = flock.clone();
+        let action_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let other_action_runs = action_runs.clone();
+        let result = std::thread::spawn(move || {
+            let guard = other_flock.typing_guard_with_timeout("w1:p2", Duration::ZERO)?;
+            other_action_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(guard);
+            Ok::<(), DunkError>(())
+        })
+        .join()
+        .unwrap();
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to type concurrently"));
+
+        assert_eq!(0, action_runs.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn public_typing_guard_honors_zero_environment_timeout() {
+        let _env_lock = TYPING_TIMEOUT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let restore = RestoreTypingTimeout(std::env::var_os("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S"));
+        std::env::set_var("DUNKINGSHEEP_TYPING_LOCK_TIMEOUT_S", "0");
+
+        let (flock, _dir) = test_flock();
+        let held = flock.typing_guard("w1:p1").unwrap();
+        let other_flock = flock.clone();
+        let action_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let other_action_runs = action_runs.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = other_flock
+                .typing_guard("w1:p2")
+                .map(|guard| {
+                    other_action_runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(guard);
+                })
+                .map_err(|error| error.to_string());
+            sent.send(result).unwrap();
+        });
+
+        let received = received.recv_timeout(Duration::from_secs(1));
+        drop(held);
+        waiter.join().unwrap();
+        drop(restore);
+        let result =
+            received.expect("a zero timeout must refuse immediately rather than use the default");
+
+        let error = result.unwrap_err();
+        assert!(
+            error.starts_with("the typing lock was held for more than 0s by ('w1:p1',"),
+            "unexpected refusal: {error}"
+        );
+        assert_eq!(0, action_runs.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn typing_lock_is_reentrant_for_nested_same_thread_bursts() {
+        let (flock, _dir) = test_flock();
+        let outer = flock
+            .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
+            .unwrap();
+        let inner = flock
+            .typing_guard_with_timeout("w1:p1", Duration::from_millis(20))
+            .unwrap();
+        drop(inner);
+
+        let other_flock = flock.clone();
+        let blocked = std::thread::spawn(move || {
+            other_flock
+                .typing_guard_with_timeout("w1:p2", Duration::ZERO)
+                .unwrap_err()
+                .to_string()
+        })
+        .join()
+        .unwrap();
+        assert!(blocked.contains("('w1:p1',"));
+        drop(outer);
+        assert!(flock
+            .typing_guard_with_timeout("w1:p2", Duration::from_millis(20))
+            .is_ok());
+    }
 }
 
 /// Baseline-aware turn confirmation: an unreadable or already-working baseline is never proof.
