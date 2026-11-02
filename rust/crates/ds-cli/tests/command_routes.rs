@@ -1905,7 +1905,8 @@ fn cli_route_11_context_local_write_a() {
         String::from_utf8(refused.stderr).unwrap()
     );
     assert_eq!(original, std::fs::read_to_string(&original_path).unwrap());
-    assert!(!root.join(".dunkingsheep/ground-truth").exists());
+    let ground_truth = root.join(".dunkingsheep/ground-truth");
+    assert_eq!(0, std::fs::read_dir(ground_truth).unwrap().count());
 
     let absent = run_local_cli(
         &socket,
