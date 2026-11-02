@@ -2,8 +2,11 @@
 // Python: 3.14.4
 // Unicode database: 16.0.0
 // Oracle stream: UTF-8(casefold(chr(cp))) + NUL, scalar order, surrogates skipped.
+#[cfg(test)]
 pub(crate) const PYTHON_VERSION: &str = "3.14.4";
+#[cfg(test)]
 pub(crate) const UNICODE_VERSION: &str = "16.0.0";
+#[cfg(test)]
 pub(crate) const ORACLE_SHA256: &str =
     "c657d6f6dd68cbada7e9f6766fde574d34c8b3c3a767f634018b4457168c9cab";
 pub(crate) const CASEFOLD: &[(u32, &str)] = &[
