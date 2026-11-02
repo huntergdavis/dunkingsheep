@@ -1976,3 +1976,179 @@ fn cli_route_11_context_local_write_a() {
         .unwrap()
         .contains("scope: global\n"));
 }
+
+#[test]
+fn cli_route_12_context_local_write_b() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let global_dir = root.join("isolated-global");
+    let socket = root.join("unused-daemon.sock");
+    let body_file = root.join("replacement.md");
+    std::fs::write(
+        &body_file,
+        b"replacement first\r\nreplacement second\rthird",
+    )
+    .unwrap();
+
+    let seed = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--local",
+            "--text",
+            "old body",
+            "--class",
+            "fact",
+            "--subject",
+            "file replacement",
+            "--stated",
+            "2026-01-01",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), seed.status.code());
+    assert_eq!(
+        "added fact/2026-01-01-file-replacement\n",
+        String::from_utf8(seed.stdout).unwrap()
+    );
+    assert!(seed.stderr.is_empty());
+
+    let superseded = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-01-file-replacement",
+            body_file.to_str().unwrap(),
+            "--local",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), superseded.status.code());
+    assert!(superseded.stderr.is_empty());
+    let superseded_text = String::from_utf8(superseded.stdout).unwrap();
+    let replacement_slug = superseded_text
+        .strip_prefix("superseded by ")
+        .and_then(|text| text.strip_suffix('\n'))
+        .unwrap();
+    let replacement_path = root
+        .join(".dunkingsheep/fact")
+        .join(format!("{replacement_slug}.md"));
+    let replacement = std::fs::read_to_string(&replacement_path).unwrap();
+    assert!(replacement.contains("subject: file replacement\n"));
+    assert!(replacement.contains("supersedes: 2026-01-01-file-replacement\n"));
+    assert!(replacement.ends_with("replacement first\nreplacement second\nthird\n"));
+    let old =
+        std::fs::read_to_string(root.join(".dunkingsheep/fact/2026-01-01-file-replacement.md"))
+            .unwrap();
+    assert!(old.contains(&format!("superseded_by: {replacement_slug}\n")));
+
+    let stdin_seed = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--local",
+            "--text",
+            "stdin old",
+            "--class",
+            "fact",
+            "--subject",
+            "stdin replacement",
+            "--stated",
+            "2026-01-02",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), stdin_seed.status.code());
+    assert_eq!(
+        "added fact/2026-01-02-stdin-replacement\n",
+        String::from_utf8(stdin_seed.stdout).unwrap()
+    );
+    assert!(stdin_seed.stderr.is_empty());
+    let stdin_superseded = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-02-stdin-replacement",
+            "--local",
+        ],
+        Some(b"stdin first\r\nstdin second\rthird"),
+        None,
+    );
+    assert_eq!(Some(0), stdin_superseded.status.code());
+    assert!(stdin_superseded.stderr.is_empty());
+    let stdin_slug = String::from_utf8(stdin_superseded.stdout)
+        .unwrap()
+        .strip_prefix("superseded by ")
+        .unwrap()
+        .trim()
+        .to_string();
+    let stdin_article = std::fs::read_to_string(
+        root.join(".dunkingsheep/fact")
+            .join(format!("{stdin_slug}.md")),
+    )
+    .unwrap();
+    assert!(stdin_article.ends_with("stdin first\nstdin second\nthird\n"));
+
+    let retired = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "retire",
+            replacement_slug,
+            "--reason",
+            "obsolete note",
+            "--local",
+            "--json",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), retired.status.code());
+    assert_eq!(
+        format!(
+            "{{\n  \"slug\": \"{replacement_slug}\",\n  \"retired\": true,\n  \"reason\": \"obsolete note\"\n}}\n"
+        ),
+        String::from_utf8(retired.stdout).unwrap()
+    );
+    assert!(retired.stderr.is_empty());
+    let retired_article = std::fs::read_to_string(replacement_path).unwrap();
+    assert!(retired_article.contains("retired_reason: obsolete note\n"));
+    assert!(retired_article.contains("\n\n**Retired "));
+    assert!(retired_article.ends_with(": obsolete note\n"));
+    assert!(
+        !socket.exists(),
+        "local context writes must not create or contact a daemon socket"
+    );
+
+    let missing = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &["context", "supersede", "missing-entry", "--local"],
+        Some(b"unused body"),
+        None,
+    );
+    assert_eq!(Some(2), missing.status.code());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        "context: entry missing-entry not found\n",
+        String::from_utf8(missing.stderr).unwrap()
+    );
+}

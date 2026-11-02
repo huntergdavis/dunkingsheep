@@ -2,9 +2,9 @@
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
 //! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
 //! (`usage_cmd`), `install` and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token`,
-//! `git-credential` and `doctor` (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything
-//! else, including the `context` write subcommands, keeps the "parsed but not ported yet" answer
-//! (exit 1).
+//! `git-credential` and `doctor` (`daemon_cmd`), and `github wrappers` (`github_cmd`). Local
+//! `context add`, `promote`, `supersede` and `retire` writes are also wired; remaining unsupported
+//! commands keep the "parsed but not ported yet" answer (exit 1).
 //!
 //! `--json` for `context`: Python prints `json.dumps(result, indent=2)`; the ordered mode in
 //! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
@@ -52,11 +52,12 @@ fn not_ported(command: &str) -> Outcome {
 
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
-    if matches!(sub, "add" | "promote") && matches!(ns.get("local"), Some(Value::Bool(true))) {
+    if matches!(sub, "add" | "promote" | "supersede" | "retire")
+        && matches!(ns.get("local"), Some(Value::Bool(true)))
+    {
         return context_local_write(sub, ns, json);
     }
-    // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
-    // supersede / retire local writes are not ported.
+    // add / promote / supersede / retire go to the daemon (role-gated there) unless --local.
     if matches!(sub, "add" | "promote" | "supersede" | "retire") {
         if matches!(ns.get("local"), Some(Value::Bool(true))) {
             return not_ported(&format!("context {sub} --local"));
@@ -89,7 +90,7 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
 }
 
 fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcome {
-    use ds_core::context::store::{AddArgs, Store};
+    use ds_core::context::store::{AddArgs, Store, SupersedeMeta};
 
     let global_store = matches!(ns.get("global_store"), Some(Value::Bool(true)));
     let store = Store::new(None, global_store);
@@ -179,7 +180,71 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
             };
             store.add(&entry.body, &args, None)
         }
-        _ => unreachable!("only local add/promote are routed here"),
+        "supersede" => {
+            let file = text(ns, "file").unwrap_or("-");
+            let body = if file == "-" {
+                let mut body = String::new();
+                if let Err(error) =
+                    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut body)
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: format!("{error}\n"),
+                        code: 3,
+                    };
+                }
+                body.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                match std::fs::read_to_string(file) {
+                    Ok(body) => body.replace("\r\n", "\n").replace('\r', "\n"),
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("{error}\n"),
+                            code: 3,
+                        };
+                    }
+                }
+            };
+            store.supersede(
+                text(ns, "slug").unwrap_or(""),
+                &body,
+                None,
+                &SupersedeMeta::default(),
+                None,
+            )
+        }
+        "retire" => {
+            let result = store.retire(
+                text(ns, "slug").unwrap_or(""),
+                text(ns, "reason").unwrap_or(""),
+                None,
+                None,
+            );
+            return match result {
+                Ok((slug, reason)) => {
+                    let mut value = Map::new();
+                    value.insert("slug".into(), Value::String(slug.clone()));
+                    value.insert("retired".into(), Value::Bool(true));
+                    value.insert("reason".into(), Value::String(reason));
+                    Outcome {
+                        stdout: if json {
+                            format!("{}\n", ordered_json(&Value::Object(value)))
+                        } else {
+                            format!("retired {slug}\n")
+                        },
+                        stderr: String::new(),
+                        code: 0,
+                    }
+                }
+                Err(error) => Outcome {
+                    stdout: String::new(),
+                    stderr: format!("context: {error}\n"),
+                    code: 2,
+                },
+            };
+        }
+        _ => unreachable!("only local context writes are routed here"),
     };
 
     match added {
