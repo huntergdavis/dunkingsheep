@@ -1701,9 +1701,15 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 crate::daemon_cmd::run_command(ns, "task_heartbeat", args, |result| {
                     let seconds = result["lease_seconds"]
                         .as_f64()
-                        .map(|seconds| seconds as i64)
-                        .or_else(|| result["lease_seconds"].as_i64())
-                        .unwrap_or(0);
+                        .map(|seconds| {
+                            let seconds = seconds.trunc();
+                            if seconds == 0.0 {
+                                "0".to_string()
+                            } else {
+                                format!("{seconds:.0}")
+                            }
+                        })
+                        .unwrap_or_else(|| "0".to_string());
                     format!(
                         "lease on {} extended ({}s)\n",
                         crate::render_fleet::py_str(&result["task_id"]),

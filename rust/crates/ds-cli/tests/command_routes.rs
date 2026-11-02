@@ -1128,6 +1128,19 @@ fn cli_route_20_task_claim_a() {
     );
     assert!(heartbeat.stderr.is_empty());
 
+    let long_heartbeat = run_daemon_cli(
+        &["task", "heartbeat", "t10", "--lease", "1e20"],
+        "task_heartbeat",
+        json!({"id":"t10", "lease_seconds":1e20}),
+        json!({"task_id":"t10", "lease_seconds":1e20}),
+    );
+    assert_eq!(Some(0), long_heartbeat.status.code());
+    assert_eq!(
+        "lease on t10 extended (100000000000000000000s)\n",
+        String::from_utf8(long_heartbeat.stdout).unwrap()
+    );
+    assert!(long_heartbeat.stderr.is_empty());
+
     let released = run_daemon_cli(
         &["task", "release", "t10"],
         "task_release",
