@@ -80,6 +80,37 @@ fn memory(ns: &Map<String, Value>) -> Outcome {
                 crate::render_print::render_memory_context(result)
             })
         }
+        Some("ingest") => {
+            for key in ["path", "harness", "project"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_ingest", args, |result| {
+                format!(
+                    "queued {} ({})\n",
+                    crate::render_fleet::py_str(&result["path"]),
+                    crate::render_fleet::py_str(&result["harness"])
+                )
+            })
+        }
+        Some("backfill") => {
+            let action = if ns.get("pause") == Some(&Value::Bool(true)) {
+                "pause"
+            } else if ns.get("resume") == Some(&Value::Bool(true)) {
+                "resume"
+            } else if ns.get("status") == Some(&Value::Bool(true)) {
+                "status"
+            } else {
+                "start"
+            };
+            args.insert("action".into(), Value::String(action.to_string()));
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_backfill", args, |result| {
+                crate::render_print::render_memory_backfill(result)
+            })
+        }
         Some(other) => not_ported(&format!("memory {other}")),
         None => not_ported("memory"),
     }

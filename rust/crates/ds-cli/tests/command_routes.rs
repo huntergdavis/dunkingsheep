@@ -3314,3 +3314,90 @@ fn cli_route_35_memory_a() {
     );
     assert!(context.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_37_memory_c() {
+    let ingested = run_daemon_cli(
+        &[
+            "memory",
+            "ingest",
+            "/tmp/session.jsonl",
+            "--harness",
+            "codex",
+            "--project",
+            "demo",
+        ],
+        "memory_ingest",
+        json!({
+            "path": "/tmp/session.jsonl",
+            "harness": "codex",
+            "project": "demo"
+        }),
+        json!({"path": "/tmp/session.jsonl", "harness": "codex"}),
+    );
+    assert_eq!(Some(0), ingested.status.code());
+    assert_eq!(
+        "queued /tmp/session.jsonl (codex)\n",
+        String::from_utf8(ingested.stdout).unwrap()
+    );
+    assert!(ingested.stderr.is_empty());
+
+    let started = run_daemon_cli(
+        &["memory", "backfill", "--limit", "4"],
+        "memory_backfill",
+        json!({"action": "start", "limit": 4}),
+        json!({
+            "enqueued": 2,
+            "discovered": 7,
+            "paused": false,
+            "status": {"ingestor": {"throttle_s": 15}}
+        }),
+    );
+    assert_eq!(Some(0), started.status.code());
+    assert_eq!(
+        "queued 2 of 7 source(s); paused False; throttle 15\npath None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\ningestor {'throttle_s': 15}\n",
+        String::from_utf8(started.stdout).unwrap()
+    );
+    assert!(started.stderr.is_empty());
+
+    let paused = run_daemon_cli(
+        &[
+            "memory", "backfill", "--pause", "--resume", "--status", "--limit", "3", "--json",
+        ],
+        "memory_backfill",
+        json!({"action": "pause", "limit": 3}),
+        json!({"paused": true}),
+    );
+    assert_eq!(Some(0), paused.status.code());
+    assert_eq!(
+        "{\n  \"paused\": true\n}\n",
+        String::from_utf8(paused.stdout).unwrap()
+    );
+    assert!(paused.stderr.is_empty());
+
+    let resumed = run_daemon_cli(
+        &["memory", "backfill", "--resume", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "resume", "limit": null}),
+        json!({"resumed": true}),
+    );
+    assert_eq!(Some(0), resumed.status.code());
+    assert_eq!(
+        "{\n  \"resumed\": true\n}\n",
+        String::from_utf8(resumed.stdout).unwrap()
+    );
+    assert!(resumed.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "backfill", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "status", "limit": null}),
+        json!({"status": "idle"}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"status\": \"idle\"\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
