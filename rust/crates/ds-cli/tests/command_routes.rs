@@ -1078,10 +1078,10 @@ fn cli_route_19_task_edit_c() {
         &["task", "delete", "t9"],
         "task_delete",
         json!({"id":"t9"}),
-        json!({"deleted":true}),
+        json!({"deleted":"t9"}),
     );
     assert_eq!(0, deleted.status.code().unwrap());
-    assert_eq!("deleted True\n", String::from_utf8(deleted.stdout).unwrap());
+    assert_eq!("deleted t9\n", String::from_utf8(deleted.stdout).unwrap());
     assert!(deleted.stderr.is_empty());
 
     let noted = run_daemon_cli(
@@ -1090,11 +1090,11 @@ fn cli_route_19_task_edit_c() {
         ],
         "task_note",
         json!({"id":"t9", "event":"review", "reason":"checked"}),
-        json!({"noted":true, "event":"review"}),
+        json!({"noted":"t9", "event":"review"}),
     );
     assert_eq!(0, noted.status.code().unwrap());
     assert_eq!(
-        "noted True: review\n",
+        "noted t9: review\n",
         String::from_utf8(noted.stdout).unwrap()
     );
     assert!(noted.stderr.is_empty());
