@@ -1,10 +1,12 @@
-//! The Rust web adapter foundation. Route handlers are added in later T62 slices.
+//! The Rust web adapter foundation.
 
 #![forbid(unsafe_code)]
 
-/// An empty router for the web server to extend with the T62 route handlers.
+pub mod routes;
+
+/// Router for the web server's T62 route handlers.
 pub fn router() -> axum::Router {
-    axum::Router::new()
+    routes::auth::router()
 }
 
 #[cfg(test)]
