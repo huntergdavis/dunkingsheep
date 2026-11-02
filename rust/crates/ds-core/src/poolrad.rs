@@ -402,6 +402,126 @@ pub fn filed_ids_from_tasks(tasks: &[Value]) -> HashSet<String> {
     filed_keys_from_tasks(tasks).into_keys().collect()
 }
 
+/// Return row IDs with a matching disposition document on the repository tree.
+///
+/// The filename before the first `DISPOSITION` token is the row ID, with any
+/// trailing underscores or hyphens removed. Sorting matches Python's
+/// `sorted(Path.glob(...))`; if multiple files reduce to one ID, the last name
+/// in that order supplies the value.
+pub fn disposition_closures(repo: impl AsRef<Path>) -> HashMap<String, String> {
+    let root = repo.as_ref().join("docs/re");
+    let Ok(mut names) = sorted_names(&root) else {
+        return HashMap::new();
+    };
+    names.retain(|name| name.contains("DISPOSITION") && name.ends_with(".md"));
+
+    let mut output = HashMap::new();
+    for name in names {
+        let Some((row_id, _)) = name.split_once("DISPOSITION") else {
+            continue;
+        };
+        let row_id = row_id.trim_end_matches(['_', '-']);
+        if !row_id.is_empty() {
+            output.insert(row_id.to_owned(), format!("docs/re/{name}"));
+        }
+    }
+    output
+}
+
+/// Return row IDs listed after `CHECKER_ROWS` in Python checker files.
+///
+/// Checker paths are visited in filename order and each file contributes the
+/// first path for a duplicate row ID, matching Python's `setdefault` behavior.
+pub fn registered_checker_ids(repo: impl AsRef<Path>) -> HashMap<String, String> {
+    let root = repo.as_ref().join("tools/overlay");
+    let Ok(mut names) = sorted_names(&root) else {
+        return HashMap::new();
+    };
+    names.retain(|name| name.ends_with(".py"));
+
+    let mut output = HashMap::new();
+    for name in names {
+        let Ok(bytes) = fs::read(root.join(&name)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let Some((_, rows)) = text.split_once("CHECKER_ROWS") else {
+            continue;
+        };
+        let rows: String = rows.chars().take(400).collect();
+        for row_id in checker_row_ids(&rows) {
+            output
+                .entry(row_id)
+                .or_insert_with(|| format!("tools/overlay/{name}"));
+        }
+    }
+    output
+}
+
+/// Port of Python `_unit_tokens`: return the accepted filename spellings for a
+/// row's unit and offset. The caller checks the unit and offset as separate
+/// filename segments; adjacency is not required.
+pub fn _unit_tokens(row_id: &str) -> HashSet<String> {
+    let parts: Vec<&str> = row_id.split('_').collect();
+    if parts.len() < 3 {
+        return HashSet::new();
+    }
+    let unit = parts[1].to_ascii_lowercase();
+    let offset = parts[2].to_ascii_lowercase();
+    let mut shapes = HashSet::from([unit.clone()]);
+    if let Some(trimmed) = unit.strip_prefix("00") {
+        shapes.insert(trimmed.to_owned());
+    }
+    if let Some(trimmed) = unit.strip_prefix('0') {
+        shapes.insert(trimmed.to_owned());
+    }
+
+    let mut tokens = HashSet::from([offset]);
+    for shape in shapes {
+        let unpadded = shape.trim_start_matches('0');
+        tokens.insert(format!(
+            "u{}",
+            if unpadded.is_empty() { "0" } else { unpadded }
+        ));
+        tokens.insert(shape);
+    }
+    tokens
+}
+
+fn sorted_names(root: &Path) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "non-UTF-8 filename"))?;
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn checker_row_ids(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut row_ids = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_start) = text[search_from..].find("OVL_") {
+        let start = search_from + relative_start;
+        let mut end = start + 4;
+        while end < bytes.len() && (bytes[end].is_ascii_hexdigit() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end > start + 4 {
+            row_ids.push(text[start..end].to_owned());
+            search_from = end;
+        } else {
+            search_from = start + 1;
+        }
+    }
+    row_ids
+}
+
 fn required(row: &Value, key: &str) -> Result<String, String> {
     row.get(key).map(py_str).ok_or_else(|| format!("'{key}'"))
 }
@@ -632,6 +752,89 @@ mod tests {
         assert_eq!(
             filed_ids_from_tasks(&tasks),
             HashSet::from(["OVL_1".to_owned(), "OVL_2".to_owned()])
+        );
+    }
+
+    #[test]
+    fn disposition_closures_use_sorted_filename_keys() {
+        let repo = tempdir();
+        let dispositions = repo.path().join("docs/re");
+        fs::create_dir_all(&dispositions).unwrap();
+        fs::write(dispositions.join("abc--DISPOSITION-a.md"), "ignored").unwrap();
+        fs::write(dispositions.join("abc_DISPOSITION-b.md"), "ignored").unwrap();
+        fs::write(dispositions.join("OVL_0068_0294_DISPOSITION.md"), "ignored").unwrap();
+        fs::write(dispositions.join("not-a-disposition.txt"), "ignored").unwrap();
+
+        assert_eq!(
+            disposition_closures(repo.path()),
+            HashMap::from([
+                ("abc".to_owned(), "docs/re/abc_DISPOSITION-b.md".to_owned()),
+                (
+                    "OVL_0068_0294".to_owned(),
+                    "docs/re/OVL_0068_0294_DISPOSITION.md".to_owned(),
+                ),
+            ])
+        );
+        assert!(disposition_closures(tempdir().path()).is_empty());
+    }
+
+    #[test]
+    fn registered_checker_ids_follow_sorted_files_and_python_scan_window() {
+        let repo = tempdir();
+        let overlay = repo.path().join("tools/overlay");
+        fs::create_dir_all(&overlay).unwrap();
+        fs::write(
+            overlay.join("a.py"),
+            "CHECKER_ROWS = ['OVL_0001_0002', 'OVL_0003_0004']\n",
+        )
+        .unwrap();
+        let mut b_contents = "CHECKER_ROWS".to_owned();
+        b_contents.push_str(&"x".repeat(400));
+        b_contents.push_str(" OVL_0005_0006");
+        fs::write(overlay.join("b.py"), b_contents).unwrap();
+        fs::write(
+            overlay.join("c.py"),
+            "CHECKER_ROWS = ['OVL_0001_9999', 'OVL_0007_0008']\n",
+        )
+        .unwrap();
+        fs::create_dir(overlay.join("unreadable.py")).unwrap();
+        fs::write(overlay.join("z.txt"), "CHECKER_ROWS OVL_0009_0009").unwrap();
+
+        assert_eq!(
+            registered_checker_ids(repo.path()),
+            HashMap::from([
+                ("OVL_0001_0002".to_owned(), "tools/overlay/a.py".to_owned()),
+                ("OVL_0003_0004".to_owned(), "tools/overlay/a.py".to_owned()),
+                ("OVL_0007_0008".to_owned(), "tools/overlay/c.py".to_owned()),
+            ])
+        );
+        assert!(registered_checker_ids(tempdir().path()).is_empty());
+    }
+
+    #[test]
+    fn unit_tokens_include_zero_trimmed_and_offset_spellings() {
+        assert_eq!(
+            _unit_tokens("OVL_006A_0824"),
+            HashSet::from([
+                "006a".to_owned(),
+                "06a".to_owned(),
+                "6a".to_owned(),
+                "u6a".to_owned(),
+                "0824".to_owned(),
+            ])
+        );
+        assert_eq!(
+            _unit_tokens("OVL_03B0_06FB_extra"),
+            HashSet::from([
+                "03b0".to_owned(),
+                "3b0".to_owned(),
+                "u3b0".to_owned(),
+                "06fb".to_owned(),
+            ])
+        );
+        assert!(
+            _unit_tokens("OVL_1").is_empty(),
+            "IDs without unit and offset components have no tokens"
         );
     }
 }
