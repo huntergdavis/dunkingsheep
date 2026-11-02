@@ -311,11 +311,49 @@ fn python_number_string(value: &serde_json::Number) -> String {
     if value.is_f64() {
         value
             .as_f64()
-            .map(crate::usage::py_float_repr)
+            .map(python_float_string)
             .unwrap_or_else(|| value.to_string())
     } else {
         value.to_string()
     }
+}
+
+fn python_float_string(value: f64) -> String {
+    if !value.is_finite() || value == 0.0 {
+        return crate::usage::py_float_repr(value);
+    }
+
+    let text = value.to_string();
+    let (sign, unsigned) = text
+        .strip_prefix('-')
+        .map(|unsigned| ("-", unsigned))
+        .unwrap_or(("", text.as_str()));
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{integer}{fraction}");
+    let Some(first_nonzero) = digits.bytes().position(|digit| digit != b'0') else {
+        return crate::usage::py_float_repr(value);
+    };
+    let exponent = integer.len() as i32 - first_nonzero as i32 - 1;
+
+    if (-4..16).contains(&exponent) {
+        return if text.contains('.') {
+            text
+        } else {
+            format!("{text}.0")
+        };
+    }
+
+    let significant = digits[first_nonzero..].trim_end_matches('0');
+    let mantissa = if significant.len() == 1 {
+        significant.to_string()
+    } else {
+        format!("{}.{}", &significant[..1], &significant[1..])
+    };
+    format!(
+        "{sign}{mantissa}e{}{:02}",
+        if exponent < 0 { '-' } else { '+' },
+        exponent.abs()
+    )
 }
 
 fn python_repr(value: &str) -> String {
