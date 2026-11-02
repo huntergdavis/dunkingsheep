@@ -660,14 +660,11 @@ impl Flock {
         };
         match value {
             Some(Value::Object(row)) => {
-                let name = {
-                    let mailbox = as_text(row.get("mailbox"));
-                    if mailbox.is_empty() {
-                        as_text(row.get("name"))
-                    } else {
-                        mailbox
-                    }
-                };
+                let name = as_text(
+                    row.get("mailbox")
+                        .filter(|value| truthy(value))
+                        .or_else(|| row.get("name").filter(|value| truthy(value))),
+                );
                 let declared = matches!(row.get("declared"), Some(v) if truthy(v));
                 if declared && !Flock::usable_declared_name(&name) {
                     eprintln!(
@@ -796,6 +793,7 @@ pub mod panes;
 pub mod project_summary;
 pub mod resolve;
 pub mod retire;
+mod retired;
 pub mod roles_gate;
 pub mod roster;
 pub mod send_keys;

@@ -28,6 +28,8 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+mod retired;
+pub use retired::RetiredArchiveOptions;
 mod owner_queries;
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
