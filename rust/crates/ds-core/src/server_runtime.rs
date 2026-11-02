@@ -5,6 +5,7 @@
 //! explicitly instead of being silently replaced with tmux.
 
 mod status;
+mod submit;
 
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
