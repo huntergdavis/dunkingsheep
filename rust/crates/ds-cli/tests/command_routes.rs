@@ -351,3 +351,209 @@ fn cli_route_17_task_edit_a() {
     );
     assert!(completed.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_23_owner_inbox_a() {
+    let pushed = run_daemon_cli(
+        &["owner", "push", "%42", "hello", "owner"],
+        "owner_push",
+        json!({"target": "%42", "body": "hello owner", "subject": null}),
+        json!({"id": 77, "pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), pushed.status.code());
+    assert_eq!(
+        "pushed owner message 77 for %42 (no inbox row, nothing typed)\n",
+        String::from_utf8(pushed.stdout).unwrap()
+    );
+    assert!(pushed.stderr.is_empty());
+
+    let polled = run_daemon_cli(
+        &["owner", "poll", "%42"],
+        "owner_poll",
+        json!({"pane_id": "%42", "by": "harness"}),
+        json!({"pane_id": "%42", "by": "harness"}),
+    );
+    assert_eq!(Some(0), polled.status.code());
+    assert_eq!(
+        "poll recorded for %42 by harness\n",
+        String::from_utf8(polled.stdout).unwrap()
+    );
+    assert!(polled.stderr.is_empty());
+
+    let taken = run_daemon_cli(
+        &["owner", "take", "%42", "--json"],
+        "owner_take",
+        json!({"pane_id": "%42", "by": null}),
+        json!({"messages": []}),
+    );
+    assert_eq!(Some(0), taken.status.code());
+    assert_eq!(
+        "{\n  \"messages\": []\n}\n",
+        String::from_utf8(taken.stdout).unwrap()
+    );
+    assert!(taken.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_24_owner_inbox_b() {
+    let conversation = run_daemon_cli(
+        &["owner", "conversation", "--limit", "7", "--before", "12.5"],
+        "owner_conversation",
+        json!({"limit": 7, "before": 12.5}),
+        json!({"mailbox": "owner", "count": 0, "waiting": [], "messages": []}),
+    );
+    assert_eq!(Some(0), conversation.status.code());
+    assert_eq!(
+        "mailbox owner  messages 0  waiting 0\n",
+        String::from_utf8(conversation.stdout).unwrap()
+    );
+    assert!(conversation.stderr.is_empty());
+
+    let reply_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(reply_file.path(), "file reply\n").unwrap();
+    let reply_path = reply_file.path().to_str().unwrap();
+    let reply = run_daemon_cli(
+        &["owner", "reply", "question-4", "--body-file", reply_path],
+        "owner_reply",
+        json!({"message_id": "question-4", "body": "file reply\n"}),
+        json!({
+            "question": "question-4",
+            "reply": {"message_id": "reply-5"},
+            "transport": "web",
+            "acked": true
+        }),
+    );
+    assert_eq!(Some(0), reply.status.code());
+    assert_eq!(
+        "answered question-4 with reply-5 on web (question True acked)\n",
+        String::from_utf8(reply.stdout).unwrap()
+    );
+    assert!(reply.stderr.is_empty());
+
+    let ingest_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ingest_file.path(), "incoming question\n").unwrap();
+    let ingest_path = ingest_file.path().to_str().unwrap();
+    let ingested = run_daemon_cli(
+        &[
+            "owner",
+            "ingest",
+            "telegram",
+            "--body-file",
+            ingest_path,
+            "--external-id",
+            "telegram:91",
+        ],
+        "owner_ingest",
+        json!({
+            "transport": "telegram",
+            "body": "incoming question\n",
+            "external_id": "telegram:91"
+        }),
+        json!({"accepted": true, "message_id": "question-6"}),
+    );
+    assert_eq!(Some(0), ingested.status.code());
+    assert_eq!(
+        "{\n  \"accepted\": true,\n  \"message_id\": \"question-6\"\n}\n",
+        String::from_utf8(ingested.stdout).unwrap()
+    );
+    assert!(ingested.stderr.is_empty());
+
+    let temp = tempfile::tempdir().unwrap();
+    let missing = run_cli(
+        &temp.path().join("no-daemon.sock").display().to_string(),
+        &["owner", "reply", "question-7"],
+    );
+    assert_eq!(Some(1), missing.status.code());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        "owner reply: a body or --body-file is required\n",
+        String::from_utf8(missing.stderr).unwrap()
+    );
+}
+
+#[test]
+fn cli_route_25_owner_inbox_c() {
+    let outbox = run_daemon_cli(
+        &["owner", "outbox", "telegram", "--limit", "9"],
+        "owner_outbox",
+        json!({"transport": "telegram", "limit": 9}),
+        json!({"count": 0, "rows": []}),
+    );
+    assert_eq!(Some(0), outbox.status.code());
+    assert_eq!(
+        "{\n  \"count\": 0,\n  \"rows\": []\n}\n",
+        String::from_utf8(outbox.stdout).unwrap()
+    );
+    assert!(outbox.stderr.is_empty());
+
+    let delivered = run_daemon_cli(
+        &["owner", "delivered", "question-8", "web"],
+        "owner_delivered",
+        json!({"message_id": "question-8", "transport": "web"}),
+        json!({"delivered": true}),
+    );
+    assert_eq!(Some(0), delivered.status.code());
+    assert_eq!(
+        "{\n  \"delivered\": true\n}\n",
+        String::from_utf8(delivered.stdout).unwrap()
+    );
+    assert!(delivered.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["owner", "stats"],
+        "owner_stats",
+        json!({}),
+        json!({"counts": {"queued": 2}}),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "{\n  \"counts\": {\n    \"queued\": 2\n  }\n}\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_26_owner_fallback_and_body_newlines() {
+    let stats = run_daemon_cli(
+        &["owner", "--json"],
+        "owner_stats",
+        json!({}),
+        json!({"counts": {"queued": 2}}),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "{\n  \"counts\": {\n    \"queued\": 2\n  }\n}\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+
+    let reply_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(reply_file.path(), b"first\r\nsecond\rthird").unwrap();
+    let reply_path = reply_file.path().to_str().unwrap();
+    let reply = run_daemon_cli(
+        &["owner", "reply", "question-26", "--body-file", reply_path],
+        "owner_reply",
+        json!({"message_id": "question-26", "body": "first\nsecond\nthird"}),
+        json!({
+            "question": "question-26",
+            "reply": {"message_id": "reply-26"},
+            "transport": "web",
+            "acked": true
+        }),
+    );
+    assert_eq!(Some(0), reply.status.code());
+    assert!(reply.stderr.is_empty());
+
+    let ingest_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ingest_file.path(), b"line one\r\nline two\rline three").unwrap();
+    let ingest_path = ingest_file.path().to_str().unwrap();
+    let ingest = run_daemon_cli(
+        &["owner", "ingest", "web", "--body-file", ingest_path],
+        "owner_ingest",
+        json!({"transport": "web", "body": "line one\nline two\nline three"}),
+        json!({"accepted": true}),
+    );
+    assert_eq!(Some(0), ingest.status.code());
+    assert!(ingest.stderr.is_empty());
+}
