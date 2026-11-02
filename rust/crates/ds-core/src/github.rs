@@ -984,13 +984,13 @@ fn decode_github_base64(content: &str) -> Result<Vec<u8>, GitHubError> {
         .bytes()
         .filter(|byte| sextet(*byte).is_some() || *byte == b'=')
         .collect();
-    if encoded.len() % 4 != 0 {
+    let (groups, remainder) = encoded.as_chunks::<4>();
+    if !remainder.is_empty() {
         return Err(GitHubError("Incorrect padding".into()));
     }
     let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
-    let groups = encoded.chunks_exact(4);
     let group_count = groups.len();
-    for (index, group) in groups.enumerate() {
+    for (index, group) in groups.iter().enumerate() {
         let first = sextet(group[0]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
         let second = sextet(group[1]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
         decoded.push((first << 2) | (second >> 4));
