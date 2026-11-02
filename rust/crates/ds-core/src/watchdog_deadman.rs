@@ -332,7 +332,7 @@ fn unicode_decode_error(bytes: &[u8], error: Utf8Error) -> String {
     let byte = bytes.get(position).copied().unwrap_or_default();
     let reason = if error.error_len().is_none() {
         "unexpected end of data"
-    } else if byte & 0xc0 == 0x80 || byte >= 0xf5 {
+    } else if (0x80..=0xc1).contains(&byte) || byte >= 0xf5 {
         "invalid start byte"
     } else {
         "invalid continuation byte"
@@ -404,6 +404,22 @@ mod tests {
                     "unreadable (NotADirectoryError: [Errno {errno}] Not a directory: '{}')",
                     path.display()
                 ))
+            ),
+            recorded_cadence(path)
+        );
+    }
+
+    #[test]
+    fn watchdog_deadman_recorded_cadence_formats_c0_as_invalid_start_byte_like_python() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state/heartbeat.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, [0xc0, 0xaf]).unwrap();
+
+        assert_eq!(
+            (
+                None,
+                Some("unreadable (UnicodeDecodeError: 'utf-8' codec can't decode byte 0xc0 in position 0: invalid start byte)".into())
             ),
             recorded_cadence(path)
         );
