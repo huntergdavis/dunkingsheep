@@ -118,7 +118,7 @@ mod tests {
             }),
         );
         let error = runtime
-            .block_on(unavailable.helper_pushenv_list_panes())
+            .block_on(async { unavailable.helper_pushenv_list_panes().await })
             .expect_err("listing failure is surfaced");
         assert!(error.to_string().contains("tmux server not running"));
 
