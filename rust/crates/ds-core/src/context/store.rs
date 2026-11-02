@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use regex::Regex;
 
@@ -78,6 +79,7 @@ fn needs_python_unicode_escape(ch: char) -> bool {
     let codepoint = ch as u32;
     ch.is_control()
         || (ch.is_whitespace() && ch != ' ')
+        || is_unassigned(ch)
         || matches!(
             codepoint,
             0x00ad
@@ -111,6 +113,14 @@ fn needs_python_unicode_escape(ch: char) -> bool {
                 | 0x100000..=0x10fffd
                 | 0x10ffff
         )
+}
+
+fn is_unassigned(ch: char) -> bool {
+    static UNASSIGNED: OnceLock<Regex> = OnceLock::new();
+    let mut encoded = [0; 4];
+    UNASSIGNED
+        .get_or_init(|| Regex::new(r"\p{Cn}").expect("valid Unicode category regex"))
+        .is_match(ch.encode_utf8(&mut encoded))
 }
 
 fn tuple_repr(items: &[&str]) -> String {
