@@ -65,7 +65,10 @@ impl AuthError {
             ),
             Self::IncorrectPassword => (StatusCode::UNAUTHORIZED, "Incorrect password".to_owned()),
             Self::SignInRequired => (StatusCode::UNAUTHORIZED, "Sign in required".to_owned()),
-            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+            Self::Internal(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+                    .into_response();
+            }
         };
         (status, Json(json!({"detail": detail}))).into_response()
     }
@@ -274,6 +277,7 @@ mod tests {
 
     struct FakeAuth {
         identity: Mutex<Result<Identity, AuthError>>,
+        login_error: Mutex<Option<AuthError>>,
         changed_password: Mutex<Option<(String, String, Option<String>)>>,
         logged_out: Mutex<Option<Option<String>>>,
     }
@@ -282,6 +286,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 identity: Mutex::new(Ok(Identity::Owner)),
+                login_error: Mutex::new(None),
                 changed_password: Mutex::new(None),
                 logged_out: Mutex::new(None),
             }
@@ -294,8 +299,11 @@ mod tests {
             _address: &'a str,
             password: &'a str,
         ) -> AuthFuture<'a, Result<String, AuthError>> {
+            let configured_error = self.login_error.lock().expect("login lock").clone();
             Box::pin(async move {
-                if password == "correct" {
+                if let Some(error) = configured_error {
+                    Err(error)
+                } else if password == "correct" {
                     Ok("session-token".into())
                 } else {
                     Err(AuthError::IncorrectPassword)
@@ -358,6 +366,18 @@ mod tests {
         )
     }
 
+    fn body_text(response: Response) -> (StatusCode, String, HeaderMap) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+            .expect("response body");
+        (
+            status,
+            String::from_utf8(body.to_vec()).expect("text response"),
+            headers,
+        )
+    }
+
     #[test]
     fn login_returns_safe_next_and_strict_session_cookie() {
         let backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth::default());
@@ -404,6 +424,41 @@ mod tests {
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body, json!({"detail": "Cross-origin request refused"}));
+    }
+
+    #[test]
+    fn login_internal_error_does_not_leak_backend_details() {
+        let fake = Arc::new(FakeAuth {
+            login_error: Mutex::new(Some(AuthError::Internal(
+                "credential database path and secret".into(),
+            ))),
+            ..FakeAuth::default()
+        });
+        let backend: Arc<dyn AuthBackend> = fake;
+        let mut headers = headers();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
+        let response = block_on(login(
+            Extension(backend),
+            ConnectInfo("127.0.0.1:4000".parse().unwrap()),
+            headers,
+            "/api/login".parse().unwrap(),
+            Json(LoginBody {
+                password: "correct".into(),
+                next: None,
+            }),
+        ));
+        let (status, body, response_headers) = body_text(response);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "Internal Server Error");
+        assert!(!body.contains("credential database path and secret"));
+        assert_eq!(
+            response_headers
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain; charset=utf-8"
+        );
     }
 
     #[test]
