@@ -2206,6 +2206,7 @@ fn cli_route_12_context_local_write_b() {
         String::from_utf8(missing.stderr).unwrap()
     );
 }
+#[test]
 fn cli_route_27_state() {
     let captured = run_daemon_cli(
         &["state", "capture"],
