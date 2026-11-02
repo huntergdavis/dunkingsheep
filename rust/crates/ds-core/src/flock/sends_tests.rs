@@ -1518,7 +1518,7 @@ fn remember_bounds_history_and_decided_tombstones_and_keeps_created_at() {
     assert_eq!("m500", history.back().unwrap().id);
     drop(history);
 
-    let mut decided = flock.decided.lock().unwrap();
+    let decided = flock.decided.lock().unwrap();
     assert_eq!(500, decided.by_id.len());
     assert!(!decided.by_id.contains_key("m0"));
     assert_eq!(Some(500.0), decided.by_id["m500"].created_at);
