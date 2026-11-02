@@ -699,7 +699,9 @@ fn a_delivery_receipt_is_one_batch_per_mailbox_and_an_empty_batch_keeps_it() {
             .record_delivery("w", &[a.clone(), "  ".into(), b.clone()], Some(1.0))
             .unwrap()
     );
-    store.record_delivery("w", &[b.clone()], Some(2.0)).unwrap();
+    store
+        .record_delivery("w", std::slice::from_ref(&b), Some(2.0))
+        .unwrap();
     assert_eq!(0, store.record_delivery("w", &[], Some(3.0)).unwrap());
     let receipt = inbox::pending_delivery(&fixture.pool(), "w")
         .unwrap()
