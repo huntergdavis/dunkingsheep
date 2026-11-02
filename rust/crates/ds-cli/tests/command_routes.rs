@@ -3230,3 +3230,83 @@ fn cli_route_33_superuser_a() {
     );
     assert!(removed_json.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_36_memory_b() {
+    let hook = run_daemon_cli(
+        &[
+            "memory",
+            "hook-context",
+            "--query",
+            "start prompt",
+            "--sessions",
+            "2",
+        ],
+        "memory_context",
+        json!({"query": "start prompt", "sessions": 2}),
+        json!({"text": "prior session notes"}),
+    );
+    assert_eq!(Some(0), hook.status.code());
+    assert_eq!(
+        "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Dunking Sheep memory - relevant past sessions for this workspace:\\n\\nprior session notes\"}}\n",
+        String::from_utf8(hook.stdout).unwrap()
+    );
+    assert!(hook.stderr.is_empty());
+
+    let cwd_name = std::env::current_dir()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let hook_json = run_daemon_cli(
+        &["memory", "hook-context", "--query", "", "--json"],
+        "memory_context",
+        json!({"query": cwd_name, "sessions": 5}),
+        json!({"text": ""}),
+    );
+    assert_eq!(Some(0), hook_json.status.code());
+    assert_eq!(
+        "{\n  \"text\": \"\"\n}\n",
+        String::from_utf8(hook_json.stdout).unwrap()
+    );
+    assert!(hook_json.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["memory", "stats"],
+        "memory_stats",
+        json!({}),
+        json!({
+            "path": "/tmp/memory.db",
+            "schema_version": 2,
+            "ok": true,
+            "sources": 4,
+            "sessions": 3,
+            "chunks": 9,
+            "queue_depth": 0,
+            "queue": "idle",
+            "db_bytes": 100,
+            "queries": {"count": 7, "p50": 1.25, "p95": 2.5, "p99": 3.5, "errors": 0},
+            "harness": [{"harness": "codex", "chunks": 9, "sessions": 3}]
+        }),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "path /tmp/memory.db  schema 2  ok True\nsources 4  sessions 3  chunks 9\nqueue depth 0  idle\ndb bytes 100\nqueries n=7 p50=1.25 p95=2.5 p99=3.5 errors=0\n  codex: 9 chunks / 3 sessions\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "status", "--json"],
+        "memory_status",
+        json!({}),
+        json!({"ok": true, "sources": 0}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"sources\": 0\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}

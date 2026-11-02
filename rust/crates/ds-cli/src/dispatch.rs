@@ -54,6 +54,45 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn memory_aux(ns: &Map<String, Value>) -> Outcome {
+    let sub = text(ns, "memory_command").unwrap_or("");
+    match sub {
+        "hook-context" => {
+            let query = text(ns, "query")
+                .filter(|query| !query.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| cwd.file_name().map(|name| name.to_string_lossy().into()))
+                        .unwrap_or_default()
+                });
+            let mut args = Map::new();
+            args.insert("query".into(), Value::String(query));
+            args.insert(
+                "sessions".into(),
+                ns.get("sessions").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_hook_context(result)
+            })
+        }
+        "stats" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_stats",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        "status" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_status",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        _ => not_ported(&format!("memory {sub}")),
+    }
+}
+
 fn superuser(ns: &Map<String, Value>) -> Outcome {
     let (rpc, args) = match text(ns, "superuser_command") {
         Some("status") => ("superuser_status", Map::new()),
@@ -1903,6 +1942,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "report" => report(ns),
         "superuser" => superuser(ns),
+        "memory" => memory_aux(ns),
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
