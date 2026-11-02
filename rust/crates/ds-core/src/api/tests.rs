@@ -2722,10 +2722,10 @@ fn test_poolrad_sync_files_n_and_never_refiles() {
         &env,
         Some("w1:p1"),
         "poolrad_sync",
-        args(json!({"limit": 1, "dry_run": "yes"})),
+        args(json!({"limit": "1_0", "dry_run": "yes"})),
     )
     .unwrap();
-    assert_eq!(dry_run["filed"].as_array().unwrap().len(), 1);
+    assert_eq!(dry_run["filed"].as_array().unwrap().len(), 7);
     assert!(env.store.tasks.lock().unwrap().is_empty());
 
     let first = dispatch_as_flock_role(
@@ -2774,6 +2774,17 @@ fn test_poolrad_sync_files_n_and_never_refiles() {
             args(json!({"limit": "bad"})),
         )),
         "invalid literal for int() with base 10: 'bad'"
+    );
+    assert_eq!(
+        refusal(dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "poolrad_sync",
+            args(json!({"limit": "1__0"})),
+        )),
+        "invalid literal for int() with base 10: '1__0'"
     );
     assert_eq!(
         refusal(dispatch_as_flock_role(

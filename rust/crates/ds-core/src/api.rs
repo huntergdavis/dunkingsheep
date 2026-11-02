@@ -824,7 +824,7 @@ fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
             .or_else(|| number.as_f64().map(|value| value as i64))
             .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?,
         Value::Bool(value) => i64::from(*value),
-        Value::String(value) => value.trim().parse::<i64>().map_err(|_| {
+        Value::String(value) => parse_python_decimal_int(value).ok_or_else(|| {
             DunkError::Refused(format!(
                 "invalid literal for int() with base 10: {}",
                 py_repr(value)
@@ -845,6 +845,38 @@ fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
         Value::Null => unreachable!("falsey limit uses the default"),
     };
     Ok(usize::try_from(limit.max(0)).unwrap_or(usize::MAX))
+}
+
+fn parse_python_decimal_int(value: &str) -> Option<i64> {
+    let literal = value.trim();
+    let sign_len = usize::from(matches!(literal.as_bytes().first(), Some(b'+' | b'-')));
+    let (sign, digits) = literal.split_at(sign_len);
+    if digits.is_empty() {
+        return None;
+    }
+
+    let bytes = digits.as_bytes();
+    let mut previous_was_digit = false;
+    let mut normalized = String::with_capacity(literal.len());
+    normalized.push_str(sign);
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte.is_ascii_digit() {
+            normalized.push(char::from(byte));
+            previous_was_digit = true;
+        } else if byte == b'_'
+            && previous_was_digit
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)
+        {
+            previous_was_digit = false;
+        } else {
+            return None;
+        }
+    }
+    if previous_was_digit {
+        normalized.parse().ok()
+    } else {
+        None
+    }
 }
 
 /// `dunk_core.Flock.poolrad_sync`: Python applies `int(limit or 6)` and forwards dry-run truth.
