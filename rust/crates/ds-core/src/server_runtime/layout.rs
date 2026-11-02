@@ -290,7 +290,7 @@ mod tests {
             );
         });
 
-        let mut invisible_tab = FakeTerminal::new();
+        let invisible_tab = FakeTerminal::new();
         with_adapter(invisible_tab, |adapter| {
             assert_eq!(
                 Err("tmux created the window but it is not visible".to_string()),
