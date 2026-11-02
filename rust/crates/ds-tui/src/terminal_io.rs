@@ -21,7 +21,7 @@ pub trait TuiTerminal {
     fn draw<C: RpcClient>(&mut self, model: &TuiModel<C>, now: f64) -> io::Result<()>;
 }
 
-impl<B: Backend> TuiTerminal for Terminal<B> {
+impl<B: Backend<Error = io::Error>> TuiTerminal for Terminal<B> {
     fn draw<C: RpcClient>(&mut self, model: &TuiModel<C>, now: f64) -> io::Result<()> {
         self.draw(|frame| match model.view {
             View::Dunks => crate::view::draw_dunks(frame, model, now),
@@ -120,7 +120,7 @@ where
         if key.kind == KeyEventKind::Release {
             return Ok(());
         }
-        let now = self.now();
+        let now = (self.clock)();
         match model.handle_key(key, &mut self.modals, now) {
             KeyDispatch::Handled
             | KeyDispatch::Ignored
