@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::prelude::Frame;
 use ratatui::Terminal;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::app;
 use crate::model::{
@@ -47,9 +47,17 @@ impl<T: Transport> FlockRpcClient<T> {
 
 impl<T: Transport> RpcClient for FlockRpcClient<T> {
     fn call(&mut self, command: &str, args: Value) -> Result<Value, RpcError> {
-        let args = args.as_object().cloned().ok_or_else(|| {
-            RpcError::Refused("TUI RPC arguments must be a JSON object".to_owned())
-        })?;
+        let args = match args {
+            Value::Object(args) => args,
+            // TuiModel represents a no-argument RPC as JSON null; Python passes
+            // that call as empty kwargs, which is the FlockClient Map contract.
+            Value::Null => Map::new(),
+            _ => {
+                return Err(RpcError::Refused(
+                    "TUI RPC arguments must be a JSON object or null".to_owned(),
+                ));
+            }
+        };
         self.client
             .call(command, args)
             .map_err(|error| match error {
@@ -309,6 +317,19 @@ mod tests {
         let request: Value = serde_json::from_str(&requests.borrow()[0]).unwrap();
         assert_eq!(request["cmd"], "update_dunk");
         assert_eq!(request["args"], json!({"id": "d1", "name": "next"}));
+
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let mut no_args = FlockRpcClient::new(flock_client(
+            r#"{"ok":true,"result":{"dunks":[]}}"#,
+            Rc::clone(&requests),
+        ));
+        assert_eq!(
+            no_args.call("list_dunks", Value::Null),
+            Ok(json!({"dunks": []}))
+        );
+        let request: Value = serde_json::from_str(&requests.borrow()[0]).unwrap();
+        assert_eq!(request["cmd"], "list_dunks");
+        assert_eq!(request["args"], json!({}));
 
         let requests = Rc::new(RefCell::new(Vec::new()));
         let mut refused = FlockRpcClient::new(flock_client(
