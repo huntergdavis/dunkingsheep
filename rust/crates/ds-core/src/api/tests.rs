@@ -88,6 +88,7 @@ struct ParityEnv {
     view_cache: ViewCache,
     now_s: f64,
     pane_pid: Option<i64>,
+    inbox_value: Cell<i64>,
     probes: Cell<u32>,
     turn_calls: Mutex<Vec<String>>,
 }
@@ -100,6 +101,7 @@ impl ParityEnv {
             view_cache: ViewCache::new(),
             now_s: 1_800_000_100.0,
             pane_pid,
+            inbox_value: Cell::new(1),
             probes: Cell::new(0),
             turn_calls: Mutex::new(Vec::new()),
         }
@@ -170,7 +172,7 @@ impl StatusEnv for ParityEnv {
         Some("/tmp/dunks.json".into())
     }
     fn inbox_count(&self, pane: &str) -> Result<Value, String> {
-        Ok(json!({"mailbox": pane, "unread": 1}))
+        Ok(json!({"mailbox": pane, "unread": self.inbox_value.get()}))
     }
 }
 
@@ -264,6 +266,266 @@ fn flock() -> (tempfile::TempDir, Flock) {
         false,
     );
     (dir, flock)
+}
+
+fn staffed_flock(tag: &str) -> (tempfile::TempDir, Flock) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    roles
+        .register("w1:p1", "owner", None, None, None, None, None, None)
+        .unwrap();
+    roles
+        .register("w2:p2", "worker", None, None, None, None, None, None)
+        .unwrap();
+    flock.attach_roles(roles, None);
+    (dir, flock)
+}
+
+fn dispatch_as_flock_role(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &dyn CommandEnv,
+    pane: Option<&str>,
+    name: &str,
+    args: Option<Args>,
+) -> Result<Value, DunkError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime");
+    let request = RequestCtx {
+        self_pane_id: pane.map(str::to_owned),
+        ..RequestCtx::default()
+    };
+    let context = HandlerContext {
+        flock,
+        request: &request,
+        env,
+        runtime: runtime.handle(),
+    };
+    dispatcher.dispatch(&context, &FlockGate(&context), name, args)
+}
+
+#[test]
+fn h_lanes_matches_python() {
+    let (_dir, flock) = staffed_flock("api-lanes");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut registry = serde_json::Map::new();
+    registry.insert("w2:p2".into(), json!({"mailbox":"worker", "declared":true}));
+    registry.insert("w1:p1".into(), json!("owner"));
+    flock.write_lane_registry(&registry);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+    let listed =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "lanes", None).unwrap();
+    assert_eq!(listed["count"], 2);
+    assert_eq!(
+        listed["lanes"][0],
+        json!({
+            "pane_id":"w1:p1", "mailbox":"owner", "declared":false,
+            "alive":null, "dead_since":null
+        })
+    );
+    assert_eq!(listed["lanes"][1]["pane_id"], "w2:p2");
+    assert_eq!(
+        dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "lanes",
+            args(json!({"action":" LIST "})),
+        )
+        .unwrap(),
+        listed
+    );
+    assert_eq!(
+        refusal(dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "lanes",
+            args(json!({"action":"remove"})),
+        )),
+        "lanes action must be list or set"
+    );
+
+    let set = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lanes",
+        args(json!({"action":"set", "pane":"w1:p1", "mailbox":"owner-renamed"})),
+    )
+    .unwrap();
+    assert_eq!(
+        set,
+        json!({"pane_id":"w1:p1", "mailbox":"owner-renamed", "declared":true})
+    );
+}
+
+#[test]
+fn h_lane_set_invalidates_cached_status_view() {
+    let (_dir, flock) = staffed_flock("api-lane-set");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+
+    let before = flock.view_cache().view(&env, Some("w1:p1"), false, 5.0);
+    assert_eq!(before["inbox_count"]["unread"], 1);
+    env.inbox_value.set(2);
+    let updated = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_set",
+        args(json!({"pane":" w1:p1 ", "mailbox":" owner "})),
+    )
+    .unwrap();
+    assert_eq!(
+        updated,
+        json!({"pane_id":"w1:p1", "mailbox":"owner", "declared":true})
+    );
+    let after = flock.view_cache().view(&env, Some("w1:p1"), false, 5.0);
+    assert_eq!(after["inbox_count"]["unread"], 2);
+
+    env.inbox_value.set(3);
+    assert!(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_set",
+        args(json!({"pane":"missing", "mailbox":"bad"})),
+    )
+    .is_err());
+    let after_refusal = flock.view_cache().view(&env, Some("w1:p1"), false, 5.0);
+    assert_eq!(after_refusal["inbox_count"]["unread"], 2);
+
+    assert!(refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lane_set",
+        args(json!({"pane":"w1:p1", "mailbox":"worker-claim"})),
+    ))
+    .contains("requires a superuser"));
+}
+
+#[test]
+fn h_lane_register_matches_python() {
+    let (_dir, flock) = staffed_flock("api-lane-register");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+
+    let registered = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_register",
+        args(json!({
+            "pane":"w2:p2", "role":"reviewer", "provider":"codex",
+            "model":"gpt-6.1-sol", "label":"api-review"
+        })),
+    )
+    .unwrap();
+    assert_eq!(registered["pane_id"], "w2:p2");
+    assert_eq!(registered["role"], "reviewer");
+    assert_eq!(registered["provider"], "codex");
+    assert_eq!(registered["model"], "gpt-6.1-sol");
+    assert_eq!(registered["label"], "api-review");
+
+    let refused = refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "lane_register",
+        args(json!({"pane":"w1:p1", "role":"worker"})),
+    ));
+    assert!(
+        refused.contains("lane register requires the owner role"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn h_lane_unregister_matches_python() {
+    let (_dir, flock) = staffed_flock("api-lane-unregister");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+
+    let removed = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_unregister",
+        args(json!({"pane":"w2:p2"})),
+    )
+    .unwrap();
+    assert_eq!(removed["pane_id"], "w2:p2");
+    assert_eq!(removed["removed"]["role"], "worker");
+    assert_eq!(
+        flock.caller_role(Some("w2:p2"), &env).unwrap(),
+        crate::roles::DEFAULT_ROLE
+    );
+}
+
+#[test]
+fn h_lane_handlers_refuse_non_string_pane_values() {
+    let (_dir, flock) = staffed_flock("api-lane-pane-types");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+
+    let register_error = refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_register",
+        args(json!({"pane":123, "role":"worker"})),
+    ));
+    assert!(register_error.contains("pane must be a string"));
+    assert_eq!(
+        flock.caller_role(Some("w1:p1"), &env).unwrap(),
+        "owner",
+        "invalid pane input must not fall back to registering the caller"
+    );
+    assert_eq!(
+        flock.caller_role(Some("123"), &env).unwrap(),
+        crate::roles::DEFAULT_ROLE,
+        "invalid pane input must not register a coerced target"
+    );
+
+    let unregister_error = refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_unregister",
+        args(json!({"pane":123})),
+    ));
+    assert!(unregister_error.contains("pane must be a string"));
+    assert_eq!(
+        flock.caller_role(Some("w2:p2"), &env).unwrap(),
+        "worker",
+        "invalid pane input must not remove a role"
+    );
 }
 
 fn refusal(result: Result<Value, DunkError>) -> String {

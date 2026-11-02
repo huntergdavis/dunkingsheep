@@ -225,6 +225,19 @@ impl Dispatcher {
         self.register("help", h_help);
     }
 
+    /// Register only the T39 lane-unregister handler.
+    pub fn register_lane_unregister(&mut self) {
+        self.register("lane_unregister", h_lane_unregister);
+    }
+
+    /// Register only the T39 lane registry handlers.
+    pub fn register_lanes(&mut self) {
+        self.register("lanes", h_lanes);
+        self.register("lane_set", h_lane_set);
+        self.register("lane_register", h_lane_register);
+        self.register("lane_unregister", h_lane_unregister);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -329,6 +342,84 @@ pub fn h_help(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
         },
         "commands": commands,
     }))
+}
+
+/// `dunk_api.h_lanes`: list the registered lanes or declare a pane/mailbox pair.
+pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("list")
+        .trim()
+        .to_lowercase();
+    if action == "set" {
+        context
+            .flock
+            .require_superuser(context.self_pane_id(), "lane_set", context.env)?;
+        let result = lane_set(context, &args)?;
+        context.flock.invalidate_view();
+        return Ok(result);
+    }
+    if action != "list" {
+        return Err(DunkError::Refused(
+            "lanes action must be list or set".into(),
+        ));
+    }
+    let rows = context.flock.lanes();
+    Ok(json!({"lanes": rows, "count": rows.len()}))
+}
+
+/// `dunk_api.h_lane_set`: missing/invalid parameters are refused by Flock with Python parity.
+pub fn h_lane_set(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let result = lane_set(context, &args)?;
+    context.flock.invalidate_view();
+    Ok(result)
+}
+
+fn lane_set(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
+    let terminal = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?;
+    context.flock.lane_set(
+        terminal.as_ref(),
+        args.get("pane").and_then(Value::as_str).unwrap_or(""),
+        args.get("mailbox").and_then(Value::as_str).unwrap_or(""),
+    )
+}
+
+/// `dunk_api.h_lane_register`: role checks and owner bootstrap live in Flock.
+pub fn h_lane_register(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = match args.get("pane") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(pane)) => Some(pane.as_str()),
+        Some(_) => return Err(DunkError::Refused("pane must be a string".into())),
+    };
+    context.flock.lane_register(
+        pane,
+        args.get("role").and_then(Value::as_str),
+        args.get("provider").and_then(Value::as_str),
+        args.get("model").and_then(Value::as_str),
+        args.get("label").and_then(Value::as_str),
+        context.self_pane_id(),
+        context.env,
+    )
+}
+
+/// `dunk_api.h_lane_unregister`.
+pub fn h_lane_unregister(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = match args.get("pane") {
+        None | Some(Value::Null) => {
+            return Err(DunkError::Refused("pane is required".into()));
+        }
+        Some(Value::String(pane)) => pane.as_str(),
+        Some(_) => return Err(DunkError::Refused("pane must be a string".into())),
+    };
+    context
+        .flock
+        .lane_unregister(pane, context.self_pane_id(), context.env)
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
