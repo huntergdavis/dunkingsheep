@@ -258,6 +258,20 @@ impl Dispatcher {
         self.register("list_workspaces", h_list_workspaces);
     }
 
+    /// Register only the T39 superuser status/add/remove handlers.
+    pub fn register_superuser_status_add_remove(&mut self) {
+        self.register("superuser_status", h_superuser_status);
+        self.register("superuser_add", h_superuser_add);
+        self.register("superuser_remove", h_superuser_remove);
+    }
+
+    /// Register only the T39 superuser recovery and service-token handlers.
+    pub fn register_superuser_recover_tokens(&mut self) {
+        self.register("superuser_recover", h_superuser_recover);
+        self.register("token_issue", h_token_issue);
+        self.register("token_revoke", h_token_revoke);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -582,6 +596,72 @@ pub fn h_list_workspaces(context: &HandlerContext<'_>, _: Args) -> Result<Value,
     }))
 }
 
+/// `dunk_api.h_superuser_status`.
+pub fn h_superuser_status(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context
+        .flock
+        .superuser_status(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_add`.
+pub fn h_superuser_add(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let entry = args
+        .get("entry")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("superuser_add: entry must be a string".into()))?;
+    context
+        .flock
+        .superuser_add(entry, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_remove`.
+pub fn h_superuser_remove(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let entry = args
+        .get("entry")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("superuser_remove: entry must be a string".into()))?;
+    context
+        .flock
+        .superuser_remove(entry, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_superuser_recover`.
+pub fn h_superuser_recover(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    context
+        .flock
+        .superuser_recover(context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_token_issue`.
+pub fn h_token_issue(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = args
+        .get("role")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("token_issue: role must be a string".into()))?;
+    let label = match args.get("label") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(label)) => Some(label.as_str()),
+        Some(_) => {
+            return Err(DunkError::Refused(
+                "token_issue: label must be a string".into(),
+            ));
+        }
+    };
+    context
+        .flock
+        .token_issue(role, label, context.self_pane_id(), context.env)
+}
+
+/// `dunk_api.h_token_revoke`.
+pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let label = args
+        .get("label")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("token_revoke: label must be a string".into()))?;
+    context
+        .flock
+        .token_revoke(label, context.self_pane_id(), context.env)
+}
 pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let action = args
         .get("action")
