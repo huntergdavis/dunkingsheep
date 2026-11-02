@@ -80,3 +80,155 @@ fn the_kind_gate_refuses_a_missing_label_and_names_the_tool() {
 fn an_unreadable_kind_table_fails_open_like_the_python() {
     assert!(kind_gate("OVL_C", "t", None).is_none());
 }
+
+#[test]
+fn branch_attribution_has_precedence_and_respects_delimiters() {
+    let lanes = vec![
+        ("%1".to_string(), " Build ".to_string()),
+        ("%2".to_string(), "build-two".to_string()),
+    ];
+    let mints = vec![("%3".to_string(), "2026-01-01T11:00:00Z".to_string())];
+    assert_eq!(
+        Some("%1".to_string()),
+        attribute_author(Some("BUILD/feature"), None, &lanes, &mints)
+    );
+    assert_eq!(
+        Some("%2".to_string()),
+        attribute_author(Some("build-two-feature"), None, &lanes, &[])
+    );
+    assert_eq!(
+        Some("%3".to_string()),
+        attribute_author(
+            Some("other/feature"),
+            Some("2026-01-01T12:00:00Z"),
+            &[],
+            &mints
+        )
+    );
+    assert_eq!(
+        None,
+        attribute_author(Some("builder/feature"), None, &lanes, &[])
+    );
+}
+
+#[test]
+fn mint_attribution_requires_one_mint_strictly_inside_two_hours() {
+    let one = vec![("%1".to_string(), "2026-01-01T10:00:00Z".to_string())];
+    assert_eq!(
+        None,
+        attribute_author(None, Some("2026-01-01T12:00:00Z"), &[], &one)
+    );
+    let two = vec![
+        ("%1".to_string(), "2026-01-01T11:00:00Z".to_string()),
+        ("%2".to_string(), "2026-01-01T11:30:00Z".to_string()),
+    ];
+    assert_eq!(
+        None,
+        attribute_author(None, Some("2026-01-01T12:00:00Z"), &[], &two)
+    );
+    assert_eq!(None, attribute_author(None, Some("not-a-time"), &[], &one));
+}
+
+#[test]
+fn task_author_is_only_returned_for_one_successful_author() {
+    assert_eq!(
+        Some("%4".to_string()),
+        author_from_tasks::<()>(Ok(vec!["%4".to_string()]))
+    );
+    assert_eq!(None, author_from_tasks::<()>(Ok(vec![])));
+    assert_eq!(
+        None,
+        author_from_tasks::<()>(Ok(vec!["%4".to_string(), "%5".to_string()]))
+    );
+    assert_eq!(None, author_from_tasks::<()>(Err(())));
+}
+
+#[test]
+fn iso_matches_the_strict_utc_timestamp_shape() {
+    assert_eq!(Some(0), _iso(Some("1970-01-01T00:00:00Z")));
+    assert_eq!(None, _iso(None));
+    assert_eq!(None, _iso(Some("2026-02-30T12:00:00Z")));
+    assert_eq!(None, _iso(Some("2026-01-01T12:00:00+00:00")));
+}
+
+#[test]
+fn row_ids_are_uppercase_boundary_checked_and_deduplicated() {
+    assert_eq!(
+        vec!["OVL_007F_0F7E".to_string(), "RES_0001_0002".to_string()],
+        row_ids(Some(
+            "OVL_007F_0F7E OVL_007F_0F7E xOVL_0001_0002 OVL_0001_0002x res_0001_0002"
+        ))
+    );
+    assert!(row_ids(None).is_empty());
+}
+
+#[test]
+fn stem_and_own_row_follow_the_poolrad_filename_convention() {
+    assert_eq!(
+        "U7F_STATE_FLAGS_0F7E",
+        stem_of("docs/U7F_STATE_FLAGS_0F7E.md")
+    );
+    assert!(own_row(Some("OVL_007F_0F7E"), "U7F_STATE_FLAGS_0F7E"));
+    assert!(own_row(Some("RES_007F_0F7E"), "U007F_STATE_0F7E"));
+    assert!(!own_row(Some("OVL_007F_0F7E"), "U80_STATE_0F7E"));
+    assert!(!own_row(Some("ovl_007f_0f7e"), "U7F_STATE_0F7E"));
+}
+
+#[test]
+fn ledger_rows_skip_header_and_malformed_or_blank_lines() {
+    assert_eq!(
+        vec![("OVL_A".to_string(), "a.md".to_string())],
+        ledger_rows(Some("id,evidence_doc\nOVL_A,a.md\n\nmalformed\n"))
+    );
+    assert!(ledger_rows(None).is_empty());
+}
+
+#[test]
+fn with_row_sorts_inserts_and_preserves_lf_or_crlf() {
+    assert_eq!(
+        Ok("id,doc\nOVL_A,a.md\nOVL_B,b.md\nOVL_C,c.md\n".to_string()),
+        with_row(Some("id,doc\nOVL_A,a.md\nOVL_C,c.md\n"), "OVL_B", "b.md")
+    );
+    assert_eq!(
+        Ok("id,doc\r\nOVL_A,a.md\r\nOVL_B,b.md\r\n".to_string()),
+        with_row(Some("id,doc\r\nOVL_A,a.md\r\n"), "OVL_B", "b.md")
+    );
+    assert_eq!(
+        Err("the ledger is empty: no header line to keep"),
+        with_row(None, "OVL_B", "b.md")
+    );
+}
+
+#[test]
+fn choose_row_uses_first_single_source_and_refuses_ambiguity_or_duplicates() {
+    let sources = [
+        ("verdict notes", Some("none here")),
+        ("review task title", Some("OVL_007F_0F7E")),
+        ("PR body", Some("RES_0001_0002")),
+    ];
+    assert_eq!(
+        (
+            Some(("OVL_007F_0F7E".to_string(), "docs/U7F_0F7E.md".to_string())),
+            "".to_string()
+        ),
+        choose_row(&sources, &["docs/U7F_0F7E.md"], Some("id,doc\n"))
+    );
+    assert_eq!(
+        "the verdict notes names 2 row ids (OVL_0001_0001, OVL_0002_0002); one ledger row is one id",
+        choose_row(
+            &[("verdict notes", Some("OVL_0001_0001 OVL_0002_0002"))],
+            &[],
+            Some("id,doc\n")
+        )
+        .1
+    );
+    assert_eq!(
+        "OVL_007F_0F7E is already credited as prior.md",
+        choose_row(
+            &[("verdict notes", Some("OVL_007F_0F7E"))],
+            &["docs/U7F_0F7E.md"],
+            Some("id,doc\nOVL_007F_0F7E,prior.md\n")
+        )
+        .1
+    );
+}
