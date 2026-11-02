@@ -200,6 +200,11 @@ impl Json {
         {
             doc.prefix.push('_');
         }
+        static NUMBER: OnceLock<Regex> = OnceLock::new();
+        let number = NUMBER.get_or_init(|| {
+            Regex::new(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$")
+                .expect("static JSON number regex")
+        });
         let mut rewritten = String::new();
         index = 0;
         let mut copied = 0;
@@ -224,14 +229,7 @@ impl Json {
                 {
                     end += 1;
                 }
-                static NUMBER: OnceLock<Regex> = OnceLock::new();
-                if !NUMBER
-                    .get_or_init(|| {
-                        Regex::new(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$")
-                            .expect("static JSON number regex")
-                    })
-                    .is_match(&text[index..end])
-                {
+                if !number.is_match(&text[index..end]) {
                     return None;
                 }
                 end
@@ -471,7 +469,7 @@ fn json_string(text: &str) -> String {
             '\t' => result.push_str("\\t"),
             '\u{8}' => result.push_str("\\b"),
             '\u{c}' => result.push_str("\\f"),
-            ch if ch < '\u{20}' || ch >= '\u{7f}' => {
+            ch if !('\u{20}'..'\u{7f}').contains(&ch) => {
                 for unit in ch.encode_utf16(&mut [0; 2]) {
                     result.push_str(&format!("\\u{unit:04x}"));
                 }
@@ -490,6 +488,8 @@ fn repr_string(text: &str) -> String {
     };
     let mut result = quote.to_string();
     static NONPRINT: OnceLock<Regex> = OnceLock::new();
+    let nonprint = NONPRINT
+        .get_or_init(|| Regex::new(r"^[\p{C}\p{Z}]$").expect("static Unicode category regex"));
     for ch in text.chars() {
         match ch {
             '\\' => result.push_str("\\\\"),
@@ -500,13 +500,7 @@ fn repr_string(text: &str) -> String {
                 result.push('\\');
                 result.push(ch);
             }
-            ch if ch != ' '
-                && NONPRINT
-                    .get_or_init(|| {
-                        Regex::new(r"^[\p{C}\p{Z}]$").expect("static Unicode category regex")
-                    })
-                    .is_match(&ch.to_string()) =>
-            {
+            ch if ch != ' ' && nonprint.is_match(&ch.to_string()) => {
                 let n = ch as u32;
                 result.push_str(&if n <= 255 {
                     format!("\\x{n:02x}")
