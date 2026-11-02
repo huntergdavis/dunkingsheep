@@ -27,6 +27,7 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     {
         let mut message = sends::Message::new("m43", "%1", "worker", "held text", "d7");
         message.created_at = 50.0;
+        message.schedule_template = Some("daily {date}".into());
         message.holds = 3;
         message.next_attempt_at = Some(80.0);
         message.hold_signature = Some("composer signature".into());
@@ -40,7 +41,26 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     decided_message.created_at = 42.0;
     decided_message.status = "failed".into();
     decided_message.attempt_generation = Some("pid:12:start:34".into());
+    decided_message.typed_at = Some(41.5);
     source.note_stuck_candidate(&decided_message);
+    {
+        let mut candidates = source.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.native_binding = Some((12, "start-34".into(), "session-42".into()));
+        candidate.recovery_outcome = Some("recovered".into());
+        candidate.recovery_detail = Some("matched receipt".into());
+        candidate.recovered_at = Some(43.25);
+        candidate.receipts_reconciled = Some(true);
+        candidate.native_refusal = Some("ambiguous boundary".into());
+        candidate.unobservable_logged = Some(true);
+        candidate.native_recovery = Some(false);
+        candidate.schedule_template = Some("scheduled {date}".into());
+        candidate.retired_at = Some(44.5);
+        candidate.consumed_at = Some(45.75);
+        candidate
+            .extra_fields
+            .insert("future_marker".into(), json!({"version": 7}));
+    }
     source.remember(&decided_message);
     {
         let mut tracker = source.stuck_tracker.lock().unwrap();
@@ -76,6 +96,7 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     let queue = restored.outbox_snapshot();
     let message = &queue["%1"][0];
     assert_eq!("held text", message.text);
+    assert_eq!(Some("daily {date}"), message.schedule_template.as_deref());
     assert_eq!(3, message.holds);
     assert_eq!(Some(80.0), message.next_attempt_at);
     assert_eq!(
@@ -83,9 +104,35 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
         message.hold_signature.as_deref()
     );
     assert!(!message.hold_while_typing);
+    let candidate = restored.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!("failed", candidate.status);
+    assert_eq!(Some(41.5), candidate.typed_at);
     assert_eq!(
-        "failed",
-        restored.stuck_candidates.lock().unwrap()["%1"].status
+        Some((12, "start-34".into(), "session-42".into())),
+        candidate.native_binding
+    );
+    assert_eq!(Some("recovered"), candidate.recovery_outcome.as_deref());
+    assert_eq!(
+        Some("matched receipt"),
+        candidate.recovery_detail.as_deref()
+    );
+    assert_eq!(Some(43.25), candidate.recovered_at);
+    assert_eq!(Some(true), candidate.receipts_reconciled);
+    assert_eq!(
+        Some("ambiguous boundary"),
+        candidate.native_refusal.as_deref()
+    );
+    assert_eq!(Some(true), candidate.unobservable_logged);
+    assert_eq!(Some(false), candidate.native_recovery);
+    assert_eq!(
+        Some("scheduled {date}"),
+        candidate.schedule_template.as_deref()
+    );
+    assert_eq!(Some(44.5), candidate.retired_at);
+    assert_eq!(Some(45.75), candidate.consumed_at);
+    assert_eq!(
+        json!({"version": 7}),
+        candidate.extra_fields["future_marker"]
     );
     assert_eq!(1, restored.stuck_tracker.lock().unwrap().spent["m42:42"]);
     assert_eq!(90.0, restored.stuck_config.lock().unwrap().threshold_s);

@@ -1331,6 +1331,86 @@ mod owned_text_tests {
         assert!(second.eligible);
     }
 
+    #[test]
+    fn candidate_updates_preserve_recovery_metadata_only_for_same_identity() {
+        let flock = flock();
+        let mut original = Message::new("m20", "%1", "writer", "original", "direct");
+        original.created_at = 20.0;
+        original.status = "failed".into();
+        original.attempt_generation = Some("pid:20:start:4".into());
+        flock.note_stuck_candidate(&original);
+        {
+            let mut candidates = flock.stuck_candidates.lock().unwrap();
+            let candidate = candidates.get_mut("%1").unwrap();
+            candidate.native_binding = Some((20, "start-4".into(), "session-20".into()));
+            candidate.recovery_outcome = Some("consumed".into());
+            candidate.recovery_detail = Some("receipt matched".into());
+            candidate.recovered_at = Some(21.0);
+            candidate.receipts_reconciled = Some(true);
+            candidate.native_refusal = Some("boundary".into());
+            candidate.unobservable_logged = Some(true);
+            candidate.native_recovery = Some(true);
+            candidate.schedule_template = Some("schedule template".into());
+            candidate.retired_at = Some(22.0);
+            candidate.consumed_at = Some(23.0);
+            candidate
+                .extra_fields
+                .insert("extension".into(), serde_json::json!("kept"));
+        }
+
+        let mut same = original.clone();
+        same.status = "typed".into();
+        same.text = "updated body".into();
+        flock.note_stuck_candidate(&same);
+        let preserved = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+        assert_eq!(
+            Some((20, "start-4".into(), "session-20".into())),
+            preserved.native_binding
+        );
+        assert_eq!(Some("consumed"), preserved.recovery_outcome.as_deref());
+        assert_eq!("consumed", preserved.status);
+        assert!(!preserved.eligible);
+        assert_eq!(
+            Some("receipt matched"),
+            preserved.recovery_detail.as_deref()
+        );
+        assert_eq!(Some(21.0), preserved.recovered_at);
+        assert_eq!(Some(true), preserved.receipts_reconciled);
+        assert_eq!(Some("boundary"), preserved.native_refusal.as_deref());
+        assert_eq!(Some(true), preserved.unobservable_logged);
+        assert_eq!(Some(true), preserved.native_recovery);
+        assert_eq!(
+            Some("schedule template"),
+            preserved.schedule_template.as_deref()
+        );
+        assert_eq!(Some(22.0), preserved.retired_at);
+        assert_eq!(Some(23.0), preserved.consumed_at);
+        assert_eq!(
+            serde_json::json!("kept"),
+            preserved.extra_fields["extension"]
+        );
+
+        let mut replacement = Message::new("m21", "%1", "writer", "replacement", "direct");
+        replacement.created_at = 21.0;
+        replacement.status = "failed".into();
+        replacement.attempt_generation = Some("pid:20:start:4".into());
+        flock.note_stuck_candidate(&replacement);
+        let replacement = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+        assert_eq!("m21", replacement.message_id);
+        assert_eq!(None, replacement.native_binding);
+        assert_eq!(None, replacement.recovery_outcome);
+        assert_eq!(None, replacement.recovery_detail);
+        assert_eq!(None, replacement.recovered_at);
+        assert_eq!(None, replacement.receipts_reconciled);
+        assert_eq!(None, replacement.native_refusal);
+        assert_eq!(None, replacement.unobservable_logged);
+        assert_eq!(None, replacement.native_recovery);
+        assert_eq!(None, replacement.schedule_template);
+        assert_eq!(None, replacement.retired_at);
+        assert_eq!(None, replacement.consumed_at);
+        assert!(replacement.extra_fields.is_empty());
+    }
+
     fn pane_with_current_process(pane_id: &str) -> Pane {
         let mut env = Pane::default();
         env.panes.push(serde_json::json!({

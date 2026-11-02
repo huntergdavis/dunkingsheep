@@ -14,7 +14,7 @@
 //! is not evidence of a person. The only refusals are a DEAD session (read, not claimed) and an
 //! unknowable composer boundary.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
@@ -1022,6 +1022,8 @@ pub struct Message {
     pub press_enter: bool,
     /// True for a timer-triggered send (Python's transient `attempt.scheduled`).
     pub scheduled: bool,
+    /// Original template of a scheduled attempt, retained for post-restart eligibility checks.
+    pub schedule_template: Option<String>,
     pub attempt_generation: Option<String>,
     /// Time at which the guarded composer write completed, persisted in the stuck candidate.
     pub typed_at: Option<f64>,
@@ -1051,6 +1053,7 @@ impl Message {
             kind: "text".to_string(),
             press_enter: true,
             scheduled: false,
+            schedule_template: None,
             attempt_generation: None,
             typed_at: None,
             is_notice: false,
@@ -1142,6 +1145,18 @@ pub(crate) struct StuckCandidate {
     pub transcript_texts: Vec<String>,
     pub typed_at: Option<f64>,
     pub native_binding: Option<(i64, String, String)>,
+    pub recovery_outcome: Option<String>,
+    pub recovery_detail: Option<String>,
+    pub recovered_at: Option<f64>,
+    pub receipts_reconciled: Option<bool>,
+    pub native_refusal: Option<String>,
+    pub unobservable_logged: Option<bool>,
+    pub native_recovery: Option<bool>,
+    pub schedule_template: Option<String>,
+    pub retired_at: Option<f64>,
+    pub consumed_at: Option<f64>,
+    /// Unknown Python candidate keys are retained at top level for forward-compatible saves.
+    pub extra_fields: Map<String, Value>,
 }
 
 impl StuckCandidate {
@@ -1173,16 +1188,56 @@ impl StuckCandidate {
             transcript_texts: Vec::new(),
             typed_at: message.typed_at,
             native_binding: None,
+            recovery_outcome: None,
+            recovery_detail: None,
+            recovered_at: None,
+            receipts_reconciled: None,
+            native_refusal: None,
+            unobservable_logged: None,
+            native_recovery: None,
+            schedule_template: message.schedule_template.clone(),
+            retired_at: None,
+            consumed_at: None,
+            extra_fields: Map::new(),
         }
     }
 }
+
+const CANDIDATE_SNAPSHOT_FIELDS: &[&str] = &[
+    "message_id",
+    "created_at",
+    "press_enter",
+    "status",
+    "kind",
+    "scheduled",
+    "source",
+    "notify_for",
+    "text",
+    "label",
+    "generation",
+    "eligible",
+    "superseded_by",
+    "transcript_texts",
+    "typed_at",
+    "native_binding",
+    "recovery_outcome",
+    "recovery_detail",
+    "recovered_at",
+    "receipts_reconciled",
+    "native_refusal",
+    "unobservable_logged",
+    "native_recovery",
+    "schedule_template",
+    "retired_at",
+    "consumed_at",
+];
 
 pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
     let native_binding = candidate
         .native_binding
         .as_ref()
         .map(|(pid, start, session)| json!([pid, start, session]));
-    json!({
+    let known = json!({
         "message_id": candidate.message_id,
         "created_at": candidate.created_at,
         "press_enter": candidate.press_enter,
@@ -1199,7 +1254,22 @@ pub(crate) fn candidate_snapshot(candidate: &StuckCandidate) -> Value {
         "transcript_texts": candidate.transcript_texts,
         "typed_at": candidate.typed_at,
         "native_binding": native_binding,
-    })
+        "recovery_outcome": candidate.recovery_outcome,
+        "recovery_detail": candidate.recovery_detail,
+        "recovered_at": candidate.recovered_at,
+        "receipts_reconciled": candidate.receipts_reconciled,
+        "native_refusal": candidate.native_refusal,
+        "unobservable_logged": candidate.unobservable_logged,
+        "native_recovery": candidate.native_recovery,
+        "schedule_template": candidate.schedule_template,
+        "retired_at": candidate.retired_at,
+        "consumed_at": candidate.consumed_at,
+    });
+    let mut snapshot = candidate.extra_fields.clone();
+    if let Some(fields) = known.as_object() {
+        snapshot.extend(fields.clone());
+    }
+    Value::Object(snapshot)
 }
 
 pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
@@ -1215,6 +1285,11 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
                 parts.get(2)?.as_str()?.to_owned(),
             ))
         });
+    let extra_fields = row
+        .iter()
+        .filter(|(key, _)| !CANDIDATE_SNAPSHOT_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     Some(StuckCandidate {
         message_id: string("message_id")?,
         created_at: row.get("created_at")?.as_f64()?,
@@ -1261,6 +1336,17 @@ pub(crate) fn candidate_from_snapshot(value: &Value) -> Option<StuckCandidate> {
             .unwrap_or_default(),
         typed_at: row.get("typed_at").and_then(Value::as_f64),
         native_binding,
+        recovery_outcome: string("recovery_outcome"),
+        recovery_detail: string("recovery_detail"),
+        recovered_at: row.get("recovered_at").and_then(Value::as_f64),
+        receipts_reconciled: row.get("receipts_reconciled").and_then(Value::as_bool),
+        native_refusal: string("native_refusal"),
+        unobservable_logged: row.get("unobservable_logged").and_then(Value::as_bool),
+        native_recovery: row.get("native_recovery").and_then(Value::as_bool),
+        schedule_template: string("schedule_template"),
+        retired_at: row.get("retired_at").and_then(Value::as_f64),
+        consumed_at: row.get("consumed_at").and_then(Value::as_f64),
+        extra_fields,
     })
 }
 
@@ -1276,6 +1362,7 @@ pub(crate) fn message_snapshot(message: &Message) -> Value {
         "kind": message.kind,
         "press_enter": message.press_enter,
         "scheduled": message.scheduled,
+        "schedule_template": message.schedule_template,
         "attempt_generation": message.attempt_generation,
         "is_notice": message.is_notice,
         "notify_for": message.notify_for,
@@ -1308,6 +1395,7 @@ pub(crate) fn message_from_snapshot(value: &Value) -> Option<Message> {
         .and_then(Value::as_bool)
         .unwrap_or(true);
     message.scheduled = field("scheduled").and_then(Value::as_bool).unwrap_or(false);
+    message.schedule_template = string("schedule_template");
     message.attempt_generation = string("attempt_generation");
     message.is_notice = field("is_notice").and_then(Value::as_bool).unwrap_or(false);
     message.notify_for = field("notify_for")
@@ -1519,6 +1607,24 @@ impl Flock {
         {
             candidate.typed_at = message.typed_at.or(existing.typed_at);
             candidate.native_binding = existing.native_binding.clone();
+            candidate.recovery_outcome = existing.recovery_outcome.clone();
+            candidate.recovery_detail = existing.recovery_detail.clone();
+            candidate.recovered_at = existing.recovered_at;
+            candidate.receipts_reconciled = existing.receipts_reconciled;
+            candidate.native_refusal = existing.native_refusal.clone();
+            candidate.unobservable_logged = existing.unobservable_logged;
+            candidate.native_recovery = existing.native_recovery;
+            candidate.schedule_template = message
+                .schedule_template
+                .clone()
+                .or_else(|| existing.schedule_template.clone());
+            candidate.retired_at = existing.retired_at;
+            candidate.consumed_at = existing.consumed_at;
+            candidate.extra_fields = existing.extra_fields.clone();
+            if candidate.recovery_outcome.as_deref() == Some("consumed") {
+                candidate.status = "consumed".into();
+                candidate.eligible = false;
+            }
         }
         if candidate_is_newer(existing, &candidate) {
             return;
