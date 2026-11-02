@@ -10,6 +10,7 @@
 //! File names deviate from the task text on purpose: `inbox.rs` already exists as a single
 //! file, so the store is `inbox_store.rs` beside it rather than a `inbox/` directory move.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -55,6 +56,15 @@ pub struct Store {
     writer: SyncWriter,
     readers: ReadPool,
     blob_dir: PathBuf,
+}
+
+/// Python's maintenance result omits `mailboxes` when no live panes are known.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Undeliverable {
+    pub undeliverable: usize,
+    pub panes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mailboxes: Option<Vec<String>>,
 }
 
 fn refuse(text: impl Into<String>) -> DunkError {
@@ -120,6 +130,93 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         self.writer.path()
+    }
+
+    /// Mark queued mail for vanished panes, including legacy pane-keyed mailboxes.
+    /// An empty inventory cannot establish that any target has disappeared.
+    pub fn mark_undeliverable(
+        &self,
+        live_panes: &BTreeSet<String>,
+    ) -> Result<Undeliverable, DunkError> {
+        let live: BTreeSet<String> = live_panes
+            .iter()
+            .filter(|pane| !pane.is_empty())
+            .cloned()
+            .collect();
+        if live.is_empty() {
+            return Ok(Undeliverable {
+                undeliverable: 0,
+                panes: Vec::new(),
+                mailboxes: None,
+            });
+        }
+        self.writer.call(move |connection| {
+            let tx = connection.transaction().map_err(map_sqlite)?;
+            let dead_panes: Vec<String> = {
+                let mut statement = tx
+                    .prepare("SELECT DISTINCT pane_id FROM messages WHERE state = 'queued' AND pane_id IS NOT NULL")
+                    .map_err(map_sqlite)?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(map_sqlite)?;
+                rows.collect::<Result<BTreeSet<_>, _>>()
+                    .map_err(map_sqlite)?
+                    .into_iter()
+                    .filter(|pane| !live.contains(pane))
+                    .collect()
+            };
+            let mut changed = 0;
+            if !dead_panes.is_empty() {
+                let marks = vec!["?"; dead_panes.len()].join(",");
+                changed += tx.execute(
+                    &format!("UPDATE messages SET state = 'undeliverable', reason = 'target pane no longer exists' WHERE state = 'queued' AND pane_id IN ({marks})"),
+                    rusqlite::params_from_iter(dead_panes.iter()),
+                ).map_err(map_sqlite)?;
+            }
+            // Query after the first transition: rows changed above are no longer queued.
+            let dead_mailboxes: Vec<String> = {
+                let mut statement = tx
+                    .prepare("SELECT DISTINCT mailbox FROM messages WHERE state = 'queued'")
+                    .map_err(map_sqlite)?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(map_sqlite)?;
+                rows.collect::<Result<BTreeSet<_>, _>>()
+                    .map_err(map_sqlite)?
+                    .into_iter()
+                    .filter(|mailbox| crate::inbox::is_pane_mailbox(mailbox) && !live.contains(mailbox))
+                    .collect()
+            };
+            if !dead_mailboxes.is_empty() {
+                let marks = vec!["?"; dead_mailboxes.len()].join(",");
+                changed += tx.execute(
+                    &format!("UPDATE messages SET state = 'undeliverable', reason = 'target pane no longer exists' WHERE state = 'queued' AND mailbox IN ({marks})"),
+                    rusqlite::params_from_iter(dead_mailboxes.iter()),
+                ).map_err(map_sqlite)?;
+            }
+            tx.commit().map_err(map_sqlite)?;
+            Ok(Undeliverable {
+                undeliverable: changed,
+                panes: dead_panes,
+                mailboxes: Some(dead_mailboxes),
+            })
+        })
+    }
+
+    /// Archive only old, unarchived undeliverable rows, preserving their read receipts.
+    pub fn auto_archive_undeliverable(
+        &self,
+        age_s: Option<f64>,
+        now: Option<f64>,
+    ) -> Result<usize, DunkError> {
+        let now = now.unwrap_or_else(now_s);
+        let cutoff = now - age_s.unwrap_or(86400.0);
+        self.writer.call(move |connection| {
+            connection.execute(
+                "UPDATE messages SET state = 'archived', archived_at = ?, reason = COALESCE(reason, 'undeliverable older than 24h') WHERE state = 'undeliverable' AND created_at < ? AND archived_at IS NULL",
+                rusqlite::params![now, cutoff],
+            ).map_err(map_sqlite)
+        })
     }
 
     /// Every mailbox associated with a pane, including names that outlive its pane id.
