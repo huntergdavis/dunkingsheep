@@ -319,19 +319,6 @@ mod tests {
         assert_eq!(request["args"], json!({"id": "d1", "name": "next"}));
 
         let requests = Rc::new(RefCell::new(Vec::new()));
-        let mut no_args = FlockRpcClient::new(flock_client(
-            r#"{"ok":true,"result":{"dunks":[]}}"#,
-            Rc::clone(&requests),
-        ));
-        assert_eq!(
-            no_args.call("list_dunks", Value::Null),
-            Ok(json!({"dunks": []}))
-        );
-        let request: Value = serde_json::from_str(&requests.borrow()[0]).unwrap();
-        assert_eq!(request["cmd"], "list_dunks");
-        assert_eq!(request["args"], json!({}));
-
-        let requests = Rc::new(RefCell::new(Vec::new()));
         let mut refused = FlockRpcClient::new(flock_client(
             r#"{"ok":false,"error":"not allowed"}"#,
             requests,
@@ -340,6 +327,23 @@ mod tests {
             refused.call("update_dunk", json!({"id": "d1"})),
             Err(RpcError::Refused("not allowed".to_owned()))
         );
+    }
+
+    #[test]
+    fn model_refresh_passes_null_list_args_as_empty_flock_args() {
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let client = FlockRpcClient::new(flock_client(
+            r#"{"ok":true,"result":{"dunks":[{"id":"d1","name":"One"}]}}"#,
+            Rc::clone(&requests),
+        ));
+        let mut model = TuiModel::connected(client, 0.0);
+
+        assert!(!model.refresh(0.0));
+        assert_eq!(model.dunks, vec![json!({"id": "d1", "name": "One"})]);
+
+        let request: Value = serde_json::from_str(&requests.borrow()[0]).unwrap();
+        assert_eq!(request["cmd"], "list_dunks");
+        assert_eq!(request["args"], json!({}));
     }
 
     #[test]
