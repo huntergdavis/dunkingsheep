@@ -2728,6 +2728,29 @@ fn test_poolrad_sync_files_n_and_never_refiles() {
     assert_eq!(dry_run["filed"].as_array().unwrap().len(), 7);
     assert!(env.store.tasks.lock().unwrap().is_empty());
 
+    let unicode_digits = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": "١٢٣", "dry_run": true})),
+    )
+    .unwrap();
+    assert_eq!(unicode_digits["filed"].as_array().unwrap().len(), 7);
+
+    let negative_limit = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": -1, "dry_run": true})),
+    )
+    .unwrap();
+    assert_eq!(negative_limit["filed"].as_array().unwrap().len(), 1);
+    assert!(env.store.tasks.lock().unwrap().is_empty());
+
     let first = dispatch_as_flock_role(
         &dispatcher,
         &flock,
@@ -2806,6 +2829,45 @@ fn test_poolrad_sync_files_n_and_never_refiles() {
         None,
     ))
     .contains("requires a superuser"));
+}
+
+#[test]
+fn test_poolrad_sync_dry_run_matches_python_bool() {
+    let (_dir, flock) = staffed_flock("api-poolrad-dry-run-bool");
+    let env = PoolradApiEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_poolrad_sync_progress();
+
+    for dry_run in [
+        json!("false"),
+        json!(2),
+        json!(["yes"]),
+        json!({"yes": true}),
+    ] {
+        let result = dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "poolrad_sync",
+            args(json!({"limit": 1, "dry_run": dry_run})),
+        )
+        .unwrap();
+        assert_eq!(result["filed"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(env.store.tasks.lock().unwrap().len(), 4);
+
+    let dry_run = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": 1, "dry_run": "on"})),
+    )
+    .unwrap();
+    assert_eq!(dry_run["filed"].as_array().unwrap().len(), 1);
+    assert_eq!(env.store.tasks.lock().unwrap().len(), 4);
 }
 
 #[test]
