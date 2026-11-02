@@ -441,8 +441,10 @@ struct Env {
     panic_in_plan: bool,
     sent: Mutex<Vec<String>>,
     metrics: Mutex<Vec<String>>,
-    plan_saw: Mutex<Vec<(Option<i64>, Option<f64>, usize)>>,
+    plan_saw: Mutex<Vec<PlanObservation>>,
 }
+
+type PlanObservation = (Option<i64>, Option<f64>, usize);
 
 impl Env {
     fn ready() -> Env {
