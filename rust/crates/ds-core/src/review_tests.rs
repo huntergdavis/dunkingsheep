@@ -247,8 +247,10 @@ fn choose_row_uses_first_single_source_and_refuses_ambiguity_or_duplicates() {
 #[derive(Default)]
 struct FakeReviewStore {
     tasks: Vec<Value>,
-    queries: RefCell<Vec<(Option<String>, bool, usize, String)>>,
+    queries: RefCell<Vec<ReviewListQuery>>,
 }
+
+type ReviewListQuery = (Option<String>, bool, usize, String);
 
 impl ReviewTaskStore for FakeReviewStore {
     type Error = &'static str;
