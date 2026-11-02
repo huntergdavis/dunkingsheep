@@ -32,7 +32,7 @@ impl TerminalCallAdapter<'_> {
     }
 
     fn helper_deliveryenv_server_error_hint(&self) -> String {
-        self.with_terminal(Terminal::server_error_hint)
+        self.with_terminal(|terminal| terminal.server_error_hint())
     }
 }
 
