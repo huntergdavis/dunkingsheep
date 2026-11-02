@@ -164,9 +164,6 @@ fn rule_resource_would_kill_with(
             SOURCE_RULE,
             false,
         ));
-        if let Some(item) = out.last_mut() {
-            item["severity"] = json!("info");
-        }
     }
     Ok(out)
 }
@@ -189,7 +186,7 @@ fn resource_callers(leases: &[Value]) -> Vec<Caller> {
         let Ok(start) = start_text.parse::<i64>() else {
             continue;
         };
-        if start < 0 || start.to_string() != start_text {
+        if start <= 0 || start.to_string() != start_text {
             continue;
         }
         let name = lease

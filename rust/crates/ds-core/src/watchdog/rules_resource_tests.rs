@@ -99,7 +99,7 @@ fn would_kill_names_the_lane_and_the_task_it_was_doing() {
     assert_eq!(fixture.state, state_path);
     assert_eq!(2, result.len());
     assert_eq!("resource.would_kill", result[0]["rule"]);
-    assert_eq!("info", result[0]["severity"]);
+    assert_eq!("warning", result[0]["severity"]);
     assert_eq!("t6", result[0]["evidence"]["task"]);
     assert!(result[0]["summary"]
         .as_str()
@@ -143,6 +143,7 @@ fn malformed_or_missing_caller_identity_fails_closed() {
         json!({"task_id":"t6","pane_id":"w8:p8","caller_pid":4000000}),
         json!({"task_id":"t6","pane_id":"w8:p8","caller_pid":4000000,"caller_start":"not-a-starttime"}),
         json!({"task_id":"t6","pane_id":"w8:p8","caller_pid":4000000,"caller_start":"0001"}),
+        json!({"task_id":"t6","pane_id":"w8:p8","caller_pid":4000000,"caller_start":"0"}),
         json!({"task_id":"t6","pane_id":"w8:p8","caller_pid":"bad","caller_start":"1"}),
         json!({"task_id":"t6","pane_id":"w8:p8","caller_start":"1"}),
     ];
@@ -157,6 +158,18 @@ fn malformed_or_missing_caller_identity_fails_closed() {
         "an invalid identity must never reach the sampler"
     );
     assert!(result.is_empty());
+}
+
+#[test]
+fn configured_critical_severity_is_preserved() {
+    let fixture = Fixture::new();
+    let mut rule = fixture.rule(false);
+    rule["severity"] = json!("critical");
+    let result =
+        rule_resource_would_kill_with(&fixture.data, &rule, NOW, &|_, _, _, _| Ok(canned()))
+            .unwrap();
+
+    assert_eq!("critical", result[0]["severity"]);
 }
 
 #[test]
