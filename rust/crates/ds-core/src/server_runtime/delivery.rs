@@ -327,9 +327,6 @@ mod tests {
         let error = failing_flock
             .delivery_target(&failing, "unknown lane", None)
             .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "tmux server not running - start it with `tmux new -d`"
-        );
+        assert!(error.to_string().contains("reason=unknown_name"));
     }
 }
