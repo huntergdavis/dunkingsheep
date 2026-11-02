@@ -41,8 +41,9 @@ pub trait AuthBackend: Send + Sync + 'static {
     ) -> AuthFuture<'a, Result<(), AuthError>>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Identity {
+    #[default]
     Owner,
     Api,
 }
@@ -268,7 +269,7 @@ mod tests {
     use serde_json::Value;
     use std::{
         sync::Mutex,
-        task::{Context, Poll, Wake, Waker},
+        task::{Context, Poll, Waker},
     };
 
     struct FakeAuth {
@@ -328,20 +329,9 @@ mod tests {
         }
     }
 
-    impl Default for Identity {
-        fn default() -> Self {
-            Self::Owner
-        }
-    }
-
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let waker: &Waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
         let mut future = std::pin::pin!(future);
         loop {
             if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
