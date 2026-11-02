@@ -104,6 +104,20 @@ async fn a_fixture_backend_never_reaps_but_still_runs_the_maintenance() {
 }
 
 #[tokio::test]
+async fn the_tick_sweeps_auto_unblock_before_the_live_backend_check() {
+    let (flock, tasks, _dir) = flock_with_tasks("auto-unblock").await;
+    let dependency = tasks.add("global", "dependency", "").await.unwrap();
+    let dependent = tasks.add("global", "dependent", "").await.unwrap();
+    tasks.complete(&dependency.id).await.unwrap();
+    tasks.block_by(&dependent.id, &dependency.id).await.unwrap();
+
+    let tick = flock.reaper_tick(&Fake::new(&[], false)).await;
+
+    assert!(tick.skipped_not_live);
+    assert_eq!("open", tasks.get(&dependent.id).await.unwrap().status);
+}
+
+#[tokio::test]
 async fn a_live_backend_requeues_a_dead_callers_claim_and_says_so() {
     let (flock, tasks, _dir) = flock_with_tasks("live").await;
     let task = tasks.add("global", "t", "").await.unwrap();
