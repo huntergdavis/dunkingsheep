@@ -2683,6 +2683,16 @@ fn test_gh_token_follows_the_role() {
         Some(&env.now_s),
         flock.gh_token_mints.lock().unwrap().get("w1:p1")
     );
+    assert_eq!(
+        Some("w1:p1".to_owned()),
+        crate::github::author_from_mints(
+            Some(env.now_s - 1800.0),
+            None,
+            Some(env.now_s),
+            env.tokens.config_dir(),
+        )
+        .unwrap()
+    );
     let reviewer =
         dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p2"), "gh_token", None).unwrap();
     assert_eq!("fake-reviewer-token", reviewer["token"]);

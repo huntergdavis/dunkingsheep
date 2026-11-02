@@ -865,6 +865,8 @@ pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, Dun
         if let Some(pane_id) = context.self_pane_id().filter(|pane| !pane.is_empty()) {
             let now = context.env.now_s();
             context.flock.record_gh_token_mint(pane_id, now);
+            let _ =
+                crate::github::record_author_mint(pane_id, Some(now), None, tokens.config_dir());
         }
     }
     Ok(json!({
