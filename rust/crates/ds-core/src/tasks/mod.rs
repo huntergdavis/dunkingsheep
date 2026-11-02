@@ -777,8 +777,27 @@ impl Tasks {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<(), DunkError> {
+        self.note_with_meta(id, event, actor, reason, &json!({}))
+            .await
+    }
+
+    /// Append an actor-owned event with the same reason field as `note` and extra
+    /// metadata. The supplied object is copied first, then `reason` is set from the
+    /// dedicated argument so callers cannot accidentally lose or replace it.
+    pub async fn note_with_meta(
+        &self,
+        id: &str,
+        event: &str,
+        actor: &str,
+        reason: Option<&str>,
+        extra: &serde_json::Value,
+    ) -> Result<(), DunkError> {
         let (id, event, actor) = (id.to_string(), event.to_string(), actor.to_string());
         let reason = reason.map(|r| r.to_string());
+        let mut meta = extra.as_object().cloned().unwrap_or_default();
+        if let Some(reason) = reason.as_ref() {
+            meta.insert("reason".into(), serde_json::Value::String(reason.clone()));
+        }
         let now = crate::clock::now_s();
         self.writer
             .call(move |conn| {
@@ -789,10 +808,7 @@ impl Tasks {
                 // unparseable rows, which would make the normal shape of a reviewer's
                 // note invisible (the t605 problem this API exists to fix). An empty meta
                 // is "{}", not NULL, as the Python writes it.
-                let meta = match reason.as_deref() {
-                    Some(text) => json!({ "reason": text }).to_string(),
-                    None => "{}".to_string(),
-                };
+                let meta = serde_json::Value::Object(meta).to_string();
                 conn.execute(
                     "INSERT INTO task_events (task_id, event, at, actor, meta) VALUES (?,?,?,?,?)",
                     params![id, event, now, actor, meta],
@@ -1294,6 +1310,59 @@ impl Tasks {
                 Ok(out)
             })
             .await
+    }
+
+    /// Visible review rows with the review-only columns, retaining `list_visible`'s
+    /// exact `order_key` order. The metadata is fetched in one actor query for the
+    /// ordered IDs rather than reconstructed with one query per task.
+    pub async fn list_review_rows_visible(&self) -> Result<Vec<ReviewTaskRow>, DunkError> {
+        let visible = self
+            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
+            .await?;
+        if visible.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = visible.iter().map(|row| row.task.id.clone()).collect();
+        let metadata = self
+            .writer
+            .call(move |conn| {
+                let marks = vec!["?"; ids.len()].join(",");
+                let sql = format!(
+                    "SELECT id, completed_by, repo, pr, head, verdict FROM tasks WHERE id IN ({marks})"
+                );
+                let mut stmt = conn.prepare(&sql).map_err(db::map_sqlite)?;
+                let rows = stmt
+                    .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })
+                    .map_err(db::map_sqlite)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(db::map_sqlite)
+            })
+            .await?;
+        let mut out = Vec::with_capacity(visible.len());
+        for row in visible {
+            if let Some((_, completed_by, repo, pr, head, verdict)) =
+                metadata.iter().find(|(id, ..)| id == &row.task.id)
+            {
+                out.push(ReviewTaskRow {
+                    id: row.task.id,
+                    status: row.task.status,
+                    completed_by: completed_by.clone(),
+                    repo: repo.clone(),
+                    pr: *pr,
+                    head: head.clone(),
+                    verdict: verdict.clone(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// `Tasks.stats`: counts by status, per visible scope and in total.
@@ -1903,6 +1972,18 @@ pub struct ReviewFacts {
     pub author: Option<String>,
     pub repo: Option<String>,
     pub pr: Option<i64>,
+    pub verdict: Option<String>,
+}
+
+/// The review identity and completion columns carried alongside the ordinary task row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewTaskRow {
+    pub id: String,
+    pub status: String,
+    pub completed_by: Option<String>,
+    pub repo: Option<String>,
+    pub pr: Option<i64>,
+    pub head: Option<String>,
     pub verdict: Option<String>,
 }
 
@@ -3752,5 +3833,127 @@ mod tests {
             ],
             "created once, completed once: completing a done task fires nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn note_with_meta_roundtrips_reason_and_arbitrary_accounting_fields() {
+        let store = store("note-with-meta").await;
+        let task = store.add("global", "review", "").await.unwrap();
+        let meta = json!({"accounting_pr": 82, "body_pr": 41, "row": "OVL_A"});
+        store
+            .note_with_meta(
+                &task.id,
+                "note",
+                "review-sync",
+                Some("accounting PR #82\nbody PR #41"),
+                &meta,
+            )
+            .await
+            .unwrap();
+        let (actor, event_meta): (String, String) = store
+            .writer
+            .call({
+                let id = task.id.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT actor, meta FROM task_events WHERE task_id = ? AND event = 'note'",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(db::map_sqlite)
+                }
+            })
+            .await
+            .unwrap();
+        let event_meta: serde_json::Value = serde_json::from_str(&event_meta).unwrap();
+        assert_eq!("review-sync", actor);
+        assert_eq!("accounting PR #82\nbody PR #41", event_meta["reason"]);
+        assert_eq!(82, event_meta["accounting_pr"]);
+        assert_eq!(41, event_meta["body_pr"]);
+        assert_eq!("OVL_A", event_meta["row"]);
+        assert_eq!(
+            "accounting PR #82\nbody PR #41",
+            store.notes(&task.id).await.unwrap()[0].text
+        );
+    }
+
+    #[tokio::test]
+    async fn list_review_rows_uses_visible_order_and_exposes_exact_head_identity() {
+        let store = store("review-rows-order").await;
+        let later = store
+            .add_with(
+                "global",
+                "later review",
+                "",
+                AddOptions {
+                    priority: Some("low".into()),
+                    kind: Some("review".into()),
+                    author: Some("%2".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("8".into()),
+                    head: Some("head-later".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let earlier = store
+            .add_with(
+                "global",
+                "urgent review",
+                "",
+                AddOptions {
+                    priority: Some("urgent".into()),
+                    kind: Some("review".into()),
+                    author: Some("%1".into()),
+                    repo: Some("o/r".into()),
+                    pr: Some("7".into()),
+                    head: Some("head-exact".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .writer
+            .call({
+                let id = earlier.id.clone();
+                move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET status='done', completed_by='%1', verdict='accept' WHERE id=?",
+                        params![id],
+                    )
+                    .map_err(db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let visible = store
+            .list_visible(None, None, None, true, 1000, None, Some("review"), false)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.task.id)
+            .collect::<Vec<_>>();
+        let review_rows = store.list_review_rows_visible().await.unwrap();
+        assert_eq!(
+            visible,
+            review_rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![earlier.id, later.id],
+            review_rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(Some("head-exact"), review_rows[0].head.as_deref());
+        assert_eq!(Some("%1"), review_rows[0].completed_by.as_deref());
+        assert_eq!(Some("accept"), review_rows[0].verdict.as_deref());
+        assert_eq!(Some("head-later"), review_rows[1].head.as_deref());
     }
 }
