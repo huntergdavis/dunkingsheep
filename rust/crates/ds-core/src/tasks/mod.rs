@@ -615,7 +615,7 @@ impl Tasks {
         let done = self.set_status(id, "done", None, by).await?;
         // The Python returns early on an already-done task, so it fires nothing.
         if before.status != "done" {
-            self.fire(&done.id, "completed", None, Some(&before.kind));
+            self.fire(&done.id, "completed", by, Some(&before.kind));
             // t1218 A: tell the assignee of each task this completion opened, through the
             // observer (the daemon turns it into a guarded inbox nudge).
             let opened = self.unblocked_by(&done.id).await?;

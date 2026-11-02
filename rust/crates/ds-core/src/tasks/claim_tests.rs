@@ -666,6 +666,15 @@ async fn test_dependencies_gate_next_until_done() {
 async fn test_global_completion_is_final_for_everyone() {
     let tasks = store("py-global-completion").await;
     let task = add_with(&tasks, "shared", None, &["w1:p1", "w2:p2"], &[], false).await;
+    let completed_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = completed_events.clone();
+    tasks.on_event(Box::new(move |id, event, by, _| {
+        if event == "completed" {
+            sink.lock()
+                .unwrap()
+                .push((id.to_owned(), by.map(str::to_owned)));
+        }
+    }));
     let claimed = tasks
         .claim_next("global", "w1:p1", ClaimOptions::default())
         .await
@@ -690,6 +699,10 @@ async fn test_global_completion_is_final_for_everyone() {
         .await
         .unwrap();
     assert_eq!(Some("w1:p1".to_owned()), completed_by);
+    assert_eq!(
+        vec![(task.id.clone(), Some("w1:p1".to_owned()))],
+        *completed_events.lock().unwrap()
+    );
     assert!(claimed_task(
         tasks
             .claim_next("global", "w2:p2", ClaimOptions::default())
