@@ -36,6 +36,39 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+fn run_local_context_cli(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+) -> Output {
+    run_local_context_cli_with_ledger(cwd, config_dir, superuser, args, None)
+}
+
+fn run_local_context_cli_with_ledger(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+    ledger: Option<&Path>,
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    command
+        .args(["--self-pane", "%99"])
+        .args(args)
+        .current_dir(cwd)
+        .env("DUNKINGSHEEP_DIR", config_dir)
+        .env("DUNKINGSHEEP_SUPERUSER", superuser)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_CONTEXT_LEDGER")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE");
+    if let Some(ledger) = ledger {
+        command.env("DUNKINGSHEEP_CONTEXT_LEDGER", ledger);
+    }
+    command.output().expect("run Rust CLI")
+}
+
 fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .args(["--socket", socket, "--self-pane", "%99"])
@@ -3025,6 +3058,27 @@ fn cli_route_10_context_local_seed() {
         !ledger.exists(),
         "unauthorized adopt must not create the ledger"
     );
+
+    let failing_ledger = config.join("ledger-is-a-directory");
+    std::fs::create_dir(&failing_ledger).unwrap();
+    let failed_adopt = run_local_context_cli_with_ledger(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+        Some(&failing_ledger),
+    );
+    assert_ne!(Some(0), failed_adopt.status.code());
+    assert!(failed_adopt.stdout.is_empty());
+    let error = String::from_utf8(failed_adopt.stderr).unwrap();
+    assert!(!error.trim().is_empty());
+    assert!(!error.contains("adopted"));
 
     let empty_path_snapshot = run_local_context_cli(
         &cwd,

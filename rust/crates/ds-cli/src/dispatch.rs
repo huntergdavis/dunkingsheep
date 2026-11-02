@@ -178,7 +178,10 @@ fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
             }
             let store = Store::new(path.as_deref(), global);
             let mut ledger = Ledger::new(None);
-            let adopted = store.adopt(&mut ledger, "adopt");
+            let adopted = match store.adopt(&mut ledger, "adopt") {
+                Ok(adopted) => adopted,
+                Err(error) => return Some(failed(error.to_string())),
+            };
             let ledger_path = ledger.path.display().to_string();
             let value = serde_json::json!({"adopted": adopted, "ledger": ledger_path});
             let count = value["adopted"].as_array().map_or(0, Vec::len);
