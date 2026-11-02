@@ -224,6 +224,78 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_07_inbox_read_b() {
+    let read = run_daemon_cli(
+        &["inbox", "read", "reviewer", "--limit", "3", "--peek"],
+        "inbox_read",
+        json!({"mailbox": "reviewer", "limit": 3, "peek": true}),
+        json!({
+            "mailbox": "reviewer",
+            "messages": [{
+                "message_id": "i10",
+                "sender": "codex",
+                "subject": "Review",
+                "attachments": [{
+                    "id": "a1",
+                    "filename": "diff.txt",
+                    "size": 3,
+                    "media_type": "text/plain"
+                }],
+                "body": "Please review"
+            }],
+            "truncated": true,
+            "omitted": 2,
+            "note": "older messages omitted"
+        }),
+    );
+    assert_eq!(0, read.status.code().unwrap());
+    assert_eq!(
+        "--- i10 from codex | Review\n    attachment a1  diff.txt  3 bytes  text/plain\nPlease review\n\n[capped: 2 older message(s) left out - older messages omitted]\n",
+        String::from_utf8(read.stdout).unwrap()
+    );
+    assert!(read.stderr.is_empty());
+
+    let recovered = run_daemon_cli(
+        &["inbox", "recover", "reviewer"],
+        "inbox_recover",
+        json!({"mailbox": "reviewer"}),
+        json!({
+            "mailbox": "reviewer",
+            "messages": [{
+                "message_id": "i11",
+                "sender": "owner",
+                "attachments": [],
+                "body": "Recovered content"
+            }]
+        }),
+    );
+    assert_eq!(0, recovered.status.code().unwrap());
+    assert_eq!(
+        "mailbox reviewer: recovered 1 delivered message(s) - display them, then inbox ack\n--- i11 from owner\nRecovered content\n\n",
+        String::from_utf8(recovered.stdout).unwrap()
+    );
+    assert!(recovered.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["inbox", "status", "i12"],
+        "inbox_status",
+        json!({"message_id": "i12"}),
+        json!({
+            "message_id": "i12",
+            "state": "acked",
+            "destination": "reviewer",
+            "notify": {"state": "sent", "reason": "accepted"}
+        }),
+    );
+    assert_eq!(0, status.status.code().unwrap());
+    assert_eq!(
+        "message_id        i12\nstate             acked\ndestination       reviewer\nnotify            sent (accepted)\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
