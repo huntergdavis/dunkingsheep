@@ -688,3 +688,344 @@ fn merge_review_and_graphql_requests_keep_methods_payloads_and_errors() {
     assert_eq!(query_payload["variables"], variables);
     assert_eq!(seen[3].url, "https://api.github.com/graphql");
 }
+
+#[test]
+fn git_ref_helpers_use_python_paths_and_only_404_409_mean_absent() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"object":{"sha":"ref-sha"}}"#.to_vec()));
+    fake.enqueue(response(br#"{"object":{"sha":"present-sha"}}"#.to_vec()));
+    fake.enqueue(GitHubResponse {
+        status: 404,
+        reason: "Not Found".into(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    });
+    fake.enqueue(GitHubResponse {
+        status: 409,
+        reason: "Conflict".into(),
+        body: br#"{"message":"Conflict"}"#.to_vec(),
+    });
+    fake.enqueue(GitHubResponse {
+        status: 403,
+        reason: "Forbidden".into(),
+        body: br#"{"message":"denied"}"#.to_vec(),
+    });
+    fake.enqueue(response(br#"{"tree":{"sha":"tree-sha"}}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(get_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "feature/topic",
+            "fixture-token",
+        ))
+        .unwrap(),
+        "ref-sha"
+    );
+    assert!(futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "present",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert!(!futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "missing",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert!(!futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "conflicting",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert_eq!(
+        futuresless_block_on(ref_exists(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "forbidden",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub GET /repos/owner/repo/git/ref/heads/forbidden -> 403: denied"
+    );
+    assert_eq!(
+        futuresless_block_on(commit_tree(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "commit-sha",
+            "fixture-token",
+        ))
+        .unwrap(),
+        "tree-sha"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 6);
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/git/ref/heads/feature/topic"
+    );
+    assert_eq!(
+        seen[5].url,
+        "https://api.github.com/repos/owner/repo/git/commits/commit-sha"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token fixture-token");
+}
+
+#[test]
+fn file_text_decodes_python_base64_and_handles_missing_directories_and_encoding() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"encoding":"base64","content":"SGVsbG8g4pyT\n","sha":"blob-sha"}"#.to_vec(),
+    ));
+    fake.enqueue(GitHubResponse {
+        status: 404,
+        reason: "Not Found".into(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    });
+    fake.enqueue(response(br#"[{"name":"child"}]"#.to_vec()));
+    fake.enqueue(response(br#"{"encoding":"utf-8"}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "docs/readme.md",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap(),
+        (
+            Some("Hello ✓".into()),
+            Some(Value::String("blob-sha".into()))
+        )
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "missing.md",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap(),
+        (None, None)
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "docs",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo/docs is a directory, not a file"
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "binary.dat",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo/binary.dat: unexpected encoding 'utf-8'"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/contents/docs/readme.md?ref=main"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token fixture-token");
+}
+
+#[test]
+fn pr_files_paginates_and_projects_python_file_fields() {
+    let fake = FakeTransport::default();
+    let first_page = (0..100)
+        .map(|number| serde_json::json!({"filename":format!("file-{number}"),"status":"modified"}))
+        .collect::<Vec<_>>();
+    fake.enqueue(response(serde_json::to_vec(&first_page).unwrap()));
+    fake.enqueue(response(
+        br#"[{"filename":"renamed.md","status":"renamed","previous_filename":"old.md"},{"filename":null,"status":null}]"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+
+    let files = futuresless_block_on(pr_files(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        42,
+        "fixture-token",
+    ))
+    .unwrap();
+    assert_eq!(files.len(), 102);
+    assert_eq!(files[0]["filename"], "file-0");
+    assert_eq!(files[100]["previous_filename"], "old.md");
+    assert_eq!(files[101]["filename"], "");
+    assert_eq!(files[101]["status"], "");
+    assert_eq!(files[101]["previous_filename"], Value::Null);
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/42/files?per_page=100&page=1"
+    );
+    assert_eq!(
+        seen[1].url,
+        "https://api.github.com/repos/owner/repo/pulls/42/files?per_page=100&page=2"
+    );
+}
+
+#[test]
+fn git_write_helpers_send_exact_payloads_and_project_open_pull() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"sha":"tree-sha"}"#.to_vec()));
+    fake.enqueue(response(br#"{"sha":"commit-sha"}"#.to_vec()));
+    fake.enqueue(response(br#"{"object":{"sha":"branch-sha"}}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"number":"17","html_url":"https://github.test/pull/17","node_id":"PR_node","head":{"sha":"head-sha"}}"#.to_vec(),
+    ));
+    fake.enqueue(GitHubResponse {
+        status: 422,
+        reason: "Unprocessable Entity".into(),
+        body: br#"{"message":"Reference already exists"}"#.to_vec(),
+    });
+    let (transport, recorded) = recorded_transport(fake);
+    let entries = vec![serde_json::json!({
+        "path":"docs/credit.csv",
+        "mode":"100644",
+        "type":"blob",
+        "content":"row\n",
+    })];
+    let parents = vec!["parent-sha".to_owned()];
+
+    assert_eq!(
+        futuresless_block_on(create_tree(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "base-tree",
+            &entries,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "tree-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(create_commit(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "Add accounting row",
+            "tree-sha",
+            &parents,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "commit-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(create_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "accounting/pr42",
+            "commit-sha",
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "branch-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(open_pull(
+            &*transport,
+            DEFAULT_API,
+            OpenPullRequest {
+                repo: "owner/repo",
+                title: "Account for accepted row",
+                head: "accounting/pr42",
+                base: "main",
+                body: "Generated from the merged evidence.",
+            },
+            "reviewer-token",
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "number":17,
+            "url":"https://github.test/pull/17",
+            "node_id":"PR_node",
+            "head":"head-sha",
+        })
+    );
+    assert_eq!(
+        futuresless_block_on(create_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "accounting/pr42",
+            "new-sha",
+            "reviewer-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub POST /repos/owner/repo/git/refs -> 422: Reference already exists"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    assert_eq!(seen[0].method, "POST");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/git/trees"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[0].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"base_tree":"base-tree","tree":entries})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[1].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"message":"Add accounting row","tree":"tree-sha","parents":["parent-sha"]})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[2].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"ref":"refs/heads/accounting/pr42","sha":"commit-sha"})
+    );
+    assert_eq!(seen[3].url, "https://api.github.com/repos/owner/repo/pulls");
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[3].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({
+            "title":"Account for accepted row",
+            "head":"accounting/pr42",
+            "base":"main",
+            "body":"Generated from the merged evidence.",
+        })
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token reviewer-token");
+    assert!(seen.iter().all(|request| request.timeout_s == 20));
+}
