@@ -11,6 +11,7 @@ mod inbox_stores;
 mod status;
 mod submit;
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +21,8 @@ use tokio::task::JoinHandle;
 
 use crate::error::{refusal, DunkError};
 use crate::flock::lanes::TerminalEnv;
+use crate::flock::loop_env::LoopFuture;
+use crate::flock::loops::ReaperEnv;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use crate::flock::sends::SendEnv;
@@ -28,6 +31,8 @@ use crate::flock::Flock;
 use crate::server::RequestCtx;
 use crate::terminal::tmux::TmuxBackend;
 use crate::terminal::Terminal;
+
+mod reaper;
 
 /// A request-scoped adapter borrowed on the server's existing connection thread.
 ///
@@ -309,6 +314,36 @@ impl LoopRuntimeAdapter {
             };
             call(&flock, &adapter)
         })
+    }
+}
+
+impl ReaperEnv for LoopRuntimeAdapter {
+    fn list_panes(&self) -> LoopFuture<'_, Result<Vec<Value>, DunkError>> {
+        self.helper_reaperenv_list_panes()
+    }
+
+    fn is_live(&self) -> bool {
+        self.helper_reaperenv_is_live()
+    }
+
+    fn clear_historical_errors(&self, panes: &BTreeSet<String>) -> LoopFuture<'_, ()> {
+        self.helper_reaperenv_clear_historical_errors(panes)
+    }
+
+    fn inbox_maintenance(
+        &self,
+        panes: &BTreeSet<String>,
+        pane_list: &[Value],
+    ) -> LoopFuture<'_, ()> {
+        self.helper_reaperenv_inbox_maintenance(panes, pane_list)
+    }
+
+    fn memory_maintenance(&self) -> LoopFuture<'_, ()> {
+        self.helper_reaperenv_memory_maintenance()
+    }
+
+    fn set_last_message(&self, message: &str) {
+        self.helper_reaperenv_set_last_message(message);
     }
 }
 

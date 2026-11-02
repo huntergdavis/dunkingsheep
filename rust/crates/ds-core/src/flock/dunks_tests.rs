@@ -5,6 +5,7 @@ use super::sends::SnapshotStore;
 use super::Flock;
 use crate::error::DunkError;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -89,6 +90,42 @@ fn load_dunks_tolerates_a_corrupt_dunk_collection() {
     let (next_id, rows) = flock.dunks.snapshot();
     assert_eq!(1, next_id);
     assert!(rows.is_empty());
+}
+
+#[test]
+fn clear_historical_errors_only_clears_running_exact_live_targets() {
+    let (_dir, flock) = flock();
+    flock._load_dunks(&map(json!({
+        "next_id": 5,
+        "dunkers": [
+            {"id": "d1", "running": true, "target_pane_id": "%1",
+             "last_error": "tmux: target pane not found"},
+            {"id": "d2", "running": true, "target_pane_id": "%2",
+             "last_error": "target pane not found"},
+            {"id": "d3", "running": false, "target_pane_id": "%1",
+             "last_error": "target pane not found"},
+            {"id": "d4", "running": true, "target_pane_id": "%1",
+             "last_error": "other error"}
+        ]
+    })));
+
+    assert!(flock
+        .dunks
+        .clear_historical_errors(&BTreeSet::from(["%1".to_string()])));
+    let rows = flock.dunks.list();
+    let error = |id: &str| {
+        rows.iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(|row| row.get("last_error"))
+            .cloned()
+    };
+    assert_eq!(Some(Value::Null), error("d1"));
+    assert_eq!(Some(json!("target pane not found")), error("d2"));
+    assert_eq!(Some(json!("target pane not found")), error("d3"));
+    assert_eq!(Some(json!("other error")), error("d4"));
+    assert!(!flock
+        .dunks
+        .clear_historical_errors(&BTreeSet::from(["%1".to_string()])));
 }
 
 #[test]
