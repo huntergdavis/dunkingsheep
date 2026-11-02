@@ -460,12 +460,10 @@ mod tests {
         .expect_err("contended guard refuses");
         assert!(error.to_string().contains("identity record is busy"));
         drop(held);
-        assert!(
-            acquire_shared_guards_with_timeout(
-                std::slice::from_ref(&path),
-                Duration::from_millis(20),
-            )
-            .is_ok()
-        );
+        assert!(acquire_shared_guards_with_timeout(
+            std::slice::from_ref(&path),
+            Duration::from_millis(20),
+        )
+        .is_ok());
     }
 }

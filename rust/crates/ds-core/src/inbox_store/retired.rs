@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, TransactionBehavior, params_from_iter};
+use rusqlite::{params_from_iter, Connection, TransactionBehavior};
 
 use crate::clock::now_s;
 use crate::db::map_sqlite;
