@@ -295,12 +295,12 @@ fn counts_summary(counts: &Value) -> (String, String) {
     if counts.is_empty() {
         return ("?".to_owned(), String::new());
     }
-    let mut values: Vec<(&String, &Value)> = counts.iter().collect();
-    values.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut keys: Vec<&String> = counts.keys().collect();
+    keys.sort();
     let total: i64 = counts.values().filter_map(Value::as_i64).sum();
-    let items = values
+    let items = keys
         .into_iter()
-        .map(|(key, value)| format!("{key}={}", py_str(value)))
+        .map(|key| format!("{key}={}", py_str(&counts[key])))
         .collect::<Vec<_>>()
         .join(", ");
     (total.to_string(), items)
