@@ -158,11 +158,12 @@ fn context_writes_go_to_the_daemon_with_the_pythons_arguments_and_failure_mappin
     let out = go(&["context", "promote", "some-slug", "--json"]);
     assert_eq!("promoted 2026-11-01-thing\n", out.stdout);
 
-    // --local writes the files directly: not ported (and nothing reaches the daemon).
+    // --local promotion reads the local store; an absent slug is silent and never reaches daemon.
     let before = log.lock().unwrap().len();
     let out = go(&["context", "promote", "x", "--local"]);
     assert_eq!(1, out.code);
-    assert!(out.stderr.contains("not ported yet"), "{}", out.stderr);
+    assert!(out.stdout.is_empty());
+    assert!(out.stderr.is_empty());
     assert_eq!(before, log.lock().unwrap().len());
 
     // The daemon says no: "refused: <reason>", exit 2.
