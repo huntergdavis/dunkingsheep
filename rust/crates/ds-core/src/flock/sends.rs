@@ -1518,6 +1518,41 @@ impl Flock {
         candidates.insert(message.pane_id.clone(), candidate);
     }
 
+    /// Bind native identity only to the exact pre-send candidate and its captured process
+    /// generation. This prevents a resolver result for a replacement pane from being adopted.
+    pub(crate) fn bind_native_candidate(
+        &self,
+        pane_id: &str,
+        message_id: &str,
+        created_at: f64,
+        generation: Option<&str>,
+        binding: &crate::recovery_native::PromptSessionBinding,
+    ) -> bool {
+        let expected_generation = format!("pid:{}:start:{}", binding.pid, binding.start);
+        if generation != Some(expected_generation.as_str()) {
+            return false;
+        }
+        let mut candidates = self
+            .stuck_candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(candidate) = candidates.get_mut(pane_id) else {
+            return false;
+        };
+        if candidate.message_id != message_id
+            || candidate.created_at.to_bits() != created_at.to_bits()
+            || candidate.generation.as_deref() != Some(expected_generation.as_str())
+        {
+            return false;
+        }
+        candidate.native_binding = Some((
+            binding.pid,
+            binding.start.clone(),
+            binding.session_id.clone(),
+        ));
+        true
+    }
+
     /// Persist typed-attempt authority before the caller sends the first Enter. `pane` is the
     /// already-resolved pane record from the caller's terminal adapter; native lookup failure
     /// leaves the strict generation-bound candidate intact and does not block the save.
@@ -1540,20 +1575,13 @@ impl Flock {
         let result = (|| {
             self.note_stuck_candidate(message);
             if let Ok(binding) = crate::recovery_native::resolve_prompt_session(pane) {
-                let mut candidates = self
-                    .stuck_candidates
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(candidate) = candidates.get_mut(pane_id) {
-                    if candidate.message_id == message.id
-                        && candidate.created_at.to_bits() == message.created_at.to_bits()
-                        && candidate.generation.as_deref()
-                            == Some(format!("pid:{}:start:{}", binding.pid, binding.start).as_str())
-                    {
-                        candidate.native_binding =
-                            Some((binding.pid, binding.start, binding.session_id));
-                    }
-                }
+                self.bind_native_candidate(
+                    pane_id,
+                    &message.id,
+                    message.created_at,
+                    message.attempt_generation.as_deref(),
+                    &binding,
+                );
             }
             self.save()?;
             Ok(true)

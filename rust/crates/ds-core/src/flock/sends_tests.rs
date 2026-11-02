@@ -1649,3 +1649,36 @@ fn persist_typed_attempt_without_matching_message_context_does_not_mutate() {
     assert!(message.typed_at.is_none());
     assert!(flock.stuck_candidates.lock().unwrap().is_empty());
 }
+
+#[test]
+fn native_binding_requires_the_original_candidate_and_attempt_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m4", "%4", "worker", "native", "send_text");
+    message.status = "typed".into();
+    message.created_at = 4.0;
+    message.attempt_generation = Some("pid:123:start:456".into());
+    flock.note_stuck_candidate(&message);
+    let binding = crate::recovery_native::PromptSessionBinding {
+        pid: 123,
+        start: "456".into(),
+        session_id: "session-id".into(),
+        rollout_path: "/unused/rollout.jsonl".into(),
+        cwd: "/unused".into(),
+    };
+
+    assert!(!flock.bind_native_candidate(
+        "%4",
+        "m4",
+        4.0,
+        Some("pid:123:start:replacement"),
+        &binding,
+    ));
+    assert!(!flock.bind_native_candidate("%4", "m4", 5.0, Some("pid:123:start:456"), &binding));
+    assert!(flock.bind_native_candidate("%4", "m4", 4.0, Some("pid:123:start:456"), &binding));
+
+    assert_eq!(
+        Some((123, "456".into(), "session-id".into())),
+        flock.stuck_candidates.lock().unwrap()["%4"].native_binding
+    );
+}
