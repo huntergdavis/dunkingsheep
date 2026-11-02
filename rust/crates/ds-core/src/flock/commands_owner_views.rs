@@ -17,6 +17,8 @@ use crate::error::DunkError;
 use crate::owner::OwnerPush;
 use crate::terminal::Terminal;
 
+type RequireSuperuser<'a> = dyn Fn(Option<&str>, &str) -> Result<(), DunkError> + 'a;
+
 fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
@@ -142,7 +144,7 @@ pub fn h_lanes(
     terminal: &dyn Terminal,
     args: &Value,
     self_pane_id: Option<&str>,
-    require_superuser: &dyn Fn(Option<&str>, &str) -> Result<(), DunkError>,
+    require_superuser: &RequireSuperuser<'_>,
 ) -> Result<Value, DunkError> {
     let action = text_or(args, "action")
         .unwrap_or("list")
