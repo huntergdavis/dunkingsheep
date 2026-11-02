@@ -3232,6 +3232,122 @@ fn cli_route_33_superuser_a() {
 }
 
 #[test]
+fn cli_route_34_superuser_b() {
+    let status = run_daemon_cli(
+        &["superuser", "status"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [{"label": "owner", "role": "owner"}]
+        }),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  tokens: owner=owner\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let added = run_daemon_cli(
+        &["superuser", "add", "worker@example"],
+        "superuser_add",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "added": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  added: worker@example\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["superuser", "remove", "worker@example"],
+        "superuser_remove",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "removed": 1,
+            "entry": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), removed.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  removed: 1 (worker@example)\n",
+        String::from_utf8(removed.stdout).unwrap()
+    );
+    assert!(removed.stderr.is_empty());
+
+    let recovered = run_daemon_cli(
+        &["superuser", "recover"],
+        "superuser_recover",
+        json!({"name": null}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), recovered.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  recovered: %99 (None)\n",
+        String::from_utf8(recovered.stdout).unwrap()
+    );
+    assert!(recovered.stderr.is_empty());
+
+    let named = run_daemon_cli(
+        &[
+            "superuser",
+            "recover",
+            "--name",
+            "bootstrap owner",
+            "--json",
+        ],
+        "superuser_recover",
+        json!({"name": "bootstrap owner"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), named.status.code());
+    assert_eq!(
+        "{\n  \"path\": \"/tmp/roles.json\",\n  \"superuser\": true,\n  \"pane_id\": \"%99\",\n  \"role\": \"owner\",\n  \"lanes\": {},\n  \"tokens\": [],\n  \"recovered\": true,\n  \"entry\": {\n    \"role\": \"owner\"\n  }\n}\n",
+        String::from_utf8(named.stdout).unwrap()
+    );
+    assert!(named.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_35_memory_a() {
     let recalled = run_daemon_cli(
         &[

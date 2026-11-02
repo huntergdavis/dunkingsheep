@@ -135,6 +135,14 @@ fn superuser(ns: &Map<String, Value>) -> Outcome {
             );
             ("superuser_remove", args)
         }
+        Some("recover") => {
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_recover", args)
+        }
         Some(other) => return not_ported(&format!("superuser {other}")),
         None => return not_ported("superuser"),
     };
