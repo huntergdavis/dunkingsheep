@@ -220,6 +220,13 @@ fn safe_next(value: &str, headers: &HeaderMap, uri: &Uri) -> Option<String> {
     if candidate.contains('\\') {
         return None;
     }
+    // The WHATWG URL parser removes tabs and newlines before navigation.
+    if candidate
+        .chars()
+        .any(|character| character.is_ascii_control())
+    {
+        return None;
+    }
     if candidate.starts_with('/') && !candidate.starts_with("//") {
         return Some(candidate.to_owned());
     }
@@ -426,6 +433,28 @@ mod tests {
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!({"ok": true, "next": "/dash/cos"}));
+    }
+
+    #[test]
+    fn login_rejects_ascii_controls_in_safe_next() {
+        for control in ['\t', '\n', '\r'] {
+            let backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth::default());
+            let mut headers = headers();
+            headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
+            let response = block_on(login(
+                Extension(backend),
+                ConnectInfo("127.0.0.1:4000".parse().unwrap()),
+                headers,
+                "/api/login".parse().unwrap(),
+                Json(LoginBody {
+                    password: "correct".into(),
+                    next: Some(format!("/{control}/evil.example")),
+                }),
+            ));
+            let (status, body, _) = body_json(response);
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, json!({"ok": true, "next": "/dash/cos"}));
+        }
     }
 
     #[test]
