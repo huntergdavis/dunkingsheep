@@ -47,6 +47,7 @@ impl Store {
         let cutoff = now - options.age_s;
         let reason = options
             .reason
+            .filter(|reason| !reason.is_empty())
             .unwrap_or_else(|| "mailbox of a retired pane".to_string());
 
         self.writer.call(move |connection| {
@@ -278,6 +279,79 @@ mod tests {
         );
         assert!(error.is_err());
         assert_eq!("queued", fields(&store, &id).0);
+    }
+
+    #[test]
+    fn retired_archive_uses_python_reason_fallback_and_preserves_existing_reason() {
+        let (_dir, store) = store();
+        let default_reason = send(&store, "default-reason", Some("w1:p1"));
+        let empty_reason = send(&store, "empty-reason", Some("w1:p1"));
+        let configured_reason = send(&store, "configured-reason", Some("w1:p1"));
+        let whitespace_reason = send(&store, "whitespace-reason", Some("w1:p1"));
+        let existing_reason = send(&store, "existing-reason", Some("w1:p1"));
+        store
+            .writer
+            .call({
+                let ids = vec![
+                    default_reason.clone(),
+                    empty_reason.clone(),
+                    configured_reason.clone(),
+                    whitespace_reason.clone(),
+                    existing_reason.clone(),
+                ];
+                let existing_reason_id = existing_reason.clone();
+                move |connection| {
+                    for id in ids {
+                        connection
+                            .execute("UPDATE messages SET created_at = 1 WHERE id = ?", [id])
+                            .map_err(crate::db::map_sqlite)?;
+                    }
+                    connection
+                        .execute(
+                            "UPDATE messages SET reason = 'keep existing reason' WHERE id = ?",
+                            [existing_reason_id],
+                        )
+                        .map_err(crate::db::map_sqlite)?;
+                    Ok(())
+                }
+            })
+            .expect("age messages");
+
+        let archive = |mailbox, reason| {
+            store
+                .archive_retired(
+                    RetiredArchiveOptions {
+                        now: Some(172_800.0),
+                        reason,
+                        ..RetiredArchiveOptions::default()
+                    },
+                    eligible(mailbox),
+                )
+                .expect("archive message")
+        };
+        assert_eq!(1, archive("default-reason", None));
+        assert_eq!(1, archive("empty-reason", Some(String::new())));
+        assert_eq!(1, archive("configured-reason", Some("configured".into())));
+        assert_eq!(1, archive("whitespace-reason", Some(" ".into())));
+        assert_eq!(1, archive("existing-reason", Some("replacement".into())));
+
+        assert_eq!(
+            Some("mailbox of a retired pane".to_string()),
+            fields(&store, &default_reason).3
+        );
+        assert_eq!(
+            Some("mailbox of a retired pane".to_string()),
+            fields(&store, &empty_reason).3
+        );
+        assert_eq!(
+            Some("configured".to_string()),
+            fields(&store, &configured_reason).3
+        );
+        assert_eq!(Some(" ".to_string()), fields(&store, &whitespace_reason).3);
+        assert_eq!(
+            Some("keep existing reason".to_string()),
+            fields(&store, &existing_reason).3
+        );
     }
 
     #[test]
