@@ -268,7 +268,10 @@ def pull_detail(repo, number, token):
     2026-10-30: its merge-ish keys are auto_merge, merge_commit_sha, merged_at),
     which is why review-sync asks here - and only for a head it is about to file.
     """
-    _status, pr = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    try:
+        _status, pr = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    except ValueError as error:
+        raise GitHubError(f"GitHub pull detail: invalid JSON: {error}") from None
     if not isinstance(pr, dict):
         raise GitHubError("GitHub pull detail: expected a JSON object")
     return {"state": pr.get("state"), "head": pr.get("head"),

@@ -1,5 +1,6 @@
 """GitHub Apps and the review timer (FLAT_FLEET.md 6), against a fake GitHub."""
 
+import io
 import os
 import sys
 import tempfile
@@ -333,6 +334,20 @@ class TimerTests(unittest.TestCase):
                 self.assertTrue(any("cleanup: GitHub pull detail: expected a JSON object" in e
                                     for e in report["errors"]))
                 self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
+    def test_cleanup_real_transport_reports_invalid_json_and_keeps_review(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        response = io.BytesIO(b"not JSON")
+        response.status = 200
+        with patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                patch.object(dunk_github.urllib.request, "urlopen", return_value=response):
+            report = self.sync.run()
+        self.assertEqual([], report["cancelled"])
+        self.assertTrue(any("cleanup: GitHub pull detail: invalid JSON" in e
+                            for e in report["errors"]))
+        self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
 
     def test_real_github_detail_preserves_state_and_head_without_invention(self):
         for response in ({}, {"state": "open", "head": {"sha": "b" * 40}}):
