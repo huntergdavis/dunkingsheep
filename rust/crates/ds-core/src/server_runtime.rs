@@ -4,6 +4,8 @@
 //! defaulting to tmux. Herdr is retired in the Rust runtime, so it is refused
 //! explicitly instead of being silently replaced with tmux.
 
+use std::ffi::OsStr;
+
 use crate::error::{refusal, DunkError};
 use crate::terminal::tmux::TmuxBackend;
 
@@ -11,13 +13,27 @@ pub const TERMINAL_BACKEND_ENV: &str = "DUNKINGSHEEP_TERMINAL_BACKEND";
 pub const DEFAULT_TERMINAL_BACKEND: &str = "tmux";
 
 /// Return the normalized configured backend name, using tmux when unset or blank.
-pub fn configured_backend_name() -> String {
-    normalize_backend_name(std::env::var(TERMINAL_BACKEND_ENV).ok().as_deref())
+/// A configured value that cannot be represented as UTF-8 is a refusal, never a default.
+pub fn configured_backend_name() -> Result<String, DunkError> {
+    configured_backend_name_from(std::env::var_os(TERMINAL_BACKEND_ENV).as_deref())
 }
 
 /// Construct the configured backend, refusing retired and unknown names explicitly.
 pub fn configured_backend() -> Result<TmuxBackend, DunkError> {
-    backend_from_name(Some(&configured_backend_name()))
+    let name = configured_backend_name()?;
+    backend_from_name(Some(&name))
+}
+
+fn configured_backend_name_from(configured: Option<&OsStr>) -> Result<String, DunkError> {
+    let Some(configured) = configured else {
+        return Ok(DEFAULT_TERMINAL_BACKEND.to_owned());
+    };
+    let Some(configured) = configured.to_str() else {
+        return Err(refusal(
+            "terminal backend setting is not valid UTF-8; expected 'tmux'",
+        ));
+    };
+    Ok(normalize_backend_name(Some(configured)))
 }
 
 fn normalize_backend_name(configured: Option<&str>) -> String {
@@ -59,6 +75,19 @@ mod tests {
         assert_eq!(
             backend_from_name(Some("other")).unwrap_err().to_string(),
             "unknown terminal backend \"other\"; expected 'tmux'"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_backend_refuses_non_utf8_environment_names() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let invalid_value = OsStr::from_bytes(b"tmux\xff");
+        let error = configured_backend_name_from(Some(invalid_value)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "terminal backend setting is not valid UTF-8; expected 'tmux'"
         );
     }
 }
