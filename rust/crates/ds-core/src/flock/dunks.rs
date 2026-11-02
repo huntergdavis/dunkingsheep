@@ -568,6 +568,34 @@ impl DunkList {
         self.state().dunkers.iter().map(Dunker::to_dict).collect()
     }
 
+    /// Clear stale missing-pane errors for running dunks whose exact target is live.
+    /// Returns whether a persisted field changed; the Flock owner performs one whole-state save.
+    pub(crate) fn clear_historical_errors(
+        &self,
+        live_panes: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        if live_panes.is_empty() {
+            return false;
+        }
+        let mut state = self.state();
+        let mut changed = false;
+        for dunker in &mut state.dunkers {
+            let target_is_live = dunker
+                .target_pane_id
+                .as_ref()
+                .is_some_and(|pane| live_panes.contains(pane));
+            let has_missing_pane_error = dunker
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("target pane not found"));
+            if dunker.running && target_is_live && has_missing_pane_error {
+                dunker.last_error = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// `Flock.add`. `pane` is the resolved target row, if a target was given.
     pub fn add(
         &self,
