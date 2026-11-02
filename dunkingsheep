@@ -254,6 +254,8 @@ def build_parser():
     q.add_argument("mailbox", nargs="?")
     q.add_argument("--limit", "-n", type=int, default=10)
     q.add_argument("--peek", action="store_true", help="do not mark them read")
+    q.add_argument("--messages-only", action="store_true",
+                   help="omit caller task queues from the response")
     q = isub.add_parser("recover", help="replay the latest delivered batch after a lost read response")
     q.add_argument("mailbox", nargs="?", help="agent name, pane id or 'self' (default self)")
     q = isub.add_parser("archive", help="archive a mailbox in bulk (no deletion)")
@@ -3074,8 +3076,11 @@ def run_client_command(client, args):
             return client.call("inbox_list", mailbox=args.mailbox,
                                unread_only=not args.all, limit=args.limit), print_inbox_list
         if sub == "read":
-            return client.call("inbox_read", mailbox=args.mailbox, limit=args.limit,
-                               peek=args.peek), print_inbox_read
+            options = {"mailbox": args.mailbox, "limit": args.limit,
+                       "peek": args.peek}
+            if args.messages_only:
+                options["include_tasks"] = False
+            return client.call("inbox_read", **options), print_inbox_read
         if sub == "recover":
             return client.call("inbox_recover", mailbox=args.mailbox), print_inbox_recover
         if sub == "status":

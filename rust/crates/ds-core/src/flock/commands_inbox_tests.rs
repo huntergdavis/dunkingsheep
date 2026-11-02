@@ -22,6 +22,7 @@ struct Env {
     panes: Vec<Value>,
     role: &'static str,
     override_name: Option<String>,
+    task_calls: std::sync::atomic::AtomicUsize,
     pool: ReadPool,
     store: Store,
     _dir: tempfile::TempDir,
@@ -92,6 +93,8 @@ impl InboxEnv for Env {
     }
     fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
     fn tasks_for_pane(&self, pane: &str) -> Value {
+        self.task_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         json!([{"pane": pane}])
     }
 }
@@ -114,6 +117,7 @@ fn env(role: &'static str) -> Env {
         panes: vec![pane("w1:p1", "Mine"), pane("w1:p2", "Other")],
         role,
         override_name: None,
+        task_calls: std::sync::atomic::AtomicUsize::new(0),
         pool,
         store,
         _dir: dir,
@@ -507,6 +511,39 @@ fn reading_marks_the_batch_read_and_carries_the_task_queue() {
 }
 
 #[test]
+fn messages_only_read_skips_task_lookup_and_preserves_peek_mark_and_receipt() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    let id = put(&e, "Mine", "one");
+
+    let peek = f
+        .inbox_read_with_options(&e, None, 10, true, false, Some("w1:p1"))
+        .unwrap();
+    assert!(peek.tasks.is_none());
+    assert_eq!(0, e.task_calls.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(None, peek.marked_read);
+    assert_eq!(1, f.inbox_count(&e, None, Some("w1:p1")).unwrap().unread);
+
+    let read = f
+        .inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap();
+    assert!(read.tasks.is_none());
+    assert_eq!(0, e.task_calls.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(Some(1), read.marked_read);
+    assert_eq!("read", read.messages[0].summary.state);
+    assert!(read.messages[0].read_at.is_some());
+    assert_eq!(0, f.inbox_count(&e, None, Some("w1:p1")).unwrap().unread);
+    let (_, recovered) = f.inbox_recover(&e, None, Some("w1:p1")).unwrap();
+    assert_eq!(
+        vec![id],
+        recovered
+            .iter()
+            .map(|message| message.summary.message_id.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn peek_does_not_consume_and_a_read_can_be_recovered() {
     let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
     let f = flock(&d);
@@ -535,6 +572,9 @@ fn reading_another_lanes_mail_is_refused_before_anything_is_marked() {
     put(&e, "Other", "private");
     assert!(f
         .inbox_read(&e, Some("w1:p2"), 10, false, Some("w1:p1"))
+        .is_err());
+    assert!(f
+        .inbox_read_with_options(&e, Some("w1:p2"), 10, false, false, Some("w1:p1"))
         .is_err());
     assert_eq!(
         1,

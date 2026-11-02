@@ -727,7 +727,8 @@ def h_inbox_list(flock, args, self_pane_id):
 def h_inbox_read(flock, args, self_pane_id):
     return flock.inbox_read(args.get("mailbox"), limit=int(_opt(args, "limit", 10)),
                             peek=_bool(args.get("peek"), False),
-                            self_pane_id=self_pane_id)
+                            self_pane_id=self_pane_id,
+                            include_tasks=_bool(args.get("include_tasks"), True))
 
 
 def h_report_run(flock, args, self_pane_id):
@@ -1982,15 +1983,20 @@ COMMANDS = [
     Command(
         "inbox_read",
         "Read waiting messages in order, with their full bodies, and mark them "
-        "read. This is the one an agent calls when it has mail. Use peek=true "
-        "to look without marking them read. If the answer never arrives, "
-        "inbox_recover replays the batch instead of losing it.",
+        "read. By default the result also includes the caller's task queues; set "
+        "include_tasks=false for a messages-only response. This is the one an agent "
+        "calls when it has mail. Use peek=true to look without marking them read. "
+        "If the answer never arrives, inbox_recover replays the batch instead of "
+        "losing it.",
         h_inbox_read,
         params={"mailbox": MAILBOX_PARAM,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100,
                           "description": "How many to read (default 10)."},
                 "peek": {"type": "boolean",
-                         "description": "Do not mark them read (default false)."}},
+                         "description": "Do not mark them read (default false)."},
+                "include_tasks": {"type": "boolean",
+                                  "description": "Include the caller's task queues "
+                                                 "in the result (default true)."}},
     ),
     Command(
         "inbox_status",
