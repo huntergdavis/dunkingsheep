@@ -61,6 +61,47 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct NoNetworkGithubTransport;
+
+impl crate::github::GitHubTransport for NoNetworkGithubTransport {
+    fn send<'a>(
+        &'a self,
+        _request: crate::github::GitHubRequest,
+    ) -> crate::github::PinBoxFuture<'a, Result<crate::github::GitHubResponse, String>> {
+        Box::pin(async { Err("unexpected GitHub request with a seeded token cache".into()) })
+    }
+}
+
+struct GithubTokenApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    tokens: crate::github::Tokens,
+    now_s: f64,
+}
+
+impl PaneInfoEnv for GithubTokenApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for GithubTokenApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        self.now_s
+    }
+
+    fn github_tokens(&self) -> Result<&crate::github::Tokens, DunkError> {
+        Ok(&self.tokens)
+    }
+}
+
 struct CompletionEnv(TestEnv);
 
 impl PaneInfoEnv for CompletionEnv {
@@ -287,6 +328,63 @@ fn staffed_flock(tag: &str) -> (tempfile::TempDir, Flock) {
         .unwrap();
     flock.attach_roles(roles, None);
     (dir, flock)
+}
+
+fn github_token_flock(tag: &str) -> (tempfile::TempDir, Flock) {
+    let (dir, flock) = flock();
+    let mut roles = Roles::new(
+        &Env::default(),
+        Some(dir.path().join(format!("{tag}-roles.json"))),
+        Some(dir.path().join(format!("{tag}-tokens.json"))),
+        None,
+    )
+    .unwrap();
+    for (pane, role) in [
+        ("w1:p1", "worker"),
+        ("w1:p2", "reviewer"),
+        ("w1:p3", "owner"),
+    ] {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+    (dir, flock)
+}
+
+fn github_token_api_env(dir: &Path) -> GithubTokenApiEnv {
+    let config_dir = dir.join("github-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let cache_path = dir.join("github-tokens.json");
+    std::fs::write(
+        &cache_path,
+        serde_json::to_vec(&json!({
+            "tokens": {
+                "author": {
+                    "token": "fake-author-token",
+                    "expires_at": 4_102_444_800.0,
+                    "slug": "author-app"
+                },
+                "reviewer": {
+                    "token": "fake-reviewer-token",
+                    "expires_at": 4_102_444_800.0,
+                    "slug": "reviewer-app"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    GithubTokenApiEnv {
+        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        tokens: crate::github::Tokens::new(
+            Some(cache_path),
+            config_dir,
+            Box::new(NoNetworkGithubTransport),
+            Some("https://github.invalid".into()),
+        ),
+        now_s: 1_800_000_000.0,
+    }
 }
 
 fn dispatch_as_flock_role(
@@ -2559,4 +2657,93 @@ fn h_task_follow_rejects_falsey_non_string_scopes() {
     let followers = dispatch(&dispatcher, &flock, &gate, "task_followers", None, None)
         .expect("read followers after invalid scopes");
     assert_eq!(followers, json!({"followers": []}));
+}
+
+#[test]
+fn test_gh_token_follows_the_role() {
+    let (dir, flock) = github_token_flock("gh-token-role");
+    let env = github_token_api_env(dir.path());
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_gh_token();
+
+    let worker =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p1"), "gh_token", None).unwrap();
+    assert_eq!(
+        json!({
+            "token": "fake-author-token",
+            "kind": "author",
+            "role": "worker",
+            "slug": "author-app",
+            "expires_at": 4_102_444_800.0,
+            "cached": true
+        }),
+        worker
+    );
+    assert_eq!(
+        Some(&env.now_s),
+        flock.gh_token_mints.lock().unwrap().get("w1:p1")
+    );
+    let reviewer =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p2"), "gh_token", None).unwrap();
+    assert_eq!("fake-reviewer-token", reviewer["token"]);
+    assert_eq!("reviewer", reviewer["kind"]);
+
+    let owner =
+        dispatch_as_flock_role(&dispatcher, &flock, &env, Some("w1:p3"), "gh_token", None).unwrap();
+    assert_eq!(Value::Null, owner["token"]);
+    assert_eq!(Value::Null, owner["kind"]);
+    assert_eq!("owner", owner["role"]);
+    assert!(owner["note"]
+        .as_str()
+        .unwrap()
+        .contains("keeps their own login"));
+
+    let owner_reviewer = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p3"),
+        "gh_token",
+        args(json!({"kind": "reviewer"})),
+    )
+    .unwrap();
+    assert_eq!("fake-reviewer-token", owner_reviewer["token"]);
+    assert_eq!("reviewer", owner_reviewer["kind"]);
+
+    let forbidden = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "gh_token",
+        args(json!({"kind": "reviewer"})),
+    )
+    .unwrap_err();
+    assert!(forbidden
+        .to_string()
+        .contains("may only act as the author App"));
+
+    let bad_worker_kind = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "gh_token",
+        args(json!({"kind": 7})),
+    )
+    .unwrap_err();
+    assert!(bad_worker_kind
+        .to_string()
+        .contains("may only act as the author App, not 7"));
+
+    let bad_owner_kind = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p3"),
+        "gh_token",
+        args(json!({"kind": 7})),
+    )
+    .unwrap_err();
+    assert!(bad_owner_kind.to_string().contains("unknown app kind 7"));
 }

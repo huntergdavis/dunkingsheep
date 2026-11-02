@@ -36,6 +36,13 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Wall-clock time, in epoch seconds, for request-scoped caches and command timestamps.
     fn now_s(&self) -> f64;
 
+    /// The accepted GitHub App token cache used by `gh_token`.
+    fn github_tokens(&self) -> Result<&crate::github::Tokens, DunkError> {
+        Err(DunkError::Refused(
+            "GitHub token adapter is not wired".into(),
+        ))
+    }
+
     /// Status sources for the `status` handler. Existing fixtures may stage this adapter, but
     /// production dispatch must supply the real daemon snapshot.
     fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
@@ -225,6 +232,17 @@ fn python_value_repr(value: &Value) -> String {
     }
 }
 
+fn python_value_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Array(_) | Value::Object(_) => python_value_repr(value),
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(value) => value.to_string(),
+    }
+}
+
 /// `dunk_roles.clamp_desk_args`: daemon-side result caps for the desk role.
 pub fn clamp_desk_args(command: &str, args: &Args) -> Args {
     let mut args = args.clone();
@@ -334,6 +352,11 @@ impl Dispatcher {
         self.register("superuser_recover", h_superuser_recover);
         self.register("token_issue", h_token_issue);
         self.register("token_revoke", h_token_revoke);
+    }
+
+    /// Register only the T39 GitHub App token handler.
+    pub fn register_gh_token(&mut self) {
+        self.register("gh_token", h_gh_token);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -793,6 +816,65 @@ pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value,
     context
         .flock
         .token_revoke(label, context.self_pane_id(), context.env)
+}
+
+/// `dunk_core.Flock.gh_token` through the accepted T52 token cache.
+pub fn h_gh_token(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let role = context
+        .flock
+        .caller_role(context.self_pane_id(), context.env)?;
+    let requested = args.get("kind").filter(|value| truthy(value));
+    let requested_kind = match requested {
+        None => None,
+        Some(Value::String(kind)) => Some(kind.as_str()),
+        Some(value) if matches!(role.as_str(), "owner" | "system") => {
+            return Err(crate::github::GitHubError(format!(
+                "unknown app kind {}",
+                python_value_repr(value)
+            ))
+            .into());
+        }
+        Some(value) => {
+            let implied = crate::github::kind_for_role(&role, None)?;
+            if let Some(implied) = implied {
+                return Err(crate::github::GitHubError(format!(
+                    "role {role} may only act as the {implied} App, not {}",
+                    python_value_string(value)
+                ))
+                .into());
+            }
+            return Ok(json!({
+                "token": null,
+                "kind": null,
+                "role": role,
+                "note": "this role uses no App token (the owner keeps their own login)"
+            }));
+        }
+    };
+    let Some(kind) = crate::github::kind_for_role(&role, requested_kind)? else {
+        return Ok(json!({
+            "token": null,
+            "kind": null,
+            "role": role,
+            "note": "this role uses no App token (the owner keeps their own login)"
+        }));
+    };
+    let tokens = context.env.github_tokens()?;
+    let entry = context.block_on(tokens.get(kind, None))??;
+    if kind == "author" {
+        if let Some(pane_id) = context.self_pane_id().filter(|pane| !pane.is_empty()) {
+            let now = context.env.now_s();
+            context.flock.record_gh_token_mint(pane_id, now);
+        }
+    }
+    Ok(json!({
+        "token": entry.get("token").cloned().unwrap_or(Value::Null),
+        "kind": kind,
+        "role": role,
+        "slug": entry.get("slug").cloned().unwrap_or(Value::Null),
+        "expires_at": entry.get("expires_at").cloned().unwrap_or(Value::Null),
+        "cached": entry.get("cached").cloned().unwrap_or(Value::Bool(false)),
+    }))
 }
 pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let action = args
