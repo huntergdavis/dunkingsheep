@@ -54,6 +54,31 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn superuser(ns: &Map<String, Value>) -> Outcome {
+    let (rpc, args) = match text(ns, "superuser_command") {
+        Some("status") => ("superuser_status", Map::new()),
+        Some("add") => {
+            let mut args = Map::new();
+            args.insert(
+                "entry".into(),
+                ns.get("entry").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_add", args)
+        }
+        Some("remove") => {
+            let mut args = Map::new();
+            args.insert(
+                "entry".into(),
+                ns.get("entry").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_remove", args)
+        }
+        Some(other) => return not_ported(&format!("superuser {other}")),
+        None => return not_ported("superuser"),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_fleet::render_superuser)
+}
+
 fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
     let sub = text(ns, "context_command").unwrap_or("");
     let path = text(ns, "path")
@@ -1877,6 +1902,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "github" => github(ns),
         "guard" => guard(ns),
         "report" => report(ns),
+        "superuser" => superuser(ns),
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
