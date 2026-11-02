@@ -10,6 +10,18 @@ const OWNER: &str = "w2:p1";
 const WORKER: &str = "w2:p2";
 const OTHER: &str = "w9:p9";
 
+struct NoPanes;
+
+impl crate::flock::panes::PaneInfoEnv for NoPanes {
+    fn list_panes_grouped(&self) -> Vec<serde_json::Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _: &str) -> Option<serde_json::Value> {
+        None
+    }
+}
+
 fn refused<T: std::fmt::Debug>(result: Result<T, DunkError>) -> String {
     result.expect_err("expected a refusal").to_string()
 }
@@ -23,11 +35,52 @@ async fn flock_with_store(tag: &str) -> (crate::testsupport::Scratch<Flock>, Arc
     let dir = scratch.path().to_path_buf();
     let tasks = Arc::new(Tasks::open(dir.join("tasks.db")).await.unwrap());
     let flock = Flock::new(dir.join("launches.json"), dir.join("lanes.json"), false);
+    let roles = crate::roles::Roles::new(
+        &crate::config::Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    flock.attach_roles(roles, None);
     flock.attach_stores(Stores {
         tasks: Some(tasks.clone()),
         ..Default::default()
     });
     (crate::testsupport::Scratch::new(flock, scratch), tasks)
+}
+
+fn register_roles(flock: &crate::testsupport::Scratch<Flock>, registrations: &[(&str, &str)]) {
+    let dir = flock.dir().to_path_buf();
+    let mut roles = crate::roles::Roles::new(
+        &crate::config::Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    for (pane, role) in registrations {
+        roles
+            .register(pane, role, None, None, None, None, None, None)
+            .unwrap();
+    }
+    flock.attach_roles(roles, None);
+}
+
+fn set_service_role(flock: &crate::testsupport::Scratch<Flock>, role: &str) {
+    let dir = flock.dir().to_path_buf();
+    let mut roles = crate::roles::Roles::new(
+        &crate::config::Env::default(),
+        Some(dir.join("roles.json")),
+        Some(dir.join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    let token = roles
+        .issue_token(role, Some("task-add-test"), None)
+        .unwrap();
+    flock.attach_roles(roles, None);
+    flock.set_service_token(Some(&token));
 }
 
 // -- _task_scope ---------------------------------------------------------------------
@@ -389,8 +442,8 @@ async fn task_add_defaults_to_global_low_open_and_unowned() {
             None,
             None,
             TaskAddArgs::default(),
-            "owner",
             Some("w1:p1"),
+            &NoPanes,
         )
         .await
         .unwrap();
@@ -405,14 +458,15 @@ async fn task_add_defaults_to_global_low_open_and_unowned() {
 }
 
 #[tokio::test]
-async fn task_add_resolves_self_and_refuses_lane_roles_assigning_others() {
+async fn task_add_reads_role_from_caller_context() {
     let (flock, _tasks) = flock_with_store("add-owners").await;
+    register_roles(&flock, &[("w1:p1", "worker"), ("w1:p0", "owner")]);
     let mine = TaskAddArgs {
         assignees: &["self"],
         ..Default::default()
     };
     let t = flock
-        .task_add("a", None, None, mine, "worker", Some("w1:p1"))
+        .task_add("a", None, None, mine, Some("w1:p1"), &NoPanes)
         .await
         .unwrap();
     assert_eq!(r#"["w1:p1"]"#, t.assignees);
@@ -420,12 +474,14 @@ async fn task_add_resolves_self_and_refuses_lane_roles_assigning_others() {
         assignees: &["w2:p2"],
         ..Default::default()
     };
-    assert!(flock
-        .task_add("b", None, None, other, "worker", Some("w1:p1"))
+    let error = flock
+        .task_add("b", None, None, other, Some("w1:p1"), &NoPanes)
         .await
-        .is_err());
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("only to yourself"), "{error}");
     assert!(flock
-        .task_add("b", None, None, other, "owner", Some("w1:p1"))
+        .task_add("b", None, None, other, Some("w1:p0"), &NoPanes)
         .await
         .is_ok());
 }
@@ -435,13 +491,13 @@ async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles
     let (flock, _tasks) = flock_with_store("add-refuse").await;
     let args = TaskAddArgs::default();
     let err = flock
-        .task_add("x", Some("w3:p3"), None, args, "owner", None)
+        .task_add("x", Some("w3:p3"), None, args, None, &NoPanes)
         .await
         .unwrap_err()
         .to_string();
     assert!(err.contains("private queue"), "{err}");
     assert!(flock
-        .task_add("  ", None, None, args, "owner", None)
+        .task_add("  ", None, None, args, None, &NoPanes)
         .await
         .is_err());
     let review = TaskAddArgs {
@@ -449,7 +505,7 @@ async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles
         ..Default::default()
     };
     assert!(flock
-        .task_add("r", None, None, review, "worker", Some("w1:p1"))
+        .task_add("r", None, None, review, Some("w1:p1"), &NoPanes)
         .await
         .is_err());
     let blocked = TaskAddArgs {
@@ -457,7 +513,7 @@ async fn task_add_refuses_anonymous_creation_in_a_private_queue_and_blank_titles
         ..Default::default()
     };
     assert!(flock
-        .task_add("s", None, None, blocked, "worker", Some("w1:p1"))
+        .task_add("s", None, None, blocked, Some("w1:p1"), &NoPanes)
         .await
         .is_err());
 }
@@ -654,6 +710,7 @@ fn check_task_add_returns_the_resolved_owners_for_the_store_write() {
 #[tokio::test]
 async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
     let (flock, tasks) = flock_with_store("add-review").await;
+    set_service_role(&flock, "system");
     let args = TaskAddArgs {
         kind: Some("review"),
         author: Some("w7:p7"),
@@ -663,12 +720,12 @@ async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
         ..Default::default()
     };
     let t = flock
-        .task_add("review it", None, None, args, "system", None)
+        .task_add("review it", None, None, args, None, &NoPanes)
         .await
         .unwrap();
     assert_eq!("review", t.kind);
     let again = flock
-        .task_add("again", None, None, args, "system", None)
+        .task_add("again", None, None, args, None, &NoPanes)
         .await;
     let err = again.unwrap_err().to_string();
     assert!(
@@ -681,7 +738,7 @@ async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
         ..Default::default()
     };
     let err = flock
-        .task_add("x", None, None, bare, "system", None)
+        .task_add("x", None, None, bare, None, &NoPanes)
         .await
         .unwrap_err()
         .to_string();
@@ -691,7 +748,7 @@ async fn task_add_stores_kind_author_repo_pr_and_head_for_a_review() {
         ..Default::default()
     };
     let err = flock
-        .task_add("x", None, None, bad, "owner", None)
+        .task_add("x", None, None, bad, None, &NoPanes)
         .await
         .unwrap_err()
         .to_string();
@@ -712,12 +769,12 @@ async fn task_add_deduplicates_assignees_and_task_list_filters_needs_owner() {
         ..Default::default()
     };
     let t = flock
-        .task_add("d", None, None, args, "owner", None)
+        .task_add("d", None, None, args, None, &NoPanes)
         .await
         .unwrap();
     assert_eq!(r#"["w1:p1"]"#, t.assignees);
     let q = flock
-        .task_add("q", None, None, TaskAddArgs::default(), "owner", None)
+        .task_add("q", None, None, TaskAddArgs::default(), None, &NoPanes)
         .await
         .unwrap();
     flock
@@ -725,7 +782,7 @@ async fn task_add_deduplicates_assignees_and_task_list_filters_needs_owner() {
         .await
         .unwrap();
     let w = flock
-        .task_add("w", None, None, TaskAddArgs::default(), "owner", None)
+        .task_add("w", None, None, TaskAddArgs::default(), None, &NoPanes)
         .await
         .unwrap();
     flock
