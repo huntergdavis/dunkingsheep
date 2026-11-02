@@ -9,6 +9,7 @@
 //! NOT in this slice: the handlers themselves.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde_json::{json, Map, Value};
@@ -51,6 +52,11 @@ pub trait CommandEnv: PaneInfoEnv {
     /// Real turn side effects (metrics and next-job observation).
     fn turn_hooks(&self) -> Result<&dyn crate::flock::commands_turns::TurnHooks, DunkError> {
         Err(DunkError::Refused("turn hooks are not wired".into()))
+    }
+
+    /// The retired-pane archive used by `retire_pane`.
+    fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
+        crate::panes::default_path(&crate::config::Env::from_process())
     }
 }
 
@@ -309,6 +315,11 @@ impl Dispatcher {
         self.register("list_panes", h_list_panes);
         self.register("read_pane", h_read_pane);
         self.register("list_workspaces", h_list_workspaces);
+    }
+
+    /// Register only the T37c retire-pane handler.
+    pub fn register_retire_pane(&mut self) {
+        self.register("retire_pane", h_retire_pane);
     }
 
     /// Register only the T39 superuser status/add/remove handlers.
@@ -584,6 +595,68 @@ pub fn h_read_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         "tab_label": pane.get("tab_label"),
         "text": text,
     }))
+}
+
+struct ApiRetireEnv<'ctx, 'request> {
+    context: &'ctx HandlerContext<'request>,
+    retired_path: PathBuf,
+}
+
+impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
+    fn panes(&self) -> Vec<Value> {
+        self.context.env.list_panes_grouped()
+    }
+
+    fn server_error_hint(&self) -> String {
+        self.context
+            .env
+            .terminal()
+            .lock()
+            .map(|terminal| terminal.server_error_hint())
+            .unwrap_or_else(|_| "terminal adapter lock poisoned".into())
+    }
+
+    fn require_superuser(&self, self_pane_id: Option<&str>, action: &str) -> Result<(), DunkError> {
+        self.context
+            .flock
+            .require_superuser(self_pane_id, action, self.context.env)
+    }
+
+    fn mailboxes_of_pane(&self, pane_id: &str) -> Vec<String> {
+        self.context
+            .flock
+            .stores()
+            .inbox
+            .and_then(|store| store.mailboxes_for_pane(pane_id).ok())
+            .unwrap_or_default()
+    }
+
+    fn unread(&self, pane_id: &str) -> Option<i64> {
+        self.context
+            .flock
+            .stores()
+            .inbox
+            .and_then(|store| store.unread_for_pane(pane_id).ok())
+    }
+
+    fn retired_path(&self) -> PathBuf {
+        self.retired_path.clone()
+    }
+}
+
+/// `dunk_api.h_retire_pane`: the flock handler owns the state transition; this adapter supplies
+/// request-scoped pane, role, inbox and config dependencies.
+pub fn h_retire_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let env = ApiRetireEnv {
+        context,
+        retired_path: context.env.retired_panes_path()?,
+    };
+    crate::flock::retire::h_retire_pane(
+        &env,
+        &Value::Object(args),
+        context.self_pane_id(),
+        Some(context.env.now_s()),
+    )
 }
 
 /// `dunk_api.h_list_workspaces`.

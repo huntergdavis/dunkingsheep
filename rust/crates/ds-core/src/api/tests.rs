@@ -17,7 +17,7 @@ use crate::proc::Caller;
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 struct FixedRole(&'static str, bool);
@@ -1844,6 +1844,35 @@ struct PaneApiEnv {
     panes: Vec<Value>,
 }
 
+struct RetirePaneApiEnv {
+    inner: PaneApiEnv,
+    retired_path: PathBuf,
+}
+
+impl PaneInfoEnv for RetirePaneApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.inner.list_panes_grouped()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.inner.get_pane(pane_id)
+    }
+}
+
+impl CommandEnv for RetirePaneApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        self.inner.terminal()
+    }
+
+    fn now_s(&self) -> f64 {
+        self.inner.now_s()
+    }
+
+    fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
+        Ok(self.retired_path.clone())
+    }
+}
+
 impl PaneInfoEnv for PaneApiEnv {
     fn list_panes_grouped(&self) -> Vec<Value> {
         self.panes.clone()
@@ -1915,6 +1944,63 @@ fn pane_api_dispatch(
         &request,
         env,
     )
+}
+
+#[test]
+fn retire_pane_dispatch_is_owner_only_and_requires_a_reason_before_recording() {
+    let (dir, flock) = staffed_flock("api-retire-pane");
+    let retired_path = dir.path().join("retired-panes.json");
+    let env = RetirePaneApiEnv {
+        inner: pane_api_env(),
+        retired_path: retired_path.clone(),
+    };
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_retire_pane();
+
+    let listed = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "retire_pane",
+        Some(serde_json::Map::from_iter([(
+            "action".into(),
+            json!("list"),
+        )])),
+    )
+    .expect("owner can list retired panes");
+    assert_eq!(listed, json!({"retired": [], "count": 0}));
+
+    let refused = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "retire_pane",
+        Some(serde_json::Map::from_iter([
+            ("action".into(), json!("retire")),
+            ("pane".into(), json!("w1:p1")),
+        ])),
+    )
+    .expect_err("retiring without a reason is refused");
+    assert_eq!(refused.to_string(), "'reason' is required");
+    assert!(!retired_path.exists(), "refusal must not create an archive");
+
+    let denied = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "retire_pane",
+        Some(serde_json::Map::from_iter([(
+            "action".into(),
+            json!("list"),
+        )])),
+    )
+    .expect_err("the registry restricts this command to the owner role");
+    assert!(denied
+        .to_string()
+        .contains("not available to role 'worker'"));
 }
 
 #[test]
