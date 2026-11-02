@@ -54,6 +54,20 @@ pub trait CommandEnv: PaneInfoEnv {
         Err(DunkError::Refused("turn hooks are not wired".into()))
     }
 
+    /// Run the accepted Poolrad sync service with request-derived options.
+    fn poolrad_sync(&self, _limit: usize, _dry_run: bool) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "poolrad sync adapter is not wired".into(),
+        ))
+    }
+
+    /// Read the accepted Poolrad progress service.
+    fn poolrad_progress(&self) -> Result<Value, DunkError> {
+        Err(DunkError::Refused(
+            "poolrad progress adapter is not wired".into(),
+        ))
+    }
+
     /// The retired-pane archive used by `retire_pane`.
     fn retired_panes_path(&self) -> Result<PathBuf, DunkError> {
         crate::panes::default_path(&crate::config::Env::from_process())
@@ -334,6 +348,12 @@ impl Dispatcher {
         self.register("superuser_recover", h_superuser_recover);
         self.register("token_issue", h_token_issue);
         self.register("token_revoke", h_token_revoke);
+    }
+
+    /// Register the T39 Poolrad sync and progress handlers.
+    pub fn register_poolrad_sync_progress(&mut self) {
+        self.register("poolrad_sync", h_poolrad_sync);
+        self.register("poolrad_progress", h_poolrad_progress);
     }
 
     /// Register only the T39 task-following API leaf.
@@ -794,6 +814,51 @@ pub fn h_token_revoke(context: &HandlerContext<'_>, args: Args) -> Result<Value,
         .flock
         .token_revoke(label, context.self_pane_id(), context.env)
 }
+fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
+    let Some(value) = args.get("limit").filter(|value| truthy(value)) else {
+        return Ok(6);
+    };
+    let limit = match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value as i64))
+            .ok_or_else(|| DunkError::Refused("cannot convert value to int".into()))?,
+        Value::Bool(value) => i64::from(*value),
+        Value::String(value) => value.trim().parse::<i64>().map_err(|_| {
+            DunkError::Refused(format!(
+                "invalid literal for int() with base 10: {}",
+                py_repr(value)
+            ))
+        })?,
+        Value::Array(_) => {
+            return Err(DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                    .into(),
+            ));
+        }
+        Value::Object(_) => {
+            return Err(DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                    .into(),
+            ));
+        }
+        Value::Null => unreachable!("falsey limit uses the default"),
+    };
+    Ok(usize::try_from(limit.max(0)).unwrap_or(usize::MAX))
+}
+
+/// `dunk_core.Flock.poolrad_sync`: Python applies `int(limit or 6)` and forwards dry-run truth.
+pub fn h_poolrad_sync(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let limit = poolrad_limit(&args)?;
+    let dry_run = args.get("dry_run").is_some_and(truthy);
+    context.env.poolrad_sync(limit, dry_run)
+}
+
+/// `dunk_core.Flock.poolrad_progress`.
+pub fn h_poolrad_progress(context: &HandlerContext<'_>, _args: Args) -> Result<Value, DunkError> {
+    context.env.poolrad_progress()
+}
+
 pub fn h_lanes(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let action = args
         .get("action")

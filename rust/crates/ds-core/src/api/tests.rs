@@ -61,6 +61,154 @@ impl CommandEnv for TestEnv {
     }
 }
 
+#[derive(Default)]
+struct PoolradApiStore {
+    tasks: Mutex<Vec<Value>>,
+}
+
+impl crate::poolrad::PoolradTaskStore for PoolradApiStore {
+    fn list(
+        &self,
+        _scope: Option<&str>,
+        _include_done: bool,
+        _limit: usize,
+        _kind: &str,
+    ) -> Result<Vec<Value>, String> {
+        Ok(self.tasks.lock().unwrap().clone())
+    }
+
+    fn add(
+        &self,
+        _scope: &str,
+        title: &str,
+        body: &str,
+        priority: &str,
+        kind: &str,
+        created_by: &str,
+    ) -> Result<Value, String> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let task = json!({
+            "id": format!("t{}", tasks.len() + 1),
+            "title": title,
+            "body": body,
+            "priority": priority,
+            "kind": kind,
+            "created_by": created_by,
+            "status": "open"
+        });
+        tasks.push(task.clone());
+        Ok(task)
+    }
+}
+
+struct PoolradApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    sync_repo: tempfile::TempDir,
+    progress_repo: tempfile::TempDir,
+    queue_path: PathBuf,
+    credit_path: PathBuf,
+    store: PoolradApiStore,
+}
+
+impl PoolradApiEnv {
+    fn new() -> Self {
+        let sync_repo = tempfile::tempdir().unwrap();
+        let progress_repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(progress_repo.path().join("docs/re")).unwrap();
+        std::fs::write(
+            progress_repo
+                .path()
+                .join("docs/re/strict_full_c_addresses.csv"),
+            "id,name\nOVL_0001_0001,fixture\n",
+        )
+        .unwrap();
+        std::fs::write(
+            progress_repo
+                .path()
+                .join("docs/re/reviewed_function_identities.csv"),
+            "id,name\nOVL_0001_0001,fixture\nOVL_0001_0002,fixture\n",
+        )
+        .unwrap();
+        let queue_path = progress_repo.path().join("strict-queue.json");
+        std::fs::write(
+            &queue_path,
+            r#"{"summary":{"composable_bodies":7,"candidates":4}}"#,
+        )
+        .unwrap();
+        let credit_path = progress_repo.path().join("credit-pending.json");
+        Self {
+            terminal: Mutex::new(Box::new(FakeTerminal::default())),
+            sync_repo,
+            progress_repo,
+            queue_path,
+            credit_path,
+            store: PoolradApiStore::default(),
+        }
+    }
+
+    fn sync_rows() -> Value {
+        json!({
+            "rows": (1..=7).map(|index| json!({
+                "id": format!("OVL_0001_{index:04X}"),
+                "rank": index,
+                "score": 50,
+                "bytes": 100,
+                "grade": "A",
+                "unit": 1,
+                "offset": index,
+                "ovr_offset": index,
+                "instructions": 40,
+                "behaviour": "leaf",
+                "classification": "game_evidenced",
+                "confidence": 0.9,
+                "aliases": [format!("0x1:0x{index:X}")],
+                "prior_translation": null,
+                "callee_readiness": {"composable": true, "ready": 2, "counts": {"strict": 2}}
+            })).collect::<Vec<_>>()
+        })
+    }
+}
+
+impl PaneInfoEnv for PoolradApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    fn get_pane(&self, _pane_id: &str) -> Option<Value> {
+        None
+    }
+}
+
+impl CommandEnv for PoolradApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_000.0
+    }
+
+    fn poolrad_sync(&self, limit: usize, dry_run: bool) -> Result<Value, DunkError> {
+        let rows = Self::sync_rows();
+        let exporter = |_: &Path| Ok(rows.clone());
+        crate::poolrad::PoolradSync::new(&self.store)
+            .with_repo(self.sync_repo.path())
+            .with_exporter(&exporter)
+            .with_credit_path(self.sync_repo.path().join("credit-pending.json"))
+            .run_with(limit, dry_run, "medium")
+            .map_err(DunkError::Refused)
+    }
+
+    fn poolrad_progress(&self) -> Result<Value, DunkError> {
+        crate::poolrad::progress(
+            Some(self.progress_repo.path()),
+            Some(&self.queue_path),
+            Some(&self.credit_path),
+        )
+        .map_err(DunkError::Refused)
+    }
+}
+
 struct CompletionEnv(TestEnv);
 
 impl PaneInfoEnv for CompletionEnv {
@@ -2559,4 +2707,130 @@ fn h_task_follow_rejects_falsey_non_string_scopes() {
     let followers = dispatch(&dispatcher, &flock, &gate, "task_followers", None, None)
         .expect("read followers after invalid scopes");
     assert_eq!(followers, json!({"followers": []}));
+}
+
+#[test]
+fn test_poolrad_sync_files_n_and_never_refiles() {
+    let (_dir, flock) = staffed_flock("api-poolrad-sync");
+    let env = PoolradApiEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_poolrad_sync_progress();
+
+    let dry_run = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": 1, "dry_run": "yes"})),
+    )
+    .unwrap();
+    assert_eq!(dry_run["filed"].as_array().unwrap().len(), 1);
+    assert!(env.store.tasks.lock().unwrap().is_empty());
+
+    let first = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": "2"})),
+    )
+    .unwrap();
+    assert_eq!(first["filed"].as_array().unwrap().len(), 2);
+    assert_eq!(env.store.tasks.lock().unwrap().len(), 2);
+
+    // Python's `int(limit or 6)` makes numeric zero select the default limit.
+    let rest = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        args(json!({"limit": 0})),
+    )
+    .unwrap();
+    assert_eq!(rest["filed"].as_array().unwrap().len(), 5);
+    assert_eq!(env.store.tasks.lock().unwrap().len(), 7);
+
+    let repeated = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "poolrad_sync",
+        None,
+    )
+    .unwrap();
+    assert!(repeated["filed"].as_array().unwrap().is_empty());
+
+    assert_eq!(
+        refusal(dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "poolrad_sync",
+            args(json!({"limit": "bad"})),
+        )),
+        "invalid literal for int() with base 10: 'bad'"
+    );
+    assert_eq!(
+        refusal(dispatch_as_flock_role(
+            &dispatcher,
+            &flock,
+            &env,
+            Some("w1:p1"),
+            "poolrad_sync",
+            args(json!({"limit": [1]})),
+        )),
+        "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+    );
+    assert!(refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "poolrad_sync",
+        None,
+    ))
+    .contains("needs a superuser"));
+}
+
+#[test]
+fn test_poolrad_progress_reports_the_recorded_count() {
+    let (_dir, flock) = staffed_flock("api-poolrad-progress");
+    let env = PoolradApiEnv::new();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_poolrad_sync_progress();
+
+    let report = dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w2:p2"),
+        "poolrad_progress",
+        None,
+    )
+    .unwrap();
+    assert_eq!(report["credited"], 1);
+    assert_eq!(report["identities"], 2);
+    assert_eq!(report["ceiling"], 815);
+    assert_eq!(
+        report["ceiling_note"],
+        "CEILING: 815 is an upper bound, not a verified denominator"
+    );
+    assert_eq!(report["composable_bodies"], 7);
+    assert_eq!(report["queue_candidates"], 4);
+    assert_eq!(report["credit_pending"], 0);
+    assert!(report["queue_exported_at"].is_number());
+
+    assert_eq!(
+        refusal(TestEnv::default().poolrad_sync(6, false)),
+        "poolrad sync adapter is not wired"
+    );
+    assert_eq!(
+        refusal(TestEnv::default().poolrad_progress()),
+        "poolrad progress adapter is not wired"
+    );
 }
