@@ -12,6 +12,7 @@
 use serde_json::{Map, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::context_cmd::context_read;
 use crate::usage_cmd::{ordered_json, usage_command, Outcome};
@@ -309,6 +310,151 @@ fn github(ns: &Map<String, Value>) -> Outcome {
         }
         Some(other) => not_ported(&format!("github {other}")),
         None => not_ported("github"),
+    }
+}
+
+fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Option<Vec<String>>) {
+    let executable = executable.display().to_string();
+    let launch = format!("{executable} mcp");
+    let quoted_executable = serde_json::to_string(&executable).expect("serialize executable path");
+    let json_block = format!(
+        "{{\n  \"mcpServers\": {{\n    \"dunkingsheep\": {{\n      \"command\": {quoted_executable},\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}"
+    );
+    let toml_block =
+        format!("[mcp_servers.dunkingsheep]\ncommand = {quoted_executable}\nargs = [\"mcp\"]\n");
+    match harness {
+        "claude" => {
+            let cmd = vec![
+                "claude".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "--scope".to_string(),
+                scope.to_string(),
+                "dunkingsheep".to_string(),
+                "--".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = shell_join(&cmd);
+            (
+                format!("# Claude Code\n{rendered}\nclaude mcp list   # expect: dunkingsheep: {launch} - Connected\n"),
+                Some(cmd),
+            )
+        }
+        "codex" => {
+            let cmd = vec![
+                "codex".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "dunkingsheep".to_string(),
+                "--".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = shell_join(&cmd);
+            (
+                format!("# OpenAI Codex CLI\n{rendered}\ncodex mcp list    # expect a dunkingsheep row, status enabled\n# or in ~/.codex/config.toml:\n{toml_block}"),
+                Some(cmd),
+            )
+        }
+        "gemini" => {
+            let cmd = vec![
+                "gemini".to_string(),
+                "mcp".to_string(),
+                "add".to_string(),
+                "--scope".to_string(),
+                scope.to_string(),
+                "dunkingsheep".to_string(),
+                executable,
+                "mcp".to_string(),
+            ];
+            let rendered = shell_join(&cmd);
+            (
+                format!("# Gemini CLI\n{rendered}\n# or add the JSON block below to ~/.gemini/settings.json\n"),
+                Some(cmd),
+            )
+        }
+        "cursor" => (
+            format!("# Cursor / Windsurf / VS Code / Claude Desktop: add to the mcp.json (or claude_desktop_config.json) file:\n{json_block}\n"),
+            None,
+        ),
+        "json" => (format!("{json_block}\n"), None),
+        "toml" => (toml_block, None),
+        _ => (String::new(), None),
+    }
+}
+
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn mcp_setup(ns: &Map<String, Value>) -> Outcome {
+    let harness = text(ns, "harness").unwrap_or("all");
+    let scope = text(ns, "scope").unwrap_or("user");
+    let apply = matches!(ns.get("apply"), Some(Value::Bool(true)));
+    let harnesses: &[&str] = if harness == "all" {
+        &["claude", "codex", "gemini", "cursor"]
+    } else {
+        &[harness]
+    };
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return Outcome {
+                stdout: String::new(),
+                stderr: format!("cannot locate dunkingsheep executable: {error}\n"),
+                code: 3,
+            }
+        }
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut code = 0;
+    if harness == "all" {
+        stdout.push_str("Register Dunking Sheep as an MCP server. Pick your harness, or run\n`dunkingsheep mcp-setup <harness> --apply` to have this done for you.\n\n");
+    }
+    for name in harnesses {
+        let (instructions, command) = mcp_setup_text(name, scope, &executable);
+        stdout.push_str(&instructions);
+        stdout.push('\n');
+        if apply && harness != "all" {
+            let Some(command) = command else {
+                stderr = format!("error: {name} has no CLI to apply; paste the block above\n");
+                code = 2;
+                break;
+            };
+            let path_env = std::env::var("PATH").unwrap_or_default();
+            if find_executable(&command[0], &path_env).is_none() {
+                stderr = format!("error: {} is not on PATH\n", command[0]);
+                code = 3;
+                break;
+            }
+            stdout.push_str(&format!("$ {}\n", command.join(" ")));
+            match Command::new(&command[0])
+                .args(&command[1..])
+                .stdin(Stdio::inherit())
+                .output()
+            {
+                Ok(output) => {
+                    stdout.push_str(&String::from_utf8_lossy(&output.stdout));
+                    stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+                    code = output.status.code().unwrap_or(1);
+                }
+                Err(error) => {
+                    stderr = format!("error: cannot run {}: {error}\n", command[0]);
+                    code = 3;
+                }
+            }
+            break;
+        }
+    }
+    Outcome {
+        stdout,
+        stderr,
+        code,
     }
 }
 
@@ -1412,12 +1558,160 @@ fn review(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn load_report(ns: &Map<String, Value>) -> Outcome {
+    let mut client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let mut args = Map::new();
+    args.insert("limit".into(), Value::from(500));
+    let result = match crate::daemon_cmd::call(&mut client, "task_list", args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+    let tasks = result
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let callers = ds_core::load::registered_callers(tasks);
+    let policies_path = text(ns, "policies").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+            .join(".config/dunkingsheep/load-policies.json")
+    });
+    let policies = std::fs::read(&policies_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| {
+            let agents = value
+                .get("agents")
+                .filter(|v| v.as_object().is_some_and(|object| !object.is_empty()));
+            agents.or(Some(&value)).and_then(Value::as_object).cloned()
+        });
+    let env = ds_core::config::Env::from_process();
+    let state_path = match ds_core::load::default_state_path(&env) {
+        Ok(path) => path,
+        Err(error) => return load_failure(error.to_string(), 3),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64());
+    let evaluate = |sample: &Map<String, Value>, policy: &Map<String, Value>| {
+        ds_core::policy::evaluate(sample, policy).map_err(|error| error.to_string())
+    };
+    let report =
+        match ds_core::load::collect(&callers, now, policies.as_ref(), &evaluate, &state_path) {
+            Ok(report) => report,
+            Err(error) => return load_failure(error.to_string(), error.exit_code().max(2)),
+        };
+    if matches!(ns.get("json"), Some(Value::Bool(true))) {
+        Outcome {
+            stdout: format!("{}\n", crate::usage_cmd::ordered_json(&report)),
+            stderr: String::new(),
+            code: 0,
+        }
+    } else {
+        Outcome {
+            stdout: crate::render_print::render_load(&report),
+            stderr: String::new(),
+            code: 0,
+        }
+    }
+}
+
+fn load_failure(message: String, code: i32) -> Outcome {
+    Outcome {
+        stdout: String::new(),
+        stderr: format!("error: {message}\n"),
+        code,
+    }
+}
+
+fn allocation(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    for key in [
+        "action", "pane_id", "pool", "pools", "roles", "skills", "requires", "task_id", "revision",
+        "body",
+    ] {
+        if let Some(value) = ns.get(key).filter(|value| !value.is_null()) {
+            args.insert(key.to_string(), value.clone());
+        }
+    }
+    if text(ns, "action") == Some("register") {
+        args.insert(
+            "enabled".into(),
+            Value::Bool(!matches!(ns.get("disable"), Some(Value::Bool(true)))),
+        );
+    }
+    crate::daemon_cmd::run_command(
+        ns,
+        "allocation",
+        args,
+        crate::render_print::render_json_indent2,
+    )
+}
+
+fn report(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "report_command") {
+        Some("list") => {
+            let mut args = Map::new();
+            args.insert(
+                "out_dir".into(),
+                ns.get("out_dir").cloned().unwrap_or(Value::Null),
+            );
+            let stamp = |at: f64| {
+                use chrono::TimeZone;
+                chrono::Local
+                    .timestamp_opt(at.floor() as i64, 0)
+                    .single()
+                    .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default()
+            };
+            crate::daemon_cmd::run_command(ns, "report_list", args, |result| {
+                crate::render_print::render_report_list(result, &stamp)
+            })
+        }
+        Some("run") => {
+            let prose = if let Some(path) = text(ns, "prose_file").filter(|p| !p.is_empty()) {
+                match std::fs::read_to_string(path) {
+                    Ok(prose) => prose,
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("error: {error}\n"),
+                            code: 3,
+                        }
+                    }
+                }
+            } else {
+                text(ns, "prose").unwrap_or_default().to_string()
+            };
+            let mut args = Map::new();
+            args.insert(
+                "post".into(),
+                Value::Bool(!matches!(ns.get("no_post"), Some(Value::Bool(true)))),
+            );
+            if !prose.is_empty() {
+                args.insert("prose".into(), Value::String(prose));
+            }
+            if let Some(out_dir) = text(ns, "out_dir").filter(|value| !value.is_empty()) {
+                args.insert("out_dir".into(), Value::String(out_dir.to_string()));
+            }
+            crate::daemon_cmd::run_command(ns, "report_run", args, |result| {
+                crate::render_fleet::render_report_run(result)
+            })
+        }
+        Some(other) => not_ported(&format!("report {other}")),
+        None => not_ported("report"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
     let json = matches!(ns.get("json"), Some(Value::Bool(true)));
     match command {
         "install" => install_launcher(ns, json),
+        "mcp-setup" => mcp_setup(ns),
         "context" => context(ns, json),
         // `secrets-check [--base REF] [--cwd DIR] [--quiet]`: exit 1 + the refusal on stderr.
         "secrets-check" => crate::secrets_cmd::secrets_check_command(
@@ -1436,6 +1730,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "report" => report(ns),
+        "allocation" => allocation(ns),
+        "load" => load_report(ns),
         "pm" => pm(ns),
         "owner" => match text(ns, "owner_command") {
             Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
@@ -1789,6 +2086,52 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 };
                 crate::daemon_cmd::run_command(ns, "inbox_status", args, |result| {
                     crate::render_print::render_inbox_status(result, &stamp)
+                })
+            }
+            "archive" => {
+                let mut args = Map::new();
+                args.insert(
+                    "mailbox".into(),
+                    ns.get("mailbox").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "before".into(),
+                    ns.get("before").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "state".into(),
+                    ns.get("state")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("queued,acked".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_archive", args, |result| {
+                    crate::render_print::render_inbox_archive(result)
+                })
+            }
+            "stats" => crate::daemon_cmd::run_command(
+                ns,
+                "inbox_stats",
+                Map::new(),
+                crate::render_fleet::render_inbox_stats,
+            ),
+            "fetch" => {
+                let mut args = Map::new();
+                args.insert(
+                    "attachment_id".into(),
+                    ns.get("attachment_id").cloned().unwrap_or(Value::Null),
+                );
+                args.insert(
+                    "dest".into(),
+                    ns.get("dest")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(".".into())),
+                );
+                crate::daemon_cmd::run_command(ns, "inbox_fetch", args, |result| {
+                    format!(
+                        "wrote {} ({} bytes)\n",
+                        crate::render_fleet::py_str(&result["path"]),
+                        crate::render_fleet::py_str(&result["size"])
+                    )
                 })
             }
             _ => not_ported("inbox"),
