@@ -447,6 +447,7 @@ class FlockClient:
     def _call_once(self, request):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
+        reader = None
         try:
             # Retry only the connect: a 20-agent burst can overflow a short listen
             # backlog. Once connected, do not retry (the command may have run).
@@ -464,7 +465,11 @@ class FlockClient:
                 reader = sock.makefile("rb")
                 raw = reader.readline()
             finally:
-                sock.close()
+                # socket.makefile() owns a reference to the descriptor. Closing
+                # only sock leaves the connection open while an exception
+                # traceback retains this frame (notably a timed-out readline).
+                if reader is not None:
+                    reader.close()
         finally:
             # A failed connect used to escape without closing the socket, so a
             # retry storm leaked one fd per attempt on the client side too.
