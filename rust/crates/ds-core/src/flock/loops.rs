@@ -47,14 +47,14 @@ pub trait ReaperEnv: Send + Sync {
     /// `getattr(self.herdr, "live", False)`: only a live backend may move real work.
     fn is_live(&self) -> bool;
     /// `_clear_historical_errors(panes)`.
-    fn clear_historical_errors(&self, panes: &BTreeSet<String>) -> LoopFuture<'_, ()>;
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()>;
     /// The inbox sweeps: `mark_undeliverable(panes)`, `auto_archive_undeliverable()`,
     /// `_archive_retired_inbox(pane_list)`.
-    fn inbox_maintenance(
-        &self,
-        panes: &BTreeSet<String>,
-        pane_list: &[Value],
-    ) -> LoopFuture<'_, ()>;
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        pane_list: &'a [Value],
+    ) -> LoopFuture<'a, ()>;
     /// `self.memory.recover_leases()` + `requeue_partial()`: deterministic self-repair.
     fn memory_maintenance(&self) -> LoopFuture<'_, ()>;
     /// `self.last_message = "Requeued N task(s) (...)"`.

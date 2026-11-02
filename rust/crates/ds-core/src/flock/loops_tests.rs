@@ -41,7 +41,7 @@ impl ReaperEnv for Fake {
     fn is_live(&self) -> bool {
         self.live
     }
-    fn clear_historical_errors(&self, panes: &BTreeSet<String>) -> LoopFuture<'_, ()> {
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
         Box::pin(async move {
             self.log
                 .lock()
@@ -49,7 +49,11 @@ impl ReaperEnv for Fake {
                 .push(format!("clear {}", panes.len()));
         })
     }
-    fn inbox_maintenance(&self, panes: &BTreeSet<String>, _: &[Value]) -> LoopFuture<'_, ()> {
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        _: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
         Box::pin(async move {
             self.log
                 .lock()
@@ -92,7 +96,7 @@ impl ReaperEnv for OrderedFake {
         true
     }
 
-    fn clear_historical_errors(&self, _: &BTreeSet<String>) -> LoopFuture<'_, ()> {
+    fn clear_historical_errors<'a>(&'a self, _: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
         Box::pin(async move {
             self.record("clear:start");
             tokio::task::yield_now().await;
@@ -100,7 +104,11 @@ impl ReaperEnv for OrderedFake {
         })
     }
 
-    fn inbox_maintenance(&self, _: &BTreeSet<String>, _: &[Value]) -> LoopFuture<'_, ()> {
+    fn inbox_maintenance<'a>(
+        &'a self,
+        _: &'a BTreeSet<String>,
+        _: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
         Box::pin(async move {
             self.record("inbox:start");
             tokio::task::yield_now().await;

@@ -326,15 +326,15 @@ impl ReaperEnv for LoopRuntimeAdapter {
         self.helper_reaperenv_is_live()
     }
 
-    fn clear_historical_errors(&self, panes: &BTreeSet<String>) -> LoopFuture<'_, ()> {
+    fn clear_historical_errors<'a>(&'a self, panes: &'a BTreeSet<String>) -> LoopFuture<'a, ()> {
         self.helper_reaperenv_clear_historical_errors(panes)
     }
 
-    fn inbox_maintenance(
-        &self,
-        panes: &BTreeSet<String>,
-        pane_list: &[Value],
-    ) -> LoopFuture<'_, ()> {
+    fn inbox_maintenance<'a>(
+        &'a self,
+        panes: &'a BTreeSet<String>,
+        pane_list: &'a [Value],
+    ) -> LoopFuture<'a, ()> {
         self.helper_reaperenv_inbox_maintenance(panes, pane_list)
     }
 
