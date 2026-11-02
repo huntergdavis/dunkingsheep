@@ -34,6 +34,7 @@ mod claim;
 pub mod next_job;
 pub mod next_job_runtime;
 mod pane_view;
+pub mod wire;
 pub use claim::{
     claimable, refusal, CallerAlive, Candidate, ClaimOptions, ClaimOutcome, Refusal, Requeued,
 };

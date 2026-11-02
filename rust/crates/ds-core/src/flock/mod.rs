@@ -802,6 +802,7 @@ pub mod send_keys;
 pub mod sends;
 pub mod status;
 pub mod status_runtime;
+pub mod task_wire;
 pub mod views;
 
 #[cfg(test)]
