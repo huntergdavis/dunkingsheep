@@ -15,6 +15,8 @@
 //! unknowable composer boundary.
 
 use serde_json::{json, Value};
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,10 +50,21 @@ pub(crate) struct TypingLock {
 
 /// An acquired global typing lock. Drop restores the previous owner and releases
 /// one reentrant level, including when a burst returns early or unwinds.
+///
+/// This guard is intentionally not `Send`: its destructor must run on the same
+/// thread that acquired the reentrant lock. The type system rejects moving it:
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// fn typing_guard_must_not_be_send() {
+///     require_send::<ds_core::flock::sends::TypingGuard<'static>>();
+/// }
+/// ```
 #[derive(Debug)]
 pub struct TypingGuard<'a> {
     lock: &'a TypingLock,
     previous_owner: Option<(String, f64)>,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for TypingGuard<'_> {
@@ -176,6 +189,7 @@ impl Flock {
         Ok(TypingGuard {
             lock: &self.typing_lock,
             previous_owner,
+            _not_send: PhantomData,
         })
     }
 }
