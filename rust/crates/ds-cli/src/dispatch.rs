@@ -29,6 +29,19 @@ fn task_stamp(at: f64) -> String {
         .unwrap_or_default()
 }
 
+fn joined_words(ns: &Map<String, Value>, key: &str) -> String {
+    ns.get(key)
+        .and_then(Value::as_array)
+        .map(|words| {
+            words
+                .iter()
+                .map(crate::render_fleet::py_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
 fn not_ported(command: &str) -> Outcome {
     Outcome {
         stdout: String::new(),
@@ -817,6 +830,61 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             }
             _ => not_ported("task"),
         },
+        "fire" | "test" => {
+            let mut args = Map::new();
+            args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+            args.insert(
+                "countdown_s".into(),
+                ns.get("countdown").cloned().unwrap_or(Value::from(0)),
+            );
+            args.insert("wait".into(), Value::Bool(true));
+            crate::daemon_cmd::run_command(ns, "fire_dunk", args, |result| {
+                let state = if crate::render_print::truthy(&result["queued"]) {
+                    "queued"
+                } else if crate::render_print::truthy(&result["ok"]) {
+                    "sent"
+                } else {
+                    "FAILED"
+                };
+                format!(
+                    "{}: {state} ({})\n",
+                    crate::render_fleet::py_str(&result["id"]),
+                    crate::render_fleet::py_str(&result["message"])
+                )
+            })
+        }
+        "send" | "send-keys" => {
+            let is_keys = command == "send-keys";
+            let mut args = Map::new();
+            args.insert(
+                "target".into(),
+                ns.get("target").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                if is_keys { "keys" } else { "text" }.into(),
+                Value::String(joined_words(ns, if is_keys { "keys" } else { "text" })),
+            );
+            args.insert(
+                "hold_while_typing".into(),
+                Value::Bool(!matches!(ns.get("ignore_typing"), Some(Value::Bool(true)))),
+            );
+            args.insert(
+                "wait_s".into(),
+                Value::from(ns.get("wait").and_then(Value::as_f64).unwrap_or(10.0)),
+            );
+            args.insert(
+                "desk_token".into(),
+                ns.get("desk_token").cloned().unwrap_or(Value::Null),
+            );
+            if !is_keys {
+                args.insert(
+                    "press_enter".into(),
+                    Value::Bool(!matches!(ns.get("no_enter"), Some(Value::Bool(true)))),
+                );
+            }
+            let rpc = if is_keys { "send_keys" } else { "send_text" };
+            crate::daemon_cmd::run_command(ns, rpc, args, crate::render_fleet::render_message)
+        }
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
         "status" => {
