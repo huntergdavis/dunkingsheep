@@ -305,6 +305,29 @@ class TimerTests(unittest.TestCase):
                                999: {"state": "closed"}}
         return task
 
+    def test_cleanup_uses_state_from_real_github_detail_wrapper(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        for state in ("open", "closed"):
+            with self.subTest(state=state), \
+                    patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                    patch.object(dunk_github, "_request", return_value=(200, {
+                        "state": state, "head": {"sha": task["head"]}})) as request:
+                report = self.sync.run()
+                request.assert_called_once_with(
+                    "GET", f"{dunk_github.API}/repos/o/r/pulls/{task['pr']}",
+                    token="tok-reviewer")
+                self.assertEqual([task["id"]] if state == "closed" else [], report["cancelled"])
+
+    def test_real_github_detail_preserves_state_and_head_without_invention(self):
+        for response in ({}, {"state": "open", "head": {"sha": "b" * 40}}):
+            with self.subTest(response=response), \
+                    patch.object(dunk_github, "_request", return_value=(200, response)):
+                detail = dunk_github.pull_detail("o/r", 7, "fake-token")
+                self.assertEqual(response.get("state"), detail["state"])
+                self.assertEqual(response.get("head"), detail["head"])
+
     def test_cleanup_preserves_open_review_omitted_by_stale_list(self):
         self.sync.run()
         task = self.flock.tasks.list(kind="review", include_done=False)[0]
