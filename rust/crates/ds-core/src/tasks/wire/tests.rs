@@ -17,6 +17,16 @@ tasks = ReadTasks.__new__(ReadTasks)
 flock = Flock.__new__(Flock)
 flock.tasks = tasks
 method, args = sys.argv[2], json.loads(sys.argv[3])
+if method == 'task_add_plan':
+    # Run the actual Python role/default path, capturing its store-call arguments
+    # instead of writing. The fixture role is not a production API parameter.
+    role = args.pop('_fixture_role')
+    flock.caller_role = lambda pane: role
+    class PlanTasks:
+        def add(self, scope, title, **kwargs):
+            return dict(scope=scope, title=title, **kwargs)
+    flock.tasks = PlanTasks()
+    method = 'task_add'
 try:
     target = flock if method.startswith('task_') else tasks
     print(json.dumps({'ok': getattr(target, method)(**args)}))

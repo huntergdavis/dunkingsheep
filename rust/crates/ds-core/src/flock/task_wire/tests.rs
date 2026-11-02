@@ -80,6 +80,29 @@ async fn flock_task_wire_add_uses_request_environment_roles_defaults_and_full_ro
         "the supplied live PaneInfoEnv must reach caller_role"
     );
     assert_eq!(low.typed.priority, "low");
+    let python_low = oracle(
+        tasks.path(),
+        "task_add_plan",
+        json!({
+            "title":"default","self_pane_id":"%4","_fixture_role":"worker"
+        }),
+    );
+    for key in [
+        "scope",
+        "title",
+        "body",
+        "status",
+        "priority",
+        "assignees",
+        "created_by",
+        "multi_assignee",
+        "kind",
+    ] {
+        assert_eq!(
+            low.wire[key], python_low["ok"][key],
+            "Python task_add default {key}"
+        );
+    }
     assert_eq!(low.wire["created_by"], "%4");
     assert_eq!(low.wire["assignees"], json!([]));
     assert_eq!(low.wire["children"], json!([]));
@@ -108,6 +131,28 @@ async fn flock_task_wire_add_uses_request_environment_roles_defaults_and_full_ro
         .await
         .unwrap();
     assert_eq!(high.typed.priority, "high");
+    let python_high = oracle(
+        tasks.path(),
+        "task_add_plan",
+        json!({
+            "title":"explicit","scope":"self","body":"body","priority":"high",
+            "parent_id":low.typed.id,"assignees":["me"],"self_pane_id":"%4","_fixture_role":"worker"
+        }),
+    );
+    for key in [
+        "scope",
+        "title",
+        "body",
+        "priority",
+        "assignees",
+        "parent_id",
+        "created_by",
+    ] {
+        assert_eq!(
+            high.wire[key], python_high["ok"][key],
+            "Python task_add explicit {key}"
+        );
+    }
     assert_eq!(high.wire["scope"], "%4");
     assert_eq!(high.wire["assignees"], json!(["%4"]));
     assert_eq!(high.wire["parent"]["id"], low.typed.id);
@@ -147,6 +192,16 @@ async fn flock_task_wire_add_uses_request_environment_roles_defaults_and_full_ro
         .unwrap_err()
         .to_string();
     assert_eq!(refused,"task add may assign only to yourself for role worker; handing work to another lane is the owner's (lanes pull with task next)");
+    assert_eq!(
+        refused,
+        oracle(
+            tasks.path(),
+            "task_add_plan",
+            json!({
+                "title":"delegate","assignees":["%9"],"self_pane_id":"%4","_fixture_role":"worker"
+            })
+        )["error"]
+    );
     let delegated = flock
         .task_add_wire(
             "delegate",
