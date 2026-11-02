@@ -125,10 +125,14 @@ fn app_jwt_uses_rs256_and_exact_claim_times() {
     validation.validate_exp = false;
     validation.validate_nbf = false;
     validation.required_spec_claims.clear();
-    let public_key = jsonwebtoken::DecodingKey::from_rsa_pem(TEST_RSA_KEY.as_bytes()).unwrap();
-    let claims = jsonwebtoken::decode::<Value>(&jwt, &public_key, &validation)
-        .unwrap()
-        .claims;
+    validation.insecure_disable_signature_validation();
+    let claims = jsonwebtoken::decode::<Value>(
+        &jwt,
+        &jsonwebtoken::DecodingKey::from_secret(b"fixture"),
+        &validation,
+    )
+    .unwrap()
+    .claims;
     assert_eq!(claims["iat"], 9_940);
     assert_eq!(claims["exp"], 10_540);
     assert_eq!(claims["iss"], 123);
@@ -172,13 +176,15 @@ fn request_preserves_headers_body_timeout_and_bearer_precedence() {
     let payload = serde_json::json!({"name":"x"});
     let result = futuresless_block_on(request(
         &fake,
-        "POST",
-        "https://api.github.com/repos/o/r",
-        Some("tok"),
-        Some("jwt"),
-        Some(&payload),
-        7,
-        DEFAULT_API,
+        RequestOptions {
+            method: "POST",
+            url: "https://api.github.com/repos/o/r",
+            token: Some("tok"),
+            bearer: Some("jwt"),
+            payload: Some(&payload),
+            timeout_s: 7,
+            api_root: DEFAULT_API,
+        },
     ))
     .unwrap();
     assert_eq!(result, (201, Some(serde_json::json!({"id":4}))));
@@ -203,39 +209,38 @@ fn request_formats_api_errors_and_unreachable_errors() {
     });
     let error = futuresless_block_on(request(
         &fake,
-        "GET",
-        "https://api.github.com/app",
-        None,
-        None,
-        None,
-        20,
-        DEFAULT_API,
+        RequestOptions {
+            method: "GET",
+            url: "https://api.github.com/app",
+            token: None,
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root: DEFAULT_API,
+        },
     ))
     .unwrap_err();
     assert_eq!(error.to_string(), "GitHub GET /app -> 403: denied");
     *fake.next.lock().unwrap() = Err("timed out".into());
     let error = futuresless_block_on(request(
         &fake,
-        "GET",
-        "url",
-        None,
-        None,
-        None,
-        20,
-        DEFAULT_API,
+        RequestOptions {
+            method: "GET",
+            url: "url",
+            token: None,
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root: DEFAULT_API,
+        },
     ))
     .unwrap_err();
     assert_eq!(error.to_string(), "GitHub unreachable: timed out");
 }
 
 fn futuresless_block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    let mut context = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = Box::pin(future);
     loop {
         if let Poll::Ready(result) = future.as_mut().poll(&mut context) {

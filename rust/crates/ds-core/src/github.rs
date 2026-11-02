@@ -82,7 +82,8 @@ pub fn load_app(
     let path = app_file(kind, config_dir);
     let raw = fs.read_config(&path).map_err(|_| {
         GitHubError(format!(
-            "no GitHub App registered as {kind:?}: {} is missing (create it with the manifest page, docs/FLAT_FLEET.md 6.1)",
+            "no GitHub App registered as {}: {} is missing (create it with the manifest page, docs/FLAT_FLEET.md 6.1)",
+            python_repr(kind),
             path.display()
         ))
     })?;
@@ -109,7 +110,8 @@ pub fn load_app(
         .unwrap_or(default_pem);
     if !fs.key_exists(&pem) {
         return Err(GitHubError(format!(
-            "GitHub App {kind:?} private key missing: {}",
+            "GitHub App {} private key missing: {}",
+            python_repr(kind),
             pem.display()
         )));
     }
@@ -134,7 +136,7 @@ fn is_falsey(value: &Value) -> bool {
 fn python_int(value: &Value) -> Result<i64, GitHubError> {
     match value {
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
-            .ok_or_else(|| GitHubError(format!("int() argument must be a string, a bytes-like object or a real number, not 'float'"))),
+            .ok_or_else(|| GitHubError("int() argument must be a string, a bytes-like object or a real number, not 'float'".into())),
         Value::String(s) => s.trim().parse::<i64>().map_err(|_| {
             GitHubError(format!("invalid literal for int() with base 10: {s:?}"))
         }),
@@ -203,6 +205,16 @@ pub trait GitHubTransport: Send + Sync {
 
 pub type PinBoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+pub struct RequestOptions<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub token: Option<&'a str>,
+    pub bearer: Option<&'a str>,
+    pub payload: Option<&'a Value>,
+    pub timeout_s: u64,
+    pub api_root: &'a str,
+}
+
 #[derive(Clone, Default)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -242,14 +254,17 @@ impl GitHubTransport for ReqwestTransport {
 
 pub async fn request(
     transport: &dyn GitHubTransport,
-    method: &str,
-    url: &str,
-    token: Option<&str>,
-    bearer: Option<&str>,
-    payload: Option<&Value>,
-    timeout_s: u64,
-    api_root: &str,
+    options: RequestOptions<'_>,
 ) -> Result<(u16, Option<Value>), GitHubError> {
+    let RequestOptions {
+        method,
+        url,
+        token,
+        bearer,
+        payload,
+        timeout_s,
+        api_root,
+    } = options;
     let mut headers = BTreeMap::from([
         ("Accept".into(), "application/vnd.github+json".into()),
         ("User-Agent".into(), "dunkingsheep".into()),
@@ -374,15 +389,18 @@ impl Tokens {
     }
 
     pub async fn installation_id(&self, app: &AppConfig, bearer: &str) -> Result<i64, GitHubError> {
+        let url = format!("{}/app/installations", self.api_root);
         let (_, result) = request(
             &*self.transport,
-            "GET",
-            &format!("{}/app/installations", self.api_root),
-            None,
-            Some(bearer),
-            None,
-            20,
-            &self.api_root,
+            RequestOptions {
+                method: "GET",
+                url: &url,
+                token: None,
+                bearer: Some(bearer),
+                payload: None,
+                timeout_s: 20,
+                api_root: &self.api_root,
+            },
         )
         .await?;
         let installs = result
