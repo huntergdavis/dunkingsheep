@@ -2952,25 +2952,6 @@ fn cli_route_10_context_local_seed() {
     assert!(!cwd.join("ground-truth").exists());
     assert!(!cwd.join("fact").exists());
 
-    let empty_path_snapshot = run_local_context_cli(
-        &cwd,
-        &config,
-        "0",
-        &[
-            "context".to_string(),
-            "snapshot".to_string(),
-            "--path".to_string(),
-            String::new(),
-        ],
-    );
-    assert_eq!(Some(0), empty_path_snapshot.status.code());
-    assert!(empty_path_snapshot.stderr.is_empty());
-    let empty_path_snapshot: Value = serde_json::from_slice(&empty_path_snapshot.stdout).unwrap();
-    assert_eq!(
-        ".dunkingsheep",
-        empty_path_snapshot["stores"]["project"]["path"]
-    );
-
     let init = run_local_context_cli(
         &cwd,
         &config,
@@ -3043,6 +3024,25 @@ fn cli_route_10_context_local_seed() {
     assert!(
         !ledger.exists(),
         "unauthorized adopt must not create the ledger"
+    );
+
+    let empty_path_snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "snapshot".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_snapshot.status.code());
+    assert!(empty_path_snapshot.stderr.is_empty());
+    let empty_path_snapshot: Value = serde_json::from_slice(&empty_path_snapshot.stdout).unwrap();
+    assert_eq!(
+        ".dunkingsheep",
+        empty_path_snapshot["stores"]["project"]["path"]
     );
 
     let snapshot = run_local_context_cli(
