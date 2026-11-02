@@ -6,17 +6,30 @@ use serde_json::Value;
 
 use super::LoopRuntimeAdapter;
 use crate::error::{refusal, DunkError};
+use crate::flock::lanes::pane_to_json;
 use crate::flock::loop_env::LoopFuture;
-use crate::flock::mailbox::MailboxEnv;
 use crate::roles::DEFAULT_ROLE;
+use crate::terminal::Terminal;
 
 impl LoopRuntimeAdapter {
     #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
     pub(crate) fn helper_pushenv_list_panes<'a>(
         &'a self,
     ) -> LoopFuture<'a, Result<Vec<Value>, DunkError>> {
-        let worker =
-            self.with_loop_terminal(|_, terminal| MailboxEnv::try_list_panes_grouped(terminal));
+        let worker = self.with_loop_terminal(|_, terminal| {
+            terminal.with_terminal(|backend| {
+                backend
+                    .try_list_panes_grouped()
+                    .map(|grouped| {
+                        grouped
+                            .into_values()
+                            .flatten()
+                            .map(|pane| pane_to_json(&pane, None))
+                            .collect()
+                    })
+                    .map_err(|error| DunkError::Refused(error.to_string()))
+            })
+        });
         Box::pin(async move {
             worker
                 .await
@@ -113,14 +126,16 @@ mod tests {
             Arc::clone(&flock),
             Arc::new(|| {
                 let mut terminal = FakeTerminal::new();
-                terminal.available = false;
+                terminal.fail_grouped_panes = Some(crate::terminal::TerminalError::unavailable(
+                    "pane listing failed",
+                ));
                 Box::new(terminal) as Box<dyn Terminal>
             }),
         );
         let error = runtime
             .block_on(async { unavailable.helper_pushenv_list_panes().await })
             .expect_err("listing failure is surfaced");
-        assert!(error.to_string().contains("tmux server not running"));
+        assert!(error.to_string().contains("pane listing failed"));
 
         let no_roles_flock = Arc::new(Flock::new(
             dir.path().join("no-roles-launches.json"),
