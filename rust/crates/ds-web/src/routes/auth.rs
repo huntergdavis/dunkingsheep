@@ -6,7 +6,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::{
     extract::{ConnectInfo, Extension, Json},
-    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Router,
@@ -18,6 +18,25 @@ const SESSION_COOKIE: &str = "vp_session";
 const SESSION_MAX_AGE: u64 = 7 * 24 * 60 * 60;
 
 pub type AuthFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Trusted external scheme for same-origin checks and login return URLs.
+/// Configure this from the web application's transport or trusted proxy setup,
+/// never directly from a client-supplied forwarding header.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RequestScheme {
+    #[default]
+    Http,
+    Https,
+}
+
+impl RequestScheme {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
 
 /// The route boundary for credential and session operations. The production
 /// adapter owns hashing, persistence, rate limiting, and session expiry.
@@ -90,20 +109,28 @@ struct PasswordBody {
 /// Mount the auth routes. The outer web application supplies its backend as
 /// an `Extension<Arc<dyn AuthBackend>>`, keeping persistence out of handlers.
 pub fn router() -> Router {
+    router_with_scheme(RequestScheme::Http)
+}
+
+/// Mount auth routes with the externally visible request scheme. When TLS
+/// terminates at a reverse proxy, the application must set this from its
+/// trusted proxy configuration rather than accepting client forwarding headers.
+pub fn router_with_scheme(scheme: RequestScheme) -> Router {
     Router::new()
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/password", post(change_password))
+        .layer(Extension(scheme))
 }
 
 async fn login(
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
     ConnectInfo(address): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
-    uri: Uri,
     Json(body): Json<LoginBody>,
 ) -> Response {
-    if let Some(response) = same_origin(&headers, uri.scheme_str()) {
+    if let Some(response) = same_origin(&headers, scheme) {
         return response;
     }
     let address = address.ip().to_string();
@@ -112,7 +139,7 @@ async fn login(
             let next = body
                 .next
                 .as_deref()
-                .and_then(|next| safe_next(next, &headers, &uri));
+                .and_then(|next| safe_next(next, &headers, scheme));
             let mut response =
                 Json(json!({"ok": true, "next": next.unwrap_or_else(|| "/dash/cos".to_owned())}))
                     .into_response();
@@ -125,10 +152,10 @@ async fn login(
 
 async fn logout(
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
-    uri: Uri,
 ) -> Response {
-    if let Some(response) = same_origin(&headers, uri.scheme_str()) {
+    if let Some(response) = same_origin(&headers, scheme) {
         return response;
     }
     let cookie = cookie_value(&headers, SESSION_COOKIE);
@@ -148,11 +175,11 @@ async fn logout(
 
 async fn change_password(
     Extension(backend): Extension<Arc<dyn AuthBackend>>,
+    Extension(scheme): Extension<RequestScheme>,
     headers: HeaderMap,
-    uri: Uri,
     Json(body): Json<PasswordBody>,
 ) -> Response {
-    if let Some(response) = same_origin(&headers, uri.scheme_str()) {
+    if let Some(response) = same_origin(&headers, scheme) {
         return response;
     }
     if !(12..=200).contains(&body.new_password.chars().count()) {
@@ -190,14 +217,13 @@ async fn change_password(
     }
 }
 
-fn same_origin(headers: &HeaderMap, uri_scheme: Option<&str>) -> Option<Response> {
+fn same_origin(headers: &HeaderMap, scheme: RequestScheme) -> Option<Response> {
     let origin = headers.get(header::ORIGIN)?.to_str().ok()?;
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let scheme = uri_scheme.unwrap_or("http");
-    if origin != format!("{scheme}://{host}") {
+    if origin != format!("{}://{host}", scheme.as_str()) {
         Some(
             (
                 StatusCode::FORBIDDEN,
@@ -210,7 +236,7 @@ fn same_origin(headers: &HeaderMap, uri_scheme: Option<&str>) -> Option<Response
     }
 }
 
-fn safe_next(value: &str, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+fn safe_next(value: &str, headers: &HeaderMap, request_scheme: RequestScheme) -> Option<String> {
     let candidate = value.trim();
     if candidate.is_empty() {
         return None;
@@ -236,10 +262,9 @@ fn safe_next(value: &str, headers: &HeaderMap, uri: &Uri) -> Option<String> {
     let request_host = headers.get(header::HOST)?.to_str().ok()?;
     let request_port = request_host.rsplit_once(':')?.1;
     let request_host = request_host.rsplit_once(':')?.0;
-    let request_scheme = uri.scheme_str().unwrap_or("http");
     if host.eq_ignore_ascii_case(request_host)
         && port == request_port
-        && scheme == request_scheme
+        && scheme == request_scheme.as_str()
         && matches!(scheme, "http" | "https")
     {
         Some(candidate.to_owned())
@@ -397,9 +422,9 @@ mod tests {
         headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
         let response = block_on(login(
             Extension(backend),
+            Extension(RequestScheme::Http),
             ConnectInfo("127.0.0.1:4000".parse().unwrap()),
             headers,
-            "/api/login".parse().unwrap(),
             Json(LoginBody {
                 password: "correct".into(),
                 next: Some("/dash/tasks".into()),
@@ -416,15 +441,42 @@ mod tests {
     }
 
     #[test]
+    fn https_origin_form_request_uses_configured_scheme() {
+        let backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth::default());
+        let mut headers = headers();
+        headers.insert(header::HOST, HeaderValue::from_static("desk.test:443"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://desk.test:443"),
+        );
+        let response = block_on(login(
+            Extension(backend),
+            Extension(RequestScheme::Https),
+            ConnectInfo("127.0.0.1:4000".parse().unwrap()),
+            headers,
+            Json(LoginBody {
+                password: "correct".into(),
+                next: Some("https://desk.test:443/dash/tasks".into()),
+            }),
+        ));
+        let (status, body, _) = body_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({"ok": true, "next": "https://desk.test:443/dash/tasks"})
+        );
+    }
+
+    #[test]
     fn login_rejects_backslash_safe_next() {
         let backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth::default());
         let mut headers = headers();
         headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
         let response = block_on(login(
             Extension(backend),
+            Extension(RequestScheme::Http),
             ConnectInfo("127.0.0.1:4000".parse().unwrap()),
             headers,
-            "/api/login".parse().unwrap(),
             Json(LoginBody {
                 password: "correct".into(),
                 next: Some("/\\evil.example".into()),
@@ -443,9 +495,9 @@ mod tests {
             headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
             let response = block_on(login(
                 Extension(backend),
+                Extension(RequestScheme::Http),
                 ConnectInfo("127.0.0.1:4000".parse().unwrap()),
                 headers,
-                "/api/login".parse().unwrap(),
                 Json(LoginBody {
                     password: "correct".into(),
                     next: Some(format!("/{control}/evil.example")),
@@ -467,9 +519,9 @@ mod tests {
         );
         let response = block_on(login(
             Extension(backend),
+            Extension(RequestScheme::Http),
             ConnectInfo("127.0.0.1:4000".parse().unwrap()),
             headers,
-            "/api/login".parse().unwrap(),
             Json(LoginBody {
                 password: "correct".into(),
                 next: None,
@@ -493,9 +545,9 @@ mod tests {
         headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
         let response = block_on(login(
             Extension(backend),
+            Extension(RequestScheme::Http),
             ConnectInfo("127.0.0.1:4000".parse().unwrap()),
             headers,
-            "/api/login".parse().unwrap(),
             Json(LoginBody {
                 password: "correct".into(),
                 next: None,
@@ -526,8 +578,8 @@ mod tests {
         headers.insert(header::COOKIE, HeaderValue::from_static("vp_session=old"));
         let response = block_on(logout(
             Extension(backend),
+            Extension(RequestScheme::Http),
             headers.clone(),
-            "/api/logout".parse().unwrap(),
         ));
         let (status, body, _) = body_json(response);
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -537,8 +589,8 @@ mod tests {
         let backend: Arc<dyn AuthBackend> = authorized.clone();
         let response = block_on(logout(
             Extension(backend),
+            Extension(RequestScheme::Http),
             headers,
-            "/api/logout".parse().unwrap(),
         ));
         let (status, body, response_headers) = body_json(response);
         assert_eq!(status, StatusCode::OK);
@@ -566,8 +618,8 @@ mod tests {
         );
         let response = block_on(change_password(
             Extension(backend),
+            Extension(RequestScheme::Http),
             headers.clone(),
-            "/api/password".parse().unwrap(),
             Json(PasswordBody {
                 current_password: "old".into(),
                 new_password: "a sufficiently long password".into(),
@@ -592,8 +644,8 @@ mod tests {
         let backend: Arc<dyn AuthBackend> = api.clone();
         let response = block_on(change_password(
             Extension(backend),
+            Extension(RequestScheme::Http),
             headers,
-            "/api/password".parse().unwrap(),
             Json(PasswordBody {
                 current_password: "old".into(),
                 new_password: "a sufficiently long password".into(),
