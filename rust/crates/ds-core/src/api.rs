@@ -631,12 +631,11 @@ impl crate::flock::retire::RetireEnv for ApiRetireEnv<'_, '_> {
             .unwrap_or_default()
     }
 
-    fn unread(&self, pane_id: &str) -> Option<i64> {
-        self.context
-            .flock
-            .stores()
-            .inbox
-            .and_then(|store| store.unread_for_pane(pane_id).ok())
+    fn unread(&self, pane_id: &str) -> Result<Option<i64>, DunkError> {
+        match self.context.flock.stores().inbox {
+            Some(store) => store.unread_for_pane(pane_id).map(Some),
+            None => Ok(None),
+        }
     }
 
     fn retired_path(&self) -> PathBuf {

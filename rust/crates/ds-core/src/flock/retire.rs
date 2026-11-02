@@ -27,7 +27,8 @@ pub trait RetireEnv {
     /// because retirement must still record.
     fn mailboxes_of_pane(&self, pane_id: &str) -> Vec<String>;
     /// How much mail is now quiet: `inbox.count(pane_id).unread`, None when there is no inbox.
-    fn unread(&self, pane_id: &str) -> Option<i64>;
+    /// A read failure propagates after the retirement record has been written.
+    fn unread(&self, pane_id: &str) -> Result<Option<i64>, DunkError>;
     /// The retired-panes file (`retired-panes.json`).
     fn retired_path(&self) -> PathBuf;
 }
@@ -116,7 +117,7 @@ pub fn h_retire_pane(
     // The mail is evidence: report how much is now quiet, and keep every row.
     let mut out = serde_json::to_value(record).map_err(|e| DunkError::Refused(e.to_string()))?;
     out["unread_kept"] = env
-        .unread(&pane_id)
+        .unread(&pane_id)?
         .map(|n| json!(n))
         .unwrap_or(Value::Null);
     Ok(out)
@@ -132,6 +133,7 @@ mod tests {
         superuser: bool,
         boxes: Vec<String>,
         unread: Option<i64>,
+        unread_error: Option<String>,
         // Removes the directory when the test is done with the env (t1490).
         _dir: tempfile::TempDir,
     }
@@ -155,8 +157,11 @@ mod tests {
         fn mailboxes_of_pane(&self, _: &str) -> Vec<String> {
             self.boxes.clone()
         }
-        fn unread(&self, _: &str) -> Option<i64> {
-            self.unread
+        fn unread(&self, _: &str) -> Result<Option<i64>, DunkError> {
+            match &self.unread_error {
+                Some(error) => Err(DunkError::Refused(error.clone())),
+                None => Ok(self.unread),
+            }
         }
         fn retired_path(&self) -> PathBuf {
             self.path.clone()
@@ -175,6 +180,7 @@ mod tests {
             superuser: true,
             boxes: vec!["crackdown-codex".into(), "alpha".into()],
             unread: Some(3),
+            unread_error: None,
         }
     }
 
@@ -244,6 +250,25 @@ mod tests {
         assert_eq!(out["pane_id"], "%99");
         assert_eq!(out["labels"], json!([]));
         assert!(out["unread_kept"].is_null(), "no inbox: unknown, not zero");
+    }
+
+    #[test]
+    fn unread_failure_propagates_after_the_retirement_record_is_written() {
+        let mut e = env("unread-error");
+        e.unread_error = Some("inbox read failed".into());
+
+        let err = h_retire_pane(
+            &e,
+            &json!({"action": "retire", "pane": "%7", "reason": "superseded"}),
+            Some("%1"),
+            Some(1000.0),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "inbox read failed");
+
+        let listed = h_retire_pane(&e, &json!({"action": "list"}), None, None).unwrap();
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["retired"][0]["pane_id"], "%7");
     }
 
     #[test]
