@@ -55,13 +55,13 @@ pub enum View {
 /// Follow-up requested by the key dispatcher for behavior implemented in later
 /// TUI leaves. Returning these keeps key ownership here without duplicating the
 /// modal and target-picker implementations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyDispatch {
     Handled,
     Ignored,
     Quit,
     QuitAndShutdown,
-    TaskView(KeyCode),
+    TaskView(KeyEvent),
     PickTarget,
     EditInterval,
     EditText,
@@ -403,7 +403,9 @@ impl<C: RpcClient> TuiModel<C> {
         modal: &mut M,
         now: f64,
     ) -> KeyDispatch {
-        if key.code == KeyCode::Char('v') {
+        let plain_or_shift =
+            key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT;
+        if key.code == KeyCode::Char('v') && plain_or_shift {
             self.view = match self.view {
                 View::Dunks => View::Tasks,
                 View::Tasks => View::Dunks,
@@ -420,7 +422,10 @@ impl<C: RpcClient> TuiModel<C> {
             return KeyDispatch::Handled;
         }
         if self.view == View::Tasks {
-            return KeyDispatch::TaskView(key.code);
+            return KeyDispatch::TaskView(key);
+        }
+        if !plain_or_shift {
+            return KeyDispatch::Ignored;
         }
 
         match key.code {
@@ -817,7 +822,12 @@ mod tests {
 
         assert_eq!(
             model.handle_key(key(KeyCode::Char('q')), &mut modal, 2.0),
-            KeyDispatch::TaskView(KeyCode::Char('q'))
+            KeyDispatch::TaskView(key(KeyCode::Char('q')))
+        );
+        let control_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(
+            model.handle_key(control_q.clone(), &mut modal, 2.5),
+            KeyDispatch::TaskView(control_q)
         );
         assert_eq!(
             model.handle_key(key(KeyCode::Char('v')), &mut modal, 3.0),
@@ -942,6 +952,18 @@ mod tests {
         model.dunks.push(serde_json::json!({"id": "d2"}));
         let mut modal = FakeModal::default();
 
+        let control_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let control_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(
+            model.handle_key(control_c, &mut modal, 1.0),
+            KeyDispatch::Ignored
+        );
+        assert_eq!(
+            model.handle_key(control_a, &mut modal, 1.0),
+            KeyDispatch::Ignored
+        );
+        assert!(model.client.calls.is_empty());
+
         assert_eq!(
             model.handle_key(key(KeyCode::Down), &mut modal, 1.0),
             KeyDispatch::Handled
@@ -957,7 +979,11 @@ mod tests {
             KeyDispatch::Quit
         );
         assert_eq!(
-            model.handle_key(key(KeyCode::Char('Q')), &mut modal, 1.0),
+            model.handle_key(
+                KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+                &mut modal,
+                1.0,
+            ),
             KeyDispatch::QuitAndShutdown
         );
         assert_eq!(
