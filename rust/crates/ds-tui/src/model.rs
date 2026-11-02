@@ -826,7 +826,7 @@ mod tests {
         );
         let control_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(
-            model.handle_key(control_q.clone(), &mut modal, 2.5),
+            model.handle_key(control_q, &mut modal, 2.5),
             KeyDispatch::TaskView(control_q)
         );
         assert_eq!(
