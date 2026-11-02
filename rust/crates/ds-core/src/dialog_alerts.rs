@@ -565,8 +565,8 @@ mod tests {
             })
         }
         fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
-        fn tasks_for_pane(&self, _: &str) -> Value {
-            json!([])
+        fn tasks_for_pane(&self, _: &str) -> Result<Value, DunkError> {
+            Ok(json!([]))
         }
     }
 
