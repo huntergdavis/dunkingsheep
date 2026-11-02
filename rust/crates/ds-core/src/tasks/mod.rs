@@ -2751,7 +2751,7 @@ mod tests {
             .unwrap();
         let id = review.id.clone();
         assert_eq!(52, store.set_accounting_pr(&id, 52).await.unwrap());
-        let (accounting_pr, pr, events, event): (Option<i64>, Option<i64>, i64, (String, Option<String>, String, String, String)) = store
+        let (accounting_pr, pr, events, event) = store
             .writer
             .call({
                 let id = id.clone();
