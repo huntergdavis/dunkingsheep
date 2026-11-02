@@ -2852,6 +2852,8 @@ mod tests {
         let err = store.set_accounting_pr("t999", 5).await.unwrap_err();
         assert_eq!("no task with id 't999'", err.to_string());
         for (id, expected) in [
+            ("t\u{378}", "no task with id 't\\u0378'"),
+            ("t\u{379}", "no task with id 't\\u0379'"),
             ("t\u{85}", "no task with id 't\\x85'"),
             ("t\u{200b}", "no task with id 't\\u200b'"),
             ("t\u{2028}", "no task with id 't\\u2028'"),

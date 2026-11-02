@@ -80,7 +80,8 @@ fn needs_python_unicode_escape(ch: char) -> bool {
         || (ch.is_whitespace() && ch != ' ')
         || matches!(
             codepoint,
-            0x00ad
+            0x0378..=0x0379
+                | 0x00ad
                 | 0x0600..=0x0605
                 | 0x061c
                 | 0x06dd
