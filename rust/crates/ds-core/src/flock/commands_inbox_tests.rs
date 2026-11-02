@@ -11,7 +11,7 @@ use crate::db::ReadPool;
 use crate::inbox_store::{Outgoing, Store};
 use serde_json::{json, Value};
 
-type RecordedMetric = (String, Option<String>, Option<i64>);
+type RecordedMetric = (String, Option<String>, Option<i64>, Option<i64>);
 
 struct Env {
     routing: Vec<RouteEntry>,
@@ -70,11 +70,12 @@ impl InboxEnv for Env {
         _: &str,
         _: Option<&str>,
         ms: Option<i64>,
+        bytes: Option<i64>,
     ) {
         self.metrics
             .lock()
             .unwrap()
-            .push((kind.to_string(), pane.map(str::to_string), ms));
+            .push((kind.to_string(), pane.map(str::to_string), ms, bytes));
     }
     fn pm_routing(&self) -> Vec<RouteEntry> {
         self.routing.clone()
@@ -514,6 +515,32 @@ fn reading_marks_the_batch_read_and_carries_the_task_queue() {
     let again = f.inbox_read(&e, None, 10, false, Some("w1:p1")).unwrap();
     assert!(again.messages.is_empty());
     assert_eq!(None, again.marked_read);
+}
+
+#[test]
+fn reading_records_source_pane_and_body_bytes_on_each_metric() {
+    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    e.store
+        .send(&Outgoing {
+            mailbox: "Mine",
+            pane_id: Some("source-pane"),
+            body: Some("é"),
+            sender: Some("pm"),
+            ..Default::default()
+        })
+        .expect("send");
+
+    f.inbox_read_with_options(&e, None, 10, false, false, Some("w1:p1"))
+        .unwrap();
+
+    let metrics = e.metrics.lock().unwrap();
+    let read = metrics
+        .iter()
+        .find(|metric| metric.0 == "inbox.read")
+        .expect("read metric");
+    assert_eq!(Some("source-pane".into()), read.1);
+    assert_eq!(Some(2), read.3);
 }
 
 #[test]

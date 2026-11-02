@@ -32,7 +32,7 @@ pub trait InboxEnv: MailboxEnv {
     fn store(&self) -> &Store;
     fn now(&self) -> f64;
     /// `self.metrics.record(kind, pane_id=.., mailbox=.., sender=.., source="inbox",
-    /// outcome="ok", duration_ms=..)`. An unattached metrics store is safely ignored.
+    /// outcome="ok", duration_ms=.., bytes=..)`. An unattached metrics store is safely ignored.
     fn record_metric(
         &self,
         kind: &str,
@@ -40,6 +40,7 @@ pub trait InboxEnv: MailboxEnv {
         mailbox: &str,
         sender: Option<&str>,
         duration_ms: Option<i64>,
+        bytes: Option<i64>,
     );
     /// `dunk_pm.load_routing()`; an unreadable file is an empty routing (the send path
     /// swallows it: "routing must never block a send").
@@ -375,6 +376,7 @@ impl Flock {
                 key.as_deref().unwrap_or(""),
                 was.sender.as_deref(),
                 duration,
+                None,
             );
         }
         Ok(AckResult {
@@ -671,10 +673,11 @@ impl Flock {
             message.read_at = Some(now);
             env.record_metric(
                 "inbox.read",
-                None,
+                message.pane_id.as_deref(),
                 &key,
                 message.summary.sender.as_deref(),
                 Some(((now - message.summary.created_at) * 1000.0) as i64),
+                Some(message.summary.body_bytes),
             );
         }
         Ok(ReadResult {

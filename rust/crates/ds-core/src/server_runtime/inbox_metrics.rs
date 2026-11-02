@@ -14,6 +14,7 @@ impl RequestRuntimeAdapter<'_> {
         mailbox: &str,
         sender: Option<&str>,
         duration_ms: Option<i64>,
+        bytes: Option<i64>,
     ) {
         let Some(metrics) = self.terminal.flock.stores().metrics else {
             return;
@@ -26,6 +27,7 @@ impl RequestRuntimeAdapter<'_> {
             source: Some("inbox".to_owned()),
             outcome: Some("ok".to_owned()),
             duration_ms,
+            bytes,
             ..Event::default()
         });
     }
@@ -127,6 +129,7 @@ mod tests {
             "%17",
             Some("%sender"),
             Some(42),
+            Some(123),
         );
         adapter.helper_inboxenv_record_sent(Some("%17"), "%17", Some("%sender"), 33, 2);
         let events = metrics
@@ -143,6 +146,7 @@ mod tests {
         assert_eq!(Some("inbox".into()), read.source);
         assert_eq!(Some("ok".into()), read.outcome);
         assert_eq!(Some(42), read.duration_ms);
+        assert_eq!(Some(123), read.bytes);
         let sent = events
             .iter()
             .find(|event| event.kind == "inbox.sent")
@@ -178,7 +182,14 @@ mod tests {
             runtime.handle(),
             &terminal,
         );
-        no_metrics_adapter.helper_inboxenv_record_metric("inbox.read", None, "%17", None, None);
+        no_metrics_adapter.helper_inboxenv_record_metric(
+            "inbox.read",
+            None,
+            "%17",
+            None,
+            None,
+            None,
+        );
         no_metrics_adapter.helper_inboxenv_record_sent(None, "%17", None, 0, 0);
         assert!(without_metrics.stores().metrics.is_none());
     }
