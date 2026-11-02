@@ -436,6 +436,21 @@ class Sync:
         # PRs that closed or merged: their live review task is moot.
         for key, task in live.items():
             if key not in seen and key[0] in listed and not dry_run:
+                # A successful list can still omit an OPEN PR (stale snapshot,
+                # or a conflicted PR skipped above). Only its fresh detail may
+                # establish that the review is moot; unknown is never closed.
+                try:
+                    detail = self.github.pull_detail(key[0], key[1], token)
+                except dunk_github.GitHubError as error:
+                    report["errors"].append(f"{key[0]}#{key[1]} cleanup: {error}")
+                    continue
+                state = detail.get("state") if isinstance(detail, dict) else None
+                if state == "open":
+                    continue
+                if state not in ("closed", "merged"):
+                    report["errors"].append(
+                        f"{key[0]}#{key[1]} cleanup: unknown PR state {state!r}")
+                    continue
                 # The live map predates the GitHub reads. Another request may
                 # have completed this review while the sweep was listing PRs.
                 if self.flock.tasks.get(task["id"])["status"] in ("done", "cancelled"):

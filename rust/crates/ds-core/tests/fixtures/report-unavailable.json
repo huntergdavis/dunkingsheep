@@ -1,0 +1,13 @@
+{
+  "generated_at": 1700000000,
+  "iso": "2023-11-14T22:13:20Z",
+  "sections": {
+    "tasks": {"error": "task metrics unavailable: store locked"},
+    "lanes": {"error": "pane list unavailable: daemon busy", "live": null},
+    "needs_owner": {"error": "needs-owner query unavailable: daemon busy"},
+    "reviews": {"error": "review list unavailable: api offline"},
+    "poolrad": {"error": "poolrad read unavailable: no snapshot"},
+    "budget": {"error": "usage read unavailable: cache missing"},
+    "watchdog": {"error": "watchdog read unavailable: permission denied"}
+  }
+}

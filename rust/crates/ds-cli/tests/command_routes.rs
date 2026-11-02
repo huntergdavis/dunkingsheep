@@ -2954,6 +2954,107 @@ fn cli_route_26_reports() {
 }
 
 #[test]
+fn cli_route_32_token() {
+    let issued = run_daemon_cli(
+        &["token", "issue", "--role", "owner"],
+        "token_issue",
+        json!({"role": "owner", "label": null}),
+        json!({"token": "single-use-secret", "role": "owner", "label": null}),
+    );
+    assert_eq!(Some(0), issued.status.code());
+    assert_eq!(
+        "single-use-secret\n",
+        String::from_utf8(issued.stdout).unwrap()
+    );
+    assert!(issued.stderr.is_empty());
+
+    let issued_json = run_daemon_cli(
+        &[
+            "token", "issue", "--role", "web", "--label", "web app", "--json",
+        ],
+        "token_issue",
+        json!({"role": "web", "label": "web app"}),
+        json!({"token": "json-secret", "role": "web", "label": "web app"}),
+    );
+    assert_eq!(Some(0), issued_json.status.code());
+    assert_eq!(
+        "{\n  \"token\": \"json-secret\",\n  \"role\": \"web\",\n  \"label\": \"web app\"\n}\n",
+        String::from_utf8(issued_json.stdout).unwrap()
+    );
+    assert!(issued_json.stderr.is_empty());
+
+    let revoked = run_daemon_cli(
+        &["token", "revoke", "expired-web"],
+        "token_revoke",
+        json!({"label": "expired-web"}),
+        json!({"revoked": 2, "label": "expired-web"}),
+    );
+    assert_eq!(Some(0), revoked.status.code());
+    assert_eq!(
+        "revoked 2 token(s) labelled expired-web\n",
+        String::from_utf8(revoked.stdout).unwrap()
+    );
+    assert!(revoked.stderr.is_empty());
+
+    let revoked_json = run_daemon_cli(
+        &["token", "revoke", "missing", "--json"],
+        "token_revoke",
+        json!({"label": "missing"}),
+        json!({"revoked": 0, "label": "missing"}),
+    );
+    assert_eq!(Some(0), revoked_json.status.code());
+    assert_eq!(
+        "{\n  \"revoked\": 0,\n  \"label\": \"missing\"\n}\n",
+        String::from_utf8(revoked_json.stdout).unwrap()
+    );
+    assert!(revoked_json.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "tokens": [
+                {"label": "web desk", "role": "web"},
+                {"label": "owner", "role": "owner"}
+            ]
+        }),
+    );
+    assert_eq!(Some(0), listed.status.code());
+    assert_eq!(
+        format!(
+            "{:<24} {}\n{:<24} {}\n",
+            "web desk", "web", "owner", "owner"
+        ),
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let empty = run_daemon_cli(
+        &["token", "list"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": []}),
+    );
+    assert_eq!(Some(0), empty.status.code());
+    assert_eq!("no tokens\n", String::from_utf8(empty.stdout).unwrap());
+    assert!(empty.stderr.is_empty());
+
+    let listed_json = run_daemon_cli(
+        &["token", "list", "--json"],
+        "superuser_status",
+        json!({}),
+        json!({"tokens": [{"label": "system", "role": "system"}]}),
+    );
+    assert_eq!(Some(0), listed_json.status.code());
+    assert_eq!(
+        "{\n  \"tokens\": [\n    {\n      \"label\": \"system\",\n      \"role\": \"system\"\n    }\n  ]\n}\n",
+        String::from_utf8(listed_json.stdout).unwrap()
+    );
+    assert!(listed_json.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_10_context_local_seed() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("work");
@@ -3232,6 +3333,202 @@ fn cli_route_33_superuser_a() {
 }
 
 #[test]
+fn cli_route_36_memory_b() {
+    let hook = run_daemon_cli(
+        &[
+            "memory",
+            "hook-context",
+            "--query",
+            "start prompt",
+            "--sessions",
+            "2",
+        ],
+        "memory_context",
+        json!({"query": "start prompt", "sessions": 2}),
+        json!({"text": "prior session notes"}),
+    );
+    assert_eq!(Some(0), hook.status.code());
+    assert_eq!(
+        "{\"hookSpecificOutput\": {\"hookEventName\": \"SessionStart\", \"additionalContext\": \"Dunking Sheep memory - relevant past sessions for this workspace:\\n\\nprior session notes\"}}\n",
+        String::from_utf8(hook.stdout).unwrap()
+    );
+    assert!(hook.stderr.is_empty());
+
+    let cwd_name = std::env::current_dir()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let hook_json = run_daemon_cli(
+        &["memory", "hook-context", "--query", "", "--json"],
+        "memory_context",
+        json!({"query": cwd_name, "sessions": 5}),
+        json!({"text": ""}),
+    );
+    assert_eq!(Some(0), hook_json.status.code());
+    assert_eq!(
+        "{\n  \"text\": \"\"\n}\n",
+        String::from_utf8(hook_json.stdout).unwrap()
+    );
+    assert!(hook_json.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["memory", "stats"],
+        "memory_stats",
+        json!({}),
+        json!({
+            "path": "/tmp/memory.db",
+            "schema_version": 2,
+            "ok": true,
+            "sources": 4,
+            "sessions": 3,
+            "chunks": 9,
+            "queue_depth": 0,
+            "queue": "idle",
+            "db_bytes": 100,
+            "queries": {"count": 7, "p50": 1.25, "p95": 2.5, "p99": 3.5, "errors": 0},
+            "harness": [{"harness": "codex", "chunks": 9, "sessions": 3}]
+        }),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "path /tmp/memory.db  schema 2  ok True\nsources 4  sessions 3  chunks 9\nqueue depth 0  idle\ndb bytes 100\nqueries n=7 p50=1.25 p95=2.5 p99=3.5 errors=0\n  codex: 9 chunks / 3 sessions\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "status", "--json"],
+        "memory_status",
+        json!({}),
+        json!({"ok": true, "sources": 0}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"ok\": true,\n  \"sources\": 0\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_34_superuser_b() {
+    let status = run_daemon_cli(
+        &["superuser", "status"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [{"label": "owner", "role": "owner"}]
+        }),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  tokens: owner=owner\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let added = run_daemon_cli(
+        &["superuser", "add", "worker@example"],
+        "superuser_add",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "added": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  added: worker@example\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["superuser", "remove", "worker@example"],
+        "superuser_remove",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "removed": 1,
+            "entry": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), removed.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  removed: 1 (worker@example)\n",
+        String::from_utf8(removed.stdout).unwrap()
+    );
+    assert!(removed.stderr.is_empty());
+
+    let recovered = run_daemon_cli(
+        &["superuser", "recover"],
+        "superuser_recover",
+        json!({"name": null}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), recovered.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  recovered: %99 (None)\n",
+        String::from_utf8(recovered.stdout).unwrap()
+    );
+    assert!(recovered.stderr.is_empty());
+
+    let named = run_daemon_cli(
+        &[
+            "superuser",
+            "recover",
+            "--name",
+            "bootstrap owner",
+            "--json",
+        ],
+        "superuser_recover",
+        json!({"name": "bootstrap owner"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "recovered": true,
+            "entry": {"role": "owner"}
+        }),
+    );
+    assert_eq!(Some(0), named.status.code());
+    assert_eq!(
+        "{\n  \"path\": \"/tmp/roles.json\",\n  \"superuser\": true,\n  \"pane_id\": \"%99\",\n  \"role\": \"owner\",\n  \"lanes\": {},\n  \"tokens\": [],\n  \"recovered\": true,\n  \"entry\": {\n    \"role\": \"owner\"\n  }\n}\n",
+        String::from_utf8(named.stdout).unwrap()
+    );
+    assert!(named.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_35_memory_a() {
     let recalled = run_daemon_cli(
         &[
@@ -3313,4 +3610,91 @@ fn cli_route_35_memory_a() {
         String::from_utf8(context.stdout).unwrap()
     );
     assert!(context.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_37_memory_c() {
+    let ingested = run_daemon_cli(
+        &[
+            "memory",
+            "ingest",
+            "/tmp/session.jsonl",
+            "--harness",
+            "codex",
+            "--project",
+            "demo",
+        ],
+        "memory_ingest",
+        json!({
+            "path": "/tmp/session.jsonl",
+            "harness": "codex",
+            "project": "demo"
+        }),
+        json!({"path": "/tmp/session.jsonl", "harness": "codex"}),
+    );
+    assert_eq!(Some(0), ingested.status.code());
+    assert_eq!(
+        "queued /tmp/session.jsonl (codex)\n",
+        String::from_utf8(ingested.stdout).unwrap()
+    );
+    assert!(ingested.stderr.is_empty());
+
+    let started = run_daemon_cli(
+        &["memory", "backfill", "--limit", "4"],
+        "memory_backfill",
+        json!({"action": "start", "limit": 4}),
+        json!({
+            "enqueued": 2,
+            "discovered": 7,
+            "paused": false,
+            "status": {"ingestor": {"throttle_s": 15}}
+        }),
+    );
+    assert_eq!(Some(0), started.status.code());
+    assert_eq!(
+        "queued 2 of 7 source(s); paused False; throttle 15\npath None  schema None  ok None\nsources None  sessions None  chunks None\nqueue depth None  None\ndb bytes None\nqueries n=None p50=None p95=None p99=None errors=None\ningestor {'throttle_s': 15}\n",
+        String::from_utf8(started.stdout).unwrap()
+    );
+    assert!(started.stderr.is_empty());
+
+    let paused = run_daemon_cli(
+        &[
+            "memory", "backfill", "--pause", "--resume", "--status", "--limit", "3", "--json",
+        ],
+        "memory_backfill",
+        json!({"action": "pause", "limit": 3}),
+        json!({"paused": true}),
+    );
+    assert_eq!(Some(0), paused.status.code());
+    assert_eq!(
+        "{\n  \"paused\": true\n}\n",
+        String::from_utf8(paused.stdout).unwrap()
+    );
+    assert!(paused.stderr.is_empty());
+
+    let resumed = run_daemon_cli(
+        &["memory", "backfill", "--resume", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "resume", "limit": null}),
+        json!({"resumed": true}),
+    );
+    assert_eq!(Some(0), resumed.status.code());
+    assert_eq!(
+        "{\n  \"resumed\": true\n}\n",
+        String::from_utf8(resumed.stdout).unwrap()
+    );
+    assert!(resumed.stderr.is_empty());
+
+    let status = run_daemon_cli(
+        &["memory", "backfill", "--status", "--json"],
+        "memory_backfill",
+        json!({"action": "status", "limit": null}),
+        json!({"status": "idle"}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"status\": \"idle\"\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
 }

@@ -406,7 +406,7 @@ pub fn flush_box(
 }
 
 /// Statuses that mean the lane was already running a turn before this send.
-fn is_working_status(status: Option<&str>) -> bool {
+pub(super) fn is_working_status(status: Option<&str>) -> bool {
     matches!(status, Some("working" | "busy" | "running" | "processing"))
 }
 
@@ -722,7 +722,7 @@ mod send_lock_tests {
 }
 
 /// Baseline-aware turn confirmation: an unreadable or already-working baseline is never proof.
-fn turn_started(env: &mut dyn SubmitEnv, pane_id: &str, baseline: Option<&str>) -> bool {
+pub(super) fn turn_started(env: &mut dyn SubmitEnv, pane_id: &str, baseline: Option<&str>) -> bool {
     let Some(baseline) = baseline else {
         return false;
     };
@@ -1657,6 +1657,141 @@ impl Flock {
                 .collect();
         }
         candidates.insert(message.pane_id.clone(), candidate);
+    }
+
+    /// Apply an observer result only to the candidate identity that produced it.
+    /// Recovery decisions are persisted before any inbox receipt can be published.
+    #[allow(dead_code)] // The concrete stuck-observer caller is a separate runtime slice.
+    pub(crate) fn reconcile_stuck(
+        &self,
+        pane_id: &str,
+        message_id: &str,
+        outcome: &str,
+        detail: &str,
+        created_at: Option<f64>,
+    ) {
+        let Some(created_at) = created_at else {
+            tracing::warn!(
+                pane_id,
+                message_id,
+                "skipping stuck reconciliation without created_at"
+            );
+            return;
+        };
+        let entry = {
+            let mut candidates = self
+                .stuck_candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(candidate) = candidates.get_mut(pane_id) else {
+                return;
+            };
+            if candidate.message_id != message_id || candidate.created_at != created_at {
+                return;
+            }
+            candidate.recovery_outcome = Some(outcome.to_string());
+            candidate.recovery_detail = Some(detail.to_string());
+            candidate.recovered_at = Some(clock::now_s());
+            match outcome {
+                "consumed" => {
+                    candidate.eligible = false;
+                    candidate.status = "consumed".to_string();
+                }
+                "exhausted" => candidate.eligible = false,
+                _ => {}
+            }
+            candidate.clone()
+        };
+
+        if let Err(error) = self.save() {
+            tracing::warn!(pane_id, message_id, error = %error, "failed to save stuck recovery outcome");
+            return;
+        }
+        if outcome == "consumed" {
+            self.publish_stuck_receipt_after_save(pane_id, &entry);
+        }
+    }
+
+    /// Repair receipts for a previously persisted consumed outcome, including after restart.
+    /// The pre-write save is intentional: callers cannot publish an in-memory-only decision.
+    #[allow(dead_code)] // The restart repair caller is a separate runtime slice.
+    pub(crate) fn publish_stuck_receipt(&self, pane_id: &str, entry: &StuckCandidate) {
+        if !self.stuck_candidate_is_consumed(pane_id, entry) {
+            return;
+        }
+        if let Err(error) = self.save() {
+            tracing::warn!(pane_id, message_id = %entry.message_id, error = %error, "failed to save consumed recovery before receipt repair");
+            return;
+        }
+        self.publish_stuck_receipt_after_save(pane_id, entry);
+    }
+
+    fn publish_stuck_receipt_after_save(&self, pane_id: &str, entry: &StuckCandidate) {
+        if !self.stuck_candidate_is_consumed(pane_id, entry) {
+            return;
+        }
+        let stores = self.stores();
+        if !entry.notify_for.is_empty() && stores.inbox.is_none() {
+            tracing::warn!(pane_id, message_id = %entry.message_id, "inbox store unavailable; recovered receipts remain pending");
+            return;
+        }
+        let Some(detail) = entry.recovery_detail.as_deref() else {
+            tracing::warn!(pane_id, message_id = %entry.message_id, "recovery detail missing; recovered receipt remains pending");
+            return;
+        };
+        let reason = format!("recovered: {detail}");
+        if let Some(inbox) = stores.inbox.as_ref() {
+            for inbox_id in &entry.notify_for {
+                if let Err(error) = inbox.record_notify(inbox_id, "sent", Some(&reason), None, None)
+                {
+                    tracing::warn!(pane_id, message_id = %entry.message_id, inbox_id, error = %error, "recovered prompt receipt could not be reconciled");
+                    return;
+                }
+            }
+        }
+
+        let previous = {
+            let mut candidates = self
+                .stuck_candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(live) = candidates.get_mut(pane_id) else {
+                return;
+            };
+            if live.message_id != entry.message_id
+                || live.created_at != entry.created_at
+                || live.recovery_outcome.as_deref() != Some("consumed")
+            {
+                return;
+            }
+            let previous = live.receipts_reconciled;
+            live.receipts_reconciled = Some(true);
+            previous
+        };
+        if let Err(error) = self.save() {
+            let mut candidates = self
+                .stuck_candidates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(live) = candidates.get_mut(pane_id) {
+                if live.message_id == entry.message_id && live.created_at == entry.created_at {
+                    live.receipts_reconciled = previous;
+                }
+            }
+            tracing::warn!(pane_id, message_id = %entry.message_id, error = %error, "failed to save recovered receipt reconciliation marker");
+        }
+    }
+
+    fn stuck_candidate_is_consumed(&self, pane_id: &str, entry: &StuckCandidate) -> bool {
+        self.stuck_candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(pane_id)
+            .is_some_and(|live| {
+                live.message_id == entry.message_id
+                    && live.created_at == entry.created_at
+                    && live.recovery_outcome.as_deref() == Some("consumed")
+            })
     }
 
     /// Bind native identity only to the exact pre-send candidate and its captured process

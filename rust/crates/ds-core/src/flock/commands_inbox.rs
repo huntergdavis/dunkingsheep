@@ -4,8 +4,8 @@
 //! `inbox_list`, `inbox_status`, `inbox_stats`, `inbox_recover`.
 //!
 //! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`; slice 3 adds `inbox_send` and
-//! `inbox_read`. The outbox (`send_now`, the queued-notice fold), the PM routing file, the
-//! tasks view and metrics have no Rust owner yet, so they sit behind [`InboxEnv`] hooks.
+//! `inbox_read`. The outbox (`send_now`, the queued-notice fold) and PM routing file remain
+//! behind [`InboxEnv`] hooks; the runtime adapter supplies metrics and task-view services.
 //! NOT ported: the `log.info` line of `inbox_send`. `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
 
 use crate::error::DunkError;
@@ -36,8 +36,7 @@ pub trait InboxEnv: MailboxEnv {
     fn store(&self) -> &Store;
     fn now(&self) -> f64;
     /// `self.metrics.record(kind, pane_id=.., mailbox=.., sender=.., source="inbox",
-    /// outcome="ok", duration_ms=..)`. Metrics have no Rust owner yet, so the daemon wiring
-    /// supplies this.
+    /// outcome="ok", duration_ms=.., bytes=..)`. An unattached metrics store is safely ignored.
     fn record_metric(
         &self,
         kind: &str,
@@ -45,6 +44,7 @@ pub trait InboxEnv: MailboxEnv {
         mailbox: &str,
         sender: Option<&str>,
         duration_ms: Option<i64>,
+        bytes: Option<i64>,
     );
     /// `dunk_pm.load_routing()`; an unreadable file is an empty routing (the send path
     /// swallows it: "routing must never block a send").
@@ -68,8 +68,8 @@ pub trait InboxEnv: MailboxEnv {
         bytes: usize,
         attachments: usize,
     );
-    /// `self.tasks.for_pane(pane)`, already rendered as the wire's JSON.
-    fn tasks_for_pane(&self, pane_id: &str) -> Value;
+    /// `self.tasks.for_pane(pane)`, already rendered as wire JSON; errors leave mail unread.
+    fn tasks_for_pane(&self, pane_id: &str) -> Result<Value, DunkError>;
 }
 
 /// One project in the PM routing file (`dunk_pm.load_routing`).
@@ -403,6 +403,7 @@ impl Flock {
                 key.as_deref().unwrap_or(""),
                 was.sender.as_deref(),
                 duration,
+                None,
             );
         }
         Ok(AckResult {
@@ -679,6 +680,7 @@ impl Flock {
             self_pane_id
                 .filter(|p| !p.is_empty())
                 .map(|p| env.tasks_for_pane(p))
+                .transpose()?
         } else {
             None
         };
@@ -705,10 +707,11 @@ impl Flock {
             message.read_at = Some(now);
             env.record_metric(
                 "inbox.read",
-                None,
+                message.pane_id.as_deref(),
                 &key,
                 message.summary.sender.as_deref(),
                 Some(((now - message.summary.created_at) * 1000.0) as i64),
+                Some(message.summary.body_bytes),
             );
         }
         Ok(ReadResult {

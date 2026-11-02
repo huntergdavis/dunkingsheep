@@ -28,6 +28,8 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+mod retired;
+pub use retired::RetiredArchiveOptions;
 mod owner_queries;
 const _: () = assert!(MAX_BLOB_BYTES > 0);
 
@@ -1151,6 +1153,8 @@ impl Store {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub summary: Summary,
+    /// Pane that the message was addressed to; used by inbox read telemetry.
+    pub pane_id: Option<String>,
     pub body: String,
     pub read_at: Option<f64>,
     pub attachments: Vec<AttachmentRow>,
@@ -1164,7 +1168,8 @@ pub struct AttachmentRow {
     pub size: i64,
 }
 
-const FULL_COLUMNS: &str = "id, mailbox, mailbox_label, sender, subject, state, created_at, \
+const FULL_COLUMNS: &str =
+    "id, mailbox, mailbox_label, pane_id, sender, subject, state, created_at, \
     body, length(CAST(body AS BLOB)) AS body_bytes, digest_id, transport, reply_to, \
     external_id, delivered_at, delivery_transport, read_at, \
     (SELECT COUNT(*) FROM attachments a WHERE a.message_id = messages.id) AS n_attachments";
@@ -1199,6 +1204,7 @@ fn full_from_row(row: &rusqlite::Row, now: f64) -> rusqlite::Result<Message> {
             delivery_transport: row.get("delivery_transport")?,
             state,
         },
+        pane_id: row.get("pane_id")?,
         body: row.get("body")?,
         read_at: row.get("read_at")?,
         attachments: Vec::new(),

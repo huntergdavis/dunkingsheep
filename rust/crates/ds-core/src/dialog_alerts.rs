@@ -549,6 +549,7 @@ mod tests {
             _: &str,
             _: Option<&str>,
             _: Option<i64>,
+            _: Option<i64>,
         ) {
         }
         fn pm_routing(&self) -> Vec<RouteEntry> {
@@ -565,8 +566,8 @@ mod tests {
             })
         }
         fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
-        fn tasks_for_pane(&self, _: &str) -> Value {
-            json!([])
+        fn tasks_for_pane(&self, _: &str) -> Result<Value, DunkError> {
+            Ok(json!([]))
         }
     }
 

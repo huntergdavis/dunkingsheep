@@ -54,6 +54,45 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn memory_aux(ns: &Map<String, Value>) -> Outcome {
+    let sub = text(ns, "memory_command").unwrap_or("");
+    match sub {
+        "hook-context" => {
+            let query = text(ns, "query")
+                .filter(|query| !query.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| cwd.file_name().map(|name| name.to_string_lossy().into()))
+                        .unwrap_or_default()
+                });
+            let mut args = Map::new();
+            args.insert("query".into(), Value::String(query));
+            args.insert(
+                "sessions".into(),
+                ns.get("sessions").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_hook_context(result)
+            })
+        }
+        "stats" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_stats",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        "status" => crate::daemon_cmd::run_command(
+            ns,
+            "memory_status",
+            Map::new(),
+            crate::render_print::render_memory_stats,
+        ),
+        _ => not_ported(&format!("memory {sub}")),
+    }
+}
+
 fn memory(ns: &Map<String, Value>) -> Outcome {
     let mut args = Map::new();
     match text(ns, "memory_command") {
@@ -80,6 +119,37 @@ fn memory(ns: &Map<String, Value>) -> Outcome {
                 crate::render_print::render_memory_context(result)
             })
         }
+        Some("ingest") => {
+            for key in ["path", "harness", "project"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_ingest", args, |result| {
+                format!(
+                    "queued {} ({})\n",
+                    crate::render_fleet::py_str(&result["path"]),
+                    crate::render_fleet::py_str(&result["harness"])
+                )
+            })
+        }
+        Some("backfill") => {
+            let action = if ns.get("pause") == Some(&Value::Bool(true)) {
+                "pause"
+            } else if ns.get("resume") == Some(&Value::Bool(true)) {
+                "resume"
+            } else if ns.get("status") == Some(&Value::Bool(true)) {
+                "status"
+            } else {
+                "start"
+            };
+            args.insert("action".into(), Value::String(action.to_string()));
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_backfill", args, |result| {
+                crate::render_print::render_memory_backfill(result)
+            })
+        }
         Some(other) => not_ported(&format!("memory {other}")),
         None => not_ported("memory"),
     }
@@ -103,6 +173,14 @@ fn superuser(ns: &Map<String, Value>) -> Outcome {
                 ns.get("entry").cloned().unwrap_or(Value::Null),
             );
             ("superuser_remove", args)
+        }
+        Some("recover") => {
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_recover", args)
         }
         Some(other) => return not_ported(&format!("superuser {other}")),
         None => return not_ported("superuser"),
@@ -1907,6 +1985,62 @@ fn report(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn token(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "token_command") {
+        Some("issue") => {
+            let mut args = Map::new();
+            args.insert(
+                "role".into(),
+                ns.get("role").cloned().unwrap_or(Value::Null),
+            );
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_issue", args, |result| {
+                format!("{}\n", crate::render_fleet::py_str(&result["token"]))
+            })
+        }
+        Some("revoke") => {
+            let mut args = Map::new();
+            args.insert(
+                "label".into(),
+                ns.get("label").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "token_revoke", args, |result| {
+                format!(
+                    "revoked {} token(s) labelled {}\n",
+                    crate::render_fleet::py_str(&result["revoked"]),
+                    crate::render_fleet::py_str(&result["label"])
+                )
+            })
+        }
+        Some("list") => {
+            crate::daemon_cmd::run_command(ns, "superuser_status", Map::new(), |result| {
+                let rows = result
+                    .get("tokens")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|token| {
+                        let label = crate::render_fleet::py_str(&token["label"]);
+                        let role = crate::render_fleet::py_str(&token["role"]);
+                        let padding = 24usize.saturating_sub(label.chars().count());
+                        format!("{label}{} {role}", " ".repeat(padding))
+                    })
+                    .collect::<Vec<_>>();
+                if rows.is_empty() {
+                    "no tokens\n".to_string()
+                } else {
+                    format!("{}\n", rows.join("\n"))
+                }
+            })
+        }
+        Some(other) => not_ported(&format!("token {other}")),
+        None => not_ported("token"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1934,7 +2068,10 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "report" => report(ns),
         "superuser" => superuser(ns),
-        "memory" => memory(ns),
+        "memory" => match text(ns, "memory_command") {
+            Some("hook-context" | "stats" | "status") => memory_aux(ns),
+            _ => memory(ns),
+        },
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
@@ -1943,6 +2080,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "token" => token(ns),
         "review" => review(ns),
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
