@@ -1515,3 +1515,29 @@ async fn test_the_reaper_still_reopens_an_in_progress_task() {
         "the rule is not 'never reopen': a worked task whose claim expires goes back to open"
     );
 }
+
+#[tokio::test]
+async fn test_completing_deletes_the_lease() {
+    let tasks = store("py-complete-lease").await;
+    let task = tasks.add("global", "work", "").await.unwrap();
+    tasks
+        .claim_next("global", "w1:p1", ClaimOptions::default())
+        .await
+        .unwrap();
+    tasks.complete(&task.id).await.unwrap();
+    assert!(tasks.leases_for(&task.id, None).await.unwrap().is_empty());
+    assert_eq!("done", tasks.get(&task.id).await.unwrap().status);
+}
+
+#[tokio::test]
+async fn test_cancelling_deletes_the_lease() {
+    let tasks = store("py-cancel-lease").await;
+    let task = tasks.add("global", "work", "").await.unwrap();
+    tasks
+        .claim_next("global", "w1:p1", ClaimOptions::default())
+        .await
+        .unwrap();
+    tasks.cancel(&task.id, "withdrawn").await.unwrap();
+    assert!(tasks.leases_for(&task.id, None).await.unwrap().is_empty());
+    assert_eq!("cancelled", tasks.get(&task.id).await.unwrap().status);
+}
