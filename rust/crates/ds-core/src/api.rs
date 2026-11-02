@@ -967,9 +967,11 @@ fn python_decimal_digit(character: char) -> Option<u8> {
 
     let codepoint = character as u32;
     DECIMAL_RANGES.iter().find_map(|&(start, end)| {
-        (start..=end)
-            .contains(&codepoint)
-            .then_some(((codepoint - start) % 10) as u8)
+        if (start..=end).contains(&codepoint) {
+            Some(((codepoint - start) % 10) as u8)
+        } else {
+            None
+        }
     })
 }
 
