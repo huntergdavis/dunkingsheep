@@ -1012,6 +1012,7 @@ impl Message {
 ///
 /// This is in-memory only; snapshot persistence belongs to the separate snapshot leaf.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // The stuck-recovery consumer is owned by a later leaf.
 pub(crate) struct StuckCandidate {
     pub message_id: String,
     pub created_at: f64,
@@ -1030,6 +1031,7 @@ pub(crate) struct StuckCandidate {
 }
 
 impl StuckCandidate {
+    #[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
     fn from_message(message: &Message) -> Self {
         let eligible = (message.status == "failed"
             || (message.scheduled && message.status == "sent"))
@@ -1058,6 +1060,7 @@ impl StuckCandidate {
     }
 }
 
+#[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
 fn candidate_is_newer(left: &StuckCandidate, right: &StuckCandidate) -> bool {
     match left.created_at.total_cmp(&right.created_at) {
         std::cmp::Ordering::Greater => return true,
@@ -1117,6 +1120,7 @@ impl Flock {
     /// replace a newer send, cancellation, or deliberate no-enter intent. Ineligible
     /// intents are retained as tombstones so that they still supersede older candidates.
     /// This only mutates in-memory state; snapshot persistence has a separate owner.
+    #[allow(dead_code)] // The outcome caller is a separate dependent T33 leaf.
     pub(crate) fn note_stuck_candidate(&self, message: &Message) {
         if message.pane_id.is_empty() {
             return;
