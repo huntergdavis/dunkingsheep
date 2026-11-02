@@ -121,10 +121,13 @@ fn lease_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Lease> {
         claimed_at: row.get(2)?,
         heartbeat_at: row.get(3)?,
         expires_at: row.get(4)?,
+        caller_pid: row.get(5)?,
+        caller_start: row.get(6)?,
     })
 }
 
-const LEASE_COLUMNS: &str = "task_id, pane_id, claimed_at, heartbeat_at, expires_at";
+const LEASE_COLUMNS: &str =
+    "task_id, pane_id, claimed_at, heartbeat_at, expires_at, caller_pid, caller_start";
 
 impl Tasks {
     /// Live leases held by a pane.

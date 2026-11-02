@@ -15,6 +15,7 @@ use crate::error::{refusal, DunkError};
 use crate::flock::lanes::TerminalEnv;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
+use crate::flock::sends::SendEnv;
 use crate::flock::status::ViewCache;
 use crate::flock::Flock;
 use crate::server::RequestCtx;
@@ -38,6 +39,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
 pub(crate) struct TerminalCallAdapter<'a> {
     flock: &'a Flock,
     terminal: &'a Mutex<Box<dyn Terminal>>,
+    runtime: &'a Handle,
 }
 
 /// Runtime services safe to move into a Tokio blocking worker. The non-Send terminal is
@@ -57,7 +59,11 @@ impl<'a> RequestRuntimeAdapter<'a> {
         terminal: &'a Mutex<Box<dyn Terminal>>,
     ) -> Self {
         Self {
-            terminal: TerminalCallAdapter { flock, terminal },
+            terminal: TerminalCallAdapter {
+                flock,
+                terminal,
+                runtime,
+            },
             request,
             runtime,
         }
@@ -117,6 +123,92 @@ impl TerminalCallAdapter<'_> {
             };
             call(&env)
         })
+    }
+
+    fn with_terminal_mut<T>(&self, call: impl FnOnce(&mut dyn Terminal) -> T) -> T {
+        let mut terminal = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        call(terminal.as_mut())
+    }
+
+    fn helper_sendenv_read_pane(&self, pane_id: &str, lines: i64, ansi: bool) -> Option<String> {
+        self.with_terminal(|terminal| terminal.read_pane(pane_id, lines, ansi).ok().flatten())
+    }
+
+    fn helper_sendenv_pane_harness(&self, pane_id: &str) -> Option<String> {
+        self.with_terminal(|terminal| {
+            let pane = terminal.get_pane(pane_id)?;
+            let harness = crate::terminal::parse::agent_kind(&pane.command, &pane.title);
+            (!harness.is_empty()).then_some(harness)
+        })
+    }
+
+    fn helper_sendenv_read_status(&self, pane_id: &str) -> Option<String> {
+        self.with_terminal(|terminal| {
+            terminal
+                .agent_status(pane_id)
+                .map(|status| status.trim().to_lowercase())
+                .filter(|status| !status.is_empty())
+        })
+    }
+
+    fn helper_sendenv_session_process_gone(&self, pane_id: &str) -> bool {
+        let Some(tasks) = self.flock.stores().tasks else {
+            return false;
+        };
+        self.runtime
+            .block_on(tasks.leases_for_pane(pane_id, None))
+            .map(|leases| {
+                leases.into_iter().any(|lease| {
+                    lease.caller_pid.is_some_and(|pid| {
+                        !crate::proc::process_alive(pid, lease.caller_start.as_deref())
+                    })
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn helper_sendenv_federated_input(&self) -> bool {
+        federated_input_enabled(std::env::var_os("DUNKINGSHEEP_FEDERATED_INPUT").as_deref())
+    }
+
+    fn helper_sendenv_send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        match self.with_terminal_mut(|terminal| terminal.send_keys(pane_id, &[key])) {
+            Ok(()) => (true, "sent".into()),
+            Err(error) => (false, error.to_string()),
+        }
+    }
+}
+
+fn federated_input_enabled(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+impl SendEnv for TerminalCallAdapter<'_> {
+    fn read_pane(&self, pane_id: &str, lines: i64, ansi: bool) -> Option<String> {
+        self.helper_sendenv_read_pane(pane_id, lines, ansi)
+    }
+
+    fn pane_harness(&self, pane_id: &str) -> Option<String> {
+        self.helper_sendenv_pane_harness(pane_id)
+    }
+
+    fn session_process_gone(&self, pane_id: &str) -> bool {
+        self.helper_sendenv_session_process_gone(pane_id)
+    }
+
+    fn read_status(&self, pane_id: &str) -> Option<String> {
+        self.helper_sendenv_read_status(pane_id)
+    }
+
+    fn send_key(&mut self, pane_id: &str, key: &str) -> (bool, String) {
+        self.helper_sendenv_send_key(pane_id, key)
+    }
+
+    fn federated_input(&self) -> bool {
+        self.helper_sendenv_federated_input()
     }
 }
 
@@ -192,11 +284,13 @@ impl LoopRuntimeAdapter {
     {
         let flock = Arc::clone(&self.flock);
         let factory = Arc::clone(&self.terminal_factory);
+        let runtime = Handle::current();
         tokio::task::spawn_blocking(move || {
             let terminal = Mutex::new(factory());
             let adapter = TerminalCallAdapter {
                 flock: &flock,
                 terminal: &terminal,
+                runtime: &runtime,
             };
             call(&flock, &adapter)
         })
@@ -256,7 +350,151 @@ fn backend_from_name(configured: Option<&str>) -> Result<TmuxBackend, DunkError>
 mod tests {
     use super::*;
     use crate::flock::panes::PaneInfoEnv;
+    use crate::flock::panes::Stores;
+    use crate::flock::sends::SendEnv;
+    use crate::tasks::{ClaimOptions, ClaimOutcome, Tasks};
     use crate::terminal::fakes::FakeTerminal;
+
+    #[test]
+    fn production_env_send_read_uses_concrete_services() {
+        let dir = crate::testsupport::dir("runtime-send-read");
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("roles.json"),
+            false,
+        );
+        let mut fake = FakeTerminal::new();
+        fake.screens
+            .insert("w2:p2".into(), "first\nsecond\nthird".into());
+        fake.statuses.insert("w2:p2".into(), " Working ".into());
+        let reads = Arc::clone(&fake.reads);
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let request = RequestCtx::default();
+        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+
+        assert_eq!(
+            SendEnv::read_pane(&adapter.terminal, "w2:p2", 2, true),
+            Some("second\nthird".into())
+        );
+        assert_eq!(
+            *reads.lock().expect("reads lock"),
+            vec![("w2:p2".into(), 2, true)]
+        );
+        assert_eq!(
+            SendEnv::pane_harness(&adapter.terminal, "w2:p2"),
+            Some("claude".into())
+        );
+        assert_eq!(SendEnv::pane_harness(&adapter.terminal, "w1:p1"), None);
+        assert_eq!(SendEnv::pane_harness(&adapter.terminal, "%missing"), None);
+        assert_eq!(
+            SendEnv::read_status(&adapter.terminal, "w2:p2"),
+            Some("working".into())
+        );
+        assert_eq!(SendEnv::read_status(&adapter.terminal, "%missing"), None);
+
+        let mut unreadable_fake = FakeTerminal::new();
+        unreadable_fake.unreadable.insert("w2:p2".into());
+        let unreadable_terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(unreadable_fake));
+        let unreadable_adapter =
+            RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &unreadable_terminal);
+        assert_eq!(
+            SendEnv::read_pane(&unreadable_adapter.terminal, "w2:p2", 40, false),
+            None
+        );
+    }
+
+    #[test]
+    fn production_env_send_state_uses_concrete_services() {
+        assert!(federated_input_enabled(Some(OsStr::new("1"))));
+        assert!(!federated_input_enabled(None));
+        assert!(!federated_input_enabled(Some(OsStr::new("true"))));
+        assert!(!federated_input_enabled(Some(OsStr::new(" 1 "))));
+
+        let dir = crate::testsupport::dir("runtime-send-state");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let tasks = Arc::new(
+            runtime
+                .block_on(Tasks::open(dir.path().join("tasks.db")))
+                .expect("tasks store"),
+        );
+        let live_pid = i64::from(std::process::id());
+        let live_start = crate::proc::process_start(live_pid);
+        let live_task = runtime
+            .block_on(tasks.add("global", "live process lease", "test"))
+            .expect("live task");
+        let live = runtime
+            .block_on(tasks.claim_next(
+                "global",
+                "%live",
+                ClaimOptions {
+                    caller: Some((live_pid, live_start, Some("test".into()))),
+                    ..ClaimOptions::default()
+                },
+            ))
+            .expect("claim live lease");
+        assert!(matches!(live, ClaimOutcome::Claimed { .. }));
+
+        let dead_task = runtime
+            .block_on(tasks.add("global", "dead process lease", "test"))
+            .expect("dead task");
+        let dead = runtime
+            .block_on(tasks.claim_next(
+                "global",
+                "%dead",
+                ClaimOptions {
+                    caller: Some((i64::MAX, None, Some("test".into()))),
+                    ..ClaimOptions::default()
+                },
+            ))
+            .expect("claim dead lease");
+        assert!(matches!(dead, ClaimOutcome::Claimed { .. }));
+        assert_ne!(live_task.id, dead_task.id);
+
+        let flock = Flock::new(
+            dir.path().join("launches.json"),
+            dir.path().join("roles.json"),
+            false,
+        );
+        flock.attach_stores(Stores {
+            tasks: Some(tasks),
+            ..Stores::default()
+        });
+        let fake = FakeTerminal::new();
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
+        let request = RequestCtx::default();
+        let mut adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        assert!(!SendEnv::session_process_gone(
+            &adapter.terminal,
+            "%missing"
+        ));
+        assert!(!SendEnv::session_process_gone(&adapter.terminal, "%live"));
+        assert!(SendEnv::session_process_gone(&adapter.terminal, "%dead"));
+        assert_eq!(
+            SendEnv::send_key(&mut adapter.terminal, "w1:p1", "Enter"),
+            (true, "sent".into())
+        );
+
+        let mut unavailable = FakeTerminal::new();
+        unavailable.available = false;
+        let unavailable_terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(unavailable));
+        let mut unavailable_adapter =
+            RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &unavailable_terminal);
+        assert_eq!(
+            SendEnv::send_key(&mut unavailable_adapter.terminal, "w1:p1", "Enter"),
+            (
+                false,
+                "tmux server not running - start it with `tmux new -d`".into()
+            )
+        );
+    }
 
     #[test]
     fn configured_backend_selects_tmux_by_default_and_refuses_retired_or_unknown_names() {

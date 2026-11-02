@@ -6,6 +6,7 @@
 //! fake does, so a test can create a tab and then find it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use super::{
     AgentSpec, Pane, Resize, ResizedPane, Tab, Terminal, TerminalError, Workspace, RESIZE_MAX,
@@ -143,7 +144,7 @@ pub struct FakeTerminal {
     /// Every `(pane_id, keys)` sent as key names.
     pub keys_sent: Vec<(String, Vec<String>)>,
     /// Every `(pane_id, lines, ansi)` read.
-    pub reads: Vec<(String, i64, bool)>,
+    pub reads: Arc<Mutex<Vec<(String, i64, bool)>>>,
     counter: i64,
 }
 
@@ -165,7 +166,7 @@ impl Default for FakeTerminal {
             sends: Vec::new(),
             submits: Vec::new(),
             keys_sent: Vec::new(),
-            reads: Vec::new(),
+            reads: Arc::new(Mutex::new(Vec::new())),
             counter: 100,
         }
     }
@@ -510,6 +511,11 @@ impl Terminal for FakeTerminal {
         lines: i64,
         ansi: bool,
     ) -> Result<Option<String>, TerminalError> {
+        self.reads.lock().expect("fake terminal reads lock").push((
+            pane_id.to_string(),
+            lines,
+            ansi,
+        ));
         // The Python's order: an unknown pane is None, an unreadable pane is None,
         // then the pinned screen (tail-truncated), else the echo of what we sent.
         if self.get_pane(pane_id).is_none() {
