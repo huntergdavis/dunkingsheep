@@ -1975,6 +1975,10 @@ pub struct Lease {
     pub claimed_at: f64,
     pub heartbeat_at: f64,
     pub expires_at: f64,
+    /// Process recorded by the lease claimant, when this daemon version stored it.
+    pub caller_pid: Option<i64>,
+    /// `/proc` start time recorded with `caller_pid`, guarding against pid reuse.
+    pub caller_start: Option<String>,
 }
 
 /// `_decorate` output: the row and its derived fields, same names as the Python dict.
@@ -2026,7 +2030,7 @@ fn py_json_list(items: &[String]) -> String {
 
 fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, DunkError> {
     let mut stmt = conn
-        .prepare("SELECT task_id, pane_id, claimed_at, heartbeat_at, expires_at FROM task_leases WHERE task_id = ?")
+        .prepare("SELECT task_id, pane_id, claimed_at, heartbeat_at, expires_at, caller_pid, caller_start FROM task_leases WHERE task_id = ?")
         .map_err(db::map_sqlite)?;
     let rows = stmt
         .query_map(params![id], |row| {
@@ -2036,6 +2040,8 @@ fn leases_for_conn(conn: &Connection, id: &str, now: f64) -> Result<Vec<Lease>, 
                 claimed_at: row.get(2)?,
                 heartbeat_at: row.get(3)?,
                 expires_at: row.get(4)?,
+                caller_pid: row.get(5)?,
+                caller_start: row.get(6)?,
             })
         })
         .map_err(db::map_sqlite)?
