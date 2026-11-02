@@ -54,6 +54,37 @@ fn not_ported(command: &str) -> Outcome {
     }
 }
 
+fn memory(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    match text(ns, "memory_command") {
+        Some("recall" | "search") => {
+            for key in ["query", "limit", "harness", "project", "since"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            let rpc = if text(ns, "memory_command") == Some("search") {
+                "memory_search"
+            } else {
+                "memory_recall"
+            };
+            crate::daemon_cmd::run_command(ns, rpc, args, |result| {
+                crate::render_print::render_memory(
+                    result.as_array().map(Vec::as_slice).unwrap_or_default(),
+                )
+            })
+        }
+        Some("context") => {
+            for key in ["query", "sessions"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_context(result)
+            })
+        }
+        Some(other) => not_ported(&format!("memory {other}")),
+        None => not_ported("memory"),
+    }
+}
+
 fn superuser(ns: &Map<String, Value>) -> Outcome {
     let (rpc, args) = match text(ns, "superuser_command") {
         Some("status") => ("superuser_status", Map::new()),
@@ -1903,6 +1934,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "report" => report(ns),
         "superuser" => superuser(ns),
+        "memory" => memory(ns),
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),
