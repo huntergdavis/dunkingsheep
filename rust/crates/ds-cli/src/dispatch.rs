@@ -96,6 +96,19 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
     let store = Store::new(None, global_store);
     let added = match sub {
         "add" => {
+            let cls = text(ns, "cls").unwrap_or("");
+            let type_ = text(ns, "type_").unwrap_or("reference");
+            let authority = text(ns, "authority").unwrap_or("agent");
+            if cls == "ground-truth"
+                || matches!(type_, "rule" | "principle")
+                || authority == "owner"
+            {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: "refused: local context add cannot verify the bound owner role for protected entries; omit --local to use the daemon\n".into(),
+                    code: 2,
+                };
+            }
             let body = if let Some(body) = text(ns, "text").filter(|body| !body.is_empty()) {
                 body.to_string()
             } else {
@@ -138,9 +151,9 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
                 }
             };
             let args = AddArgs {
-                cls: text(ns, "cls").unwrap_or(""),
+                cls,
                 subject: text(ns, "subject").unwrap_or(""),
-                type_: text(ns, "type_").unwrap_or("reference"),
+                type_,
                 authority: text(ns, "authority"),
                 source: text(ns, "source").unwrap_or(""),
                 stated: text(ns, "stated"),
@@ -152,33 +165,18 @@ fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcom
         }
         "promote" => {
             let slug = text(ns, "slug").unwrap_or("");
-            let Some(entry) = store.find(slug) else {
+            let Some(_entry) = store.find(slug) else {
                 return Outcome {
                     stdout: String::new(),
                     stderr: String::new(),
                     code: 1,
                 };
             };
-            if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
-                return Outcome {
-                    stdout: String::new(),
-                    stderr: "refused: only an owner act promotes a ground truth\n".into(),
-                    code: 1,
-                };
-            }
-            let args = AddArgs {
-                cls: "ground-truth",
-                subject: entry.get("subject").unwrap_or(""),
-                type_: entry
-                    .get("type")
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("principle"),
-                authority: Some("owner"),
-                source: entry.get("source").unwrap_or(""),
-                supersedes: Some(&entry.slug),
-                ..AddArgs::default()
+            return Outcome {
+                stdout: String::new(),
+                stderr: "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n".into(),
+                code: 2,
             };
-            store.add(&entry.body, &args, None)
         }
         "supersede" => {
             let file = text(ns, "file").unwrap_or("-");

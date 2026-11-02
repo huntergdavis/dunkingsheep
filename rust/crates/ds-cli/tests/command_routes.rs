@@ -1898,15 +1898,49 @@ fn cli_route_11_context_local_write_a() {
         None,
         None,
     );
-    assert_eq!(Some(1), refused.status.code());
+    assert_eq!(Some(2), refused.status.code());
     assert!(refused.stdout.is_empty());
     assert_eq!(
-        "refused: only an owner act promotes a ground truth\n",
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
         String::from_utf8(refused.stderr).unwrap()
     );
     assert_eq!(original, std::fs::read_to_string(&original_path).unwrap());
     let ground_truth = root.join(".dunkingsheep/ground-truth");
-    assert_eq!(0, std::fs::read_dir(ground_truth).unwrap().count());
+    assert!(std::fs::read_dir(&ground_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!ground_truth.exists()));
+
+    let protected_add = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--text",
+            "must not be written",
+            "--class",
+            "fact",
+            "--subject",
+            "protected local entry",
+            "--type",
+            "rule",
+            "--stated",
+            "2026-10-24",
+            "--local",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), protected_add.status.code());
+    assert!(protected_add.stdout.is_empty());
+    assert_eq!(
+        "refused: local context add cannot verify the bound owner role for protected entries; omit --local to use the daemon\n",
+        String::from_utf8(protected_add.stderr).unwrap()
+    );
+    assert!(!root
+        .join(".dunkingsheep/fact/2026-10-24-protected-local-entry.md")
+        .exists());
 
     let absent = run_local_cli(
         &socket,
@@ -1928,25 +1962,17 @@ fn cli_route_11_context_local_write_a() {
         None,
         Some("1"),
     );
-    assert_eq!(Some(0), promoted.status.code());
-    assert!(promoted.stderr.is_empty());
-    let promoted_text = String::from_utf8(promoted.stdout).unwrap();
-    let promoted_slug = promoted_text
-        .strip_prefix("promoted ")
-        .and_then(|text| text.strip_suffix('\n'))
-        .unwrap();
-    let promoted_path = root
-        .join(".dunkingsheep/ground-truth")
-        .join(format!("{promoted_slug}.md"));
-    let promoted_article = std::fs::read_to_string(promoted_path).unwrap();
-    assert!(promoted_article.contains("class: ground-truth\n"));
-    assert!(promoted_article.contains("subject: file entry\n"));
-    assert!(promoted_article.contains("authority: owner\n"));
-    assert!(promoted_article.contains("source: fixture\n"));
-    assert!(promoted_article.contains("supersedes: 2026-10-21-file-entry\n"));
-    assert!(promoted_article.ends_with("file first\nfile second\nfile third\n"));
+    assert_eq!(Some(2), promoted.status.code());
+    assert!(promoted.stdout.is_empty());
+    assert_eq!(
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(promoted.stderr).unwrap()
+    );
     let superseded = std::fs::read_to_string(original_path).unwrap();
-    assert!(superseded.contains(&format!("superseded_by: {promoted_slug}\n")));
+    assert_eq!(original, superseded);
+    assert!(std::fs::read_dir(&ground_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!ground_truth.exists()));
 
     let global_promoted = run_local_cli(
         &socket,
@@ -1962,19 +1988,16 @@ fn cli_route_11_context_local_write_a() {
         None,
         Some("1"),
     );
-    assert_eq!(Some(0), global_promoted.status.code());
-    assert!(global_promoted.stderr.is_empty());
-    let global_promoted_text = String::from_utf8(global_promoted.stdout).unwrap();
-    let global_promoted_slug = global_promoted_text
-        .strip_prefix("promoted ")
-        .and_then(|text| text.strip_suffix('\n'))
-        .unwrap();
-    let global_truth_path = global_dir
-        .join("context/ground-truth")
-        .join(format!("{global_promoted_slug}.md"));
-    assert!(std::fs::read_to_string(global_truth_path)
-        .unwrap()
-        .contains("scope: global\n"));
+    assert_eq!(Some(2), global_promoted.status.code());
+    assert!(global_promoted.stdout.is_empty());
+    assert_eq!(
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(global_promoted.stderr).unwrap()
+    );
+    let global_truth = global_dir.join("context/ground-truth");
+    assert!(std::fs::read_dir(&global_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!global_truth.exists()));
 }
 
 #[test]
