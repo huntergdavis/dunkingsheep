@@ -2585,6 +2585,7 @@
    "json": false,
    "limit": 10,
    "mailbox": null,
+   "messages_only": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2603,6 +2604,7 @@
    "json": true,
    "limit": 10,
    "mailbox": null,
+   "messages_only": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2621,6 +2623,7 @@
    "json": true,
    "limit": 10,
    "mailbox": null,
+   "messages_only": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2640,6 +2643,7 @@
    "json": false,
    "limit": 1,
    "mailbox": null,
+   "messages_only": false,
    "no_start_daemon": false,
    "peek": false,
    "self_pane": null,
@@ -2658,8 +2662,28 @@
    "json": false,
    "limit": 10,
    "mailbox": null,
+   "messages_only": false,
    "no_start_daemon": false,
    "peek": true,
+   "self_pane": null,
+   "socket": null
+  }
+ },
+ {
+  "argv": [
+   "inbox",
+   "read",
+   "--messages-only"
+  ],
+  "namespace": {
+   "command": "inbox",
+   "inbox_command": "read",
+   "json": false,
+   "limit": 10,
+   "mailbox": null,
+   "messages_only": true,
+   "no_start_daemon": false,
+   "peek": false,
    "self_pane": null,
    "socket": null
   }

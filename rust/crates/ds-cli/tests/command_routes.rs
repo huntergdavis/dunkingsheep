@@ -1719,6 +1719,18 @@ fn cli_route_07_inbox_read_b() {
 }
 
 #[test]
+fn cli_inbox_read_messages_only_forwards_opt_out() {
+    let output = run_daemon_cli(
+        &["inbox", "read", "reviewer", "--messages-only", "--peek"],
+        "inbox_read",
+        json!({"mailbox": "reviewer", "limit": 10, "peek": true, "include_tasks": false}),
+        json!({"mailbox": "reviewer", "messages": [], "truncated": false, "omitted": 0, "note": null}),
+    );
+    assert_eq!(0, output.status.code().unwrap());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_11_context_local_write_a() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

@@ -6,6 +6,7 @@ import tempfile
 import logging
 import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -1005,13 +1006,39 @@ class FlockTaskTests(unittest.TestCase):
         self.flock.inbox.send("Codex Site", "hello", sender="pm")
         self.flock.task_add("global work", self_pane_id="w2:p1")
         self.flock.task_add("local work", scope="self", self_pane_id="w2:p1")
-        result = self.flock.inbox_read(self_pane_id="w2:p1")
+        result = dunk_api.h_inbox_read(self.flock, {}, self_pane_id="w2:p1")
         self.assertEqual(1, len(result["messages"]))
         self.assertIn("tasks", result)
         titles = [task["title"] for task in result["tasks"]["global"]]
         titles += [task["title"] for task in result["tasks"]["pane"]]
         self.assertIn("global work", titles)
         self.assertIn("local work", titles)
+
+    def test_messages_only_read_skips_tasks_and_preserves_peek_and_receipt(self):
+        self.flock.inbox.send("Codex Site", "hello", sender="pm")
+        with patch.object(self.flock.tasks, "for_pane",
+                          wraps=self.flock.tasks.for_pane) as for_pane:
+            peeked = self.flock.inbox_read(
+                peek=True, self_pane_id="w2:p1", include_tasks=False)
+            for_pane.assert_not_called()
+        self.assertNotIn("tasks", peeked)
+        self.assertEqual(1, self.flock.inbox.count("Codex Site")["unread"])
+        self.assertNotIn("marked_read", peeked)
+
+        with patch.object(self.flock.tasks, "for_pane",
+                          wraps=self.flock.tasks.for_pane) as for_pane:
+            read = dunk_api.h_inbox_read(
+                self.flock, {"include_tasks": False}, self_pane_id="w2:p1")
+            for_pane.assert_not_called()
+        self.assertNotIn("tasks", read)
+        self.assertEqual(1, len(read["messages"]))
+        self.assertEqual(1, read["marked_read"])
+        self.assertEqual("read", read["messages"][0]["state"])
+        self.assertIsNotNone(read["messages"][0]["read_at"])
+        self.assertEqual(0, self.flock.inbox.count("Codex Site")["unread"])
+        recovered = self.flock.inbox_recover("Codex Site")
+        self.assertEqual([read["messages"][0]["message_id"]],
+                         [message["message_id"] for message in recovered["messages"]])
 
     def test_next_claims_and_auto_follows_when_empty(self):
         # t110: an unassigned add is owned by its CREATOR, so the claimer here has

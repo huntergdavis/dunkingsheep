@@ -1729,6 +1729,9 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                     "peek".into(),
                     Value::Bool(matches!(ns.get("peek"), Some(Value::Bool(true)))),
                 );
+                if matches!(ns.get("messages_only"), Some(Value::Bool(true))) {
+                    args.insert("include_tasks".into(), Value::Bool(false));
+                }
                 crate::daemon_cmd::run_command(ns, "inbox_read", args, |result| {
                     crate::render_print::render_inbox_read(result)
                 })

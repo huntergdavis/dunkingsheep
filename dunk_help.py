@@ -479,8 +479,8 @@ def guide(markdown=False):
       "lease; `task_complete` completes it for everyone. `task_follow` is the\n"
       "push: the daemon then hands you the next task when the backend reports\n"
       "your pane idle, so you do not poll. An empty task_next subscribes you\n"
-      "automatically. `inbox_read` returns your global tasks and your own pane's\n"
-      "tasks after the messages.\n")
+      "automatically. `inbox_read` includes global and pane task queues by default;\n"
+      "use `dunkingsheep inbox read --messages-only` to omit them.\n")
     w(code("dunkingsheep task add \"Ship the parser\" -p high --body \"...\"\n"
            "dunkingsheep task add \"Write tests\" --depends-on t12\n"
            "dunkingsheep task next                 # atomic claim (global by default)\n"
