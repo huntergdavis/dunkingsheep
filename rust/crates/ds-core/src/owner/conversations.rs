@@ -722,7 +722,7 @@ mod tests {
             },
             Some(DESK),
         );
-        assert!(error(invalid_transport).contains("unsupported transport"));
+        assert!(error(invalid_transport).contains("transport must be one of"));
 
         let missing_attachment = fixture._dir.path().join("not-created");
         let duplicate = fixture
