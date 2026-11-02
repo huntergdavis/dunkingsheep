@@ -406,6 +406,49 @@ mod tests {
     }
 
     #[test]
+    fn flock_archive_retired_uses_python_truthiness_for_mailbox_fallback() {
+        let fixture = new_fixture();
+        panes::retire(
+            "w1:p9",
+            "replaced",
+            None,
+            &["0"],
+            &["0"],
+            &fixture.retired_path,
+            Some(100.0),
+        )
+        .expect("retire numeric mailbox alias");
+        crate::atomic_json::write(
+            &fixture.lane_path,
+            &json!({
+                "w1:p9": {"mailbox": 0, "declared": true, "declared_at": 99.0}
+            }),
+        )
+        .expect("write falsey mailbox registry row");
+        let unknown = send_old_to(&fixture, "0", "w1:p9");
+        assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("queued", state(&fixture, &unknown));
+
+        let fixture = new_fixture();
+        retirement(&fixture, 100.0);
+        crate::atomic_json::write(
+            &fixture.lane_path,
+            &json!({
+                "w1:p9": {
+                    "mailbox": 0,
+                    "name": "old-lane",
+                    "declared": true,
+                    "declared_at": 99.0
+                }
+            }),
+        )
+        .expect("write fallback name registry row");
+        let eligible = send_old(&fixture, "w1:p9");
+        assert_eq!(1, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("archived", state(&fixture, &eligible));
+    }
+
+    #[test]
     fn flock_archive_retired_protects_shared_aliases() {
         let fixture = new_fixture();
         retirement(&fixture, 100.0);
