@@ -498,7 +498,7 @@ fn cli_route_06_inbox_read_a() {
 
 #[test]
 fn cli_route_14_pm_nonfinite_demo() {
-    // Golden payloads reproduced with the Python CLI's json.loads/json.dumps path.
+    // Golden nonfinite/surrogate payloads from the Python CLI's json.loads/json.dumps path.
     for (raw, expected) in [
         (r###"{"note": NaN}"###, r###"{"note": NaN, "demo": true}"###),
         (
@@ -524,6 +524,34 @@ fn cli_route_14_pm_nonfinite_demo() {
         (
             r###"{"n":1e400,"negative":-1e400,"zero":-0,"floatzero":-0.0}"###,
             r###"{"n": Infinity, "negative": -Infinity, "zero": 0, "floatzero": -0.0, "demo": true}"###,
+        ),
+        (
+            r###"{"note":"\ud800"}"###,
+            r###"{"note": "\ud800", "demo": true}"###,
+        ),
+        (
+            r###"{"note":"\udfff"}"###,
+            r###"{"note": "\udfff", "demo": true}"###,
+        ),
+        (
+            r###"{"note":"\ud83d\ude00"}"###,
+            r###"{"note": "\ud83d\ude00", "demo": true}"###,
+        ),
+        (
+            r###"{"note":"\\ud800","pair":"\\ud83d\\ude00"}"###,
+            r###"{"note": "\\ud800", "pair": "\\ud83d\\ude00", "demo": true}"###,
+        ),
+        (
+            r###"{"\ud800":["\udfff","\ud800\ud83d\ude00"],"n":NaN}"###,
+            r###"{"\ud800": ["\udfff", "\ud800\ud83d\ude00"], "n": NaN, "demo": true}"###,
+        ),
+        (
+            r###"{"literal":"x\u005f_dunk_pm_escape_surrogate_d800_y","note":"\ud800","constant":["__dunk_pm_escape_NaN"],"n":NaN}"###,
+            r###"{"literal": "x__dunk_pm_escape_surrogate_d800_y", "note": "\ud800", "constant": ["__dunk_pm_escape_NaN"], "n": NaN, "demo": true}"###,
+        ),
+        (
+            r###"{"note":"\ud80x"}"###,
+            r###"{"note": "{\"note\":\"\\ud80x\"}", "demo": true}"###,
         ),
     ] {
         let temp = tempfile::tempdir().unwrap();
