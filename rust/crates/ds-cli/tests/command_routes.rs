@@ -3173,3 +3173,60 @@ fn cli_route_10_context_local_seed() {
     );
     assert!(status.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_33_superuser_a() {
+    let status = run_daemon_cli(
+        &["superuser", "status"],
+        "superuser_status",
+        json!({}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [{"label": "owner", "role": "owner"}]
+        }),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  tokens: owner=owner\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let added = run_daemon_cli(
+        &["superuser", "add", "worker@example"],
+        "superuser_add",
+        json!({"entry": "worker@example"}),
+        json!({
+            "path": "/tmp/roles.json",
+            "superuser": true,
+            "pane_id": "%99",
+            "role": "owner",
+            "lanes": {},
+            "tokens": [],
+            "added": "worker@example"
+        }),
+    );
+    assert_eq!(Some(0), added.status.code());
+    assert_eq!(
+        "roles /tmp/roles.json\n  owner: yes (pane %99, role owner)\n  (no lanes registered; `lane register --role owner` bootstraps)\n  added: worker@example\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let removed_json = run_daemon_cli(
+        &["superuser", "remove", "worker@example", "--json"],
+        "superuser_remove",
+        json!({"entry": "worker@example"}),
+        json!({"removed": 1, "entry": "worker@example"}),
+    );
+    assert_eq!(Some(0), removed_json.status.code());
+    assert_eq!(
+        "{\n  \"removed\": 1,\n  \"entry\": \"worker@example\"\n}\n",
+        String::from_utf8(removed_json.stdout).unwrap()
+    );
+    assert!(removed_json.stderr.is_empty());
+}
