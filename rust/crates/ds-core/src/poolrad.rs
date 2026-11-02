@@ -1,17 +1,21 @@
 //! Local helpers used by the Poolrad strict-candidate queue.
 //!
-//! This module only reads local files and invokes the local candidate exporter;
-//! it does not access GitHub, the task queue, or Poolrad repositories.
+//! This module reads local files, invokes the local candidate exporter, and
+//! writes injectable credit-pending state; it never accesses GitHub, the task
+//! queue, or Poolrad repositories.
 
 use chrono::Utc;
-use serde_json::Value;
+use regex::Regex;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::{self, Read};
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STRICT_MANIFEST: &str = "docs/re/strict_full_c_addresses.csv";
 const IDENTITIES: &str = "docs/re/reviewed_function_identities.csv";
@@ -522,6 +526,190 @@ fn checker_row_ids(text: &str) -> Vec<String> {
     row_ids
 }
 
+/// Return the first merge-commit PR number above `commit`, if one exists.
+pub fn merge_pr(repo: impl AsRef<Path>, commit: &str) -> io::Result<Option<u64>> {
+    let log = git(
+        repo,
+        &[
+            "log",
+            "--merges",
+            "--ancestry-path",
+            &format!("{commit}..HEAD"),
+            "--format=%s",
+        ],
+    )?;
+    let pattern = Regex::new(r"#([0-9]+)").expect("pull request number pattern");
+    for subject in log.lines().rev().filter(|line| !line.trim().is_empty()) {
+        if let Some(captures) = pattern.captures(subject) {
+            if let Some(number) = captures
+                .get(1)
+                .and_then(|digits| digits.as_str().parse().ok())
+            {
+                return Ok(Some(number));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Match a recovered-model filename carrying both the row's unit and offset.
+pub fn model_name_matches(name: &str, rid: &str) -> bool {
+    let parts: Vec<&str> = rid.split('_').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    let unit = parts[1].to_lowercase();
+    let offset = parts[2].to_lowercase();
+    let unit = unit.trim_start_matches('0');
+    let unit = if unit.is_empty() { "0" } else { unit };
+    let offset = offset.trim_start_matches('0');
+    let offset = if offset.is_empty() { "0" } else { offset };
+    let name = name.to_lowercase();
+    let unit_pattern = Regex::new(&format!(r"(^|[_/])u{}([_/.]|$)", regex::escape(unit)))
+        .expect("escaped unit pattern");
+    let offset_pattern = Regex::new(&format!(r"(^|_)0*{}([_/.]|$)", regex::escape(offset)))
+        .expect("escaped offset pattern");
+    unit_pattern.is_match(&name) && offset_pattern.is_match(&name)
+}
+
+/// Find the first matching recovered model and its local commit/merge evidence.
+pub fn model_evidence(repo: impl AsRef<Path>, rid: &str) -> io::Result<Option<Value>> {
+    let repo = repo.as_ref();
+    let src = repo.join("src/recovered");
+    let Ok(entries) = fs::read_dir(src) else {
+        return Ok(None);
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".c"))
+        .collect();
+    names.sort();
+    for name in names {
+        if !model_name_matches(&name, rid) {
+            continue;
+        }
+        let relative = format!("src/recovered/{name}");
+        let commit = git(repo, &["log", "-1", "--format=%H", "--", &relative])?;
+        if commit.is_empty() {
+            continue;
+        }
+        let pr = merge_pr(repo, &commit)?
+            .map(Value::from)
+            .unwrap_or(Value::Null);
+        return Ok(Some(serde_json::json!({
+            "model": relative,
+            "commit": commit,
+            "pr": pr
+        })));
+    }
+    Ok(None)
+}
+
+/// Resolve the credit-pending file, using the configured Dunking Sheep state dir.
+pub fn credit_pending_path(path: Option<&Path>) -> PathBuf {
+    if let Some(path) = path {
+        return path.to_owned();
+    }
+    let config = std::env::var_os("DUNKINGSHEEP_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/dunkingsheep"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config/dunkingsheep"));
+    config.join("poolrad/credit-pending.json")
+}
+
+/// Merge pending evidence into a disposable or owner-selected file atomically.
+/// Existing IDs keep their first-seen evidence. A filesystem failure matches
+/// Python's warning-and-None result; malformed evidence is returned as an error.
+pub fn record_credit_pending(
+    entries: &Map<String, Value>,
+    path: Option<&Path>,
+) -> Result<Option<Value>, String> {
+    let path = credit_pending_path(path);
+    let mut bodies = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|data| data.get("bodies").and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+    for (rid, evidence) in entries {
+        if bodies.contains_key(rid) {
+            continue;
+        }
+        let Some(mut evidence) = evidence.as_object().cloned() else {
+            return Err(format!("credit evidence for {rid} must be an object"));
+        };
+        evidence.insert("first_seen".to_owned(), json_timestamp());
+        bodies.insert(rid.clone(), Value::Object(evidence));
+    }
+    let mut payload = Map::new();
+    payload.insert("bodies".to_owned(), Value::Object(bodies.clone()));
+    payload.insert("count".to_owned(), Value::from(bodies.len()));
+    payload.insert("updated_at".to_owned(), json_timestamp());
+    let payload = Value::Object(payload);
+    let serialized = serde_json::to_vec_pretty(&payload).map_err(|error| error.to_string())?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Err(error) = fs::create_dir_all(parent) {
+        warn_credit_pending_write(&path, &error);
+        return Ok(None);
+    }
+    let mut temporary = OsString::from(path.as_os_str());
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let opened = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&temporary);
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(error) => {
+            warn_credit_pending_write(&path, &error);
+            return Ok(None);
+        }
+    };
+    if let Err(error) = file.write_all(&serialized).and_then(|()| file.flush()) {
+        warn_credit_pending_write(&path, &error);
+        return Ok(None);
+    }
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, &path) {
+        warn_credit_pending_write(&path, &error);
+        return Ok(None);
+    }
+    Ok(Some(payload))
+}
+
+fn warn_credit_pending_write(path: &Path, error: &io::Error) {
+    tracing::warn!(
+        path = %path.display(),
+        error = %error,
+        "credit-pending record not written"
+    );
+}
+
+/// Return the saved credit-pending evidence, or an empty map for absent/bad data.
+pub fn credit_pending(path: Option<&Path>) -> Map<String, Value> {
+    fs::read_to_string(credit_pending_path(path))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|data| data.get("bodies").and_then(Value::as_object).cloned())
+        .unwrap_or_default()
+}
+
+fn json_timestamp() -> Value {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    Value::from((seconds * 1000.0).round_ties_even() / 1000.0)
+}
+
 fn required(row: &Value, key: &str) -> Result<String, String> {
     row.get(key).map(py_str).ok_or_else(|| format!("'{key}'"))
 }
@@ -597,9 +785,61 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("temporary directory")
+    }
+
+    fn fixture_git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Poolrad Fixture")
+            .env("GIT_AUTHOR_EMAIL", "poolrad-fixture@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Poolrad Fixture")
+            .env("GIT_COMMITTER_EMAIL", "poolrad-fixture@example.invalid")
+            .output()
+            .expect("git fixture command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn model_git_fixture(repo: &Path, filename: &str, pr: Option<u64>) -> String {
+        fixture_git(repo, &["init", "--quiet", "--initial-branch=main"]);
+        fs::write(repo.join("README.md"), "fixture\n").unwrap();
+        fixture_git(repo, &["add", "-A"]);
+        fixture_git(repo, &["commit", "--quiet", "-m", "init"]);
+        if pr.is_some() {
+            fixture_git(repo, &["checkout", "--quiet", "-b", "side"]);
+        }
+        let relative = format!("src/recovered/{filename}");
+        let model = repo.join(&relative);
+        fs::create_dir_all(model.parent().unwrap()).unwrap();
+        fs::write(&model, "/* fixture model */\n").unwrap();
+        fixture_git(repo, &["add", "-A"]);
+        fixture_git(repo, &["commit", "--quiet", "-m", "add model"]);
+        let commit = fixture_git(repo, &["rev-parse", "HEAD"]);
+        if let Some(pr) = pr {
+            fixture_git(repo, &["checkout", "--quiet", "main"]);
+            fixture_git(
+                repo,
+                &[
+                    "merge",
+                    "--quiet",
+                    "--no-ff",
+                    "-m",
+                    &format!("Merge pull request #{pr} from fixture/model"),
+                    "side",
+                ],
+            );
+        }
+        commit
     }
 
     #[test]
@@ -836,5 +1076,95 @@ mod tests {
             _unit_tokens("OVL_1").is_empty(),
             "IDs without unit and offset components have no tokens"
         );
+    }
+
+    #[test]
+    fn model_evidence_reports_first_model_commit_and_its_merge_pr() {
+        let repo = tempdir();
+        let commit = model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", Some(1433));
+        let evidence = model_evidence(repo.path(), "OVL_0020_11AC")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            evidence,
+            json!({
+                "model":"src/recovered/overlay_u20_list_walk_11ac_cpu.c",
+                "commit":commit,
+                "pr":1433
+            })
+        );
+        assert_eq!(merge_pr(repo.path(), &commit).unwrap(), Some(1433));
+        assert!(model_evidence(repo.path(), "OVL_0001_0002")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn model_evidence_does_not_invent_a_pr_for_a_direct_commit() {
+        let repo = tempdir();
+        let commit = model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", None);
+        assert_eq!(merge_pr(repo.path(), &commit).unwrap(), None);
+        assert_eq!(
+            model_evidence(repo.path(), "OVL_0020_11AC")
+                .unwrap()
+                .unwrap()["pr"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn credit_pending_writes_atomically_with_private_mode_and_keeps_first_evidence() {
+        let state = tempdir();
+        let path = state.path().join("nested/credit-pending.json");
+        let entries = serde_json::from_value::<Map<String, Value>>(json!({
+            "OVL_0020_11AC":{"model":"m.c","commit":"abc","pr":1433}
+        }))
+        .unwrap();
+        let first = record_credit_pending(&entries, Some(&path))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first["count"], 1);
+        let first_seen = first["bodies"]["OVL_0020_11AC"]["first_seen"].clone();
+        assert!(first_seen.is_number());
+        assert_eq!(
+            credit_pending(Some(&path)),
+            first["bodies"].as_object().unwrap().clone()
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let later = serde_json::from_value::<Map<String, Value>>(json!({
+            "OVL_0020_11AC":{"model":"replacement.c","commit":"def","pr":9},
+            "OVL_0001_0002":{"model":"new.c","commit":"ghi","pr":10}
+        }))
+        .unwrap();
+        let second = record_credit_pending(&later, Some(&path)).unwrap().unwrap();
+        assert_eq!(second["count"], 2);
+        assert_eq!(second["bodies"]["OVL_0020_11AC"]["model"], "m.c");
+        assert_eq!(second["bodies"]["OVL_0020_11AC"]["first_seen"], first_seen);
+        assert!(second["updated_at"].as_f64().unwrap() >= first["updated_at"].as_f64().unwrap());
+        assert!(credit_pending_path(Some(&path)).ends_with("nested/credit-pending.json"));
+    }
+
+    #[test]
+    fn credit_pending_reads_bad_data_as_empty_and_write_failure_returns_none() {
+        let state = tempdir();
+        let path = state.path().join("credit-pending.json");
+        assert!(credit_pending(Some(&path)).is_empty());
+        fs::write(&path, "{broken").unwrap();
+        assert!(credit_pending(Some(&path)).is_empty());
+        fs::remove_file(&path).unwrap();
+
+        let directory_target = state.path().join("target-directory");
+        fs::create_dir(&directory_target).unwrap();
+        let entries = serde_json::from_value::<Map<String, Value>>(json!({
+            "OVL_1_1":{"model":"m.c"}
+        }))
+        .unwrap();
+        assert!(record_credit_pending(&entries, Some(&directory_target))
+            .unwrap()
+            .is_none());
     }
 }
