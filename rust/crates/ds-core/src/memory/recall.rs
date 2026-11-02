@@ -39,7 +39,7 @@ pub const PER_SESSION_LIMIT: usize = 2;
 /// How many matches to ask SQLite for before the ranking trims to `limit`
 /// (`max(limit * 3, 20)`).
 pub fn fetch_limit(limit: usize) -> usize {
-    (limit * 3).max(20)
+    limit.saturating_mul(3).max(20)
 }
 
 /// The Python's score: bm25 (negative, lower is better) turned into a positive
@@ -206,7 +206,8 @@ fn fetch(
             params.push(rusqlite::types::Value::Real(since));
         }
         sql.push_str(" ORDER BY bm25(chunks_fts) LIMIT ?");
-        params.push(rusqlite::types::Value::Integer(fetch_limit(limit) as i64));
+        let fetch_limit = i64::try_from(fetch_limit(limit)).unwrap_or(i64::MAX);
+        params.push(rusqlite::types::Value::Integer(fetch_limit));
         let mut statement = connection.prepare(&sql).map_err(map_sqlite)?;
         let rows = statement
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {

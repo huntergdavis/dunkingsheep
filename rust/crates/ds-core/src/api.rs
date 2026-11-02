@@ -238,6 +238,19 @@ impl Dispatcher {
         self.register("lane_unregister", h_lane_unregister);
     }
 
+    /// Register only the T39 context supersede and retire handlers.
+    pub fn register_context_supersede_retire(&mut self) {
+        self.register("context_supersede", h_context_supersede);
+        self.register("context_retire", h_context_retire);
+    }
+
+    /// Register only the T39 memory recall, search and context handlers.
+    pub fn register_memory_recall_search_context(&mut self) {
+        self.register("memory_recall", h_memory_recall);
+        self.register("memory_search", h_memory_search);
+        self.register("memory_context", h_memory_context);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -420,6 +433,204 @@ pub fn h_lane_unregister(context: &HandlerContext<'_>, args: Args) -> Result<Val
     context
         .flock
         .lane_unregister(pane, context.self_pane_id(), context.env)
+}
+
+fn context_store(args: &Args) -> crate::context::store::Store {
+    let global_store = python_bool_arg(args, "global_store", true);
+    let project_path = args
+        .get("project_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty());
+    if global_store || project_path.is_none() {
+        crate::context::store::Store::new(None, true)
+    } else {
+        crate::context::store::Store::new(project_path.map(std::path::Path::new), false)
+    }
+}
+
+fn context_arg_string<'a>(args: &'a Args, key: &str) -> Result<&'a str, DunkError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused(format!("'{key}' is required")))
+}
+
+fn memory_pool(
+    context: &HandlerContext<'_>,
+) -> Result<std::sync::Arc<crate::db::ReadPool>, DunkError> {
+    context.flock.stores().memory.ok_or_else(|| {
+        DunkError::Refused(
+            "memory service is not enabled; start the daemon with persistence".into(),
+        )
+    })
+}
+
+fn memory_arg_string<'a>(args: &'a Args, key: &str) -> Result<&'a str, DunkError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused(format!("'{key}' is required")))
+}
+
+fn context_ledger() -> crate::context::ledger::Ledger {
+    crate::context::ledger::Ledger::new(None)
+}
+
+fn added_context_value(added: crate::context::store::Added) -> Value {
+    json!({
+        "slug": added.slug,
+        "path": added.path.to_string_lossy(),
+        "class": added.cls,
+    })
+}
+
+/// `dunk_api.h_context_supersede`.
+pub fn h_context_supersede(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let slug = context_arg_string(&args, "slug")?;
+    let body = context_arg_string(&args, "body")?;
+    let store = context_store(&args);
+    let Some(old) = store
+        .resolve(slug)
+        .map_err(|error| DunkError::Refused(error.0))?
+    else {
+        return Err(DunkError::Refused(format!("no live entry '{slug}'")));
+    };
+    let self_pane_id = context.self_pane_id();
+    let role = context.flock.caller_role(self_pane_id, context.env)?;
+    if (old.get("class") == Some("ground-truth") || old.get("authority") == Some("owner"))
+        && role != "owner"
+    {
+        return Err(DunkError::Refused(
+            "only the owner supersedes a rule".into(),
+        ));
+    }
+    let by = self_pane_id.unwrap_or(&role);
+    let mut ledger = context_ledger();
+    let added = store
+        .supersede(
+            slug,
+            body,
+            Some(by),
+            &crate::context::store::SupersedeMeta::default(),
+            Some(&mut ledger),
+        )
+        .map_err(|error| DunkError::Refused(error.0))?;
+    Ok(added_context_value(added))
+}
+
+/// `dunk_api.h_context_retire`.
+pub fn h_context_retire(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let slug = context_arg_string(&args, "slug")?;
+    let reason = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("");
+    let self_pane_id = context.self_pane_id();
+    context
+        .flock
+        .require_superuser(self_pane_id, "context retire", context.env)?;
+    let store = context_store(&args);
+    let mut ledger = context_ledger();
+    let (slug, reason) = store
+        .retire(slug, reason, self_pane_id, Some(&mut ledger))
+        .map_err(|error| DunkError::Refused(error.0))?;
+    Ok(json!({"slug": slug, "retired": true, "reason": reason}))
+}
+
+const MEMORY_RECALL_MAX_LIMIT: i64 = 50;
+const MEMORY_CONTEXT_MAX_SESSIONS: i64 = 20;
+
+fn memory_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => py_int(value).ok_or_else(|| match value {
+            Value::String(value) => DunkError::Refused(format!(
+                "invalid literal for int() with base 10: '{}'",
+                value
+            )),
+            Value::Array(_) => DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                    .into(),
+            ),
+            Value::Object(_) => DunkError::Refused(
+                "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                    .into(),
+            ),
+            _ => DunkError::Refused("cannot convert value to int".into()),
+        }),
+    }
+}
+
+fn memory_int_arg_at_most(
+    args: &Args,
+    key: &str,
+    default: i64,
+    maximum: i64,
+) -> Result<i64, DunkError> {
+    let value = memory_int_arg(args, key, default)?;
+    if value > maximum {
+        return Err(DunkError::Refused(format!(
+            "{key} must not exceed {maximum}"
+        )));
+    }
+    Ok(value)
+}
+
+fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkError> {
+    let harness = args
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let project = args
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let since = args
+        .get("since")
+        .filter(|value| truthy(value))
+        .map(python_float)
+        .transpose()?;
+    Ok(crate::memory::recall::Filters {
+        harness,
+        project,
+        since,
+    })
+}
+
+fn memory_recall(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
+    let query = memory_arg_string(args, "query")?;
+    let limit = memory_int_arg_at_most(args, "limit", 10, MEMORY_RECALL_MAX_LIMIT)?.max(0) as usize;
+    let pool = memory_pool(context)?;
+    let rows = crate::memory::recall::recall(
+        pool.as_ref(),
+        query,
+        limit,
+        &memory_filters(args)?,
+        context.env.now_s(),
+        1200,
+    )?;
+    serde_json::to_value(rows).map_err(|error| DunkError::Refused(error.to_string()))
+}
+
+/// `dunk_api.h_memory_recall`.
+pub fn h_memory_recall(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    memory_recall(context, &args)
+}
+
+/// `dunk_api.h_memory_search`.
+pub fn h_memory_search(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    memory_recall(context, &args)
+}
+
+/// `dunk_api.h_memory_context`.
+pub fn h_memory_context(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let query = memory_arg_string(&args, "query")?;
+    // Negative values retain Python's slice-from-the-end behavior; positive requests follow
+    // the published API maximum, bounding the recall multiplier below.
+    let sessions = memory_int_arg_at_most(&args, "sessions", 5, MEMORY_CONTEXT_MAX_SESSIONS)?;
+    let pool = memory_pool(context)?;
+    crate::memory::queries::context(pool.as_ref(), query, sessions, 2, context.env.now_s())
 }
 
 fn python_bool_arg(args: &Args, key: &str, default: bool) -> bool {
