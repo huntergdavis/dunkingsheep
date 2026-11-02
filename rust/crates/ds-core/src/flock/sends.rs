@@ -1143,7 +1143,9 @@ impl Flock {
             .is_some_and(|generation| Some(generation) == candidate.generation.as_ref())
         {
             let mut transcript = existing.transcript_texts.clone();
-            if existing.status == "sent" && existing.press_enter {
+            let same_message = existing.message_id == candidate.message_id
+                && existing.created_at.to_bits() == candidate.created_at.to_bits();
+            if !same_message && existing.status == "sent" && existing.press_enter {
                 transcript.push(existing.text.clone());
             }
             transcript.retain(|text| !text.is_empty());
