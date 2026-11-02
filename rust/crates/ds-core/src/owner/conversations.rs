@@ -425,6 +425,12 @@ mod tests {
         fn pid(&self) -> u32 {
             1
         }
+        fn state_file(&self) -> Option<String> {
+            None
+        }
+        fn inbox_count(&self, _: &str) -> Result<Value, String> {
+            Ok(Value::Null)
+        }
         fn now(&self) -> f64 {
             1_000.0
         }
