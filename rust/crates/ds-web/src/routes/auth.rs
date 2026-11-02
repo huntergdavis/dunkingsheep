@@ -215,6 +215,11 @@ fn safe_next(value: &str, headers: &HeaderMap, uri: &Uri) -> Option<String> {
     if candidate.is_empty() {
         return None;
     }
+    // Browsers treat backslashes as slashes in HTTP(S) URLs, so a path like
+    // `/\\evil.example` can become a cross-origin URL after navigation.
+    if candidate.contains('\\') {
+        return None;
+    }
     if candidate.starts_with('/') && !candidate.starts_with("//") {
         return Some(candidate.to_owned());
     }
@@ -401,6 +406,26 @@ mod tests {
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
         assert!(cookie.contains("Max-Age=604800"));
+    }
+
+    #[test]
+    fn login_rejects_backslash_safe_next() {
+        let backend: Arc<dyn AuthBackend> = Arc::new(FakeAuth::default());
+        let mut headers = headers();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://desk.test"));
+        let response = block_on(login(
+            Extension(backend),
+            ConnectInfo("127.0.0.1:4000".parse().unwrap()),
+            headers,
+            "/api/login".parse().unwrap(),
+            Json(LoginBody {
+                password: "correct".into(),
+                next: Some("/\\evil.example".into()),
+            }),
+        ));
+        let (status, body, _) = body_json(response);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"ok": true, "next": "/dash/cos"}));
     }
 
     #[test]
