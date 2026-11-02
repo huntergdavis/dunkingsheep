@@ -28,6 +28,8 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+mod owner_queries;
+
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.
 #[derive(Debug, Clone, Default)]
 pub struct Outgoing<'a> {
