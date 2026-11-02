@@ -769,10 +769,12 @@ mod tests {
 
         const CALLERS: usize = 8;
         let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+        let fixture_ref = &fixture;
         let results = std::thread::scope(|scope| {
             let callers = (0..CALLERS)
                 .map(|_| {
                     let barrier = barrier.clone();
+                    let fixture = fixture_ref;
                     scope.spawn(move || {
                         barrier.wait();
                         fixture.service().ingest(
