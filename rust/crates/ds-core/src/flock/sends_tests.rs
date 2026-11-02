@@ -119,6 +119,9 @@ impl FlushEnv for Pane {
 
 const P: &str = "w2:p1";
 
+// Single producer makes these lock probes a deterministic proof: wake runs while enqueue owns
+// the lock, then save runs after enqueue releases it. The concurrent test below checks only
+// producer/FIFO/callback counts because cross-producer contention is legitimate there.
 #[test]
 fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
     use std::sync::{Arc, Mutex, TryLockError};
@@ -192,23 +195,22 @@ fn enqueue_appends_starts_worker_then_saves_the_queued_message() {
 fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() {
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, TryLockError};
+    use std::sync::Arc;
 
-    struct Wake;
+    // Lock ownership is proved by the deterministic single-producer callback test above. Here,
+    // another producer may legitimately hold the queue while this producer is in `save`, so
+    // probing `try_lock` would conflate unrelated contention with enqueue's own lock lifetime.
+    struct Wake(AtomicUsize);
     impl OutboxWake for Wake {
-        fn ensure_worker(&self, flock: &Flock, _: &str) -> Result<(), crate::error::DunkError> {
-            assert!(matches!(
-                flock.outbox.try_lock(),
-                Err(TryLockError::WouldBlock)
-            ));
+        fn ensure_worker(&self, _: &Flock, _: &str) -> Result<(), crate::error::DunkError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
 
     struct Store(AtomicUsize);
     impl SnapshotStore for Store {
-        fn save(&self, flock: &Flock) -> Result<(), crate::error::DunkError> {
-            assert!(flock.outbox.try_lock().is_ok());
+        fn save(&self, _: &Flock) -> Result<(), crate::error::DunkError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -220,7 +222,7 @@ fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() 
         dir.path(),
         false,
     ));
-    let wake = Arc::new(Wake);
+    let wake = Arc::new(Wake(AtomicUsize::new(0)));
     let store = Arc::new(Store(AtomicUsize::new(0)));
     let mut producers = Vec::new();
     for producer in 0..4 {
@@ -254,6 +256,7 @@ fn enqueue_keeps_fifo_order_and_allocates_unique_ids_for_concurrent_producers() 
     let queue = flock.outbox_snapshot();
     let messages = &queue["pane-a"];
     assert_eq!(32, messages.len());
+    assert_eq!(32, wake.0.load(Ordering::SeqCst));
     assert_eq!(32, store.0.load(Ordering::SeqCst));
     let ids: HashSet<&str> = messages.iter().map(|message| message.id.as_str()).collect();
     assert_eq!(32, ids.len());
