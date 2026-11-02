@@ -1145,6 +1145,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             }
             _ => not_ported("task"),
         },
+        "whoami" => crate::daemon_cmd::whoami(ns),
         "update" | "set" => {
             let mut args = Map::new();
             args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
@@ -1203,7 +1204,6 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
                 crate::render_print::render_dunk(result)
             })
         }
-        "whoami" => crate::daemon_cmd::whoami(ns),
         "turn" => match text(ns, "turn_command") {
             Some("start") => {
                 let mut args = Map::new();
