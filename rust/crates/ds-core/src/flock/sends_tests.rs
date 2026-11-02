@@ -1521,7 +1521,7 @@ fn remember_bounds_history_and_decided_tombstones_and_keeps_created_at() {
     let mut decided = flock.decided.lock().unwrap();
     assert_eq!(500, decided.by_id.len());
     assert!(!decided.by_id.contains_key("m0"));
-    assert_eq!(500.0, decided.by_id["m500"].created_at);
+    assert_eq!(Some(500.0), decided.by_id["m500"].created_at);
     drop(decided);
 
     let candidates = flock.stuck_candidates.lock().unwrap();
@@ -1546,5 +1546,106 @@ fn remember_refreshes_created_at_for_a_reused_message_id() {
     let decided = flock.decided.lock().unwrap();
     assert_eq!(1, decided.by_id.len());
     assert_eq!("failed", decided.by_id["m1"].status);
-    assert_eq!(20.0, decided.by_id["m1"].created_at);
+    assert_eq!(Some(20.0), decided.by_id["m1"].created_at);
+}
+
+#[test]
+fn persist_typed_attempt_saves_candidate_before_submit_and_restores_message_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            dir.path().join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m1", "%1", "worker", "typed text", "send_text");
+    message.created_at = 7.0;
+    message.attempt_generation = Some("pid:123:start:456".into());
+
+    let saved = flock
+        .persist_typed_attempt(
+            &mut message,
+            "%1",
+            "typed text",
+            true,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+
+    assert!(saved);
+    assert_eq!(
+        "queued", message.status,
+        "the caller keeps its prior status"
+    );
+    let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!("typed", candidate.status);
+    assert!(candidate.typed_at.is_some());
+    assert!(
+        candidate.native_binding.is_none(),
+        "native lookup failure keeps the strict candidate"
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!("typed", snapshot["stuck_candidates"]["%1"]["status"]);
+    assert!(snapshot["stuck_candidates"]["%1"]["typed_at"].is_number());
+}
+
+#[test]
+fn persist_typed_attempt_refuses_enter_when_snapshot_save_fails_and_restores_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"file").unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            blocker.join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m2", "%2", "worker", "must not submit", "send_text");
+    message.attempt_generation = Some("pid:123:start:456".into());
+
+    assert!(flock
+        .persist_typed_attempt(
+            &mut message,
+            "%2",
+            "must not submit",
+            true,
+            &serde_json::json!({})
+        )
+        .is_err());
+
+    assert_eq!(
+        "queued", message.status,
+        "a failed receipt save refuses Enter"
+    );
+    let candidate = flock.stuck_candidates.lock().unwrap()["%2"].clone();
+    assert_eq!("typed", candidate.status);
+    assert!(candidate.typed_at.is_some());
+}
+
+#[test]
+fn persist_typed_attempt_without_matching_message_context_does_not_mutate() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m3", "%3", "worker", "owned text", "send_text");
+
+    assert!(flock
+        .persist_typed_attempt(
+            &mut message,
+            "%3",
+            "different text",
+            true,
+            &serde_json::json!({})
+        )
+        .unwrap());
+
+    assert_eq!("queued", message.status);
+    assert!(message.typed_at.is_none());
+    assert!(flock.stuck_candidates.lock().unwrap().is_empty());
 }

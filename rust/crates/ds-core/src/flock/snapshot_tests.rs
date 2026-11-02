@@ -1,0 +1,160 @@
+use super::{sends, status_runtime::StatusState, Flock};
+use crate::config::Env;
+use crate::stuck::{Config, Record};
+use serde_json::json;
+use std::sync::atomic::Ordering;
+
+fn flock(dir: &std::path::Path, persist: bool) -> Flock {
+    Flock::new(dir.join("launches.json"), dir.join("lanes.json"), persist)
+}
+
+#[test]
+fn whole_flock_snapshot_restores_queued_and_recovery_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = flock(dir.path(), false);
+    source.next_message_id.store(44, Ordering::Relaxed);
+    {
+        let mut message = sends::Message::new("m43", "%1", "worker", "held text", "d7");
+        message.created_at = 50.0;
+        message.holds = 3;
+        message.next_attempt_at = Some(80.0);
+        message.hold_signature = Some("composer signature".into());
+        message.hold_while_typing = false;
+        sends::outbox_lock(&source.outbox)
+            .entry("%1".into())
+            .or_default()
+            .push(message);
+    }
+    let mut decided_message = sends::Message::new("m42", "%1", "worker", "failed", "send_text");
+    decided_message.created_at = 42.0;
+    decided_message.status = "failed".into();
+    decided_message.attempt_generation = Some("pid:12:start:34".into());
+    source.note_stuck_candidate(&decided_message);
+    source.remember(&decided_message);
+    {
+        let mut tracker = source.stuck_tracker.lock().unwrap();
+        tracker.records.insert(
+            "%1".into(),
+            Record {
+                message_id: Some("m42".into()),
+                generation: Some("pid:12:start:34".into()),
+                fingerprint: Some("abc".into()),
+                first_seen: Some(1.0),
+                last_attempt_at: Some(2.0),
+                attempts: 1,
+                terminal: None,
+            },
+        );
+        tracker.spent.insert("m42:42".into(), 1);
+    }
+    *source.stuck_config.lock().unwrap() = Config {
+        enabled: false,
+        threshold_s: 90.0,
+        max_attempts: 4,
+        cooldown_s: 30.0,
+        observation_interval_s: 10.0,
+    };
+    let payload = source.snapshot();
+
+    let restored = flock(dir.path(), false);
+    restored.restore_snapshot(&payload);
+
+    assert_eq!(44, restored.next_message_id.load(Ordering::Relaxed));
+    let queue = restored.outbox_snapshot();
+    let message = &queue["%1"][0];
+    assert_eq!("held text", message.text);
+    assert_eq!(3, message.holds);
+    assert_eq!(Some(80.0), message.next_attempt_at);
+    assert_eq!(
+        Some("composer signature"),
+        message.hold_signature.as_deref()
+    );
+    assert!(!message.hold_while_typing);
+    assert_eq!(
+        "failed",
+        restored.stuck_candidates.lock().unwrap()["%1"].status
+    );
+    assert_eq!(1, restored.stuck_tracker.lock().unwrap().spent["m42:42"]);
+    assert_eq!(90.0, restored.stuck_config.lock().unwrap().threshold_s);
+    let tombstone = restored.decided.lock().unwrap().by_id["m42"].clone();
+    assert_eq!("failed", tombstone.status);
+    assert_eq!(Some(42.0), tombstone.created_at);
+}
+
+#[test]
+fn restore_suppresses_only_a_decided_row_with_matching_id_and_created_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let make_row = |id: &str, created_at| {
+        let mut message = sends::Message::new(id, "%1", "worker", id, "send_text");
+        message.created_at = created_at;
+        sends::message_snapshot(&message)
+    };
+    let payload = json!({
+        "decided": {
+            "same": {"status": "sent", "created_at": 1.0},
+            "reused": {"status": "failed", "created_at": 9.0},
+            "unknown-time": {"status": "sent", "created_at": null}
+        },
+        "decided_order": ["same", "reused", "unknown-time"],
+        "outbox": [make_row("same", 1.0), make_row("reused", 10.0), make_row("unknown-time", 20.0)]
+    });
+    let restored = flock(dir.path(), false);
+    restored.restore_snapshot(&payload);
+    let rows = restored.outbox_snapshot();
+    let ids = rows["%1"]
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["reused", "unknown-time"], ids);
+}
+
+#[test]
+fn an_inbox_status_read_error_keeps_the_queued_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = std::sync::Arc::new(
+        crate::inbox_store::Store::open(dir.path().join("inbox.db"), dir.path().join("blobs"))
+            .unwrap(),
+    );
+    let restored = flock(dir.path(), false);
+    restored.attach_stores(super::panes::Stores {
+        inbox: Some(inbox),
+        ..super::panes::Stores::default()
+    });
+    let mut message = sends::Message::new("queued", "%1", "worker", "mail", "notice");
+    message.notify_for = vec!["missing-inbox-row".into()];
+    restored.restore_outbox(&[sends::message_snapshot(&message)]);
+    assert_eq!(1, restored.outbox_snapshot()["%1"].len());
+}
+
+#[test]
+fn save_writes_a_complete_atomic_snapshot_to_the_attached_state_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = flock(dir.path(), true);
+    let executable = dir.path().join("daemon");
+    std::fs::write(&executable, b"fixture").unwrap();
+    let path = dir.path().join("state.json");
+    flock
+        .attach_status_state(StatusState::at_start(
+            "test",
+            &path,
+            executable,
+            Env::default(),
+        ))
+        .unwrap();
+    flock.save().unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    for field in [
+        "version",
+        "next_id",
+        "next_message_id",
+        "dunkers",
+        "stuck_candidates",
+        "stuck",
+        "stuck_config",
+        "outbox",
+        "decided",
+        "decided_order",
+    ] {
+        assert!(payload.get(field).is_some(), "missing {field}");
+    }
+}
