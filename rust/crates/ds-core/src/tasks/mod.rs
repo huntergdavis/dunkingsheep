@@ -1584,7 +1584,12 @@ impl Tasks {
                     )
                     .optional()
                     .map_err(db::map_sqlite)?
-                    .ok_or_else(|| DunkError::Refused(format!("no task with id {id:?}")))?;
+                    .ok_or_else(|| {
+                        DunkError::Refused(format!(
+                            "no task with id {}",
+                            crate::context::store::py_repr(&id)
+                        ))
+                    })?;
                 tx.execute(
                     "UPDATE tasks SET accounting_pr = ?, updated_at = ? WHERE id = ?",
                     params![number, now, id],
@@ -2845,7 +2850,7 @@ mod tests {
     async fn set_accounting_pr_on_an_unknown_id_is_a_refusal_and_writes_nothing() {
         let store = store("accounting-pr-unknown").await;
         let err = store.set_accounting_pr("t999", 5).await.unwrap_err();
-        assert_eq!("no task with id \"t999\"", err.to_string());
+        assert_eq!("no task with id 't999'", err.to_string());
         let events: i64 = store
             .writer
             .call(|conn| {
