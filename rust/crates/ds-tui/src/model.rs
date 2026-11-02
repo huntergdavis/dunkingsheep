@@ -419,9 +419,10 @@ impl<C: RpcClient> TuiModel<C> {
         };
         let value = value.trim();
         let max_sends = if value.is_empty() || value == "0" {
-            Some(0)
+            Some(serde_json::json!(0))
         } else {
-            parse_unicode_decimal_integer(value)
+            normalize_unicode_decimal_integer(value)
+                .and_then(|digits| serde_json::from_str::<Value>(&digits).ok())
         };
         let Some(max_sends) = max_sends else {
             self.flash("Max sends must be a whole number", now, 4.0);
@@ -555,11 +556,15 @@ fn python_string(value: &Value) -> String {
     }
 }
 
-fn parse_unicode_decimal_integer(value: &str) -> Option<u64> {
-    value.chars().try_fold(0_u64, |number, character| {
-        let digit = unicode_decimal_digit(character)?;
-        number.checked_mul(10)?.checked_add(u64::from(digit))
-    })
+fn normalize_unicode_decimal_integer(value: &str) -> Option<String> {
+    value.chars().try_fold(
+        String::with_capacity(value.len()),
+        |mut digits, character| {
+            let digit = unicode_decimal_digit(character)?;
+            digits.push(char::from_digit(digit, 10)?);
+            Some(digits)
+        },
+    )
 }
 
 fn unicode_decimal_digit(character: char) -> Option<u32> {
@@ -728,6 +733,26 @@ mod tests {
                 assert_eq!(model.message_until, 6.0);
             }
         }
+    }
+
+    #[test]
+    fn edit_max_sends_preserves_integers_larger_than_u64() {
+        let input = "18446744073709551616";
+        let mut model = action_model(serde_json::json!({"id": "d1"}), vec![Ok(Value::Null)]);
+        let mut modal = FakeModal {
+            responses: VecDeque::from([Some(input.into())]),
+            ..FakeModal::default()
+        };
+        let expected_max_sends: Value = serde_json::from_str(input).expect("large JSON integer");
+
+        assert!(!model.edit_max_sends(&mut modal, 2.0));
+        assert_eq!(
+            model.client.calls,
+            vec![(
+                "update_dunk".into(),
+                serde_json::json!({"id": "d1", "max_sends": expected_max_sends})
+            )]
+        );
     }
 
     #[test]
