@@ -388,7 +388,7 @@ pub fn prose_problems(prose: &str, report: &Value) -> Result<Vec<String>, Report
         let regex = Regex::new(&format!(r"\b{status}\b")).expect("valid regex");
         if regex.is_match(prose) && !known_status.contains(status) {
             problems.push(format!(
-                "prose says {status:?}, which this report does not report"
+                "prose says '{status}', which this report does not report"
             ));
         }
     }
