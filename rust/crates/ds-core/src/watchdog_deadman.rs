@@ -32,6 +32,9 @@ pub fn daemon_path_problem(
             parent.display()
         ));
     }
+    let expected_dir_display = expected_dir
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "None".to_string());
     let expected_dir = expected_dir.filter(|path| !path.as_os_str().is_empty());
     if expected_dir.and_then(|expected| fs::canonicalize(expected).ok())
         != fs::canonicalize(&parent).ok()
@@ -39,9 +42,7 @@ pub fn daemon_path_problem(
         return Some(format!(
             "daemon path parent {} is not the expected directory {}",
             parent.display(),
-            expected_dir
-                .map(|path| path.display().to_string())
-                .unwrap_or_default()
+            expected_dir_display
         ));
     }
     None
@@ -474,6 +475,19 @@ mod tests {
                 Some(directory.path().join("socket").to_str().unwrap()),
                 Some(directory.path())
             )
+        );
+    }
+
+    #[test]
+    fn watchdog_deadman_daemon_path_problem_renders_missing_expected_dir_as_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon_path = directory.path().join("socket");
+        assert_eq!(
+            Some(format!(
+                "daemon path parent {} is not the expected directory None",
+                directory.path().display()
+            )),
+            daemon_path_problem(Some(daemon_path.to_str().unwrap()), None)
         );
     }
 
