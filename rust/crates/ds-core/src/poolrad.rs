@@ -43,7 +43,7 @@ pub fn git(repo: impl AsRef<Path>, args: &[&str]) -> std::io::Result<String> {
         .stderr(Stdio::piped())
         .spawn()?;
     let (status, stdout, _) =
-        wait_with_output(child, Duration::from_secs(30)).map_err(std::io::Error::other)?;
+        wait_with_output(child, Duration::from_secs(30), "git").map_err(std::io::Error::other)?;
     if !status.success() {
         return Ok(String::new());
     }
@@ -103,7 +103,7 @@ pub fn export_queue(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = command.spawn().map_err(|error| error.to_string())?;
-    let (status, stdout, stderr) = wait_with_output(child, timeout)?;
+    let (status, stdout, stderr) = wait_with_output(child, timeout, "strict_candidate_queue.py")?;
     if !status.success() {
         let detail = if stderr.is_empty() { stdout } else { stderr };
         let detail = String::from_utf8_lossy(&detail);
@@ -120,6 +120,7 @@ pub fn export_queue(
 fn wait_with_output(
     mut child: Child,
     timeout: Duration,
+    command_name: &str,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
     let stdout = child
         .stdout
@@ -151,7 +152,7 @@ fn wait_with_output(
             let _ = child.wait();
             let _ = join_pipe(stdout_reader);
             let _ = join_pipe(stderr_reader);
-            return Err("strict_candidate_queue.py timed out".to_owned());
+            return Err(format!("{command_name} timed out"));
         }
         thread::sleep(Duration::from_millis(10));
     }
