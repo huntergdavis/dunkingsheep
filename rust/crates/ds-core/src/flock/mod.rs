@@ -85,6 +85,9 @@ pub struct Flock {
     pub(crate) dunks: dunks::DunkList,
     /// pane_id -> FIFO messages waiting for the pane's outbox worker.
     pub(crate) outbox: Mutex<BTreeMap<String, Vec<sends::Message>>>,
+    /// pane_id -> the latest delivery intent used by the stuck observer.
+    #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
+    pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
     pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
@@ -130,6 +133,7 @@ impl Flock {
             launches: Mutex::new(BTreeMap::new()),
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
+            stuck_candidates: Mutex::new(BTreeMap::new()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             pane_send_locks: Mutex::new(BTreeMap::new()),

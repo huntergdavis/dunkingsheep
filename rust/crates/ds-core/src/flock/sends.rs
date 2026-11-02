@@ -907,13 +907,15 @@ pub struct Message {
     pub text: String,
     /// "send_text" or the dunk id for a fired dunk.
     pub source: String,
-    /// queued | sent | failed | cancelled
+    /// queued | typed | sent | failed | cancelled
     pub status: String,
     pub hold_while_typing: bool,
     /// "text", or "keys" (how a panel is dismissed).
     pub kind: String,
     /// `send --no-enter` leaves the text in the box deliberately; not a stalled delivery.
     pub press_enter: bool,
+    /// True for a timer-triggered send (Python's transient `attempt.scheduled`).
+    pub scheduled: bool,
     pub attempt_generation: Option<String>,
     /// An inbox notice: one per pane, never stacked.
     pub is_notice: bool,
@@ -938,6 +940,7 @@ impl Message {
             hold_while_typing: true,
             kind: "text".to_string(),
             press_enter: true,
+            scheduled: false,
             attempt_generation: None,
             is_notice: false,
             notify_for: Vec::new(),
@@ -1005,6 +1008,89 @@ impl Message {
     }
 }
 
+/// The latest delivery intent observed for one pane by the stuck observer.
+///
+/// This is in-memory only; snapshot persistence belongs to the separate snapshot leaf.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // The stuck-recovery consumer is owned by a later leaf.
+pub(crate) struct StuckCandidate {
+    pub message_id: String,
+    pub created_at: f64,
+    pub press_enter: bool,
+    pub status: String,
+    pub kind: String,
+    pub scheduled: bool,
+    pub source: String,
+    pub notify_for: Vec<String>,
+    pub text: String,
+    pub label: String,
+    pub generation: Option<String>,
+    pub eligible: bool,
+    pub superseded_by: String,
+    pub transcript_texts: Vec<String>,
+}
+
+impl StuckCandidate {
+    #[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
+    fn from_message(message: &Message) -> Self {
+        let eligible = (message.status == "failed"
+            || message.status == "typed"
+            || (message.scheduled && message.status == "sent"))
+            && message.press_enter
+            && message.kind == "text"
+            && message
+                .attempt_generation
+                .as_deref()
+                .is_some_and(|generation| !generation.is_empty());
+        Self {
+            message_id: message.id.clone(),
+            created_at: message.created_at,
+            press_enter: message.press_enter,
+            status: message.status.clone(),
+            kind: message.kind.clone(),
+            scheduled: message.scheduled,
+            source: message.source.clone(),
+            notify_for: message.notify_for.clone(),
+            text: message.text.clone(),
+            label: message.target_label.clone(),
+            generation: message.attempt_generation.clone(),
+            eligible,
+            superseded_by: message.id.clone(),
+            transcript_texts: Vec::new(),
+        }
+    }
+}
+
+#[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
+fn candidate_is_newer(left: &StuckCandidate, right: &StuckCandidate) -> bool {
+    match left.created_at.total_cmp(&right.created_at) {
+        std::cmp::Ordering::Greater => return true,
+        std::cmp::Ordering::Less => return false,
+        std::cmp::Ordering::Equal => {}
+    }
+    let left_digits: String = left
+        .message_id
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    let right_digits: String = right
+        .message_id
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect();
+    let left_digits = left_digits.trim_start_matches('0');
+    let right_digits = right_digits.trim_start_matches('0');
+    let id_order = match (left_digits.is_empty(), right_digits.is_empty()) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => left_digits
+            .len()
+            .cmp(&right_digits.len())
+            .then_with(|| left_digits.cmp(right_digits)),
+    };
+    id_order.then_with(|| left.message_id.cmp(&right.message_id)) == std::cmp::Ordering::Greater
+}
+
 /// Snapshot persistence is deliberately invoked after worker startup and after the
 /// outbox mutex is released, matching Python's `_enqueue` then `_save` ordering.
 /// The store reads the current whole-Flock state when called, so a fast worker may
@@ -1029,6 +1115,59 @@ fn outbox_lock(
 }
 
 impl Flock {
+    /// Keep the pane's latest delivery intent for the stuck observer.
+    ///
+    /// Completion order is not intent order: a late outcome for an older message cannot
+    /// replace a newer send, cancellation, or deliberate no-enter intent. Ineligible
+    /// intents are retained as tombstones so that they still supersede older candidates.
+    /// This only mutates in-memory state; snapshot persistence has a separate owner.
+    #[allow(dead_code)] // The outcome caller is a separate dependent T33 leaf.
+    pub(crate) fn note_stuck_candidate(&self, message: &Message) {
+        if message.pane_id.is_empty() {
+            return;
+        }
+        let mut candidate = StuckCandidate::from_message(message);
+        let mut candidates = self
+            .stuck_candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(existing) = candidates.get(&message.pane_id) else {
+            candidates.insert(message.pane_id.clone(), candidate);
+            return;
+        };
+        if candidate_is_newer(existing, &candidate) {
+            return;
+        }
+        if existing
+            .generation
+            .as_ref()
+            .is_some_and(|generation| Some(generation) == candidate.generation.as_ref())
+        {
+            let mut transcript = existing.transcript_texts.clone();
+            let same_message = existing.message_id == candidate.message_id
+                && existing.created_at.to_bits() == candidate.created_at.to_bits();
+            if !same_message && existing.status == "sent" && existing.press_enter {
+                transcript.push(existing.text.clone());
+            }
+            transcript.retain(|text| !text.is_empty());
+            let mut unique = Vec::with_capacity(REMEMBERED_SENDS);
+            for text in transcript {
+                if !unique.contains(&text) {
+                    unique.push(text);
+                }
+            }
+            candidate.transcript_texts = unique
+                .into_iter()
+                .rev()
+                .take(REMEMBERED_SENDS)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
+        candidates.insert(message.pane_id.clone(), candidate);
+    }
+
     /// Remember text this flock typed into a pane, moving duplicate text to newest.
     ///
     /// A later observer uses this bounded history to distinguish a stranded send from a
