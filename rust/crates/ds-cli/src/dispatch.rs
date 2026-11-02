@@ -317,14 +317,9 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
     let executable = executable.display().to_string();
     let launch = format!("{executable} mcp");
     let quoted_executable = serde_json::to_string(&executable).expect("serialize executable path");
-    let json_block = ordered_json(&serde_json::json!({
-        "mcpServers": {
-            "dunkingsheep": {
-                "command": executable,
-                "args": ["mcp"]
-            }
-        }
-    }));
+    let json_block = format!(
+        "{{\n  \"mcpServers\": {{\n    \"dunkingsheep\": {{\n      \"command\": {quoted_executable},\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}"
+    );
     let toml_block =
         format!("[mcp_servers.dunkingsheep]\ncommand = {quoted_executable}\nargs = [\"mcp\"]\n");
     match harness {
