@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::{json, Value};
@@ -55,6 +56,26 @@ fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Ou
     let output = run_cli(&socket_text, command);
     daemon.join().unwrap();
     output
+}
+
+fn run_local_context_cli(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .args(["--self-pane", "%99"])
+        .args(args)
+        .current_dir(cwd)
+        .env("DUNKINGSHEEP_DIR", config_dir)
+        .env("DUNKINGSHEEP_SUPERUSER", superuser)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_CONTEXT_LEDGER")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .output()
+        .expect("run Rust CLI")
 }
 
 #[test]
@@ -350,4 +371,162 @@ fn cli_route_17_task_edit_a() {
         String::from_utf8(completed.stdout).unwrap()
     );
     assert!(completed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_10_context_local_seed() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    let config = temp.path().join("config");
+    let store = temp.path().join("project-store");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+
+    let init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), init.status.code());
+    assert_eq!(
+        format!("store at {}\n", store.display()),
+        String::from_utf8(init.stdout).unwrap()
+    );
+    assert!(init.stderr.is_empty());
+    for class in ["ground-truth", "fact", "history", "provisional"] {
+        assert!(
+            store.join(class).is_dir(),
+            "missing class directory {class}"
+        );
+    }
+    assert!(store.join("README.md").is_file());
+
+    let init_json = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+            "--json".into(),
+        ],
+    );
+    assert_eq!(Some(0), init_json.status.code());
+    assert_eq!(
+        format!("{{\n  \"root\": \"{}\"\n}}\n", store.display()),
+        String::from_utf8(init_json.stdout).unwrap()
+    );
+    assert!(init_json.stderr.is_empty());
+
+    let entry = store.join("fact").join("fixture.md");
+    std::fs::write(
+        &entry,
+        "---\nclass: fact\nsubject: fixture\ntype: reference\nscope: project\nauthority: agent\nsource: test\nstated: 2026-11-01\n---\nFixture body.\n",
+    )
+    .unwrap();
+    let ledger = config.join("context-ledger.db");
+    let refused = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(1), refused.status.code());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal\n",
+        String::from_utf8(refused.stderr).unwrap()
+    );
+    assert!(
+        !ledger.exists(),
+        "unauthorized adopt must not create the ledger"
+    );
+
+    let snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "snapshot".into(),
+            "--project".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), snapshot.status.code());
+    assert!(snapshot.stderr.is_empty());
+    let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
+    assert_eq!("context-snapshot/1", snapshot["schema"]);
+    assert!(snapshot["as_of"].as_u64().unwrap() > 0);
+    assert!(snapshot["digest"]
+        .as_str()
+        .unwrap()
+        .contains("Fixture body."));
+    assert_eq!("ok", snapshot["stores"]["project"]["status"]);
+    assert_eq!(
+        store.display().to_string(),
+        snapshot["stores"]["project"]["path"]
+    );
+    assert_eq!(1, snapshot["stores"]["project"]["counts"]["fact"]);
+    assert_eq!(
+        1,
+        snapshot["stores"]["project"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+    );
+
+    let adopted = run_local_context_cli(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), adopted.status.code());
+    assert_eq!(
+        format!("adopted 1 entries into {}\n", ledger.display()),
+        String::from_utf8(adopted.stdout).unwrap()
+    );
+    assert!(adopted.stderr.is_empty());
+    assert!(ledger.is_file());
+
+    let status = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "status".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        format!("{:11} {:13} {}\n", "recorded", "fact", "fixture"),
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
 }
