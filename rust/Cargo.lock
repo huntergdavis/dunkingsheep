@@ -458,6 +458,7 @@ name = "ds-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "ds-core",
  "ratatui",
  "serde_json",
 ]

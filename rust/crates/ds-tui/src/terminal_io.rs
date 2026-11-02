@@ -56,9 +56,14 @@ impl TerminalInput for CrosstermInput {
 
 /// The modal provider supplied by the runtime adapter must handle all existing
 /// prompts without teaching the model about a concrete terminal.
-pub trait ModalProviders: LineModalProvider + TargetModalProvider + TextModalProvider {}
-
-impl<T> ModalProviders for T where T: LineModalProvider + TargetModalProvider + TextModalProvider {}
+pub trait ModalProviders: LineModalProvider + TargetModalProvider + TextModalProvider {
+    /// Return a terminal error raised while a synchronous modal was running. The
+    /// model-facing modal API represents cancellation as `None`, so the runtime
+    /// surfaces I/O failures immediately after model dispatch instead.
+    fn take_io_error(&mut self) -> Option<io::Error> {
+        None
+    }
+}
 
 /// Ratatui drawing, crossterm key input, and existing model action dispatch.
 pub struct TerminalLoopIo<T, I, M> {
@@ -140,6 +145,9 @@ where
                 model.edit_text(&mut self.modals, now);
             }
         }
+        if let Some(error) = self.modals.take_io_error() {
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -208,6 +216,8 @@ mod tests {
             None
         }
     }
+
+    impl ModalProviders for FakeModals {}
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)
