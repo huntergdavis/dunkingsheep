@@ -406,7 +406,7 @@ pub fn flush_box(
 }
 
 /// Statuses that mean the lane was already running a turn before this send.
-fn is_working_status(status: Option<&str>) -> bool {
+pub(super) fn is_working_status(status: Option<&str>) -> bool {
     matches!(status, Some("working" | "busy" | "running" | "processing"))
 }
 
@@ -722,7 +722,7 @@ mod send_lock_tests {
 }
 
 /// Baseline-aware turn confirmation: an unreadable or already-working baseline is never proof.
-fn turn_started(env: &mut dyn SubmitEnv, pane_id: &str, baseline: Option<&str>) -> bool {
+pub(super) fn turn_started(env: &mut dyn SubmitEnv, pane_id: &str, baseline: Option<&str>) -> bool {
     let Some(baseline) = baseline else {
         return false;
     };
