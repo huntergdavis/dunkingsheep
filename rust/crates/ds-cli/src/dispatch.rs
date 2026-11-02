@@ -778,7 +778,7 @@ fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
         }
         Some("stats") => ("owner_stats", crate::render_print::render_owner_stats),
         Some(other) => return not_ported(&format!("owner {other}")),
-        None => return not_ported("owner"),
+        None => ("owner_stats", crate::render_print::render_owner_stats),
     };
     crate::daemon_cmd::run_command(ns, command, args, printer)
 }
