@@ -492,6 +492,7 @@ pub mod delivery;
 pub mod dunks;
 pub mod lane_registry_rows;
 pub mod lanes;
+pub mod loop_env;
 pub mod loops;
 pub mod loops_push;
 pub mod loops_stuck;
