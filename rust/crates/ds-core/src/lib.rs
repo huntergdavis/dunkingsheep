@@ -40,6 +40,7 @@ pub mod pane_record;
 pub mod panes;
 pub mod pm;
 pub mod policy;
+pub mod poolrad;
 pub mod proc;
 pub mod projects;
 pub mod protocol;
