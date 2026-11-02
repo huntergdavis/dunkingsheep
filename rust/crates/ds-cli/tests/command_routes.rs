@@ -2929,6 +2929,48 @@ fn cli_route_10_context_local_seed() {
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&config).unwrap();
 
+    let empty_path_init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "init".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_init.status.code());
+    assert_eq!(
+        "store at .dunkingsheep\n",
+        String::from_utf8(empty_path_init.stdout).unwrap()
+    );
+    assert!(empty_path_init.stderr.is_empty());
+    let default_store = cwd.join(".dunkingsheep");
+    assert!(default_store.join("ground-truth").is_dir());
+    assert!(default_store.join("fact").is_dir());
+    assert!(!cwd.join("ground-truth").exists());
+    assert!(!cwd.join("fact").exists());
+
+    let empty_path_snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "snapshot".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_snapshot.status.code());
+    assert!(empty_path_snapshot.stderr.is_empty());
+    let empty_path_snapshot: Value = serde_json::from_slice(&empty_path_snapshot.stdout).unwrap();
+    assert_eq!(
+        ".dunkingsheep",
+        empty_path_snapshot["stores"]["project"]["path"]
+    );
+
     let init = run_local_context_cli(
         &cwd,
         &config,

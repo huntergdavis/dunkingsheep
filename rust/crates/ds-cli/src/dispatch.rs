@@ -56,7 +56,9 @@ fn not_ported(command: &str) -> Outcome {
 
 fn context_local(ns: &Map<String, Value>, json: bool) -> Option<Outcome> {
     let sub = text(ns, "context_command").unwrap_or("");
-    let path = text(ns, "path").map(PathBuf::from);
+    let path = text(ns, "path")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
     let global = matches!(ns.get("global_store"), Some(Value::Bool(true)));
     let now = chrono::Local::now().naive_local();
 
