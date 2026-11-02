@@ -320,6 +320,20 @@ class TimerTests(unittest.TestCase):
                     token="tok-reviewer")
                 self.assertEqual([task["id"]] if state == "closed" else [], report["cancelled"])
 
+    def test_cleanup_real_wrapper_reports_malformed_http_json_and_keeps_review(self):
+        self.sync.run()
+        task = self.flock.tasks.list(kind="review", include_done=False)[0]
+        self.github.pulls = []
+        for response in (None, [], ["closed"], "closed", 1, False):
+            with self.subTest(response=response), \
+                    patch.object(self.github, "pull_detail", side_effect=dunk_github.pull_detail), \
+                    patch.object(dunk_github, "_request", return_value=(200, response)):
+                report = self.sync.run()
+                self.assertEqual([], report["cancelled"])
+                self.assertTrue(any("cleanup: GitHub pull detail: expected a JSON object" in e
+                                    for e in report["errors"]))
+                self.assertEqual("open", self.flock.tasks.get(task["id"])["status"])
+
     def test_real_github_detail_preserves_state_and_head_without_invention(self):
         for response in ({}, {"state": "open", "head": {"sha": "b" * 40}}):
             with self.subTest(response=response), \

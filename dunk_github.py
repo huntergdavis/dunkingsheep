@@ -269,6 +269,8 @@ def pull_detail(repo, number, token):
     which is why review-sync asks here - and only for a head it is about to file.
     """
     _status, pr = _request("GET", f"{API}/repos/{repo}/pulls/{number}", token=token)
+    if not isinstance(pr, dict):
+        raise GitHubError("GitHub pull detail: expected a JSON object")
     return {"state": pr.get("state"), "head": pr.get("head"),
             "additions": pr.get("additions"), "deletions": pr.get("deletions"),
             "changed_files": pr.get("changed_files"), "mergeable": pr.get("mergeable"),
