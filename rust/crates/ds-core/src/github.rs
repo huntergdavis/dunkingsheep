@@ -776,7 +776,7 @@ pub async fn open_pulls(
             .unwrap_or_default();
         let batch_len = batch.len();
         pulls.extend(batch);
-        if batch_len == 0 || batch_len < 100 {
+        if batch_len < 100 {
             break;
         }
     }
@@ -818,6 +818,401 @@ pub async fn open_pulls(
             }))
         })
         .collect()
+}
+
+/// Resolve a branch or ref name to the commit SHA GitHub currently reports.
+pub async fn get_ref(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    reference: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/ref/heads/{reference}");
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("object"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Check for a branch, treating only GitHub's not-found/conflict responses as absent.
+pub async fn ref_exists(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> Result<bool, GitHubError> {
+    match get_ref(transport, api_root, repo, branch, token).await {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error.to_string().contains("-> 404") || error.to_string().contains("-> 409") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Resolve a commit SHA to its tree SHA.
+pub async fn commit_tree(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    sha: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/commits/{sha}");
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("tree"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Return decoded UTF-8 file contents and its blob SHA, or `(None, None)` for a 404.
+pub async fn file_text(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    path: &str,
+    reference: &str,
+    token: &str,
+) -> Result<(Option<String>, Option<Value>), GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/contents/{path}?ref={reference}");
+    let (_, data) = match request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) if error.to_string().contains("-> 404") => return Ok((None, None)),
+        Err(error) => return Err(error),
+    };
+    let data = data.unwrap_or(Value::Null);
+    if data.is_null() {
+        return Err(GitHubError(
+            "'NoneType' object has no attribute 'get'".into(),
+        ));
+    }
+    if data.is_array() {
+        return Err(GitHubError(format!(
+            "{repo}/{path} is a directory, not a file"
+        )));
+    }
+    let encoding_value = data.get("encoding");
+    let encoding = encoding_value.and_then(Value::as_str);
+    if encoding != Some("base64") {
+        let encoding_repr = match encoding_value {
+            None | Some(Value::Null) => "None".to_owned(),
+            Some(Value::String(value)) => python_repr(value),
+            Some(value) => python_string(value),
+        };
+        return Err(GitHubError(format!(
+            "{repo}/{path}: unexpected encoding {}",
+            encoding_repr
+        )));
+    }
+    let content_value = data.get("content").filter(|value| python_truthy(value));
+    let content = match content_value {
+        None => "",
+        Some(Value::String(content)) => content,
+        Some(_) => {
+            return Err(GitHubError(
+                "argument should be a bytes-like object or ASCII string".into(),
+            ));
+        }
+    };
+    let bytes = decode_github_base64(content)?;
+    let text = String::from_utf8(bytes).map_err(|error| GitHubError(error.to_string()))?;
+    let sha = data.get("sha").cloned();
+    Ok((Some(text), sha))
+}
+
+fn decode_github_base64(content: &str) -> Result<Vec<u8>, GitHubError> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    // Python's base64.b64decode defaults to discarding non-alphabet characters.
+    let encoded: Vec<u8> = content
+        .bytes()
+        .filter(|byte| sextet(*byte).is_some() || *byte == b'=')
+        .collect();
+    let (groups, remainder) = encoded.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return Err(GitHubError("Incorrect padding".into()));
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
+    let group_count = groups.len();
+    for (index, group) in groups.iter().enumerate() {
+        let first = sextet(group[0]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        let second = sextet(group[1]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((first << 2) | (second >> 4));
+        if group[2] == b'=' {
+            if group[3] != b'=' || index + 1 != group_count {
+                return Err(GitHubError("Invalid base64 data".into()));
+            }
+            continue;
+        }
+        let third = sextet(group[2]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((second << 4) | (third >> 2));
+        if group[3] == b'=' {
+            if index + 1 != group_count {
+                return Err(GitHubError("Invalid base64 data".into()));
+            }
+            continue;
+        }
+        let fourth = sextet(group[3]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((third << 6) | fourth);
+    }
+    Ok(decoded)
+}
+
+/// List every file changed by a pull request, preserving GitHub pagination order.
+pub async fn pr_files(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Vec<Value>, GitHubError> {
+    let mut files = Vec::new();
+    for page in 1..=10 {
+        let url = format!("{api_root}/repos/{repo}/pulls/{number}/files?per_page=100&page={page}");
+        let (_, batch) = request(
+            transport,
+            RequestOptions {
+                method: "GET",
+                url: &url,
+                token: Some(token),
+                bearer: None,
+                payload: None,
+                timeout_s: 20,
+                api_root,
+            },
+        )
+        .await?;
+        let batch = batch
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        let batch_len = batch.len();
+        files.extend(batch.into_iter().map(|item| {
+            let filename = item
+                .get("filename")
+                .filter(|value| python_truthy(value))
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            let status = item
+                .get("status")
+                .filter(|value| python_truthy(value))
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            serde_json::json!({
+                "filename": filename,
+                "status": status,
+                "previous_filename": item.get("previous_filename").cloned().unwrap_or(Value::Null),
+            })
+        }));
+        if batch_len < 100 {
+            break;
+        }
+    }
+    Ok(files)
+}
+
+/// Create a Git tree on top of an existing tree SHA.
+pub async fn create_tree(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    base_tree: &str,
+    entries: &[Value],
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/trees");
+    let payload = serde_json::json!({"base_tree": base_tree, "tree": entries});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Create a commit with the supplied parent SHAs.
+pub async fn create_commit(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    message: &str,
+    tree: &str,
+    parents: &[String],
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/commits");
+    let payload = serde_json::json!({"message": message, "tree": tree, "parents": parents});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Create a branch ref. GitHub's conflict response deliberately remains an error.
+pub async fn create_ref(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    sha: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/refs");
+    let payload = serde_json::json!({"ref": format!("refs/heads/{branch}"), "sha": sha});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("object"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'object' or 'sha'".into()))
+}
+
+/// Open a pull request and return Python's compact response projection.
+pub async fn open_pull(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    pull: OpenPullRequest<'_>,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{}/pulls", pull.repo);
+    let payload = serde_json::json!({
+        "title": pull.title,
+        "head": pull.head,
+        "base": pull.base,
+        "body": pull.body,
+    });
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let data = data.unwrap_or(Value::Null);
+    let number = python_int(
+        data.get("number")
+            .ok_or_else(|| GitHubError("'number'".into()))?,
+    )?;
+    let pull_head = data
+        .get("head")
+        .filter(|value| python_truthy(value))
+        .and_then(|value| value.get("sha"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(serde_json::json!({
+        "number": number,
+        "url": data.get("html_url").cloned().unwrap_or(Value::Null),
+        "node_id": data.get("node_id").cloned().unwrap_or(Value::Null),
+        "head": pull_head,
+    }))
+}
+
+pub struct OpenPullRequest<'a> {
+    pub repo: &'a str,
+    pub title: &'a str,
+    pub head: &'a str,
+    pub base: &'a str,
+    pub body: &'a str,
 }
 
 pub async fn pull_detail(
