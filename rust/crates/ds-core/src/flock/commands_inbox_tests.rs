@@ -23,6 +23,7 @@ struct Env {
     role: &'static str,
     override_name: Option<String>,
     task_calls: std::sync::atomic::AtomicUsize,
+    fail_tasks: bool,
     pool: ReadPool,
     store: Store,
     _dir: tempfile::TempDir,
@@ -92,10 +93,14 @@ impl InboxEnv for Env {
         })
     }
     fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
-    fn tasks_for_pane(&self, pane: &str) -> Value {
+    fn tasks_for_pane(&self, pane: &str) -> Result<Value, crate::error::DunkError> {
         self.task_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        json!([{"pane": pane}])
+        if self.fail_tasks {
+            Err(crate::error::DunkError::Refused("task view failed".into()))
+        } else {
+            Ok(json!([{"pane": pane}]))
+        }
     }
 }
 
@@ -118,6 +123,7 @@ fn env(role: &'static str) -> Env {
         role,
         override_name: None,
         task_calls: std::sync::atomic::AtomicUsize::new(0),
+        fail_tasks: false,
         pool,
         store,
         _dir: dir,
@@ -512,9 +518,10 @@ fn reading_marks_the_batch_read_and_carries_the_task_queue() {
 
 #[test]
 fn messages_only_read_skips_task_lookup_and_preserves_peek_mark_and_receipt() {
-    let (e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
     let f = flock(&d);
     let id = put(&e, "Mine", "one");
+    e.fail_tasks = true;
 
     let peek = f
         .inbox_read_with_options(&e, None, 10, true, false, Some("w1:p1"))
@@ -541,6 +548,21 @@ fn messages_only_read_skips_task_lookup_and_preserves_peek_mark_and_receipt() {
             .map(|message| message.summary.message_id.clone())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn task_lookup_error_leaves_inbox_batch_unread() {
+    let (mut e, d) = (env("worker"), tempfile::tempdir().unwrap());
+    let f = flock(&d);
+    put(&e, "Mine", "one");
+    e.fail_tasks = true;
+
+    let error = f
+        .inbox_read_with_options(&e, None, 10, false, true, Some("w1:p1"))
+        .expect_err("task lookup failure propagates");
+    assert_eq!("task view failed", error.to_string());
+    assert_eq!(1, f.inbox_count(&e, None, Some("w1:p1")).unwrap().unread);
+    assert_eq!(1, e.task_calls.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]
