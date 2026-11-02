@@ -1011,27 +1011,70 @@ fn cli_route_56_mcp_setup() {
     );
 
     let quoted_path = quoted_executable.display().to_string();
-    let shell_path = format!("'{}'", quoted_path.replace('\'', "'\\''"));
-    for (harness, command) in [
+    for (harness, expected_argv) in [
         (
             "claude",
-            format!("claude mcp add --scope user dunkingsheep -- {shell_path} mcp\n"),
+            vec![
+                "claude".into(),
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                "user".into(),
+                "dunkingsheep".into(),
+                "--".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
         ),
         (
             "codex",
-            format!("codex mcp add dunkingsheep -- {shell_path} mcp\n"),
+            vec![
+                "codex".into(),
+                "mcp".into(),
+                "add".into(),
+                "dunkingsheep".into(),
+                "--".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
         ),
         (
             "gemini",
-            format!("gemini mcp add --scope user dunkingsheep {shell_path} mcp\n"),
+            vec![
+                "gemini".into(),
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                "user".into(),
+                "dunkingsheep".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
         ),
     ] {
         let setup = run_quoted(harness);
         assert_eq!(0, setup.status.code().unwrap());
         assert!(setup.stderr.is_empty());
-        assert!(
-            String::from_utf8(setup.stdout).unwrap().contains(&command),
-            "missing shell-quoted executable for {harness}"
+        let setup = String::from_utf8(setup.stdout).unwrap();
+        let command_line = setup.lines().nth(1).unwrap();
+        let parsed = Command::new("sh")
+            .args([
+                "-c",
+                "eval \"set -- $1\"; printf '%s\\n' \"$@\"",
+                "--",
+                command_line,
+            ])
+            .output()
+            .unwrap();
+        assert!(parsed.status.success());
+        let parsed: Vec<String> = String::from_utf8(parsed.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            expected_argv, parsed,
+            "rendered {harness} argv did not round-trip"
         );
     }
 }

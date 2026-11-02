@@ -386,17 +386,7 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
 
 fn shell_join(args: &[String]) -> String {
     args.iter()
-        .map(|arg| {
-            if !arg.is_empty()
-                && arg
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || "_@%+=:,./-".contains(ch))
-            {
-                arg.clone()
-            } else {
-                format!("'{}'", arg.replace('\'', "'\\''"))
-            }
-        })
+        .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }
