@@ -14,6 +14,9 @@ use serde_json::Value;
 use crate::native_session::{self, NativeSessionError, NativeSessionSnapshot, Signature};
 use crate::proc::{self, PaneProcess};
 
+#[path = "recovery_native/python_printability.rs"]
+mod python_printability;
+
 const CODEX_HOME: &str = "CODEX_HOME";
 const STATE_DIR: &str = "DUNKINGSHEEP_CODEX_STATE_DIR";
 const BINDINGS_ENV: &str = "DUNKINGSHEEP_RECOVERY_BINDINGS";
@@ -302,9 +305,16 @@ fn prompt_python_string_repr(value: &str) -> String {
                 result.push('\\');
                 result.push(character);
             }
-            character if character.is_control() => {
+            character if !python_printability::is_printable(character) => {
                 use std::fmt::Write as _;
-                write!(result, "\\x{:02x}", character as u32).expect("write to string");
+                let codepoint = character as u32;
+                if codepoint <= 0xff {
+                    write!(result, "\\x{codepoint:02x}").expect("write to string");
+                } else if codepoint <= 0xffff {
+                    write!(result, "\\u{codepoint:04x}").expect("write to string");
+                } else {
+                    write!(result, "\\U{codepoint:08x}").expect("write to string");
+                }
             }
             character => result.push(character),
         }

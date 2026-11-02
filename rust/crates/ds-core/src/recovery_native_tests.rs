@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -277,6 +278,48 @@ fn test_prompt_text_conversion_matches_python_truthiness_and_str_fixtures() {
     for (value, expected) in cases {
         assert_eq!(expected, prompt_str_or_empty(Some(&value)), "{value}");
     }
+}
+
+#[test]
+fn test_prompt_python_repr_escapes_nonprintable_unicode_like_python() {
+    let cases = [
+        ("\u{00a0}", "'\\xa0'"),
+        ("\u{2028}", "'\\u2028'"),
+        ("\u{200b}", "'\\u200b'"),
+        ("\u{e000}", "'\\ue000'"),
+        ("\u{0378}", "'\\u0378'"),
+        ("\u{e0001}", "'\\U000e0001'"),
+        ("plain space", "'plain space'"),
+        ("cafe\u{0301} ☕", "'cafe\u{0301} ☕'"),
+        ("a'b", "\"a'b\""),
+        ("a\"b'c", "'a\"b\\'c'"),
+        ("\u{007f}", "'\\x7f'"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(expected, prompt_python_string_repr(input), "{input:?}");
+    }
+
+    let list = json!(["\u{00a0}"]);
+    assert_eq!("['\\xa0']", prompt_str_or_empty(Some(&list)));
+    let dictionary = json!({"\u{00a0}": "value"});
+    assert_eq!("{'\\xa0': 'value'}", prompt_str_or_empty(Some(&dictionary)));
+}
+
+#[test]
+fn test_prompt_python_printability_table_matches_all_unicode_scalars() {
+    assert_eq!("3.14.4", python_printability::PYTHON_VERSION);
+    assert_eq!("16.0.0", python_printability::UNICODE_VERSION);
+
+    let mut digest = Sha256::new();
+    for codepoint in 0..=0x10ffff {
+        if (0xd800..=0xdfff).contains(&codepoint) {
+            continue;
+        }
+        let character = char::from_u32(codepoint).expect("Unicode scalar");
+        digest.update([u8::from(python_printability::is_printable(character))]);
+    }
+    let actual = format!("{:x}", digest.finalize());
+    assert_eq!(python_printability::PRINTABILITY_SHA256, actual);
 }
 
 #[test]
