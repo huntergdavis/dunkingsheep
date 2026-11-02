@@ -968,6 +968,45 @@ fn cli_route_56_mcp_setup() {
     );
     assert!(!home.join("config").exists());
     assert!(!home.join("dunkingsheep").exists());
+
+    let quoted_dir = temp.path().join("quoted\"back\\slash");
+    std::fs::create_dir_all(&quoted_dir).unwrap();
+    let quoted_executable = quoted_dir.join("dunkingsheep");
+    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
+    let run_quoted = |harness: &str| {
+        Command::new(&quoted_executable)
+            .args(["mcp-setup", harness])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("DUNKINGSHEEP_DIR", home.join("dunkingsheep"))
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+            .output()
+            .unwrap()
+    };
+
+    let quoted_json = run_quoted("json");
+    assert_eq!(0, quoted_json.status.code().unwrap());
+    assert!(quoted_json.stderr.is_empty());
+    let json_config: Value = serde_json::from_slice(&quoted_json.stdout).unwrap();
+    assert_eq!(
+        quoted_executable.display().to_string(),
+        json_config["mcpServers"]["dunkingsheep"]["command"]
+    );
+    assert_eq!(
+        json!("mcp"),
+        json_config["mcpServers"]["dunkingsheep"]["args"][0]
+    );
+
+    let quoted_toml = run_quoted("toml");
+    assert_eq!(0, quoted_toml.status.code().unwrap());
+    assert!(quoted_toml.stderr.is_empty());
+    let encoded_path = serde_json::to_string(&quoted_executable.display().to_string()).unwrap();
+    assert_eq!(
+        format!("[mcp_servers.dunkingsheep]\ncommand = {encoded_path}\nargs = [\"mcp\"]\n\n"),
+        String::from_utf8(quoted_toml.stdout).unwrap()
+    );
 }
 
 #[test]

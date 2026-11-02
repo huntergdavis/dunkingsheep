@@ -316,12 +316,17 @@ fn github(ns: &Map<String, Value>) -> Outcome {
 fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Option<Vec<String>>) {
     let executable = executable.display().to_string();
     let launch = format!("{executable} mcp");
-    let json_block = format!(
-        "{{\n  \"mcpServers\": {{\n    \"dunkingsheep\": {{\n      \"command\": \"{}\",\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}",
-        executable
-    );
+    let quoted_executable = serde_json::to_string(&executable).expect("serialize executable path");
+    let json_block = ordered_json(&serde_json::json!({
+        "mcpServers": {
+            "dunkingsheep": {
+                "command": executable,
+                "args": ["mcp"]
+            }
+        }
+    }));
     let toml_block =
-        format!("[mcp_servers.dunkingsheep]\ncommand = \"{executable}\"\nargs = [\"mcp\"]\n");
+        format!("[mcp_servers.dunkingsheep]\ncommand = {quoted_executable}\nargs = [\"mcp\"]\n");
     match harness {
         "claude" => {
             let cmd = vec![
