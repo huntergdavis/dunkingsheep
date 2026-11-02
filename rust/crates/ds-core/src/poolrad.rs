@@ -87,6 +87,11 @@ pub fn export_queue(
     timeout: Duration,
 ) -> Result<Value, String> {
     let out = out.as_ref();
+    let parent = out
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     let mut command = Command::new("python3");
     command
         .arg("tools/overlay/strict_candidate_queue.py")
@@ -486,11 +491,12 @@ mod tests {
         let exporter = repo.path().join("tools/overlay/strict_candidate_queue.py");
         fs::create_dir_all(exporter.parent().unwrap()).unwrap();
         fs::write(&exporter, "import json, sys\nout=sys.argv[sys.argv.index('--json')+1]\njson.dump({'rows':[{'id':'x'}]}, open(out, 'w'))\n").unwrap();
-        let out = repo.path().join("queue.json");
+        let out = repo.path().join("fresh/nested/queue.json");
         assert_eq!(
             export_queue(repo.path(), &out, Duration::from_secs(5)).unwrap(),
             json!({"rows":[{"id":"x"}]})
         );
+        assert!(out.parent().unwrap().is_dir());
     }
 
     #[test]
