@@ -109,6 +109,7 @@ fn needs_python_unicode_escape(ch: char) -> bool {
                 | 0xe000..=0xf8ff
                 | 0xf0000..=0xffffd
                 | 0x100000..=0x10fffd
+                | 0x10ffff
         )
 }
 

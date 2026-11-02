@@ -2867,6 +2867,7 @@ mod tests {
             ("t\u{e000}", "no task with id 't\\ue000'"),
             ("t\u{feff}", "no task with id 't\\ufeff'"),
             ("t\u{e0001}", "no task with id 't\\U000e0001'"),
+            ("t\u{10ffff}", "no task with id 't\\U0010ffff'"),
         ] {
             let nonprintable = store.set_accounting_pr(id, 5).await.unwrap_err();
             assert_eq!(expected, nonprintable.to_string());
