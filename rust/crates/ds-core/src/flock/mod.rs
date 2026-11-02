@@ -510,6 +510,7 @@ pub mod panes;
 pub mod project_summary;
 pub mod resolve;
 pub mod retire;
+mod retired;
 pub mod roles_gate;
 pub mod roster;
 pub mod send_keys;
