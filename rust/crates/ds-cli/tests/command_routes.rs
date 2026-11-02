@@ -36,6 +36,39 @@ fn run_cli_with_env(socket: &str, command: &[&str], env: &[(&str, &str)]) -> Out
     cli.output().expect("run Rust CLI")
 }
 
+fn run_local_context_cli(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+) -> Output {
+    run_local_context_cli_with_ledger(cwd, config_dir, superuser, args, None)
+}
+
+fn run_local_context_cli_with_ledger(
+    cwd: &Path,
+    config_dir: &Path,
+    superuser: &str,
+    args: &[String],
+    ledger: Option<&Path>,
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    command
+        .args(["--self-pane", "%99"])
+        .args(args)
+        .current_dir(cwd)
+        .env("DUNKINGSHEEP_DIR", config_dir)
+        .env("DUNKINGSHEEP_SUPERUSER", superuser)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_CONTEXT_LEDGER")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE");
+    if let Some(ledger) = ledger {
+        command.env("DUNKINGSHEEP_CONTEXT_LEDGER", ledger);
+    }
+    command.output().expect("run Rust CLI")
+}
+
 fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
         .args(["--socket", socket, "--self-pane", "%99"])
@@ -891,6 +924,192 @@ fn cli_route_01_dunk_read_batch() {
         String::from_utf8(poll.stdout).unwrap()
     );
     assert!(poll.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_56_mcp_setup() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let capture = temp.path().join("claude-argv");
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nexit 7\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&original_path)),
+    )
+    .unwrap();
+    let executable = std::fs::canonicalize(env!("CARGO_BIN_EXE_dunkingsheep"))
+        .unwrap()
+        .display()
+        .to_string();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_dunkingsheep"))
+            .args(args)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("DUNKINGSHEEP_DIR", home.join("dunkingsheep"))
+            .env("PATH", &path)
+            .env("CAPTURE", &capture)
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+            .output()
+            .unwrap()
+    };
+
+    let json = run(&["mcp-setup", "json"]);
+    assert_eq!(0, json.status.code().unwrap());
+    assert_eq!(
+        format!(
+            "{{\n  \"mcpServers\": {{\n    \"dunkingsheep\": {{\n      \"command\": \"{executable}\",\n      \"args\": [\"mcp\"]\n    }}\n  }}\n}}\n\n"
+        ),
+        String::from_utf8(json.stdout).unwrap()
+    );
+    assert!(json.stderr.is_empty());
+
+    let apply = run(&["mcp-setup", "claude", "--scope", "project", "--apply"]);
+    assert_eq!(7, apply.status.code().unwrap());
+    assert_eq!(
+        format!(
+            "# Claude Code\nclaude mcp add --scope project dunkingsheep -- {executable} mcp\nclaude mcp list   # expect: dunkingsheep: {executable} mcp - Connected\n\n$ claude mcp add --scope project dunkingsheep -- {executable} mcp\n"
+        ),
+        String::from_utf8(apply.stdout).unwrap()
+    );
+    assert!(apply.stderr.is_empty());
+    assert_eq!(
+        format!("mcp\nadd\n--scope\nproject\ndunkingsheep\n--\n{executable}\nmcp\n"),
+        std::fs::read_to_string(&capture).unwrap()
+    );
+
+    let cursor = run(&["mcp-setup", "cursor", "--apply"]);
+    assert_eq!(2, cursor.status.code().unwrap());
+    assert!(String::from_utf8(cursor.stdout)
+        .unwrap()
+        .contains("\"args\": [\"mcp\"]"));
+    assert_eq!(
+        "error: cursor has no CLI to apply; paste the block above\n",
+        String::from_utf8(cursor.stderr).unwrap()
+    );
+    assert!(!home.join("config").exists());
+    assert!(!home.join("dunkingsheep").exists());
+
+    let quoted_dir = temp
+        .path()
+        .join("quoted space \"double\" 'single' \\backslash");
+    std::fs::create_dir_all(&quoted_dir).unwrap();
+    let quoted_executable = quoted_dir.join("dunkingsheep");
+    std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
+    let run_quoted = |harness: &str| {
+        Command::new(&quoted_executable)
+            .args(["mcp-setup", harness])
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join("config"))
+            .env("DUNKINGSHEEP_DIR", home.join("dunkingsheep"))
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+            .output()
+            .unwrap()
+    };
+
+    let quoted_json = run_quoted("json");
+    assert_eq!(0, quoted_json.status.code().unwrap());
+    assert!(quoted_json.stderr.is_empty());
+    let json_config: Value = serde_json::from_slice(&quoted_json.stdout).unwrap();
+    assert_eq!(
+        quoted_executable.display().to_string(),
+        json_config["mcpServers"]["dunkingsheep"]["command"]
+    );
+    assert_eq!(
+        json!("mcp"),
+        json_config["mcpServers"]["dunkingsheep"]["args"][0]
+    );
+
+    let quoted_toml = run_quoted("toml");
+    assert_eq!(0, quoted_toml.status.code().unwrap());
+    assert!(quoted_toml.stderr.is_empty());
+    let encoded_path = serde_json::to_string(&quoted_executable.display().to_string()).unwrap();
+    assert_eq!(
+        format!("[mcp_servers.dunkingsheep]\ncommand = {encoded_path}\nargs = [\"mcp\"]\n\n"),
+        String::from_utf8(quoted_toml.stdout).unwrap()
+    );
+
+    let quoted_path = quoted_executable.display().to_string();
+    for (harness, expected_argv) in [
+        (
+            "claude",
+            vec![
+                "claude".into(),
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                "user".into(),
+                "dunkingsheep".into(),
+                "--".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
+        ),
+        (
+            "codex",
+            vec![
+                "codex".into(),
+                "mcp".into(),
+                "add".into(),
+                "dunkingsheep".into(),
+                "--".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
+        ),
+        (
+            "gemini",
+            vec![
+                "gemini".into(),
+                "mcp".into(),
+                "add".into(),
+                "--scope".into(),
+                "user".into(),
+                "dunkingsheep".into(),
+                quoted_path.clone(),
+                "mcp".into(),
+            ],
+        ),
+    ] {
+        let setup = run_quoted(harness);
+        assert_eq!(0, setup.status.code().unwrap());
+        assert!(setup.stderr.is_empty());
+        let setup = String::from_utf8(setup.stdout).unwrap();
+        let command_line = setup.lines().nth(1).unwrap();
+        let parsed = Command::new("sh")
+            .args([
+                "-c",
+                "eval \"set -- $1\"; printf '%s\\n' \"$@\"",
+                "--",
+                command_line,
+            ])
+            .output()
+            .unwrap();
+        assert!(parsed.status.success());
+        let parsed: Vec<String> = String::from_utf8(parsed.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            expected_argv, parsed,
+            "rendered {harness} argv did not round-trip"
+        );
+    }
 }
 
 #[test]
@@ -2487,4 +2706,470 @@ fn cli_route_31_review() {
         String::from_utf8(review_list_json.stdout).unwrap()
     );
     assert!(review_list_json.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_09_inbox_write_b() {
+    let archived = run_daemon_cli(
+        &[
+            "inbox",
+            "archive",
+            "reviewer",
+            "--before",
+            "2026-10-01",
+            "--state",
+            "read,acked",
+        ],
+        "inbox_archive",
+        json!({
+            "mailbox": "reviewer",
+            "before": "2026-10-01",
+            "state": "read,acked"
+        }),
+        json!({
+            "mailbox": "reviewer",
+            "archived": 2,
+            "states": ["read", "acked"],
+            "before": "2026-10-01"
+        }),
+    );
+    assert_eq!(0, archived.status.code().unwrap());
+    assert_eq!(
+        "archived 2 message(s) in reviewer (states read,acked before 2026-10-01)\n",
+        String::from_utf8(archived.stdout).unwrap()
+    );
+    assert!(archived.stderr.is_empty());
+
+    let stats = run_daemon_cli(
+        &["inbox", "stats"],
+        "inbox_stats",
+        json!({}),
+        json!({"mailboxes": []}),
+    );
+    assert_eq!(0, stats.status.code().unwrap());
+    assert_eq!("no mailboxes\n", String::from_utf8(stats.stdout).unwrap());
+    assert!(stats.stderr.is_empty());
+
+    let dest = tempfile::tempdir().unwrap();
+    let dest_path = dest.path().to_str().unwrap();
+    let fetched = run_daemon_cli(
+        &["inbox", "fetch", "attachment-1", "--dest", dest_path],
+        "inbox_fetch",
+        json!({"attachment_id": "attachment-1", "dest": dest_path}),
+        json!({"path": "/sandbox/attachment.txt", "size": 12}),
+    );
+    assert_eq!(0, fetched.status.code().unwrap());
+    assert_eq!(
+        "wrote /sandbox/attachment.txt (12 bytes)\n",
+        String::from_utf8(fetched.stdout).unwrap()
+    );
+    assert!(fetched.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_13_load_report() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("daemon.sock");
+    let socket_text = socket.display().to_string();
+    let config = temp.path().join("config");
+    let policy_file = temp.path().join("policies.json");
+    let state_file = temp.path().join("load-state.json");
+    std::fs::write(&policy_file, "not json").unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+    let daemon = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let result = if request["cmd"] == "status" {
+                json!({})
+            } else {
+                assert_eq!("task_list", request["cmd"]);
+                assert_eq!(json!({"limit": 500}), request["args"]);
+                json!({"tasks": [{"caller_pid": 2147483647_i64,
+                    "caller_start": 10, "caller_name": "fixture"}]})
+            };
+            let response = json!({"ok": true, "result": result});
+            let mut writer = &stream;
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .unwrap();
+        }
+    });
+
+    let run_load = |json_output: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+        command
+            .args(["--socket", &socket_text, "--self-pane", "%99", "load"])
+            .args(["--policies", policy_file.to_str().unwrap()])
+            .env("HOME", temp.path())
+            .env("DUNKINGSHEEP_DIR", &config)
+            .env("DUNKINGSHEEP_LOAD_STATE", &state_file)
+            .env_remove("DUNKINGSHEEP_SOCKET")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+            .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE");
+        if json_output {
+            command.arg("--json");
+        }
+        command.output().expect("run Rust CLI load")
+    };
+
+    let human = run_load(false);
+    assert_eq!(Some(0), human.status.code());
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(human_stdout.starts_with("window Nones | host load1 "));
+    assert!(human_stdout.contains("fixture"));
+    assert!(human_stdout.contains("skipped: process gone\n"));
+    assert!(human.stderr.is_empty());
+
+    let raw = run_load(true);
+    assert_eq!(Some(0), raw.status.code());
+    assert!(raw.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&raw.stdout).unwrap();
+    assert_eq!("fixture", report["skipped"][0]["name"]);
+    assert_eq!("process gone", report["skipped"][0]["reason"]);
+    assert_eq!(json!([]), report["would_kill"]);
+    let state: Value = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    assert!(state.get("at").is_some());
+    assert_eq!(json!({}), state["callers"]);
+    daemon.join().unwrap();
+}
+
+#[test]
+fn cli_route_15_allocation() {
+    let status = run_daemon_cli(
+        &["allocation", "status"],
+        "allocation",
+        json!({"action": "status"}),
+        json!({"workers": [], "offers": []}),
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        "{\n  \"workers\": [],\n  \"offers\": []\n}\n",
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
+
+    let registered = run_daemon_cli(
+        &[
+            "--json",
+            "allocation",
+            "register",
+            "--pane-id",
+            "%42",
+            "--pool",
+            "compute",
+            "--pools",
+            "cpu",
+            "--pools",
+            "gpu",
+            "--roles",
+            "worker",
+            "--roles",
+            "reviewer",
+            "--skills",
+            "rust",
+            "--skills",
+            "cli",
+            "--requires",
+            "linux",
+            "--task-id",
+            "t8",
+            "--revision",
+            "main",
+            "--body",
+            "checked body",
+            "--disable",
+        ],
+        "allocation",
+        json!({
+            "action": "register",
+            "pane_id": "%42",
+            "pool": "compute",
+            "pools": ["cpu", "gpu"],
+            "roles": ["worker", "reviewer"],
+            "skills": ["rust", "cli"],
+            "requires": ["linux"],
+            "task_id": "t8",
+            "revision": "main",
+            "body": "checked body",
+            "enabled": false
+        }),
+        json!({"action": "registered", "pane_id": "%42"}),
+    );
+    assert_eq!(Some(0), registered.status.code());
+    assert_eq!(
+        "{\n  \"action\": \"registered\",\n  \"pane_id\": \"%42\"\n}\n",
+        String::from_utf8(registered.stdout).unwrap()
+    );
+    assert!(registered.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_26_reports() {
+    let prose_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(prose_file.path(), "file prose\n").unwrap();
+    let prose_path = prose_file.path().to_str().unwrap();
+    let ran = run_daemon_cli(
+        &[
+            "report",
+            "run",
+            "--no-post",
+            "--prose",
+            "ignored",
+            "--prose-file",
+            prose_path,
+            "--out-dir",
+            "/reports",
+        ],
+        "report_run",
+        json!({"post": false, "prose": "file prose\n", "out_dir": "/reports"}),
+        json!({
+            "path": "/reports/2026-11-01.md",
+            "generated_at": "2026-11-01T12:00:00-08:00",
+            "posted": {"message_id": "i42", "transport": "socket"},
+            "prose_rejected": ["unknown task"]
+        }),
+    );
+    assert_eq!(0, ran.status.code().unwrap());
+    assert_eq!(
+        "report /reports/2026-11-01.md  (generated 2026-11-01T12:00:00-08:00)\nposted to the owner mailbox as i42 (transport socket)\nprose rejected: unknown task\n",
+        String::from_utf8(ran.stdout).unwrap()
+    );
+    assert!(ran.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &["report", "list"],
+        "report_list",
+        json!({"out_dir": null}),
+        json!({"count": 0, "dir": "/reports", "reports": []}),
+    );
+    assert_eq!(0, listed.status.code().unwrap());
+    assert_eq!(
+        "0 report(s) in /reports\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_10_context_local_seed() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("work");
+    let config = temp.path().join("config");
+    let store = temp.path().join("project-store");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+
+    let empty_path_init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "init".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_init.status.code());
+    assert_eq!(
+        "store at .dunkingsheep\n",
+        String::from_utf8(empty_path_init.stdout).unwrap()
+    );
+    assert!(empty_path_init.stderr.is_empty());
+    let default_store = cwd.join(".dunkingsheep");
+    assert!(default_store.join("ground-truth").is_dir());
+    assert!(default_store.join("fact").is_dir());
+    assert!(!cwd.join("ground-truth").exists());
+    assert!(!cwd.join("fact").exists());
+
+    let init = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), init.status.code());
+    assert_eq!(
+        format!("store at {}\n", store.display()),
+        String::from_utf8(init.stdout).unwrap()
+    );
+    assert!(init.stderr.is_empty());
+    for class in ["ground-truth", "fact", "history", "provisional"] {
+        assert!(
+            store.join(class).is_dir(),
+            "missing class directory {class}"
+        );
+    }
+    assert!(store.join("README.md").is_file());
+
+    let init_json = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "init".into(),
+            "--path".into(),
+            store.display().to_string(),
+            "--json".into(),
+        ],
+    );
+    assert_eq!(Some(0), init_json.status.code());
+    assert_eq!(
+        format!("{{\n  \"root\": \"{}\"\n}}\n", store.display()),
+        String::from_utf8(init_json.stdout).unwrap()
+    );
+    assert!(init_json.stderr.is_empty());
+
+    let entry = store.join("fact").join("fixture.md");
+    std::fs::write(
+        &entry,
+        "---\nclass: fact\nsubject: fixture\ntype: reference\nscope: project\nauthority: agent\nsource: test\nstated: 2026-11-01\n---\nFixture body.\n",
+    )
+    .unwrap();
+    let ledger = config.join("context-ledger.db");
+    let refused = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(1), refused.status.code());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        "refused: `context ledger adopt` is the owner's bootstrap; run it with DUNKINGSHEEP_SUPERUSER=1 from the owner's terminal\n",
+        String::from_utf8(refused.stderr).unwrap()
+    );
+    assert!(
+        !ledger.exists(),
+        "unauthorized adopt must not create the ledger"
+    );
+
+    let failing_ledger = config.join("ledger-is-a-directory");
+    std::fs::create_dir(&failing_ledger).unwrap();
+    let failed_adopt = run_local_context_cli_with_ledger(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+        Some(&failing_ledger),
+    );
+    assert_ne!(Some(0), failed_adopt.status.code());
+    assert!(failed_adopt.stdout.is_empty());
+    let error = String::from_utf8(failed_adopt.stderr).unwrap();
+    assert!(!error.trim().is_empty());
+    assert!(!error.contains("adopted"));
+
+    let empty_path_snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".to_string(),
+            "snapshot".to_string(),
+            "--path".to_string(),
+            String::new(),
+        ],
+    );
+    assert_eq!(Some(0), empty_path_snapshot.status.code());
+    assert!(empty_path_snapshot.stderr.is_empty());
+    let empty_path_snapshot: Value = serde_json::from_slice(&empty_path_snapshot.stdout).unwrap();
+    assert_eq!(
+        ".dunkingsheep",
+        empty_path_snapshot["stores"]["project"]["path"]
+    );
+
+    let snapshot = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "snapshot".into(),
+            "--project".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), snapshot.status.code());
+    assert!(snapshot.stderr.is_empty());
+    let snapshot: Value = serde_json::from_slice(&snapshot.stdout).unwrap();
+    assert_eq!("context-snapshot/1", snapshot["schema"]);
+    assert!(snapshot["as_of"].as_u64().unwrap() > 0);
+    assert!(snapshot["digest"]
+        .as_str()
+        .unwrap()
+        .contains("Fixture body."));
+    assert_eq!("ok", snapshot["stores"]["project"]["status"]);
+    assert_eq!(
+        store.display().to_string(),
+        snapshot["stores"]["project"]["path"]
+    );
+    assert_eq!(1, snapshot["stores"]["project"]["counts"]["fact"]);
+    assert_eq!(
+        1,
+        snapshot["stores"]["project"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+    );
+
+    let adopted = run_local_context_cli(
+        &cwd,
+        &config,
+        "1",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "adopt".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), adopted.status.code());
+    assert_eq!(
+        format!("adopted 1 entries into {}\n", ledger.display()),
+        String::from_utf8(adopted.stdout).unwrap()
+    );
+    assert!(adopted.stderr.is_empty());
+    assert!(ledger.is_file());
+
+    let status = run_local_context_cli(
+        &cwd,
+        &config,
+        "0",
+        &[
+            "context".into(),
+            "ledger".into(),
+            "status".into(),
+            "--path".into(),
+            store.display().to_string(),
+        ],
+    );
+    assert_eq!(Some(0), status.status.code());
+    assert_eq!(
+        format!("{:11} {:13} {}\n", "recorded", "fact", "fixture"),
+        String::from_utf8(status.stdout).unwrap()
+    );
+    assert!(status.stderr.is_empty());
 }

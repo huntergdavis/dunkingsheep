@@ -20,6 +20,12 @@ use crate::terminal::{Pane, Terminal};
 /// `Flock.IDLE_CLAIM_S` (= `dunk_activity.IDLE_CLAIM_S`).
 pub const IDLE_CLAIM_S: f64 = activity::IDLE_CLAIM_S;
 
+/// Role-registry status returned to lane resolvers.
+pub type RegisteredPaneStatus = (bool, bool, Option<String>);
+
+/// Role-registry callback used by lane resolvers.
+pub type RegisteredPaneCallback<'a> = dyn Fn(&str) -> RegisteredPaneStatus + 'a;
+
 /// One typed pane as the tmux backend's dict. `agent_status` is the backend's answer
 /// (`Terminal::agent_status`), "unknown" when it has none, exactly as `_parse_panes` starts.
 pub fn pane_to_json(pane: &Pane, agent_status: Option<&str>) -> Value {
@@ -54,7 +60,7 @@ pub fn pane_to_json(pane: &Pane, agent_status: Option<&str>) -> Value {
 /// registry's `_registered_pane` (no backend call).
 pub struct TerminalEnv<'a> {
     pub terminal: &'a dyn Terminal,
-    pub registered: &'a dyn Fn(&str) -> (bool, bool, Option<String>),
+    pub registered: &'a RegisteredPaneCallback<'a>,
 }
 
 impl PaneInfoEnv for TerminalEnv<'_> {

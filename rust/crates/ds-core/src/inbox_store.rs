@@ -28,6 +28,8 @@ use crate::inbox::{
     RETENTION_S, SCHEMA, STATES,
 };
 
+const _: () = assert!(MAX_BLOB_BYTES > 0);
+
 /// What `send` stores. Every field but `mailbox` and `body` is optional, as in the Python.
 #[derive(Debug, Clone, Default)]
 pub struct Outgoing<'a> {
@@ -41,6 +43,32 @@ pub struct Outgoing<'a> {
     pub transport: Option<&'a str>,
     pub reply_to: Option<&'a str>,
     pub external_id: Option<&'a str>,
+}
+
+/// Fields for inserting or refreshing a digest message.
+#[derive(Debug, Clone, Copy)]
+pub struct DigestUpsert<'a> {
+    pub mailbox: &'a str,
+    pub digest_id: &'a str,
+    pub body: &'a str,
+    pub subject: Option<&'a str>,
+    pub sender: Option<&'a str>,
+    pub mailbox_label: Option<&'a str>,
+    pub pane_id: Option<&'a str>,
+}
+
+impl<'a> DigestUpsert<'a> {
+    pub fn new(mailbox: &'a str, digest_id: &'a str, body: &'a str) -> Self {
+        Self {
+            mailbox,
+            digest_id,
+            body,
+            subject: None,
+            sender: None,
+            mailbox_label: None,
+            pane_id: None,
+        }
+    }
 }
 
 /// One stored attachment: the content-addressed blob plus what the row records.
@@ -398,7 +426,6 @@ impl Store {
         let blob_path = self.blob_dir.join(&sha);
         if !blob_path.exists() {
             check_sizes(0, "", 0, self.blob_bytes() + size).map_err(refuse)?;
-            debug_assert!(MAX_BLOB_BYTES > 0);
             // Write beside the target and rename, so a crash never leaves a half blob
             // under its hash (a later send would then dedupe onto a truncated file).
             let partial = self.blob_dir.join(format!(".{sha}.partial"));
@@ -442,16 +469,16 @@ impl Store {
     /// every window; it must not become a stream). An update replaces the body and makes
     /// the row unread again (read/ack/archive/cancel stamps and the notify state cleared);
     /// `created_at` and the id stay. Returns the message id.
-    pub fn upsert_digest(
-        &self,
-        mailbox: &str,
-        digest_id: &str,
-        body: &str,
-        subject: Option<&str>,
-        sender: Option<&str>,
-        mailbox_label: Option<&str>,
-        pane_id: Option<&str>,
-    ) -> Result<String, DunkError> {
+    pub fn upsert_digest(&self, digest: DigestUpsert<'_>) -> Result<String, DunkError> {
+        let DigestUpsert {
+            mailbox,
+            digest_id,
+            body,
+            subject,
+            sender,
+            mailbox_label,
+            pane_id,
+        } = digest;
         if body.trim().is_empty() {
             return Err(refuse("a digest needs a body"));
         }

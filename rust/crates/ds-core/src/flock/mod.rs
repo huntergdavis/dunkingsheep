@@ -133,6 +133,8 @@ pub struct Flock {
     last_message: Mutex<String>,
     /// Per-pane successful retry key, matching Python Flock._submit_key.
     pub(crate) learned_submit_keys: Mutex<BTreeMap<String, String>>,
+    /// Pane -> last author-App token mint time, matching Python Flock._gh_token_mints.
+    pub(crate) gh_token_mints: Mutex<BTreeMap<String, f64>>,
     quarantined_mailboxes: Mutex<Vec<Value>>,
 }
 
@@ -173,6 +175,7 @@ impl Flock {
             status_runtime: OnceLock::new(),
             last_message: Mutex::new(String::new()),
             learned_submit_keys: Mutex::new(BTreeMap::new()),
+            gh_token_mints: Mutex::new(BTreeMap::new()),
             quarantined_mailboxes: Mutex::new(Vec::new()),
         };
         flock.load_launches();
@@ -444,6 +447,16 @@ impl Flock {
         }
         if let Some(rows) = root.get("outbox").and_then(Value::as_array) {
             self.restore_outbox(rows);
+        }
+    }
+
+    /// Remember a successful author-App token mint for review attribution.
+    pub(crate) fn record_gh_token_mint(&self, pane_id: &str, at: f64) {
+        if !pane_id.is_empty() {
+            self.gh_token_mints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(pane_id.to_owned(), at);
         }
     }
 

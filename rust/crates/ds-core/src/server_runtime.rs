@@ -5,6 +5,7 @@
 //! explicitly instead of being silently replaced with tmux.
 
 mod delivery;
+mod inbox;
 mod status;
 mod submit;
 

@@ -580,25 +580,35 @@ impl Store {
     }
 
     /// `adopt`: bootstrap, record every live entry as-is. The owner's one-shot.
-    pub fn adopt(&self, ledger: &mut Ledger, by: &str) -> Vec<String> {
+    pub fn adopt(&self, ledger: &mut Ledger, by: &str) -> Result<Vec<String>, ContextError> {
+        self.adopt_entries(self.live_entries(), ledger, by)
+    }
+
+    /// Process a captured live-entry list. Kept within this context module so tests can
+    /// deterministically exercise a file disappearing after discovery.
+    pub(super) fn adopt_entries(
+        &self,
+        entries: Vec<Entry>,
+        ledger: &mut Ledger,
+        by: &str,
+    ) -> Result<Vec<String>, ContextError> {
         let mut adopted = Vec::new();
-        for entry in self.live_entries() {
-            let Ok(text) = std::fs::read_to_string(&entry.path) else {
-                continue;
-            };
-            let recorded = ledger.record(
-                &self.root,
-                &entry.slug,
-                &text,
-                entry.get("class"),
-                entry.get("authority"),
-                Some(by),
-            );
-            if recorded.is_ok() {
-                adopted.push(entry.slug.clone());
-            }
+        for entry in entries {
+            let text = std::fs::read_to_string(&entry.path)
+                .map_err(|error| io_error(&entry.path, error))?;
+            ledger
+                .record(
+                    &self.root,
+                    &entry.slug,
+                    &text,
+                    entry.get("class"),
+                    entry.get("authority"),
+                    Some(by),
+                )
+                .map_err(|error| ContextError(error.to_string()))?;
+            adopted.push(entry.slug.clone());
         }
-        adopted
+        Ok(adopted)
     }
 
     /// `ensure`: create the root, the four class directories and the README.
