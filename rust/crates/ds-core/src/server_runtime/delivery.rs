@@ -17,8 +17,36 @@ impl TerminalCallAdapter<'_> {
     }
 
     fn helper_deliveryenv_agent_alive(&self, pane_id: &str) -> Option<bool> {
-        let (registered, alive, _) = MailboxEnv::registered_pane(self, pane_id);
-        registered.then_some(alive)
+        let pane = self.helper_deliveryenv_get_pane(pane_id)?;
+        let pane_pid = pane.get("pane_pid").and_then(Value::as_i64)?;
+        let entries = crate::proc::pane_agent_pids(Some(pane_pid));
+        let direct: Option<Vec<crate::push::ChildProc>> = entries.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| crate::push::ChildProc {
+                    comm: entry.comm,
+                    state: entry.state,
+                })
+                .collect()
+        });
+        crate::push::lane_agent_alive(direct.as_deref(), || {
+            let parents = crate::load::ppid_map();
+            let tree = crate::load::tree_of(pane_pid, &parents);
+            Some(tree.into_iter().any(|pid| {
+                let Some(process) = crate::proc::stat(pid) else {
+                    return false;
+                };
+                let comm = process
+                    .comm
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&process.comm)
+                    .to_lowercase();
+                crate::proc::AGENT_NAMES.contains(&comm.as_str())
+                    && !crate::proc::DEAD_STATES.contains(&process.state.as_str())
+                    && !matches!(process.state.as_str(), "T" | "t")
+            }))
+        })
     }
 
     fn helper_deliveryenv_has_web_token(&self) -> Result<bool, DunkError> {
@@ -202,16 +230,25 @@ mod tests {
             .expect("temporary fixture token");
         flock.attach_roles(roles, None);
 
-        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
+        let mut fake = FakeTerminal::new();
+        for pane in &mut fake.panes {
+            match pane.pane_id.as_str() {
+                "w1:p1" | "w2:p2" => pane.pane_pid = Some(pid),
+                "w3:p3" => pane.pane_pid = Some(i64::MAX),
+                _ => {}
+            }
+        }
+        let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime");
         let request = RequestCtx::default();
         let adapter = request_adapter(&flock, &request, &runtime, &terminal);
-        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w2:p2"), Some(true));
-        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w1:p1"), None); // bare shell
-        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w3:p3"), Some(false)); // unknown process
+        assert_eq!(MailboxEnv::registered_pane(&adapter, "w2:p2").1, true);
+        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w2:p2"), Some(false));
+        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w1:p1"), Some(false)); // bare shell
+        assert_eq!(DeliveryEnv::agent_alive(&adapter, "w3:p3"), None); // unknown process table
         assert!(DeliveryEnv::has_web_token(&adapter).expect("valid fixture token store"));
 
         let absent_dir = crate::testsupport::dir("runtime-delivery-no-web-token");
@@ -290,7 +327,7 @@ mod tests {
         )
         .expect("real capability handler");
         assert_eq!(capability["agent"], "claude");
-        assert_eq!(capability["agent_alive"], false);
+        assert_eq!(capability["agent_alive"], Value::Null);
         assert_eq!(capability["desk_credential"], true);
         assert_eq!(capability["desk_can_type"], true);
 
