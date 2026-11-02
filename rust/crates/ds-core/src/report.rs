@@ -490,7 +490,8 @@ fn required_object<'a>(
     name: &str,
 ) -> Result<&'a Map<String, Value>, ReportError> {
     value
-        .as_object()
+        .get(name)
+        .and_then(Value::as_object)
         .ok_or_else(|| ReportError::Field(name.to_owned()))
 }
 
