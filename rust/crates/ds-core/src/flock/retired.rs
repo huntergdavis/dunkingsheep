@@ -11,6 +11,7 @@ use super::Flock;
 use crate::error::DunkError;
 use crate::inbox_store::RetiredArchiveOptions;
 use crate::lock::{Guard, Mode};
+use crate::unicode_casefold::full_casefold;
 use crate::{config, inbox, panes};
 
 const IDENTITY_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -148,12 +149,12 @@ fn eligible_now(
             let declared_at = row.get("declared_at").and_then(Value::as_f64);
             let aliases: BTreeSet<String> = panes::retirement_aliases(&record)
                 .into_iter()
-                .map(|value| inbox::normalise_mailbox(&value).to_lowercase())
+                .map(|value| full_casefold(&inbox::normalise_mailbox(&value)))
                 .collect();
             let matching_declaration = declared
                 && name
                     .as_ref()
-                    .map(|value| aliases.contains(&inbox::normalise_mailbox(value).to_lowercase()))
+                    .map(|value| aliases.contains(&full_casefold(&inbox::normalise_mailbox(value))))
                     .unwrap_or(false)
                 && declared_at
                     .map(|at| at.is_finite() && at > 0.0 && at < record.retired_at)
@@ -211,7 +212,7 @@ fn eligible_now(
     let mut alias_owners: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for record in &effective {
         for alias in panes::retirement_aliases(record) {
-            let normalized = inbox::normalise_mailbox(&alias).to_lowercase();
+            let normalized = full_casefold(&inbox::normalise_mailbox(&alias));
             alias_owners
                 .entry(normalized)
                 .or_default()
@@ -301,10 +302,14 @@ mod tests {
     }
 
     fn send_old(fixture: &Fixture, pane_id: &str) -> String {
+        send_old_to(fixture, "old-lane", pane_id)
+    }
+
+    fn send_old_to(fixture: &Fixture, mailbox: &str, pane_id: &str) -> String {
         let id = fixture
             .store
             .send(&Outgoing {
-                mailbox: "old-lane",
+                mailbox,
                 body: Some("queued"),
                 pane_id: Some(pane_id),
                 ..Outgoing::default()
@@ -424,6 +429,47 @@ mod tests {
         .expect("write lanes");
         let old = send_old(&fixture, "w1:p9");
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("queued", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_archive_retired_casefolds_declared_aliases_like_python() {
+        let fixture = new_fixture();
+        panes::retire(
+            "w1:p9",
+            "replaced",
+            None,
+            &["STRASSE"],
+            &["STRASSE"],
+            &fixture.retired_path,
+            Some(100.0),
+        )
+        .expect("retire");
+        declared_lane(&fixture, "Straße", 99.0);
+        let old = send_old_to(&fixture, "STRASSE", "w1:p9");
+        assert_eq!(1, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
+        assert_eq!("archived", state(&fixture, &old));
+    }
+
+    #[test]
+    fn flock_archive_retired_casefolds_live_labels_before_protecting_mailbox() {
+        let fixture = new_fixture();
+        panes::retire(
+            "w1:p9",
+            "replaced",
+            None,
+            &["STRASSE"],
+            &["STRASSE"],
+            &fixture.retired_path,
+            Some(100.0),
+        )
+        .expect("retire");
+        declared_lane(&fixture, "STRASSE", 99.0);
+        let old = send_old_to(&fixture, "STRASSE", "w1:p9");
+        assert_eq!(
+            0,
+            run(&fixture, json!([{"pane_id":"w1:p1", "label":"Straße"}])).unwrap()
+        );
         assert_eq!("queued", state(&fixture, &old));
     }
 
