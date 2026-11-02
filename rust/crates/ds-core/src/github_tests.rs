@@ -1074,6 +1074,10 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
         br#"{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"number":5}}}}"#.to_vec(),
     ));
     fake.enqueue(response(br#"{"node_id":""}"#.to_vec()));
+    fake.enqueue(response(br#"{"node_id":"PR_default"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":8}}}}"#.to_vec(),
+    ));
     fake.enqueue(response(br#"{"node_id":"PR_error"}"#.to_vec()));
     fake.enqueue(response(
         br#"{"errors":[{"message":"protected branch"}]}"#.to_vec(),
@@ -1121,6 +1125,18 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
         "owner/repo#6: no node id for the auto-merge mutation"
     );
     assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            8,
+            "author-token",
+            None,
+        ))
+        .unwrap(),
+        serde_json::json!({"pullRequest":{"number":8}})
+    );
+    assert_eq!(
         futuresless_block_on(disable_auto_merge(
             &*transport,
             DEFAULT_API,
@@ -1134,7 +1150,7 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
     );
 
     let seen = recorded.lock().unwrap();
-    assert_eq!(seen.len(), 7);
+    assert_eq!(seen.len(), 9);
     assert_eq!(
         seen[0].url,
         "https://api.github.com/repos/owner/repo/pulls/5"
@@ -1157,7 +1173,7 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
         "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }"
     );
     assert_eq!(disable["variables"], serde_json::json!({"id":"PR_disable"}));
-    let default_enable: Value = serde_json::from_slice(seen[5].body.as_ref().unwrap()).unwrap();
+    let default_enable: Value = serde_json::from_slice(seen[6].body.as_ref().unwrap()).unwrap();
     assert_eq!(default_enable["variables"]["method"], "MERGE");
 }
 
