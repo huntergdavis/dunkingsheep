@@ -1274,6 +1274,37 @@ mod owned_text_tests {
     }
 
     #[test]
+    fn typed_text_with_enter_and_attempt_identity_is_recoverable() {
+        let flock = flock();
+        let mut message = Message::new("m2", "%1", "writer", "awaiting confirmation", "direct");
+        message.status = "typed".into();
+        message.attempt_generation = Some("pid:9:start:1".into());
+
+        flock.note_stuck_candidate(&message);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        let candidate = &candidates["%1"];
+        assert_eq!("typed", candidate.status);
+        assert!(candidate.press_enter);
+        assert!(candidate.eligible);
+    }
+
+    #[test]
+    fn typed_no_enter_intent_is_not_recoverable() {
+        let flock = flock();
+        let mut message = Message::new("m3", "%1", "writer", "deliberate draft", "direct");
+        message.status = "typed".into();
+        message.press_enter = false;
+        message.attempt_generation = Some("pid:9:start:1".into());
+
+        flock.note_stuck_candidate(&message);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert!(!candidates["%1"].eligible);
+        assert!(!candidates["%1"].press_enter);
+    }
+
+    #[test]
     fn candidate_retains_message_metadata_and_repeated_update_is_idempotent() {
         let flock = flock();
         let mut message = Message::new("m17", "%1", "writer label", "exact text", "dunk-4");

@@ -907,7 +907,7 @@ pub struct Message {
     pub text: String,
     /// "send_text" or the dunk id for a fired dunk.
     pub source: String,
-    /// queued | sent | failed | cancelled
+    /// queued | typed | sent | failed | cancelled
     pub status: String,
     pub hold_while_typing: bool,
     /// "text", or "keys" (how a panel is dismissed).
@@ -1034,6 +1034,7 @@ impl StuckCandidate {
     #[allow(dead_code)] // Called when the later stuck-recovery leaf wires this state.
     fn from_message(message: &Message) -> Self {
         let eligible = (message.status == "failed"
+            || message.status == "typed"
             || (message.scheduled && message.status == "sent"))
             && message.press_enter
             && message.kind == "text"
