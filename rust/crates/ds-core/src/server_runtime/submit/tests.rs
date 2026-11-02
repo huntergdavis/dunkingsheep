@@ -126,15 +126,28 @@ fn production_submission_adapters_are_complete_and_guard_retry_keys() {
         SubmitEnv::send_submit_key_guarded(&mut a, "w1:p1", "Enter", false),
         (
             false,
-            "submission unconfirmed: pane unreadable before key".into(),
-            None
+            "tmux server not running - start it with `tmux new -d`".into(),
+            Some("Enter".into())
         )
     );
     assert_eq!(
         FlushEnv::server_error_hint(&a),
         "tmux server not running - start it with `tmux new -d`"
     );
-    // Both refusal paths released the real fleet-wide typing guard.
+    // Unreadable input is a distinct refusal before a key is selected. The fake's
+    // availability flag refuses writes but intentionally keeps its screen readable.
+    let mut unreadable = FakeTerminal::new();
+    unreadable.unreadable.insert("w1:p1".into());
+    *f.terminal.lock().unwrap() = Box::new(unreadable);
+    assert_eq!(
+        SubmitEnv::send_submit_key_guarded(&mut a, "w1:p1", "Enter", false),
+        (
+            false,
+            "submission unconfirmed: pane unreadable before key".into(),
+            None
+        )
+    );
+    // All refusal paths released the real fleet-wide typing guard.
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
