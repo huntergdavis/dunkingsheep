@@ -182,22 +182,22 @@ fn eligible_now(
                 "SELECT DISTINCT mailbox FROM messages WHERE state != 'cancelled' ORDER BY mailbox",
             )
             .map_err(crate::db::map_sqlite)?;
-        statement
+        let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
-            .map_err(crate::db::map_sqlite)?
-            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::db::map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(crate::db::map_sqlite)?
     };
     let bindings = {
         let mut statement = connection
             .prepare("SELECT DISTINCT mailbox, pane_id FROM messages WHERE pane_id IS NOT NULL")
             .map_err(crate::db::map_sqlite)?;
-        statement
+        let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(crate::db::map_sqlite)?
-            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::db::map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(crate::db::map_sqlite)?
     };
     for (mailbox, pane_id) in bindings {
@@ -259,7 +259,7 @@ mod tests {
         lane_path: PathBuf,
     }
 
-    fn fixture() -> Fixture {
+    fn new_fixture() -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
         let retired_path = dir.path().join("retired-panes.json");
         let lane_path = dir.path().join("lane-registry.json");
@@ -310,36 +310,17 @@ mod tests {
                 ..Outgoing::default()
             })
             .expect("send");
-        let id_for_write = id.clone();
-        fixture
-            .store
-            .writer
-            .call(move |connection| {
-                connection
-                    .execute(
-                        "UPDATE messages SET created_at = 1 WHERE id = ?",
-                        [id_for_write],
-                    )
-                    .map_err(crate::db::map_sqlite)?;
-                Ok(())
-            })
+        let connection = rusqlite::Connection::open(fixture.store.path()).expect("test writer");
+        connection
+            .execute("UPDATE messages SET created_at = 1 WHERE id = ?", [&id])
             .expect("age row");
         id
     }
 
     fn state(fixture: &Fixture, id: &str) -> String {
-        let id = id.to_string();
-        fixture
-            .store
-            .writer
-            .call(move |connection| {
-                connection
-                    .query_row("SELECT state FROM messages WHERE id = ?", [id], |row| {
-                        row.get(0)
-                    })
-                    .map_err(crate::db::map_sqlite)
-            })
-            .expect("read state")
+        crate::inbox::status(fixture.store.read_pool(), id, 172_800.0)
+            .expect("read status")
+            .state
     }
 
     fn run(fixture: &Fixture, live: Value) -> Result<usize, DunkError> {
@@ -356,21 +337,21 @@ mod tests {
 
     #[test]
     fn flock_archive_retired_revalidates_declared_identity_and_keeps_active_bindings() {
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         declared_lane(&fixture, "old-lane", 99.0);
         let old = send_old(&fixture, "w1:p9");
         assert_eq!(1, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("archived", state(&fixture, &old));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         declared_lane(&fixture, "old-lane", 100.0); // declaration is not older than retirement
         let stale = send_old(&fixture, "w1:p9");
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("queued", state(&fixture, &stale));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         declared_lane(&fixture, "old-lane", 99.0);
         let active = send_old(&fixture, "w1:p1");
@@ -380,21 +361,21 @@ mod tests {
 
     #[test]
     fn flock_archive_retired_fails_closed_for_live_and_unknown_lane_identity() {
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         declared_lane(&fixture, "old-lane", 99.0);
         let live = send_old(&fixture, "w1:p9");
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p9"}])).unwrap());
         assert_eq!("queued", state(&fixture, &live));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         crate::atomic_json::write(&fixture.lane_path, &json!([])).expect("bad registry");
         let unknown = send_old(&fixture, "w1:p9");
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("queued", state(&fixture, &unknown));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         crate::atomic_json::write(
             &fixture.lane_path,
@@ -405,13 +386,13 @@ mod tests {
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("queued", state(&fixture, &unknown));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         let unknown = send_old(&fixture, "w1:p9");
         assert_eq!(0, run(&fixture, json!([{"pane_id":"w1:p1"}])).unwrap());
         assert_eq!("queued", state(&fixture, &unknown));
 
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         declared_lane(&fixture, "old-lane", 99.0);
         let missing_id = send_old(&fixture, "w1:p9");
@@ -421,7 +402,7 @@ mod tests {
 
     #[test]
     fn flock_archive_retired_protects_shared_aliases() {
-        let fixture = fixture();
+        let fixture = new_fixture();
         retirement(&fixture, 100.0);
         panes::retire(
             "w1:p8",
@@ -448,7 +429,7 @@ mod tests {
 
     #[test]
     fn flock_archive_retired_refuses_contended_identity_guard() {
-        let fixture = fixture();
+        let fixture = new_fixture();
         let path = appended_lock_path(&fixture.retired_path);
         let held = Guard::try_acquire(&path, Mode::Exclusive)
             .unwrap()
