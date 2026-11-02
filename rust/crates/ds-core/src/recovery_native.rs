@@ -56,9 +56,11 @@ pub fn process_environment(pid: i64) -> Result<BTreeMap<String, String>, NativeS
     let wanted = [CODEX_HOME.as_bytes(), STATE_DIR.as_bytes()];
     let mut result = BTreeMap::new();
     for entry in bytes.split(|byte| *byte == 0) {
-        let Some((key, value)) = entry.split_once(|byte| *byte == b'=') else {
+        let Some(separator) = entry.iter().position(|byte| *byte == b'=') else {
             continue;
         };
+        let (key, value_with_separator) = entry.split_at(separator);
+        let value = &value_with_separator[1..];
         if !wanted.contains(&key) {
             continue;
         }
