@@ -25,6 +25,11 @@ serde = { version = "1", features = ["derive"] }
 # json.dumps parity (CLI printers, MCP schemas, the capped desk head) stops needing workarounds.
 # It pulls in `indexmap`; sort_keys=True sites must sort explicitly.
 serde_json = { version = "1", features = ["preserve_order"] }
+# T52 (ds-core/github.rs): GitHub App JWT signing and REST calls. jsonwebtoken
+# replaces PyJWT; reqwest uses rustls and async APIs. The boring fallback is the
+# existing Python GitHub client until this Rust path is integrated and accepted.
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # T42 (ds-cli): the one parser crate RUST_PORT.md section 3 pins; the builder API is used
 # (not derive) because the command tree is generated data, not Rust types.
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions"] }
