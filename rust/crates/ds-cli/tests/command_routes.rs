@@ -2,7 +2,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::process::{Command, Output};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 
 use serde_json::{json, Value};
 
@@ -54,6 +55,43 @@ fn run_cli_with_stdin(socket: &str, command: &[&str], input: &str) -> Output {
         .write_all(input.as_bytes())
         .unwrap();
     child.wait_with_output().expect("wait for Rust CLI")
+}
+
+fn run_local_cli(
+    socket: &Path,
+    cwd: &Path,
+    global_dir: &Path,
+    command: &[&str],
+    stdin: Option<&[u8]>,
+    superuser: Option<&str>,
+) -> Output {
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_dunkingsheep"));
+    cli.args(["--socket", socket.to_str().unwrap(), "--self-pane", "%99"])
+        .args(command)
+        .current_dir(cwd)
+        .env("DUNKINGSHEEP_DIR", global_dir)
+        .env_remove("DUNKINGSHEEP_SOCKET")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN")
+        .env_remove("DUNKINGSHEEP_SERVICE_TOKEN_FILE")
+        .env_remove("DUNKINGSHEEP_SUPERUSER")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(superuser) = superuser {
+        cli.env("DUNKINGSHEEP_SUPERUSER", superuser);
+    }
+    let mut child = cli.spawn().expect("run local Rust CLI");
+    if let Some(stdin) = stdin {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin)
+            .expect("write CLI stdin");
+    } else {
+        drop(child.stdin.take());
+    }
+    child.wait_with_output().expect("wait for local Rust CLI")
 }
 
 fn run_daemon_cli(command: &[&str], rpc: &str, args: Value, result: Value) -> Output {
@@ -1678,4 +1716,493 @@ fn cli_route_07_inbox_read_b() {
         String::from_utf8(status.stdout).unwrap()
     );
     assert!(status.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_11_context_local_write_a() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let global_dir = root.join("isolated-global");
+    let socket = root.join("unused-daemon.sock");
+    let source_file = root.join("body.md");
+    std::fs::write(&source_file, b"file first\r\nfile second\rfile third").unwrap();
+    let source_path = source_file.to_str().unwrap();
+
+    let inline = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            source_path,
+            "--text",
+            "inline wins",
+            "--class",
+            "fact",
+            "--subject",
+            "inline entry",
+            "--type",
+            "measurement",
+            "--authority",
+            "measured",
+            "--source",
+            "fixture",
+            "--stated",
+            "2026-10-20",
+            "--recheck-after",
+            "30d",
+            "--local",
+            "--json",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), inline.status.code());
+    assert!(inline.stderr.is_empty());
+    assert_eq!(
+        format!(
+            "{{\n  \"slug\": \"2026-10-20-inline-entry\",\n  \"path\": \".dunkingsheep/fact/2026-10-20-inline-entry.md\",\n  \"class\": \"fact\"\n}}\n"
+        ),
+        String::from_utf8(inline.stdout).unwrap()
+    );
+    let inline_path = root.join(".dunkingsheep/fact/2026-10-20-inline-entry.md");
+    let inline_article = std::fs::read_to_string(&inline_path).unwrap();
+    assert!(inline_article.ends_with("inline wins\n"));
+    assert!(!inline_article.contains("file first"));
+
+    let from_file = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            source_path,
+            "--class",
+            "fact",
+            "--subject",
+            "file entry",
+            "--source",
+            "fixture",
+            "--stated",
+            "2026-10-21",
+            "--local",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), from_file.status.code());
+    assert_eq!(
+        "added fact/2026-10-21-file-entry\n",
+        String::from_utf8(from_file.stdout).unwrap()
+    );
+    assert!(from_file.stderr.is_empty());
+    let original_path = root.join(".dunkingsheep/fact/2026-10-21-file-entry.md");
+    let original = std::fs::read_to_string(&original_path).unwrap();
+    assert!(original.ends_with("file first\nfile second\nfile third\n"));
+
+    let from_stdin = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--class",
+            "provisional",
+            "--subject",
+            "stdin entry",
+            "--stated",
+            "2026-10-22",
+            "--recheck-after",
+            "5d",
+            "--local",
+        ],
+        Some(b"stdin first\r\nstdin second\rstdin third"),
+        None,
+    );
+    assert_eq!(Some(0), from_stdin.status.code());
+    assert_eq!(
+        "added provisional/2026-10-22-stdin-entry\n",
+        String::from_utf8(from_stdin.stdout).unwrap()
+    );
+    assert!(from_stdin.stderr.is_empty());
+    let stdin_article =
+        std::fs::read_to_string(root.join(".dunkingsheep/provisional/2026-10-22-stdin-entry.md"))
+            .unwrap();
+    assert!(stdin_article.ends_with("stdin first\nstdin second\nstdin third\n"));
+
+    let global = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--local",
+            "--global",
+            "--class",
+            "fact",
+            "--subject",
+            "global entry",
+            "--text",
+            "global body",
+            "--stated",
+            "2026-10-23",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), global.status.code());
+    assert_eq!(
+        "added fact/2026-10-23-global-entry\n",
+        String::from_utf8(global.stdout).unwrap()
+    );
+    assert!(global.stderr.is_empty());
+    let global_article_path = global_dir.join("context/fact/2026-10-23-global-entry.md");
+    assert!(global_article_path.is_file());
+
+    let missing = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "missing.md",
+            "--class",
+            "fact",
+            "--subject",
+            "missing",
+            "--local",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(2), missing.status.code());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        "no such file: 'missing.md' - the body comes from --text, stdin or a file; for text inline use: dunkingsheep context add --text '<claim>' --class ... --subject ...\n",
+        String::from_utf8(missing.stderr).unwrap()
+    );
+    assert!(!root
+        .join(".dunkingsheep/fact/2026-10-22-missing.md")
+        .exists());
+
+    let refused = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &["context", "promote", "2026-10-21-file-entry", "--local"],
+        None,
+        None,
+    );
+    assert_eq!(Some(2), refused.status.code());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(refused.stderr).unwrap()
+    );
+    assert_eq!(original, std::fs::read_to_string(&original_path).unwrap());
+    let ground_truth = root.join(".dunkingsheep/ground-truth");
+    assert!(std::fs::read_dir(&ground_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!ground_truth.exists()));
+
+    let protected_add = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--text",
+            "must not be written",
+            "--class",
+            "fact",
+            "--subject",
+            "protected local entry",
+            "--type",
+            "rule",
+            "--stated",
+            "2026-10-24",
+            "--local",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), protected_add.status.code());
+    assert!(protected_add.stdout.is_empty());
+    assert_eq!(
+        "refused: local context add cannot verify the bound owner role for protected entries; omit --local to use the daemon\n",
+        String::from_utf8(protected_add.stderr).unwrap()
+    );
+    assert!(!root
+        .join(".dunkingsheep/fact/2026-10-24-protected-local-entry.md")
+        .exists());
+
+    let absent = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &["context", "promote", "does-not-exist", "--local"],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(1), absent.status.code());
+    assert!(absent.stdout.is_empty());
+    assert!(absent.stderr.is_empty());
+
+    let promoted = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &["context", "promote", "2026-10-21-file-entry", "--local"],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), promoted.status.code());
+    assert!(promoted.stdout.is_empty());
+    assert_eq!(
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(promoted.stderr).unwrap()
+    );
+    let superseded = std::fs::read_to_string(original_path).unwrap();
+    assert_eq!(original, superseded);
+    assert!(std::fs::read_dir(&ground_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!ground_truth.exists()));
+
+    let global_promoted = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "promote",
+            "2026-10-23-global-entry",
+            "--local",
+            "--global",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), global_promoted.status.code());
+    assert!(global_promoted.stdout.is_empty());
+    assert_eq!(
+        "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(global_promoted.stderr).unwrap()
+    );
+    let global_truth = global_dir.join("context/ground-truth");
+    assert!(std::fs::read_dir(&global_truth)
+        .map(|entries| entries.count() == 0)
+        .unwrap_or(!global_truth.exists()));
+}
+
+#[test]
+fn cli_route_12_context_local_write_b() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let global_dir = root.join("isolated-global");
+    let socket = root.join("unused-daemon.sock");
+    let body_file = root.join("replacement.md");
+    std::fs::write(
+        &body_file,
+        b"replacement first\r\nreplacement second\rthird",
+    )
+    .unwrap();
+
+    let seed = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--local",
+            "--text",
+            "old body",
+            "--class",
+            "fact",
+            "--subject",
+            "file replacement",
+            "--stated",
+            "2026-01-01",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), seed.status.code());
+    assert_eq!(
+        "added fact/2026-01-01-file-replacement\n",
+        String::from_utf8(seed.stdout).unwrap()
+    );
+    assert!(seed.stderr.is_empty());
+
+    let superseded = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-01-file-replacement",
+            body_file.to_str().unwrap(),
+            "--local",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), superseded.status.code());
+    assert!(superseded.stderr.is_empty());
+    let superseded_text = String::from_utf8(superseded.stdout).unwrap();
+    let replacement_slug = superseded_text
+        .strip_prefix("superseded by ")
+        .and_then(|text| text.strip_suffix('\n'))
+        .unwrap();
+    let replacement_path = root
+        .join(".dunkingsheep/fact")
+        .join(format!("{replacement_slug}.md"));
+    let replacement = std::fs::read_to_string(&replacement_path).unwrap();
+    assert!(replacement.contains("subject: file replacement\n"));
+    assert!(replacement.contains("supersedes: 2026-01-01-file-replacement\n"));
+    assert!(replacement.ends_with("replacement first\nreplacement second\nthird\n"));
+    let old =
+        std::fs::read_to_string(root.join(".dunkingsheep/fact/2026-01-01-file-replacement.md"))
+            .unwrap();
+    assert!(old.contains(&format!("superseded_by: {replacement_slug}\n")));
+
+    let protected = root.join(".dunkingsheep/ground-truth/2026-01-03-protected-rule.md");
+    std::fs::create_dir_all(protected.parent().unwrap()).unwrap();
+    let protected_contents = "---\nclass: ground-truth\nsubject: protected rule\ntype: principle\nscope: project\nauthority: owner\nstated: 2026-01-03\nsource: fixture\n---\n\nprotected body\n";
+    std::fs::write(&protected, protected_contents).unwrap();
+    let protected_supersede = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-03-protected-rule",
+            body_file.to_str().unwrap(),
+            "--local",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), protected_supersede.status.code());
+    assert!(protected_supersede.stdout.is_empty());
+    assert_eq!(
+        "refused: local context supersede cannot verify the bound owner role for protected entries; omit --local to use the daemon\n",
+        String::from_utf8(protected_supersede.stderr).unwrap()
+    );
+    assert_eq!(
+        protected_contents,
+        std::fs::read_to_string(&protected).unwrap()
+    );
+    assert_eq!(
+        1,
+        std::fs::read_dir(protected.parent().unwrap())
+            .unwrap()
+            .count()
+    );
+
+    let stdin_seed = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "add",
+            "--local",
+            "--text",
+            "stdin old",
+            "--class",
+            "fact",
+            "--subject",
+            "stdin replacement",
+            "--stated",
+            "2026-01-02",
+        ],
+        None,
+        None,
+    );
+    assert_eq!(Some(0), stdin_seed.status.code());
+    assert_eq!(
+        "added fact/2026-01-02-stdin-replacement\n",
+        String::from_utf8(stdin_seed.stdout).unwrap()
+    );
+    assert!(stdin_seed.stderr.is_empty());
+    let stdin_superseded = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "supersede",
+            "2026-01-02-stdin-replacement",
+            "--local",
+        ],
+        Some(b"stdin first\r\nstdin second\rthird"),
+        None,
+    );
+    assert_eq!(Some(0), stdin_superseded.status.code());
+    assert!(stdin_superseded.stderr.is_empty());
+    let stdin_slug = String::from_utf8(stdin_superseded.stdout)
+        .unwrap()
+        .strip_prefix("superseded by ")
+        .unwrap()
+        .trim()
+        .to_string();
+    let stdin_article = std::fs::read_to_string(
+        root.join(".dunkingsheep/fact")
+            .join(format!("{stdin_slug}.md")),
+    )
+    .unwrap();
+    assert!(stdin_article.ends_with("stdin first\nstdin second\nthird\n"));
+
+    let retired = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &[
+            "context",
+            "retire",
+            replacement_slug,
+            "--reason",
+            "obsolete note",
+            "--local",
+            "--json",
+        ],
+        None,
+        Some("1"),
+    );
+    assert_eq!(Some(2), retired.status.code());
+    assert!(retired.stdout.is_empty());
+    assert_eq!(
+        "refused: local context retire cannot verify the bound owner role; omit --local to use the daemon\n",
+        String::from_utf8(retired.stderr).unwrap()
+    );
+    let retired_article = std::fs::read_to_string(replacement_path).unwrap();
+    assert_eq!(replacement, retired_article);
+    assert!(
+        !socket.exists(),
+        "local context writes must not create or contact a daemon socket"
+    );
+
+    let missing = run_local_cli(
+        &socket,
+        root,
+        &global_dir,
+        &["context", "supersede", "missing-entry", "--local"],
+        Some(b"unused body"),
+        None,
+    );
+    assert_eq!(Some(2), missing.status.code());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        "context: entry missing-entry not found\n",
+        String::from_utf8(missing.stderr).unwrap()
+    );
 }
