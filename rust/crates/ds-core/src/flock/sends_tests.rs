@@ -1331,6 +1331,86 @@ mod owned_text_tests {
         assert!(second.eligible);
     }
 
+    #[test]
+    fn candidate_updates_preserve_recovery_metadata_only_for_same_identity() {
+        let flock = flock();
+        let mut original = Message::new("m20", "%1", "writer", "original", "direct");
+        original.created_at = 20.0;
+        original.status = "failed".into();
+        original.attempt_generation = Some("pid:20:start:4".into());
+        flock.note_stuck_candidate(&original);
+        {
+            let mut candidates = flock.stuck_candidates.lock().unwrap();
+            let candidate = candidates.get_mut("%1").unwrap();
+            candidate.native_binding = Some((20, "start-4".into(), "session-20".into()));
+            candidate.recovery_outcome = Some("consumed".into());
+            candidate.recovery_detail = Some("receipt matched".into());
+            candidate.recovered_at = Some(21.0);
+            candidate.receipts_reconciled = Some(true);
+            candidate.native_refusal = Some("boundary".into());
+            candidate.unobservable_logged = Some(true);
+            candidate.native_recovery = Some(true);
+            candidate.schedule_template = Some("schedule template".into());
+            candidate.retired_at = Some(22.0);
+            candidate.consumed_at = Some(23.0);
+            candidate
+                .extra_fields
+                .insert("extension".into(), serde_json::json!("kept"));
+        }
+
+        let mut same = original.clone();
+        same.status = "typed".into();
+        same.text = "updated body".into();
+        flock.note_stuck_candidate(&same);
+        let preserved = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+        assert_eq!(
+            Some((20, "start-4".into(), "session-20".into())),
+            preserved.native_binding
+        );
+        assert_eq!(Some("consumed"), preserved.recovery_outcome.as_deref());
+        assert_eq!("consumed", preserved.status);
+        assert!(!preserved.eligible);
+        assert_eq!(
+            Some("receipt matched"),
+            preserved.recovery_detail.as_deref()
+        );
+        assert_eq!(Some(21.0), preserved.recovered_at);
+        assert_eq!(Some(true), preserved.receipts_reconciled);
+        assert_eq!(Some("boundary"), preserved.native_refusal.as_deref());
+        assert_eq!(Some(true), preserved.unobservable_logged);
+        assert_eq!(Some(true), preserved.native_recovery);
+        assert_eq!(
+            Some("schedule template"),
+            preserved.schedule_template.as_deref()
+        );
+        assert_eq!(Some(22.0), preserved.retired_at);
+        assert_eq!(Some(23.0), preserved.consumed_at);
+        assert_eq!(
+            serde_json::json!("kept"),
+            preserved.extra_fields["extension"]
+        );
+
+        let mut replacement = Message::new("m21", "%1", "writer", "replacement", "direct");
+        replacement.created_at = 21.0;
+        replacement.status = "failed".into();
+        replacement.attempt_generation = Some("pid:20:start:4".into());
+        flock.note_stuck_candidate(&replacement);
+        let replacement = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+        assert_eq!("m21", replacement.message_id);
+        assert_eq!(None, replacement.native_binding);
+        assert_eq!(None, replacement.recovery_outcome);
+        assert_eq!(None, replacement.recovery_detail);
+        assert_eq!(None, replacement.recovered_at);
+        assert_eq!(None, replacement.receipts_reconciled);
+        assert_eq!(None, replacement.native_refusal);
+        assert_eq!(None, replacement.unobservable_logged);
+        assert_eq!(None, replacement.native_recovery);
+        assert_eq!(None, replacement.schedule_template);
+        assert_eq!(None, replacement.retired_at);
+        assert_eq!(None, replacement.consumed_at);
+        assert!(replacement.extra_fields.is_empty());
+    }
+
     fn pane_with_current_process(pane_id: &str) -> Pane {
         let mut env = Pane::default();
         env.panes.push(serde_json::json!({
@@ -1436,4 +1516,356 @@ mod owned_text_tests {
         assert_eq!(text_identity("a b"), text_identity("a\n  b"));
         assert_eq!(None, text_identity(" \n\t "));
     }
+}
+
+#[test]
+fn record_delivery_outcome_records_metrics_receipts_and_waiters_once() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use crate::metrics::MetricsStore;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let notification_ids: Vec<_> = (0..3)
+        .map(|index| {
+            inbox
+                .send(&Outgoing {
+                    mailbox: "writer",
+                    body: Some(&format!("notice {index}")),
+                    ..Outgoing::default()
+                })
+                .unwrap()
+        })
+        .collect();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(
+            "CREATE TABLE notify_updates (count INTEGER NOT NULL);
+             INSERT INTO notify_updates VALUES (0);
+             CREATE TRIGGER count_notify_updates AFTER UPDATE OF notify_state ON messages
+             BEGIN UPDATE notify_updates SET count = count + 1; END;",
+        )
+        .unwrap();
+
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    let cases = [
+        (true, "ok", Some("message.sent"), None, "sent"),
+        (
+            false,
+            "failed",
+            Some("message.sent"),
+            Some("timeout"),
+            "failed",
+        ),
+        (
+            false,
+            "undeliverable",
+            None,
+            Some("undeliverable"),
+            "failed",
+        ),
+    ];
+
+    for (index, (ok, outcome, metric, detail, notify_state)) in cases.into_iter().enumerate() {
+        let mut message = Message::new(
+            &format!("m{}", index + 1),
+            "%1",
+            "writer mailbox",
+            "é",
+            "dunk-7",
+        );
+        message.created_at = 10.0;
+        message.finished_at = Some(15.5);
+        message.holds = 2;
+        message.notify_for.push(notification_ids[index].clone());
+        let cloned = message.clone();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| flock.record_delivery_outcome(&message, ok, detail, outcome, metric));
+            scope.spawn(|| flock.record_delivery_outcome(&cloned, ok, detail, outcome, metric));
+        });
+        message.done.wait();
+
+        let actual_state: Option<String> = observer
+            .query_row(
+                "SELECT notify_state FROM messages WHERE id = ?1",
+                [&notification_ids[index]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(Some(notify_state.to_string()), actual_state);
+    }
+
+    let update_count: i64 = observer
+        .query_row("SELECT count FROM notify_updates", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(3, update_count);
+
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
+    assert_eq!(2, events.len());
+    let sent = events
+        .iter()
+        .find(|event| event.outcome.as_deref() == Some("ok"))
+        .unwrap();
+    assert_eq!("message.sent", sent.kind);
+    assert_eq!(Some("%1".into()), sent.pane_id);
+    assert_eq!(Some("writer mailbox".into()), sent.mailbox);
+    assert_eq!(Some("dunk-7".into()), sent.source);
+    assert_eq!(None, sent.reason);
+    assert_eq!(Some(5_500), sent.duration_ms);
+    assert_eq!(Some(2), sent.attempts);
+    assert_eq!(Some(2), sent.bytes);
+    let failed = events
+        .iter()
+        .find(|event| event.outcome.as_deref() == Some("failed"))
+        .unwrap();
+    assert_eq!("message.failed", failed.kind);
+    assert_eq!(Some("timeout".into()), failed.reason);
+}
+
+#[test]
+fn record_delivery_outcome_ignores_receipt_errors_and_still_settles_waiter() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(
+            "CREATE TRIGGER reject_notify BEFORE UPDATE OF notify_state ON messages
+             BEGIN SELECT RAISE(ABORT, 'store unavailable'); END;",
+        )
+        .unwrap();
+
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    let mut message = Message::new("m1", "%1", "writer", "body", "direct");
+    message.notify_for.push(inbox_id);
+
+    flock.record_delivery_outcome(&message, false, Some("closed"), "undeliverable", None);
+    message.done.wait();
+
+    let actual_state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&message.notify_for[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(None, actual_state);
+}
+
+#[test]
+fn remember_bounds_history_and_decided_tombstones_and_keeps_created_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+
+    for index in 0..501 {
+        let mut message = Message::new(
+            &format!("m{index}"),
+            &format!("%{index}"),
+            "writer",
+            "body",
+            "direct",
+        );
+        message.status = "sent".into();
+        message.press_enter = false;
+        message.created_at = index as f64;
+        flock.remember(&message);
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    assert_eq!(50, history.len());
+    assert_eq!("m451", history.front().unwrap().id);
+    assert_eq!("m500", history.back().unwrap().id);
+    drop(history);
+
+    let decided = flock.decided.lock().unwrap();
+    assert_eq!(500, decided.by_id.len());
+    assert!(!decided.by_id.contains_key("m0"));
+    assert_eq!(Some(500.0), decided.by_id["m500"].created_at);
+    drop(decided);
+
+    let candidates = flock.stuck_candidates.lock().unwrap();
+    assert_eq!(501, candidates.len());
+    assert!(candidates.values().all(|candidate| !candidate.eligible));
+}
+
+#[test]
+fn remember_refreshes_created_at_for_a_reused_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut first = Message::new("m1", "%1", "writer", "first", "direct");
+    first.status = "sent".into();
+    first.created_at = 10.0;
+    flock.remember(&first);
+
+    let mut reused = Message::new("m1", "%1", "writer", "reused", "direct");
+    reused.status = "failed".into();
+    reused.created_at = 20.0;
+    flock.remember(&reused);
+
+    let decided = flock.decided.lock().unwrap();
+    assert_eq!(1, decided.by_id.len());
+    assert_eq!("failed", decided.by_id["m1"].status);
+    assert_eq!(Some(20.0), decided.by_id["m1"].created_at);
+}
+
+#[test]
+fn persist_typed_attempt_saves_candidate_before_submit_and_restores_message_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            dir.path().join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m1", "%1", "worker", "typed text", "send_text");
+    message.created_at = 7.0;
+    message.attempt_generation = Some("pid:123:start:456".into());
+
+    let saved = flock
+        .persist_typed_attempt(
+            &mut message,
+            "%1",
+            "typed text",
+            true,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+
+    assert!(saved);
+    assert_eq!(
+        "queued", message.status,
+        "the caller keeps its prior status"
+    );
+    let candidate = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+    assert_eq!("typed", candidate.status);
+    assert!(candidate.typed_at.is_some());
+    assert!(
+        candidate.native_binding.is_none(),
+        "native lookup failure keeps the strict candidate"
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!("typed", snapshot["stuck_candidates"]["%1"]["status"]);
+    assert!(snapshot["stuck_candidates"]["%1"]["typed_at"].is_number());
+}
+
+#[test]
+fn persist_typed_attempt_refuses_enter_when_snapshot_save_fails_and_restores_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("not-a-directory");
+    std::fs::write(&blocker, b"file").unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), true);
+    flock
+        .attach_status_state(super::status_runtime::StatusState::at_start(
+            "test",
+            blocker.join("state.json"),
+            std::env::current_exe().unwrap(),
+            crate::config::Env::default(),
+        ))
+        .unwrap();
+    let mut message = Message::new("m2", "%2", "worker", "must not submit", "send_text");
+    message.attempt_generation = Some("pid:123:start:456".into());
+
+    assert!(flock
+        .persist_typed_attempt(
+            &mut message,
+            "%2",
+            "must not submit",
+            true,
+            &serde_json::json!({})
+        )
+        .is_err());
+
+    assert_eq!(
+        "queued", message.status,
+        "a failed receipt save refuses Enter"
+    );
+    let candidate = flock.stuck_candidates.lock().unwrap()["%2"].clone();
+    assert_eq!("typed", candidate.status);
+    assert!(candidate.typed_at.is_some());
+}
+
+#[test]
+fn persist_typed_attempt_without_matching_message_context_does_not_mutate() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m3", "%3", "worker", "owned text", "send_text");
+
+    assert!(flock
+        .persist_typed_attempt(
+            &mut message,
+            "%3",
+            "different text",
+            true,
+            &serde_json::json!({})
+        )
+        .unwrap());
+
+    assert_eq!("queued", message.status);
+    assert!(message.typed_at.is_none());
+    assert!(flock.stuck_candidates.lock().unwrap().is_empty());
+}
+
+#[test]
+fn native_binding_requires_the_original_candidate_and_attempt_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut message = Message::new("m4", "%4", "worker", "native", "send_text");
+    message.status = "typed".into();
+    message.created_at = 4.0;
+    message.attempt_generation = Some("pid:123:start:456".into());
+    flock.note_stuck_candidate(&message);
+    let binding = crate::recovery_native::PromptSessionBinding {
+        pid: 123,
+        start: "456".into(),
+        session_id: "session-id".into(),
+        rollout_path: "/unused/rollout.jsonl".into(),
+        cwd: "/unused".into(),
+    };
+
+    assert!(!flock.bind_native_candidate(
+        "%4",
+        "m4",
+        4.0,
+        Some("pid:123:start:replacement"),
+        &binding,
+    ));
+    assert!(!flock.bind_native_candidate("%4", "m4", 5.0, Some("pid:123:start:456"), &binding));
+    assert!(flock.bind_native_candidate("%4", "m4", 4.0, Some("pid:123:start:456"), &binding));
+
+    assert_eq!(
+        Some((123, "456".into(), "session-id".into())),
+        flock.stuck_candidates.lock().unwrap()["%4"].native_binding
+    );
 }
