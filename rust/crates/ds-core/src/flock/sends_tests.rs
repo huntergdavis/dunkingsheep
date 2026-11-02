@@ -1040,3 +1040,71 @@ mod flush_box_tests {
         assert_eq!(6, pane.reads.borrow().len());
     }
 }
+
+#[test]
+fn pane_generation_requires_pid_and_process_start_and_binds_both() {
+    let pid = serde_json::json!({"pane_pid": 41, "pid": 99});
+    assert_eq!(
+        Some("pid:41:start:1001".to_string()),
+        pane_generation_with(&pid, |seen| {
+            assert_eq!(seen, 41);
+            Some("1001".into())
+        })
+    );
+    assert_ne!(
+        pane_generation_with(&pid, |_| Some("1002".into())),
+        pane_generation_with(&pid, |_| Some("1001".into()))
+    );
+    assert_ne!(
+        pane_generation_with(&serde_json::json!({"pane_pid": 42}), |_| Some(
+            "1001".into()
+        )),
+        pane_generation_with(&pid, |_| Some("1001".into()))
+    );
+    assert_eq!(
+        None,
+        pane_generation_with(&serde_json::json!({"pane_pid": 41}), |_| None)
+    );
+    assert_eq!(
+        None,
+        pane_generation_with(
+            &serde_json::json!({"pane_pid": 41}),
+            |_| Some(String::new())
+        )
+    );
+}
+
+#[test]
+fn pane_generation_falls_back_to_pid_and_reads_real_process_start() {
+    use crate::flock::panes::PaneInfoEnv;
+    use serde_json::Value;
+
+    struct Pane(Option<Value>);
+    impl PaneInfoEnv for Pane {
+        fn list_panes_grouped(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn get_pane(&self, pane_id: &str) -> Option<Value> {
+            assert_eq!(pane_id, "%7");
+            self.0.clone()
+        }
+    }
+
+    let env = Pane(Some(serde_json::json!({
+        "pane_pid": 0,
+        "pid": std::process::id(),
+    })));
+    let start = crate::proc::process_start(i64::from(std::process::id())).unwrap();
+    assert_eq!(
+        Some(format!("pid:{}:start:{start}", std::process::id())),
+        pane_generation(&env, "%7")
+    );
+    assert_eq!(None, pane_generation(&Pane(None), "%7"));
+    assert_eq!(
+        None,
+        pane_generation(
+            &Pane(Some(serde_json::json!({"pane_pid": 999_999_999}))),
+            "%7"
+        )
+    );
+}
