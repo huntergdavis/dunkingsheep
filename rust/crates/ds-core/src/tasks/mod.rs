@@ -2854,6 +2854,13 @@ mod tests {
         for (id, expected) in [
             ("t\u{378}", "no task with id 't\\u0378'"),
             ("t\u{379}", "no task with id 't\\u0379'"),
+            ("t\u{380}", "no task with id 't\\u0380'"),
+            ("t\u{381}", "no task with id 't\\u0381'"),
+            ("t\u{382}", "no task with id 't\\u0382'"),
+            ("t\u{383}", "no task with id 't\\u0383'"),
+            ("t\u{38b}", "no task with id 't\\u038b'"),
+            ("t\u{38d}", "no task with id 't\\u038d'"),
+            ("t\u{3a2}", "no task with id 't\\u03a2'"),
             ("t\u{85}", "no task with id 't\\x85'"),
             ("t\u{200b}", "no task with id 't\\u200b'"),
             ("t\u{2028}", "no task with id 't\\u2028'"),
