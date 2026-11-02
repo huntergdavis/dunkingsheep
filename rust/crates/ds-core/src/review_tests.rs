@@ -989,3 +989,103 @@ async fn actual_temporary_tasks_actor_records_accounting_and_exposes_exact_head_
     );
     assert_eq!(82, accounting_pr);
 }
+
+#[tokio::test]
+async fn second_review_uses_real_tasks_writer_with_exact_body_and_metadata() {
+    let dir = crate::testsupport::dir("review-sync-second-review");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let sync = ReviewSync::with_tokens(store, (), FakeReviewPolicy { required: 2 });
+    let id = sync
+        ._second_review("o/r", 7, "abcdef1234567890", "%1", None)
+        .await
+        .expect("the review task is inserted through Tasks");
+    let task = sync.flock.get(&id).await.unwrap();
+    assert_eq!("global", task.scope);
+    assert_eq!(
+        "Review r PR #7 abcdef12 (second reviewer: %1 accepted)",
+        task.title
+    );
+    assert_eq!(
+        concat!(
+            "SECOND REVIEW o/r#7 @ abcdef1234567890\n",
+            "Lane %1 already accepted this exact head. 2 distinct reviewer lanes are ",
+            "required, so this task exists for a DIFFERENT lane; the claim filter keeps ",
+            "%1 off it.\n\n",
+            "Verdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` with ",
+            "the evidence in `task note` first."
+        ),
+        task.body
+    );
+    assert_eq!("high", task.priority);
+    assert_eq!("review", task.kind);
+    let facts = sync.flock.review_facts(&id).await.unwrap();
+    assert_eq!(Some("%1"), facts.author.as_deref());
+    assert_eq!(Some("o/r"), facts.repo.as_deref());
+    assert_eq!(Some(7), facts.pr);
+    let row = sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .unwrap();
+    assert_eq!(Some("abcdef1234567890"), row.head.as_deref());
+    let creator: Option<String> = rusqlite::Connection::open(dir.path().join("tasks.db"))
+        .unwrap()
+        .query_row(
+            "SELECT actor FROM task_events WHERE task_id = ? AND event = 'created'",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Some("review-sync".into()), creator);
+
+    let long_lane = "lane-".repeat(40);
+    let long_id = sync
+        ._second_review("o/r", 8, "head-8", &long_lane, None)
+        .await
+        .unwrap();
+    let long_task = sync.flock.get(&long_id).await.unwrap();
+    assert_eq!(120, long_task.title.chars().count());
+}
+
+#[tokio::test]
+async fn second_review_insertion_refusal_returns_no_id_and_appends_source_error() {
+    let dir = crate::testsupport::dir("review-sync-second-review-refusal");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let existing = store
+        .add_with(
+            "global",
+            "existing review",
+            "",
+            crate::tasks::AddOptions {
+                kind: Some("review".into()),
+                author: Some("%1".into()),
+                repo: Some("o/r".into()),
+                pr: Some("7".into()),
+                head: Some("abcdef1234567890".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let sync = ReviewSync::with_tokens(store, (), FakeReviewPolicy { required: 2 });
+    let mut report = json!({"errors": []});
+    assert_eq!(
+        None,
+        sync._second_review("o/r", 7, "abcdef1234567890", "%1", Some(&mut report))
+            .await
+    );
+    let error = report["errors"][0].as_str().unwrap();
+    assert!(error.starts_with(
+        "second review o/r#7: a live review task for o/r#7@abcdef123456 already exists"
+    ));
+    assert!(
+        !report.to_string().contains("task_id"),
+        "the refusal reports an error and no fabricated task id"
+    );
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(existing.id, rows[0].id);
+}

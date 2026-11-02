@@ -11,7 +11,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::github::{GitHubTransport, StatusUpdate};
-use crate::tasks::{ReviewTaskRow, TaskNote, Tasks};
+use crate::tasks::{AddOptions, ReviewTaskRow, TaskNote, Tasks};
 
 pub type ReviewPrKey = (Option<Value>, Option<Value>);
 pub type JudgedHeadKey = (Option<Value>, Option<Value>, Option<Value>);
@@ -95,6 +95,53 @@ impl ReviewTaskActor for Tasks {
             Tasks::notes(self, id)
                 .await
                 .map_err(|error| error.to_string())
+        })
+    }
+}
+
+/// The concrete actor seam for filing the next review task through `Tasks::add_with`.
+/// The production implementation below always uses the real writer actor.
+pub trait ReviewTaskCreator {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        first_lane: &'a str,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>>;
+}
+
+impl ReviewTaskCreator for Tasks {
+    fn add_review_task<'a>(
+        &'a self,
+        title: &'a str,
+        body: &'a str,
+        first_lane: &'a str,
+        repo: &'a str,
+        number: i64,
+        head: &'a str,
+    ) -> ReviewFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.add_with(
+                "global",
+                title,
+                body,
+                AddOptions {
+                    priority: Some("high".into()),
+                    kind: Some("review".into()),
+                    author: Some(first_lane.into()),
+                    repo: Some(repo.into()),
+                    pr: Some(number.to_string()),
+                    head: Some(head.into()),
+                    created_by: Some("review-sync".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|task| task.id)
+            .map_err(|error| error.to_string())
         })
     }
 }
@@ -498,6 +545,52 @@ where
             task.get("id").map(python_string).unwrap_or_else(|| "None".into()),
             by.filter(|value| !value.is_empty()).unwrap_or("?")
         )
+    }
+}
+
+impl<S, T, G, X> ReviewSync<S, T, G, X>
+where
+    S: ReviewTaskCreator,
+    G: ReviewPolicy,
+{
+    /// File the distinct second review task for an accepted exact head.
+    pub async fn _second_review(
+        &self,
+        repo: &str,
+        number: i64,
+        head: &str,
+        first_lane: &str,
+        report: Option<&mut Value>,
+    ) -> Option<String> {
+        let repository = repo.rsplit('/').next().unwrap_or(repo);
+        let short_head: String = head.chars().take(8).collect();
+        let title: String = format!(
+            "Review {repository} PR #{number} {short_head} (second reviewer: {first_lane} accepted)"
+        )
+        .chars()
+        .take(120)
+        .collect();
+        let required = self.github.required_verdicts(repo);
+        let body = format!(
+            "SECOND REVIEW {repo}#{number} @ {head}\nLane {first_lane} already accepted this exact head. {required} distinct reviewer lanes are required, so this task exists for a DIFFERENT lane; the claim filter keeps {first_lane} off it.\n\nVerdict: `dunkingsheep task complete <id> --verdict accept|needs-fix` with the evidence in `task note` first."
+        );
+        match self
+            .flock
+            .add_review_task(&title, &body, first_lane, repo, number, head)
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(error) => {
+                if let Some(report) = report {
+                    append_report(
+                        report,
+                        "errors",
+                        Value::String(format!("second review {repo}#{number}: {error}")),
+                    );
+                }
+                None
+            }
+        }
     }
 }
 
