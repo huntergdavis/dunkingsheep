@@ -429,7 +429,7 @@ fn cli_route_10_context_local_seed() {
     let entry = store.join("fact").join("fixture.md");
     std::fs::write(
         &entry,
-        "---\nclass: fact\nsubject: fixture\ntype: reference\nauthority: agent\nsource: test\nstated: 2026-11-01\n---\nFixture body.\n",
+        "---\nclass: fact\nsubject: fixture\ntype: reference\nscope: project\nauthority: agent\nsource: test\nstated: 2026-11-01\n---\nFixture body.\n",
     )
     .unwrap();
     let ledger = config.join("context-ledger.db");
