@@ -833,10 +833,12 @@ pub trait PoolradTaskStore {
 
 /// Injectable port of Python `Sync`. Its default exporter is the local,
 /// read-only candidate exporter; stores and exporters can be faked in tests.
+type PoolradExporter<'a> = dyn Fn(&Path) -> Result<Value, String> + 'a;
+
 pub struct PoolradSync<'a> {
     store: &'a dyn PoolradTaskStore,
     repo: PathBuf,
-    exporter: Option<&'a dyn Fn(&Path) -> Result<Value, String>>,
+    exporter: Option<&'a PoolradExporter<'a>>,
     credit_path: Option<PathBuf>,
 }
 
@@ -858,7 +860,7 @@ impl<'a> PoolradSync<'a> {
         self
     }
 
-    pub fn with_exporter(mut self, exporter: &'a dyn Fn(&Path) -> Result<Value, String>) -> Self {
+    pub fn with_exporter(mut self, exporter: &'a PoolradExporter<'a>) -> Self {
         self.exporter = Some(exporter);
         self
     }
@@ -1015,7 +1017,7 @@ impl<'a> PoolradSync<'a> {
         let picked = candidates(&queue, &credited, &filed, limit, Some(&closed));
         let mut already_filed_tasks = Map::new();
         let mut filed_rows: Vec<_> = filed_keys.iter().collect();
-        filed_rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        filed_rows.sort_by_key(|(left, _)| *left);
         for (rid, (task_id, status)) in filed_rows {
             already_filed_tasks.insert(
                 rid.clone(),
@@ -1952,7 +1954,7 @@ mod tests {
         let partial = PoolradSync::new(&partial_store)
             .with_repo(repo.path())
             .with_exporter(&exporter)
-            .with_credit_path(&state.path().join("partial-credit-pending.json"))
+            .with_credit_path(state.path().join("partial-credit-pending.json"))
             .run()
             .unwrap();
         assert_eq!(partial["filed"][0]["id"], "OVL_0020_11AC");
