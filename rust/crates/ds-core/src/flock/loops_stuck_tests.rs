@@ -3,14 +3,20 @@
 //! source states (30 s scan period, stable `since`, fresh interval on a replaced/non-modal pane,
 //! nothing typed) and the loop's tick order.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::loops_stuck::{run_stuck_observer, DialogObserver, StuckEnv};
+use super::commands_inbox::{InboxEnv, Nudge, RouteEntry};
+use super::loops_stuck::{run_stuck_observer, DialogObserver, StalePanelReporter, StuckEnv};
+use super::mailbox::MailboxEnv;
+use super::Flock;
+use crate::db::ReadPool;
 use crate::error::DunkError;
+use crate::inbox_store::Store;
 
 const MODAL: &str = "\u{1b}[1mApprove this?\u{1b}[0m\nEsc to cancel   Enter to confirm\n";
 
@@ -56,7 +62,7 @@ impl StuckEnv for Fake {
     fn pane_generation(&self, pane_id: &str) -> Option<String> {
         self.generations.lock().unwrap().get(pane_id).cloned()
     }
-    fn note_stale_panel(&self, pane_id: &str, text: &str, since: f64) {
+    fn note_stale_panel(&self, pane_id: &str, _: Option<&str>, text: &str, since: f64) {
         self.notes
             .lock()
             .unwrap()
@@ -73,6 +79,250 @@ impl StuckEnv for Fake {
 
 fn agent(id: &str) -> Value {
     json!({"pane_id": id, "agent": "claude"})
+}
+
+struct AlertInbox {
+    pool: ReadPool,
+    store: Arc<Store>,
+    _dir: tempfile::TempDir,
+    nudges: Mutex<Vec<String>>,
+    panes: Vec<Value>,
+}
+
+impl AlertInbox {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(Store::open(dir.path().join("inbox.db"), dir.path().join("blobs")).unwrap());
+        let pool = ReadPool::open(store.path(), 1).unwrap();
+        Self {
+            pool,
+            store,
+            _dir: dir,
+            nudges: Mutex::new(Vec::new()),
+            panes: vec![json!({
+                "pane_id":"w9:pH", "terminal_id":"term_vp", "label":"VP",
+                "tab_label":"VP", "workspace_label":"fixture", "agent":"codex"
+            })],
+        }
+    }
+}
+
+impl MailboxEnv for AlertInbox {
+    fn list_panes(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+    fn registered_pane(&self, _: &str) -> (bool, bool, Option<String>) {
+        (false, false, None)
+    }
+}
+
+impl InboxEnv for AlertInbox {
+    fn caller_role(&self, _: &str) -> String {
+        "owner".into()
+    }
+    fn mailbox_override(&self) -> Option<String> {
+        None
+    }
+    fn backend_name(&self) -> String {
+        "fixture".into()
+    }
+    fn lane_panes(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn pool(&self) -> &ReadPool {
+        &self.pool
+    }
+    fn store(&self) -> &Store {
+        &self.store
+    }
+    fn now(&self) -> f64 {
+        100.0
+    }
+    fn record_metric(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+        _: Option<&str>,
+        _: Option<i64>,
+        _: Option<i64>,
+    ) {
+    }
+    fn pm_routing(&self) -> Vec<RouteEntry> {
+        Vec::new()
+    }
+    fn fold_into_queued_notice(&self, _: &str, _: &str, _: &str) -> Option<String> {
+        None
+    }
+    fn send_now(&self, _: &str, text: &str, _: &str) -> Result<Nudge, DunkError> {
+        self.nudges.lock().unwrap().push(text.to_string());
+        Ok(Nudge {
+            queued: false,
+            message: Some("fixture submitted".into()),
+        })
+    }
+    fn record_sent(&self, _: Option<&str>, _: &str, _: Option<&str>, _: usize, _: usize) {}
+    fn tasks_for_pane(&self, _: &str) -> Result<Value, DunkError> {
+        Ok(json!([]))
+    }
+}
+
+fn alert_flock(dir: &tempfile::TempDir) -> Flock {
+    let flock = Flock::new(
+        dir.path().join("state.json"),
+        dir.path().join("lanes.json"),
+        false,
+    );
+    flock.wire_observability(dir.path(), None).unwrap();
+    flock
+}
+
+#[test]
+fn note_stale_panel_waits_requires_identity_and_retries_only_failed_sinks() {
+    let inbox = AlertInbox::new();
+    let state = tempfile::tempdir().unwrap();
+    let alert_db = state.path().join("alerts.db");
+    let flock = alert_flock(&state);
+    let mut reporter = StalePanelReporter::new();
+    let owner_calls = Cell::new(0);
+    let vp_calls = Cell::new(0);
+    let mut owner = |_: &str| {
+        let attempt = owner_calls.get() + 1;
+        owner_calls.set(attempt);
+        if attempt == 1 {
+            Err("offline".into())
+        } else {
+            Ok(crate::dialog_alerts::SinkDelivery::Delivered)
+        }
+    };
+    let mut vp = |body: &str| {
+        vp_calls.set(vp_calls.get() + 1);
+        crate::dialog_alerts::post_vp(&flock, &inbox, body, Some("w9:pH"))
+    };
+
+    reporter.note_with_sinks(
+        &flock,
+        "%2",
+        "modal",
+        Some("pid:1:start:2"),
+        Some("Allow command?"),
+        0.0,
+        29.9,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    reporter.note_with_sinks(
+        &flock,
+        "%2",
+        "box",
+        Some("pid:1:start:2"),
+        Some("Allow command?"),
+        0.0,
+        30.0,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    reporter.note_with_sinks(
+        &flock,
+        "%3",
+        "modal",
+        None,
+        Some("Allow command?"),
+        0.0,
+        30.0,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    reporter.note_with_sinks(
+        &flock,
+        "%4",
+        "modal",
+        Some("pid:1:start:2"),
+        None,
+        0.0,
+        30.0,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    assert_eq!(owner_calls.get(), 0);
+    assert_eq!(vp_calls.get(), 0);
+
+    reporter.note_with_sinks(
+        &flock,
+        "%2",
+        "modal",
+        Some("pid:1:start:2"),
+        Some("Allow command?"),
+        0.0,
+        30.0,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    assert_eq!(owner_calls.get(), 1);
+    assert_eq!(vp_calls.get(), 1);
+    let (mailbox, rows) = flock
+        .inbox_list(&inbox, Some("VP"), true, 10, None)
+        .unwrap();
+    assert_eq!(mailbox, "VP");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sender.as_deref(), Some("watchdog"));
+    assert_eq!(
+        rows[0].subject.as_deref(),
+        Some("Dialog blocks queued delivery")
+    );
+    assert_eq!(inbox.nudges.lock().unwrap().len(), 1);
+
+    reporter.note_with_sinks(
+        &flock,
+        "%2",
+        "modal",
+        Some("pid:1:start:2"),
+        Some("Allow command?"),
+        0.0,
+        89.9,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    assert_eq!(
+        owner_calls.get(),
+        1,
+        "failed owner sink waits for the 60s retry"
+    );
+    assert_eq!(vp_calls.get(), 1, "successful VP sink is not repeated");
+    reporter.note_with_sinks(
+        &flock,
+        "%2",
+        "modal",
+        Some("pid:1:start:2"),
+        Some("Allow command?"),
+        0.0,
+        90.0,
+        Some(&alert_db),
+        &mut owner,
+        &mut vp,
+    );
+    assert_eq!(owner_calls.get(), 2, "failed owner sink retries at 60s");
+    assert_eq!(vp_calls.get(), 1, "successful VP sink remains deduplicated");
+
+    let metrics = flock.stores().metrics.unwrap();
+    let events = metrics.events_between(0.0, 200.0).unwrap();
+    let pane_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "panel.blocking" && event.pane_id.as_deref() == Some("%2"))
+        .collect();
+    assert_eq!(pane_events.len(), 1);
+    assert_eq!(pane_events[0].outcome.as_deref(), Some("held"));
+    assert_eq!(pane_events[0].reason.as_deref(), Some("dialog"));
 }
 
 #[test]
