@@ -1421,6 +1421,62 @@ fn h_memory_context_negative_sessions_matches_python_slice() {
 }
 
 #[test]
+fn h_memory_handlers_bound_positive_query_limits() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+
+    let recall_max = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query":"adapter", "limit":50}),
+    )
+    .unwrap();
+    assert_eq!(recall_max.as_array().unwrap().len(), 1);
+    for limit in [51_i64, i64::MAX] {
+        let error = refusal(dispatch_memory(
+            &dispatcher,
+            &flock,
+            &env,
+            "memory_recall",
+            json!({"query":"adapter", "limit":limit}),
+        ));
+        assert!(error.contains("limit must not exceed 50"), "{error}");
+    }
+
+    let search_error = refusal(dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query":"adapter", "limit":i64::MAX}),
+    ));
+    assert!(search_error.contains("limit must not exceed 50"));
+
+    let context_max = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query":"adapter", "sessions":20}),
+    )
+    .unwrap();
+    assert_eq!(context_max["sessions"].as_array().unwrap().len(), 1);
+    for sessions in [21_i64, i64::MAX] {
+        let error = refusal(dispatch_memory(
+            &dispatcher,
+            &flock,
+            &env,
+            "memory_context",
+            json!({"query":"adapter", "sessions":sessions}),
+        ));
+        assert!(error.contains("sessions must not exceed 20"), "{error}");
+    }
+}
+
+#[test]
 fn h_context_supersede_matches_python() {
     let _serial = CONTEXT_LEDGER_TEST_LOCK.lock().expect("ledger test lock");
     let dir = tempfile::tempdir().expect("tempdir");

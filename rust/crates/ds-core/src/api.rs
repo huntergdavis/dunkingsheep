@@ -536,6 +536,9 @@ pub fn h_context_retire(context: &HandlerContext<'_>, args: Args) -> Result<Valu
     Ok(json!({"slug": slug, "retired": true, "reason": reason}))
 }
 
+const MEMORY_RECALL_MAX_LIMIT: i64 = 50;
+const MEMORY_CONTEXT_MAX_SESSIONS: i64 = 20;
+
 fn memory_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(default),
@@ -555,6 +558,21 @@ fn memory_int_arg(args: &Args, key: &str, default: i64) -> Result<i64, DunkError
             _ => DunkError::Refused("cannot convert value to int".into()),
         }),
     }
+}
+
+fn memory_int_arg_at_most(
+    args: &Args,
+    key: &str,
+    default: i64,
+    maximum: i64,
+) -> Result<i64, DunkError> {
+    let value = memory_int_arg(args, key, default)?;
+    if value > maximum {
+        return Err(DunkError::Refused(format!(
+            "{key} must not exceed {maximum}"
+        )));
+    }
+    Ok(value)
 }
 
 fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkError> {
@@ -582,7 +600,7 @@ fn memory_filters(args: &Args) -> Result<crate::memory::recall::Filters, DunkErr
 
 fn memory_recall(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkError> {
     let query = memory_arg_string(args, "query")?;
-    let limit = memory_int_arg(args, "limit", 10)?.max(0) as usize;
+    let limit = memory_int_arg_at_most(args, "limit", 10, MEMORY_RECALL_MAX_LIMIT)?.max(0) as usize;
     let pool = memory_pool(context)?;
     let rows = crate::memory::recall::recall(
         pool.as_ref(),
@@ -608,7 +626,9 @@ pub fn h_memory_search(context: &HandlerContext<'_>, args: Args) -> Result<Value
 /// `dunk_api.h_memory_context`.
 pub fn h_memory_context(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
     let query = memory_arg_string(&args, "query")?;
-    let sessions = memory_int_arg(&args, "sessions", 5)?;
+    // Negative values retain Python's slice-from-the-end behavior; positive requests follow
+    // the published API maximum, bounding the recall multiplier below.
+    let sessions = memory_int_arg_at_most(&args, "sessions", 5, MEMORY_CONTEXT_MAX_SESSIONS)?;
     let pool = memory_pool(context)?;
     crate::memory::queries::context(pool.as_ref(), query, sessions, 2, context.env.now_s())
 }
