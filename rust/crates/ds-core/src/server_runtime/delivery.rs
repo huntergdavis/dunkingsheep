@@ -10,6 +10,79 @@ use crate::flock::delivery::DeliveryEnv;
 use crate::flock::mailbox::MailboxEnv;
 use crate::flock::panes::PaneInfoEnv;
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessSnapshotRow {
+    pid: i64,
+    ppid: i64,
+    comm: String,
+    state: String,
+}
+
+fn read_process_snapshot() -> Option<Vec<ProcessSnapshotRow>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut snapshot = Vec::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        let Some(process) = crate::proc::stat(pid) else {
+            continue;
+        };
+        snapshot.push(ProcessSnapshotRow {
+            pid,
+            ppid: process.ppid,
+            comm: process.comm,
+            state: process.state,
+        });
+    }
+    Some(snapshot)
+}
+
+fn process_tree_has_agent(root_pid: i64, snapshot: &[ProcessSnapshotRow]) -> bool {
+    // Match Python _agent_evidence: remove dead/stopped rows before constructing links, so a
+    // codex child below a stopped wrapper is not mistaken for a running agent in this pane.
+    let rows: BTreeMap<i64, &ProcessSnapshotRow> = snapshot
+        .iter()
+        .filter(|row| {
+            !crate::proc::DEAD_STATES.contains(&row.state.as_str())
+                && !matches!(row.state.as_str(), "T" | "t")
+        })
+        .map(|row| (row.pid, row))
+        .collect();
+    let parents: BTreeMap<i64, i64> = rows.values().map(|row| (row.pid, row.ppid)).collect();
+    crate::load::tree_of(root_pid, &parents)
+        .into_iter()
+        .any(|pid| {
+            let Some(row) = rows.get(&pid) else {
+                return false;
+            };
+            let comm = row
+                .comm
+                .rsplit('/')
+                .next()
+                .unwrap_or(&row.comm)
+                .to_lowercase();
+            crate::proc::AGENT_NAMES.contains(&comm.as_str())
+        })
+}
+
+fn lane_agent_alive_with_snapshot(
+    root_pid: i64,
+    direct: Option<&[crate::push::ChildProc]>,
+    snapshot: impl FnOnce() -> Option<Vec<ProcessSnapshotRow>>,
+) -> Option<bool> {
+    crate::push::lane_agent_alive(direct, || {
+        let snapshot = snapshot()?;
+        Some(process_tree_has_agent(root_pid, &snapshot))
+    })
+}
 
 impl TerminalCallAdapter<'_> {
     fn helper_deliveryenv_get_pane(&self, pane_id: &str) -> Option<Value> {
@@ -29,24 +102,7 @@ impl TerminalCallAdapter<'_> {
                 })
                 .collect()
         });
-        crate::push::lane_agent_alive(direct.as_deref(), || {
-            let parents = crate::load::ppid_map();
-            let tree = crate::load::tree_of(pane_pid, &parents);
-            Some(tree.into_iter().any(|pid| {
-                let Some(process) = crate::proc::stat(pid) else {
-                    return false;
-                };
-                let comm = process
-                    .comm
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&process.comm)
-                    .to_lowercase();
-                crate::proc::AGENT_NAMES.contains(&comm.as_str())
-                    && !crate::proc::DEAD_STATES.contains(&process.state.as_str())
-                    && !matches!(process.state.as_str(), "T" | "t")
-            }))
-        })
+        lane_agent_alive_with_snapshot(pane_pid, direct.as_deref(), read_process_snapshot)
     }
 
     fn helper_deliveryenv_has_web_token(&self) -> Result<bool, DunkError> {
@@ -274,6 +330,107 @@ mod tests {
             .expect("capability absorbs role token read failures");
         assert_eq!(capability["desk_credential"], false);
         assert_eq!(capability["desk_can_type"], false);
+    }
+
+    #[test]
+    fn production_delivery_agent_liveness_filters_snapshot_before_descendant_links() {
+        use crate::push::ChildProc;
+        use std::cell::Cell;
+
+        let direct_shell = [ChildProc {
+            comm: "bash".into(),
+            state: "S".into(),
+        }];
+        let stopped_wrapper = vec![
+            ProcessSnapshotRow {
+                pid: 10,
+                ppid: 1,
+                comm: "bash".into(),
+                state: "S".into(),
+            },
+            ProcessSnapshotRow {
+                pid: 11,
+                ppid: 10,
+                comm: "node".into(),
+                state: "T".into(),
+            },
+            ProcessSnapshotRow {
+                pid: 12,
+                ppid: 11,
+                comm: "codex".into(),
+                state: "S".into(),
+            },
+        ];
+        assert_eq!(
+            Some(false),
+            lane_agent_alive_with_snapshot(10, Some(&direct_shell), || Some(stopped_wrapper))
+        );
+
+        let running_nested_agent = vec![
+            ProcessSnapshotRow {
+                pid: 10,
+                ppid: 1,
+                comm: "bash".into(),
+                state: "S".into(),
+            },
+            ProcessSnapshotRow {
+                pid: 11,
+                ppid: 10,
+                comm: "node".into(),
+                state: "S".into(),
+            },
+            ProcessSnapshotRow {
+                pid: 12,
+                ppid: 11,
+                comm: "codex".into(),
+                state: "S".into(),
+            },
+        ];
+        assert_eq!(
+            Some(true),
+            lane_agent_alive_with_snapshot(10, Some(&direct_shell), || {
+                Some(running_nested_agent)
+            })
+        );
+
+        let replaced_root = [ChildProc {
+            comm: "claude".into(),
+            state: "S".into(),
+        }];
+        let root_fallback_called = Cell::new(false);
+        assert_eq!(
+            Some(true),
+            lane_agent_alive_with_snapshot(10, Some(&replaced_root), || {
+                root_fallback_called.set(true);
+                None
+            })
+        );
+        assert!(!root_fallback_called.get());
+
+        // The wrapper's argv may mention codex; the fallback sees kernel comm only.
+        let argv_only_wrapper = vec![ProcessSnapshotRow {
+            pid: 10,
+            ppid: 1,
+            comm: "bash".into(),
+            state: "S".into(),
+        }];
+        assert_eq!(
+            Some(false),
+            lane_agent_alive_with_snapshot(10, Some(&direct_shell), || Some(argv_only_wrapper))
+        );
+        assert_eq!(
+            None,
+            lane_agent_alive_with_snapshot(10, Some(&direct_shell), || None)
+        );
+        let absent_fallback_called = Cell::new(false);
+        assert_eq!(
+            None,
+            lane_agent_alive_with_snapshot(10, None, || {
+                absent_fallback_called.set(true);
+                None
+            })
+        );
+        assert!(!absent_fallback_called.get());
     }
 
     #[test]
