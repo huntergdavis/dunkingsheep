@@ -482,3 +482,94 @@ fn cli_route_17_task_edit_a() {
     );
     assert!(completed.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_16_task_create_read() {
+    let added = run_daemon_cli(
+        &[
+            "task",
+            "add",
+            "Review",
+            "--scope",
+            "global",
+            "--body",
+            "check change",
+            "--status",
+            "blocked",
+            "--priority",
+            "high",
+            "--assign",
+            "%99",
+            "--depends-on",
+            "t1",
+            "--parent",
+            "t0",
+            "--multi",
+            "--kind",
+            "review",
+            "--author",
+            "writer",
+            "--repo",
+            "owner/repo",
+            "--pr",
+            "42",
+            "--head",
+            "abc123",
+        ],
+        "task_add",
+        json!({
+            "title": "Review", "scope": "global", "body": "check change",
+            "status": "blocked", "priority": "high", "assignees": ["%99"],
+            "depends_on": ["t1"], "parent_id": "t0", "multi_assignee": true,
+            "kind": "review", "author": "writer", "repo": "owner/repo", "pr": 42,
+            "head": "abc123"
+        }),
+        json!({"id":"t2", "priority":"high", "status":"blocked", "title":"Review", "scope":"global"}),
+    );
+    assert_eq!(0, added.status.code().unwrap());
+    assert_eq!(
+        "t2 [high] blocked  Review\nscope       global\n",
+        String::from_utf8(added.stdout).unwrap()
+    );
+    assert!(added.stderr.is_empty());
+
+    let listed = run_daemon_cli(
+        &[
+            "task",
+            "ls",
+            "global",
+            "--status",
+            "open",
+            "--assignee",
+            "%99",
+            "--all",
+            "-n",
+            "7",
+            "--kind",
+            "work",
+            "--needs-owner",
+        ],
+        "task_list",
+        json!({"scope":"global", "status":"open", "assignee":"%99", "include_done":true, "limit":7, "kind":"work", "needs_owner":true}),
+        json!({"scope":"global", "pane_id":"%99", "tasks":[]}),
+    );
+    assert_eq!(0, listed.status.code().unwrap());
+    assert_eq!(
+        "scope global (pane %99)\nno tasks\n",
+        String::from_utf8(listed.stdout).unwrap()
+    );
+    assert!(listed.stderr.is_empty());
+
+    let read = run_daemon_cli(
+        &["task", "read", "t2"],
+        "task_read",
+        json!({"id":"t2"}),
+        json!({"id":"t2", "priority":"high", "status":"blocked", "title":"Review", "scope":"global"}),
+    );
+    assert_eq!(0, read.status.code().unwrap());
+    assert_eq!(
+        "t2 [high] blocked  Review\nscope       global\n",
+        String::from_utf8(read.stdout).unwrap()
+    );
+    assert!(read.stderr.is_empty());
+}
