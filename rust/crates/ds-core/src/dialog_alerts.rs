@@ -23,6 +23,13 @@ use crate::flock::Flock;
 const OWNER_POST_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_VP_PANE: &str = "w9:pH";
 
+#[cfg(unix)]
+const PYTHON_DEFAULT_SEARCH_PATH: &str = "/bin:/usr/bin";
+#[cfg(windows)]
+const PYTHON_DEFAULT_SEARCH_PATH: &str = r".;C:\Windows\System32";
+#[cfg(not(any(unix, windows)))]
+const PYTHON_DEFAULT_SEARCH_PATH: &str = "/bin:/usr/bin";
+
 /// Inputs used to resolve the `vpctl` executable. `Some("")` mirrors Python's empty
 /// `DUNKINGSHEEP_VPCTL`: it falls through to PATH and then the home-directory fallback.
 #[derive(Debug, Clone)]
@@ -38,13 +45,38 @@ impl OwnerPostConfig {
         Self {
             override_command: std::env::var_os("DUNKINGSHEEP_VPCTL"),
             path: std::env::var_os("PATH"),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: python_home(
+                std::env::var_os("HOME").map(PathBuf::from),
+                account_home_directory,
+            ),
         }
     }
 }
 
+fn python_home(
+    configured_home: Option<PathBuf>,
+    account_home: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    configured_home.or_else(account_home)
+}
+
+/// `Path.home()` uses the account database if HOME is absent. Rust's equivalent is
+/// deprecated for general application use, but preserves that specific platform fallback
+/// without adding a dependency to this port.
+#[allow(deprecated)]
+fn account_home_directory() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
 /// Resolve the command using the same override, PATH, home fallback order as Python.
 pub fn resolve_owner_command(config: &OwnerPostConfig) -> Result<PathBuf, String> {
+    resolve_owner_command_with_default_path(config, OsStr::new(PYTHON_DEFAULT_SEARCH_PATH))
+}
+
+fn resolve_owner_command_with_default_path(
+    config: &OwnerPostConfig,
+    default_search_path: &OsStr,
+) -> Result<PathBuf, String> {
     if let Some(command) = config
         .override_command
         .as_deref()
@@ -52,12 +84,11 @@ pub fn resolve_owner_command(config: &OwnerPostConfig) -> Result<PathBuf, String
     {
         return Ok(PathBuf::from(command));
     }
-    if let Some(path) = config.path.as_deref() {
-        for directory in std::env::split_paths(path) {
-            let candidate = directory.join("vpctl");
-            if is_executable(&candidate) {
-                return Ok(candidate);
-            }
+    let search_path = config.path.as_deref().unwrap_or(default_search_path);
+    for directory in std::env::split_paths(search_path) {
+        let candidate = directory.join("vpctl");
+        if is_executable(&candidate) {
+            return Ok(candidate);
         }
     }
     config
@@ -649,6 +680,31 @@ mod tests {
         assert!(resolve_owner_command(&missing)
             .unwrap_err()
             .contains("HOME is not set"));
+    }
+
+    #[test]
+    fn missing_path_uses_python_default_search_path_and_home_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let default_bin = directory.path().join("default-bin");
+        std::fs::create_dir(&default_bin).unwrap();
+        let default_vpctl = default_bin.join("vpctl");
+        executable(&default_vpctl, "#!/bin/sh\nexit 0\n");
+
+        let config = OwnerPostConfig {
+            override_command: None,
+            path: None,
+            home: None,
+        };
+        assert_eq!(
+            default_vpctl,
+            resolve_owner_command_with_default_path(&config, default_bin.as_os_str()).unwrap()
+        );
+
+        let account_home = directory.path().join("account-home");
+        assert_eq!(
+            Some(account_home.clone()),
+            python_home(None, || Some(account_home))
+        );
     }
 
     #[test]
