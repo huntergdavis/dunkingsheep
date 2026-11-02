@@ -385,9 +385,6 @@ mod tests {
         store.complete(&third.id).await.unwrap();
         event(&store, &third.id, "completed", now, Some("w1:p1"), Some(7)).await;
         store.block(&one.id, "waiting").await.unwrap();
-        // `set_status` writes its event with NO scope (the Python records scope and priority), so
-        // a scoped query drops it: seed the scoped one (T11 gap, t1225).
-        event(&store, &one.id, "blocked", now, None, None).await;
         let metrics = store.metrics(global_only()).await.unwrap();
         assert_eq!(3, metrics["throughput"]["created"]);
         assert_eq!(1, metrics["throughput"]["claimed"]);
