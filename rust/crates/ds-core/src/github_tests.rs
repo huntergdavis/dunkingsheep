@@ -305,6 +305,34 @@ fn token_load_filters_bad_entries_and_save_is_private_and_atomic() {
 }
 
 #[test]
+fn token_cache_save_removes_temporary_file_when_publish_fails() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cache.json");
+    fs::create_dir(&path).unwrap();
+    let fake = Box::new(FakeTransport::default());
+    let mut tokens = Tokens::new(
+        Some(path.clone()),
+        dir.path().into(),
+        fake,
+        Some(DEFAULT_API.into()),
+    );
+    tokens.cache.get_mut().unwrap().insert(
+        "fixture".into(),
+        serde_json::json!({"expires_at":123,"token":"fixture-secret"}),
+    );
+
+    assert!(tokens.save().is_err());
+    assert!(path.is_dir());
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".cache.json.tmp.")
+    }));
+}
+
+#[test]
 fn installation_id_returns_first_installation_or_exact_empty_refusal() {
     let app = AppConfig {
         id: 1,

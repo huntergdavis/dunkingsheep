@@ -23,6 +23,47 @@ pub const DEFAULT_API: &str = "https://api.github.com";
 pub const REFRESH_MARGIN_S: f64 = 600.0;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+struct TokenCacheTempFile {
+    path: PathBuf,
+    file: Option<File>,
+    cleanup: bool,
+}
+
+impl TokenCacheTempFile {
+    fn new(path: PathBuf, file: File) -> Self {
+        Self {
+            path,
+            file: Some(file),
+            cleanup: true,
+        }
+    }
+
+    fn file(&self) -> &File {
+        self.file.as_ref().expect("temporary file is still open")
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("temporary file is still open")
+    }
+
+    fn close(&mut self) {
+        drop(self.file.take());
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = false;
+    }
+}
+
+impl Drop for TokenCacheTempFile {
+    fn drop(&mut self) {
+        self.close();
+        if self.cleanup {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubError(pub String);
 
@@ -374,7 +415,7 @@ impl Tokens {
             .path
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("github-tokens.json"));
-        let (temporary, mut file) = (0..128)
+        let (temporary, file) = (0..128)
             .find_map(|_| {
                 let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
                 let candidate = parent.join(format!(
@@ -398,17 +439,23 @@ impl Tokens {
                     "could not create a unique GitHub token cache file".into(),
                 ))
             })?;
+        let mut temporary = TokenCacheTempFile::new(temporary, file);
         #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|e| {
-                let _ = fs::remove_file(&temporary);
-                GitHubError(e.to_string())
-            })?;
-        file.write_all(&bytes)
+        temporary
+            .file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|e| GitHubError(e.to_string()))?;
-        file.flush().map_err(|e| GitHubError(e.to_string()))?;
-        drop(file);
-        fs::rename(&temporary, &self.path).map_err(|e| GitHubError(e.to_string()))?;
+        temporary
+            .file_mut()
+            .write_all(&bytes)
+            .map_err(|e| GitHubError(e.to_string()))?;
+        temporary
+            .file_mut()
+            .flush()
+            .map_err(|e| GitHubError(e.to_string()))?;
+        temporary.close();
+        fs::rename(&temporary.path, &self.path).map_err(|e| GitHubError(e.to_string()))?;
+        temporary.disarm();
         Ok(())
     }
 
