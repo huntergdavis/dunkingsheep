@@ -273,6 +273,9 @@ impl Flock {
     /// `task_list`: `(explicit scope or None for "visible", tasks)`. A scope other than
     /// blank/`all` goes through `task_scope` (privacy), then the store filters. `limit` of 0
     /// means the Python's default of 200.
+    // Keep the eight filters aligned with `DunkCore.task_list` in Python; grouping them would
+    // change this public Rust call boundary and require edits outside this scoped lint task.
+    #[allow(clippy::too_many_arguments)]
     pub async fn task_list(
         &self,
         scope: Option<&str>,
