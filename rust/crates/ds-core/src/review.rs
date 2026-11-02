@@ -296,7 +296,7 @@ where
         repo: &str,
         number: i64,
         token: &str,
-        mut report: Option<&mut Value>,
+        report: Option<&mut Value>,
     ) -> Option<bool> {
         let detail =
             match crate::github::pull_detail(&self.transport, &self.api_root, repo, number, token)
@@ -304,7 +304,7 @@ where
             {
                 Ok(detail) => detail,
                 Err(error) => {
-                    if let Some(report) = report.as_deref_mut() {
+                    if let Some(report) = report {
                         append_report(
                             report,
                             "errors",
@@ -337,31 +337,10 @@ where
     }
 
     /// Post the review status and record the source-compatible success/error report.
-    pub async fn _status(
-        &self,
-        repo: &str,
-        sha: &str,
-        state: &str,
-        token: &str,
-        description: &str,
-        url: &str,
-        report: &mut Value,
-    ) {
-        let short_sha: String = sha.chars().take(12).collect();
-        match crate::github::post_status(
-            &self.transport,
-            &self.api_root,
-            token,
-            StatusUpdate {
-                repo,
-                sha,
-                state,
-                description,
-                target_url: Some(url),
-            },
-        )
-        .await
-        {
+    pub async fn _status(&self, token: &str, update: StatusUpdate<'_>, report: &mut Value) {
+        let short_sha: String = update.sha.chars().take(12).collect();
+        let (repo, state) = (update.repo, update.state);
+        match crate::github::post_status(&self.transport, &self.api_root, token, update).await {
             Ok(_) => append_report(
                 report,
                 "statuses",

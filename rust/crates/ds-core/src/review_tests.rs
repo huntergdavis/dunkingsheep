@@ -665,22 +665,26 @@ async fn status_posts_full_request_and_reports_success_error_with_twelve_charact
     let sync = review_sync(FakeReviewActor::default(), transport);
     let mut report = json!({"statuses": [], "errors": []});
     sync._status(
-        "o/r",
-        "1234567890123456",
-        "success",
         "fake-token",
-        "review passed",
-        "https://example.test/review/7",
+        StatusUpdate {
+            repo: "o/r",
+            sha: "1234567890123456",
+            state: "success",
+            description: "review passed",
+            target_url: Some("https://example.test/review/7"),
+        },
         &mut report,
     )
     .await;
     sync._status(
-        "o/r",
-        "abcdef0123456789",
-        "failure",
         "fake-token",
-        "review failed",
-        "",
+        StatusUpdate {
+            repo: "o/r",
+            sha: "abcdef0123456789",
+            state: "failure",
+            description: "review failed",
+            target_url: Some(""),
+        },
         &mut report,
     )
     .await;
@@ -754,7 +758,7 @@ async fn record_accounting_awaits_setter_then_preserves_every_metadata_field() {
         None,
         sync._record_accounting(&json!({"id":"t9"}), &out).await
     );
-    let writes = sync.flock.writes.borrow();
+    let writes = sync.flock.writes.borrow().clone();
     assert_eq!(2, writes.len());
     assert_eq!("set_accounting_pr", writes[0].0);
     assert_eq!("note_with_meta", writes[1].0);
@@ -783,14 +787,12 @@ async fn record_accounting_falsey_pr_joins_errors_and_contains_actor_failures() 
         None,
         sync._record_accounting(&json!({"id":"t9"}), &out).await
     );
-    let writes = sync.flock.writes.borrow();
+    let writes = sync.flock.writes.borrow().clone();
     assert_eq!(1, writes.len(), "falsey accounting PR writes only the note");
     assert_eq!(
         "no accounting PR for body PR #41: missing; denied",
         writes[0].1["meta"]["reason"]
     );
-    drop(writes);
-
     let setter = FakeReviewActor::default();
     *setter.setter_error.borrow_mut() = Some("setter failed".into());
     let sync = review_sync(setter, FakeReviewTransport::default());
