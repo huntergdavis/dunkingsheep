@@ -24,6 +24,10 @@ pub trait InboxEnv: MailboxEnv {
     fn caller_role(&self, pane_id: &str) -> String;
     /// `DUNKINGSHEEP_MAILBOX`, trimmed; `None` when unset or blank.
     fn mailbox_override(&self) -> Option<String>;
+    /// Recipient-side wake policy; tests inject it without changing process environment.
+    fn inbox_silent_mailboxes(&self) -> Option<String> {
+        std::env::var("DUNKINGSHEEP_INBOX_SILENT_MAILBOXES").ok()
+    }
     /// The backend's name, for the `_own_mailbox` refusal text.
     fn backend_name(&self) -> String;
     /// `dunk_pm.load_routing()` members, for `inbox_count`'s `lane_panes`.
@@ -88,6 +92,29 @@ pub struct Nudge {
 
 /// `SYSTEM_SENDERS`.
 pub const SYSTEM_SENDERS: [&str; 1] = ["watchdog"];
+
+/// Match final resolved destinations only; silence never changes storage or authority.
+pub fn recipient_is_quiet(
+    policy: Option<&str>,
+    mailbox: &str,
+    label: &str,
+    pane_id: Option<&str>,
+) -> bool {
+    let normalize = |text: &str| {
+        crate::unicode_casefold::full_casefold(
+            text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)),
+        )
+    };
+    let destinations = [Some(mailbox), Some(label), pane_id];
+    policy.unwrap_or("").split(',').any(|entry| {
+        let entry = normalize(entry);
+        !entry.is_empty()
+            && destinations
+                .iter()
+                .flatten()
+                .any(|value| normalize(value) == entry)
+    })
+}
 
 /// `NOTICE_PREFIX`.
 pub const NOTICE_PREFIX: &str = "[inbox] ";
@@ -544,7 +571,14 @@ impl Flock {
             ..Default::default()
         })?;
         let mut notified = false;
-        if args.notify {
+        if args.notify
+            && !recipient_is_quiet(
+                env.inbox_silent_mailboxes().as_deref(),
+                &mailbox,
+                &label,
+                pane_id.as_deref(),
+            )
+        {
             if let Some(pane) = pane_id.as_deref() {
                 let unread = inbox::count(env.pool(), &mailbox, &[], env.now())?.unread;
                 let text = notice_text(&mailbox, unread, sender.as_deref(), subject.as_deref());

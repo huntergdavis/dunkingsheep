@@ -2172,7 +2172,9 @@ class Flock:
                    self_pane_id=None, system_sender=None):
         """Put a message in another agent's inbox. Nothing is typed into their
         terminal except, when `notify`, a short line telling them they have
-        mail - which is the one send short enough to always submit.
+        mail - which is the one send short enough to always submit. The optional
+        DUNKINGSHEEP_INBOX_SILENT_MAILBOXES recipient policy suppresses that wake,
+        independently of the sender's notify flag, without suppressing the mail.
 
         `system_sender` names a non-agent sender (the watchdog). It is accepted
         only from SYSTEM_SENDERS and only from a caller with no pane (a systemd
@@ -2245,7 +2247,9 @@ class Flock:
         if undeliverable_reason:
             message["outcome"] = "undeliverable"
             message["reason"] = undeliverable_reason
-        if notify and pane_id:
+        if (notify and pane_id and not _inbox_recipient_is_quiet(
+                os.environ.get("DUNKINGSHEEP_INBOX_SILENT_MAILBOXES"),
+                mailbox, label, pane_id)):
             unread = self.inbox.count(mailbox)["unread"]
             text = _notice_text(mailbox, unread, sender, subject)
             try:
@@ -8955,6 +8959,14 @@ def _bright_text(line):
     if not dim:
         out.append(line[position:])
     return "".join(out)
+
+
+def _inbox_recipient_is_quiet(policy, mailbox, label, pane_id):
+    """Recipient policy controls wake notices, never durable mail delivery."""
+    quiet = {entry.strip().casefold() for entry in (policy or "").split(",")
+             if entry.strip()}
+    return any(value and value.strip().casefold() in quiet
+               for value in (mailbox, label, pane_id))
 
 
 def _notice_text(mailbox, unread, sender=None, subject=None):
