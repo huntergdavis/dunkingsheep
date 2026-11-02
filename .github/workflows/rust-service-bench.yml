@@ -4,8 +4,7 @@ on:
   pull_request:
     paths:
       - "rust/crates/ds-core/benches/service.rs"
-      - "rust/crates/ds-core/src/terminal/control.rs"
-      - "rust/crates/ds-core/src/terminal/parse.rs"
+      - "rust/crates/ds-core/src/terminal/**"
       - "rust/crates/ds-core/Cargo.toml"
       - "rust/Cargo.toml"
       - "rust/Cargo.lock"
