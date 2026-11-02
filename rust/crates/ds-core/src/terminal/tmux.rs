@@ -572,6 +572,16 @@ impl Terminal for TmuxBackend {
             .collect()
     }
 
+    fn try_list_panes_with_status(&self) -> Result<Vec<(Pane, Option<String>)>, TerminalError> {
+        // Preserve both the fallible list result and the single-process tmux path.
+        self.try_list_panes().map(|panes| {
+            panes
+                .into_iter()
+                .map(|pane| (pane, Some("unknown".to_string())))
+                .collect()
+        })
+    }
+
     fn get_pane_with_status(&self, pane_id: &str) -> Option<(Pane, Option<String>)> {
         // One listing; `agent_status` would list again.
         self.get_pane(pane_id)
