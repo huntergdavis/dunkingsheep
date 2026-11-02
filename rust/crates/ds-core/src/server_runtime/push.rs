@@ -9,7 +9,6 @@ use crate::error::{refusal, DunkError};
 use crate::flock::lanes::pane_to_json;
 use crate::flock::loop_env::LoopFuture;
 use crate::roles::DEFAULT_ROLE;
-use crate::terminal::Terminal;
 
 impl LoopRuntimeAdapter {
     #[allow(dead_code)] // The complete PushEnv implementation belongs to its assembly leaf.
