@@ -224,6 +224,82 @@ fn cli_route_06_inbox_read_a() {
 }
 
 #[test]
+fn cli_route_03_dunk_edit_lifecycle_a() {
+    let updated = run_daemon_cli(
+        &[
+            "set",
+            "d1",
+            "-T",
+            "owner",
+            "-t",
+            "",
+            "-e",
+            "1.5h",
+            "-n",
+            "",
+            "--any-time",
+            "--max-sends",
+            "0",
+            "--always-send",
+            "--ignore-typing",
+        ],
+        "update_dunk",
+        json!({
+            "id": "d1",
+            "target": "owner",
+            "text": "",
+            "interval_minutes": "1.5h",
+            "name": "",
+            "only_when": null,
+            "max_sends": null,
+            "skip_if_unconsumed": false,
+            "hold_while_typing": false
+        }),
+        json!({
+            "id": "d1",
+            "text": "updated",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": false
+        }),
+    );
+    assert_eq!(0, updated.status.code().unwrap());
+    assert_eq!(
+        "id               d1\nskip_if_unconsumed False\nhold_while_typing False\ntext             'updated'\n",
+        String::from_utf8(updated.stdout).unwrap()
+    );
+    assert!(updated.stderr.is_empty());
+
+    let removed = run_daemon_cli(
+        &["delete", "d2"],
+        "remove_dunk",
+        json!({"id": "d2"}),
+        json!({"id": "d2"}),
+    );
+    assert_eq!(0, removed.status.code().unwrap());
+    assert_eq!("removed d2\n", String::from_utf8(removed.stdout).unwrap());
+    assert!(removed.stderr.is_empty());
+
+    let started = run_daemon_cli(
+        &["start", "d3"],
+        "start_dunk",
+        json!({"id": "d3"}),
+        json!({
+            "id": "d3",
+            "running": true,
+            "status": "active",
+            "skip_if_unconsumed": false,
+            "hold_while_typing": true
+        }),
+    );
+    assert_eq!(0, started.status.code().unwrap());
+    assert_eq!(
+        "id               d3\nrunning          True\nstatus           active\nskip_if_unconsumed False\nhold_while_typing True\n",
+        String::from_utf8(started.stdout).unwrap()
+    );
+    assert!(started.stderr.is_empty());
+}
+
+#[test]
 fn cli_generic_json_preserves_daemon_insertion_order() {
     let temp = tempfile::tempdir().unwrap();
     let socket = temp.path().join("daemon.sock");
