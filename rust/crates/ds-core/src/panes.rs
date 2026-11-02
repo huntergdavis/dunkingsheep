@@ -74,8 +74,8 @@ pub type Records = BTreeMap<String, Retired>;
 /// PER-RECORD TOLERANCE (t1017): the Python keeps every well-formed record when ONE is
 /// malformed, because its consumers skip non-dict values. Deserialising straight into
 /// `Records` failed the whole parse on one bad record, and every retirement then stopped
-/// protecting anything - 'retired' silently turned back into 'paging every four hours'
-/// - in a file a human edits. So parse to raw values and convert record by record,
+/// protecting anything, so 'retired' silently turned back into 'paging every four hours'
+/// in a file a human edits. Parse to raw values and convert record by record,
 /// skipping (and logging) the bad ones. A wholly unparseable file still reads as empty.
 pub fn load(path: &Path) -> Records {
     let mut records = Records::new();

@@ -412,7 +412,7 @@ impl OwnerPush {
             });
             let pending = rows
                 .iter()
-                .filter(|(_, taken)| taken.map_or(true, |at| at == 0.0))
+                .filter(|(_, taken)| taken.is_none_or(|at| at == 0.0))
                 .count();
             Ok(Stats {
                 pushed: rows.len() as i64,
