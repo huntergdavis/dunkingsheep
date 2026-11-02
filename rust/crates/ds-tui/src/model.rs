@@ -31,6 +31,13 @@ pub trait RpcClient {
     fn close_local(&mut self) {}
 }
 
+/// Supplies the result of the line modal for model actions that prompt the user.
+/// Returning `None` represents Escape; a submitted value is returned as entered,
+/// with the modal adapter responsible for applying its displayed default.
+pub trait LineModalProvider {
+    fn line_modal(&mut self, label: &str, default: &str) -> Option<String>;
+}
+
 /// Which backend currently serves requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMode {
@@ -372,6 +379,150 @@ impl<C: RpcClient> TuiModel<C> {
         self.tasks.get(self.task_selected)
     }
 
+    /// Prompt for a dunker's display name and update it through the daemon.
+    pub fn edit_name<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let default = dunk
+            .get("name")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let Some(value) = modal.line_modal("Dunker name", &default) else {
+            return false;
+        };
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "name": value.trim()}),
+            now,
+        )
+        .1
+    }
+
+    /// Prompt for the maximum number of sends. Blank and zero both mean forever.
+    pub fn edit_max_sends<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let default = dunk
+            .get("max_sends")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let Some(value) = modal.line_modal("Max sends (blank = forever)", &default) else {
+            return false;
+        };
+        let value = value.trim();
+        let max_sends = if value.is_empty() || value == "0" {
+            Some(0)
+        } else if value.chars().all(|character| character.is_ascii_digit()) {
+            value.parse::<u64>().ok()
+        } else {
+            None
+        };
+        let Some(max_sends) = max_sends else {
+            self.flash("Max sends must be a whole number", now, 4.0);
+            return false;
+        };
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "max_sends": max_sends}),
+            now,
+        )
+        .1
+    }
+
+    /// Toggle the send gate between scheduled delivery and idle-only delivery.
+    pub fn toggle_only_idle(&mut self, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let new_value = if dunk.get("only_when").and_then(Value::as_str) == Some("idle") {
+            "any"
+        } else {
+            "idle"
+        };
+        let reconnect = self
+            .rpc(
+                "update_dunk",
+                serde_json::json!({"id": id, "only_when": new_value}),
+                now,
+            )
+            .1;
+        self.flash(
+            if new_value == "idle" {
+                "Sends wait for idle agent"
+            } else {
+                "Sends on schedule"
+            },
+            now,
+            4.0,
+        );
+        reconnect
+    }
+
+    /// Toggle whether missed, unconsumed sends are skipped.
+    pub fn toggle_skip_if_unconsumed(&mut self, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let new_value = !dunk.get("skip_if_unconsumed").is_some_and(python_truthy);
+        let reconnect = self
+            .rpc(
+                "update_dunk",
+                serde_json::json!({"id": id, "skip_if_unconsumed": new_value}),
+                now,
+            )
+            .1;
+        self.flash(
+            if new_value {
+                "Skip sends the target never consumed"
+            } else {
+                "Always send on schedule"
+            },
+            now,
+            4.0,
+        );
+        reconnect
+    }
+
+    /// Toggle whether a send waits while someone is typing in its target.
+    pub fn toggle_hold_while_typing(&mut self, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let current_value = dunk.get("hold_while_typing").is_none_or(python_truthy);
+        let new_value = !current_value;
+        let reconnect = self
+            .rpc(
+                "update_dunk",
+                serde_json::json!({"id": id, "hold_while_typing": new_value}),
+                now,
+            )
+            .1;
+        self.flash(
+            if new_value {
+                "Hold while someone is typing in the target"
+            } else {
+                "Send even while someone is typing"
+            },
+            now,
+            4.0,
+        );
+        reconnect
+    }
+
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
         self.message = text.into();
         self.message_until = now + seconds;
@@ -392,6 +543,17 @@ fn python_truthy(value: &Value) -> bool {
         Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
         Value::String(value) => !value.is_empty(),
         Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+fn python_string(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_owned(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Number(number) => number.to_string(),
+        Value::String(string) => string.clone(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
     }
 }
 
@@ -439,6 +601,167 @@ mod tests {
             self.calls.push((command.to_owned(), args));
             self.responses.pop_front().expect("fake response")
         }
+    }
+
+    #[derive(Default)]
+    struct FakeModal {
+        responses: VecDeque<Option<String>>,
+        prompts: Vec<(String, String)>,
+    }
+
+    impl LineModalProvider for FakeModal {
+        fn line_modal(&mut self, label: &str, default: &str) -> Option<String> {
+            self.prompts.push((label.to_owned(), default.to_owned()));
+            self.responses.pop_front().expect("fake modal response")
+        }
+    }
+
+    fn action_model(dunk: Value, responses: Vec<Result<Value, RpcError>>) -> TuiModel<FakeClient> {
+        let client = FakeClient {
+            responses: VecDeque::from(responses),
+            ..FakeClient::default()
+        };
+        let mut model = TuiModel::connected(client, 0.0);
+        model.dunks.push(dunk);
+        model
+    }
+
+    #[test]
+    fn edit_name_prompts_with_current_name_and_sends_trimmed_value() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1", "name": "Current"}),
+            vec![Ok(Value::Null)],
+        );
+        let mut modal = FakeModal {
+            responses: VecDeque::from([Some("  New name  ".into())]),
+            ..FakeModal::default()
+        };
+
+        assert!(!model.edit_name(&mut modal, 1.0));
+        assert_eq!(
+            modal.prompts,
+            vec![("Dunker name".into(), "Current".into())]
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![(
+                "update_dunk".into(),
+                serde_json::json!({"id": "d1", "name": "New name"})
+            )]
+        );
+    }
+
+    #[test]
+    fn edit_name_cancel_does_not_send_an_update() {
+        let mut model = action_model(serde_json::json!({"id": "d1", "name": "Current"}), vec![]);
+        let mut modal = FakeModal {
+            responses: VecDeque::from([None]),
+            ..FakeModal::default()
+        };
+
+        assert!(!model.edit_name(&mut modal, 1.0));
+        assert_eq!(
+            modal.prompts,
+            vec![("Dunker name".into(), "Current".into())]
+        );
+        assert!(model.client.calls.is_empty());
+    }
+
+    #[test]
+    fn edit_max_sends_handles_blank_zero_valid_integer_and_invalid_text() {
+        for (input, expected) in [
+            ("", Some(0)),
+            ("0", Some(0)),
+            (" 12 ", Some(12)),
+            ("1.5", None),
+        ] {
+            let responses = expected.map_or_else(Vec::new, |_| vec![Ok(Value::Null)]);
+            let mut model = action_model(serde_json::json!({"id": "d1"}), responses);
+            let mut modal = FakeModal {
+                responses: VecDeque::from([Some(input.into())]),
+                ..FakeModal::default()
+            };
+
+            assert!(!model.edit_max_sends(&mut modal, 2.0));
+            assert_eq!(
+                modal.prompts,
+                vec![("Max sends (blank = forever)".into(), String::new())]
+            );
+            if let Some(max_sends) = expected {
+                assert_eq!(
+                    model.client.calls,
+                    vec![(
+                        "update_dunk".into(),
+                        serde_json::json!({"id": "d1", "max_sends": max_sends})
+                    )]
+                );
+            } else {
+                assert!(model.client.calls.is_empty());
+                assert_eq!(model.message, "Max sends must be a whole number");
+                assert_eq!(model.message_until, 6.0);
+            }
+        }
+    }
+
+    #[test]
+    fn send_gate_toggles_submit_exact_fields_values_and_flashes() {
+        let mut model = action_model(
+            serde_json::json!({
+                "id": "d1",
+                "only_when": "idle",
+                "skip_if_unconsumed": true,
+                "hold_while_typing": true
+            }),
+            vec![Ok(Value::Null); 6],
+        );
+
+        assert!(!model.toggle_only_idle(1.0));
+        assert_eq!(model.message, "Sends on schedule");
+        model.dunks[0]["only_when"] = serde_json::json!("any");
+        assert!(!model.toggle_only_idle(2.0));
+        assert_eq!(model.message, "Sends wait for idle agent");
+
+        assert!(!model.toggle_skip_if_unconsumed(3.0));
+        assert_eq!(model.message, "Always send on schedule");
+        model.dunks[0]["skip_if_unconsumed"] = serde_json::json!(false);
+        assert!(!model.toggle_skip_if_unconsumed(4.0));
+        assert_eq!(model.message, "Skip sends the target never consumed");
+
+        assert!(!model.toggle_hold_while_typing(5.0));
+        assert_eq!(model.message, "Send even while someone is typing");
+        model.dunks[0]["hold_while_typing"] = serde_json::json!(false);
+        assert!(!model.toggle_hold_while_typing(6.0));
+        assert_eq!(model.message, "Hold while someone is typing in the target");
+
+        assert_eq!(
+            model.client.calls,
+            vec![
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "only_when": "any"})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "only_when": "idle"})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "skip_if_unconsumed": false})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "skip_if_unconsumed": true})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "hold_while_typing": false})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "hold_while_typing": true})
+                ),
+            ]
+        );
     }
 
     #[test]
