@@ -6,8 +6,9 @@ use super::lanes::*;
 use super::mailbox::MailboxEnv;
 use super::Flock;
 use crate::activity::Turn;
+use crate::error::DunkError;
 use crate::terminal::fakes::FakeTerminal;
-use crate::terminal::Terminal;
+use crate::terminal::{Terminal, TerminalError};
 use serde_json::json;
 
 fn flock() -> crate::testsupport::Scratch<Flock> {
@@ -164,4 +165,31 @@ fn resolve_lanes_lists_every_pane_with_its_derived_status() {
         .find(|l| l["pane_id"] == json!("w1:p1"))
         .unwrap();
     assert_eq!(shell["agent_status"], json!(null));
+}
+
+#[test]
+fn resolve_lanes_refuses_when_backend_pane_list_fails() {
+    let mut term = FakeTerminal::new();
+    term.fail_grouped_panes = Some(TerminalError::refused("offline"));
+    let env = TerminalEnv {
+        terminal: &term,
+        registered: &none,
+    };
+
+    assert!(matches!(
+        flock().resolve_lanes(&env, 100.0),
+        Err(DunkError::Refused(message)) if message == "cannot list panes: offline"
+    ));
+}
+
+#[test]
+fn resolve_lanes_preserves_successful_empty_listing() {
+    let mut term = FakeTerminal::new();
+    term.panes.clear();
+    let env = TerminalEnv {
+        terminal: &term,
+        registered: &none,
+    };
+
+    assert!(flock().resolve_lanes(&env, 100.0).unwrap().is_empty());
 }
