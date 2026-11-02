@@ -7,8 +7,7 @@
 //! The stores are attached after construction (`attach_roles`), like the tasks/inbox stores:
 //! a gate call on a flock with no registry attached is a named refusal, never a guess.
 //!
-//! NOT ported here: `self.last_message = "Registered ..."` (the Rust `Flock` has no
-//! `last_message` yet), and the dispatch-time use of these gates (`api.rs`, T39).
+//! Successful registration publishes its status message on the Flock owner.
 
 use std::sync::Mutex;
 
@@ -279,6 +278,7 @@ impl Flock {
         })?;
         self.forget_role_pane(&target);
         self.with_caller(|state| state.role = None);
+        self.set_last_message(format!("Registered {target} as {role}"));
         Ok(Value::Object(entry))
     }
 

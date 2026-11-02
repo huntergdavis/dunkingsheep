@@ -178,6 +178,40 @@ fn production_env_status_state_uses_concrete_services() {
     f.flock.set_last_message("actual completed operation");
     assert_eq!(env.task_followers(), 1);
     assert_eq!(env.last_message(), "actual completed operation");
+    let roles = crate::roles::Roles::new(
+        &Env::default(),
+        Some(f.dir.path().join("roles.json")),
+        Some(f.dir.path().join("tokens.json")),
+        None,
+    )
+    .unwrap();
+    f.flock.attach_roles(roles, None);
+    f.flock
+        .lane_register(
+            Some("w9:p9"),
+            Some("owner"),
+            None,
+            None,
+            None,
+            Some("w9:p9"),
+            &a,
+        )
+        .unwrap();
+    assert_eq!(env.last_message(), "Registered w9:p9 as owner");
+    f.flock.clear_caller();
+    assert!(f
+        .flock
+        .lane_register(
+            Some("w9:p8"),
+            Some("owner"),
+            None,
+            None,
+            None,
+            Some("w9:p7"),
+            &a
+        )
+        .is_err());
+    assert_eq!(env.last_message(), "Registered w9:p9 as owner");
     let mut terminal = FakeTerminal::new();
     terminal.panes[0].command = "codex".into();
     f.send("codex", None);

@@ -5,6 +5,7 @@ use crate::error::DunkError;
 use crate::flock::{dunks::DunkList, status::StatusEnv, status_runtime::StatusState};
 use serde_json::{json, Map, Value};
 
+#[allow(dead_code)] // Final production dispatcher construction is gated on t1605.
 impl RequestRuntimeAdapter<'_> {
     fn status_state(&self) -> &StatusState {
         self.terminal
