@@ -59,6 +59,34 @@ impl CommandEnv for TestEnv {
     }
 }
 
+struct PaneApiEnv {
+    terminal: Mutex<Box<dyn Terminal>>,
+    panes: Vec<Value>,
+}
+
+impl PaneInfoEnv for PaneApiEnv {
+    fn list_panes_grouped(&self) -> Vec<Value> {
+        self.panes.clone()
+    }
+
+    fn get_pane(&self, pane_id: &str) -> Option<Value> {
+        self.panes
+            .iter()
+            .find(|pane| pane["pane_id"] == pane_id)
+            .cloned()
+    }
+}
+
+impl CommandEnv for PaneApiEnv {
+    fn terminal(&self) -> &Mutex<Box<dyn Terminal>> {
+        &self.terminal
+    }
+
+    fn now_s(&self) -> f64 {
+        1_800_000_100.0
+    }
+}
+
 struct CompletionEnv(TestEnv);
 
 impl PaneInfoEnv for CompletionEnv {
@@ -919,6 +947,167 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         ),
         Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
     ));
+}
+
+fn pane_api_env() -> PaneApiEnv {
+    pane_api_env_with_screen(None)
+}
+
+fn pane_api_env_with_screen(screen: Option<&str>) -> PaneApiEnv {
+    let mut terminal = FakeTerminal::default();
+    if let Some(screen) = screen {
+        terminal.screens.insert("w1:p1".into(), screen.into());
+    }
+    PaneApiEnv {
+        terminal: Mutex::new(Box::new(terminal)),
+        panes: vec![json!({
+            "pane_id": "w1:p1",
+            "terminal_id": "w1:p1",
+            "workspace_id": "w1",
+            "tab_id": "w1",
+            "workspace_label": "work",
+            "tab_label": "1",
+            "agent": "codex",
+            "agent_status": "working",
+            "cwd": "/tmp/project",
+            "terminal_title_stripped": "api writer",
+            "pane_pid": 123,
+        })],
+    }
+}
+
+fn pane_api_dispatch(
+    command: &str,
+    value: Value,
+    env: &PaneApiEnv,
+    self_pane_id: Option<&str>,
+) -> Result<Value, DunkError> {
+    let (_dir, flock) = flock();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_list_panes_read_pane_workspaces();
+    let request = RequestCtx {
+        self_pane_id: self_pane_id.map(str::to_owned),
+        ..RequestCtx::default()
+    };
+    dispatch_with_env(
+        &dispatcher,
+        &flock,
+        &FixedRole("owner", true),
+        command,
+        args(value),
+        &request,
+        env,
+    )
+}
+
+#[test]
+fn h_list_panes_matches_python() {
+    let env = pane_api_env();
+    assert_eq!(
+        pane_api_dispatch("list_panes", json!({}), &env, Some("w1:p1")).unwrap(),
+        json!({
+            "self_pane_id": "w1:p1",
+            "panes": [{
+                "pane_id": "w1:p1",
+                "is_self": true,
+                "workspace_label": "work",
+                "tab_label": "1",
+                "agent": "codex",
+                "agent_status": "working",
+                "agent_status_source": "terminal backend",
+                "agent_status_reason": null,
+                "agent_status_inferred": false,
+                "cwd": "/tmp/project",
+                "terminal_title_stripped": "api writer",
+                "terminal_id": "w1:p1",
+                "workspace_id": "w1",
+                "tab_id": "w1",
+                "pane_pid": 123,
+            }]
+        })
+    );
+}
+
+#[test]
+fn h_read_pane_matches_python() {
+    let env = pane_api_env();
+    assert_eq!(
+        pane_api_dispatch(
+            "read_pane",
+            json!({"target": "self", "lines": 0}),
+            &env,
+            Some("w1:p1"),
+        )
+        .unwrap(),
+        json!({
+            "pane_id": "w1:p1",
+            "agent": "codex",
+            "agent_status": "working",
+            "tab_label": "1",
+            "text": "",
+        })
+    );
+}
+
+#[test]
+fn h_read_pane_normalizes_negative_line_counts() {
+    let env = pane_api_env_with_screen(Some("one\ntwo\nthree"));
+    let result = pane_api_dispatch(
+        "read_pane",
+        json!({"target":"self", "lines":-2}),
+        &env,
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(result["text"], "two\nthree");
+
+    let minimum = pane_api_dispatch(
+        "read_pane",
+        json!({"target":"self", "lines":i64::MIN}),
+        &env,
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(minimum["text"], "one\ntwo\nthree");
+}
+
+#[test]
+fn h_list_workspaces_matches_python() {
+    let env = pane_api_env();
+    assert_eq!(
+        pane_api_dispatch("list_workspaces", json!({}), &env, Some("w1:p1")).unwrap(),
+        json!({
+            "self": {"workspace_id": "w1", "tab_id": "w1"},
+            "workspaces": [
+                {
+                    "workspace_id": "w1",
+                    "label": "work",
+                    "number": 1,
+                    "active_tab_id": "w1",
+                    "tabs": [{
+                        "tab_id": "w1",
+                        "workspace_id": "w1",
+                        "label": "1",
+                        "number": 1,
+                        "active": true,
+                    }],
+                },
+                {
+                    "workspace_id": "w2",
+                    "label": "other",
+                    "number": 2,
+                    "active_tab_id": "w2",
+                    "tabs": [{
+                        "tab_id": "w2",
+                        "workspace_id": "w2",
+                        "label": "2",
+                        "number": 2,
+                        "active": true,
+                    }],
+                },
+            ]
+        })
+    );
 }
 
 #[test]

@@ -225,6 +225,13 @@ impl Dispatcher {
         self.register("help", h_help);
     }
 
+    /// Register only the T39 pane and workspace listing handlers.
+    pub fn register_list_panes_read_pane_workspaces(&mut self) {
+        self.register("list_panes", h_list_panes);
+        self.register("read_pane", h_read_pane);
+        self.register("list_workspaces", h_list_workspaces);
+    }
+
     /// `dunk_api.dispatch(flock, name, args, self_pane_id)`, with the acting pane read only from
     /// this request's [`RequestCtx`] and caller state scoped to this synchronous request thread.
     pub fn dispatch<G: CallerGate + ?Sized>(
@@ -328,6 +335,220 @@ pub fn h_help(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkErr
             "error": {"id": "echoed", "ok": false, "error": "message"},
         },
         "commands": commands,
+    }))
+}
+
+/// `dunk_api.h_list_panes`.
+pub fn h_list_panes(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    const KEEP: &[&str] = &[
+        "pane_id",
+        "is_self",
+        "workspace_label",
+        "tab_label",
+        "agent",
+        "agent_status",
+        "agent_status_source",
+        "agent_status_reason",
+        "agent_status_inferred",
+        "cwd",
+        "terminal_title_stripped",
+        "terminal_id",
+        "workspace_id",
+        "tab_id",
+        "pane_pid",
+    ];
+    let panes = context.env.list_panes_grouped();
+    let mut projected = Vec::with_capacity(panes.len());
+    for mut pane in panes {
+        let self_pane_id = context.self_pane_id().filter(|id| !id.is_empty());
+        pane["is_self"] = json!(self_pane_id.is_some_and(|id| pane["pane_id"] == id));
+        let activity = context.flock.lane_activity(&pane, context.env.now_s());
+        pane["agent_status"] = activity["state"].clone();
+        pane["agent_status_source"] = activity["source"].clone();
+        pane["agent_status_reason"] = activity["reason"].clone();
+        pane["agent_status_inferred"] = activity["inferred"].clone();
+        let row = pane
+            .as_object()
+            .expect("pane info rows are JSON objects")
+            .iter()
+            .filter(|(key, _)| KEEP.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Map<String, Value>>();
+        projected.push(Value::Object(row));
+    }
+    let mut result = json!({
+        "self_pane_id": context.self_pane_id(),
+        "panes": projected,
+    });
+
+    // Match Flock.registry_pane_gap: this is diagnostic only, so an unreadable
+    // registry/list does not turn an otherwise useful pane listing into failure.
+    if let (Ok(registry), Ok(terminal)) = (
+        context.flock.lane_registry(false),
+        context.env.terminal().lock(),
+    ) {
+        let live = terminal
+            .list_panes()
+            .into_iter()
+            .map(|pane| pane.pane_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut gap = Vec::new();
+        if let Some(lanes) = registry.get("lanes").and_then(Value::as_object) {
+            for (pane_id, entry) in lanes {
+                if live.contains(pane_id) {
+                    continue;
+                }
+                let pid = entry.get("pane_pid").and_then(Value::as_i64);
+                let alive = pid.is_some_and(|pid| {
+                    crate::proc::process_alive(pid, entry.get("start").and_then(Value::as_str))
+                });
+                gap.push(json!({
+                    "pane": pane_id,
+                    "label": entry.get("label").cloned().unwrap_or(Value::Null),
+                    "role": entry.get("role").cloned().unwrap_or(Value::Null),
+                    "pid": pid,
+                    "alive": alive,
+                }));
+            }
+        }
+        if !gap.is_empty() {
+            result["registry_gap"] = Value::Array(gap);
+        }
+    }
+    Ok(result)
+}
+
+fn python_read_pane_lines(args: &Args) -> Result<i64, DunkError> {
+    let Some(value) = args.get("lines").filter(|value| !value.is_null()) else {
+        return Ok(40);
+    };
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|number| number as i64))
+            .ok_or_else(|| DunkError::Refused("cannot convert value to int".into())),
+        Value::Bool(value) => Ok(i64::from(*value)),
+        Value::String(value) => value.trim().parse::<i64>().map_err(|_| {
+            DunkError::Refused(format!(
+                "invalid literal for int() with base 10: '{}'",
+                value
+            ))
+        }),
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
+        Value::Null => unreachable!("null uses the default above"),
+    }
+}
+
+/// `dunk_api.h_read_pane`.
+pub fn h_read_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let target = args
+        .get("target")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DunkError::Refused("target is required".into()))?;
+    let lines = python_read_pane_lines(&args)?.saturating_abs();
+    let panes = context.env.list_panes_grouped();
+    let hint = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+        .server_error_hint();
+    let pane =
+        crate::flock::resolve::resolve_target(&panes, target, context.self_pane_id(), &hint)?;
+    let pane_id = pane["pane_id"]
+        .as_str()
+        .ok_or_else(|| DunkError::Refused("resolved pane is missing pane_id".into()))?;
+    let text = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?
+        .read_pane(pane_id, lines, false)
+        .map_err(|error| DunkError::Refused(error.message))?
+        .ok_or_else(|| DunkError::Refused(format!("could not read pane {pane_id}")))?;
+    Ok(json!({
+        "pane_id": pane_id,
+        "agent": pane.get("agent"),
+        "agent_status": pane.get("agent_status"),
+        "tab_label": pane.get("tab_label"),
+        "text": text,
+    }))
+}
+
+/// `dunk_api.h_list_workspaces`.
+pub fn h_list_workspaces(context: &HandlerContext<'_>, _: Args) -> Result<Value, DunkError> {
+    let terminal = context
+        .env
+        .terminal()
+        .lock()
+        .map_err(|_| DunkError::Refused("terminal adapter lock poisoned".into()))?;
+    let tabs = terminal.list_tabs();
+    let mut workspaces = terminal
+        .list_workspaces()
+        .into_iter()
+        .map(|workspace| {
+            let mut tabs_for_workspace = tabs
+                .iter()
+                .filter(|tab| {
+                    let workspace_id = if tab.workspace_id.is_empty() {
+                        tab.tab_id.split(':').next().unwrap_or("")
+                    } else {
+                        &tab.workspace_id
+                    };
+                    workspace_id == workspace.workspace_id
+                })
+                .collect::<Vec<_>>();
+            tabs_for_workspace.sort_by_key(|tab| tab.index);
+            let active_tab_id = tabs_for_workspace
+                .iter()
+                .find(|tab| tab.active)
+                .map(|tab| Value::String(tab.tab_id.clone()))
+                .unwrap_or(Value::Null);
+            let tabs = tabs_for_workspace
+                .iter()
+                .map(|tab| {
+                    json!({
+                        "tab_id": tab.tab_id,
+                        "workspace_id": if tab.workspace_id.is_empty() {
+                            tab.tab_id.split(':').next().unwrap_or("")
+                        } else {
+                            &tab.workspace_id
+                        },
+                        "label": tab.label,
+                        "number": tab.index,
+                        "active": tab.active,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "workspace_id": workspace.workspace_id,
+                "label": workspace.label,
+                "number": workspace.index,
+                "active_tab_id": active_tab_id,
+                "tabs": tabs,
+            })
+        })
+        .collect::<Vec<_>>();
+    workspaces.sort_by_key(|workspace| workspace["number"].as_i64().unwrap_or(0));
+    let own = context
+        .self_pane_id()
+        .and_then(|pane_id| context.env.get_pane(pane_id))
+        .map(|pane| {
+            json!({
+                "workspace_id": pane.get("workspace_id"),
+                "tab_id": pane.get("tab_id"),
+            })
+        });
+    Ok(json!({
+        "self": own,
+        "workspaces": workspaces,
     }))
 }
 
