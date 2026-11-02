@@ -24,6 +24,9 @@ use crate::error::{refusal, DunkError};
 pub const KINDS: [&str; 2] = ["author", "reviewer"];
 pub const DEFAULT_API: &str = "https://api.github.com";
 pub const REFRESH_MARGIN_S: f64 = 600.0;
+pub const REVIEW_CONTEXT: &str = "dunkingsheep/review";
+pub const DEFAULT_REQUIRED_VERDICTS: usize = 1;
+pub const POOLRAD_REQUIRED_VERDICTS: usize = 2;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TokenCacheTempFile {
@@ -1216,6 +1219,283 @@ pub struct OpenPullRequest<'a> {
     pub head: &'a str,
     pub base: &'a str,
     pub body: &'a str,
+}
+
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn github_object(value: Option<Value>) -> Result<Value, GitHubError> {
+    let value = value.unwrap_or(Value::Null);
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(GitHubError(format!(
+            "'{}' object has no attribute 'get'",
+            python_type_name(&value)
+        )))
+    }
+}
+
+/// Return open pull requests whose head belongs to the repository's owner and branch.
+pub async fn pulls_for_head(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> Result<Vec<Value>, GitHubError> {
+    let owner = repo.split('/').next().unwrap_or("");
+    let url = format!("{api_root}/repos/{repo}/pulls?state=open&head={owner}:{branch}&per_page=20");
+    let (_, batch) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pulls = batch
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    pulls
+        .into_iter()
+        .map(|pull| {
+            let number = python_int(
+                pull.get("number")
+                    .ok_or_else(|| GitHubError("'number'".into()))?,
+            )?;
+            Ok(serde_json::json!({
+                "number": number,
+                "url": pull.get("html_url").cloned().unwrap_or(Value::Null),
+                "node_id": pull.get("node_id").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect()
+}
+
+/// Queue a pull request for auto-merge, using GitHub's GraphQL mutation.
+pub async fn enable_auto_merge(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+    method: Option<&str>,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, pull) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(pull)?;
+    let node_id = pull
+        .get("node_id")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .ok_or_else(|| {
+            GitHubError(format!(
+                "{repo}#{number}: no node id for the auto-merge mutation"
+            ))
+        })?;
+    let method = method.unwrap_or("MERGE").to_uppercase();
+    let variables = serde_json::json!({"id":node_id,"method":method});
+    let result = graphql(
+        transport,
+        api_root,
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }",
+        token,
+        Some(&variables),
+    )
+    .await?;
+    Ok(result
+        .get("enablePullRequestAutoMerge")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+/// Disable a pull request's queued auto-merge through GitHub GraphQL.
+pub async fn disable_auto_merge(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, pull) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(pull)?;
+    let node_id = pull
+        .get("node_id")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .ok_or_else(|| {
+            GitHubError(format!(
+                "{repo}#{number}: no node id for the auto-merge mutation"
+            ))
+        })?;
+    let variables = serde_json::json!({"id":node_id});
+    graphql(
+        transport,
+        api_root,
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }",
+        token,
+        Some(&variables),
+    )
+    .await
+}
+
+/// Read a pull request's state fields and normalize its Python truth values.
+pub async fn pull_state(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, response) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(response)?;
+    Ok(serde_json::json!({
+        "state": pull.get("state").cloned().unwrap_or(Value::Null),
+        "merged": pull.get("merged").is_some_and(python_truthy),
+        "merged_at": pull.get("merged_at").cloned().unwrap_or(Value::Null),
+        "mergeable_state": pull.get("mergeable_state").cloned().unwrap_or(Value::Null),
+        "auto_merge": pull.get("auto_merge").is_some_and(python_truthy),
+    }))
+}
+
+/// Build GitHub's branch-protection request body for the review app check.
+pub fn protection_payload(
+    approvals: &Value,
+    reviewer_app_id: &Value,
+    bypass_app_slug: Option<&str>,
+) -> Result<Value, GitHubError> {
+    let approvals = python_int(approvals)?;
+    let reviewer_app_id = python_int(reviewer_app_id)?;
+    let mut reviews = serde_json::json!({
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": false,
+        "required_approving_review_count": approvals,
+    });
+    if let Some(slug) = bypass_app_slug.filter(|value| !value.is_empty()) {
+        reviews["bypass_pull_request_allowances"] = serde_json::json!({"apps":[slug]});
+    }
+    Ok(serde_json::json!({
+        "required_status_checks": {
+            "strict": false,
+            "checks": [{"context": REVIEW_CONTEXT, "app_id": reviewer_app_id}],
+        },
+        "enforce_admins": true,
+        "required_pull_request_reviews": reviews,
+        "restrictions": null,
+        "allow_force_pushes": false,
+        "allow_deletions": false,
+        "required_linear_history": false,
+    }))
+}
+
+/// Resolve the required distinct reviewer lanes, using the optional JSON config
+/// when supplied and `github-repos.json` otherwise.
+pub fn required_verdicts(repo: &str, config: Option<&Value>) -> Result<usize, GitHubError> {
+    required_verdicts_with_fs(repo, config, &default_config_dir(), &OsAppFileSystem)
+}
+
+fn required_verdicts_with_fs(
+    repo: &str,
+    config: Option<&Value>,
+    config_dir: &Path,
+    file_system: &dyn AppFileSystem,
+) -> Result<usize, GitHubError> {
+    let config = config
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            file_system
+                .read_config(&config_dir.join("github-repos.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+        });
+    let table = config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("required_verdicts"))
+        .filter(|value| python_truthy(value));
+    let fallback = if repo == "huntergdavis/poolrad-decomp" {
+        POOLRAD_REQUIRED_VERDICTS
+    } else {
+        DEFAULT_REQUIRED_VERDICTS
+    };
+    let fallback_value = Value::from(fallback as i64);
+    let configured = match table {
+        None => &fallback_value,
+        Some(Value::Object(values)) => values.get(repo).unwrap_or(&fallback_value),
+        Some(other) => {
+            return Err(GitHubError(format!(
+                "'{}' object has no attribute 'get'",
+                python_type_name(other)
+            )));
+        }
+    };
+    let value = python_int(configured).unwrap_or(DEFAULT_REQUIRED_VERDICTS as i64);
+    Ok(value.max(1) as usize)
+}
+
+fn default_config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("DUNKINGSHEEP_DIR") {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/dunkingsheep")
 }
 
 pub async fn pull_detail(
