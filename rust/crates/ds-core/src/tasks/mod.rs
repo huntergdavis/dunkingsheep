@@ -3547,7 +3547,7 @@ mod tests {
         assert!(validate_kind("x")
             .unwrap_err()
             .to_string()
-            .contains("kind must be one of work, review, verify, report; got \"x\""));
+            .contains("kind must be one of work, review, verify, report; got 'x'"));
         assert_eq!(validate_verdict("ACCEPT").unwrap(), "accept");
         assert!(validate_verdict("maybe").is_err());
     }
