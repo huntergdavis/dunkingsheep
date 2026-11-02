@@ -1992,6 +1992,56 @@ fn consumed_receipt_is_not_published_when_candidate_save_fails() {
 }
 
 #[test]
+fn missing_recovery_detail_leaves_receipt_pending() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    recovery_candidate(&flock, "m7", 7.0, vec![inbox_id.clone()]);
+    {
+        let mut candidates = flock.stuck_candidates.lock().unwrap();
+        let candidate = candidates.get_mut("%1").unwrap();
+        candidate.recovery_outcome = Some("consumed".into());
+        candidate.recovery_detail = None;
+        candidate.status = "consumed".into();
+        candidate.eligible = false;
+    }
+    let entry = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+
+    flock.publish_stuck_receipt("%1", &entry);
+
+    let state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&inbox_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(None, state);
+    assert_eq!(
+        None,
+        flock.stuck_candidates.lock().unwrap()["%1"].receipts_reconciled
+    );
+}
+
+#[test]
 fn partial_receipt_failure_stays_pending_and_retry_completes_without_new_recovery() {
     use crate::flock::panes::Stores;
     use crate::inbox_store::{Outgoing, Store};

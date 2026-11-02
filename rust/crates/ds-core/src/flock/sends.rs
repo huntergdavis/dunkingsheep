@@ -1735,10 +1735,11 @@ impl Flock {
             tracing::warn!(pane_id, message_id = %entry.message_id, "inbox store unavailable; recovered receipts remain pending");
             return;
         }
-        let reason = format!(
-            "recovered: {}",
-            entry.recovery_detail.as_deref().unwrap_or("")
-        );
+        let Some(detail) = entry.recovery_detail.as_deref() else {
+            tracing::warn!(pane_id, message_id = %entry.message_id, "recovery detail missing; recovered receipt remains pending");
+            return;
+        };
+        let reason = format!("recovered: {detail}");
         if let Some(inbox) = stores.inbox.as_ref() {
             for inbox_id in &entry.notify_for {
                 if let Err(error) = inbox.record_notify(inbox_id, "sent", Some(&reason), None, None)
