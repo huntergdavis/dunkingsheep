@@ -950,8 +950,16 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
 }
 
 fn pane_api_env() -> PaneApiEnv {
+    pane_api_env_with_screen(None)
+}
+
+fn pane_api_env_with_screen(screen: Option<&str>) -> PaneApiEnv {
+    let mut terminal = FakeTerminal::default();
+    if let Some(screen) = screen {
+        terminal.screens.insert("w1:p1".into(), screen.into());
+    }
     PaneApiEnv {
-        terminal: Mutex::new(Box::new(FakeTerminal::default())),
+        terminal: Mutex::new(Box::new(terminal)),
         panes: vec![json!({
             "pane_id": "w1:p1",
             "terminal_id": "w1:p1",
@@ -1039,6 +1047,28 @@ fn h_read_pane_matches_python() {
             "text": "",
         })
     );
+}
+
+#[test]
+fn h_read_pane_normalizes_negative_line_counts() {
+    let env = pane_api_env_with_screen(Some("one\ntwo\nthree"));
+    let result = pane_api_dispatch(
+        "read_pane",
+        json!({"target":"self", "lines":-2}),
+        &env,
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(result["text"], "two\nthree");
+
+    let minimum = pane_api_dispatch(
+        "read_pane",
+        json!({"target":"self", "lines":i64::MIN}),
+        &env,
+        Some("w1:p1"),
+    )
+    .unwrap();
+    assert_eq!(minimum["text"], "one\ntwo\nthree");
 }
 
 #[test]

@@ -452,7 +452,7 @@ pub fn h_read_pane(context: &HandlerContext<'_>, args: Args) -> Result<Value, Du
         .get("target")
         .and_then(Value::as_str)
         .ok_or_else(|| DunkError::Refused("target is required".into()))?;
-    let lines = python_read_pane_lines(&args)?;
+    let lines = python_read_pane_lines(&args)?.saturating_abs();
     let panes = context.env.list_panes_grouped();
     let hint = context
         .env
