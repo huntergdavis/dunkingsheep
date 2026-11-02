@@ -204,10 +204,9 @@ pub fn post_owner(
     ];
     let output = process.run(command.as_os_str(), &args, body, OWNER_POST_TIMEOUT)?;
     if !output.success {
-        return Err(format!(
-            "vpctl exited unsuccessfully (stdout: {:?}; stderr: {:?})",
-            output.stdout, output.stderr
-        ));
+        // Keep captured output inside the process boundary. Like Python's notify wrapper,
+        // the durable sink result exposes the exception class, never arbitrary child text.
+        return Err("CalledProcessError".into());
     }
     Ok(SinkDelivery::Delivered)
 }
@@ -685,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_post_propagates_timeout_and_nonzero_process_output() {
+    fn owner_post_redacts_nonzero_process_output_and_reports_timeout() {
         let directory = tempfile::tempdir().unwrap();
         let command = directory.path().join("vpctl");
         let config = OwnerPostConfig {
@@ -709,8 +708,24 @@ mod tests {
             ..Default::default()
         };
         let error = post_owner("body", &config, &mut failed).unwrap_err();
-        assert!(error.contains("out"));
-        assert!(error.contains("denied"));
+        assert_eq!("CalledProcessError", error);
+        assert!(!error.contains("out"));
+        assert!(!error.contains("denied"));
+
+        let (_alerts_dir, alerts_db) = path();
+        let mut owner = |body: &str| post_owner(body, &config, &mut failed);
+        let mut vp = successful_sink;
+        let report = notify(
+            "%2",
+            Some("g-redacted"),
+            Some("question"),
+            &mut owner,
+            &mut vp,
+            Some(&alerts_db),
+            Some(100.0),
+        )
+        .unwrap();
+        assert_eq!("CalledProcessError", report[0].error.as_deref().unwrap());
     }
 
     #[cfg(unix)]
