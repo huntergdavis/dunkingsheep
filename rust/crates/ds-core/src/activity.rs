@@ -84,7 +84,11 @@ pub fn turn_state(
             return (None, None, Some(format!(
                 "no activity source: no {harness} turn has ever been recorded for this pane (extension not loaded, or the lane has not taken a turn since it started)")))
         }
-        Some(state) if state.is_empty() => {
+        Some(Turn {
+            started_at: None,
+            expires_at: None,
+            ended_at: None,
+        }) => {
             return (None, None, Some(format!(
                 "no activity source: no {harness} turn has ever been recorded for this pane (extension not loaded, or the lane has not taken a turn since it started)")))
         }

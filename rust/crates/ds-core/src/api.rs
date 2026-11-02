@@ -165,7 +165,7 @@ fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map_or(true, |f| f != 0.0),
+        Value::Number(n) => n.as_f64().is_none_or(|f| f != 0.0),
         Value::String(s) => !s.is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
