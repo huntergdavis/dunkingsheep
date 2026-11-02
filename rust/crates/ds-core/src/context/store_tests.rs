@@ -665,9 +665,47 @@ fn bootstrap_trusts_everything_until_adopt() {
         store.verified(&entry, &mut ledger),
         "bootstrap: no rows yet"
     );
-    assert_eq!(vec!["old".to_string()], store.adopt(&mut ledger, "adopt"));
+    assert_eq!(
+        vec!["old".to_string()],
+        store.adopt(&mut ledger, "adopt").unwrap()
+    );
     assert_eq!(1, ledger.count().unwrap());
     assert!(store.verified(&entry, &mut ledger));
+}
+
+#[test]
+fn adopt_propagates_ledger_record_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let store = Store::new(Some(&root), false);
+    store.ensure().unwrap();
+    let entry = root.join("fact").join("fixture.md");
+    std::fs::write(&entry, render(&front(&[]), "Fixture body.")).unwrap();
+    let ledger_path = dir.path().join("ledger-is-a-directory");
+    std::fs::create_dir(&ledger_path).unwrap();
+    let mut ledger = Ledger::new(Some(&ledger_path));
+
+    let error = store.adopt(&mut ledger, "adopt").unwrap_err();
+    assert!(!error.to_string().is_empty());
+    assert!(ledger_path.is_dir());
+}
+
+#[test]
+fn adopt_propagates_entry_read_failure() {
+    let (_dir, store) = store();
+    store.ensure().unwrap();
+    let entry_path = store.root.join("fact").join("gone.md");
+    std::fs::write(&entry_path, render(&front(&[]), "Fixture body.")).unwrap();
+    let entries = store.live_entries();
+    assert_eq!(1, entries.len());
+    std::fs::remove_file(&entry_path).unwrap();
+    let mut ledger = Ledger::new(Some(&store.root.join("ledger.db")));
+
+    let error = store
+        .adopt_entries(entries, &mut ledger, "adopt")
+        .unwrap_err();
+    assert!(error.to_string().contains("gone.md"));
+    assert_eq!(0, ledger.count().unwrap());
 }
 
 #[test]

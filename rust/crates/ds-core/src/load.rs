@@ -37,7 +37,7 @@ pub type Evaluate<'a> = &'a dyn Fn(&Object, &Object) -> Result<Vec<Value>, Strin
 /// sits behind a nix feature this crate does not enable and a Cargo change is outside this task.
 fn auxv(key: u64) -> Option<f64> {
     let bytes = fs::read("/proc/self/auxv").ok()?;
-    bytes.chunks_exact(16).find_map(|entry| {
+    bytes.as_chunks::<16>().0.iter().find_map(|entry| {
         let (k, v) = entry.split_at(8);
         let k = u64::from_ne_bytes(k.try_into().ok()?);
         let v = u64::from_ne_bytes(v.try_into().ok()?);

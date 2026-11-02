@@ -6,6 +6,8 @@
 
 mod delivery;
 mod inbox;
+mod inbox_metrics;
+mod inbox_stores;
 mod status;
 mod submit;
 
@@ -37,6 +39,7 @@ pub(crate) struct RequestRuntimeAdapter<'a> {
     terminal: TerminalCallAdapter<'a>,
     request: &'a RequestCtx,
     runtime: &'a Handle,
+    inbox: Option<Arc<crate::inbox_store::Store>>,
 }
 
 /// Terminal access shared by the request and loop adapters. A lock is held only while a
@@ -63,6 +66,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
         runtime: &'a Handle,
         terminal: &'a Mutex<Box<dyn Terminal>>,
     ) -> Self {
+        let inbox = flock.stores().inbox;
         Self {
             terminal: TerminalCallAdapter {
                 flock,
@@ -71,6 +75,7 @@ impl<'a> RequestRuntimeAdapter<'a> {
             },
             request,
             runtime,
+            inbox,
         }
     }
 
