@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
 use crate::model::{RpcClient, TuiModel, View};
 
 /// The Python TUI uses a curses timeout of 200 ms between redraws.
@@ -13,11 +15,11 @@ pub trait TuiLoopIo<C: RpcClient> {
 
     fn now(&self) -> f64;
     fn draw(&mut self, model: &TuiModel<C>, now: f64) -> Result<(), Self::Error>;
-    fn read_key(&mut self, timeout: Duration) -> Result<Option<char>, Self::Error>;
+    fn read_key(&mut self, timeout: Duration) -> Result<Option<KeyEvent>, Self::Error>;
 
     /// Forward keys not consumed by the event loop to the command adapter.
     /// Every adapter must define this behavior; silently dropping commands is invalid.
-    fn handle_key(&mut self, model: &mut TuiModel<C>, key: char) -> Result<(), Self::Error>;
+    fn handle_key(&mut self, model: &mut TuiModel<C>, key: KeyEvent) -> Result<(), Self::Error>;
 
     /// Re-establish the daemon connection after the model's retry threshold.
     fn reconnect(&mut self, _model: &mut TuiModel<C>, _now: f64) {}
@@ -48,17 +50,18 @@ where
         let now = io.now();
         io.draw(model, now)?;
         let key = io.read_key(REFRESH_INTERVAL)?;
-        let quit = matches!(key, Some('q' | '\x1b' | 'Q'));
-        if key == Some('Q') {
+        let control = key.and_then(control_key);
+        let quit = matches!(control, Some('q' | '\x1b' | 'Q'));
+        if control == Some('Q') {
             model.quit_and_shutdown(now);
         }
-        if key == Some('v') {
+        if control == Some('v') {
             model.view = match model.view {
                 View::Dunks => View::Tasks,
                 View::Tasks => View::Dunks,
             };
         }
-        if let Some(key) = key.filter(|key| !matches!(key, 'q' | '\x1b' | 'Q' | 'v')) {
+        if let Some(key) = key.filter(|_| control.is_none()) {
             io.handle_key(model, key)?;
         }
 
@@ -72,6 +75,23 @@ where
     }
 }
 
+fn control_key(key: KeyEvent) -> Option<char> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let plain_or_shift = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    if !plain_or_shift {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('q') => Some('q'),
+        KeyCode::Esc => Some('\x1b'),
+        KeyCode::Char('Q') => Some('Q'),
+        KeyCode::Char('v') if key.modifiers.is_empty() => Some('v'),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -82,6 +102,7 @@ mod tests {
 
     use super::*;
     use crate::model::{ClientMode, RpcError};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[derive(Default)]
     struct FakeClient {
@@ -112,12 +133,13 @@ mod tests {
     }
 
     struct FakeIo {
-        keys: VecDeque<Option<char>>,
+        keys: VecDeque<Option<KeyEvent>>,
         now: f64,
         draws: usize,
         timeouts: Vec<Duration>,
         reconnects: usize,
-        handled_keys: Vec<char>,
+        handled_keys: Vec<KeyEvent>,
+        fail_handler: bool,
     }
 
     impl TuiLoopIo<FakeClient> for FakeIo {
@@ -132,16 +154,19 @@ mod tests {
             Ok(())
         }
 
-        fn read_key(&mut self, timeout: Duration) -> Result<Option<char>, Self::Error> {
+        fn read_key(&mut self, timeout: Duration) -> Result<Option<KeyEvent>, Self::Error> {
             self.timeouts.push(timeout);
-            Ok(self.keys.pop_front().unwrap_or(Some('q')))
+            Ok(self.keys.pop_front().unwrap_or(Some(key('q'))))
         }
 
         fn handle_key(
             &mut self,
             _: &mut TuiModel<FakeClient>,
-            key: char,
+            key: KeyEvent,
         ) -> Result<(), Self::Error> {
+            if self.fail_handler {
+                return Err("handler failed");
+            }
             self.handled_keys.push(key);
             Ok(())
         }
@@ -151,7 +176,20 @@ mod tests {
         }
     }
 
+    fn key(ch: char) -> KeyEvent {
+        let code = if ch == '\x1b' {
+            KeyCode::Esc
+        } else {
+            KeyCode::Char(ch)
+        };
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     fn io(keys: impl IntoIterator<Item = Option<char>>) -> FakeIo {
+        io_events(keys.into_iter().map(|ch| ch.map(key)))
+    }
+
+    fn io_events(keys: impl IntoIterator<Item = Option<KeyEvent>>) -> FakeIo {
         FakeIo {
             keys: keys.into_iter().collect(),
             now: 10.0,
@@ -159,6 +197,7 @@ mod tests {
             timeouts: Vec::new(),
             reconnects: 0,
             handled_keys: Vec::new(),
+            fail_handler: false,
         }
     }
 
@@ -185,8 +224,32 @@ mod tests {
 
         run(&mut model, &mut io).unwrap();
 
-        assert_eq!(io.handled_keys, vec!['a']);
+        assert_eq!(io.handled_keys, vec![key('a')]);
         assert_eq!(model.view, View::Tasks);
+    }
+
+    #[test]
+    fn run_forwards_arrows_and_modifiers_unchanged() {
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
+        let control_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let control_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        let q_release = KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        let mut model = TuiModel::connected(FakeClient::default(), 0.0);
+        let mut io = io_events([
+            Some(left),
+            Some(control_x),
+            Some(control_q),
+            Some(q_release),
+            Some(key('q')),
+        ]);
+
+        run(&mut model, &mut io).unwrap();
+
+        assert_eq!(io.handled_keys, vec![left, control_x, control_q, q_release]);
     }
 
     #[test]
@@ -296,18 +359,17 @@ mod tests {
                 0.0
             }
             fn draw(&mut self, _: &TuiModel<FakeClient>, _: f64) -> Result<(), Self::Error> {
-                Err("terminal failed")
+                Ok(())
             }
-            fn read_key(&mut self, _: Duration) -> Result<Option<char>, Self::Error> {
-                Ok(None)
+            fn read_key(&mut self, _: Duration) -> Result<Option<KeyEvent>, Self::Error> {
+                Err("input failed")
             }
             fn handle_key(
                 &mut self,
                 _: &mut TuiModel<FakeClient>,
-                _: char,
+                _: KeyEvent,
             ) -> Result<(), Self::Error> {
-                // This explicit no-op is unreachable because draw fails first.
-                Ok(())
+                unreachable!("input failure returns before the handler")
             }
         }
 
@@ -315,7 +377,19 @@ mod tests {
         let close_count = client.close_count.clone();
         let mut model = TuiModel::local_fallback(client, 0.0, "socket missing");
 
-        assert_eq!(run(&mut model, &mut FailingIo), Err("terminal failed"));
+        assert_eq!(run(&mut model, &mut FailingIo), Err("input failed"));
+        assert_eq!(close_count.get(), 1);
+    }
+
+    #[test]
+    fn run_closes_local_client_when_key_handler_fails() {
+        let client = FakeClient::default();
+        let close_count = client.close_count.clone();
+        let mut model = TuiModel::local_fallback(client, 0.0, "socket missing");
+        let mut io = io([Some('a')]);
+        io.fail_handler = true;
+
+        assert_eq!(run(&mut model, &mut io), Err("handler failed"));
         assert_eq!(close_count.get(), 1);
     }
 }
