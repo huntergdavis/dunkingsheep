@@ -15,7 +15,7 @@
 //! unknowable composer boundary.
 
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
 use super::commands_inbox::NOTICE_PREFIX;
@@ -895,10 +895,75 @@ pub fn send_submit_key(
 
 /// The four outcomes a caller can act on, as one machine-readable field (`Message.OUTCOMES`).
 pub const OUTCOMES: [&str; 5] = ["ok", "stored", "queued", "unconfirmed", "refused"];
+const MESSAGE_HISTORY: usize = 50;
+const DECIDED_KEPT: usize = 500;
 
-/// `Message`: one direct message waiting in (or delivered from) a pane's outbox. The `deliver`
-/// callable and `done` event are the outbox task's business (next slice); this is the state and
-/// its wire form.
+#[derive(Debug, Default)]
+struct CompletionState {
+    started: bool,
+    settled: bool,
+}
+
+/// The transient equivalent of Python's `threading.Event` on a message.
+#[derive(Debug, Default)]
+pub struct CompletionWaiter {
+    state: Mutex<CompletionState>,
+    changed: Condvar,
+}
+
+impl CompletionWaiter {
+    fn begin(&self) -> bool {
+        let mut state = lock_unpoison(&self.state);
+        if state.started {
+            return false;
+        }
+        state.started = true;
+        true
+    }
+
+    fn settle(&self) {
+        let mut state = lock_unpoison(&self.state);
+        if !state.settled {
+            state.settled = true;
+            self.changed.notify_all();
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        lock_unpoison(&self.state).settled
+    }
+
+    pub fn wait(&self) {
+        let mut state = lock_unpoison(&self.state);
+        while !state.settled {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+impl PartialEq for CompletionWaiter {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_set() == other.is_set()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecidedTombstone {
+    pub status: String,
+    pub created_at: f64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DecidedMessages {
+    pub by_id: BTreeMap<String, DecidedTombstone>,
+    order: VecDeque<String>,
+}
+
+/// `Message`: one direct message waiting in (or delivered from) a pane's outbox. The completion
+/// waiter is transient; the `deliver` callable belongs to the outbox worker slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -926,6 +991,8 @@ pub struct Message {
     pub hold_signature: Option<String>,
     pub created_at: f64,
     pub finished_at: Option<f64>,
+    /// Completion event shared by clones and deliberately omitted from the wire form.
+    pub done: Arc<CompletionWaiter>,
 }
 
 impl Message {
@@ -950,6 +1017,7 @@ impl Message {
             hold_signature: None,
             created_at: clock::now_s(),
             finished_at: None,
+            done: Arc::new(CompletionWaiter::default()),
         }
     }
 
@@ -1115,13 +1183,118 @@ fn outbox_lock(
 }
 
 impl Flock {
+    /// `_record_delivery_outcome`: record terminal metrics/receipts once and always release
+    /// the message waiter. Store failures are best-effort bookkeeping, never worker failures.
+    pub(crate) fn record_delivery_outcome(
+        &self,
+        message: &Message,
+        ok: bool,
+        detail: Option<&str>,
+        outcome: &str,
+        metric: Option<&str>,
+    ) {
+        if !message.done.begin() {
+            return;
+        }
+
+        let stores = self.stores();
+        if let (Some(kind), Some(metrics)) = (metric, stores.metrics.as_ref()) {
+            let finished_at = message
+                .finished_at
+                .filter(|finished_at| *finished_at != 0.0)
+                .unwrap_or_else(clock::now_s);
+            let duration_ms = ((finished_at - message.created_at) * 1000.0) as i64;
+            metrics.record(&crate::metrics::Event {
+                at: 0.0,
+                kind: if ok {
+                    kind.to_string()
+                } else {
+                    "message.failed".to_string()
+                },
+                pane_id: Some(message.pane_id.clone()),
+                mailbox: Some(message.target_label.clone()),
+                sender: None,
+                source: Some(message.source.clone()),
+                outcome: Some(outcome.to_string()),
+                reason: if ok {
+                    None
+                } else {
+                    Some(
+                        detail
+                            .filter(|detail| !detail.is_empty())
+                            .unwrap_or("unconfirmed")
+                            .to_string(),
+                    )
+                },
+                duration_ms: Some(duration_ms),
+                attempts: (message.holds != 0).then_some(message.holds),
+                bytes: Some(message.text.len() as i64),
+            });
+        }
+
+        if let Some(inbox) = stores.inbox.as_ref() {
+            for inbox_id in &message.notify_for {
+                let _ = inbox.record_notify(
+                    inbox_id,
+                    if ok { "sent" } else { "failed" },
+                    detail,
+                    None,
+                    None,
+                );
+            }
+        }
+
+        message.done.settle();
+    }
+
+    /// `_remember`: retain the decided message, its id-reuse-safe tombstone, and stuck intent.
+    /// Snapshot persistence belongs to the caller after this in-memory transition.
+    pub(crate) fn remember(&self, message: &Message) {
+        self.note_stuck_candidate(message);
+
+        let mut history = self
+            .message_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history.push_back(message.clone());
+        while history.len() > MESSAGE_HISTORY {
+            history.pop_front();
+        }
+        drop(history);
+
+        let mut decided = self
+            .decided
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let status = if message.status.is_empty() {
+            "unknown"
+        } else {
+            message.status.as_str()
+        };
+        let is_new = !decided.by_id.contains_key(&message.id);
+        decided.by_id.insert(
+            message.id.clone(),
+            DecidedTombstone {
+                status: status.to_string(),
+                created_at: message.created_at,
+            },
+        );
+        if is_new {
+            decided.order.push_back(message.id.clone());
+        }
+        while decided.order.len() > DECIDED_KEPT {
+            if let Some(oldest) = decided.order.pop_front() {
+                decided.by_id.remove(&oldest);
+            }
+        }
+    }
+
     /// Keep the pane's latest delivery intent for the stuck observer.
     ///
     /// Completion order is not intent order: a late outcome for an older message cannot
     /// replace a newer send, cancellation, or deliberate no-enter intent. Ineligible
     /// intents are retained as tombstones so that they still supersede older candidates.
     /// This only mutates in-memory state; snapshot persistence has a separate owner.
-    #[allow(dead_code)] // The outcome caller is a separate dependent T33 leaf.
     pub(crate) fn note_stuck_candidate(&self, message: &Message) {
         if message.pane_id.is_empty() {
             return;

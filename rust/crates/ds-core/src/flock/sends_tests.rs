@@ -1330,3 +1330,221 @@ mod owned_text_tests {
         assert!(second.eligible);
     }
 }
+
+#[test]
+fn record_delivery_outcome_records_metrics_receipts_and_waiters_once() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use crate::metrics::MetricsStore;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let notification_ids: Vec<_> = (0..3)
+        .map(|index| {
+            inbox
+                .send(&Outgoing {
+                    mailbox: "writer",
+                    body: Some(&format!("notice {index}")),
+                    ..Outgoing::default()
+                })
+                .unwrap()
+        })
+        .collect();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(
+            "CREATE TABLE notify_updates (count INTEGER NOT NULL);
+             INSERT INTO notify_updates VALUES (0);
+             CREATE TRIGGER count_notify_updates AFTER UPDATE OF notify_state ON messages
+             BEGIN UPDATE notify_updates SET count = count + 1; END;",
+        )
+        .unwrap();
+
+    let metrics = Arc::new(MetricsStore::open(":memory:").unwrap());
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        metrics: Some(metrics.clone()),
+        ..Stores::default()
+    });
+    let cases = [
+        (true, "ok", Some("message.sent"), None, "sent"),
+        (
+            false,
+            "failed",
+            Some("message.sent"),
+            Some("timeout"),
+            "failed",
+        ),
+        (
+            false,
+            "undeliverable",
+            None,
+            Some("undeliverable"),
+            "failed",
+        ),
+    ];
+
+    for (index, (ok, outcome, metric, detail, notify_state)) in cases.into_iter().enumerate() {
+        let mut message = Message::new(
+            &format!("m{}", index + 1),
+            "%1",
+            "writer mailbox",
+            "é",
+            "dunk-7",
+        );
+        message.created_at = 10.0;
+        message.finished_at = Some(15.5);
+        message.holds = 2;
+        message.notify_for.push(notification_ids[index].clone());
+        let cloned = message.clone();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| flock.record_delivery_outcome(&message, ok, detail, outcome, metric));
+            scope.spawn(|| flock.record_delivery_outcome(&cloned, ok, detail, outcome, metric));
+        });
+        message.done.wait();
+
+        let actual_state: Option<String> = observer
+            .query_row(
+                "SELECT notify_state FROM messages WHERE id = ?1",
+                [&notification_ids[index]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(Some(notify_state.to_string()), actual_state);
+    }
+
+    let update_count: i64 = observer
+        .query_row("SELECT count FROM notify_updates", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(3, update_count);
+
+    let events = metrics
+        .events_between(0.0, crate::clock::now_s() + 1.0)
+        .unwrap();
+    assert_eq!(2, events.len());
+    let sent = events
+        .iter()
+        .find(|event| event.outcome.as_deref() == Some("ok"))
+        .unwrap();
+    assert_eq!("message.sent", sent.kind);
+    assert_eq!(Some("%1".into()), sent.pane_id);
+    assert_eq!(Some("writer mailbox".into()), sent.mailbox);
+    assert_eq!(Some("dunk-7".into()), sent.source);
+    assert_eq!(None, sent.reason);
+    assert_eq!(Some(5_500), sent.duration_ms);
+    assert_eq!(Some(2), sent.attempts);
+    assert_eq!(Some(2), sent.bytes);
+    let failed = events
+        .iter()
+        .find(|event| event.outcome.as_deref() == Some("failed"))
+        .unwrap();
+    assert_eq!("message.failed", failed.kind);
+    assert_eq!(Some("timeout".into()), failed.reason);
+}
+
+#[test]
+fn record_delivery_outcome_ignores_receipt_errors_and_still_settles_waiter() {
+    use crate::flock::panes::Stores;
+    use crate::inbox_store::{Outgoing, Store};
+    use rusqlite::Connection;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_path = dir.path().join("inbox.db");
+    let inbox = Arc::new(Store::open(&inbox_path, dir.path().join("blobs")).unwrap());
+    let inbox_id = inbox
+        .send(&Outgoing {
+            mailbox: "writer",
+            body: Some("notice"),
+            ..Outgoing::default()
+        })
+        .unwrap();
+    let observer = Connection::open(&inbox_path).unwrap();
+    observer
+        .execute_batch(
+            "CREATE TRIGGER reject_notify BEFORE UPDATE OF notify_state ON messages
+             BEGIN SELECT RAISE(ABORT, 'store unavailable'); END;",
+        )
+        .unwrap();
+
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    flock.attach_stores(Stores {
+        inbox: Some(inbox),
+        ..Stores::default()
+    });
+    let mut message = Message::new("m1", "%1", "writer", "body", "direct");
+    message.notify_for.push(inbox_id);
+
+    flock.record_delivery_outcome(&message, false, Some("closed"), "undeliverable", None);
+    message.done.wait();
+
+    let actual_state: Option<String> = observer
+        .query_row(
+            "SELECT notify_state FROM messages WHERE id = ?1",
+            [&message.notify_for[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(None, actual_state);
+}
+
+#[test]
+fn remember_bounds_history_and_decided_tombstones_and_keeps_created_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+
+    for index in 0..501 {
+        let mut message = Message::new(
+            &format!("m{index}"),
+            &format!("%{index}"),
+            "writer",
+            "body",
+            "direct",
+        );
+        message.status = "sent".into();
+        message.press_enter = false;
+        message.created_at = index as f64;
+        flock.remember(&message);
+    }
+
+    let history = flock.message_history.lock().unwrap();
+    assert_eq!(50, history.len());
+    assert_eq!("m451", history.front().unwrap().id);
+    assert_eq!("m500", history.back().unwrap().id);
+    drop(history);
+
+    let mut decided = flock.decided.lock().unwrap();
+    assert_eq!(500, decided.by_id.len());
+    assert!(!decided.by_id.contains_key("m0"));
+    assert_eq!(500.0, decided.by_id["m500"].created_at);
+    drop(decided);
+
+    let candidates = flock.stuck_candidates.lock().unwrap();
+    assert_eq!(501, candidates.len());
+    assert!(candidates.values().all(|candidate| !candidate.eligible));
+}
+
+#[test]
+fn remember_refreshes_created_at_for_a_reused_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+    let mut first = Message::new("m1", "%1", "writer", "first", "direct");
+    first.status = "sent".into();
+    first.created_at = 10.0;
+    flock.remember(&first);
+
+    let mut reused = Message::new("m1", "%1", "writer", "reused", "direct");
+    reused.status = "failed".into();
+    reused.created_at = 20.0;
+    flock.remember(&reused);
+
+    let decided = flock.decided.lock().unwrap();
+    assert_eq!(1, decided.by_id.len());
+    assert_eq!("failed", decided.by_id["m1"].status);
+    assert_eq!(20.0, decided.by_id["m1"].created_at);
+}

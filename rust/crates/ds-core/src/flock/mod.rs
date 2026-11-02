@@ -10,7 +10,7 @@
 //! (Superusers, MemoryStore, NextJobs, Allocator, outbox/stuck state).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -88,6 +88,10 @@ pub struct Flock {
     /// pane_id -> the latest delivery intent used by the stuck observer.
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
+    /// Bounded recently decided messages, used by the message-list view.
+    pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
+    /// Bounded id-keyed tombstones preventing decided messages from being restored as queued.
+    pub(crate) decided: Mutex<sends::DecidedMessages>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.
     pub(crate) sent_text_by_pane: Mutex<BTreeMap<String, Vec<String>>>,
@@ -137,6 +141,8 @@ impl Flock {
             dunks: dunks::DunkList::new(),
             outbox: Mutex::new(BTreeMap::new()),
             stuck_candidates: Mutex::new(BTreeMap::new()),
+            message_history: Mutex::new(VecDeque::new()),
+            decided: Mutex::new(sends::DecidedMessages::default()),
             sent_text_by_pane: Mutex::new(BTreeMap::new()),
             next_message_id: AtomicU64::new(1),
             pane_send_locks: Mutex::new(BTreeMap::new()),
