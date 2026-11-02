@@ -22,6 +22,8 @@ const IDENTITIES: &str = "docs/re/reviewed_function_identities.csv";
 const TITLE_PREFIX: &str = "Poolrad strict C:";
 const METHOD_DOC: &str = "docs/re/STRICT_CANDIDATE_QUEUE.md";
 const FILED_KEY_PREFIX: &str = "poolrad-strict:";
+const EXPORTER_INLINE_IN_STRICT: &str = "inline_in_strict";
+const EXPORTER_MAIN_MODEL: &str = "main_model";
 const EXPORT_ARGS: &[&str] = &[
     "--inventory",
     "resources/function-accounting-current/inventory.json",
@@ -606,6 +608,103 @@ pub fn model_evidence(repo: impl AsRef<Path>, rid: &str) -> io::Result<Option<Va
     Ok(None)
 }
 
+/// Read the model-status ledger; missing or unreadable CSV data gives an empty map.
+pub fn model_statuses(repo: impl AsRef<Path>) -> HashMap<String, String> {
+    let Ok(contents) = fs::read_to_string(repo.as_ref().join("docs/re/partial_callee_models.csv"))
+    else {
+        return HashMap::new();
+    };
+    let mut rows = csv_records(&contents).into_iter();
+    let Some(header) = rows.next() else {
+        return HashMap::new();
+    };
+    let id_column = header.iter().position(|column| column == "id");
+    let status_column = header.iter().position(|column| column == "status");
+    let mut statuses = HashMap::new();
+    for row in rows {
+        let Some(id) = id_column.and_then(|column| row.get(column)) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let status = status_column
+            .and_then(|column| row.get(column))
+            .map_or_else(String::new, |status| status.trim().to_lowercase());
+        statuses.insert(id.trim().to_owned(), status);
+    }
+    statuses
+}
+
+/// Whether the repository records enough evidence to call a model credit-ready.
+pub fn credit_ready(
+    repo: impl AsRef<Path>,
+    rid: &str,
+    checkers: Option<&HashMap<String, String>>,
+    statuses: Option<&HashMap<String, String>>,
+) -> (bool, Option<String>) {
+    let checkers = checkers
+        .cloned()
+        .unwrap_or_else(|| registered_checker_ids(repo.as_ref()));
+    let statuses = statuses.cloned().unwrap_or_else(|| model_statuses(repo));
+    if !checkers.contains_key(rid) {
+        return (false, Some("no registered checker".to_owned()));
+    }
+    if let Some(status) = statuses
+        .get(rid)
+        .filter(|status| !status.is_empty() && status != "full")
+    {
+        return (
+            false,
+            Some(format!(
+                "model status {status} in docs/re/partial_callee_models.csv"
+            )),
+        );
+    }
+    (true, None)
+}
+
+/// Find a registered checker and a recovered filename carrying this row's unit
+/// and offset as separate underscore-delimited segments.
+pub fn already_on_main(
+    repo: impl AsRef<Path>,
+    rid: &str,
+    checkers: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    let repo = repo.as_ref();
+    let checkers = checkers
+        .cloned()
+        .unwrap_or_else(|| registered_checker_ids(repo));
+    let checker = checkers.get(rid).filter(|checker| !checker.is_empty())?;
+    let tokens = _unit_tokens(rid);
+    let parts: Vec<&str> = rid.split('_').collect();
+    let offset = parts.get(2).copied().unwrap_or_default().to_lowercase();
+    let unit_shapes: HashSet<String> = tokens
+        .into_iter()
+        .filter(|token| token != &offset)
+        .collect();
+    let src = repo.join("src/recovered");
+    let Ok(entries) = fs::read_dir(src) else {
+        return None;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !name.ends_with(".c") {
+            continue;
+        }
+        let segments: HashSet<&str> = name.split('_').collect();
+        if !offset.is_empty()
+            && segments.contains(offset.as_str())
+            && unit_shapes
+                .iter()
+                .any(|unit| segments.contains(unit.as_str()))
+        {
+            return Some(format!("already on main ({checker} audits {name})"));
+        }
+    }
+    None
+}
+
 /// Resolve the credit-pending file, using the configured Dunking Sheep state dir.
 pub fn credit_pending_path(path: Option<&Path>) -> PathBuf {
     if let Some(path) = path {
@@ -708,6 +807,343 @@ fn json_timestamp() -> Value {
         .unwrap_or_default()
         .as_secs_f64();
     Value::from((seconds * 1000.0).round_ties_even() / 1000.0)
+}
+
+/// Minimal task-store seam used by the local Poolrad sync port. Production
+/// Flock wiring is intentionally left to the separate runtime integration.
+pub trait PoolradTaskStore {
+    fn list(
+        &self,
+        scope: Option<&str>,
+        include_done: bool,
+        limit: usize,
+        kind: &str,
+    ) -> Result<Vec<Value>, String>;
+
+    fn add(
+        &self,
+        scope: &str,
+        title: &str,
+        body: &str,
+        priority: &str,
+        kind: &str,
+        created_by: &str,
+    ) -> Result<Value, String>;
+}
+
+/// Injectable port of Python `Sync`. Its default exporter is the local,
+/// read-only candidate exporter; stores and exporters can be faked in tests.
+pub struct PoolradSync<'a> {
+    store: &'a dyn PoolradTaskStore,
+    repo: PathBuf,
+    exporter: Option<&'a dyn Fn(&Path) -> Result<Value, String>>,
+    credit_path: Option<PathBuf>,
+}
+
+impl<'a> PoolradSync<'a> {
+    pub fn new(store: &'a dyn PoolradTaskStore) -> Self {
+        let repo = std::env::var_os("DUNKINGSHEEP_POOLRAD_REPO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/home/hunter/workspace/poolrad-decomp"));
+        Self {
+            store,
+            repo,
+            exporter: None,
+            credit_path: None,
+        }
+    }
+
+    pub fn with_repo(mut self, repo: impl AsRef<Path>) -> Self {
+        self.repo = repo.as_ref().to_owned();
+        self
+    }
+
+    pub fn with_exporter(mut self, exporter: &'a dyn Fn(&Path) -> Result<Value, String>) -> Self {
+        self.exporter = Some(exporter);
+        self
+    }
+
+    pub fn with_credit_path(mut self, path: impl AsRef<Path>) -> Self {
+        self.credit_path = Some(path.as_ref().to_owned());
+        self
+    }
+
+    /// Run with the Python defaults: limit six, real filing, medium priority.
+    pub fn run(&self) -> Result<Value, String> {
+        self.run_with(6, false, "medium")
+    }
+
+    pub fn run_with(&self, limit: usize, dry_run: bool, priority: &str) -> Result<Value, String> {
+        let mut errors = Vec::new();
+        let mut report = serde_json::json!({
+            "repo": self.repo.to_string_lossy(),
+            "base": Value::Null,
+            "filed": [],
+            "skipped": Value::Null,
+            "errors": []
+        });
+        let queue = match self.export_queue() {
+            Ok(queue) => queue,
+            Err(error) => {
+                errors.push(error);
+                report["errors"] = Value::Array(errors.into_iter().map(Value::String).collect());
+                return Ok(report);
+            }
+        };
+        let base = git(&self.repo, &["rev-parse", "HEAD"]).map_err(|error| error.to_string())?;
+        report["base"] = Value::String(base.clone());
+        let credited = credited_ids(&self.repo);
+        let everything = self.store.list(None, true, 2000, "work")?;
+        let filed_keys = filed_keys_from_tasks(&everything);
+        let filed: HashSet<String> = filed_keys.keys().cloned().collect();
+
+        let mut closed = HashMap::new();
+        for (rid, where_closed) in disposition_closures(&self.repo) {
+            closed.insert(rid, format!("closed by {where_closed}"));
+        }
+        let checkers = registered_checker_ids(&self.repo);
+        let rows = queue
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut credit = Map::new();
+        let mut not_ready = Map::new();
+        let mut body_on_main = Map::new();
+        for row in &rows {
+            let Some(rid) = row.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if rid.is_empty() {
+                continue;
+            }
+            if !credited.contains(rid) {
+                if let Some(evidence) =
+                    model_evidence(&self.repo, rid).map_err(|error| error.to_string())?
+                {
+                    let (ready, why_not) = credit_ready(&self.repo, rid, Some(&checkers), None);
+                    if ready {
+                        credit.insert(rid.to_owned(), evidence);
+                        closed.insert(
+                            rid.to_owned(),
+                            format!(
+                                "model already on main ({}) and credit-ready; ledger credit pending, nothing to author",
+                                evidence["model"].as_str().unwrap_or_default()
+                            ),
+                        );
+                    } else {
+                        let mut evidence = evidence.as_object().cloned().unwrap_or_default();
+                        evidence.insert(
+                            "why_not".to_owned(),
+                            Value::String(why_not.unwrap_or_default()),
+                        );
+                        not_ready.insert(rid.to_owned(), Value::Object(evidence));
+                    }
+                }
+            }
+            if closed.contains_key(rid) {
+                continue;
+            }
+            let prior_translation = row
+                .get("prior_translation")
+                .filter(|value| python_truthy(value));
+            let prior_status = prior_translation
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str);
+            if prior_status == Some(EXPORTER_INLINE_IN_STRICT) {
+                closed.insert(
+                    rid.to_owned(),
+                    format!(
+                        "exporter says {EXPORTER_INLINE_IN_STRICT}: the body is inline in a model that already carries strict credit, so there is nothing to author"
+                    ),
+                );
+                continue;
+            }
+            if prior_status == Some(EXPORTER_MAIN_MODEL) {
+                let why_not = not_ready
+                    .get(rid)
+                    .and_then(|value| value.get("why_not"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("exporter says the model is on main; no registered checker");
+                let mut details = not_ready
+                    .get(rid)
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let model = prior_translation
+                            .and_then(|value| value.get("main_files"))
+                            .filter(|value| python_truthy(value))
+                            .cloned()
+                            .unwrap_or_else(|| Value::Array(Vec::new()));
+                        Map::from_iter([("model".to_owned(), model)])
+                    });
+                details.insert("why_not".to_owned(), Value::String(why_not.to_owned()));
+                body_on_main.insert(rid.to_owned(), Value::Object(details));
+                closed.insert(
+                    rid.to_owned(),
+                    format!(
+                        "exporter says {EXPORTER_MAIN_MODEL}: the body is on main and the credit is not ready ({why_not}) - the missing piece is the checker/evidence, not the body"
+                    ),
+                );
+                continue;
+            }
+            if not_ready.contains_key(rid) {
+                continue;
+            }
+            if let Some(reason) = already_on_main(&self.repo, rid, Some(&checkers)) {
+                closed.insert(rid.to_owned(), reason);
+            }
+        }
+
+        report["credit_pending"] = Value::Object(credit.clone());
+        report["models_not_credit_ready"] = Value::Object(not_ready.clone());
+        report["body_on_main"] = Value::Object(body_on_main);
+        if !credit.is_empty() && !dry_run {
+            let credit_path = self.credit_path.as_deref();
+            let written = record_credit_pending(&credit, credit_path)?;
+            report["credit_pending_file"] = if written.is_some() {
+                Value::String(
+                    credit_pending_path(credit_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                Value::Null
+            };
+        }
+
+        let picked = candidates(&queue, &credited, &filed, limit, Some(&closed));
+        let mut already_filed_tasks = Map::new();
+        let mut filed_rows: Vec<_> = filed_keys.iter().collect();
+        filed_rows.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (rid, (task_id, status)) in filed_rows {
+            already_filed_tasks.insert(
+                rid.clone(),
+                serde_json::json!({"task": task_id, "status": status}),
+            );
+        }
+        let mut closed_rows = Map::new();
+        let mut closed_keys: Vec<_> = closed.keys().collect();
+        closed_keys.sort();
+        for rid in closed_keys {
+            if let Some(reason) = closed.get(rid) {
+                closed_rows.insert(rid.clone(), Value::String(reason.clone()));
+            }
+        }
+        report["skipped"] = serde_json::json!({
+            "credited": credited.len(),
+            "already_filed": filed.len(),
+            "already_filed_tasks": already_filed_tasks,
+            "queue_rows": rows.len(),
+            "closed": closed_rows
+        });
+
+        let mut filed_report = Vec::new();
+        for row in picked {
+            let Some(rid) = row.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if dry_run {
+                filed_report.push(serde_json::json!({
+                    "id": rid,
+                    "rank": row.get("rank").cloned().unwrap_or(Value::Null),
+                    "dry": true
+                }));
+                continue;
+            }
+            let created = (|| {
+                let title = task_title(&row)?;
+                let body = task_body(&row, &base, &self.repo)?;
+                self.store
+                    .add("global", &title, &body, priority, "work", "backlog-sync")
+            })();
+            match created {
+                Ok(task) => {
+                    let Some(task_id) = task.get("id") else {
+                        errors.push(format!("{rid}: 'id'"));
+                        continue;
+                    };
+                    filed_report.push(serde_json::json!({
+                        "id": rid,
+                        "task": task_id,
+                        "rank": row.get("rank").cloned().unwrap_or(Value::Null)
+                    }));
+                }
+                Err(error) => errors.push(format!("{rid}: {error}")),
+            }
+        }
+        report["filed"] = Value::Array(filed_report);
+        report["errors"] = Value::Array(errors.into_iter().map(Value::String).collect());
+        Ok(report)
+    }
+
+    fn export_queue(&self) -> Result<Value, String> {
+        if let Some(exporter) = self.exporter {
+            return exporter(&self.repo);
+        }
+        let out = poolrad_queue_path();
+        export_queue(&self.repo, out, Duration::from_secs(300))
+    }
+}
+
+fn poolrad_queue_path() -> PathBuf {
+    let credit = credit_pending_path(None);
+    credit
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("strict-queue.json")
+}
+
+/// Lightweight Poolrad progress view matching `dunk_poolrad.progress`.
+pub fn progress(
+    repo: Option<&Path>,
+    queue_path: Option<&Path>,
+    credit_path: Option<&Path>,
+) -> Result<Value, String> {
+    let repo = repo
+        .map(Path::to_owned)
+        .or_else(|| std::env::var_os("DUNKINGSHEEP_POOLRAD_REPO").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/home/hunter/workspace/poolrad-decomp"));
+    let queue_path = queue_path
+        .map(Path::to_owned)
+        .unwrap_or_else(poolrad_queue_path);
+    let credited = credited_ids(&repo);
+    let mut summary = Value::Object(Map::new());
+    if let Ok(contents) = fs::read_to_string(&queue_path) {
+        if let Ok(value) = serde_json::from_str::<Value>(&contents) {
+            summary = value
+                .get("summary")
+                .filter(|value| python_truthy(value))
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+        }
+    }
+    let exported_at = if queue_path.exists() {
+        let modified = fs::metadata(&queue_path)
+            .and_then(|metadata| metadata.modified())
+            .map_err(|error| error.to_string())?;
+        let seconds = modified
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs_f64())
+            .unwrap_or_else(|error| -error.duration().as_secs_f64());
+        Value::from(seconds)
+    } else {
+        Value::Null
+    };
+    let main = git(&repo, &["rev-parse", "--short", "HEAD"]).map_err(|error| error.to_string())?;
+    Ok(serde_json::json!({
+        "credited": credited.len(),
+        "identities": identity_count(&repo),
+        "ceiling": 815,
+        "ceiling_note": "CEILING: 815 is an upper bound, not a verified denominator",
+        "composable_bodies": summary.get("composable_bodies").cloned().unwrap_or(Value::Null),
+        "queue_candidates": summary.get("candidates").cloned().unwrap_or(Value::Null),
+        "replaced": Value::Null,
+        "replaced_note": "replaced (bodies the game actually runs) is computed by the dashboard integration; not available here yet",
+        "main": main,
+        "queue_exported_at": exported_at,
+        "credit_pending": credit_pending(credit_path).len()
+    }))
 }
 
 fn required(row: &Value, key: &str) -> Result<String, String> {
@@ -840,6 +1276,82 @@ mod tests {
             );
         }
         commit
+    }
+
+    #[derive(Default)]
+    struct FakePoolradStore {
+        tasks: std::sync::Mutex<Vec<Value>>,
+        add_attempts: std::sync::atomic::AtomicUsize,
+        fail_on_attempt: std::sync::Mutex<Option<usize>>,
+    }
+
+    impl PoolradTaskStore for FakePoolradStore {
+        fn list(
+            &self,
+            scope: Option<&str>,
+            include_done: bool,
+            limit: usize,
+            kind: &str,
+        ) -> Result<Vec<Value>, String> {
+            assert_eq!(scope, None);
+            assert!(include_done);
+            assert_eq!(limit, 2000);
+            assert_eq!(kind, "work");
+            Ok(self.tasks.lock().unwrap().clone())
+        }
+
+        fn add(
+            &self,
+            scope: &str,
+            title: &str,
+            body: &str,
+            priority: &str,
+            kind: &str,
+            created_by: &str,
+        ) -> Result<Value, String> {
+            assert_eq!(scope, "global");
+            assert_eq!(kind, "work");
+            assert_eq!(created_by, "backlog-sync");
+            let attempt = self
+                .add_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if *self.fail_on_attempt.lock().unwrap() == Some(attempt) {
+                return Err("fixture task write failed".to_owned());
+            }
+            let mut tasks = self.tasks.lock().unwrap();
+            let id = format!("t{}", tasks.len() + 1);
+            let task = serde_json::json!({
+                "id": id,
+                "title": title,
+                "body": body,
+                "priority": priority,
+                "kind": kind,
+                "status": "open"
+            });
+            tasks.push(task.clone());
+            Ok(task)
+        }
+    }
+
+    fn poolrad_row(rid: &str, rank: i64, prior_translation: Value) -> Value {
+        serde_json::json!({
+            "id": rid,
+            "rank": rank,
+            "score": 50,
+            "bytes": 100,
+            "grade": "A",
+            "unit": 1,
+            "offset": 2,
+            "ovr_offset": 3,
+            "instructions": 40,
+            "behaviour": "leaf",
+            "classification": "game_evidenced",
+            "confidence": 0.9,
+            "aliases": ["0x1:0x2"],
+            "prior_translation": prior_translation,
+            "callee_readiness": {"composable": true, "ready": 2, "counts": {"strict": 2}}
+        })
     }
 
     #[test]
@@ -1166,5 +1678,342 @@ mod tests {
         assert!(record_credit_pending(&entries, Some(&directory_target))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn model_statuses_trim_ids_normalize_statuses_and_keep_last_duplicate() {
+        let repo = tempdir();
+        let path = repo.path().join("docs/re/partial_callee_models.csv");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "id,status,evidence_doc\r\nOVL_A, PARTIAL ,a.md\r\nOVL_B,CALLBACK,b.md\r\n  OVL_C  , FULL ,c.md\r\nOVL_A,FULL,last.md\r\n,partial,empty.md\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            model_statuses(repo.path()),
+            HashMap::from([
+                ("OVL_A".to_owned(), "full".to_owned()),
+                ("OVL_B".to_owned(), "callback".to_owned()),
+                ("OVL_C".to_owned(), "full".to_owned()),
+            ])
+        );
+        assert!(model_statuses(tempdir().unwrap().path()).is_empty());
+    }
+
+    #[test]
+    fn credit_ready_requires_checker_and_rejects_non_full_statuses() {
+        let repo = tempdir();
+        let checkers = HashMap::from([("full".to_owned(), "checker.py".to_owned())]);
+        let statuses = HashMap::from([
+            ("full".to_owned(), "full".to_owned()),
+            ("partial".to_owned(), "partial".to_owned()),
+            ("callback".to_owned(), "callback".to_owned()),
+        ]);
+        assert_eq!(
+            credit_ready(repo.path(), "missing", Some(&checkers), Some(&statuses)),
+            (false, Some("no registered checker".to_owned()))
+        );
+        assert_eq!(
+            credit_ready(repo.path(), "partial", Some(&checkers), Some(&statuses)),
+            (false, Some("no registered checker".to_owned()))
+        );
+        let checkers = HashMap::from([
+            ("full".to_owned(), "checker.py".to_owned()),
+            ("partial".to_owned(), "checker.py".to_owned()),
+            ("callback".to_owned(), "checker.py".to_owned()),
+            ("unknown".to_owned(), "checker.py".to_owned()),
+        ]);
+        assert_eq!(
+            credit_ready(repo.path(), "full", Some(&checkers), Some(&statuses)),
+            (true, None)
+        );
+        assert_eq!(
+            credit_ready(repo.path(), "partial", Some(&checkers), Some(&statuses)),
+            (
+                false,
+                Some("model status partial in docs/re/partial_callee_models.csv".to_owned())
+            )
+        );
+        assert_eq!(
+            credit_ready(repo.path(), "unknown", Some(&checkers), Some(&statuses)),
+            (true, None)
+        );
+        assert_eq!(
+            credit_ready(repo.path(), "callback", Some(&checkers), Some(&statuses)),
+            (
+                false,
+                Some("model status callback in docs/re/partial_callee_models.csv".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn already_on_main_requires_checker_and_separate_unit_offset_segments() {
+        let repo = tempdir();
+        let recovered = repo.path().join("src/recovered");
+        fs::create_dir_all(&recovered).unwrap();
+        fs::write(
+            recovered.join("overlay_u20_list_walk_11ac_cpu.c"),
+            "/* fixture */\n",
+        )
+        .unwrap();
+        let checkers = HashMap::from([("OVL_0020_11AC".to_owned(), "checker.py".to_owned())]);
+        assert_eq!(
+            already_on_main(repo.path(), "OVL_0020_11AC", Some(&checkers)),
+            Some("already on main (checker.py audits overlay_u20_list_walk_11ac_cpu.c)".to_owned())
+        );
+        assert_eq!(
+            already_on_main(repo.path(), "OVL_0020_0001", Some(&checkers)),
+            None
+        );
+        assert_eq!(already_on_main(repo.path(), "OVL_0020_11AC", None), None);
+    }
+
+    #[test]
+    fn sync_files_ranked_rows_once_and_counts_completed_filings() {
+        let repo = tempdir();
+        let store = FakePoolradStore::default();
+        let queue = serde_json::json!({"rows": [
+            poolrad_row("OVL_0001_0001", 1, Value::Null),
+            poolrad_row("OVL_0001_0002", 2, Value::Null),
+            poolrad_row("OVL_0001_0003", 3, Value::Null),
+            poolrad_row("OVL_0001_0004", 4, Value::Null),
+            poolrad_row("OVL_0001_0005", 5, Value::Null)
+        ]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let sync = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter);
+
+        let first = sync.run_with(2, false, "medium").unwrap();
+        assert_eq!(first["filed"].as_array().unwrap().len(), 2);
+        assert!(store.tasks.lock().unwrap()[0]["title"]
+            .as_str()
+            .unwrap()
+            .starts_with(TITLE_PREFIX));
+        let second = sync.run_with(2, false, "medium").unwrap();
+        assert_eq!(
+            second["filed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["OVL_0001_0003", "OVL_0001_0004"]
+        );
+        let mut tasks = store.tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 4);
+        for task in tasks.iter_mut() {
+            task["status"] = Value::String("done".to_owned());
+        }
+        drop(tasks);
+        let third = sync.run_with(2, false, "medium").unwrap();
+        assert_eq!(third["filed"].as_array().unwrap().len(), 1);
+        assert_eq!(third["skipped"]["already_filed"], 4);
+        assert_eq!(
+            third["skipped"]["already_filed_tasks"]
+                .as_object()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn sync_exporter_failure_files_nothing_and_reports_the_error() {
+        let repo = tempdir();
+        let store = FakePoolradStore::default();
+        let exporter = |_: &Path| Err("exporter exploded".to_owned());
+        let report = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .run()
+            .unwrap();
+        assert!(report["filed"].as_array().unwrap().is_empty());
+        assert_eq!(report["errors"][0], "exporter exploded");
+        assert!(report["base"].is_null());
+        assert!(store.tasks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_retry_skips_successes_after_a_partial_task_write_failure() {
+        let repo = tempdir();
+        let store = FakePoolradStore::default();
+        *store.fail_on_attempt.lock().unwrap() = Some(2);
+        let queue = serde_json::json!({"rows": [
+            poolrad_row("OVL_0001_0001", 1, Value::Null),
+            poolrad_row("OVL_0001_0002", 2, Value::Null),
+            poolrad_row("OVL_0001_0003", 3, Value::Null)
+        ]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let sync = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter);
+        let partial = sync.run_with(3, false, "medium").unwrap();
+        assert_eq!(
+            partial["filed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["OVL_0001_0001", "OVL_0001_0003"]
+        );
+        assert_eq!(
+            partial["errors"][0],
+            "OVL_0001_0002: fixture task write failed"
+        );
+        let retry = sync.run_with(3, false, "medium").unwrap();
+        assert_eq!(retry["filed"][0]["id"], "OVL_0001_0002");
+        assert_eq!(store.tasks.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn sync_preserves_exporter_closures_control_rows_and_dry_run() {
+        let repo = tempdir();
+        let store = FakePoolradStore::default();
+        let mut main_model = poolrad_row(
+            "OVL_0001_0002",
+            2,
+            serde_json::json!({"status":"main_model","main_files":["src/recovered/x.c"]}),
+        );
+        main_model["rank"] = Value::from(2);
+        let queue = serde_json::json!({"rows": [
+            poolrad_row(
+                "OVL_0001_0001",
+                1,
+                serde_json::json!({"status":"inline_in_strict"})
+            ),
+            main_model,
+            poolrad_row(
+                "OVL_0001_0003",
+                3,
+                serde_json::json!({"status":"source_mention"})
+            )
+        ]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let sync = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter);
+        let filtered = sync.run_with(5, false, "medium").unwrap();
+        assert_eq!(filtered["filed"][0]["id"], "OVL_0001_0003");
+        assert!(filtered["skipped"]["closed"]["OVL_0001_0001"]
+            .as_str()
+            .unwrap()
+            .contains("inline_in_strict"));
+        assert!(filtered["body_on_main"]["OVL_0001_0002"]["why_not"]
+            .as_str()
+            .unwrap()
+            .contains("checker"));
+
+        let dry_store = FakePoolradStore::default();
+        let dry = PoolradSync::new(&dry_store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .run_with(5, true, "medium")
+            .unwrap();
+        assert_eq!(dry["filed"].as_array().unwrap().len(), 1);
+        assert_eq!(dry["filed"][0]["dry"], true);
+        assert!(dry_store.tasks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_records_credit_ready_models_and_keeps_partial_models_authorable() {
+        let repo = tempdir();
+        model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", Some(1433));
+        let checker = repo.path().join("tools/overlay/check_model.py");
+        fs::create_dir_all(checker.parent().unwrap()).unwrap();
+        fs::write(&checker, "CHECKER_ROWS = ['OVL_0020_11AC']\n").unwrap();
+        let statuses = repo.path().join("docs/re/partial_callee_models.csv");
+        fs::create_dir_all(statuses.parent().unwrap()).unwrap();
+        fs::write(&statuses, "id,status\nOVL_0020_11AC,full\n").unwrap();
+        let state = tempdir();
+        let credit_path = state.path().join("credit-pending.json");
+        let queue = serde_json::json!({"rows":[poolrad_row(
+            "OVL_0020_11AC", 1, Value::Null
+        )]});
+        let exporter = |_: &Path| Ok(queue.clone());
+        let store = FakePoolradStore::default();
+        let report = PoolradSync::new(&store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .with_credit_path(&credit_path)
+            .run()
+            .unwrap();
+        assert!(report["filed"].as_array().unwrap().is_empty());
+        assert_eq!(report["credit_pending"]["OVL_0020_11AC"]["pr"], 1433);
+        assert!(credit_path.exists());
+        assert_eq!(credit_pending(Some(&credit_path)).len(), 1);
+        assert!(store.tasks.lock().unwrap().is_empty());
+
+        fs::write(&statuses, "id,status\nOVL_0020_11AC,partial\n").unwrap();
+        let partial_store = FakePoolradStore::default();
+        let partial = PoolradSync::new(&partial_store)
+            .with_repo(repo.path())
+            .with_exporter(&exporter)
+            .with_credit_path(&state.path().join("partial-credit-pending.json"))
+            .run()
+            .unwrap();
+        assert_eq!(partial["filed"][0]["id"], "OVL_0020_11AC");
+        assert_eq!(partial["credit_pending"], serde_json::json!({}));
+        assert!(
+            partial["models_not_credit_ready"]["OVL_0020_11AC"]["why_not"]
+                .as_str()
+                .unwrap()
+                .contains("partial")
+        );
+    }
+
+    #[test]
+    fn progress_reads_queue_summary_git_manifest_identity_and_credit_count() {
+        let repo = tempdir();
+        model_git_fixture(repo.path(), "overlay_u20_list_walk_11ac_cpu.c", None);
+        let manifest = repo.path().join(STRICT_MANIFEST);
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "id,name\nOVL_0001_0001,fixture\n").unwrap();
+        let identities = repo.path().join(IDENTITIES);
+        fs::create_dir_all(identities.parent().unwrap()).unwrap();
+        fs::write(
+            &identities,
+            "id,name\nOVL_0001_0001,fixture\nOVL_0001_0002,fixture\n",
+        )
+        .unwrap();
+        let state = tempdir();
+        let queue_path = state.path().join("strict-queue.json");
+        fs::write(
+            &queue_path,
+            "{\"summary\":{\"composable_bodies\":7,\"candidates\":4}}",
+        )
+        .unwrap();
+        let credit_path = state.path().join("credit-pending.json");
+        let entries = serde_json::from_value::<Map<String, Value>>(serde_json::json!({
+            "OVL_0001_0001":{"model":"m.c","commit":"abc","pr":1}
+        }))
+        .unwrap();
+        record_credit_pending(&entries, Some(&credit_path))
+            .unwrap()
+            .unwrap();
+
+        let summary = progress(Some(repo.path()), Some(&queue_path), Some(&credit_path)).unwrap();
+        assert_eq!(summary["credited"], 1);
+        assert_eq!(summary["identities"], 2);
+        assert_eq!(summary["ceiling"], 815);
+        assert_eq!(summary["composable_bodies"], 7);
+        assert_eq!(summary["queue_candidates"], 4);
+        assert!(summary["main"].as_str().unwrap().len() <= 7);
+        assert!(summary["queue_exported_at"].is_number());
+        assert_eq!(summary["credit_pending"], 1);
+
+        let missing = progress(
+            Some(repo.path()),
+            Some(&state.path().join("missing.json")),
+            Some(&state.path().join("missing-credit.json")),
+        )
+        .unwrap();
+        assert!(missing["composable_bodies"].is_null());
+        assert!(missing["queue_candidates"].is_null());
+        assert!(missing["queue_exported_at"].is_null());
+        assert_eq!(missing["credit_pending"], 0);
     }
 }
