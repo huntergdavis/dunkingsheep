@@ -827,18 +827,14 @@ fn poolrad_limit(args: &Args) -> Result<usize, DunkError> {
                 py_repr(value)
             ))
         }),
-        Value::Array(_) => {
-            return Err(DunkError::Refused(
-                "int() argument must be a string, a bytes-like object or a real number, not 'list'"
-                    .into(),
-            ));
-        }
-        Value::Object(_) => {
-            return Err(DunkError::Refused(
-                "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
-                    .into(),
-            ));
-        }
+        Value::Array(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'list'"
+                .into(),
+        )),
+        Value::Object(_) => Err(DunkError::Refused(
+            "int() argument must be a string, a bytes-like object or a real number, not 'dict'"
+                .into(),
+        )),
         Value::Null => unreachable!("falsey limit uses the default"),
     }
 }
