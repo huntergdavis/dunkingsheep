@@ -170,3 +170,21 @@ fn the_fixture_replays_exactly() {
         }
     }
 }
+
+#[test]
+fn oversized_internal_fetch_limits_saturate_without_overflow() {
+    assert_eq!(fetch_limit(usize::MAX), usize::MAX);
+
+    let (_dir, path) = loaded();
+    let pool = crate::db::ReadPool::open(&path, 1).expect("pool");
+    let hits = recall(
+        &pool,
+        "lease",
+        usize::MAX,
+        &Filters::default(),
+        1_700_000_100.0 + 400.0 * 86_400.0,
+        1200,
+    )
+    .expect("saturated SQLite fetch limit");
+    assert!(!hits.is_empty());
+}

@@ -11,12 +11,14 @@ use std::sync::Mutex;
 use crate::config::Env;
 use crate::flock::commands_turns::{TurnHooks, TurnState};
 use crate::flock::dunks::DunkList;
-use crate::flock::panes::PaneInfoEnv;
+use crate::flock::panes::{PaneInfoEnv, Stores};
 use crate::flock::status::{StatusEnv, ViewCache};
 use crate::proc::Caller;
 use crate::roles::Roles;
 use crate::server::RequestCtx;
 use crate::terminal::{fakes::FakeTerminal, Terminal};
+use std::path::Path;
+use std::sync::Arc;
 
 struct FixedRole(&'static str, bool);
 
@@ -526,6 +528,94 @@ fn h_lane_handlers_refuse_non_string_pane_values() {
         "worker",
         "invalid pane input must not remove a role"
     );
+}
+
+static CONTEXT_LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+struct ContextLedgerEnv(Option<std::ffi::OsString>);
+
+impl ContextLedgerEnv {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os("DUNKINGSHEEP_CONTEXT_LEDGER");
+        std::env::set_var("DUNKINGSHEEP_CONTEXT_LEDGER", path);
+        Self(previous)
+    }
+}
+
+impl Drop for ContextLedgerEnv {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            std::env::set_var("DUNKINGSHEEP_CONTEXT_LEDGER", previous);
+        } else {
+            std::env::remove_var("DUNKINGSHEEP_CONTEXT_LEDGER");
+        }
+    }
+}
+
+fn context_flock(root: &Path) -> Flock {
+    let flock = Flock::new(root.join("launches.json"), root.join("lanes.json"), false);
+    let mut roles = Roles::new(
+        &crate::config::Env::default(),
+        Some(root.join("roles.json")),
+        Some(root.join("tokens.json")),
+        None,
+    )
+    .expect("roles");
+    roles
+        .register("w1:p1", "owner", None, None, None, None, None, None)
+        .expect("owner");
+    roles
+        .register("w1:p2", "worker", None, None, None, None, None, None)
+        .expect("worker");
+    flock.attach_roles(roles, None);
+    flock
+}
+
+fn seed_context_entry(root: &Path, cls: &str, authority: &str) -> crate::context::store::Added {
+    let store = crate::context::store::Store::new(Some(root), false);
+    let mut ledger = crate::context::ledger::Ledger::new(Some(&root.join("ledger.db")));
+    store
+        .add(
+            "old context body",
+            &crate::context::store::AddArgs {
+                cls,
+                subject: "api-leaf",
+                type_: "measurement",
+                authority: Some(authority),
+                source: "api test",
+                stated: Some("2026-11-01"),
+                recheck_after: None,
+                supersedes: None,
+                slug: Some("api-leaf-entry"),
+                by: Some("test"),
+            },
+            Some(&mut ledger),
+        )
+        .expect("seed entry")
+}
+
+fn dispatch_context_command(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &TestEnv,
+    role: &'static str,
+    pane: &'static str,
+    name: &str,
+    input: Value,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx {
+        self_pane_id: Some(pane.to_string()),
+        ..RequestCtx::default()
+    };
+    dispatch_with_env(
+        dispatcher,
+        flock,
+        &FixedRole(role, role == "owner"),
+        name,
+        args(input),
+        &request,
+        env,
+    )
 }
 
 fn refusal(result: Result<Value, DunkError>) -> String {
@@ -1181,6 +1271,327 @@ fn api_handlers_refuse_when_required_adapters_are_not_wired() {
         ),
         Err(DunkError::Refused(message)) if message == "turn hooks are not wired"
     ));
+}
+
+fn memory_api_fixture() -> (tempfile::TempDir, Flock, TestEnv) {
+    const NOW: f64 = 1_800_000_000.0;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+    let connection = crate::db::open_writer(&path).expect("writer");
+    crate::memory::recall::apply_schema(&connection).expect("schema");
+    connection
+        .execute(
+            "INSERT INTO sessions (id, harness, project, cwd, title, started_at, updated_at) \
+             VALUES ('session-1', 'codex', 'demo', '/tmp/demo', 'Rust API', ?1, ?1)",
+            [NOW - 60.0],
+        )
+        .expect("session");
+    connection
+        .execute(
+            "INSERT INTO chunks (id, session_id, ordinal, role, kind, text, sha256, created_at) \
+             VALUES (1, 'session-1', 0, 'assistant', 'message', \
+                     'rust api uses a stable adapter boundary for recall', 'sha-session-1-0', ?1)",
+            [NOW - 60.0],
+        )
+        .expect("chunk");
+    drop(connection);
+    let pool = crate::db::ReadPool::open(&path, 1).expect("read pool");
+    let (_dir, flock) = flock();
+    flock.attach_stores(Stores {
+        memory: Some(Arc::new(pool)),
+        ..Stores::default()
+    });
+    (dir, flock, TestEnv::default())
+}
+
+fn dispatch_memory(
+    dispatcher: &Dispatcher,
+    flock: &Flock,
+    env: &TestEnv,
+    name: &str,
+    input: Value,
+) -> Result<Value, DunkError> {
+    let request = RequestCtx::default();
+    dispatch_with_env(
+        dispatcher,
+        flock,
+        &FixedRole("worker", false),
+        name,
+        args(input),
+        &request,
+        env,
+    )
+}
+
+#[test]
+fn h_memory_recall_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let hits = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query": "adapter", "limit": 1, "harness": "codex", "project": "demo"}),
+    )
+    .unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 1);
+    assert_eq!(hits[0]["session_id"], "session-1");
+    assert_eq!(hits[0]["harness"], "codex");
+    assert_eq!(hits[0]["project"], "demo");
+    assert_eq!(
+        hits[0]["text"],
+        "rust api uses a stable adapter boundary for recall"
+    );
+}
+
+#[test]
+fn h_memory_search_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let hits = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query": "adapter", "limit": 1, "harness": "claude"}),
+    )
+    .unwrap();
+    assert_eq!(hits, json!([]));
+}
+
+#[test]
+fn h_memory_context_matches_python() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let context = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query": "adapter", "sessions": 1}),
+    )
+    .unwrap();
+    assert_eq!(context["query"], "adapter");
+    assert_eq!(context["generated_at"], 1_800_000_000.0);
+    assert_eq!(context["counts"], json!({"sessions": 1, "snippets": 1}));
+    assert_eq!(context["sessions"][0]["session_id"], "session-1");
+    assert_eq!(
+        context["text"],
+        "[codex] demo | Rust API\n  - rust api uses a stable adapter boundary for recall"
+    );
+}
+
+#[test]
+fn h_memory_context_negative_sessions_matches_python_slice() {
+    let (dir, flock, env) = memory_api_fixture();
+    let connection = crate::db::open_writer(&dir.path().join("memory.db")).expect("writer");
+    connection
+        .execute(
+            "INSERT INTO sessions (id, harness, project, cwd, title, started_at, updated_at) \
+             VALUES ('session-2', 'codex', 'demo', '/tmp/demo', 'Other API', 1799999940, 1799999940)",
+            [],
+        )
+        .expect("second session");
+    connection
+        .execute(
+            "INSERT INTO chunks (id, session_id, ordinal, role, kind, text, sha256, created_at) \
+             VALUES (2, 'session-2', 0, 'assistant', 'message', \
+                     'adapter memory context second result', 'sha-session-2-0', 1799999940)",
+            [],
+        )
+        .expect("second chunk");
+    drop(connection);
+
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+    let context = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query": "adapter", "sessions": -1}),
+    )
+    .unwrap();
+    assert_eq!(context["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(context["counts"]["sessions"], 1);
+}
+
+#[test]
+fn h_memory_handlers_bound_positive_query_limits() {
+    let (_dir, flock, env) = memory_api_fixture();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_memory_recall_search_context();
+
+    let recall_max = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_recall",
+        json!({"query":"adapter", "limit":50}),
+    )
+    .unwrap();
+    assert_eq!(recall_max.as_array().unwrap().len(), 1);
+    for limit in [51_i64, i64::MAX] {
+        let error = refusal(dispatch_memory(
+            &dispatcher,
+            &flock,
+            &env,
+            "memory_recall",
+            json!({"query":"adapter", "limit":limit}),
+        ));
+        assert!(error.contains("limit must not exceed 50"), "{error}");
+    }
+
+    let search_error = refusal(dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_search",
+        json!({"query":"adapter", "limit":i64::MAX}),
+    ));
+    assert!(search_error.contains("limit must not exceed 50"));
+
+    let context_max = dispatch_memory(
+        &dispatcher,
+        &flock,
+        &env,
+        "memory_context",
+        json!({"query":"adapter", "sessions":20}),
+    )
+    .unwrap();
+    assert_eq!(context_max["sessions"].as_array().unwrap().len(), 1);
+    for sessions in [21_i64, i64::MAX] {
+        let error = refusal(dispatch_memory(
+            &dispatcher,
+            &flock,
+            &env,
+            "memory_context",
+            json!({"query":"adapter", "sessions":sessions}),
+        ));
+        assert!(error.contains("sessions must not exceed 20"), "{error}");
+    }
+}
+
+#[test]
+fn h_context_supersede_matches_python() {
+    let _serial = CONTEXT_LEDGER_TEST_LOCK.lock().expect("ledger test lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger_env = ContextLedgerEnv::set(&dir.path().join("context-ledger.db"));
+    let project = dir.path().join("project-store");
+    std::fs::create_dir_all(&project).expect("project store root");
+    let old = seed_context_entry(&project, "fact", "agent");
+    let flock = context_flock(dir.path());
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_supersede_retire();
+
+    let result = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_supersede",
+        json!({
+            "slug": old.slug,
+            "body": "replacement context body",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap();
+    assert_eq!(result["class"], "fact");
+    assert_ne!(result["slug"], "api-leaf-entry");
+    assert!(Path::new(result["path"].as_str().unwrap()).is_file());
+    let store = crate::context::store::Store::new(Some(&project), false);
+    let original = store.find("api-leaf-entry").expect("old entry");
+    assert!(original.get("superseded_by").is_some());
+    assert_eq!(
+        store.resolve("api-leaf-entry").unwrap().unwrap().body,
+        "replacement context body"
+    );
+
+    let rule = seed_context_entry(&project, "ground-truth", "owner");
+    let refused = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_supersede",
+        json!({
+            "slug": rule.slug,
+            "body": "worker cannot replace owner rule",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(refused, DunkError::Refused(message) if message == "only the owner supersedes a rule")
+    );
+    drop(ledger_env);
+}
+
+#[test]
+fn h_context_retire_matches_python() {
+    let _serial = CONTEXT_LEDGER_TEST_LOCK.lock().expect("ledger test lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger_env = ContextLedgerEnv::set(&dir.path().join("context-ledger.db"));
+    let project = dir.path().join("project-store");
+    std::fs::create_dir_all(&project).expect("project store root");
+    let old = seed_context_entry(&project, "fact", "agent");
+    let flock = context_flock(dir.path());
+    let env = TestEnv::default();
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_context_supersede_retire();
+
+    let denied = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "worker",
+        "w1:p2",
+        "context_retire",
+        json!({
+            "slug": old.slug,
+            "reason": "obsolete",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap_err();
+    assert!(matches!(denied, DunkError::Refused(_)));
+
+    let result = dispatch_context_command(
+        &dispatcher,
+        &flock,
+        &env,
+        "owner",
+        "w1:p1",
+        "context_retire",
+        json!({
+            "slug": old.slug,
+            "reason": "obsolete",
+            "global_store": false,
+            "project_path": project,
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        result,
+        json!({"slug": "api-leaf-entry", "retired": true, "reason": "obsolete"})
+    );
+    let entry = crate::context::store::Store::new(Some(&project), false)
+        .find("api-leaf-entry")
+        .expect("retired entry");
+    assert!(entry.get("retired_at").is_some());
+    assert_eq!(entry.get("retired_reason"), Some("obsolete"));
+    drop(ledger_env);
 }
 
 #[test]
