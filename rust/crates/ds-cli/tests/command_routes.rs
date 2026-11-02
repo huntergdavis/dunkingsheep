@@ -2241,3 +2241,90 @@ fn cli_route_27_state() {
     );
     assert!(latest.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_28_views_a() {
+    let roster = run_daemon_cli(
+        &["roster", "--json"],
+        "roster",
+        json!({}),
+        json!({"lanes": [{"id": "cli"}]}),
+    );
+    assert_eq!(Some(0), roster.status.code());
+    assert_eq!(
+        "{\n  \"lanes\": [\n    {\n      \"id\": \"cli\"\n    }\n  ]\n}\n",
+        String::from_utf8(roster.stdout).unwrap()
+    );
+    assert!(roster.stderr.is_empty());
+
+    let message_state = run_daemon_cli(
+        &["message-state", "i1,i2", "--json"],
+        "message_state",
+        json!({"message_ids": "i1,i2"}),
+        json!({"messages": [{"id": "i1", "state": "unread"}]}),
+    );
+    assert_eq!(Some(0), message_state.status.code());
+    assert_eq!("{\n  \"messages\": [\n    {\n      \"id\": \"i1\",\n      \"state\": \"unread\"\n    }\n  ]\n}\n", String::from_utf8(message_state.stdout).unwrap());
+    assert!(message_state.stderr.is_empty());
+
+    let reply_stats_default = run_daemon_cli(
+        &["reply-stats", "--json"],
+        "reply_stats",
+        json!({}),
+        json!({"total": 3}),
+    );
+    assert_eq!(Some(0), reply_stats_default.status.code());
+    assert_eq!(
+        "{\n  \"total\": 3\n}\n",
+        String::from_utf8(reply_stats_default.stdout).unwrap()
+    );
+    assert!(reply_stats_default.stderr.is_empty());
+
+    let reply_stats_boxes = run_daemon_cli(
+        &["reply-stats", "reviewer,codex", "--json"],
+        "reply_stats",
+        json!({"mailboxes": "reviewer,codex"}),
+        json!({"total": 2}),
+    );
+    assert_eq!(Some(0), reply_stats_boxes.status.code());
+    assert_eq!(
+        "{\n  \"total\": 2\n}\n",
+        String::from_utf8(reply_stats_boxes.stdout).unwrap()
+    );
+    assert!(reply_stats_boxes.stderr.is_empty());
+}
+
+#[test]
+fn cli_route_29_views_b() {
+    let summary_default = run_daemon_cli(
+        &["project-summary", "--json"],
+        "project_summary",
+        json!({"project": null}),
+        json!({"project": null, "count": 0}),
+    );
+    assert_eq!(Some(0), summary_default.status.code());
+    assert_eq!(
+        "{\n  \"project\": null,\n  \"count\": 0\n}\n",
+        String::from_utf8(summary_default.stdout).unwrap()
+    );
+    assert!(summary_default.stderr.is_empty());
+
+    let summary_path = run_daemon_cli(
+        &[
+            "project-summary",
+            "demo",
+            "--path",
+            "/tmp/project",
+            "--json",
+        ],
+        "project_summary",
+        json!({"project": "demo", "path": "/tmp/project"}),
+        json!({"project": "demo", "path": "/tmp/project", "count": 4}),
+    );
+    assert_eq!(Some(0), summary_path.status.code());
+    assert_eq!(
+        "{\n  \"project\": \"demo\",\n  \"path\": \"/tmp/project\",\n  \"count\": 4\n}\n",
+        String::from_utf8(summary_path.stdout).unwrap()
+    );
+    assert!(summary_path.stderr.is_empty());
+}

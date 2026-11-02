@@ -1320,6 +1320,42 @@ fn state(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
 
+fn read_view(ns: &Map<String, Value>) -> Outcome {
+    let command = text(ns, "command").unwrap_or("");
+    let mut args = Map::new();
+    let rpc = match command {
+        "roster" => "roster",
+        "message-state" => {
+            args.insert(
+                "message_ids".into(),
+                ns.get("ids").cloned().unwrap_or(Value::Null),
+            );
+            "message_state"
+        }
+        "reply-stats" => {
+            if let Some(mailboxes) = ns
+                .get("mailboxes")
+                .filter(|v| !v.is_null() && !v.as_str().unwrap_or("").is_empty())
+            {
+                args.insert("mailboxes".into(), mailboxes.clone());
+            }
+            "reply_stats"
+        }
+        "project-summary" => {
+            args.insert(
+                "project".into(),
+                ns.get("project").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(path) = text(ns, "path").filter(|path| !path.is_empty()) {
+                args.insert("path".into(), Value::String(path.to_string()));
+            }
+            "project_summary"
+        }
+        other => return not_ported(other),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1351,6 +1387,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             _ => owner_command(ns),
         },
         "state" => state(ns),
+        "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {
