@@ -1090,7 +1090,9 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
             Some("squash"),
         ))
         .unwrap(),
-        serde_json::json!({"pullRequest":{"number":5}})
+        serde_json::json!({
+            "pullRequest":{"number":5}
+        })
     );
     assert_eq!(
         futuresless_block_on(disable_auto_merge(
@@ -1101,7 +1103,9 @@ fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
             "author-token",
         ))
         .unwrap(),
-        serde_json::json!({"pullRequest":{"number":5}})
+        serde_json::json!({
+            "disablePullRequestAutoMerge":{"pullRequest":{"number":5}}
+        })
     );
     assert_eq!(
         futuresless_block_on(enable_auto_merge(
