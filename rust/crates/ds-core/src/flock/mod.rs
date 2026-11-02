@@ -117,6 +117,9 @@ pub struct Flock {
     pub(crate) turn_dispatch: Mutex<commands_turns::TurnDispatchState>,
     /// Shared status view cache for requests served by this flock.
     status_view: status::ViewCache,
+    status_runtime: OnceLock<status_runtime::StatusState>,
+    last_message: Mutex<String>,
+    quarantined_mailboxes: Mutex<Vec<Value>>,
 }
 
 impl Flock {
@@ -148,6 +151,9 @@ impl Flock {
             turn_states: Mutex::new(commands_turns::Turns::new()),
             turn_dispatch: Mutex::new(commands_turns::TurnDispatchState::default()),
             status_view: status::ViewCache::new(),
+            status_runtime: OnceLock::new(),
+            last_message: Mutex::new(String::new()),
+            quarantined_mailboxes: Mutex::new(Vec::new()),
         };
         flock.load_launches();
         flock
@@ -506,6 +512,7 @@ pub mod roster;
 pub mod send_keys;
 pub mod sends;
 pub mod status;
+pub mod status_runtime;
 pub mod views;
 
 #[cfg(test)]

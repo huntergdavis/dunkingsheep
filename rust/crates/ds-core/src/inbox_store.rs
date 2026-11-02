@@ -99,6 +99,25 @@ impl Store {
         })
     }
 
+    /// Shared read service for the synchronous runtime's status/count queries.
+    pub(crate) fn read_pool(&self) -> &ReadPool {
+        &self.readers
+    }
+
+    /// Retire a formerly shared agent-type mailbox without guessing a recipient.
+    pub fn rename_mailbox(&self, old: &str, new: &str) -> Result<usize, DunkError> {
+        let old = old.to_string();
+        let new = new.to_string();
+        self.writer.call(move |connection| {
+            connection
+                .execute(
+                    "UPDATE messages SET mailbox = ?1, mailbox_label = ?1 WHERE mailbox = ?2",
+                    rusqlite::params![new, old],
+                )
+                .map_err(map_sqlite)
+        })
+    }
+
     pub fn path(&self) -> &Path {
         self.writer.path()
     }

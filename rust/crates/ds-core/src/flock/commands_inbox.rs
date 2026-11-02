@@ -6,7 +6,7 @@
 //! Slice 2 adds `inbox_ack`/`archive`/`cancel`/`delete`/`fetch`; slice 3 adds `inbox_send` and
 //! `inbox_read`. The outbox (`send_now`, the queued-notice fold), the PM routing file, the
 //! tasks view and metrics have no Rust owner yet, so they sit behind [`InboxEnv`] hooks.
-//! NOT ported: the `last_message` status string and the `log.info` line of `inbox_send`. `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
+//! NOT ported: the `log.info` line of `inbox_send`. `_own_mailbox`'s 30 s cache is not ported: it only saves the pane-list walk.
 
 use crate::error::DunkError;
 use crate::inbox::{self, Counts, MailboxStats, Status, Summary};
@@ -171,24 +171,45 @@ impl Flock {
     /// `_mailbox_exists`: true when the inbox already holds mail addressed to this name.
     /// A failing query is a `false`: a fallback must not raise.
     pub fn mailbox_exists(&self, env: &dyn InboxEnv, name: &str) -> bool {
+        self.mailbox_exists_in(env.pool(), name)
+    }
+
+    fn mailbox_exists_in(&self, pool: &crate::db::ReadPool, name: &str) -> bool {
         let (clause, params) = inbox::mailbox_where(name, "mailbox");
         let sql = format!("SELECT COUNT(*) FROM messages WHERE {clause}");
-        env.pool()
-            .with(|connection| {
-                connection
-                    .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map_err(|e| DunkError::Refused(e.to_string()))
-            })
-            .map(|n| n > 0)
-            .unwrap_or(false)
+        pool.with(|connection| {
+            connection
+                .query_row(&sql, rusqlite::params_from_iter(params.iter()), |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| DunkError::Refused(e.to_string()))
+        })
+        .map(|n| n > 0)
+        .unwrap_or(false)
     }
 
     /// `_own_mailbox`: the caller's mailbox key. A lane's mailbox must not depend on the
     /// backend's pane ids, so a failed resolution falls back to `DUNKINGSHEEP_MAILBOX`, the
     /// lane registry, then a mailbox already named after the pane id.
     pub fn own_mailbox(&self, env: &dyn InboxEnv, self_pane_id: &str) -> Result<String, DunkError> {
+        self.own_mailbox_from_sources(
+            env,
+            || env.pool(),
+            self_pane_id,
+            || env.mailbox_override(),
+            || env.backend_name(),
+        )
+    }
+
+    /// The shared read-only mailbox resolution path; fallback inputs remain lazy and ordered.
+    pub(crate) fn own_mailbox_from_sources<'a>(
+        &self,
+        env: &dyn MailboxEnv,
+        pool: impl FnOnce() -> &'a crate::db::ReadPool,
+        self_pane_id: &str,
+        mailbox_override: impl FnOnce() -> Option<String>,
+        backend_name: impl FnOnce() -> String,
+    ) -> Result<String, DunkError> {
         let mut resolved = false;
         let key = match self.resolve_mailbox(env, "self", Some(self_pane_id), false, "") {
             Ok((key, _, _)) => {
@@ -196,7 +217,7 @@ impl Flock {
                 key
             }
             Err(_) => {
-                let mut key = env.mailbox_override();
+                let mut key = mailbox_override();
                 if key.is_none() {
                     key = self
                         .lane_registry(false)
@@ -204,7 +225,7 @@ impl Flock {
                         .and_then(|registry| registry.get(self_pane_id).cloned())
                         .and_then(|row| Flock::row_identity(Some(&row)).0);
                 }
-                if key.is_none() && self.mailbox_exists(env, self_pane_id) {
+                if key.is_none() && self.mailbox_exists_in(pool(), self_pane_id) {
                     key = Some(self_pane_id.to_string());
                 }
                 key.ok_or_else(|| {
@@ -212,7 +233,7 @@ impl Flock {
                         "cannot resolve this lane's mailbox: {self_pane_id:?} is not a pane \
                          on the current backend ({}) and no mailbox is named after it; set \
                          DUNKINGSHEEP_MAILBOX to the lane's mailbox name",
-                        env.backend_name()
+                        backend_name()
                     ))
                 })?
             }
@@ -571,6 +592,7 @@ impl Flock {
             body.len(),
             args.attach.len(),
         );
+        self.set_last_message(format!("Inbox message to {label}"));
         Ok(SendResult {
             message_id,
             mailbox,
