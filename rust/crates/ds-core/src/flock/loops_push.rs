@@ -108,9 +108,11 @@ impl Flock {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|pane| {
-                pane.get("pane_id")
+                let id = pane
+                    .get("pane_id")
                     .and_then(Value::as_str)
-                    .map(|id| (id.to_string(), pane))
+                    .map(str::to_owned)?;
+                Some((id, pane))
             })
             .collect();
         self.push_target_map_with_panes(env, &panes)

@@ -242,7 +242,7 @@ async fn production_env_push_core_uses_pid_bound_pane_info() {
         crate::roles::DEFAULT_ROLE
     );
 
-    let targets = flock.push_target_map_with_panes(&env, &pane_map);
+    let targets = flock.push_target_map(&env);
     assert!(targets.contains_key("w1:p1"));
     assert!(targets.contains_key("w2:p2"));
     assert!(!targets.contains_key("w3:p3"));

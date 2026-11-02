@@ -124,12 +124,13 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
-        runtime.block_on(async {
+        let panes = runtime.block_on(async {
             let panes = adapter
                 .helper_pushenv_list_panes()
                 .await
                 .expect("concrete terminal pane list");
             assert!(!panes.is_empty());
+            panes
         });
         assert_eq!(
             adapter.helper_pushenv_caller_role(
