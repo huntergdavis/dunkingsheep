@@ -52,8 +52,11 @@ fn not_ported(command: &str) -> Outcome {
 
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
+    if matches!(sub, "add" | "promote") && matches!(ns.get("local"), Some(Value::Bool(true))) {
+        return context_local_write(sub, ns, json);
+    }
     // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
-    // `--local` writes the files directly, which is not ported.
+    // supersede / retire local writes are not ported.
     if matches!(sub, "add" | "promote" | "supersede" | "retire") {
         if matches!(ns.get("local"), Some(Value::Bool(true))) {
             return not_ported(&format!("context {sub} --local"));
@@ -81,6 +84,129 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
             stdout: String::new(),
             stderr: format!("{error}\n"),
             code: 1,
+        },
+    }
+}
+
+fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcome {
+    use ds_core::context::store::{AddArgs, Store};
+
+    let global_store = matches!(ns.get("global_store"), Some(Value::Bool(true)));
+    let store = Store::new(None, global_store);
+    let added = match sub {
+        "add" => {
+            let body = if let Some(body) = text(ns, "text").filter(|body| !body.is_empty()) {
+                body.to_string()
+            } else {
+                let file = text(ns, "file").unwrap_or("-");
+                if file == "-" {
+                    let mut body = String::new();
+                    if let Err(error) =
+                        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut body)
+                    {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("{error}\n"),
+                            code: 3,
+                        };
+                    }
+                    body.replace("\r\n", "\n").replace('\r', "\n")
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(body) => body.replace("\r\n", "\n").replace('\r', "\n"),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Outcome {
+                                stdout: String::new(),
+                                stderr: format!(
+                                    "no such file: {} - the body comes from --text, stdin or a \
+                                     file; for text inline use: dunkingsheep context add --text \
+                                     '<claim>' --class ... --subject ...\n",
+                                    ds_core::context::store::py_repr(file)
+                                ),
+                                code: 2,
+                            };
+                        }
+                        Err(error) => {
+                            return Outcome {
+                                stdout: String::new(),
+                                stderr: format!("{error}\n"),
+                                code: 3,
+                            };
+                        }
+                    }
+                }
+            };
+            let args = AddArgs {
+                cls: text(ns, "cls").unwrap_or(""),
+                subject: text(ns, "subject").unwrap_or(""),
+                type_: text(ns, "type_").unwrap_or("reference"),
+                authority: text(ns, "authority"),
+                source: text(ns, "source").unwrap_or(""),
+                stated: text(ns, "stated"),
+                recheck_after: text(ns, "recheck_after"),
+                supersedes: text(ns, "supersedes"),
+                ..AddArgs::default()
+            };
+            store.add(&body, &args, None)
+        }
+        "promote" => {
+            let slug = text(ns, "slug").unwrap_or("");
+            let Some(entry) = store.find(slug) else {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    code: 1,
+                };
+            };
+            if std::env::var("DUNKINGSHEEP_SUPERUSER").ok().as_deref() != Some("1") {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: "refused: only an owner act promotes a ground truth\n".into(),
+                    code: 1,
+                };
+            }
+            let args = AddArgs {
+                cls: "ground-truth",
+                subject: entry.get("subject").unwrap_or(""),
+                type_: entry
+                    .get("type")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("principle"),
+                authority: Some("owner"),
+                source: entry.get("source").unwrap_or(""),
+                supersedes: Some(&entry.slug),
+                ..AddArgs::default()
+            };
+            store.add(&entry.body, &args, None)
+        }
+        _ => unreachable!("only local add/promote are routed here"),
+    };
+
+    match added {
+        Ok(added) => {
+            let mut value = Map::new();
+            value.insert("slug".into(), Value::String(added.slug.clone()));
+            value.insert(
+                "path".into(),
+                Value::String(added.path.display().to_string()),
+            );
+            value.insert("class".into(), Value::String(added.cls.clone()));
+            Outcome {
+                stdout: if json {
+                    format!("{}\n", ordered_json(&Value::Object(value)))
+                } else if sub == "promote" {
+                    format!("promoted {}\n", added.slug)
+                } else {
+                    format!("added {}/{}\n", added.cls, added.slug)
+                },
+                stderr: String::new(),
+                code: 0,
+            }
+        }
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("context: {error}\n"),
+            code: 2,
         },
     }
 }
