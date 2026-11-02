@@ -276,7 +276,7 @@ fn python_str(value: &Value) -> String {
         Value::Bool(true) => "True".to_string(),
         Value::Bool(false) => "False".to_string(),
         Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => python_number_string(value),
         Value::Array(_) | Value::Object(_) => python_repr_value(value),
     }
 }
@@ -287,7 +287,7 @@ fn python_repr_value(value: &Value) -> String {
         Value::Bool(true) => "True".to_string(),
         Value::Bool(false) => "False".to_string(),
         Value::String(value) => python_repr(value),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => python_number_string(value),
         Value::Array(values) => format!(
             "[{}]",
             values
@@ -304,6 +304,17 @@ fn python_repr_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+fn python_number_string(value: &serde_json::Number) -> String {
+    if value.is_f64() {
+        value
+            .as_f64()
+            .map(crate::usage::py_float_repr)
+            .unwrap_or_else(|| value.to_string())
+    } else {
+        value.to_string()
     }
 }
 
@@ -635,6 +646,22 @@ mod tests {
                 .unwrap()
                 .count
         );
+    }
+
+    #[test]
+    fn python_str_matches_float_exponents_in_scalars_and_nested_json() {
+        let value: Value = serde_json::from_str("5.960464477539062e-7").unwrap();
+        assert_eq!("5.960464477539062e-07", python_str(&value));
+
+        let values: Value =
+            serde_json::from_str("[5.960464477539062e-7,1e16,1e-5,0.0001,1.0]").unwrap();
+        assert_eq!(
+            "[5.960464477539062e-07, 1e+16, 1e-05, 0.0001, 1.0]",
+            python_str(&values)
+        );
+
+        let object: Value = serde_json::from_str("{\"value\":5.960464477539062e-7}").unwrap();
+        assert_eq!("{'value': 5.960464477539062e-07}", python_str(&object));
     }
 
     #[test]
