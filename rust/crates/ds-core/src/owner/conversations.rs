@@ -755,6 +755,74 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_ingest_keeps_unique_index_race_errors_visible() {
+        let fixture = Fixture::new("owner-ingest-race", true);
+        let connection = rusqlite::Connection::open(fixture.store.path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER hold_owner_race_insert BEFORE INSERT ON messages \
+                 WHEN NEW.mailbox = 'owner' AND NEW.external_id = 'web:race' \
+                 BEGIN SELECT length(hex(randomblob(12000000))); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        const CALLERS: usize = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+        let results = std::thread::scope(|scope| {
+            let callers = (0..CALLERS)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        fixture.service().ingest(
+                            OwnerIngest {
+                                body: Some(&Value::String("racing question".into())),
+                                transport: Some("web"),
+                                external_id: Some("web:race"),
+                                subject: None,
+                                attachments: &[],
+                            },
+                            Some(DESK),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            callers
+                .into_iter()
+                .map(|caller| caller.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            1,
+            results
+                .iter()
+                .filter(|result| result.as_ref().is_ok_and(|message| !message.duplicate))
+                .count()
+        );
+        let failures = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .collect::<Vec<_>>();
+        assert!(
+            !failures.is_empty(),
+            "the unique-index race must have losers"
+        );
+        assert!(failures
+            .iter()
+            .all(|failure| failure.to_string().contains("UNIQUE constraint failed")));
+        assert_eq!(
+            1,
+            fixture
+                .store
+                .conversation(OWNER_MAILBOX, None, None)
+                .unwrap()
+                .len()
+        );
+    }
+
+    #[test]
     fn reply_checks_existing_answer_before_body_and_rejects_reply_rows() {
         let fixture = Fixture::new("owner-reply-order", true);
         let question = fixture.send(OWNER_MAILBOX, "question", Some("telegram"), None);
