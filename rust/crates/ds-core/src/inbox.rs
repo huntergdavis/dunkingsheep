@@ -726,10 +726,14 @@ pub fn is_pane_id(value: &str) -> bool {
 /// A mailbox key that is ITSELF a pane id: older versions stored dead-pane mail this
 /// way, with `pane_id` NULL.
 pub fn is_pane_mailbox(value: &str) -> bool {
-    // The Python's PANE_MAILBOX_RE is applied to the raw value, so surrounding space makes
-    // it NOT a pane mailbox - the strict form is what a mailbox key must be, and a padded
-    // key is a caller mistake rather than a pane.
-    is_pane_id(value)
+    // Match Python's PANE_MAILBOX_RE, including Unicode decimal digits and `$`'s
+    // allowance for one final newline. Backend pane identity remains ASCII-only.
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(r"\A(?:w\d+:p\d+|%\d+)\n?\z").expect("pane mailbox regex")
+        })
+        .is_match(value)
 }
 
 /// `None` (a lane message) or one of [`TRANSPORTS`]. Only `None` and exactly `""` mean

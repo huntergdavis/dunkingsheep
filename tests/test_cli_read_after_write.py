@@ -39,6 +39,7 @@ class ReadAfterWriteTests(unittest.TestCase):
         self.total = 97
         self.read_during_write = False
         self.calls = []
+        self.arguments = []
         client = patch.object(self.cli.FlockClient, "connect_or_start")
         self.client = client.start()
         self.addCleanup(client.stop)
@@ -51,6 +52,7 @@ class ReadAfterWriteTests(unittest.TestCase):
 
     def call(self, method, **kwargs):
         self.calls.append(method)
+        self.arguments.append((method, kwargs))
         if method == "inbox_count":
             return {"total": self.total}
         if method == "inbox_read":
@@ -95,6 +97,18 @@ class ReadAfterWriteTests(unittest.TestCase):
     def test_combined_globals_write_invalidates_actual_count(self):
         self.drain_and_check("--no-start-daemon", "--self-pane", "%35",
                              "--socket", self.tmp.name + "/never-connect.sock")
+
+    def test_messages_only_flag_forwards_opt_out_without_changing_default_payload(self):
+        self.run_cli("--json", "inbox", "read", "--messages-only")
+        method, args = self.arguments[-1]
+        self.assertEqual("inbox_read", method)
+        self.assertEqual({"mailbox": None, "limit": 10, "peek": False,
+                          "include_tasks": False}, args)
+
+        self.run_cli("--json", "inbox", "read")
+        method, args = self.arguments[-1]
+        self.assertEqual("inbox_read", method)
+        self.assertEqual({"mailbox": None, "limit": 10, "peek": False}, args)
 
     def test_prefixed_read_only_commands_do_not_invalidate(self):
         for prefix in (["--self-pane", "%35"], ["--self-pane=%35"],

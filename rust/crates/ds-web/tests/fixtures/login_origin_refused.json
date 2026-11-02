@@ -1,0 +1,25 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/api/login",
+    "headers": {
+      "content-type": "application/json",
+      "host": "testserver",
+      "origin": "https://other.test"
+    },
+    "json": {
+      "password": "fixture-only"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": "{\"detail\":\"Cross-origin request refused\"}",
+    "json": {
+      "detail": "Cross-origin request refused"
+    },
+    "set_cookie": null
+  }
+}

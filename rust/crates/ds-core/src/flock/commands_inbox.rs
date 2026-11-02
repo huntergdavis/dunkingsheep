@@ -613,7 +613,7 @@ impl Flock {
     /// The order is the point (VP, t93): marking read first meant a reader whose rendering
     /// or task lookup failed had already consumed the batch, and pi-review-1 issued a verdict
     /// on a head whose withdrawal message it never saw. So: (1) fetch without marking, (2)
-    /// build the FULL result, including the caller's task queues, (3) only then mark read.
+    /// build the result, including the caller's task queues by default, (3) only then mark read.
     /// A failure in 1 or 2 leaves the batch unread, which is the safe direction.
     pub fn inbox_read(
         &self,
@@ -623,13 +623,31 @@ impl Flock {
         peek: bool,
         self_pane_id: Option<&str>,
     ) -> Result<ReadResult, DunkError> {
+        self.inbox_read_with_options(env, mailbox, limit, peek, true, self_pane_id)
+    }
+
+    /// Read messages without adding caller task queues when `include_tasks` is false.
+    /// The default `inbox_read` method preserves the historical task-inclusive response.
+    pub fn inbox_read_with_options(
+        &self,
+        env: &dyn InboxEnv,
+        mailbox: Option<&str>,
+        limit: usize,
+        peek: bool,
+        include_tasks: bool,
+        self_pane_id: Option<&str>,
+    ) -> Result<ReadResult, DunkError> {
         let key = self.mailbox_or_self(env, mailbox, self_pane_id, false, true)?;
         let mut messages = env.store().read(&key, limit, true, false)?;
-        // The owner's directive: mail and the reader's task queues travel together, so one
-        // inbox read is the whole handoff. This runs BEFORE the mark.
-        let tasks = self_pane_id
-            .filter(|p| !p.is_empty())
-            .map(|p| env.tasks_for_pane(p));
+        // By default mail and the reader's task queues travel together. When tasks are
+        // requested, compose them BEFORE the mark so a task lookup failure leaves mail unread.
+        let tasks = if include_tasks {
+            self_pane_id
+                .filter(|p| !p.is_empty())
+                .map(|p| env.tasks_for_pane(p))
+        } else {
+            None
+        };
         if peek || messages.is_empty() {
             return Ok(ReadResult {
                 mailbox: key,

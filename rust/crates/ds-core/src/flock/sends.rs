@@ -15,6 +15,7 @@
 //! unknowable composer boundary.
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
 
@@ -232,6 +233,21 @@ pub fn harness_queues_while_busy(harness: Option<&str>) -> bool {
 pub fn pane_generation(env: &dyn PaneInfoEnv, pane_id: &str) -> Option<String> {
     let pane = env.get_pane(pane_id)?;
     pane_generation_with(&pane, crate::proc::process_start)
+}
+
+/// Stable identity for a composer string that has no queued Message row, such as a dunk notice.
+/// This matches Python's `text:` plus the first 16 hexadecimal digits of SHA-256.
+pub fn text_identity(content: &str) -> Option<String> {
+    let flat = crate::stuck::collapse(content);
+    if flat.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(flat.as_bytes());
+    let prefix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(format!("text:{prefix}"))
 }
 
 pub(super) fn pane_generation_with(
@@ -1607,6 +1623,93 @@ impl Flock {
         })();
         message.status = previous_status;
         result
+    }
+
+    /// Reconstruct the last candidate only while the pane still has the generation recorded
+    /// before that attempt. This never adopts the current process as a substitute identity.
+    #[allow(dead_code)] // The stuck-observer caller is a separate runtime slice.
+    pub(crate) fn stuck_candidate_message(
+        &self,
+        pane_id: &str,
+        env: &dyn PaneInfoEnv,
+    ) -> Option<Message> {
+        let candidate = lock_unpoison(&self.stuck_candidates)
+            .get(pane_id)
+            .cloned()?;
+        let generation = candidate.generation.clone()?;
+        if !candidate.eligible
+            || generation.is_empty()
+            || pane_generation(env, pane_id).as_deref() != Some(generation.as_str())
+        {
+            return None;
+        }
+        let mut message = Message::new(
+            &candidate.message_id,
+            pane_id,
+            if candidate.label.is_empty() {
+                pane_id
+            } else {
+                &candidate.label
+            },
+            &candidate.text,
+            "stuck_candidate",
+        );
+        message.status = if candidate.status.is_empty() {
+            "failed"
+        } else {
+            &candidate.status
+        }
+        .to_string();
+        message.press_enter = candidate.press_enter;
+        message.created_at = candidate.created_at;
+        message.kind = candidate.kind;
+        message.scheduled = candidate.scheduled;
+        message.notify_for = candidate.notify_for;
+        message.attempt_generation = Some(generation);
+        Some(message)
+    }
+
+    /// Find the exact queued or bound message represented by the complete composer text.
+    /// Queue head order is deliberately irrelevant: another draft may be ahead of this send.
+    #[allow(dead_code)] // The stuck-observer caller is a separate runtime slice.
+    pub(crate) fn stranded_message(
+        &self,
+        pane_id: &str,
+        content: &str,
+        env: &dyn PaneInfoEnv,
+    ) -> Option<Message> {
+        if content.is_empty() {
+            return None;
+        }
+        let want = crate::stuck::collapse(content);
+        if want.is_empty() {
+            return None;
+        }
+        if let Some(candidate) = self.stuck_candidate_message(pane_id, env) {
+            if crate::stuck::collapse(&candidate.text) == want {
+                return Some(candidate);
+            }
+        }
+        let rows = outbox_lock(&self.outbox)
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .filter(|message| message.status == "queued")
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(message) = rows.iter().rev().find(|message| {
+            !message.text.is_empty() && crate::stuck::collapse(&message.text) == want
+        }) {
+            return Some(message.clone());
+        }
+        let prefix = want.chars().take(40).collect::<String>();
+        rows.iter()
+            .rev()
+            .find(|message| {
+                !message.text.is_empty()
+                    && crate::stuck::collapse(&message.text).starts_with(&prefix)
+            })
+            .cloned()
     }
 
     /// Remember text this flock typed into a pane, moving duplicate text to newest.

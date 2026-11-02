@@ -688,3 +688,644 @@ fn merge_review_and_graphql_requests_keep_methods_payloads_and_errors() {
     assert_eq!(query_payload["variables"], variables);
     assert_eq!(seen[3].url, "https://api.github.com/graphql");
 }
+
+#[test]
+fn git_ref_helpers_use_python_paths_and_only_404_409_mean_absent() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"object":{"sha":"ref-sha"}}"#.to_vec()));
+    fake.enqueue(response(br#"{"object":{"sha":"present-sha"}}"#.to_vec()));
+    fake.enqueue(GitHubResponse {
+        status: 404,
+        reason: "Not Found".into(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    });
+    fake.enqueue(GitHubResponse {
+        status: 409,
+        reason: "Conflict".into(),
+        body: br#"{"message":"Conflict"}"#.to_vec(),
+    });
+    fake.enqueue(GitHubResponse {
+        status: 403,
+        reason: "Forbidden".into(),
+        body: br#"{"message":"denied"}"#.to_vec(),
+    });
+    fake.enqueue(response(br#"{"tree":{"sha":"tree-sha"}}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(get_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "feature/topic",
+            "fixture-token",
+        ))
+        .unwrap(),
+        "ref-sha"
+    );
+    assert!(futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "present",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert!(!futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "missing",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert!(!futuresless_block_on(ref_exists(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "conflicting",
+        "fixture-token",
+    ))
+    .unwrap());
+    assert_eq!(
+        futuresless_block_on(ref_exists(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "forbidden",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub GET /repos/owner/repo/git/ref/heads/forbidden -> 403: denied"
+    );
+    assert_eq!(
+        futuresless_block_on(commit_tree(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "commit-sha",
+            "fixture-token",
+        ))
+        .unwrap(),
+        "tree-sha"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 6);
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/git/ref/heads/feature/topic"
+    );
+    assert_eq!(
+        seen[5].url,
+        "https://api.github.com/repos/owner/repo/git/commits/commit-sha"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token fixture-token");
+}
+
+#[test]
+fn file_text_decodes_python_base64_and_handles_missing_directories_and_encoding() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"encoding":"base64","content":"SGVsbG8g4pyT\n","sha":"blob-sha"}"#.to_vec(),
+    ));
+    fake.enqueue(GitHubResponse {
+        status: 404,
+        reason: "Not Found".into(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    });
+    fake.enqueue(response(br#"[{"name":"child"}]"#.to_vec()));
+    fake.enqueue(response(br#"{"encoding":"utf-8"}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "docs/readme.md",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap(),
+        (
+            Some("Hello ✓".into()),
+            Some(Value::String("blob-sha".into()))
+        )
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "missing.md",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap(),
+        (None, None)
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "docs",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo/docs is a directory, not a file"
+    );
+    assert_eq!(
+        futuresless_block_on(file_text(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "binary.dat",
+            "main",
+            "fixture-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo/binary.dat: unexpected encoding 'utf-8'"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/contents/docs/readme.md?ref=main"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token fixture-token");
+}
+
+#[test]
+fn pr_files_paginates_and_projects_python_file_fields() {
+    let fake = FakeTransport::default();
+    let first_page = (0..100)
+        .map(|number| serde_json::json!({"filename":format!("file-{number}"),"status":"modified"}))
+        .collect::<Vec<_>>();
+    fake.enqueue(response(serde_json::to_vec(&first_page).unwrap()));
+    fake.enqueue(response(
+        br#"[{"filename":"renamed.md","status":"renamed","previous_filename":"old.md"},{"filename":null,"status":null}]"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+
+    let files = futuresless_block_on(pr_files(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        42,
+        "fixture-token",
+    ))
+    .unwrap();
+    assert_eq!(files.len(), 102);
+    assert_eq!(files[0]["filename"], "file-0");
+    assert_eq!(files[100]["previous_filename"], "old.md");
+    assert_eq!(files[101]["filename"], "");
+    assert_eq!(files[101]["status"], "");
+    assert_eq!(files[101]["previous_filename"], Value::Null);
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/42/files?per_page=100&page=1"
+    );
+    assert_eq!(
+        seen[1].url,
+        "https://api.github.com/repos/owner/repo/pulls/42/files?per_page=100&page=2"
+    );
+}
+
+#[test]
+fn git_write_helpers_send_exact_payloads_and_project_open_pull() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"sha":"tree-sha"}"#.to_vec()));
+    fake.enqueue(response(br#"{"sha":"commit-sha"}"#.to_vec()));
+    fake.enqueue(response(br#"{"object":{"sha":"branch-sha"}}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"number":"17","html_url":"https://github.test/pull/17","node_id":"PR_node","head":{"sha":"head-sha"}}"#.to_vec(),
+    ));
+    fake.enqueue(GitHubResponse {
+        status: 422,
+        reason: "Unprocessable Entity".into(),
+        body: br#"{"message":"Reference already exists"}"#.to_vec(),
+    });
+    let (transport, recorded) = recorded_transport(fake);
+    let entries = vec![serde_json::json!({
+        "path":"docs/credit.csv",
+        "mode":"100644",
+        "type":"blob",
+        "content":"row\n",
+    })];
+    let parents = vec!["parent-sha".to_owned()];
+
+    assert_eq!(
+        futuresless_block_on(create_tree(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "base-tree",
+            &entries,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "tree-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(create_commit(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "Add accounting row",
+            "tree-sha",
+            &parents,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "commit-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(create_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "accounting/pr42",
+            "commit-sha",
+            "reviewer-token",
+        ))
+        .unwrap(),
+        "branch-sha"
+    );
+    assert_eq!(
+        futuresless_block_on(open_pull(
+            &*transport,
+            DEFAULT_API,
+            OpenPullRequest {
+                repo: "owner/repo",
+                title: "Account for accepted row",
+                head: "accounting/pr42",
+                base: "main",
+                body: "Generated from the merged evidence.",
+            },
+            "reviewer-token",
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "number":17,
+            "url":"https://github.test/pull/17",
+            "node_id":"PR_node",
+            "head":"head-sha",
+        })
+    );
+    assert_eq!(
+        futuresless_block_on(create_ref(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            "accounting/pr42",
+            "new-sha",
+            "reviewer-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub POST /repos/owner/repo/git/refs -> 422: Reference already exists"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    assert_eq!(seen[0].method, "POST");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/git/trees"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[0].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"base_tree":"base-tree","tree":entries})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[1].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"message":"Add accounting row","tree":"tree-sha","parents":["parent-sha"]})
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[2].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({"ref":"refs/heads/accounting/pr42","sha":"commit-sha"})
+    );
+    assert_eq!(seen[3].url, "https://api.github.com/repos/owner/repo/pulls");
+    assert_eq!(
+        serde_json::from_slice::<Value>(seen[3].body.as_ref().unwrap()).unwrap(),
+        serde_json::json!({
+            "title":"Account for accepted row",
+            "head":"accounting/pr42",
+            "base":"main",
+            "body":"Generated from the merged evidence.",
+        })
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token reviewer-token");
+    assert!(seen.iter().all(|request| request.timeout_s == 20));
+}
+
+#[test]
+fn pulls_for_head_uses_repo_owner_and_projects_pr_metadata() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"[{"number":"19","html_url":"https://github.test/pull/19","node_id":"PR_19"},{"number":20}]"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    let pulls = futuresless_block_on(pulls_for_head(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "accounting/topic",
+        "reviewer-token",
+    ))
+    .unwrap();
+    assert_eq!(
+        pulls,
+        vec![
+            serde_json::json!({"number":19,"url":"https://github.test/pull/19","node_id":"PR_19"}),
+            serde_json::json!({"number":20,"url":null,"node_id":null}),
+        ]
+    );
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls?state=open&head=owner:accounting/topic&per_page=20"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token reviewer-token");
+}
+
+#[test]
+fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"node_id":"PR_enable"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":5}}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"node_id":"PR_disable"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"number":5}}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"node_id":""}"#.to_vec()));
+    fake.enqueue(response(br#"{"node_id":"PR_default"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":8}}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"node_id":"PR_error"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"errors":[{"message":"protected branch"}]}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            5,
+            "author-token",
+            Some("squash"),
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "pullRequest":{"number":5}
+        })
+    );
+    assert_eq!(
+        futuresless_block_on(disable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            5,
+            "author-token",
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "disablePullRequestAutoMerge":{"pullRequest":{"number":5}}
+        })
+    );
+    assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            6,
+            "author-token",
+            None,
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo#6: no node id for the auto-merge mutation"
+    );
+    assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            8,
+            "author-token",
+            None,
+        ))
+        .unwrap(),
+        serde_json::json!({"pullRequest":{"number":8}})
+    );
+    assert_eq!(
+        futuresless_block_on(disable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            7,
+            "author-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub GraphQL: protected branch"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 9);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/5"
+    );
+    assert_eq!(seen[1].url, "https://api.github.com/graphql");
+    assert_eq!(seen[1].method, "POST");
+    assert_eq!(seen[1].headers["Authorization"], "token author-token");
+    let enable: Value = serde_json::from_slice(seen[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        enable["query"],
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }"
+    );
+    assert_eq!(
+        enable["variables"],
+        serde_json::json!({"id":"PR_enable","method":"SQUASH"})
+    );
+    let disable: Value = serde_json::from_slice(seen[3].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        disable["query"],
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }"
+    );
+    assert_eq!(disable["variables"], serde_json::json!({"id":"PR_disable"}));
+    let default_enable: Value = serde_json::from_slice(seen[6].body.as_ref().unwrap()).unwrap();
+    assert_eq!(default_enable["variables"]["method"], "MERGE");
+}
+
+#[test]
+fn pull_state_preserves_fields_and_python_truthiness() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"state":"closed","merged":"false","merged_at":"now","mergeable_state":"clean","auto_merge":{"enabled_by":null}}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    assert_eq!(
+        futuresless_block_on(pull_state(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            33,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "state":"closed",
+            "merged":true,
+            "merged_at":"now",
+            "mergeable_state":"clean",
+            "auto_merge":true,
+        })
+    );
+    assert_eq!(
+        recorded.lock().unwrap()[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/33"
+    );
+}
+
+#[test]
+fn protection_payload_matches_python_shape_defaults_and_integer_conversion() {
+    let payload = protection_payload(
+        &Value::String("2".into()),
+        &Value::String("5531872".into()),
+        Some("dunkingsheep-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "required_status_checks":{
+                "strict":false,
+                "checks":[{"context":"dunkingsheep/review","app_id":5531872}],
+            },
+            "enforce_admins":true,
+            "required_pull_request_reviews":{
+                "dismiss_stale_reviews":true,
+                "require_code_owner_reviews":false,
+                "required_approving_review_count":2,
+                "bypass_pull_request_allowances":{"apps":["dunkingsheep-reviewer"]},
+            },
+            "restrictions":null,
+            "allow_force_pushes":false,
+            "allow_deletions":false,
+            "required_linear_history":false,
+        })
+    );
+    let without_bypass =
+        protection_payload(&Value::Bool(false), &Value::from(12), Some("")).unwrap();
+    assert_eq!(
+        without_bypass["required_pull_request_reviews"]["required_approving_review_count"],
+        0
+    );
+    assert!(without_bypass["required_pull_request_reviews"]
+        .get("bypass_pull_request_allowances")
+        .is_none());
+    assert_eq!(
+        protection_payload(&Value::String("many".into()), &Value::from(1), None)
+            .unwrap_err()
+            .to_string(),
+        "invalid literal for int() with base 10: \"many\""
+    );
+}
+
+#[test]
+fn required_verdicts_uses_repo_fallbacks_config_overrides_and_safe_file_fallback() {
+    let config_dir = PathBuf::from("/isolated/config");
+    let file_system = FixtureFs::default();
+    let config_path = config_dir.join("github-repos.json");
+    assert_eq!(
+        required_verdicts_with_fs("huntergdavis/dunkingsheep", None, &config_dir, &file_system)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "huntergdavis/poolrad-decomp",
+            None,
+            &config_dir,
+            &file_system
+        )
+        .unwrap(),
+        2
+    );
+
+    let config = serde_json::json!({
+        "repos":["owner/repo"],
+        "required_verdicts":{
+            "owner/repo":3,
+            "huntergdavis/poolrad-decomp":0,
+            "bad/value":"not-a-count",
+        },
+    });
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", Some(&config), &config_dir, &file_system).unwrap(),
+        3
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "huntergdavis/poolrad-decomp",
+            Some(&config),
+            &config_dir,
+            &file_system
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs("bad/value", Some(&config), &config_dir, &file_system).unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "owner/repo",
+            Some(&serde_json::json!({"required_verdicts":"bad"})),
+            &config_dir,
+            &file_system,
+        )
+        .unwrap_err()
+        .to_string(),
+        "'str' object has no attribute 'get'"
+    );
+
+    file_system.data.lock().unwrap().insert(
+        config_path,
+        Ok(r#"{"required_verdicts":{"owner/repo":"4"}}"#.into()),
+    );
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", None, &config_dir, &file_system).unwrap(),
+        4
+    );
+    file_system
+        .data
+        .lock()
+        .unwrap()
+        .insert(config_dir.join("github-repos.json"), Ok("not json".into()));
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", None, &config_dir, &file_system).unwrap(),
+        1
+    );
+}

@@ -25,9 +25,10 @@ pub trait TuiLoopIo<C: RpcClient> {
 
 /// Draw, poll input, refresh RPC-backed state, and clean up on loop exit.
 ///
-/// `q` exits the loop and `v` switches between the dunk and task views. All other
-/// input is forwarded to the command adapter. Cleanup also runs when terminal I/O
-/// returns an error.
+/// `q` and Escape exit without stopping daemon-owned dunks; uppercase `Q` sends
+/// the explicit stop-all request before exiting. `v` switches between the dunk and
+/// task views. All other input is forwarded to the command adapter. Cleanup also
+/// runs when terminal I/O returns an error.
 pub fn run<C, I>(model: &mut TuiModel<C>, io: &mut I) -> Result<(), I::Error>
 where
     C: RpcClient,
@@ -47,14 +48,17 @@ where
         let now = io.now();
         io.draw(model, now)?;
         let key = io.read_key(REFRESH_INTERVAL)?;
-        let quit = key == Some('q');
+        let quit = matches!(key, Some('q' | '\x1b' | 'Q'));
+        if key == Some('Q') {
+            model.quit_and_shutdown(now);
+        }
         if key == Some('v') {
             model.view = match model.view {
                 View::Dunks => View::Tasks,
                 View::Tasks => View::Dunks,
             };
         }
-        if let Some(key) = key.filter(|key| !matches!(key, 'q' | 'v')) {
+        if let Some(key) = key.filter(|key| !matches!(key, 'q' | '\x1b' | 'Q' | 'v')) {
             io.handle_key(model, key)?;
         }
 
@@ -83,18 +87,21 @@ mod tests {
     struct FakeClient {
         close_count: Rc<Cell<usize>>,
         calls: usize,
+        requests: Vec<(String, Value)>,
         offline: bool,
     }
 
     impl RpcClient for FakeClient {
-        fn call(&mut self, command: &str, _: Value) -> Result<Value, RpcError> {
+        fn call(&mut self, command: &str, args: Value) -> Result<Value, RpcError> {
             self.calls += 1;
+            self.requests.push((command.to_owned(), args));
             if self.offline {
                 return Err(RpcError::Transport("offline".to_string()));
             }
             match command {
                 "list_dunks" => Ok(serde_json::json!({"dunks":[]})),
                 "task_list" => Ok(serde_json::json!({"tasks":[]})),
+                "shutdown" => Ok(serde_json::json!({})),
                 other => panic!("unexpected command {other}"),
             }
         }
@@ -194,6 +201,72 @@ mod tests {
         assert_eq!(model.mode, ClientMode::Daemon);
         assert_eq!(model.client.calls, 1);
         assert_eq!(close_count.get(), 0);
+        assert!(!model
+            .client
+            .requests
+            .iter()
+            .any(|(command, _)| command == "shutdown"));
+    }
+
+    #[test]
+    fn run_escape_quits_without_shutdown_or_forwarding_escape() {
+        let client = FakeClient::default();
+        let close_count = client.close_count.clone();
+        let mut model = TuiModel::connected(client, 0.0);
+        let mut io = io([Some('\x1b')]);
+
+        run(&mut model, &mut io).unwrap();
+
+        assert_eq!(model.mode, ClientMode::Daemon);
+        assert_eq!(close_count.get(), 0);
+        assert!(io.handled_keys.is_empty());
+        assert!(!model
+            .client
+            .requests
+            .iter()
+            .any(|(command, _)| command == "shutdown"));
+    }
+
+    #[test]
+    fn run_uppercase_q_sends_only_the_stop_all_shutdown_request() {
+        let client = FakeClient::default();
+        let close_count = client.close_count.clone();
+        let mut model = TuiModel::connected(client, 0.0);
+        let mut io = io([Some('Q')]);
+
+        run(&mut model, &mut io).unwrap();
+
+        assert_eq!(model.mode, ClientMode::Daemon);
+        assert_eq!(close_count.get(), 0);
+        assert!(io.handled_keys.is_empty());
+        let shutdown_requests = model
+            .client
+            .requests
+            .iter()
+            .filter(|(command, _)| command == "shutdown")
+            .collect::<Vec<_>>();
+        assert_eq!(shutdown_requests.len(), 1);
+        assert_eq!(
+            shutdown_requests[0].1,
+            serde_json::json!({"stop_all": true})
+        );
+    }
+
+    #[test]
+    fn run_uppercase_q_only_closes_local_fallback() {
+        let client = FakeClient::default();
+        let close_count = client.close_count.clone();
+        let mut model = TuiModel::local_fallback(client, 0.0, "socket missing");
+        let mut io = io([Some('Q')]);
+
+        run(&mut model, &mut io).unwrap();
+
+        assert_eq!(close_count.get(), 1);
+        assert!(!model
+            .client
+            .requests
+            .iter()
+            .any(|(command, _)| command == "shutdown"));
     }
 
     #[test]

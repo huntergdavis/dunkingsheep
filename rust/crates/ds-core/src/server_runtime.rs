@@ -4,7 +4,9 @@
 //! defaulting to tmux. Herdr is retired in the Rust runtime, so it is refused
 //! explicitly instead of being silently replaced with tmux.
 
+mod delivery;
 mod status;
+mod submit;
 
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};

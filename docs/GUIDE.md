@@ -1,4 +1,4 @@
-# Dunking Sheep 2.71.0 guide
+# Dunking Sheep 2.71.4 guide
 
 Dunking Sheep sends text (followed by Enter) into terminal panes on a
 schedule. It exists to keep AI coding agents moving ("continue"), to let
@@ -507,8 +507,9 @@ and records a lease in one SQLite transaction. `task_heartbeat` extends the
 lease; `task_complete` completes it for everyone. `task_follow` is the
 push: the daemon then hands you the next task when the backend reports
 your pane idle, so you do not poll. An empty task_next subscribes you
-automatically. `inbox_read` returns your global tasks and your own pane's
-tasks after the messages.
+automatically. `inbox_read` includes global and pane task queues by default;
+use `dunkingsheep inbox read --messages-only` or
+`inbox_read(include_tasks=false)` to omit them.
 
 ```
 dunkingsheep task add "Ship the parser" -p high --body "..."

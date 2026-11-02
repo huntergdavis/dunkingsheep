@@ -849,9 +849,7 @@ impl<C: RpcClient> TuiModel<C> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => TaskKeyDispatch::Quit,
             KeyCode::Char('Q') => {
-                if self.mode == ClientMode::Daemon {
-                    self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
-                }
+                self.quit_and_shutdown(now);
                 TaskKeyDispatch::QuitAndShutdown
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1101,9 +1099,7 @@ impl<C: RpcClient> TuiModel<C> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => KeyDispatch::Quit,
             KeyCode::Char('Q') => {
-                if self.mode == ClientMode::Daemon {
-                    self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
-                }
+                self.quit_and_shutdown(now);
                 KeyDispatch::QuitAndShutdown
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1328,6 +1324,13 @@ impl<C: RpcClient> TuiModel<C> {
     pub fn flash(&mut self, text: impl Into<String>, now: f64, seconds: f64) {
         self.message = text.into();
         self.message_until = now + seconds;
+    }
+
+    /// Stop daemon-owned dunks only for the explicit uppercase-Q action.
+    pub fn quit_and_shutdown(&mut self, now: f64) {
+        if self.mode == ClientMode::Daemon {
+            self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
+        }
     }
 
     /// Release only an in-process fallback; daemon-owned dunks outlive the TUI.

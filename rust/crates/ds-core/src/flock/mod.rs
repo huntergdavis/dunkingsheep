@@ -131,6 +131,8 @@ pub struct Flock {
     snapshot_lock: Mutex<()>,
     status_runtime: OnceLock<status_runtime::StatusState>,
     last_message: Mutex<String>,
+    /// Per-pane successful retry key, matching Python Flock._submit_key.
+    pub(crate) learned_submit_keys: Mutex<BTreeMap<String, String>>,
     quarantined_mailboxes: Mutex<Vec<Value>>,
 }
 
@@ -170,6 +172,7 @@ impl Flock {
             snapshot_lock: Mutex::new(()),
             status_runtime: OnceLock::new(),
             last_message: Mutex::new(String::new()),
+            learned_submit_keys: Mutex::new(BTreeMap::new()),
             quarantined_mailboxes: Mutex::new(Vec::new()),
         };
         flock.load_launches();

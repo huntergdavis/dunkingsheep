@@ -262,7 +262,8 @@ class DispatchGateTests(unittest.TestCase):
 
     def test_another_lanes_mailbox_is_not_readable(self):
         with self.assertRaisesRegex(DunkError, "not yours"):
-            self.call("inbox_read", {"mailbox": OTHER}, pane=WORKER)
+            self.call("inbox_read", {"mailbox": OTHER, "include_tasks": False},
+                      pane=WORKER)
 
     def test_a_free_model_reviewer_cannot_claim(self):
         self.roles.register("w2:p2", "reviewer", provider="pi")

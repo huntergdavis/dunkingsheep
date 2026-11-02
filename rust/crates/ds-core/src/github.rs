@@ -4,6 +4,9 @@
 //! time and HTTP transport are injectable so its credential behavior can be
 //! exercised without touching a user's config or making a live request.
 
+mod mints;
+pub use mints::{author_from_mints, author_mint_path, record_author_mint, repos_config};
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -21,6 +24,9 @@ use crate::error::{refusal, DunkError};
 pub const KINDS: [&str; 2] = ["author", "reviewer"];
 pub const DEFAULT_API: &str = "https://api.github.com";
 pub const REFRESH_MARGIN_S: f64 = 600.0;
+pub const REVIEW_CONTEXT: &str = "dunkingsheep/review";
+pub const DEFAULT_REQUIRED_VERDICTS: usize = 1;
+pub const POOLRAD_REQUIRED_VERDICTS: usize = 2;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TokenCacheTempFile {
@@ -776,7 +782,7 @@ pub async fn open_pulls(
             .unwrap_or_default();
         let batch_len = batch.len();
         pulls.extend(batch);
-        if batch_len == 0 || batch_len < 100 {
+        if batch_len < 100 {
             break;
         }
     }
@@ -818,6 +824,678 @@ pub async fn open_pulls(
             }))
         })
         .collect()
+}
+
+/// Resolve a branch or ref name to the commit SHA GitHub currently reports.
+pub async fn get_ref(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    reference: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/ref/heads/{reference}");
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("object"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Check for a branch, treating only GitHub's not-found/conflict responses as absent.
+pub async fn ref_exists(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> Result<bool, GitHubError> {
+    match get_ref(transport, api_root, repo, branch, token).await {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error.to_string().contains("-> 404") || error.to_string().contains("-> 409") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Resolve a commit SHA to its tree SHA.
+pub async fn commit_tree(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    sha: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/commits/{sha}");
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("tree"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Return decoded UTF-8 file contents and its blob SHA, or `(None, None)` for a 404.
+pub async fn file_text(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    path: &str,
+    reference: &str,
+    token: &str,
+) -> Result<(Option<String>, Option<Value>), GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/contents/{path}?ref={reference}");
+    let (_, data) = match request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) if error.to_string().contains("-> 404") => return Ok((None, None)),
+        Err(error) => return Err(error),
+    };
+    let data = data.unwrap_or(Value::Null);
+    if data.is_null() {
+        return Err(GitHubError(
+            "'NoneType' object has no attribute 'get'".into(),
+        ));
+    }
+    if data.is_array() {
+        return Err(GitHubError(format!(
+            "{repo}/{path} is a directory, not a file"
+        )));
+    }
+    let encoding_value = data.get("encoding");
+    let encoding = encoding_value.and_then(Value::as_str);
+    if encoding != Some("base64") {
+        let encoding_repr = match encoding_value {
+            None | Some(Value::Null) => "None".to_owned(),
+            Some(Value::String(value)) => python_repr(value),
+            Some(value) => python_string(value),
+        };
+        return Err(GitHubError(format!(
+            "{repo}/{path}: unexpected encoding {}",
+            encoding_repr
+        )));
+    }
+    let content_value = data.get("content").filter(|value| python_truthy(value));
+    let content = match content_value {
+        None => "",
+        Some(Value::String(content)) => content,
+        Some(_) => {
+            return Err(GitHubError(
+                "argument should be a bytes-like object or ASCII string".into(),
+            ));
+        }
+    };
+    let bytes = decode_github_base64(content)?;
+    let text = String::from_utf8(bytes).map_err(|error| GitHubError(error.to_string()))?;
+    let sha = data.get("sha").cloned();
+    Ok((Some(text), sha))
+}
+
+fn decode_github_base64(content: &str) -> Result<Vec<u8>, GitHubError> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    // Python's base64.b64decode defaults to discarding non-alphabet characters.
+    let encoded: Vec<u8> = content
+        .bytes()
+        .filter(|byte| sextet(*byte).is_some() || *byte == b'=')
+        .collect();
+    let (groups, remainder) = encoded.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return Err(GitHubError("Incorrect padding".into()));
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
+    let group_count = groups.len();
+    for (index, group) in groups.iter().enumerate() {
+        let first = sextet(group[0]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        let second = sextet(group[1]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((first << 2) | (second >> 4));
+        if group[2] == b'=' {
+            if group[3] != b'=' || index + 1 != group_count {
+                return Err(GitHubError("Invalid base64 data".into()));
+            }
+            continue;
+        }
+        let third = sextet(group[2]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((second << 4) | (third >> 2));
+        if group[3] == b'=' {
+            if index + 1 != group_count {
+                return Err(GitHubError("Invalid base64 data".into()));
+            }
+            continue;
+        }
+        let fourth = sextet(group[3]).ok_or_else(|| GitHubError("Invalid base64 data".into()))?;
+        decoded.push((third << 6) | fourth);
+    }
+    Ok(decoded)
+}
+
+/// List every file changed by a pull request, preserving GitHub pagination order.
+pub async fn pr_files(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Vec<Value>, GitHubError> {
+    let mut files = Vec::new();
+    for page in 1..=10 {
+        let url = format!("{api_root}/repos/{repo}/pulls/{number}/files?per_page=100&page={page}");
+        let (_, batch) = request(
+            transport,
+            RequestOptions {
+                method: "GET",
+                url: &url,
+                token: Some(token),
+                bearer: None,
+                payload: None,
+                timeout_s: 20,
+                api_root,
+            },
+        )
+        .await?;
+        let batch = batch
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        let batch_len = batch.len();
+        files.extend(batch.into_iter().map(|item| {
+            let filename = item
+                .get("filename")
+                .filter(|value| python_truthy(value))
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            let status = item
+                .get("status")
+                .filter(|value| python_truthy(value))
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new()));
+            serde_json::json!({
+                "filename": filename,
+                "status": status,
+                "previous_filename": item.get("previous_filename").cloned().unwrap_or(Value::Null),
+            })
+        }));
+        if batch_len < 100 {
+            break;
+        }
+    }
+    Ok(files)
+}
+
+/// Create a Git tree on top of an existing tree SHA.
+pub async fn create_tree(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    base_tree: &str,
+    entries: &[Value],
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/trees");
+    let payload = serde_json::json!({"base_tree": base_tree, "tree": entries});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Create a commit with the supplied parent SHAs.
+pub async fn create_commit(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    message: &str,
+    tree: &str,
+    parents: &[String],
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/commits");
+    let payload = serde_json::json!({"message": message, "tree": tree, "parents": parents});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'sha'".into()))
+}
+
+/// Create a branch ref. GitHub's conflict response deliberately remains an error.
+pub async fn create_ref(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    sha: &str,
+    token: &str,
+) -> Result<String, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/git/refs");
+    let payload = serde_json::json!({"ref": format!("refs/heads/{branch}"), "sha": sha});
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    data.as_ref()
+        .and_then(|value| value.get("object"))
+        .and_then(|value| value.get("sha"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| GitHubError("'object' or 'sha'".into()))
+}
+
+/// Open a pull request and return Python's compact response projection.
+pub async fn open_pull(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    pull: OpenPullRequest<'_>,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{}/pulls", pull.repo);
+    let payload = serde_json::json!({
+        "title": pull.title,
+        "head": pull.head,
+        "base": pull.base,
+        "body": pull.body,
+    });
+    let (_, data) = request(
+        transport,
+        RequestOptions {
+            method: "POST",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: Some(&payload),
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let data = data.unwrap_or(Value::Null);
+    let number = python_int(
+        data.get("number")
+            .ok_or_else(|| GitHubError("'number'".into()))?,
+    )?;
+    let pull_head = data
+        .get("head")
+        .filter(|value| python_truthy(value))
+        .and_then(|value| value.get("sha"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(serde_json::json!({
+        "number": number,
+        "url": data.get("html_url").cloned().unwrap_or(Value::Null),
+        "node_id": data.get("node_id").cloned().unwrap_or(Value::Null),
+        "head": pull_head,
+    }))
+}
+
+pub struct OpenPullRequest<'a> {
+    pub repo: &'a str,
+    pub title: &'a str,
+    pub head: &'a str,
+    pub base: &'a str,
+    pub body: &'a str,
+}
+
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "int",
+        Value::Number(_) => "float",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+fn github_object(value: Option<Value>) -> Result<Value, GitHubError> {
+    let value = value.unwrap_or(Value::Null);
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(GitHubError(format!(
+            "'{}' object has no attribute 'get'",
+            python_type_name(&value)
+        )))
+    }
+}
+
+/// Return open pull requests whose head belongs to the repository's owner and branch.
+pub async fn pulls_for_head(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> Result<Vec<Value>, GitHubError> {
+    let owner = repo.split('/').next().unwrap_or("");
+    let url = format!("{api_root}/repos/{repo}/pulls?state=open&head={owner}:{branch}&per_page=20");
+    let (_, batch) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pulls = batch
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    pulls
+        .into_iter()
+        .map(|pull| {
+            let number = python_int(
+                pull.get("number")
+                    .ok_or_else(|| GitHubError("'number'".into()))?,
+            )?;
+            Ok(serde_json::json!({
+                "number": number,
+                "url": pull.get("html_url").cloned().unwrap_or(Value::Null),
+                "node_id": pull.get("node_id").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect()
+}
+
+/// Queue a pull request for auto-merge, using GitHub's GraphQL mutation.
+pub async fn enable_auto_merge(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+    method: Option<&str>,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, pull) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(pull)?;
+    let node_id = pull
+        .get("node_id")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .ok_or_else(|| {
+            GitHubError(format!(
+                "{repo}#{number}: no node id for the auto-merge mutation"
+            ))
+        })?;
+    let method = method.unwrap_or("MERGE").to_uppercase();
+    let variables = serde_json::json!({"id":node_id,"method":method});
+    let result = graphql(
+        transport,
+        api_root,
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }",
+        token,
+        Some(&variables),
+    )
+    .await?;
+    Ok(result
+        .get("enablePullRequestAutoMerge")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+/// Disable a pull request's queued auto-merge through GitHub GraphQL.
+pub async fn disable_auto_merge(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, pull) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(pull)?;
+    let node_id = pull
+        .get("node_id")
+        .filter(|value| python_truthy(value))
+        .cloned()
+        .ok_or_else(|| {
+            GitHubError(format!(
+                "{repo}#{number}: no node id for the auto-merge mutation"
+            ))
+        })?;
+    let variables = serde_json::json!({"id":node_id});
+    graphql(
+        transport,
+        api_root,
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }",
+        token,
+        Some(&variables),
+    )
+    .await
+}
+
+/// Read a pull request's state fields and normalize its Python truth values.
+pub async fn pull_state(
+    transport: &dyn GitHubTransport,
+    api_root: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<Value, GitHubError> {
+    let url = format!("{api_root}/repos/{repo}/pulls/{number}");
+    let (_, response) = request(
+        transport,
+        RequestOptions {
+            method: "GET",
+            url: &url,
+            token: Some(token),
+            bearer: None,
+            payload: None,
+            timeout_s: 20,
+            api_root,
+        },
+    )
+    .await?;
+    let pull = github_object(response)?;
+    Ok(serde_json::json!({
+        "state": pull.get("state").cloned().unwrap_or(Value::Null),
+        "merged": pull.get("merged").is_some_and(python_truthy),
+        "merged_at": pull.get("merged_at").cloned().unwrap_or(Value::Null),
+        "mergeable_state": pull.get("mergeable_state").cloned().unwrap_or(Value::Null),
+        "auto_merge": pull.get("auto_merge").is_some_and(python_truthy),
+    }))
+}
+
+/// Build GitHub's branch-protection request body for the review app check.
+pub fn protection_payload(
+    approvals: &Value,
+    reviewer_app_id: &Value,
+    bypass_app_slug: Option<&str>,
+) -> Result<Value, GitHubError> {
+    let approvals = python_int(approvals)?;
+    let reviewer_app_id = python_int(reviewer_app_id)?;
+    let mut reviews = serde_json::json!({
+        "dismiss_stale_reviews": true,
+        "require_code_owner_reviews": false,
+        "required_approving_review_count": approvals,
+    });
+    if let Some(slug) = bypass_app_slug.filter(|value| !value.is_empty()) {
+        reviews["bypass_pull_request_allowances"] = serde_json::json!({"apps":[slug]});
+    }
+    Ok(serde_json::json!({
+        "required_status_checks": {
+            "strict": false,
+            "checks": [{"context": REVIEW_CONTEXT, "app_id": reviewer_app_id}],
+        },
+        "enforce_admins": true,
+        "required_pull_request_reviews": reviews,
+        "restrictions": null,
+        "allow_force_pushes": false,
+        "allow_deletions": false,
+        "required_linear_history": false,
+    }))
+}
+
+/// Resolve the required distinct reviewer lanes, using the optional JSON config
+/// when supplied and `github-repos.json` otherwise.
+pub fn required_verdicts(repo: &str, config: Option<&Value>) -> Result<usize, GitHubError> {
+    required_verdicts_with_fs(repo, config, &default_config_dir(), &OsAppFileSystem)
+}
+
+fn required_verdicts_with_fs(
+    repo: &str,
+    config: Option<&Value>,
+    config_dir: &Path,
+    file_system: &dyn AppFileSystem,
+) -> Result<usize, GitHubError> {
+    let config = config
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            file_system
+                .read_config(&config_dir.join("github-repos.json"))
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+        });
+    let table = config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("required_verdicts"))
+        .filter(|value| python_truthy(value));
+    let fallback = if repo == "huntergdavis/poolrad-decomp" {
+        POOLRAD_REQUIRED_VERDICTS
+    } else {
+        DEFAULT_REQUIRED_VERDICTS
+    };
+    let fallback_value = Value::from(fallback as i64);
+    let configured = match table {
+        None => &fallback_value,
+        Some(Value::Object(values)) => values.get(repo).unwrap_or(&fallback_value),
+        Some(other) => {
+            return Err(GitHubError(format!(
+                "'{}' object has no attribute 'get'",
+                python_type_name(other)
+            )));
+        }
+    };
+    let value = python_int(configured).unwrap_or(DEFAULT_REQUIRED_VERDICTS as i64);
+    Ok(value.max(1) as usize)
+}
+
+fn default_config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("DUNKINGSHEEP_DIR") {
+        return PathBuf::from(path);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/dunkingsheep")
 }
 
 pub async fn pull_detail(

@@ -56,6 +56,223 @@ fn a_write_through_the_store_is_visible_to_a_fresh_read_pool() {
     assert_eq!(1, counts.unread);
 }
 
+fn maintenance_snapshot(pool: &ReadPool, id: &str) -> serde_json::Value {
+    pool.with(|connection| {
+        connection.query_row(
+            "SELECT state, reason, created_at, read_at, archived_at, body, delivered_at FROM messages WHERE id = ?",
+            [id],
+            |row| Ok(serde_json::json!({
+                "state": row.get::<_, String>(0)?,
+                "reason": row.get::<_, Option<String>>(1)?,
+                "created_at": row.get::<_, f64>(2)?,
+                "read_at": row.get::<_, Option<f64>>(3)?,
+                "archived_at": row.get::<_, Option<f64>>(4)?,
+                "body": row.get::<_, String>(5)?,
+                "delivered_at": row.get::<_, Option<f64>>(6)?,
+            })),
+        ).map_err(map_sqlite)
+    }).expect("maintenance row")
+}
+
+#[test]
+fn inbox_maintenance_marks_only_dead_queued_targets() {
+    let f = Fixture::new();
+    let dead = f.send("dead", "pending");
+    let overlap = f.send("%9", "both identifiers are dead");
+    let live_pane = f.send("live", "keep live");
+    let read = f.send("read", "keep read");
+    let legacy: Vec<String> = ["%7", "w8:p2", "%١", "%10\n"]
+        .iter()
+        .map(|mailbox| f.send(mailbox, "legacy"))
+        .collect();
+    // send() trims mailbox input, whereas old rows may retain the raw key.
+    let newline = legacy[3].clone();
+    let setup = [
+        (dead.clone(), "%9", "queued"),
+        (overlap.clone(), "%9", "queued"),
+        (live_pane.clone(), "%1", "queued"),
+        (read.clone(), "%99", "read"),
+    ];
+    f.store.writer.call(move |connection| {
+        for (id, pane, state) in setup {
+            connection.execute(
+                "UPDATE messages SET pane_id = ?, state = ?, read_at = 91, reason = 'prior reason' WHERE id = ?",
+                rusqlite::params![pane, state, id],
+            ).map_err(map_sqlite)?;
+        }
+        connection.execute("UPDATE messages SET mailbox = ? WHERE id = ?", rusqlite::params!["%10\n", newline]).map_err(map_sqlite)?;
+        Ok(())
+    }).expect("seed pane identities");
+    let preserved: Vec<String> = ["%1", "w8:pH", "%2x", "named-mailbox"]
+        .iter()
+        .map(|mailbox| f.send(mailbox, "preserved"))
+        .collect();
+    let pool = f.pool();
+    let before: Vec<_> = [&dead, &overlap, &live_pane, &read]
+        .into_iter()
+        .chain(legacy.iter())
+        .chain(preserved.iter())
+        .map(|id| (id.clone(), maintenance_snapshot(&pool, id)))
+        .collect();
+    f.store
+        .record_delivery("dead", std::slice::from_ref(&dead), Some(81.0))
+        .expect("receipt");
+    let receipt_before: (String, f64) = pool
+        .with(|connection| {
+            connection
+                .query_row(
+                    "SELECT message_ids, delivered_at FROM deliveries WHERE mailbox = 'dead'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(map_sqlite)
+        })
+        .expect("receipt before");
+
+    let unknown = f
+        .store
+        .mark_undeliverable(&std::collections::BTreeSet::from([String::new()]))
+        .expect("unknown inventory");
+    assert_eq!(
+        serde_json::json!({"undeliverable": 0, "panes": []}),
+        serde_json::to_value(unknown).expect("serialize")
+    );
+    for (id, row) in &before {
+        assert_eq!(*row, maintenance_snapshot(&pool, id));
+    }
+
+    let live = std::collections::BTreeSet::from(["%1".to_string()]);
+    let result = f
+        .store
+        .mark_undeliverable(&live)
+        .expect("mark disappeared panes");
+    assert_eq!(result.undeliverable, 6);
+    assert_eq!(result.panes, ["%9"]);
+    assert_eq!(
+        result.mailboxes,
+        Some(vec![
+            "%10\n".into(),
+            "%7".into(),
+            "%١".into(),
+            "w8:p2".into()
+        ])
+    );
+    for (id, mut row) in before {
+        if id == dead || id == overlap || legacy.contains(&id) {
+            row["state"] = "undeliverable".into();
+            row["reason"] = "target pane no longer exists".into();
+        }
+        assert_eq!(row, maintenance_snapshot(&pool, &id), "{id}");
+    }
+    let receipt_after: (String, f64) = pool
+        .with(|connection| {
+            connection
+                .query_row(
+                    "SELECT message_ids, delivered_at FROM deliveries WHERE mailbox = 'dead'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(map_sqlite)
+        })
+        .expect("receipt after");
+    assert_eq!(receipt_before, receipt_after);
+    assert_eq!(
+        serde_json::to_value(f.store.mark_undeliverable(&live).expect("repeat"))
+            .expect("serialize"),
+        serde_json::json!({"undeliverable": 0, "panes": [], "mailboxes": []})
+    );
+}
+
+#[test]
+fn inbox_maintenance_archives_strictly_old_undeliverable() {
+    let f = Fixture::new();
+    let specs = [
+        ("old", "undeliverable", 0.0, None, None),
+        ("reason", "undeliverable", 13599.0, None, Some("gone")),
+        ("cutoff", "undeliverable", 13600.0, None, None),
+        ("new", "undeliverable", 13601.0, None, None),
+        ("already", "undeliverable", 0.0, Some(17.0), None),
+        ("queued", "queued", 0.0, None, None),
+        ("read", "read", 0.0, None, None),
+    ];
+    let ids: Vec<String> = specs
+        .iter()
+        .map(|(mailbox, ..)| f.send(mailbox, "retain body"))
+        .collect();
+    let setup = ids.clone();
+    f.store.writer.call(move |connection| {
+        for (id, (_, state, created, archived, reason)) in setup.iter().zip(specs) {
+            connection.execute(
+                "UPDATE messages SET state = ?, created_at = ?, archived_at = ?, reason = ?, read_at = 29 WHERE id = ?",
+                rusqlite::params![state, created, archived, reason, id],
+            ).map_err(map_sqlite)?;
+        }
+        Ok(())
+    }).expect("seed retention rows");
+    let pool = f.pool();
+    let before: Vec<_> = ids
+        .iter()
+        .map(|id| maintenance_snapshot(&pool, id))
+        .collect();
+    assert_eq!(
+        f.store
+            .auto_archive_undeliverable(None, Some(100000.0))
+            .expect("default retention"),
+        2
+    );
+    for (index, (id, mut row)) in ids.iter().zip(before).enumerate() {
+        if index < 2 {
+            row["state"] = "archived".into();
+            row["archived_at"] = 100000.0.into();
+            if index == 0 {
+                row["reason"] = "undeliverable older than 24h".into();
+            }
+        }
+        assert_eq!(row, maintenance_snapshot(&pool, id), "{id}");
+    }
+    assert_eq!(
+        f.store
+            .auto_archive_undeliverable(None, Some(100000.0))
+            .expect("repeat"),
+        0
+    );
+    assert_eq!(
+        f.store
+            .auto_archive_undeliverable(Some(0.0), Some(13601.0))
+            .expect("explicit zero retention"),
+        1
+    );
+    assert_eq!(
+        maintenance_snapshot(&pool, &ids[3])["state"],
+        "undeliverable"
+    );
+}
+
+#[test]
+fn inbox_maintenance_rolls_back_both_target_passes_on_failure() {
+    let f = Fixture::new();
+    let dead = f
+        .store
+        .send(&Outgoing {
+            mailbox: "named",
+            body: Some("dead pane"),
+            pane_id: Some("%9"),
+            ..Default::default()
+        })
+        .expect("send");
+    let legacy = f.send("%7", "legacy target");
+    f.store.writer.call(|connection| {
+        connection.execute_batch("CREATE TRIGGER refuse_legacy BEFORE UPDATE ON messages WHEN OLD.mailbox = '%7' BEGIN SELECT RAISE(ABORT, 'fixture legacy refusal'); END;").map_err(map_sqlite)
+    }).expect("install failure");
+    assert!(f
+        .store
+        .mark_undeliverable(&std::collections::BTreeSet::from(["%1".into()]))
+        .is_err());
+    let pool = f.pool();
+    assert_eq!(maintenance_snapshot(&pool, &dead)["state"], "queued");
+    assert_eq!(maintenance_snapshot(&pool, &legacy)["state"], "queued");
+}
+
 #[test]
 fn store_lists_distinct_mailboxes_owned_by_a_pane() {
     let fixture = Fixture::new();

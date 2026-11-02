@@ -2465,7 +2465,8 @@ class Flock:
                 "acked": question["message_id"]}
 
     @_as_dunk_error
-    def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None):
+    def inbox_read(self, mailbox=None, limit=10, peek=False, self_pane_id=None,
+                   include_tasks=True):
         """Read a batch WITHOUT consuming it, build the whole result, then commit.
 
         The order matters and it is the whole point of this method: marking read first
@@ -2474,8 +2475,9 @@ class Flock:
         verdict on a head whose withdrawal message it never saw (VP, t93). So:
 
           1. fetch with mark=False,
-          2. build the FULL result, including the caller's task queues (which is where
-             the failure actually happened: the row_factory drift crashed for_pane),
+          2. build the result, including the caller's task queues unless the caller
+             explicitly asks for messages only (the row_factory drift once crashed
+             for_pane),
           3. only then mark those ids read.
         A failure in 1 or 2 leaves the batch unread, which is the safe direction: the
         reader sees the same mail again rather than losing it.
@@ -2483,7 +2485,7 @@ class Flock:
         key = self._mailbox_or_self(mailbox, self_pane_id, own_only=True)
         messages = self.inbox.read(key, limit=limit, peek=True)
         result = {"mailbox": key, "messages": messages}
-        if self_pane_id:
+        if self_pane_id and include_tasks:
             # The owner's directive: mail and the reader's task queues travel
             # together, so one inbox read is the whole handoff. This runs BEFORE the
             # mark for the reason above - it is the step that used to crash.

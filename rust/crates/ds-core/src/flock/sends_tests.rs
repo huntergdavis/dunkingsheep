@@ -1111,8 +1111,9 @@ fn pane_generation_falls_back_to_pid_and_reads_real_process_start() {
 
 #[cfg(test)]
 mod owned_text_tests {
-    use super::super::sends::Message;
+    use super::super::sends::{pane_generation, text_identity, Message};
     use super::Flock;
+    use super::{Pane, P};
 
     fn flock() -> Flock {
         let dir = tempfile::tempdir().unwrap();
@@ -1328,6 +1329,112 @@ mod owned_text_tests {
         assert_eq!("writer label", second.label);
         assert!(second.scheduled);
         assert!(second.eligible);
+    }
+
+    fn pane_with_current_process(pane_id: &str) -> Pane {
+        let mut env = Pane::default();
+        env.panes.push(serde_json::json!({
+            "pane_id": pane_id,
+            "pane_pid": std::process::id(),
+        }));
+        env
+    }
+
+    #[test]
+    fn stranded_message_matches_composer_text_instead_of_fifo_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let head = Message::new("m1", P, "writer", "queued head", "send_text");
+        let actual = Message::new("m2", P, "writer", "actual composer", "send_text");
+        flock
+            .outbox
+            .lock()
+            .unwrap()
+            .insert(P.into(), vec![head, actual]);
+        let env = pane_with_current_process(P);
+
+        let found = flock.stranded_message(P, "actual composer", &env).unwrap();
+        assert_eq!("m2", found.id);
+        assert!(flock
+            .stranded_message(P, "foreign earlier draft", &env)
+            .is_none());
+    }
+
+    #[test]
+    fn stranded_message_prefers_newest_exact_match_then_wrapped_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let first = Message::new("m1", P, "writer", "same", "send_text");
+        let newest = Message::new("m2", P, "writer", "same", "send_text");
+        let long = Message::new(
+            "m3",
+            P,
+            "writer",
+            "a long notice whose first forty characters are stable across wrapped display lines",
+            "dunk-notice",
+        );
+        flock
+            .outbox
+            .lock()
+            .unwrap()
+            .insert(P.into(), vec![first, newest, long]);
+        let env = pane_with_current_process(P);
+
+        assert_eq!(
+            "m2",
+            flock.stranded_message(P, "same", &env).unwrap().id,
+            "the newest exact text wins"
+        );
+        assert_eq!(
+            "m3",
+            flock
+                .stranded_message(P, "a long notice whose first forty characters", &env)
+                .unwrap()
+                .id,
+            "wrapped notice may match by the source's 40-character prefix"
+        );
+    }
+
+    #[test]
+    fn stranded_message_prefers_a_current_bound_stuck_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let env = pane_with_current_process(P);
+        let mut candidate = Message::new("m-candidate", P, "writer", "stuck text", "send_text");
+        candidate.status = "failed".into();
+        candidate.attempt_generation = pane_generation(&env, P);
+        candidate.created_at = 123.0;
+        flock.note_stuck_candidate(&candidate);
+        let queued = Message::new("m-queued", P, "writer", "stuck text", "send_text");
+        flock.outbox.lock().unwrap().insert(P.into(), vec![queued]);
+
+        let found = flock.stranded_message(P, "stuck text", &env).unwrap();
+        assert_eq!("m-candidate", found.id);
+        assert_eq!("stuck_candidate", found.source);
+    }
+
+    #[test]
+    fn stuck_candidate_reconstruction_fails_closed_for_missing_or_changed_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
+        let env = pane_with_current_process(P);
+        let mut candidate = Message::new("m-candidate", P, "writer", "stuck text", "send_text");
+        candidate.status = "failed".into();
+        candidate.attempt_generation = Some("pid:1:start:old".into());
+        flock.note_stuck_candidate(&candidate);
+
+        assert!(flock.stuck_candidate_message(P, &env).is_none());
+        assert!(flock.stranded_message(P, "", &env).is_none());
+    }
+
+    #[test]
+    fn text_identity_is_stable_for_collapsed_content_and_absent_for_empty_text() {
+        assert_eq!(
+            Some("text:b94d27b9934d3e08".into()),
+            text_identity(" hello  world ")
+        );
+        assert_eq!(text_identity("a b"), text_identity("a\n  b"));
+        assert_eq!(None, text_identity(" \n\t "));
     }
 }
 

@@ -260,7 +260,7 @@ impl Dunker {
             unknown_skips: int_or_zero(kwargs, "unknown_skips"),
             hold_while_typing: kwargs
                 .get("hold_while_typing")
-                .map_or(true, |v| truthy(Some(v))),
+                .is_none_or(|v| truthy(Some(v))),
             hold_count: int_or_zero(kwargs, "hold_count"),
             last_held_at: opt_f64(kwargs, "last_held_at"),
             status: opt_str(kwargs, "status").unwrap_or_else(|| "Ready".to_string()),
@@ -523,7 +523,7 @@ impl DunkList {
         }
         let now = clock::now_s();
         for dunker in state.dunkers.iter_mut().filter(|d| d.running) {
-            if dunker.next_send_at.map_or(true, |at| at == 0.0 || at < now) {
+            if dunker.next_send_at.is_none_or(|at| at == 0.0 || at < now) {
                 dunker.next_send_at = Some(now + RESTORE_GRACE_S);
             }
         }
@@ -804,7 +804,7 @@ pub const RESTORE_GRACE_S: f64 = 5.0;
 
 /// `_start` without the timer: needs a target; sets the countdown.
 fn start_fields(dunker: &mut Dunker) -> Result<(), DunkError> {
-    if dunker.target_pane_id.as_deref().map_or(true, str::is_empty) {
+    if dunker.target_pane_id.as_deref().is_none_or(str::is_empty) {
         dunker.status = "No target - press c".into();
         return Err(DunkError::Refused(format!("{} has no target", dunker.id)));
     }

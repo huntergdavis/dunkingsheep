@@ -1,4 +1,5 @@
-usage: dunkingsheep inbox read [-h] [--limit LIMIT] [--peek] [mailbox]
+usage: dunkingsheep inbox read [-h] [--limit LIMIT] [--peek] [--messages-only]
+                               [mailbox]
 
 positional arguments:
   mailbox
@@ -7,3 +8,4 @@ options:
   -h, --help         show this help message and exit
   --limit, -n LIMIT
   --peek             do not mark them read
+  --messages-only    omit caller task queues from the response

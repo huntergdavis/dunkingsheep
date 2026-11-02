@@ -688,6 +688,10 @@
   "inbox_read": {
    "additionalProperties": false,
    "properties": {
+    "include_tasks": {
+     "description": "Include the caller's task queues in the result (default true).",
+     "type": "boolean"
+    },
     "limit": {
      "description": "How many to read (default 10).",
      "maximum": 100,
