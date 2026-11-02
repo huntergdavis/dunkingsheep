@@ -548,6 +548,21 @@ mod tests {
         )
     }
 
+    fn latest_message_id(fixture: &InboxFixture) -> String {
+        fixture
+            .pool
+            .with(|connection| {
+                connection
+                    .query_row(
+                        "SELECT id FROM messages ORDER BY rowid DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::db::map_sqlite)
+            })
+            .unwrap()
+    }
+
     struct FakeOwnerProcess {
         command: Option<OsString>,
         args: Vec<OsString>,
@@ -716,7 +731,7 @@ mod tests {
             )
             .unwrap();
         assert!(output.success);
-        assert_eq!("stdout", output.stdout);
+        assert_eq!("unicode λ bodystdout", output.stdout);
         assert_eq!("stderr", output.stderr);
     }
 
@@ -761,14 +776,16 @@ mod tests {
             post_vp(&flock, &fixture, body, Some("w9:pH")).unwrap()
         );
         assert_eq!(1, fixture.nudges.lock().unwrap().len());
-        let (summary, stored_body) = crate::inbox::get(&fixture.pool, "m1", fixture.now()).unwrap();
+        let message_id = latest_message_id(&fixture);
+        let (summary, stored_body) =
+            crate::inbox::get(&fixture.pool, &message_id, fixture.now()).unwrap();
         assert_eq!(body, stored_body);
         assert_eq!(Some("watchdog"), summary.sender.as_deref());
         assert_eq!(
             Some("Dialog blocks queued delivery"),
             summary.subject.as_deref()
         );
-        assert_eq!("w9:pH", summary.mailbox);
+        assert_eq!("VP", summary.mailbox);
     }
 
     #[test]
@@ -838,7 +855,7 @@ mod tests {
             retry.iter().map(|attempt| attempt.sink).collect::<Vec<_>>()
         );
         assert_eq!(2, owner_calls.get());
-        let counts = crate::inbox::count(&fixture.pool, "w9:pH", &[], fixture.now()).unwrap();
+        let counts = crate::inbox::count(&fixture.pool, "VP", &[], fixture.now()).unwrap();
         assert_eq!(
             1, counts.unread,
             "successful VP mail was not repeated during owner retry"
