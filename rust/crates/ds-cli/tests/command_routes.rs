@@ -969,7 +969,9 @@ fn cli_route_56_mcp_setup() {
     assert!(!home.join("config").exists());
     assert!(!home.join("dunkingsheep").exists());
 
-    let quoted_dir = temp.path().join("quoted\"back\\slash");
+    let quoted_dir = temp
+        .path()
+        .join("quoted space \"double\" 'single' \\backslash");
     std::fs::create_dir_all(&quoted_dir).unwrap();
     let quoted_executable = quoted_dir.join("dunkingsheep");
     std::fs::copy(env!("CARGO_BIN_EXE_dunkingsheep"), &quoted_executable).unwrap();
@@ -1007,6 +1009,31 @@ fn cli_route_56_mcp_setup() {
         format!("[mcp_servers.dunkingsheep]\ncommand = {encoded_path}\nargs = [\"mcp\"]\n\n"),
         String::from_utf8(quoted_toml.stdout).unwrap()
     );
+
+    let quoted_path = quoted_executable.display().to_string();
+    let shell_path = format!("'{}'", quoted_path.replace('\'', "'\\''"));
+    for (harness, command) in [
+        (
+            "claude",
+            format!("claude mcp add --scope user dunkingsheep -- {shell_path} mcp\n"),
+        ),
+        (
+            "codex",
+            format!("codex mcp add dunkingsheep -- {shell_path} mcp\n"),
+        ),
+        (
+            "gemini",
+            format!("gemini mcp add --scope user dunkingsheep {shell_path} mcp\n"),
+        ),
+    ] {
+        let setup = run_quoted(harness);
+        assert_eq!(0, setup.status.code().unwrap());
+        assert!(setup.stderr.is_empty());
+        assert!(
+            String::from_utf8(setup.stdout).unwrap().contains(&command),
+            "missing shell-quoted executable for {harness}"
+        );
+    }
 }
 
 #[test]

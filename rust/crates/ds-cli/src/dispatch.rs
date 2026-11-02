@@ -335,7 +335,7 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
                 executable,
                 "mcp".to_string(),
             ];
-            let rendered = cmd.join(" ");
+            let rendered = shell_join(&cmd);
             (
                 format!("# Claude Code\n{rendered}\nclaude mcp list   # expect: dunkingsheep: {launch} - Connected\n"),
                 Some(cmd),
@@ -351,7 +351,7 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
                 executable,
                 "mcp".to_string(),
             ];
-            let rendered = cmd.join(" ");
+            let rendered = shell_join(&cmd);
             (
                 format!("# OpenAI Codex CLI\n{rendered}\ncodex mcp list    # expect a dunkingsheep row, status enabled\n# or in ~/.codex/config.toml:\n{toml_block}"),
                 Some(cmd),
@@ -368,7 +368,7 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
                 executable,
                 "mcp".to_string(),
             ];
-            let rendered = cmd.join(" ");
+            let rendered = shell_join(&cmd);
             (
                 format!("# Gemini CLI\n{rendered}\n# or add the JSON block below to ~/.gemini/settings.json\n"),
                 Some(cmd),
@@ -382,6 +382,23 @@ fn mcp_setup_text(harness: &str, scope: &str, executable: &Path) -> (String, Opt
         "toml" => (toml_block, None),
         _ => (String::new(), None),
     }
+}
+
+fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "_@%+=:,./-".contains(ch))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn mcp_setup(ns: &Map<String, Value>) -> Outcome {
