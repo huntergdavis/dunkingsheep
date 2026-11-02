@@ -575,6 +575,53 @@ fn cli_route_16_task_create_read() {
 }
 
 #[test]
+fn cli_route_08_inbox_write_a() {
+    let acked = run_daemon_cli(
+        &["inbox", "ack", "i1", "i2", "--mailbox", "reviewer"],
+        "inbox_ack",
+        json!({"message_ids": "i1,i2", "mailbox": "reviewer"}),
+        json!({
+            "state": "acked",
+            "changed": ["i1", "i2"],
+            "acked_in": "reviewer",
+            "unchanged": 1
+        }),
+    );
+    assert_eq!(0, acked.status.code().unwrap());
+    assert_eq!(
+        "acked: i1, i2 in mailbox 'reviewer'; unchanged 1\n",
+        String::from_utf8(acked.stdout).unwrap()
+    );
+    assert!(acked.stderr.is_empty());
+
+    let cancelled = run_daemon_cli(
+        &["inbox", "cancel", "i3", "i4"],
+        "inbox_cancel",
+        json!({"message_ids": "i3,i4"}),
+        json!({"state": "cancelled", "changed": ["i3"], "unchanged": 1}),
+    );
+    assert_eq!(0, cancelled.status.code().unwrap());
+    assert_eq!(
+        "cancelled: i3; unchanged 1\n",
+        String::from_utf8(cancelled.stdout).unwrap()
+    );
+    assert!(cancelled.stderr.is_empty());
+
+    let deleted = run_daemon_cli(
+        &["inbox", "delete", "i5", "i6"],
+        "inbox_delete",
+        json!({"message_ids": "i5,i6"}),
+        json!({"state": "deleted", "deleted": ["i5", "i6"]}),
+    );
+    assert_eq!(0, deleted.status.code().unwrap());
+    assert_eq!(
+        "deleted: i5, i6\n",
+        String::from_utf8(deleted.stdout).unwrap()
+    );
+    assert!(deleted.stderr.is_empty());
+}
+
+#[test]
 fn cli_route_23_owner_inbox_a() {
     let pushed = run_daemon_cli(
         &["owner", "push", "%42", "hello", "owner"],
@@ -778,51 +825,4 @@ fn cli_route_26_owner_fallback_and_body_newlines() {
     );
     assert_eq!(Some(0), ingest.status.code());
     assert!(ingest.stderr.is_empty());
-}
-
-#[test]
-fn cli_route_08_inbox_write_a() {
-    let acked = run_daemon_cli(
-        &["inbox", "ack", "i1", "i2", "--mailbox", "reviewer"],
-        "inbox_ack",
-        json!({"message_ids": "i1,i2", "mailbox": "reviewer"}),
-        json!({
-            "state": "acked",
-            "changed": ["i1", "i2"],
-            "acked_in": "reviewer",
-            "unchanged": 1
-        }),
-    );
-    assert_eq!(0, acked.status.code().unwrap());
-    assert_eq!(
-        "acked: i1, i2 in mailbox 'reviewer'; unchanged 1\n",
-        String::from_utf8(acked.stdout).unwrap()
-    );
-    assert!(acked.stderr.is_empty());
-
-    let cancelled = run_daemon_cli(
-        &["inbox", "cancel", "i3", "i4"],
-        "inbox_cancel",
-        json!({"message_ids": "i3,i4"}),
-        json!({"state": "cancelled", "changed": ["i3"], "unchanged": 1}),
-    );
-    assert_eq!(0, cancelled.status.code().unwrap());
-    assert_eq!(
-        "cancelled: i3; unchanged 1\n",
-        String::from_utf8(cancelled.stdout).unwrap()
-    );
-    assert!(cancelled.stderr.is_empty());
-
-    let deleted = run_daemon_cli(
-        &["inbox", "delete", "i5", "i6"],
-        "inbox_delete",
-        json!({"message_ids": "i5,i6"}),
-        json!({"state": "deleted", "deleted": ["i5", "i6"]}),
-    );
-    assert_eq!(0, deleted.status.code().unwrap());
-    assert_eq!(
-        "deleted: i5, i6\n",
-        String::from_utf8(deleted.stdout).unwrap()
-    );
-    assert!(deleted.stderr.is_empty());
 }
