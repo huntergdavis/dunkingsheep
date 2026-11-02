@@ -2773,7 +2773,15 @@ mod tests {
                             "SELECT event, actor, scope, priority, meta FROM task_events \
                              WHERE task_id = ? AND event = 'accounting'",
                             params![id],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                            |r| {
+                                Ok((
+                                    r.get::<_, String>(0)?,
+                                    r.get::<_, Option<String>>(1)?,
+                                    r.get::<_, String>(2)?,
+                                    r.get::<_, String>(3)?,
+                                    r.get::<_, String>(4)?,
+                                ))
+                            },
                         )
                         .map_err(db::map_sqlite)?;
                     Ok((accounting_pr.0, accounting_pr.1, events, event))
