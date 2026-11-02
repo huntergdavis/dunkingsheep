@@ -11,7 +11,18 @@ fn flock(dir: &std::path::Path, persist: bool) -> Flock {
 #[test]
 fn whole_flock_snapshot_restores_queued_and_recovery_state() {
     let dir = tempfile::tempdir().unwrap();
-    let source = flock(dir.path(), false);
+    let source = flock(dir.path(), true);
+    let executable = dir.path().join("daemon");
+    std::fs::write(&executable, b"fixture").unwrap();
+    let state_path = dir.path().join("state.json");
+    source
+        .attach_status_state(StatusState::at_start(
+            "test",
+            &state_path,
+            executable,
+            Env::default(),
+        ))
+        .unwrap();
     source.next_message_id.store(44, Ordering::Relaxed);
     {
         let mut message = sends::Message::new("m43", "%1", "worker", "held text", "d7");
@@ -54,7 +65,9 @@ fn whole_flock_snapshot_restores_queued_and_recovery_state() {
         cooldown_s: 30.0,
         observation_interval_s: 10.0,
     };
-    let payload = source.snapshot();
+    source.save().unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
 
     let restored = flock(dir.path(), false);
     restored.restore_snapshot(&payload);
