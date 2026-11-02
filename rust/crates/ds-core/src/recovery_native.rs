@@ -33,9 +33,9 @@ impl PromptSession {
         self.assert_unchanged_with(|| proc::process_alive(self.pid, Some(&self.start)))
     }
 
-    fn assert_unchanged_with<P>(&self, process_alive: P) -> Result<(), NativeSessionError>
+    fn assert_unchanged_with<P>(&self, mut process_alive: P) -> Result<(), NativeSessionError>
     where
-        P: Fn() -> bool,
+        P: FnMut() -> bool,
     {
         if !process_alive() {
             return refuse("the bound Codex process changed");
@@ -87,11 +87,11 @@ fn read_prompt_session_from_binding_with<A, P>(
     binding: &PromptSessionBinding,
     cache: &Mutex<PromptSessionCache>,
     after_cache_key: A,
-    process_alive: P,
+    mut process_alive: P,
 ) -> Result<PromptSession, NativeSessionError>
 where
     A: FnOnce(),
-    P: Fn() -> bool,
+    P: FnMut() -> bool,
 {
     let initial_signature = fs::metadata(&binding.rollout_path)
         .map(|metadata| native_session::signature(&metadata))
@@ -107,7 +107,7 @@ where
         .find(|(key, _)| *key == initial_key)
         .map(|(_, value)| value.clone());
     if let Some(cached) = cached {
-        cached.assert_unchanged_with(|| process_alive())?;
+        cached.assert_unchanged_with(&mut process_alive)?;
         return Ok(cached);
     }
 
