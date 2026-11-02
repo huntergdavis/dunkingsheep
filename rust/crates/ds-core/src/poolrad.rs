@@ -7,9 +7,10 @@ use chrono::Utc;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
+use std::process::{Child, Command, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const STRICT_MANIFEST: &str = "docs/re/strict_full_c_addresses.csv";
@@ -117,24 +118,60 @@ pub fn export_queue(
 }
 
 fn wait_with_output(
-    mut child: std::process::Child,
+    mut child: Child,
     timeout: Duration,
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "child stdout was not piped".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "child stderr was not piped".to_owned())?;
+    let stdout_reader = drain_pipe(stdout);
+    let stderr_reader = drain_pipe(stderr);
     let started = Instant::now();
     loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            let output = child
-                .wait_with_output()
-                .map_err(|error| error.to_string())?;
-            return Ok((status, output.stdout, output.stderr));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok((status, join_pipe(stdout_reader)?, join_pipe(stderr_reader)?));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_pipe(stdout_reader);
+                let _ = join_pipe(stderr_reader);
+                return Err(error.to_string());
+            }
         }
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = join_pipe(stdout_reader);
+            let _ = join_pipe(stderr_reader);
             return Err("strict_candidate_queue.py timed out".to_owned());
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn drain_pipe<R>(mut reader: R) -> JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).map(|()| output)
+    })
+}
+
+fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| "child output reader panicked".to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 fn tail_chars(text: &str, max_chars: usize) -> &str {
@@ -490,7 +527,11 @@ mod tests {
         let repo = tempdir();
         let exporter = repo.path().join("tools/overlay/strict_candidate_queue.py");
         fs::create_dir_all(exporter.parent().unwrap()).unwrap();
-        fs::write(&exporter, "import json, sys\nout=sys.argv[sys.argv.index('--json')+1]\njson.dump({'rows':[{'id':'x'}]}, open(out, 'w'))\n").unwrap();
+        fs::write(
+            &exporter,
+            "import json, sys\nout=sys.argv[sys.argv.index('--json')+1]\nsys.stdout.write('x' * 200000)\nsys.stdout.flush()\nsys.stderr.write('y' * 200000)\nsys.stderr.flush()\njson.dump({'rows':[{'id':'x'}]}, open(out, 'w'))\n",
+        )
+        .unwrap();
         let out = repo.path().join("fresh/nested/queue.json");
         assert_eq!(
             export_queue(repo.path(), &out, Duration::from_secs(5)).unwrap(),
