@@ -1183,4 +1183,119 @@ mod owned_text_tests {
         assert!(!flock.looks_like_ours("%2", ""));
         assert!(!flock.looks_like_ours("%2", "human text"));
     }
+
+    #[test]
+    fn late_older_failure_cannot_replace_newer_no_enter_intent() {
+        let flock = flock();
+        let mut older = Message::new("m9", "%1", "writer", "same text", "direct");
+        older.created_at = 1.0;
+        older.status = "failed".into();
+        older.attempt_generation = Some("pid:9:start:1".into());
+        flock.note_stuck_candidate(&older);
+
+        let mut newer = Message::new("m10", "%1", "writer", "same text", "direct");
+        newer.created_at = 2.0;
+        newer.status = "sent".into();
+        newer.press_enter = false;
+        newer.attempt_generation = Some("pid:9:start:1".into());
+        flock.note_stuck_candidate(&newer);
+        flock.note_stuck_candidate(&older);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        let candidate = &candidates["%1"];
+        assert_eq!("m10", candidate.message_id);
+        assert_eq!("sent", candidate.status);
+        assert!(!candidate.press_enter);
+        assert!(!candidate.eligible);
+    }
+
+    #[test]
+    fn explicit_no_enter_send_is_never_recoverable() {
+        let flock = flock();
+        let mut message = Message::new("m1", "%1", "writer", "draft", "direct");
+        message.status = "failed".into();
+        message.press_enter = false;
+        message.attempt_generation = Some("pid:9:start:1".into());
+
+        flock.note_stuck_candidate(&message);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert!(!candidates["%1"].eligible);
+        assert!(!candidates["%1"].press_enter);
+    }
+
+    #[test]
+    fn key_intent_is_never_recoverable() {
+        let flock = flock();
+        let mut message = Message::new("m1", "%1", "writer", "Escape", "direct");
+        message.status = "failed".into();
+        message.kind = "keys".into();
+        message.attempt_generation = Some("pid:9:start:1".into());
+
+        flock.note_stuck_candidate(&message);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert!(!candidates["%1"].eligible);
+        assert_eq!("keys", candidates["%1"].kind);
+    }
+
+    #[test]
+    fn newer_cancelled_intent_tombstones_older_failed_candidate() {
+        let flock = flock();
+        let mut older = Message::new("m8", "%1", "writer", "body", "direct");
+        older.created_at = 1.0;
+        older.status = "failed".into();
+        older.attempt_generation = Some("pid:9:start:1".into());
+        flock.note_stuck_candidate(&older);
+
+        let mut cancelled = Message::new("m9", "%1", "writer", "body", "direct");
+        cancelled.created_at = 2.0;
+        cancelled.status = "cancelled".into();
+        cancelled.attempt_generation = Some("pid:9:start:1".into());
+        flock.note_stuck_candidate(&cancelled);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert_eq!("m9", candidates["%1"].message_id);
+        assert_eq!("cancelled", candidates["%1"].status);
+        assert!(!candidates["%1"].eligible);
+    }
+
+    #[test]
+    fn candidate_without_attempt_identity_is_never_eligible() {
+        let flock = flock();
+        let mut message = Message::new("m1", "%1", "writer", "maybe sent", "direct");
+        message.status = "failed".into();
+
+        flock.note_stuck_candidate(&message);
+
+        let candidates = flock.stuck_candidates.lock().unwrap();
+        assert!(!candidates["%1"].eligible);
+        assert_eq!(None, candidates["%1"].generation);
+    }
+
+    #[test]
+    fn candidate_retains_message_metadata_and_repeated_update_is_idempotent() {
+        let flock = flock();
+        let mut message = Message::new("m17", "%1", "writer label", "exact text", "dunk-4");
+        message.created_at = 42.5;
+        message.status = "sent".into();
+        message.scheduled = true;
+        message.attempt_generation = Some("pid:17:start:9".into());
+        message.notify_for = vec!["i20".into(), "i21".into()];
+
+        flock.note_stuck_candidate(&message);
+        let first = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+        flock.note_stuck_candidate(&message);
+        let second = flock.stuck_candidates.lock().unwrap()["%1"].clone();
+
+        assert_eq!(first, second);
+        assert_eq!(42.5, second.created_at);
+        assert_eq!(Some("pid:17:start:9".into()), second.generation);
+        assert_eq!(vec!["i20", "i21"], second.notify_for);
+        assert_eq!("dunk-4", second.source);
+        assert_eq!("exact text", second.text);
+        assert_eq!("writer label", second.label);
+        assert!(second.scheduled);
+        assert!(second.eligible);
+    }
 }
