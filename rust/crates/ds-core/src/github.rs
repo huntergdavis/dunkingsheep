@@ -4,6 +4,9 @@
 //! time and HTTP transport are injectable so its credential behavior can be
 //! exercised without touching a user's config or making a live request.
 
+mod mints;
+pub use mints::{author_from_mints, author_mint_path, record_author_mint, repos_config};
+
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
