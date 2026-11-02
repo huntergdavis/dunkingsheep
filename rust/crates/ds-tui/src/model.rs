@@ -9,8 +9,11 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::prelude::{Frame, Line, Text};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use serde_json::Value;
+
+use crate::text_editor::TextEditorBuffer;
 
 /// Retry interval used by `DunkingSheepTui.connect` in the Python client.
 pub const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
@@ -36,6 +39,16 @@ pub trait RpcClient {
 /// with the modal adapter responsible for applying its displayed default.
 pub trait LineModalProvider {
     fn line_modal(&mut self, label: &str, default: &str) -> Option<String>;
+}
+
+/// Supplies a selected pane for model actions that open the target picker.
+pub trait TargetModalProvider {
+    fn target_modal(&mut self, panes: &[Value]) -> Option<Value>;
+}
+
+/// Supplies submitted or cancelled multiline text from the full-screen editor.
+pub trait TextModalProvider {
+    fn text_modal(&mut self, initial_text: &str) -> Option<String>;
 }
 
 /// Which backend currently serves requests.
@@ -73,6 +86,31 @@ pub enum LineModalResult {
     Pending,
     Cancelled,
     Submitted(String),
+}
+
+/// Result of handling one key in the multiline text modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextModalResult {
+    Pending,
+    Cancelled,
+    Submitted(String),
+}
+
+/// Result of handling one key in the pane target picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetPickerResult {
+    Pending,
+    Cancelled,
+    Selected(Value),
+}
+
+/// Result of one task-view key dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKeyDispatch {
+    Handled,
+    Ignored,
+    Quit,
+    QuitAndShutdown,
 }
 
 /// State and Ratatui rendering for the Python TUI's seven-row line input modal.
@@ -222,6 +260,369 @@ impl LineModal {
         }
         characters.into_iter().collect()
     }
+}
+
+/// Full-screen editor state used by the multiline text modal.
+pub struct TextModal {
+    editor: TextEditorBuffer,
+    top_row: usize,
+    left_col: usize,
+}
+
+impl TextModal {
+    pub fn new(initial_text: &str) -> Self {
+        Self {
+            editor: TextEditorBuffer::new(initial_text),
+            top_row: 0,
+            left_col: 0,
+        }
+    }
+
+    pub fn editor(&self) -> &TextEditorBuffer {
+        &self.editor
+    }
+
+    /// Match the Python editor's Ctrl+G save, Escape cancel, newline, tab-as-space,
+    /// editing keys, control-key aliases, and printable Unicode input.
+    pub fn handle_key(&mut self, key: KeyEvent, viewport_height: usize) -> TextModalResult {
+        let control = key
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('\u{1b}') => TextModalResult::Cancelled,
+            KeyCode::Char('\u{7}') | KeyCode::Char('g') if control => {
+                TextModalResult::Submitted(self.editor.text())
+            }
+            KeyCode::Char('\u{7}') => TextModalResult::Submitted(self.editor.text()),
+            KeyCode::Enter | KeyCode::Char('\n' | '\r') => {
+                self.editor.newline();
+                TextModalResult::Pending
+            }
+            KeyCode::Tab | KeyCode::Char('\t') => {
+                self.editor.insert(" ");
+                TextModalResult::Pending
+            }
+            KeyCode::Backspace | KeyCode::Char('\u{7f}' | '\u{8}') => {
+                self.editor.backspace();
+                TextModalResult::Pending
+            }
+            KeyCode::Delete => {
+                self.editor.delete();
+                TextModalResult::Pending
+            }
+            KeyCode::Left | KeyCode::Char('b') if control => {
+                self.editor.move_left();
+                TextModalResult::Pending
+            }
+            KeyCode::Left => {
+                self.editor.move_left();
+                TextModalResult::Pending
+            }
+            KeyCode::Right | KeyCode::Char('f') if control => {
+                self.editor.move_right();
+                TextModalResult::Pending
+            }
+            KeyCode::Right => {
+                self.editor.move_right();
+                TextModalResult::Pending
+            }
+            KeyCode::Up | KeyCode::Char('p') if control => {
+                self.editor.move_up(1);
+                TextModalResult::Pending
+            }
+            KeyCode::Up => {
+                self.editor.move_up(1);
+                TextModalResult::Pending
+            }
+            KeyCode::Down | KeyCode::Char('n') if control => {
+                self.editor.move_down(1);
+                TextModalResult::Pending
+            }
+            KeyCode::Down => {
+                self.editor.move_down(1);
+                TextModalResult::Pending
+            }
+            KeyCode::Home | KeyCode::Char('a') if control => {
+                self.editor.move_home();
+                TextModalResult::Pending
+            }
+            KeyCode::Home => {
+                self.editor.move_home();
+                TextModalResult::Pending
+            }
+            KeyCode::End | KeyCode::Char('e') if control => {
+                self.editor.move_end();
+                TextModalResult::Pending
+            }
+            KeyCode::End => {
+                self.editor.move_end();
+                TextModalResult::Pending
+            }
+            KeyCode::PageUp => {
+                self.editor.move_up(viewport_height.max(1) as i64);
+                TextModalResult::Pending
+            }
+            KeyCode::PageDown => {
+                self.editor.move_down(viewport_height.max(1) as i64);
+                TextModalResult::Pending
+            }
+            KeyCode::Char(character)
+                if !control
+                    && !key.modifiers.intersects(
+                        crossterm::event::KeyModifiers::ALT | crossterm::event::KeyModifiers::SUPER,
+                    )
+                    && !character.is_control() =>
+            {
+                self.editor.insert(&character.to_string());
+                TextModalResult::Pending
+            }
+            _ => TextModalResult::Pending,
+        }
+    }
+
+    /// Render the editor in a bounded full-screen frame. Logical text lines never
+    /// wrap or truncate; scrolling only changes which cells are visible.
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().borders(Borders::ALL), area);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let text_height = usize::from(inner.height.saturating_sub(2)).max(1);
+        let text_width = usize::from(inner.width.saturating_sub(2)).max(1);
+        let visible_width = text_width.saturating_sub(1).max(1);
+        if self.editor.row < self.top_row {
+            self.top_row = self.editor.row;
+        } else if self.editor.row >= self.top_row.saturating_add(text_height) {
+            self.top_row = self.editor.row - text_height + 1;
+        }
+        if self.editor.col < self.left_col {
+            self.left_col = self.editor.col;
+        } else if self.editor.col >= self.left_col.saturating_add(visible_width) {
+            self.left_col = self.editor.col - visible_width + 1;
+        }
+
+        let location = format!(
+            "Ctrl+G saves, Esc cancels  Line {}/{}  Col {}  Placeholders: {{id}} {{name}} {{count}} {{target}} {{time}}",
+            self.editor.row + 1,
+            self.editor.lines.len(),
+            self.editor.col + 1
+        );
+        let mut lines = vec![Line::from("Edit text to send"), Line::from(location)];
+        for row in self.top_row..self.top_row.saturating_add(text_height) {
+            let line = self.editor.lines.get(row).map_or("", String::as_str);
+            let visible = line
+                .chars()
+                .skip(self.left_col)
+                .take(visible_width)
+                .map(|character| if character == '\t' { ' ' } else { character })
+                .collect::<String>();
+            lines.push(Line::from(visible));
+        }
+        let paragraph_area = Rect::new(
+            inner.x.saturating_add(1),
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height,
+        );
+        frame.render_widget(Paragraph::new(Text::from(lines)), paragraph_area);
+        let cursor_x = inner.x.saturating_add(usize_to_u16(
+            1 + self.editor.col.saturating_sub(self.left_col),
+        ));
+        let cursor_y = inner
+            .y
+            .saturating_add(2 + usize_to_u16(self.editor.row.saturating_sub(self.top_row)));
+        if cursor_y < area.y.saturating_add(area.height) {
+            frame.set_cursor_position((
+                cursor_x.min(area.x.saturating_add(area.width.saturating_sub(1))),
+                cursor_y,
+            ));
+        }
+    }
+}
+
+/// Interactive terminal-pane picker grouped under workspace headings.
+pub struct TargetPicker {
+    panes: Vec<Value>,
+    selected: usize,
+}
+
+impl TargetPicker {
+    pub fn new(panes: Vec<Value>) -> Self {
+        let selected = panes
+            .iter()
+            .position(|pane| python_truthy(pane.get("agent").unwrap_or(&Value::Null)))
+            .unwrap_or(0);
+        Self { panes, selected }
+    }
+
+    pub fn selected(&self) -> Option<&Value> {
+        self.panes.get(self.selected)
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> TargetPickerResult {
+        match key.code {
+            KeyCode::Esc => TargetPickerResult::Cancelled,
+            KeyCode::Enter => self
+                .selected()
+                .cloned()
+                .map_or(TargetPickerResult::Cancelled, TargetPickerResult::Selected),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                TargetPickerResult::Pending
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = self
+                    .selected
+                    .saturating_add(1)
+                    .min(self.panes.len().saturating_sub(1));
+                TargetPickerResult::Pending
+            }
+            _ => TargetPickerResult::Pending,
+        }
+    }
+
+    pub fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().borders(Borders::ALL), area);
+        draw_modal_line(frame, area, 1, "Select target pane", true);
+        draw_modal_line(
+            frame,
+            area,
+            2,
+            "j/k or arrows move, Enter selects, Esc cancels",
+            false,
+        );
+        let indent = 4_u16;
+        let header = crate::rows::format_target_row(
+            "Tab",
+            "Agent",
+            "Status",
+            "Directory",
+            i64::from(area.width),
+            i64::from(indent),
+        );
+        draw_modal_line_at(frame, area, 3, indent.saturating_add(1), &header, true);
+
+        let list_top = 5_usize;
+        let visible = usize::from(area.height.saturating_sub(7)).max(1);
+        let display = self.display_rows();
+        let selected_row = display
+            .iter()
+            .position(|row| matches!(row, TargetDisplayRow::Pane(index) if *index == self.selected))
+            .unwrap_or(0);
+        let start = selected_row.saturating_sub(visible.saturating_sub(1));
+        for (screen_index, row) in display.iter().skip(start).take(visible).enumerate() {
+            let y = list_top + screen_index;
+            match row {
+                TargetDisplayRow::Workspace(name) => draw_modal_line(frame, area, y, name, true),
+                TargetDisplayRow::Pane(index) => {
+                    let pane = &self.panes[*index];
+                    let tab = pane
+                        .get("tab_label")
+                        .or_else(|| pane.get("tab_id"))
+                        .filter(|value| python_truthy(value))
+                        .map(python_string)
+                        .unwrap_or_else(|| "?".to_owned());
+                    let tab = if python_truthy(pane.get("is_self").unwrap_or(&Value::Null)) {
+                        format!("{tab} (this)")
+                    } else {
+                        tab
+                    };
+                    let row = crate::rows::format_target_row(
+                        &tab,
+                        &target_string(pane.get("agent")),
+                        &target_string(pane.get("agent_status")),
+                        &target_string(pane.get("cwd")),
+                        i64::from(area.width),
+                        i64::from(indent),
+                    );
+                    draw_modal_line_at(
+                        frame,
+                        area,
+                        y,
+                        indent.saturating_add(1),
+                        &row,
+                        *index == self.selected,
+                    );
+                }
+            }
+        }
+    }
+
+    fn display_rows(&self) -> Vec<TargetDisplayRow> {
+        let mut rows = Vec::new();
+        let mut last_workspace: Option<String> = None;
+        for (index, pane) in self.panes.iter().enumerate() {
+            let workspace = pane
+                .get("workspace_label")
+                .or_else(|| pane.get("workspace_id"))
+                .filter(|value| python_truthy(value))
+                .map(python_string)
+                .unwrap_or_else(|| "?".to_owned());
+            if last_workspace.as_deref() != Some(workspace.as_str()) {
+                rows.push(TargetDisplayRow::Workspace(workspace.clone()));
+                last_workspace = Some(workspace);
+            }
+            rows.push(TargetDisplayRow::Pane(index));
+        }
+        rows
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TargetDisplayRow {
+    Workspace(String),
+    Pane(usize),
+}
+
+fn target_string(value: Option<&Value>) -> String {
+    value
+        .filter(|value| python_truthy(value))
+        .map(python_string)
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn draw_modal_line(frame: &mut Frame<'_>, area: Rect, row: usize, text: &str, bold: bool) {
+    draw_modal_line_at(frame, area, row, 1, text, bold);
+}
+
+fn draw_modal_line_at(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    row: usize,
+    indent: u16,
+    text: &str,
+    bold: bool,
+) {
+    let y = area.y.saturating_add(usize_to_u16(row));
+    if y >= area.y.saturating_add(area.height) {
+        return;
+    }
+    let x = area.x.saturating_add(indent);
+    let width = area.x.saturating_add(area.width).saturating_sub(x);
+    let style = if bold {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    frame.render_widget(Paragraph::new(text).style(style), Rect::new(x, y, width, 1));
+}
+
+fn usize_to_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn char_boundary(value: &str, character_index: usize) -> usize {
@@ -392,6 +793,275 @@ impl<C: RpcClient> TuiModel<C> {
             return None;
         }
         self.tasks.get(self.task_selected)
+    }
+
+    /// List available terminal panes and update the selected dunk's target after
+    /// a caller-provided modal chooses one.
+    pub fn pick_target<M: TargetModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let (result, reconnect) = self.rpc("list_panes", Value::Null, now);
+        let panes = result
+            .as_ref()
+            .and_then(|result| result.get("panes"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if panes.is_empty() {
+            let (status, status_reconnect) = self.rpc("status", Value::Null, now);
+            let hint = status
+                .as_ref()
+                .and_then(|status| status.get("herdr_hint"))
+                .filter(|hint| python_truthy(hint))
+                .map(python_string)
+                .unwrap_or_else(|| "No panes (is the backend reachable?)".into());
+            self.flash(hint, now, 4.0);
+            return reconnect || status_reconnect;
+        }
+        let Some(chosen) = modal.target_modal(&panes) else {
+            return reconnect;
+        };
+        let target = chosen.get("pane_id").cloned().unwrap_or(Value::Null);
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "target": target}),
+            now,
+        )
+        .1
+    }
+
+    /// Dispatch every task-view key from the Python TUI through fakeable modal and
+    /// RPC interfaces. Modifier filtering mirrors the dunk-view dispatcher.
+    pub fn handle_task_key<M: LineModalProvider>(
+        &mut self,
+        key: KeyEvent,
+        modal: &mut M,
+        now: f64,
+    ) -> TaskKeyDispatch {
+        let plain_or_shift =
+            key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT;
+        if !plain_or_shift {
+            return TaskKeyDispatch::Ignored;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => TaskKeyDispatch::Quit,
+            KeyCode::Char('Q') => {
+                if self.mode == ClientMode::Daemon {
+                    self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
+                }
+                TaskKeyDispatch::QuitAndShutdown
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.task_selected = self.task_selected.saturating_sub(1);
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.task_selected = self
+                    .task_selected
+                    .saturating_add(1)
+                    .min(self.tasks.len().saturating_sub(1));
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char(' ') | KeyCode::Char('c') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_complete", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('s') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc(
+                        "task_update",
+                        serde_json::json!({"id": id, "status": "in_progress"}),
+                        now,
+                    );
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('b') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let default = task
+                        .get("block_reason")
+                        .filter(|value| python_truthy(value))
+                        .map(python_string)
+                        .unwrap_or_default();
+                    if let Some(reason) = modal.line_modal("Why is it blocked?", &default) {
+                        let reason = reason.trim();
+                        let id = task.get("id").cloned().unwrap_or(Value::Null);
+                        self.rpc(
+                            "task_block",
+                            serde_json::json!({
+                                "id": id,
+                                "reason": if reason.is_empty() { Value::Null } else { Value::String(reason.into()) }
+                            }),
+                            now,
+                        );
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('u') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_unblock", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('p') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    const PRIORITIES: [&str; 4] = ["low", "medium", "high", "urgent"];
+                    let current = task
+                        .get("priority")
+                        .and_then(Value::as_str)
+                        .filter(|priority| !priority.is_empty())
+                        .unwrap_or("low");
+                    if let Some(index) = PRIORITIES.iter().position(|priority| *priority == current)
+                    {
+                        let priority = PRIORITIES[(index + 1) % PRIORITIES.len()];
+                        let id = task.get("id").cloned().unwrap_or(Value::Null);
+                        self.rpc(
+                            "task_update",
+                            serde_json::json!({"id": id, "priority": priority}),
+                            now,
+                        );
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('d') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_delete", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('e') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let default = task
+                        .get("title")
+                        .filter(|value| python_truthy(value))
+                        .map(python_string)
+                        .unwrap_or_default();
+                    if let Some(title) = modal.line_modal("Task title", &default) {
+                        let title = title.trim();
+                        if !title.is_empty() {
+                            let id = task.get("id").cloned().unwrap_or(Value::Null);
+                            self.rpc(
+                                "task_update",
+                                serde_json::json!({"id": id, "title": title}),
+                                now,
+                            );
+                        }
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('h') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_heartbeat", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('r') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_release", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('n') => {
+                let (result, _) = self.rpc("task_next", serde_json::json!({"scope": "auto"}), now);
+                if let Some(result) = result.filter(python_truthy) {
+                    if let Some(task) = result.get("task").filter(|task| python_truthy(task)) {
+                        let id = task.get("id").map(python_string).unwrap_or_default();
+                        self.flash(format!("claimed {id}"), now, 4.0);
+                    } else {
+                        self.flash("no task ready; following the queue", now, 4.0);
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('f') => {
+                let (result, _) = self.rpc("task_follow", Value::Null, now);
+                if let Some(result) = result.filter(python_truthy) {
+                    let pane_id = result.get("pane_id").map(python_string).unwrap_or_default();
+                    self.flash(format!("receiving pushed tasks as {pane_id}"), now, 4.0);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('F') => {
+                self.rpc("task_unfollow", Value::Null, now);
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('a') => {
+                if let Some(title) = modal.line_modal("New task title", "") {
+                    let title = title.trim();
+                    if !title.is_empty() {
+                        self.rpc("task_add", serde_json::json!({"title": title}), now);
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            _ => TaskKeyDispatch::Ignored,
+        }
+    }
+
+    /// Prompt for and update the selected dunk's interval using the Python label.
+    pub fn edit_interval<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let minutes = dunk
+            .get("interval_minutes")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let default = crate::rows::format_interval(minutes);
+        let Some(value) = modal.line_modal("Interval (minutes, or e.g. 90s / 1.5h)", &default)
+        else {
+            return false;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            return false;
+        }
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "interval_minutes": value}),
+            now,
+        )
+        .1
+    }
+
+    /// Prompt with the selected dunk's current text and update it verbatim after
+    /// Python-compatible outer whitespace trimming.
+    pub fn edit_text<M: TextModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let initial_text = dunk
+            .get("text")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let Some(text) = modal.text_modal(&initial_text) else {
+            return false;
+        };
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "text": text.trim()}),
+            now,
+        )
+        .1
     }
 
     /// Apply the Python dunk-view key map. Actions whose implementations live in
@@ -750,6 +1420,42 @@ mod tests {
             .collect()
     }
 
+    fn text_modal_snapshot(modal: &mut TextModal, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| modal.render(frame, frame.area()))
+            .expect("draw text modal");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line.trim_end().to_owned()
+            })
+            .collect()
+    }
+
+    fn target_picker_snapshot(picker: &TargetPicker, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw target picker");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line.trim_end().to_owned()
+            })
+            .collect()
+    }
+
     fn bordered_line(content: &str, inner_width: usize) -> String {
         format!("  │ {content:<inner_width$} │")
     }
@@ -771,12 +1477,34 @@ mod tests {
     struct FakeModal {
         responses: VecDeque<Option<String>>,
         prompts: Vec<(String, String)>,
+        target_responses: VecDeque<Option<Value>>,
+        target_panes: Vec<Vec<Value>>,
+        text_responses: VecDeque<Option<String>>,
+        text_inputs: Vec<String>,
     }
 
     impl LineModalProvider for FakeModal {
         fn line_modal(&mut self, label: &str, default: &str) -> Option<String> {
             self.prompts.push((label.to_owned(), default.to_owned()));
             self.responses.pop_front().expect("fake modal response")
+        }
+    }
+
+    impl TargetModalProvider for FakeModal {
+        fn target_modal(&mut self, panes: &[Value]) -> Option<Value> {
+            self.target_panes.push(panes.to_vec());
+            self.target_responses
+                .pop_front()
+                .expect("fake target modal response")
+        }
+    }
+
+    impl TextModalProvider for FakeModal {
+        fn text_modal(&mut self, initial_text: &str) -> Option<String> {
+            self.text_inputs.push(initial_text.to_owned());
+            self.text_responses
+                .pop_front()
+                .expect("fake text modal response")
         }
     }
 
@@ -1294,6 +2022,357 @@ mod tests {
         assert_eq!(None, model.current_task(3.0));
         assert_eq!(model.message, "No task selected");
         assert_eq!(model.message_until, 7.0);
+    }
+
+    #[test]
+    fn task_key_dispatch_routes_every_task_write_and_modal_call() {
+        let mut model = TuiModel::connected(
+            FakeClient {
+                responses: VecDeque::from([
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(serde_json::json!({"task": {"id": "t2"}})),
+                    Ok(serde_json::json!({"pane_id": "%3"})),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                ]),
+                ..FakeClient::default()
+            },
+            0.0,
+        );
+        model.tasks.push(serde_json::json!({
+            "id": "t1",
+            "title": "Old title",
+            "block_reason": "old reason",
+            "priority": "medium"
+        }));
+        let mut modal = FakeModal {
+            responses: VecDeque::from([
+                Some("  blocked reason  ".into()),
+                Some("  New title  ".into()),
+                Some("  New task  ".into()),
+            ]),
+            ..FakeModal::default()
+        };
+
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('s'),
+            KeyCode::Char('b'),
+            KeyCode::Char('u'),
+            KeyCode::Char('p'),
+            KeyCode::Char('d'),
+            KeyCode::Char('e'),
+            KeyCode::Char('h'),
+            KeyCode::Char('r'),
+            KeyCode::Char('n'),
+            KeyCode::Char('f'),
+            KeyCode::Char('F'),
+            KeyCode::Char('a'),
+        ] {
+            assert_eq!(
+                model.handle_task_key(key(code), &mut modal, 1.0),
+                TaskKeyDispatch::Handled
+            );
+        }
+
+        assert_eq!(
+            modal.prompts,
+            vec![
+                ("Why is it blocked?".into(), "old reason".into()),
+                ("Task title".into(), "Old title".into()),
+                ("New task title".into(), String::new())
+            ]
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("task_complete".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "status": "in_progress"})
+                ),
+                (
+                    "task_block".into(),
+                    serde_json::json!({"id": "t1", "reason": "blocked reason"})
+                ),
+                ("task_unblock".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "priority": "high"})
+                ),
+                ("task_delete".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "title": "New title"})
+                ),
+                ("task_heartbeat".into(), serde_json::json!({"id": "t1"})),
+                ("task_release".into(), serde_json::json!({"id": "t1"})),
+                ("task_next".into(), serde_json::json!({"scope": "auto"})),
+                ("task_follow".into(), Value::Null),
+                ("task_unfollow".into(), Value::Null),
+                ("task_add".into(), serde_json::json!({"title": "New task"}))
+            ]
+        );
+        assert_eq!(model.message, "receiving pushed tasks as %3");
+    }
+
+    #[test]
+    fn task_key_dispatch_ignores_control_shortcuts_and_preserves_quit_behavior() {
+        let mut model = TuiModel::connected(
+            FakeClient {
+                responses: VecDeque::from([Ok(Value::Null)]),
+                ..FakeClient::default()
+            },
+            0.0,
+        );
+        model.tasks.push(serde_json::json!({"id": "t1"}));
+        let mut modal = FakeModal::default();
+        assert_eq!(
+            model.handle_task_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut modal,
+                1.0,
+            ),
+            TaskKeyDispatch::Ignored
+        );
+        assert_eq!(
+            model.handle_task_key(key(KeyCode::Down), &mut modal, 1.0),
+            TaskKeyDispatch::Handled
+        );
+        assert_eq!(model.task_selected, 0);
+        assert_eq!(
+            model.handle_task_key(key(KeyCode::Char('q')), &mut modal, 1.0),
+            TaskKeyDispatch::Quit
+        );
+        assert_eq!(
+            model.handle_task_key(
+                KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+                &mut modal,
+                1.0,
+            ),
+            TaskKeyDispatch::QuitAndShutdown
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![("shutdown".into(), serde_json::json!({"stop_all": true}))]
+        );
+    }
+
+    #[test]
+    fn interval_and_text_edits_use_python_defaults_and_preserve_multiline_text() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1", "interval_minutes": 0.5, "text": "old\ntext"}),
+            vec![Ok(Value::Null), Ok(Value::Null)],
+        );
+        let mut interval_modal = FakeModal {
+            responses: VecDeque::from([Some(" 1.5h ".into())]),
+            ..FakeModal::default()
+        };
+        assert!(!model.edit_interval(&mut interval_modal, 1.0));
+        assert_eq!(
+            interval_modal.prompts,
+            vec![(
+                "Interval (minutes, or e.g. 90s / 1.5h)".into(),
+                "30s".into()
+            )]
+        );
+
+        let mut text_modal = FakeModal {
+            text_responses: VecDeque::from([Some("  new\ntext  ".into())]),
+            ..FakeModal::default()
+        };
+        assert!(!model.edit_text(&mut text_modal, 2.0));
+        assert_eq!(text_modal.text_inputs, vec!["old\ntext"]);
+        assert_eq!(
+            model.client.calls,
+            vec![
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "interval_minutes": "1.5h"})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "text": "new\ntext"})
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn pick_target_lists_panes_and_updates_the_selected_dunker() {
+        let pane = serde_json::json!({"pane_id": "%42", "agent": "codex"});
+        let mut model = action_model(
+            serde_json::json!({"id": "d1"}),
+            vec![
+                Ok(serde_json::json!({"panes": [pane.clone()]})),
+                Ok(Value::Null),
+            ],
+        );
+        let mut modal = FakeModal {
+            target_responses: VecDeque::from([Some(pane.clone())]),
+            ..FakeModal::default()
+        };
+
+        assert!(!model.pick_target(&mut modal, 1.0));
+        assert_eq!(modal.target_panes, vec![vec![pane.clone()]]);
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("list_panes".into(), Value::Null),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "target": "%42"})
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn pick_target_empty_panes_show_status_hint_without_opening_picker() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1"}),
+            vec![
+                Ok(serde_json::json!({"panes": []})),
+                Ok(serde_json::json!({"herdr_hint": "Open a managed pane first"})),
+            ],
+        );
+        let mut modal = FakeModal::default();
+
+        assert!(!model.pick_target(&mut modal, 2.0));
+        assert_eq!(model.message, "Open a managed pane first");
+        assert!(modal.target_panes.is_empty());
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("list_panes".into(), Value::Null),
+                ("status".into(), Value::Null)
+            ]
+        );
+    }
+
+    #[test]
+    fn target_picker_prefers_agent_and_supports_selection_cancel_and_rows() {
+        let panes = vec![
+            serde_json::json!({
+                "pane_id": "%1",
+                "workspace_label": "Work",
+                "tab_label": "shell",
+                "cwd": "/tmp",
+                "agent_status": "idle"
+            }),
+            serde_json::json!({
+                "pane_id": "%2",
+                "workspace_label": "Work",
+                "tab_label": "codex",
+                "agent": "codex",
+                "agent_status": "working",
+                "cwd": "/workspace"
+            }),
+            serde_json::json!({
+                "pane_id": "%3",
+                "workspace_id": "ws-2",
+                "tab_id": "tab-2",
+                "is_self": true,
+                "cwd": "/home"
+            }),
+        ];
+        let mut picker = TargetPicker::new(panes.clone());
+        assert_eq!(picker.selected(), Some(&panes[1]));
+        let snapshot = target_picker_snapshot(&picker, 80, 12);
+        assert!(snapshot
+            .iter()
+            .any(|line| line.contains("Select target pane")));
+        assert!(snapshot.iter().any(|line| line.contains("Work")));
+        assert!(snapshot.iter().any(|line| line.contains("codex")));
+
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Down)),
+            TargetPickerResult::Pending
+        );
+        assert_eq!(picker.selected(), Some(&panes[2]));
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Up)),
+            TargetPickerResult::Pending
+        );
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Enter)),
+            TargetPickerResult::Selected(panes[1].clone())
+        );
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Esc)),
+            TargetPickerResult::Cancelled
+        );
+    }
+
+    #[test]
+    fn text_modal_key_map_edits_logical_text_and_handles_escape_submit() {
+        let mut modal = TextModal::new("ab\ncd");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Left), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Backspace), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(modal.editor().text(), "ab\nd");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Backspace), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(modal.editor().text(), "abd");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Delete), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(modal.editor().text(), "ab");
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Char('X')), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Enter), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Tab), 3),
+            TextModalResult::Pending
+        );
+        assert_eq!(
+            modal.handle_key(key(KeyCode::Char('é')), 3),
+            TextModalResult::Pending
+        );
+        let submitted =
+            modal.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL), 3);
+        assert_eq!(submitted, TextModalResult::Submitted("abX\n é".into()));
+
+        let mut cancelled = TextModal::new("unchanged");
+        assert_eq!(
+            cancelled.handle_key(key(KeyCode::Esc), 3),
+            TextModalResult::Cancelled
+        );
+    }
+
+    #[test]
+    fn text_modal_snapshot_shows_title_help_and_visible_logical_lines() {
+        let mut modal = TextModal::new("first\nsecond");
+        let snapshot = text_modal_snapshot(&mut modal, 36, 10);
+        assert!(snapshot
+            .iter()
+            .any(|line| line.contains("Edit text to send")));
+        assert!(snapshot
+            .iter()
+            .any(|line| line.contains("Ctrl+G saves, Esc cancels")));
+        assert!(snapshot.iter().any(|line| line.contains("first")));
+        assert!(snapshot.iter().any(|line| line.contains("second")));
     }
 
     #[test]

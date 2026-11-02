@@ -2,9 +2,9 @@
 //! this runs the commands whose bodies exist in the CLI crate and says so honestly for the
 //! rest. Wired today: `context` (the READ subcommands, `context_cmd`), `usage`
 //! (`usage_cmd`), `install` and `secrets-check` (`secrets_cmd`), the daemon-backed `gh-token`,
-//! `git-credential` and `doctor` (`daemon_cmd`), and `github wrappers` (`github_cmd`). Everything
-//! else, including the `context` write subcommands, keeps the "parsed but not ported yet" answer
-//! (exit 1).
+//! `git-credential` and `doctor` (`daemon_cmd`), and `github wrappers` (`github_cmd`). Local
+//! `context add`, `promote`, `supersede` and `retire` writes are also wired; remaining unsupported
+//! commands keep the "parsed but not ported yet" answer (exit 1).
 //!
 //! `--json` for `context`: Python prints `json.dumps(result, indent=2)`; the ordered mode in
 //! `usage_cmd` preserves daemon/local object insertion order with Python-compatible scalars.
@@ -52,8 +52,12 @@ fn not_ported(command: &str) -> Outcome {
 
 fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
     let sub = text(ns, "context_command").unwrap_or("");
-    // add / promote / supersede / retire go to the daemon (role-gated there) unless --local;
-    // `--local` writes the files directly, which is not ported.
+    if matches!(sub, "add" | "promote" | "supersede" | "retire")
+        && matches!(ns.get("local"), Some(Value::Bool(true)))
+    {
+        return context_local_write(sub, ns, json);
+    }
+    // add / promote / supersede / retire go to the daemon (role-gated there) unless --local.
     if matches!(sub, "add" | "promote" | "supersede" | "retire") {
         if matches!(ns.get("local"), Some(Value::Bool(true))) {
             return not_ported(&format!("context {sub} --local"));
@@ -81,6 +85,198 @@ fn context(ns: &Map<String, Value>, json: bool) -> Outcome {
             stdout: String::new(),
             stderr: format!("{error}\n"),
             code: 1,
+        },
+    }
+}
+
+fn context_local_write(sub: &str, ns: &Map<String, Value>, json: bool) -> Outcome {
+    use ds_core::context::store::{AddArgs, Store, SupersedeMeta};
+
+    let global_store = matches!(ns.get("global_store"), Some(Value::Bool(true)));
+    let store = Store::new(None, global_store);
+    let added = match sub {
+        "add" => {
+            let cls = text(ns, "cls").unwrap_or("");
+            let type_ = text(ns, "type_").unwrap_or("reference");
+            let authority = text(ns, "authority").unwrap_or("agent");
+            if cls == "ground-truth"
+                || matches!(type_, "rule" | "principle")
+                || authority == "owner"
+            {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: "refused: local context add cannot verify the bound owner role for protected entries; omit --local to use the daemon\n".into(),
+                    code: 2,
+                };
+            }
+            let body = if let Some(body) = text(ns, "text").filter(|body| !body.is_empty()) {
+                body.to_string()
+            } else {
+                let file = text(ns, "file").unwrap_or("-");
+                if file == "-" {
+                    let mut body = String::new();
+                    if let Err(error) =
+                        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut body)
+                    {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("{error}\n"),
+                            code: 3,
+                        };
+                    }
+                    body.replace("\r\n", "\n").replace('\r', "\n")
+                } else {
+                    match std::fs::read_to_string(file) {
+                        Ok(body) => body.replace("\r\n", "\n").replace('\r', "\n"),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Outcome {
+                                stdout: String::new(),
+                                stderr: format!(
+                                    "no such file: {} - the body comes from --text, stdin or a \
+                                     file; for text inline use: dunkingsheep context add --text \
+                                     '<claim>' --class ... --subject ...\n",
+                                    ds_core::context::store::py_repr(file)
+                                ),
+                                code: 2,
+                            };
+                        }
+                        Err(error) => {
+                            return Outcome {
+                                stdout: String::new(),
+                                stderr: format!("{error}\n"),
+                                code: 3,
+                            };
+                        }
+                    }
+                }
+            };
+            let args = AddArgs {
+                cls,
+                subject: text(ns, "subject").unwrap_or(""),
+                type_,
+                authority: text(ns, "authority"),
+                source: text(ns, "source").unwrap_or(""),
+                stated: text(ns, "stated"),
+                recheck_after: text(ns, "recheck_after"),
+                supersedes: text(ns, "supersedes"),
+                ..AddArgs::default()
+            };
+            store.add(&body, &args, None)
+        }
+        "promote" => {
+            let slug = text(ns, "slug").unwrap_or("");
+            let Some(_entry) = store.find(slug) else {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    code: 1,
+                };
+            };
+            return Outcome {
+                stdout: String::new(),
+                stderr: "refused: local context promote cannot verify the bound owner role; omit --local to use the daemon\n".into(),
+                code: 2,
+            };
+        }
+        "supersede" => {
+            let file = text(ns, "file").unwrap_or("-");
+            let body = if file == "-" {
+                let mut body = String::new();
+                if let Err(error) =
+                    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut body)
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: format!("{error}\n"),
+                        code: 3,
+                    };
+                }
+                body.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                match std::fs::read_to_string(file) {
+                    Ok(body) => body.replace("\r\n", "\n").replace('\r', "\n"),
+                    Err(error) => {
+                        return Outcome {
+                            stdout: String::new(),
+                            stderr: format!("{error}\n"),
+                            code: 3,
+                        };
+                    }
+                }
+            };
+            let slug = text(ns, "slug").unwrap_or("");
+            match store.resolve(slug) {
+                Ok(Some(entry))
+                    if entry.get("class") == Some("ground-truth")
+                        || entry.get("authority") == Some("owner") =>
+                {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: "refused: local context supersede cannot verify the bound owner role for protected entries; omit --local to use the daemon\n".into(),
+                        code: 2,
+                    };
+                }
+                Err(error) => {
+                    return Outcome {
+                        stdout: String::new(),
+                        stderr: format!("context: {error}\n"),
+                        code: 2,
+                    };
+                }
+                _ => {}
+            }
+            store.supersede(slug, &body, None, &SupersedeMeta::default(), None)
+        }
+        "retire" => {
+            let slug = text(ns, "slug").unwrap_or("");
+            return match store.resolve(slug) {
+                Ok(Some(_)) => Outcome {
+                    stdout: String::new(),
+                    stderr: "refused: local context retire cannot verify the bound owner role; omit --local to use the daemon\n".into(),
+                    code: 2,
+                },
+                Ok(None) => Outcome {
+                    stdout: String::new(),
+                    stderr: format!("context: entry {slug} not found\n"),
+                    code: 2,
+                },
+                Err(error) => Outcome {
+                    stdout: String::new(),
+                    stderr: format!("context: {error}\n"),
+                    code: 2,
+                },
+            };
+        }
+        _ => unreachable!("only local context writes are routed here"),
+    };
+
+    match added {
+        Ok(added) => {
+            let mut value = Map::new();
+            value.insert("slug".into(), Value::String(added.slug.clone()));
+            value.insert(
+                "path".into(),
+                Value::String(added.path.display().to_string()),
+            );
+            value.insert("class".into(), Value::String(added.cls.clone()));
+            Outcome {
+                stdout: if json {
+                    format!("{}\n", ordered_json(&Value::Object(value)))
+                } else if sub == "promote" {
+                    format!("promoted {}\n", added.slug)
+                } else if sub == "supersede" {
+                    format!("superseded by {}\n", added.slug)
+                } else {
+                    format!("added {}/{}\n", added.cls, added.slug)
+                },
+                stderr: String::new(),
+                code: 0,
+            }
+        }
+        Err(error) => Outcome {
+            stdout: String::new(),
+            stderr: format!("context: {error}\n"),
+            code: 2,
         },
     }
 }
@@ -1093,6 +1289,73 @@ fn owner_outbox(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, command, args, printer)
 }
 
+fn state(ns: &Map<String, Value>) -> Outcome {
+    let command = text(ns, "state_command").unwrap_or("");
+    let (rpc, args) = match command {
+        "capture" => {
+            let mut args = Map::new();
+            args.insert(
+                "source".into(),
+                ns.get("source")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("periodic".into())),
+            );
+            ("state_capture", args)
+        }
+        "latest" => {
+            let mut args = Map::new();
+            for (source, target) in [
+                ("pane", "pane_id"),
+                ("project", "project"),
+                ("limit", "limit"),
+            ] {
+                if let Some(value) = ns.get(source).filter(|value| !value.is_null()) {
+                    args.insert(target.into(), value.clone());
+                }
+            }
+            ("state_latest", args)
+        }
+        other => return not_ported(&format!("state {other}")),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
+}
+
+fn read_view(ns: &Map<String, Value>) -> Outcome {
+    let command = text(ns, "command").unwrap_or("");
+    let mut args = Map::new();
+    let rpc = match command {
+        "roster" => "roster",
+        "message-state" => {
+            args.insert(
+                "message_ids".into(),
+                ns.get("ids").cloned().unwrap_or(Value::Null),
+            );
+            "message_state"
+        }
+        "reply-stats" => {
+            if let Some(mailboxes) = ns
+                .get("mailboxes")
+                .filter(|v| !v.is_null() && !v.as_str().unwrap_or("").is_empty())
+            {
+                args.insert("mailboxes".into(), mailboxes.clone());
+            }
+            "reply_stats"
+        }
+        "project-summary" => {
+            args.insert(
+                "project".into(),
+                ns.get("project").cloned().unwrap_or(Value::Null),
+            );
+            if let Some(path) = text(ns, "path").filter(|path| !path.is_empty()) {
+                args.insert("path".into(), Value::String(path.to_string()));
+            }
+            "project_summary"
+        }
+        other => return not_ported(other),
+    };
+    crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1123,6 +1386,8 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
+        "state" => state(ns),
+        "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {

@@ -11,12 +11,14 @@ use crate::db::ReadPool;
 use crate::inbox_store::{Outgoing, Store};
 use serde_json::{json, Value};
 
+type RecordedMetric = (String, Option<String>, Option<i64>);
+
 struct Env {
     routing: Vec<RouteEntry>,
     waiting_notice: Option<String>,
     nudges: std::sync::Mutex<Vec<String>>,
     fail_nudge: bool,
-    metrics: std::sync::Mutex<Vec<(String, Option<String>, Option<i64>)>>,
+    metrics: std::sync::Mutex<Vec<RecordedMetric>>,
     panes: Vec<Value>,
     role: &'static str,
     override_name: Option<String>,

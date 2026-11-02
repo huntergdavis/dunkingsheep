@@ -4,6 +4,8 @@
 //! defaulting to tmux. Herdr is retired in the Rust runtime, so it is refused
 //! explicitly instead of being silently replaced with tmux.
 
+mod status;
+
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
@@ -257,6 +259,11 @@ impl crate::api::CommandEnv for RequestRuntimeAdapter<'_> {
 
     fn now_s(&self) -> f64 {
         crate::clock::now_s()
+    }
+
+    fn status_env(&self) -> Result<&dyn crate::flock::status::StatusEnv, DunkError> {
+        self.terminal.flock.status_state()?;
+        Ok(self)
     }
 
     fn view_cache(&self) -> Result<&ViewCache, DunkError> {
