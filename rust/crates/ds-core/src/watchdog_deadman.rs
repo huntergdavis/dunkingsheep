@@ -308,6 +308,7 @@ fn read_text_prefix_from(reader: impl Read, max_chars: usize) -> io::Result<Vec<
 fn io_error_type(error: &io::Error) -> &'static str {
     match error.kind() {
         io::ErrorKind::NotFound => "FileNotFoundError",
+        io::ErrorKind::NotADirectory => "NotADirectoryError",
         io::ErrorKind::PermissionDenied => "PermissionError",
         io::ErrorKind::IsADirectory => "IsADirectoryError",
         _ => "OSError",
@@ -318,6 +319,7 @@ fn python_io_error(path: &Path, error: &io::Error) -> String {
     let code = error.raw_os_error().unwrap_or(5);
     let description = match error.kind() {
         io::ErrorKind::NotFound => "No such file or directory",
+        io::ErrorKind::NotADirectory => "Not a directory",
         io::ErrorKind::PermissionDenied => "Permission denied",
         io::ErrorKind::IsADirectory => "Is a directory",
         _ => return error.to_string(),
@@ -384,6 +386,27 @@ mod tests {
         assert_eq!((None, None), recorded_cadence(missing));
         let empty = heartbeat(&directory, " \n");
         assert_eq!((None, None), recorded_cadence(empty));
+    }
+
+    #[test]
+    fn watchdog_deadman_recorded_cadence_formats_not_a_directory_like_python() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("not-a-directory");
+        fs::write(&file, "file").unwrap();
+        let path = file.join("heartbeat.json");
+        let error = fs::read(&path).unwrap_err();
+        let errno = error.raw_os_error().unwrap_or(5);
+
+        assert_eq!(
+            (
+                None,
+                Some(format!(
+                    "unreadable (NotADirectoryError: [Errno {errno}] Not a directory: '{}')",
+                    path.display()
+                ))
+            ),
+            recorded_cadence(path)
+        );
     }
 
     #[test]
