@@ -29,6 +29,7 @@ import re
 import time
 
 import dunk_github
+from dunk_tasks import TaskError
 
 log = logging.getLogger("dunkingsheep.review")
 
@@ -435,7 +436,18 @@ class Sync:
         # PRs that closed or merged: their live review task is moot.
         for key, task in live.items():
             if key not in seen and key[0] in listed and not dry_run:
-                self.flock.tasks.cancel(task["id"], reason="PR closed or merged on GitHub")
+                # The live map predates the GitHub reads. Another request may
+                # have completed this review while the sweep was listing PRs.
+                if self.flock.tasks.get(task["id"])["status"] in ("done", "cancelled"):
+                    continue
+                try:
+                    self.flock.tasks.cancel(task["id"], reason="PR closed or merged on GitHub")
+                except TaskError:
+                    # Completion can also commit between the check and cancel.
+                    # A refusal for a still-live task remains a real error.
+                    if self.flock.tasks.get(task["id"])["status"] in ("done", "cancelled"):
+                        continue
+                    raise
                 report["cancelled"].append(task["id"])
         return report
 
