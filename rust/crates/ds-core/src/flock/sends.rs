@@ -960,6 +960,25 @@ pub(crate) struct DecidedTombstone {
     pub created_at: Option<f64>,
 }
 
+pub(crate) fn decided_tombstone_matches_row(
+    tombstone: &DecidedTombstone,
+    row_created_at: Option<f64>,
+) -> bool {
+    if !matches!(
+        tombstone.status.as_str(),
+        "sent" | "failed" | "cancelled" | "undeliverable"
+    ) {
+        return false;
+    }
+    let Some(tombstone_created_at) = tombstone.created_at.filter(|stamp| stamp.is_finite()) else {
+        return false;
+    };
+    let Some(row_created_at) = row_created_at.filter(|stamp| stamp.is_finite()) else {
+        return false;
+    };
+    (tombstone_created_at - row_created_at).abs() <= 1e-3
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DecidedMessages {
     #[allow(dead_code)] // Read by the restore/message-list integration slices.

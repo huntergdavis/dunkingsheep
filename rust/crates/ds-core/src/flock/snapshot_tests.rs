@@ -122,6 +122,39 @@ fn restore_suppresses_only_a_decided_row_with_matching_id_and_created_at() {
 }
 
 #[test]
+fn missing_outbox_created_at_cannot_match_a_fallback_message_timestamp() {
+    let mut row = json!({
+        "id": "missing-stamp",
+        "pane_id": "%1",
+        "target_label": "worker",
+        "text": "queued",
+        "source": "send_text"
+    });
+    let decoded = sends::message_from_snapshot(&row).unwrap();
+    let tombstone = sends::DecidedTombstone {
+        status: "sent".into(),
+        created_at: Some(decoded.created_at),
+    };
+
+    // The pre-fix comparison against Message::created_at would match this exact value and
+    // could suppress the row, even though the persisted outbox row had no timestamp.
+    assert!(
+        (tombstone.created_at.unwrap() - decoded.created_at).abs() <= 1e-3,
+        "fixture must reproduce the old fabricated-timestamp match"
+    );
+    assert!(!sends::decided_tombstone_matches_row(
+        &tombstone,
+        row.get("created_at").and_then(serde_json::Value::as_f64),
+    ));
+
+    row["created_at"] = json!(decoded.created_at);
+    assert!(sends::decided_tombstone_matches_row(
+        &tombstone,
+        row.get("created_at").and_then(serde_json::Value::as_f64),
+    ));
+}
+
+#[test]
 fn an_inbox_status_read_error_keeps_the_queued_notice() {
     let dir = tempfile::tempdir().unwrap();
     let inbox = std::sync::Arc::new(

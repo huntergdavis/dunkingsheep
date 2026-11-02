@@ -304,12 +304,10 @@ impl Flock {
                 continue;
             };
             if decided.get(&message.id).is_some_and(|entry| {
-                matches!(
-                    entry.status.as_str(),
-                    "sent" | "failed" | "cancelled" | "undeliverable"
-                ) && entry
-                    .created_at
-                    .is_some_and(|created_at| (created_at - message.created_at).abs() <= 1e-3)
+                sends::decided_tombstone_matches_row(
+                    entry,
+                    row.get("created_at").and_then(Value::as_f64),
+                )
             }) {
                 continue;
             }
