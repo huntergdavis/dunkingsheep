@@ -65,7 +65,7 @@ pub fn credited_ids(repo: impl AsRef<Path>) -> HashSet<String> {
         return HashSet::new();
     };
     records
-        .filter_map(|record| record.get(id_column))
+        .filter_map(|record| record.get(id_column).cloned())
         .filter(|id| !id.is_empty())
         .map(|id| id.trim().to_owned())
         .collect()
@@ -100,6 +100,7 @@ pub fn export_queue(
     let (status, stdout, stderr) = wait_with_output(child, timeout)?;
     if !status.success() {
         let detail = if stderr.is_empty() { stdout } else { stderr };
+        let detail = String::from_utf8_lossy(&detail);
         return Err(format!(
             "strict_candidate_queue.py failed ({}): {}",
             status.code().unwrap_or(-1),
