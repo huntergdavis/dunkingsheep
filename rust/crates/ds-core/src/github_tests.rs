@@ -1029,3 +1029,283 @@ fn git_write_helpers_send_exact_payloads_and_project_open_pull() {
     assert_eq!(seen[0].headers["Authorization"], "token reviewer-token");
     assert!(seen.iter().all(|request| request.timeout_s == 20));
 }
+
+#[test]
+fn pulls_for_head_uses_repo_owner_and_projects_pr_metadata() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"[{"number":"19","html_url":"https://github.test/pull/19","node_id":"PR_19"},{"number":20}]"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    let pulls = futuresless_block_on(pulls_for_head(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "accounting/topic",
+        "reviewer-token",
+    ))
+    .unwrap();
+    assert_eq!(
+        pulls,
+        vec![
+            serde_json::json!({"number":19,"url":"https://github.test/pull/19","node_id":"PR_19"}),
+            serde_json::json!({"number":20,"url":null,"node_id":null}),
+        ]
+    );
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls?state=open&head=owner:accounting/topic&per_page=20"
+    );
+    assert_eq!(seen[0].headers["Authorization"], "token reviewer-token");
+}
+
+#[test]
+fn auto_merge_helpers_resolve_node_ids_and_use_exact_graphql_mutations() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"node_id":"PR_enable"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"number":5}}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"node_id":"PR_disable"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"number":5}}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"node_id":""}"#.to_vec()));
+    fake.enqueue(response(br#"{"node_id":"PR_error"}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"errors":[{"message":"protected branch"}]}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+
+    assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            5,
+            "author-token",
+            Some("squash"),
+        ))
+        .unwrap(),
+        serde_json::json!({"pullRequest":{"number":5}})
+    );
+    assert_eq!(
+        futuresless_block_on(disable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            5,
+            "author-token",
+        ))
+        .unwrap(),
+        serde_json::json!({"pullRequest":{"number":5}})
+    );
+    assert_eq!(
+        futuresless_block_on(enable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            6,
+            "author-token",
+            None,
+        ))
+        .unwrap_err()
+        .to_string(),
+        "owner/repo#6: no node id for the auto-merge mutation"
+    );
+    assert_eq!(
+        futuresless_block_on(disable_auto_merge(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            7,
+            "author-token",
+        ))
+        .unwrap_err()
+        .to_string(),
+        "GitHub GraphQL: protected branch"
+    );
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 7);
+    assert_eq!(
+        seen[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/5"
+    );
+    assert_eq!(seen[1].url, "https://api.github.com/graphql");
+    assert_eq!(seen[1].method, "POST");
+    assert_eq!(seen[1].headers["Authorization"], "token author-token");
+    let enable: Value = serde_json::from_slice(seen[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        enable["query"],
+        "mutation($id: ID!, $method: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { number } } }"
+    );
+    assert_eq!(
+        enable["variables"],
+        serde_json::json!({"id":"PR_enable","method":"SQUASH"})
+    );
+    let disable: Value = serde_json::from_slice(seen[3].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        disable["query"],
+        "mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { number } } }"
+    );
+    assert_eq!(disable["variables"], serde_json::json!({"id":"PR_disable"}));
+    let default_enable: Value = serde_json::from_slice(seen[5].body.as_ref().unwrap()).unwrap();
+    assert_eq!(default_enable["variables"]["method"], "MERGE");
+}
+
+#[test]
+fn pull_state_preserves_fields_and_python_truthiness() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"state":"closed","merged":"false","merged_at":"now","mergeable_state":"clean","auto_merge":{"enabled_by":null}}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    assert_eq!(
+        futuresless_block_on(pull_state(
+            &*transport,
+            DEFAULT_API,
+            "owner/repo",
+            33,
+            "reviewer-token",
+        ))
+        .unwrap(),
+        serde_json::json!({
+            "state":"closed",
+            "merged":true,
+            "merged_at":"now",
+            "mergeable_state":"clean",
+            "auto_merge":true,
+        })
+    );
+    assert_eq!(
+        recorded.lock().unwrap()[0].url,
+        "https://api.github.com/repos/owner/repo/pulls/33"
+    );
+}
+
+#[test]
+fn protection_payload_matches_python_shape_defaults_and_integer_conversion() {
+    let payload = protection_payload(
+        &Value::String("2".into()),
+        &Value::String("5531872".into()),
+        Some("dunkingsheep-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "required_status_checks":{
+                "strict":false,
+                "checks":[{"context":"dunkingsheep/review","app_id":5531872}],
+            },
+            "enforce_admins":true,
+            "required_pull_request_reviews":{
+                "dismiss_stale_reviews":true,
+                "require_code_owner_reviews":false,
+                "required_approving_review_count":2,
+                "bypass_pull_request_allowances":{"apps":["dunkingsheep-reviewer"]},
+            },
+            "restrictions":null,
+            "allow_force_pushes":false,
+            "allow_deletions":false,
+            "required_linear_history":false,
+        })
+    );
+    let without_bypass =
+        protection_payload(&Value::Bool(false), &Value::from(12), Some("")).unwrap();
+    assert_eq!(
+        without_bypass["required_pull_request_reviews"]["required_approving_review_count"],
+        0
+    );
+    assert!(without_bypass["required_pull_request_reviews"]
+        .get("bypass_pull_request_allowances")
+        .is_none());
+    assert_eq!(
+        protection_payload(&Value::String("many".into()), &Value::from(1), None)
+            .unwrap_err()
+            .to_string(),
+        "invalid literal for int() with base 10: \"many\""
+    );
+}
+
+#[test]
+fn required_verdicts_uses_repo_fallbacks_config_overrides_and_safe_file_fallback() {
+    let config_dir = PathBuf::from("/isolated/config");
+    let file_system = FixtureFs::default();
+    let config_path = config_dir.join("github-repos.json");
+    assert_eq!(
+        required_verdicts_with_fs("huntergdavis/dunkingsheep", None, &config_dir, &file_system)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "huntergdavis/poolrad-decomp",
+            None,
+            &config_dir,
+            &file_system
+        )
+        .unwrap(),
+        2
+    );
+
+    let config = serde_json::json!({
+        "repos":["owner/repo"],
+        "required_verdicts":{
+            "owner/repo":3,
+            "huntergdavis/poolrad-decomp":0,
+            "bad/value":"not-a-count",
+        },
+    });
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", Some(&config), &config_dir, &file_system).unwrap(),
+        3
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "huntergdavis/poolrad-decomp",
+            Some(&config),
+            &config_dir,
+            &file_system
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs("bad/value", Some(&config), &config_dir, &file_system).unwrap(),
+        1
+    );
+    assert_eq!(
+        required_verdicts_with_fs(
+            "owner/repo",
+            Some(&serde_json::json!({"required_verdicts":"bad"})),
+            &config_dir,
+            &file_system,
+        )
+        .unwrap_err()
+        .to_string(),
+        "'str' object has no attribute 'get'"
+    );
+
+    file_system.data.lock().unwrap().insert(
+        config_path,
+        Ok(r#"{"required_verdicts":{"owner/repo":"4"}}"#.into()),
+    );
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", None, &config_dir, &file_system).unwrap(),
+        4
+    );
+    file_system
+        .data
+        .lock()
+        .unwrap()
+        .insert(config_dir.join("github-repos.json"), Ok("not json".into()));
+    assert_eq!(
+        required_verdicts_with_fs("owner/repo", None, &config_dir, &file_system).unwrap(),
+        1
+    );
+}
