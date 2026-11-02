@@ -21,12 +21,13 @@ pub trait TuiTerminal {
     fn draw<C: RpcClient>(&mut self, model: &TuiModel<C>, now: f64) -> io::Result<()>;
 }
 
-impl<B: Backend<Error = io::Error>> TuiTerminal for Terminal<B> {
+impl<B: Backend> TuiTerminal for Terminal<B> {
     fn draw<C: RpcClient>(&mut self, model: &TuiModel<C>, now: f64) -> io::Result<()> {
         self.draw(|frame| match model.view {
             View::Dunks => crate::view::draw_dunks(frame, model, now),
             View::Tasks => crate::view::draw_tasks(frame, model, now),
         })
+        .map_err(|error| io::Error::other(error.to_string()))
         .map(|_| ())
     }
 }
