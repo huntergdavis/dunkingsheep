@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use super::*;
 

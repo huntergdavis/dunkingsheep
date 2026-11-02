@@ -15,7 +15,7 @@ use crate::error::DunkError;
 use crate::load::Caller;
 
 type PolicyMap = Map<String, Value>;
-type Collect = dyn Fn(&[Caller], f64, &PolicyMap, &Path) -> Result<Value, DunkError>;
+type Collect<'a> = dyn Fn(&[Caller], f64, &PolicyMap, &Path) -> Result<Value, DunkError> + 'a;
 
 /// Port `rule_resource_would_kill` through the existing load collector and policy evaluator.
 pub fn rule_resource_would_kill(
@@ -26,16 +26,21 @@ pub fn rule_resource_would_kill(
     let evaluate = |sample: &PolicyMap, policy: &PolicyMap| {
         crate::policy::evaluate(sample, policy).map_err(|error| error.to_string())
     };
-    rule_resource_would_kill_with(data, rule, now, &|callers, now, policies, state_path| {
-        crate::load::collect(callers, now, Some(policies), &evaluate, state_path)
-    })
+    rule_resource_would_kill_with(
+        data,
+        rule,
+        now,
+        &move |callers, now, policies, state_path| {
+            crate::load::collect(callers, now, Some(policies), &evaluate, state_path)
+        },
+    )
 }
 
 fn rule_resource_would_kill_with(
     data: &TaskData,
     rule: &Value,
     now: f64,
-    collect: &Collect,
+    collect: &Collect<'_>,
 ) -> Result<Vec<Value>, DunkError> {
     let policies_name = rule["policies_path"].as_str().unwrap_or("");
     let policies_path = Path::new(&crate::native_session::expanduser(policies_name)).to_path_buf();
