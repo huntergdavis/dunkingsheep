@@ -20,6 +20,7 @@ pub mod clock;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod dialog_alerts;
 pub mod dispatch;
 pub mod error;
 pub mod fallback;
