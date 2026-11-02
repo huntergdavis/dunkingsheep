@@ -794,7 +794,7 @@ mod tests {
         fs::write(overlay.join("b.py"), b_contents).unwrap();
         fs::write(
             overlay.join("c.py"),
-            "CHECKER_ROWS = ['OVL_0001_9999', 'OVL_0007_0008']\n",
+            "CHECKER_ROWS = ['OVL_0001_0002', 'OVL_0007_0008']\n",
         )
         .unwrap();
         fs::create_dir(overlay.join("unreadable.py")).unwrap();
