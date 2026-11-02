@@ -1986,21 +1986,26 @@ fn retire_pane_dispatch_is_owner_only_and_requires_a_reason_before_recording() {
     assert_eq!(refused.to_string(), "'reason' is required");
     assert!(!retired_path.exists(), "refusal must not create an archive");
 
-    let denied = dispatch_as_flock_role(
+    let worker_request = RequestCtx {
+        self_pane_id: Some("w2:p2".into()),
+        ..RequestCtx::default()
+    };
+    let denied = dispatch_with_env(
         &dispatcher,
         &flock,
-        &env,
-        Some("w2:p2"),
+        &FixedRole("worker", false),
         "retire_pane",
         Some(serde_json::Map::from_iter([(
             "action".into(),
             json!("list"),
         )])),
+        &worker_request,
+        &env,
     )
     .expect_err("the registry restricts this command to the owner role");
     assert!(denied
         .to_string()
-        .contains("not available to role 'worker'"));
+        .contains("retire_pane is not permitted for role worker"));
 }
 
 #[test]
