@@ -715,6 +715,316 @@ fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn python_json_string(text: &str, out: &mut String) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ' '..='\u{7e}' => out.push(c),
+            other => {
+                let mut units = [0u16; 2];
+                for unit in other.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out.push('"');
+}
+
+struct PythonDemoObject {
+    payload: Map<String, Value>,
+    constants: Vec<(String, &'static str)>,
+    surrogates: Vec<(String, String)>,
+}
+
+// Preserve Python's nonfinite constants and unpaired UTF-16 escapes through
+// serde_json's stricter parser. Markers cannot collide with decoded user strings.
+fn python_demo_object(raw: &str) -> Option<PythonDemoObject> {
+    fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut at = start + 1;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'"' => return Some(at + 1),
+                _ => at += 1,
+            }
+        }
+        None
+    }
+    fn string_units(literal: &str) -> Option<Vec<u16>> {
+        let mut units = Vec::new();
+        let mut chars = literal[1..literal.len() - 1].chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                let unit = match chars.next()? {
+                    '"' => b'"' as u16,
+                    '\\' => b'\\' as u16,
+                    '/' => b'/' as u16,
+                    'b' => 8,
+                    'f' => 12,
+                    'n' => 10,
+                    'r' => 13,
+                    't' => 9,
+                    'u' => {
+                        let mut unit = 0;
+                        for _ in 0..4 {
+                            unit = unit * 16 + chars.next()?.to_digit(16)? as u16;
+                        }
+                        unit
+                    }
+                    _ => return None,
+                };
+                units.push(unit);
+            } else {
+                if ch < ' ' {
+                    return None;
+                }
+                let mut encoded = [0; 2];
+                units.extend_from_slice(ch.encode_utf16(&mut encoded));
+            }
+        }
+        Some(units)
+    }
+    fn unicode_escape(bytes: &[u8], at: usize) -> Option<u16> {
+        let escape = bytes.get(at..at + 6)?;
+        if !escape.starts_with(b"\\u") {
+            return None;
+        }
+        let mut unit = 0;
+        for byte in &escape[2..] {
+            unit = unit * 16 + (*byte as char).to_digit(16)? as u16;
+        }
+        Some(unit)
+    }
+    let bytes = raw.as_bytes();
+    let mut strings = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'"' {
+            let end = string_end(bytes, at)?;
+            strings.push(string_units(&raw[at..end])?);
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    let mut prefix = "__dunk_pm_escape_".to_string();
+    loop {
+        let units: Vec<u16> = prefix.encode_utf16().collect();
+        if !strings.iter().any(|value| {
+            value
+                .windows(units.len())
+                .any(|part| part == units.as_slice())
+        }) {
+            break;
+        }
+        prefix.push('_');
+    }
+    let constants: Vec<_> = ["NaN", "Infinity", "-Infinity"]
+        .into_iter()
+        .map(|token| (format!("{prefix}{token}"), token))
+        .collect();
+    let mut surrogates = Vec::new();
+    let mut rewritten = String::new();
+    at = 0;
+    let mut copied = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'"' {
+            let end = string_end(bytes, at)?;
+            at += 1;
+            while at < end - 1 {
+                if bytes[at] != b'\\' {
+                    at += raw[at..].chars().next()?.len_utf8();
+                    continue;
+                }
+                if let Some(unit) = unicode_escape(bytes, at) {
+                    if (0xd800..=0xdbff).contains(&unit)
+                        && unicode_escape(bytes, at + 6)
+                            .is_some_and(|low| (0xdc00..=0xdfff).contains(&low))
+                    {
+                        at += 12;
+                        continue;
+                    }
+                    if (0xd800..=0xdfff).contains(&unit) {
+                        let marker = format!("{prefix}surrogate_{unit:04x}_");
+                        rewritten.push_str(&raw[copied..at]);
+                        rewritten.push_str(&marker);
+                        surrogates.push((marker, format!("\\u{unit:04x}")));
+                        at += 6;
+                        copied = at;
+                        continue;
+                    }
+                }
+                at += 2;
+            }
+            at = end;
+        } else if let Some((marker, token)) = constants
+            .iter()
+            .find(|(_, token)| raw[at..].starts_with(*token))
+        {
+            // Arrays cannot make an invalid, unquoted object key valid.
+            rewritten.push_str(&raw[copied..at]);
+            rewritten.push('[');
+            python_json_string(marker, &mut rewritten);
+            rewritten.push(']');
+            at += token.len();
+            copied = at;
+        } else {
+            at += raw[at..].chars().next()?.len_utf8();
+        }
+    }
+    rewritten.push_str(&raw[copied..]);
+    let value: Value = serde_json::from_str(&rewritten).ok()?;
+    Some(PythonDemoObject {
+        payload: value.as_object()?.clone(),
+        constants,
+        surrogates,
+    })
+}
+
+fn python_compact_json(
+    value: &Value,
+    constants: &[(String, &str)],
+    surrogates: &[(String, String)],
+) -> String {
+    fn write(value: &Value, constants: &[(String, &str)], out: &mut String) {
+        match value {
+            Value::Null => out.push_str("null"),
+            Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+            Value::Number(value) => {
+                let raw = value.to_string();
+                if raw.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+                    match raw.parse::<f64>() {
+                        Ok(number) if number.is_infinite() => {
+                            out.push_str(if number.is_sign_negative() {
+                                "-Infinity"
+                            } else {
+                                "Infinity"
+                            });
+                        }
+                        Ok(number) => out.push_str(&ds_core::usage::py_float_repr(number)),
+                        Err(_) => out.push_str(&raw),
+                    }
+                } else {
+                    out.push_str(if raw == "-0" { "0" } else { &raw });
+                }
+            }
+            Value::String(text) => python_json_string(text, out),
+            Value::Array(items) => {
+                if let [Value::String(marker)] = items.as_slice() {
+                    if let Some((_, token)) = constants.iter().find(|(name, _)| name == marker) {
+                        out.push_str(token);
+                        return;
+                    }
+                }
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    write(item, constants, out);
+                }
+                out.push(']');
+            }
+            Value::Object(object) => {
+                out.push('{');
+                for (index, (key, item)) in object.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    python_json_string(key, out);
+                    out.push_str(": ");
+                    write(item, constants, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    write(value, constants, &mut out);
+    for (marker, escaped) in surrogates {
+        out = out.replace(marker, escaped);
+    }
+    out
+}
+
+fn pm(ns: &Map<String, Value>) -> Outcome {
+    let Some(subcommand) = text(ns, "pm_command") else {
+        return not_ported("pm");
+    };
+    if subcommand == "routing" {
+        return crate::daemon_cmd::run_command(
+            ns,
+            "pm_routing",
+            Map::new(),
+            crate::render_print::render_pm_routing,
+        );
+    }
+    if subcommand != "digest" {
+        return not_ported(&format!("pm {subcommand}"));
+    }
+    let mut raw = String::new();
+    if let Err(error) = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut raw) {
+        return Outcome {
+            stdout: String::new(),
+            stderr: format!("error: {error}\n"),
+            code: 3,
+        };
+    }
+    if matches!(ns.get("demo"), Some(Value::Bool(true))) {
+        let (mut payload, constants, surrogates) = if raw.trim_start().starts_with('{') {
+            python_demo_object(&raw)
+                .map(|value| (value.payload, value.constants, value.surrogates))
+                .unwrap_or_else(|| {
+                    let mut object = Map::new();
+                    object.insert("note".into(), Value::String(raw.clone()));
+                    (object, Vec::new(), Vec::new())
+                })
+        } else {
+            let mut object = Map::new();
+            object.insert("note".into(), Value::String(raw));
+            (object, Vec::new(), Vec::new())
+        };
+        payload.insert("demo".into(), Value::Bool(true));
+        raw = python_compact_json(&Value::Object(payload), &constants, &surrogates);
+    }
+    let mut args = Map::new();
+    args.insert(
+        "project".into(),
+        ns.get("project").cloned().unwrap_or(Value::Null),
+    );
+    args.insert("payload".into(), Value::String(raw));
+    args.insert("to".into(), ns.get("to").cloned().unwrap_or(Value::Null));
+    let mut client = match crate::daemon_cmd::connect(ns) {
+        Ok(client) => client,
+        Err(outcome) => return outcome,
+    };
+    let result = match crate::daemon_cmd::call(&mut client, "pm_digest", args) {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
+    Outcome {
+        stdout: if matches!(ns.get("json"), Some(Value::Bool(true))) {
+            format!("{}\n", crate::usage_cmd::ordered_json(&result))
+        } else {
+            crate::render_print::render_pm_digest(&result)
+        },
+        stderr: String::new(),
+        code: if result.get("ok") == Some(&Value::Bool(false)) {
+            2
+        } else {
+            0
+        },
+    }
+}
+
 fn guard(ns: &Map<String, Value>) -> Outcome {
     let result = match text(ns, "action").unwrap_or("status") {
         "install" => guard_install(matches!(ns.get("no_shadow"), Some(Value::Bool(true)))),
@@ -807,6 +1117,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         }
         "github" => github(ns),
         "guard" => guard(ns),
+        "pm" => pm(ns),
         "owner" => match text(ns, "owner_command") {
             Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
             Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
