@@ -817,6 +817,21 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
             }
             _ => not_ported("task"),
         },
+        "stop" | "toggle" => {
+            let mut args = Map::new();
+            args.insert("id".into(), ns.get("id").cloned().unwrap_or(Value::Null));
+            let rpc = if command == "stop" {
+                "stop_dunk"
+            } else {
+                "toggle_dunk"
+            };
+            crate::daemon_cmd::run_command(ns, rpc, args, |result| {
+                crate::render_print::render_dunk(result)
+            })
+        }
+        "stop-all" => crate::daemon_cmd::run_command(ns, "stop_all", Map::new(), |result| {
+            crate::render_print::render_dunks(result["dunks"].as_array().map_or(&[], Vec::as_slice))
+        }),
         "whoami" => crate::daemon_cmd::whoami(ns),
         // `client.call("status", check_herdr=args.check_herdr), print_status`
         "status" => {
