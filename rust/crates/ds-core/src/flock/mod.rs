@@ -89,8 +89,10 @@ pub struct Flock {
     #[allow(dead_code)] // The stuck-recovery integration caller is owned by a later leaf.
     pub(crate) stuck_candidates: Mutex<BTreeMap<String, sends::StuckCandidate>>,
     /// Bounded recently decided messages, used by the message-list view.
+    #[allow(dead_code)] // The list consumer is owned by a dependent T33 integration slice.
     pub(crate) message_history: Mutex<VecDeque<sends::Message>>,
     /// Bounded id-keyed tombstones preventing decided messages from being restored as queued.
+    #[allow(dead_code)] // Snapshot restore is owned by a dependent T33 integration slice.
     pub(crate) decided: Mutex<sends::DecidedMessages>,
     /// pane_id -> the bounded recent text this flock typed into its composer.
     #[allow(dead_code)] // The send integration callers are assigned to dependent T33 leaves.

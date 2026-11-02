@@ -895,11 +895,14 @@ pub fn send_submit_key(
 
 /// The four outcomes a caller can act on, as one machine-readable field (`Message.OUTCOMES`).
 pub const OUTCOMES: [&str; 5] = ["ok", "stored", "queued", "unconfirmed", "refused"];
+#[allow(dead_code)] // Used by the later message-list integration slice.
 const MESSAGE_HISTORY: usize = 50;
+#[allow(dead_code)] // Used by snapshot restore and decided-message integration slices.
 const DECIDED_KEPT: usize = 500;
 
 #[derive(Debug, Default)]
 struct CompletionState {
+    #[allow(dead_code)] // Read by the later outbox runtime's outcome caller.
     started: bool,
     settled: bool,
 }
@@ -912,6 +915,7 @@ pub struct CompletionWaiter {
 }
 
 impl CompletionWaiter {
+    #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
     fn begin(&self) -> bool {
         let mut state = lock_unpoison(&self.state);
         if state.started {
@@ -921,6 +925,7 @@ impl CompletionWaiter {
         true
     }
 
+    #[allow(dead_code)] // Used by the separate terminal outcome interface in this leaf.
     fn settle(&self) {
         let mut state = lock_unpoison(&self.state);
         if !state.settled {
@@ -958,7 +963,9 @@ pub(crate) struct DecidedTombstone {
 
 #[derive(Debug, Default)]
 pub(crate) struct DecidedMessages {
+    #[allow(dead_code)] // Read by the restore/message-list integration slices.
     pub by_id: BTreeMap<String, DecidedTombstone>,
+    #[allow(dead_code)] // Preserves Python dict insertion order for bounded eviction.
     order: VecDeque<String>,
 }
 
@@ -1185,6 +1192,7 @@ fn outbox_lock(
 impl Flock {
     /// `_record_delivery_outcome`: record terminal metrics/receipts once and always release
     /// the message waiter. Store failures are best-effort bookkeeping, never worker failures.
+    #[allow(dead_code)] // Called by a dependent T33 outbox integration slice.
     pub(crate) fn record_delivery_outcome(
         &self,
         message: &Message,
@@ -1249,6 +1257,7 @@ impl Flock {
 
     /// `_remember`: retain the decided message, its id-reuse-safe tombstone, and stuck intent.
     /// Snapshot persistence belongs to the caller after this in-memory transition.
+    #[allow(dead_code)] // Called by dependent T33 delivery and restore integration slices.
     pub(crate) fn remember(&self, message: &Message) {
         self.note_stuck_candidate(message);
 
@@ -1295,6 +1304,7 @@ impl Flock {
     /// replace a newer send, cancellation, or deliberate no-enter intent. Ineligible
     /// intents are retained as tombstones so that they still supersede older candidates.
     /// This only mutates in-memory state; snapshot persistence has a separate owner.
+    #[allow(dead_code)] // Runtime consumers are assigned to dependent T33 integration slices.
     pub(crate) fn note_stuck_candidate(&self, message: &Message) {
         if message.pane_id.is_empty() {
             return;
