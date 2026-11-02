@@ -254,6 +254,43 @@ fn test_read_prompt_session_decodes_python_message_bodies_in_source_order() {
 }
 
 #[test]
+fn test_read_prompt_session_float_text_matches_python_json_oracle() {
+    let fixture = Fixture::new();
+    // Read the exact same JSON bytes in Python and the authenticated Rust reader.
+    // Include nested negative zero: a top-level -0.0 is falsey in Python.
+    let meta = json!({"type":"session_meta", "payload":{"session_id":SESSION,"cwd":fixture.cwd}});
+    let payloads = [
+        "5.960464477539062e-7",
+        "-5.960464477539062e-7",
+        "1e-4",
+        "1e-5",
+        "1e15",
+        "1e16",
+        "1.0",
+        "-0.0",
+        "[5.960464477539062e-7, -0.0, 1e16]",
+        "{\"small\":-1e-7,\"zero\":-0.0,\"whole\":42}",
+    ];
+    let mut lines = vec![meta.to_string()];
+    lines.extend(payloads.iter().map(|p| {
+        format!(r#"{{"type":"event_msg","payload":{{"type":"user_message","message":{p}}}}}"#)
+    }));
+    std::fs::write(&fixture.rollout, format!("{}\n", lines.join("\n"))).unwrap();
+    let oracle = std::process::Command::new("python3")
+        .args(["-c", "import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; print('\\n'.join(str(r['payload']['message'] or '') for r in rows[1:]), end='')"])
+        .arg(&fixture.rollout).output().expect("python3 oracle");
+    assert!(
+        oracle.status.success(),
+        "{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let binding = fixture.binding();
+    let cache = Mutex::new(PromptSessionCache::default());
+    let session = read_prompt_session_from_binding(&binding, &cache).unwrap();
+    assert_eq!(session.text, String::from_utf8(oracle.stdout).unwrap());
+}
+
+#[test]
 fn test_prompt_text_conversion_matches_python_truthiness_and_str_fixtures() {
     assert_eq!("", prompt_str_or_empty(None));
     for value in [

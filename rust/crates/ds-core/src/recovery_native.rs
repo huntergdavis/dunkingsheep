@@ -255,6 +255,9 @@ fn prompt_python_str(value: &Value) -> String {
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
         Value::String(value) => value.clone(),
+        Value::Number(value) if value.is_f64() => {
+            crate::usage::py_float_repr(value.as_f64().expect("JSON float is representable"))
+        }
         Value::Number(value) => value.to_string(),
         Value::Array(values) => format!(
             "[{}]",
