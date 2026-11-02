@@ -602,6 +602,10 @@ fn owner_command(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn read_text_file_universal_newlines(path: &str) -> std::io::Result<String> {
+    std::fs::read_to_string(path).map(|contents| contents.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
     match text(ns, "owner_command") {
         Some("conversation") => {
@@ -633,7 +637,7 @@ fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
                     .and_then(Value::as_array)
                     .is_some_and(|items| !items.is_empty());
             let body = if let Some(path) = body_file {
-                match std::fs::read_to_string(path) {
+                match read_text_file_universal_newlines(path) {
                     Ok(body) => body,
                     Err(error) => {
                         return Outcome {
@@ -679,7 +683,7 @@ fn owner_inbox(ns: &Map<String, Value>) -> Outcome {
         }
         Some("ingest") => {
             let body = if let Some(path) = text(ns, "body_file").filter(|path| !path.is_empty()) {
-                match std::fs::read_to_string(path) {
+                match read_text_file_universal_newlines(path) {
                     Ok(body) => body,
                     Err(error) => {
                         return Outcome {
@@ -805,7 +809,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "owner" => match text(ns, "owner_command") {
             Some("conversation" | "reply" | "ingest") => owner_inbox(ns),
-            Some("outbox" | "delivered" | "stats") => owner_outbox(ns),
+            Some("outbox" | "delivered" | "stats") | None => owner_outbox(ns),
             _ => owner_command(ns),
         },
         "gh-token" => crate::daemon_cmd::gh_token(ns),

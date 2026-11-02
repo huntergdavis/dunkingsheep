@@ -512,3 +512,48 @@ fn cli_route_25_owner_inbox_c() {
     );
     assert!(stats.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_26_owner_fallback_and_body_newlines() {
+    let stats = run_daemon_cli(
+        &["--json", "owner"],
+        "owner_stats",
+        json!({}),
+        json!({"counts": {"queued": 2}}),
+    );
+    assert_eq!(Some(0), stats.status.code());
+    assert_eq!(
+        "{\n  \"counts\": {\n    \"queued\": 2\n  }\n}\n",
+        String::from_utf8(stats.stdout).unwrap()
+    );
+    assert!(stats.stderr.is_empty());
+
+    let reply_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(reply_file.path(), b"first\r\nsecond\rthird").unwrap();
+    let reply_path = reply_file.path().to_str().unwrap();
+    let reply = run_daemon_cli(
+        &["owner", "reply", "question-26", "--body-file", reply_path],
+        "owner_reply",
+        json!({"message_id": "question-26", "body": "first\nsecond\nthird"}),
+        json!({
+            "question": "question-26",
+            "reply": {"message_id": "reply-26"},
+            "transport": "web",
+            "acked": true
+        }),
+    );
+    assert_eq!(Some(0), reply.status.code());
+    assert!(reply.stderr.is_empty());
+
+    let ingest_file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(ingest_file.path(), b"line one\r\nline two\rline three").unwrap();
+    let ingest_path = ingest_file.path().to_str().unwrap();
+    let ingest = run_daemon_cli(
+        &["owner", "ingest", "web", "--body-file", ingest_path],
+        "owner_ingest",
+        json!({"transport": "web", "body": "line one\nline two\nline three"}),
+        json!({"accepted": true}),
+    );
+    assert_eq!(Some(0), ingest.status.code());
+    assert!(ingest.stderr.is_empty());
+}
