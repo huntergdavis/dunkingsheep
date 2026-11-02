@@ -469,7 +469,7 @@ fn get_refusals_are_400_404_and_503_with_the_pythons_texts() {
         (e.status, e.message.as_str()),
         (503, "Dunking Sheep unavailable: no socket")
     );
-    let slow = FakeDaemon::failing(DaemonError::Failed("timed out".into()));
+    let slow = FakeDaemon::failing(DaemonError::Transport("timed out".into()));
     assert_eq!(
         get("/api/roster", &backend, &slow).unwrap_err().message,
         "daemon call failed: timed out"
@@ -512,5 +512,38 @@ fn a_semicolon_is_data_not_a_separator() {
     assert_eq!(
         sent[1],
         ("reply_stats".to_string(), json!({"mailboxes": "a;b"}))
+    );
+}
+
+#[test]
+fn daemon_command_refusal_is_internal_error_while_transport_is_unavailable() {
+    let backend = FakeBackend::new(vec![]);
+    for (error, status, message) in [
+        (
+            DaemonError::Failed("permission denied".into()),
+            500,
+            "internal error: permission denied",
+        ),
+        (
+            DaemonError::Transport("timed out".into()),
+            503,
+            "daemon call failed: timed out",
+        ),
+    ] {
+        let daemon = FakeDaemon::failing(error);
+        let error = get("/api/roster", &backend, &daemon).unwrap_err();
+        assert_eq!(error.status, status);
+        assert_eq!(error_body(&error), json!({"error": message}));
+    }
+}
+
+#[test]
+fn lane_state_unavailable_keeps_python_client_error_prefix() {
+    let daemon = FakeDaemon::failing(DaemonError::Unavailable("no socket".into()));
+    let (states, reason) = lane_states(&daemon);
+    assert!(states.is_empty());
+    assert_eq!(
+        reason.as_deref(),
+        Some("daemon call failed: Dunking Sheep unavailable: no socket")
     );
 }

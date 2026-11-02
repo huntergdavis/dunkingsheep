@@ -73,7 +73,9 @@ pub fn error_body(error: &ApiError) -> Value {
 pub enum DaemonError {
     /// `DaemonUnavailable`: the daemon could not be reached (or started).
     Unavailable(String),
-    /// Any other failure of the call (a timeout, a closed socket, a refusal).
+    /// Socket timeout or other OS-level transport error.
+    Transport(String),
+    /// Command refusal or other non-transport exception.
     Failed(String),
 }
 
@@ -203,7 +205,13 @@ pub fn unique_names(panes: &[Value]) -> Vec<(String, Value)> {
 /// instead of failing the whole list.
 fn lane_states(daemon: &dyn Daemon) -> (BTreeMap<String, Value>, Option<String>) {
     match daemon.call("list_panes", &json!({})) {
-        Err(DaemonError::Unavailable(e)) | Err(DaemonError::Failed(e)) => {
+        Err(DaemonError::Unavailable(e)) => (
+            BTreeMap::new(),
+            Some(format!(
+                "daemon call failed: Dunking Sheep unavailable: {e}"
+            )),
+        ),
+        Err(DaemonError::Transport(e)) | Err(DaemonError::Failed(e)) => {
             (BTreeMap::new(), Some(format!("daemon call failed: {e}")))
         }
         Ok(payload) => {
@@ -270,7 +278,8 @@ fn call(daemon: &dyn Daemon, command: &str, args: Value) -> Result<Value, ApiErr
         DaemonError::Unavailable(e) => {
             ApiError::new(503, format!("Dunking Sheep unavailable: {e}"))
         }
-        DaemonError::Failed(e) => ApiError::new(503, format!("daemon call failed: {e}")),
+        DaemonError::Transport(e) => ApiError::new(503, format!("daemon call failed: {e}")),
+        DaemonError::Failed(e) => ApiError::new(500, format!("internal error: {e}")),
     })
 }
 
