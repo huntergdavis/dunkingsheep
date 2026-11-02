@@ -84,11 +84,7 @@ pub fn turn_state(
             return (None, None, Some(format!(
                 "no activity source: no {harness} turn has ever been recorded for this pane (extension not loaded, or the lane has not taken a turn since it started)")))
         }
-        Some(Turn {
-            started_at: None,
-            expires_at: None,
-            ended_at: None,
-        }) => {
+        Some(state) if state.is_empty() => {
             return (None, None, Some(format!(
                 "no activity source: no {harness} turn has ever been recorded for this pane (extension not loaded, or the lane has not taken a turn since it started)")))
         }
@@ -264,9 +260,8 @@ pub fn idle_claim_s_from(env: &crate::config::Env) -> f64 {
 
 /// Seconds-ago as hours, never negative (`now_hours` in the Python).
 pub fn now_hours(at: Option<f64>, now: f64) -> f64 {
-    match at {
+    match at.filter(|at| *at != 0.0) {
         None => 0.0,
-        Some(at) if at == 0.0 => 0.0,
         Some(at) => ((now - at) / 3600.0).max(0.0),
     }
 }
