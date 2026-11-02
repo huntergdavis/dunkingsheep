@@ -2329,3 +2329,78 @@ fn cli_route_29_views_b() {
     );
     assert!(summary_path.stderr.is_empty());
 }
+
+#[test]
+fn cli_route_30_poolrad() {
+    let sync = run_daemon_cli(
+        &["poolrad", "backlog-sync"],
+        "poolrad_sync",
+        json!({"limit": 6, "dry_run": false}),
+        json!({
+            "base": "main",
+            "skipped": {"queue_rows": 2, "credited": 1, "already_filed": 0},
+            "filed": [{"task": "t901", "id": "d7", "rank": 2}],
+            "errors": ["conflict"]
+        }),
+    );
+    assert_eq!(Some(0), sync.status.code());
+    assert_eq!(
+        "base main; queue rows 2, credited 1, already filed 0\n  filed t901 d7 rank 2\n  ! conflict\n",
+        String::from_utf8(sync.stdout).unwrap()
+    );
+    assert!(sync.stderr.is_empty());
+
+    let dry_run = run_daemon_cli(
+        &["poolrad", "backlog-sync", "-n", "3", "--dry-run"],
+        "poolrad_sync",
+        json!({"limit": 3, "dry_run": true}),
+        json!({
+            "base": null,
+            "skipped": {"queue_rows": 1, "credited": 0, "already_filed": 0},
+            "filed": [{"id": "d8", "rank": 1}],
+            "errors": []
+        }),
+    );
+    assert_eq!(Some(0), dry_run.status.code());
+    assert_eq!(
+        "base ?; queue rows 1, credited 0, already filed 0\n  filed (dry) d8 rank 1\n",
+        String::from_utf8(dry_run.stdout).unwrap()
+    );
+    assert!(dry_run.stderr.is_empty());
+
+    let progress = run_daemon_cli(
+        &["poolrad", "progress"],
+        "poolrad_progress",
+        json!({}),
+        json!({
+            "credited": 10,
+            "identities": 4,
+            "ceiling": 20,
+            "ceiling_note": "strict body ceiling",
+            "composable_bodies": 6,
+            "queue_candidates": 8,
+            "main": "main",
+            "replaced": null,
+            "replaced_note": "no replacement source"
+        }),
+    );
+    assert_eq!(Some(0), progress.status.code());
+    assert_eq!(
+        "credited strict bodies: 10  identities: 4  CEILING 20\n  strict body ceiling\n  composable in queue: 6 of 8 candidates; main main\n  replaced: n/a (no replacement source)\n",
+        String::from_utf8(progress.stdout).unwrap()
+    );
+    assert!(progress.stderr.is_empty());
+
+    let progress_json = run_daemon_cli(
+        &["poolrad", "progress", "--json"],
+        "poolrad_progress",
+        json!({}),
+        json!({"credited": 10, "identities": 4}),
+    );
+    assert_eq!(Some(0), progress_json.status.code());
+    assert_eq!(
+        "{\n  \"credited\": 10,\n  \"identities\": 4\n}\n",
+        String::from_utf8(progress_json.stdout).unwrap()
+    );
+    assert!(progress_json.stderr.is_empty());
+}

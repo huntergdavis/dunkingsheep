@@ -1356,6 +1356,36 @@ fn read_view(ns: &Map<String, Value>) -> Outcome {
     crate::daemon_cmd::run_command(ns, rpc, args, crate::render_print::render_view)
 }
 
+fn poolrad(ns: &Map<String, Value>) -> Outcome {
+    match text(ns, "poolrad_command") {
+        Some("backlog-sync") => {
+            let mut args = Map::new();
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::from(6)),
+            );
+            args.insert(
+                "dry_run".into(),
+                Value::Bool(matches!(ns.get("dry_run"), Some(Value::Bool(true)))),
+            );
+            crate::daemon_cmd::run_command(
+                ns,
+                "poolrad_sync",
+                args,
+                crate::render_fleet::render_poolrad_sync,
+            )
+        }
+        Some("progress") => crate::daemon_cmd::run_command(
+            ns,
+            "poolrad_progress",
+            Map::new(),
+            crate::render_fleet::render_poolrad_progress,
+        ),
+        Some(other) => not_ported(&format!("poolrad {other}")),
+        None => not_ported("poolrad"),
+    }
+}
+
 /// Run one parsed command (`ns` is the argparse namespace as a dictionary).
 pub fn run(ns: &Map<String, Value>) -> Outcome {
     let command = text(ns, "command").unwrap_or("");
@@ -1388,6 +1418,7 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         },
         "state" => state(ns),
         "roster" | "message-state" | "reply-stats" | "project-summary" => read_view(ns),
+        "poolrad" => poolrad(ns),
         "gh-token" => crate::daemon_cmd::gh_token(ns),
         // `client.call("list_panes"), print_panes`
         "fire" | "test" => {
