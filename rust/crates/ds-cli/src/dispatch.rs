@@ -93,6 +93,68 @@ fn memory_aux(ns: &Map<String, Value>) -> Outcome {
     }
 }
 
+fn memory(ns: &Map<String, Value>) -> Outcome {
+    let mut args = Map::new();
+    match text(ns, "memory_command") {
+        Some("recall" | "search") => {
+            for key in ["query", "limit", "harness", "project", "since"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            let rpc = if text(ns, "memory_command") == Some("search") {
+                "memory_search"
+            } else {
+                "memory_recall"
+            };
+            crate::daemon_cmd::run_command(ns, rpc, args, |result| {
+                crate::render_print::render_memory(
+                    result.as_array().map(Vec::as_slice).unwrap_or_default(),
+                )
+            })
+        }
+        Some("context") => {
+            for key in ["query", "sessions"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_context", args, |result| {
+                crate::render_print::render_memory_context(result)
+            })
+        }
+        Some("ingest") => {
+            for key in ["path", "harness", "project"] {
+                args.insert(key.into(), ns.get(key).cloned().unwrap_or(Value::Null));
+            }
+            crate::daemon_cmd::run_command(ns, "memory_ingest", args, |result| {
+                format!(
+                    "queued {} ({})\n",
+                    crate::render_fleet::py_str(&result["path"]),
+                    crate::render_fleet::py_str(&result["harness"])
+                )
+            })
+        }
+        Some("backfill") => {
+            let action = if ns.get("pause") == Some(&Value::Bool(true)) {
+                "pause"
+            } else if ns.get("resume") == Some(&Value::Bool(true)) {
+                "resume"
+            } else if ns.get("status") == Some(&Value::Bool(true)) {
+                "status"
+            } else {
+                "start"
+            };
+            args.insert("action".into(), Value::String(action.to_string()));
+            args.insert(
+                "limit".into(),
+                ns.get("limit").cloned().unwrap_or(Value::Null),
+            );
+            crate::daemon_cmd::run_command(ns, "memory_backfill", args, |result| {
+                crate::render_print::render_memory_backfill(result)
+            })
+        }
+        Some(other) => not_ported(&format!("memory {other}")),
+        None => not_ported("memory"),
+    }
+}
+
 fn superuser(ns: &Map<String, Value>) -> Outcome {
     let (rpc, args) = match text(ns, "superuser_command") {
         Some("status") => ("superuser_status", Map::new()),
@@ -111,6 +173,14 @@ fn superuser(ns: &Map<String, Value>) -> Outcome {
                 ns.get("entry").cloned().unwrap_or(Value::Null),
             );
             ("superuser_remove", args)
+        }
+        Some("recover") => {
+            let mut args = Map::new();
+            args.insert(
+                "name".into(),
+                ns.get("name").cloned().unwrap_or(Value::Null),
+            );
+            ("superuser_recover", args)
         }
         Some(other) => return not_ported(&format!("superuser {other}")),
         None => return not_ported("superuser"),
@@ -1942,7 +2012,10 @@ pub fn run(ns: &Map<String, Value>) -> Outcome {
         "guard" => guard(ns),
         "report" => report(ns),
         "superuser" => superuser(ns),
-        "memory" => memory_aux(ns),
+        "memory" => match text(ns, "memory_command") {
+            Some("hook-context" | "stats" | "status") => memory_aux(ns),
+            _ => memory(ns),
+        },
         "allocation" => allocation(ns),
         "load" => load_report(ns),
         "pm" => pm(ns),

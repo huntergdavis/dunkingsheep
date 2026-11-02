@@ -26,6 +26,7 @@ use crate::atomic_json;
 use crate::config;
 use crate::error::DunkError;
 use crate::lock;
+use crate::unicode_casefold::full_casefold;
 
 /// The file this module owns, under the config directory (`DUNKINGSHEEP_DIR`).
 pub fn default_path(env: &config::Env) -> Result<PathBuf, DunkError> {
@@ -73,8 +74,8 @@ pub type Records = BTreeMap<String, Retired>;
 /// PER-RECORD TOLERANCE (t1017): the Python keeps every well-formed record when ONE is
 /// malformed, because its consumers skip non-dict values. Deserialising straight into
 /// `Records` failed the whole parse on one bad record, and every retirement then stopped
-/// protecting anything - 'retired' silently turned back into 'paging every four hours'
-/// - in a file a human edits. So parse to raw values and convert record by record,
+/// protecting anything, so 'retired' silently turned back into 'paging every four hours'
+/// in a file a human edits. Parse to raw values and convert record by record,
 /// skipping (and logging) the bad ones. A wholly unparseable file still reads as empty.
 pub fn load(path: &Path) -> Records {
     let mut records = Records::new();
@@ -342,7 +343,7 @@ pub fn retired_mailboxes(
     let live: std::collections::HashSet<&String> = live_panes.iter().collect();
     let mut protected_set: std::collections::HashSet<String> = protected
         .iter()
-        .map(|value| plain(value).to_lowercase())
+        .map(|value| full_casefold(&plain(value)))
         .collect();
     let mut retired: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -354,7 +355,7 @@ pub fn retired_mailboxes(
                 aliases
                     .iter()
                     .filter(|name| !name.is_empty())
-                    .map(|name| plain(name).to_lowercase()),
+                    .map(|name| full_casefold(&plain(name))),
             );
             continue;
         }
@@ -372,7 +373,7 @@ pub fn retired_mailboxes(
         let name = plain(text);
         if text.is_empty()
             || text.starts_with("unrouted:")
-            || protected_set.contains(&name.to_lowercase())
+            || protected_set.contains(&full_casefold(&name))
         {
             continue;
         }

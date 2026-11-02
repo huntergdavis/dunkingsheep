@@ -163,17 +163,18 @@ fn seeded() -> (tempfile::TempDir, std::path::PathBuf) {
     let insert = "INSERT INTO messages (id, mailbox, mailbox_label, pane_id, sender, \
                   subject, body, state, created_at) VALUES (?,?,?,?,?,?,?,?,?)";
     // (id, mailbox, label, pane, sender, subject, body, state, created_at)
-    let rows: [(
-        &str,
-        &str,
-        &str,
-        Option<&str>,
-        &str,
-        Option<&str>,
-        &str,
-        &str,
+    type InboxSeedRow<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        &'a str,
         f64,
-    ); 5] = [
+    );
+    let rows: [InboxSeedRow<'_>; 5] = [
         (
             "i1",
             "alice",
