@@ -46,6 +46,11 @@ pub trait TargetModalProvider {
     fn target_modal(&mut self, panes: &[Value]) -> Option<Value>;
 }
 
+/// Supplies submitted or cancelled multiline text from the full-screen editor.
+pub trait TextModalProvider {
+    fn text_modal(&mut self, initial_text: &str) -> Option<String>;
+}
+
 /// Which backend currently serves requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMode {
@@ -82,6 +87,15 @@ pub enum TargetPickerResult {
     Pending,
     Cancelled,
     Selected(Value),
+}
+
+/// Result of one task-view key dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKeyDispatch {
+    Handled,
+    Ignored,
+    Quit,
+    QuitAndShutdown,
 }
 
 /// State and Ratatui rendering for the Python TUI's seven-row line input modal.
@@ -804,6 +818,237 @@ impl<C: RpcClient> TuiModel<C> {
         .1
     }
 
+    /// Dispatch every task-view key from the Python TUI through fakeable modal and
+    /// RPC interfaces. Modifier filtering mirrors the dunk-view dispatcher.
+    pub fn handle_task_key<M: LineModalProvider>(
+        &mut self,
+        key: KeyEvent,
+        modal: &mut M,
+        now: f64,
+    ) -> TaskKeyDispatch {
+        let plain_or_shift =
+            key.modifiers.is_empty() || key.modifiers == crossterm::event::KeyModifiers::SHIFT;
+        if !plain_or_shift {
+            return TaskKeyDispatch::Ignored;
+        }
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => TaskKeyDispatch::Quit,
+            KeyCode::Char('Q') => {
+                if self.mode == ClientMode::Daemon {
+                    self.rpc("shutdown", serde_json::json!({"stop_all": true}), now);
+                }
+                TaskKeyDispatch::QuitAndShutdown
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.task_selected = self.task_selected.saturating_sub(1);
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.task_selected = self
+                    .task_selected
+                    .saturating_add(1)
+                    .min(self.tasks.len().saturating_sub(1));
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char(' ') | KeyCode::Char('c') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_complete", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('s') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc(
+                        "task_update",
+                        serde_json::json!({"id": id, "status": "in_progress"}),
+                        now,
+                    );
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('b') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let default = task
+                        .get("block_reason")
+                        .filter(|value| python_truthy(value))
+                        .map(python_string)
+                        .unwrap_or_default();
+                    if let Some(reason) = modal.line_modal("Why is it blocked?", &default) {
+                        let reason = reason.trim();
+                        let id = task.get("id").cloned().unwrap_or(Value::Null);
+                        self.rpc(
+                            "task_block",
+                            serde_json::json!({
+                                "id": id,
+                                "reason": if reason.is_empty() { Value::Null } else { Value::String(reason.into()) }
+                            }),
+                            now,
+                        );
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('u') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_unblock", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('p') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    const PRIORITIES: [&str; 4] = ["low", "medium", "high", "urgent"];
+                    let current = task
+                        .get("priority")
+                        .and_then(Value::as_str)
+                        .filter(|priority| !priority.is_empty())
+                        .unwrap_or("low");
+                    if let Some(index) = PRIORITIES.iter().position(|priority| *priority == current)
+                    {
+                        let priority = PRIORITIES[(index + 1) % PRIORITIES.len()];
+                        let id = task.get("id").cloned().unwrap_or(Value::Null);
+                        self.rpc(
+                            "task_update",
+                            serde_json::json!({"id": id, "priority": priority}),
+                            now,
+                        );
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('d') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_delete", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('e') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let default = task
+                        .get("title")
+                        .filter(|value| python_truthy(value))
+                        .map(python_string)
+                        .unwrap_or_default();
+                    if let Some(title) = modal.line_modal("Task title", &default) {
+                        let title = title.trim();
+                        if !title.is_empty() {
+                            let id = task.get("id").cloned().unwrap_or(Value::Null);
+                            self.rpc(
+                                "task_update",
+                                serde_json::json!({"id": id, "title": title}),
+                                now,
+                            );
+                        }
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('h') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_heartbeat", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('r') => {
+                if let Some(task) = self.current_task(now).cloned() {
+                    let id = task.get("id").cloned().unwrap_or(Value::Null);
+                    self.rpc("task_release", serde_json::json!({"id": id}), now);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('n') => {
+                let (result, _) = self.rpc("task_next", serde_json::json!({"scope": "auto"}), now);
+                if let Some(result) = result.filter(python_truthy) {
+                    if let Some(task) = result.get("task").filter(|task| python_truthy(task)) {
+                        let id = task.get("id").map(python_string).unwrap_or_default();
+                        self.flash(format!("claimed {id}"), now, 4.0);
+                    } else {
+                        self.flash("no task ready; following the queue", now, 4.0);
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('f') => {
+                let (result, _) = self.rpc("task_follow", Value::Null, now);
+                if let Some(result) = result.filter(python_truthy) {
+                    let pane_id = result.get("pane_id").map(python_string).unwrap_or_default();
+                    self.flash(format!("receiving pushed tasks as {pane_id}"), now, 4.0);
+                }
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('F') => {
+                self.rpc("task_unfollow", Value::Null, now);
+                TaskKeyDispatch::Handled
+            }
+            KeyCode::Char('a') => {
+                if let Some(title) = modal.line_modal("New task title", "") {
+                    let title = title.trim();
+                    if !title.is_empty() {
+                        self.rpc("task_add", serde_json::json!({"title": title}), now);
+                    }
+                }
+                TaskKeyDispatch::Handled
+            }
+            _ => TaskKeyDispatch::Ignored,
+        }
+    }
+
+    /// Prompt for and update the selected dunk's interval using the Python label.
+    pub fn edit_interval<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let minutes = dunk
+            .get("interval_minutes")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
+        let default = crate::rows::format_interval(minutes);
+        let Some(value) = modal.line_modal("Interval (minutes, or e.g. 90s / 1.5h)", &default)
+        else {
+            return false;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            return false;
+        }
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "interval_minutes": value}),
+            now,
+        )
+        .1
+    }
+
+    /// Prompt with the selected dunk's current text and update it verbatim after
+    /// Python-compatible outer whitespace trimming.
+    pub fn edit_text<M: TextModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
+        let Some(dunk) = self.current().cloned() else {
+            self.current_id(now);
+            return false;
+        };
+        let id = dunk.get("id").cloned().unwrap_or(Value::Null);
+        let initial_text = dunk
+            .get("text")
+            .filter(|value| python_truthy(value))
+            .map(python_string)
+            .unwrap_or_default();
+        let Some(text) = modal.text_modal(&initial_text) else {
+            return false;
+        };
+        self.rpc(
+            "update_dunk",
+            serde_json::json!({"id": id, "text": text.trim()}),
+            now,
+        )
+        .1
+    }
+
     /// Prompt for a dunker's display name and update it through the daemon.
     pub fn edit_name<M: LineModalProvider>(&mut self, modal: &mut M, now: f64) -> bool {
         let Some(dunk) = self.current().cloned() else {
@@ -1101,6 +1346,8 @@ mod tests {
         prompts: Vec<(String, String)>,
         target_responses: VecDeque<Option<Value>>,
         target_panes: Vec<Vec<Value>>,
+        text_responses: VecDeque<Option<String>>,
+        text_inputs: Vec<String>,
     }
 
     impl LineModalProvider for FakeModal {
@@ -1116,6 +1363,15 @@ mod tests {
             self.target_responses
                 .pop_front()
                 .expect("fake target modal response")
+        }
+    }
+
+    impl TextModalProvider for FakeModal {
+        fn text_modal(&mut self, initial_text: &str) -> Option<String> {
+            self.text_inputs.push(initial_text.to_owned());
+            self.text_responses
+                .pop_front()
+                .expect("fake text modal response")
         }
     }
 
@@ -1431,6 +1687,188 @@ mod tests {
         assert_eq!(None, model.current_task(3.0));
         assert_eq!(model.message, "No task selected");
         assert_eq!(model.message_until, 7.0);
+    }
+
+    #[test]
+    fn task_key_dispatch_routes_every_task_write_and_modal_call() {
+        let mut model = TuiModel::connected(
+            FakeClient {
+                responses: VecDeque::from([
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                    Ok(serde_json::json!({"task": {"id": "t2"}})),
+                    Ok(serde_json::json!({"pane_id": "%3"})),
+                    Ok(Value::Null),
+                    Ok(Value::Null),
+                ]),
+                ..FakeClient::default()
+            },
+            0.0,
+        );
+        model.tasks.push(serde_json::json!({
+            "id": "t1",
+            "title": "Old title",
+            "block_reason": "old reason",
+            "priority": "medium"
+        }));
+        let mut modal = FakeModal {
+            responses: VecDeque::from([
+                Some("  blocked reason  ".into()),
+                Some("  New title  ".into()),
+                Some("  New task  ".into()),
+            ]),
+            ..FakeModal::default()
+        };
+
+        for code in [
+            KeyCode::Char('c'),
+            KeyCode::Char('s'),
+            KeyCode::Char('b'),
+            KeyCode::Char('u'),
+            KeyCode::Char('p'),
+            KeyCode::Char('d'),
+            KeyCode::Char('e'),
+            KeyCode::Char('h'),
+            KeyCode::Char('r'),
+            KeyCode::Char('n'),
+            KeyCode::Char('f'),
+            KeyCode::Char('F'),
+            KeyCode::Char('a'),
+        ] {
+            assert_eq!(
+                model.handle_task_key(key(code), &mut modal, 1.0),
+                TaskKeyDispatch::Handled
+            );
+        }
+
+        assert_eq!(
+            modal.prompts,
+            vec![
+                ("Why is it blocked?".into(), "old reason".into()),
+                ("Task title".into(), "Old title".into()),
+                ("New task title".into(), String::new())
+            ]
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![
+                ("task_complete".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "status": "in_progress"})
+                ),
+                (
+                    "task_block".into(),
+                    serde_json::json!({"id": "t1", "reason": "blocked reason"})
+                ),
+                ("task_unblock".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "priority": "high"})
+                ),
+                ("task_delete".into(), serde_json::json!({"id": "t1"})),
+                (
+                    "task_update".into(),
+                    serde_json::json!({"id": "t1", "title": "New title"})
+                ),
+                ("task_heartbeat".into(), serde_json::json!({"id": "t1"})),
+                ("task_release".into(), serde_json::json!({"id": "t1"})),
+                ("task_next".into(), serde_json::json!({"scope": "auto"})),
+                ("task_follow".into(), Value::Null),
+                ("task_unfollow".into(), Value::Null),
+                ("task_add".into(), serde_json::json!({"title": "New task"}))
+            ]
+        );
+        assert_eq!(model.message, "receiving pushed tasks as %3");
+    }
+
+    #[test]
+    fn task_key_dispatch_ignores_control_shortcuts_and_preserves_quit_behavior() {
+        let mut model = TuiModel::connected(
+            FakeClient {
+                responses: VecDeque::from([Ok(Value::Null)]),
+                ..FakeClient::default()
+            },
+            0.0,
+        );
+        model.tasks.push(serde_json::json!({"id": "t1"}));
+        let mut modal = FakeModal::default();
+        assert_eq!(
+            model.handle_task_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut modal,
+                1.0,
+            ),
+            TaskKeyDispatch::Ignored
+        );
+        assert_eq!(
+            model.handle_task_key(key(KeyCode::Down), &mut modal, 1.0),
+            TaskKeyDispatch::Handled
+        );
+        assert_eq!(model.task_selected, 0);
+        assert_eq!(
+            model.handle_task_key(key(KeyCode::Char('q')), &mut modal, 1.0),
+            TaskKeyDispatch::Quit
+        );
+        assert_eq!(
+            model.handle_task_key(
+                KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+                &mut modal,
+                1.0,
+            ),
+            TaskKeyDispatch::QuitAndShutdown
+        );
+        assert_eq!(
+            model.client.calls,
+            vec![("shutdown".into(), serde_json::json!({"stop_all": true}))]
+        );
+    }
+
+    #[test]
+    fn interval_and_text_edits_use_python_defaults_and_preserve_multiline_text() {
+        let mut model = action_model(
+            serde_json::json!({"id": "d1", "interval_minutes": 0.5, "text": "old\ntext"}),
+            vec![Ok(Value::Null), Ok(Value::Null)],
+        );
+        let mut interval_modal = FakeModal {
+            responses: VecDeque::from([Some(" 1.5h ".into())]),
+            ..FakeModal::default()
+        };
+        assert!(!model.edit_interval(&mut interval_modal, 1.0));
+        assert_eq!(
+            interval_modal.prompts,
+            vec![(
+                "Interval (minutes, or e.g. 90s / 1.5h)".into(),
+                "30s".into()
+            )]
+        );
+
+        let mut text_modal = FakeModal {
+            text_responses: VecDeque::from([Some("  new\ntext  ".into())]),
+            ..FakeModal::default()
+        };
+        assert!(!model.edit_text(&mut text_modal, 2.0));
+        assert_eq!(text_modal.text_inputs, vec!["old\ntext"]);
+        assert_eq!(
+            model.client.calls,
+            vec![
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "interval_minutes": "1.5h"})
+                ),
+                (
+                    "update_dunk".into(),
+                    serde_json::json!({"id": "d1", "text": "new\ntext"})
+                )
+            ]
+        );
     }
 
     #[test]
