@@ -5,7 +5,7 @@
 //! exercised without touching a user's config or making a live request.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -363,28 +363,30 @@ impl Tokens {
     pub fn save(&self) -> Result<(), GitHubError> {
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent).map_err(|e| GitHubError(e.to_string()))?;
-        let temporary = PathBuf::from(format!("{}.tmp", self.path.display()));
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({"tokens": &*cache}))
             .map_err(|e| GitHubError(e.to_string()))?;
-        #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options
-            .open(&temporary)
-            .map_err(|e| GitHubError(e.to_string()))?;
-        file.write_all(&bytes)
-            .map_err(|e| GitHubError(e.to_string()))?;
-        file.flush().map_err(|e| GitHubError(e.to_string()))?;
-        fs::rename(&temporary, &self.path).map_err(|e| GitHubError(e.to_string()))?;
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(parent).map_err(|e| GitHubError(e.to_string()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|e| GitHubError(e.to_string()))?;
         }
+        temporary
+            .as_file_mut()
+            .write_all(&bytes)
+            .map_err(|e| GitHubError(e.to_string()))?;
+        temporary
+            .as_file_mut()
+            .flush()
+            .map_err(|e| GitHubError(e.to_string()))?;
+        temporary
+            .persist(&self.path)
+            .map_err(|e| GitHubError(e.error.to_string()))?;
         Ok(())
     }
 

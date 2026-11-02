@@ -253,6 +253,13 @@ fn futuresless_block_on<F: std::future::Future>(future: F) -> F::Output {
 fn token_load_filters_bad_entries_and_save_is_private_and_atomic() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("cache.json");
+    let stale_temporary = dir.path().join("cache.json.tmp");
+    fs::write(&stale_temporary, "stale temporary contents").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stale_temporary, fs::Permissions::from_mode(0o644)).unwrap();
+    }
     fs::write(&path, r#"{"tokens":{"good":{"expires_at":9,"token":"x"},"missing":{},"false":{"expires_at":0},"scalar":2}}"#).unwrap();
     let fake = Box::new(FakeTransport::default());
     let mut tokens = Tokens::new(
@@ -270,7 +277,18 @@ fn token_load_filters_bad_entries_and_save_is_private_and_atomic() {
         serde_json::json!({"expires_at":123,"token":"fake"}),
     );
     tokens.save().unwrap();
-    assert!(!dir.path().join("cache.json.tmp").exists());
+    assert_eq!(
+        fs::read(&stale_temporary).unwrap(),
+        b"stale temporary contents"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&stale_temporary).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
