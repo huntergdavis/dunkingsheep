@@ -101,9 +101,8 @@ pub fn recipient_is_quiet(
     pane_id: Option<&str>,
 ) -> bool {
     let normalize = |text: &str| {
-        crate::unicode_casefold::full_casefold(
-            text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)),
-        )
+        text.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+            .to_owned()
     };
     let destinations = [Some(mailbox), Some(label), pane_id];
     policy.unwrap_or("").split(',').any(|entry| {

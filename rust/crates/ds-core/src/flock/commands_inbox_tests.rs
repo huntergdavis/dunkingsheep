@@ -606,7 +606,7 @@ fn quiet_recipient_policy_parses_exact_final_addresses() {
             Some("%1")
         ));
     }
-    for policy in [" %1 ,other", " CODEX-RUST-OWNER ", "Owner (%1)"] {
+    for policy in [" %1 ,other", " codex-rust-owner ", "Owner (%1)"] {
         assert!(recipient_is_quiet(
             Some(policy),
             "codex-rust-owner",
@@ -614,7 +614,8 @@ fn quiet_recipient_policy_parses_exact_final_addresses() {
             Some("%1")
         ));
     }
-    assert!(recipient_is_quiet(Some("strasse"), "Straße", "", None));
+    assert!(recipient_is_quiet(Some("Straße"), "Straße", "", None));
+    assert!(!recipient_is_quiet(Some("strasse"), "Straße", "", None));
     assert!(recipient_is_quiet(
         Some("\u{1c}%1\u{1f}"),
         "owner",

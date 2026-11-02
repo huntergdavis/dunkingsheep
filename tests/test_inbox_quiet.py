@@ -42,9 +42,10 @@ class QuietRecipientTests(unittest.TestCase):
     def test_policy_parsing_matches_only_exact_final_destinations(self):
         for policy in (None, "", " , , "):
             self.assertFalse(_inbox_recipient_is_quiet(policy, "owner", "Owner (%1)", "%1"))
-        for policy in (" %1 ,other", " CODEX-RUST-OWNER ", "Owner (%1)"):
+        for policy in (" %1 ,other", " codex-rust-owner ", "Owner (%1)"):
             self.assertTrue(_inbox_recipient_is_quiet(policy, "codex-rust-owner", "Owner (%1)", "%1"))
-        self.assertTrue(_inbox_recipient_is_quiet("strasse", "Straße", "", None))
+        self.assertTrue(_inbox_recipient_is_quiet("Straße", "Straße", "", None))
+        self.assertFalse(_inbox_recipient_is_quiet("strasse", "Straße", "", None))
         self.assertFalse(_inbox_recipient_is_quiet("owner", "other-owner", "other", "%10"))
 
     def test_quiet_alias_canonical_and_pane_still_store_unread_mail(self):
