@@ -10,6 +10,7 @@ struct Fixture {
     flock: Flock,
     terminal: Mutex<Box<dyn Terminal>>,
     metrics: Arc<MetricsStore>,
+    runtime: tokio::runtime::Runtime,
     _dir: tempfile::TempDir,
 }
 impl Fixture {
@@ -26,6 +27,11 @@ impl Fixture {
             flock,
             terminal: Mutex::new(Box::new(fake)),
             metrics,
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap(),
             _dir: dir,
         }
     }
@@ -33,6 +39,7 @@ impl Fixture {
         TerminalCallAdapter {
             flock: &self.flock,
             terminal: &self.terminal,
+            runtime: self.runtime.handle(),
         }
     }
     fn events(&self) -> Vec<Event> {
