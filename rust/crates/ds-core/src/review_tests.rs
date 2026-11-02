@@ -93,8 +93,17 @@ fn branch_attribution_has_precedence_and_respects_delimiters() {
         attribute_author(Some("BUILD/feature"), None, &lanes, &mints)
     );
     assert_eq!(
-        Some("%2".to_string()),
+        Some("%1".to_string()),
         attribute_author(Some("build-two-feature"), None, &lanes, &[])
+    );
+    assert_eq!(
+        Some("%2".to_string()),
+        attribute_author(
+            Some("build-two-feature"),
+            None,
+            &[("%2".to_string(), "build-two".to_string())],
+            &[]
+        )
     );
     assert_eq!(
         Some("%3".to_string()),
@@ -156,7 +165,7 @@ fn row_ids_are_uppercase_boundary_checked_and_deduplicated() {
     assert_eq!(
         vec!["OVL_007F_0F7E".to_string(), "RES_0001_0002".to_string()],
         row_ids(Some(
-            "OVL_007F_0F7E OVL_007F_0F7E xOVL_0001_0002 OVL_0001_0002x res_0001_0002"
+            "OVL_007F_0F7E OVL_007F_0F7E xOVL_0001_0002 OVL_0001_0002x RES_0001_0002 res_0002_0003"
         ))
     );
     assert!(row_ids(None).is_empty());
@@ -169,7 +178,7 @@ fn stem_and_own_row_follow_the_poolrad_filename_convention() {
         stem_of("docs/U7F_STATE_FLAGS_0F7E.md")
     );
     assert!(own_row(Some("OVL_007F_0F7E"), "U7F_STATE_FLAGS_0F7E"));
-    assert!(own_row(Some("RES_007F_0F7E"), "U007F_STATE_0F7E"));
+    assert!(own_row(Some("RES_007F_0F7E"), "U7F_STATE_0F7E"));
     assert!(!own_row(Some("OVL_007F_0F7E"), "U80_STATE_0F7E"));
     assert!(!own_row(Some("ovl_007f_0f7e"), "U7F_STATE_0F7E"));
 }
