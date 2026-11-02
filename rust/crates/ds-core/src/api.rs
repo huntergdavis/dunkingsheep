@@ -392,8 +392,13 @@ fn lane_set(context: &HandlerContext<'_>, args: &Args) -> Result<Value, DunkErro
 
 /// `dunk_api.h_lane_register`: role checks and owner bootstrap live in Flock.
 pub fn h_lane_register(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
+    let pane = match args.get("pane") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(pane)) => Some(pane.as_str()),
+        Some(_) => return Err(DunkError::Refused("pane must be a string".into())),
+    };
     context.flock.lane_register(
-        args.get("pane").and_then(Value::as_str),
+        pane,
         args.get("role").and_then(Value::as_str),
         args.get("provider").and_then(Value::as_str),
         args.get("model").and_then(Value::as_str),
@@ -405,10 +410,13 @@ pub fn h_lane_register(context: &HandlerContext<'_>, args: Args) -> Result<Value
 
 /// `dunk_api.h_lane_unregister`.
 pub fn h_lane_unregister(context: &HandlerContext<'_>, args: Args) -> Result<Value, DunkError> {
-    let pane = args
-        .get("pane")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DunkError::Refused("pane is required".into()))?;
+    let pane = match args.get("pane") {
+        None | Some(Value::Null) => {
+            return Err(DunkError::Refused("pane is required".into()));
+        }
+        Some(Value::String(pane)) => pane.as_str(),
+        Some(_) => return Err(DunkError::Refused("pane must be a string".into())),
+    };
     context
         .flock
         .lane_unregister(pane, context.self_pane_id(), context.env)

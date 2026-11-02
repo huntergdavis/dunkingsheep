@@ -485,6 +485,49 @@ fn h_lane_unregister_matches_python() {
     );
 }
 
+#[test]
+fn h_lane_handlers_refuse_non_string_pane_values() {
+    let (_dir, flock) = staffed_flock("api-lane-pane-types");
+    let env = ParityEnv::new(Some(std::process::id() as i64));
+    let mut dispatcher = Dispatcher::new();
+    dispatcher.register_lanes();
+
+    let register_error = refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_register",
+        args(json!({"pane":123, "role":"worker"})),
+    ));
+    assert!(register_error.contains("pane must be a string"));
+    assert_eq!(
+        flock.caller_role(Some("w1:p1"), &env).unwrap(),
+        "owner",
+        "invalid pane input must not fall back to registering the caller"
+    );
+    assert_eq!(
+        flock.caller_role(Some("123"), &env).unwrap(),
+        crate::roles::DEFAULT_ROLE,
+        "invalid pane input must not register a coerced target"
+    );
+
+    let unregister_error = refusal(dispatch_as_flock_role(
+        &dispatcher,
+        &flock,
+        &env,
+        Some("w1:p1"),
+        "lane_unregister",
+        args(json!({"pane":123})),
+    ));
+    assert!(unregister_error.contains("pane must be a string"));
+    assert_eq!(
+        flock.caller_role(Some("w2:p2"), &env).unwrap(),
+        "worker",
+        "invalid pane input must not remove a role"
+    );
+}
+
 fn refusal(result: Result<Value, DunkError>) -> String {
     match result {
         Err(DunkError::Refused(text)) => text,
