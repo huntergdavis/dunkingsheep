@@ -469,7 +469,7 @@ mod tests {
         let fake = FakeTerminal::new();
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(fake));
         let request = RequestCtx::default();
-        let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
+        let mut adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
         assert!(!SendEnv::session_process_gone(
             &adapter.terminal,
             "%missing"
