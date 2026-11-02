@@ -59,14 +59,52 @@ pub fn py_repr(text: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
-            c if c.is_control() => {
-                out.push_str(&format!("\\x{:02x}", c as u32));
+            c if needs_python_unicode_escape(c) => {
+                let codepoint = c as u32;
+                match codepoint {
+                    0..=0xff => out.push_str(&format!("\\x{codepoint:02x}")),
+                    0x100..=0xffff => out.push_str(&format!("\\u{codepoint:04x}")),
+                    _ => out.push_str(&format!("\\U{codepoint:08x}")),
+                }
             }
             c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+fn needs_python_unicode_escape(ch: char) -> bool {
+    let codepoint = ch as u32;
+    ch.is_control()
+        || (ch.is_whitespace() && ch != ' ')
+        || matches!(
+            codepoint,
+            0x00ad
+                | 0x0600..=0x0605
+                | 0x061c
+                | 0x06dd
+                | 0x070f
+                | 0x0890..=0x0891
+                | 0x08e2
+                | 0x180e
+                | 0x200b..=0x200f
+                | 0x202a..=0x202e
+                | 0x2060..=0x2064
+                | 0x2066..=0x206f
+                | 0xfeff
+                | 0xfff9..=0xfffb
+                | 0x110bd
+                | 0x110cd
+                | 0x13430..=0x1343f
+                | 0x1bca0..=0x1bca3
+                | 0x1d173..=0x1d17a
+                | 0xe0001
+                | 0xe0020..=0xe007f
+                | 0xe000..=0xf8ff
+                | 0xf0000..=0xffffd
+                | 0x100000..=0x10fffd
+        )
 }
 
 fn tuple_repr(items: &[&str]) -> String {
