@@ -964,15 +964,26 @@ async fn actual_temporary_tasks_actor_records_accounting_and_exposes_exact_head_
         &json!({"accounting_pr":82, "body_pr":41, "row":"OVL_A", "url":"u", "state":"open", "errors":[]}),
     )
     .await);
-    let notes = sync.flock.notes(&current.id).await.unwrap();
-    assert_eq!("accounting PR #82 for body PR #41", notes[0].text);
-    let accounting_pr: i64 = rusqlite::Connection::open(dir.path().join("tasks.db"))
-        .unwrap()
+    let connection = rusqlite::Connection::open(dir.path().join("tasks.db")).unwrap();
+    let (accounting_pr, raw_meta): (i64, String) = connection
         .query_row(
-            "SELECT accounting_pr FROM tasks WHERE id = ?",
+            "SELECT tasks.accounting_pr, task_events.meta FROM tasks JOIN task_events ON task_events.task_id = tasks.id WHERE tasks.id = ? AND task_events.event = 'accounting' AND task_events.actor = 'review-sync'",
             rusqlite::params![current.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
+    let meta: Value = serde_json::from_str(&raw_meta).unwrap();
+    assert_eq!("accounting PR #82 for body PR #41", meta["reason"]);
+    assert_eq!(82, meta["accounting_pr"]);
+    assert_eq!(41, meta["body_pr"]);
+    assert_eq!("OVL_A", meta["row"]);
+    assert_eq!("u", meta["url"]);
+    assert_eq!("open", meta["state"]);
+    assert_eq!(json!([]), meta["errors"]);
+    let actual_notes = sync.flock.notes(&current.id).await.unwrap();
+    assert!(
+        actual_notes.is_empty(),
+        "accounting events are not review notes"
+    );
     assert_eq!(82, accounting_pr);
 }

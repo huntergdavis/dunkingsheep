@@ -3843,7 +3843,7 @@ mod tests {
         store
             .note_with_meta(
                 &task.id,
-                "accounting",
+                "note",
                 "review-sync",
                 Some("accounting PR #82\nbody PR #41"),
                 &meta,
@@ -3856,7 +3856,7 @@ mod tests {
                 let id = task.id.clone();
                 move |conn| {
                     conn.query_row(
-                        "SELECT actor, meta FROM task_events WHERE task_id = ? AND event = 'accounting'",
+                        "SELECT actor, meta FROM task_events WHERE task_id = ? AND event = 'note'",
                         params![id],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
