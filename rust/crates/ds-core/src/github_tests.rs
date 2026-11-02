@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -6,6 +7,7 @@ use tempfile::tempdir;
 struct FixtureFs {
     data: Mutex<BTreeMap<PathBuf, Result<String, std::io::ErrorKind>>>,
     keys: Mutex<Vec<PathBuf>>,
+    key_contents: Mutex<BTreeMap<PathBuf, Vec<u8>>>,
 }
 
 impl AppFileSystem for FixtureFs {
@@ -18,6 +20,14 @@ impl AppFileSystem for FixtureFs {
     }
     fn key_exists(&self, path: &Path) -> bool {
         self.keys.lock().unwrap().contains(&path.to_path_buf())
+    }
+    fn read_key(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.key_contents
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
     }
 }
 
@@ -141,6 +151,7 @@ fn app_jwt_uses_rs256_and_exact_claim_times() {
 struct FakeTransport {
     next: Mutex<Result<GitHubResponse, String>>,
     seen: Mutex<Vec<GitHubRequest>>,
+    queued: Mutex<VecDeque<Result<GitHubResponse, String>>>,
 }
 impl Default for FakeTransport {
     fn default() -> Self {
@@ -151,6 +162,7 @@ impl Default for FakeTransport {
                 body: Vec::new(),
             })),
             seen: Mutex::new(Vec::new()),
+            queued: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -160,8 +172,19 @@ impl GitHubTransport for FakeTransport {
         request: GitHubRequest,
     ) -> PinBoxFuture<'a, Result<GitHubResponse, String>> {
         self.seen.lock().unwrap().push(request);
-        let result = self.next.lock().unwrap().clone();
+        let result = self
+            .queued
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| self.next.lock().unwrap().clone());
         Box::pin(async move { result })
+    }
+}
+
+impl FakeTransport {
+    fn enqueue(&self, response: GitHubResponse) {
+        self.queued.lock().unwrap().push_back(Ok(response));
     }
 }
 
@@ -393,4 +416,273 @@ impl GitHubTransport for RecordingTransport {
         self.recorded.lock().unwrap().push(request.clone());
         self.inner.send(request)
     }
+}
+
+fn response(body: Vec<u8>) -> GitHubResponse {
+    GitHubResponse {
+        status: 200,
+        reason: "OK".into(),
+        body,
+    }
+}
+
+fn recorded_transport(
+    fake: FakeTransport,
+) -> (Box<dyn GitHubTransport>, Arc<Mutex<Vec<GitHubRequest>>>) {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    (
+        Box::new(RecordingTransport {
+            inner: fake,
+            recorded: Arc::clone(&recorded),
+        }),
+        recorded,
+    )
+}
+
+#[test]
+fn kind_for_role_matches_owner_worker_and_refusal_rules() {
+    assert_eq!(kind_for_role("worker", None).unwrap(), Some("author"));
+    assert_eq!(kind_for_role("reviewer", None).unwrap(), Some("reviewer"));
+    assert_eq!(kind_for_role("owner", None).unwrap(), None);
+    assert_eq!(
+        kind_for_role("owner", Some("reviewer")).unwrap(),
+        Some("reviewer")
+    );
+    assert_eq!(kind_for_role("desk", Some("author")).unwrap(), None);
+    assert_eq!(
+        kind_for_role("worker", Some("reviewer"))
+            .unwrap_err()
+            .to_string(),
+        "role worker may only act as the author App, not reviewer"
+    );
+    assert_eq!(
+        kind_for_role("owner", Some("unknown"))
+            .unwrap_err()
+            .to_string(),
+        "unknown app kind 'unknown'"
+    );
+}
+
+#[test]
+fn tokens_get_mints_once_then_returns_fresh_cache_and_forget_persists() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let app_config = app_file("author", &config_dir);
+    let key_path = config_dir.join("github-app-author.pem");
+    let file_system = FixtureFs::default();
+    file_system.data.lock().unwrap().insert(
+        app_config,
+        Ok(r#"{"id":"123","slug":"author-fixture"}"#.into()),
+    );
+    file_system.keys.lock().unwrap().push(key_path.clone());
+    file_system
+        .key_contents
+        .lock()
+        .unwrap()
+        .insert(key_path, TEST_RSA_KEY.as_bytes().to_vec());
+
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"[{"id":44}]"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"token":"fake-install-token","expires_at":"1970-01-02T03:46:39Z","permissions":{"contents":"write"}}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    let cache_path = dir.path().join("github-tokens.json");
+    let tokens = Tokens::with_app_file_system(
+        Some(cache_path.clone()),
+        config_dir,
+        transport,
+        Some(DEFAULT_API.into()),
+        Box::new(file_system),
+    );
+
+    let minted = futuresless_block_on(tokens.get("author", Some(1_000.0))).unwrap();
+    assert_eq!(minted["token"], "fake-install-token");
+    assert_eq!(minted["installation_id"], 44);
+    assert_eq!(minted["slug"], "author-fixture");
+    assert_eq!(minted["kind"], "author");
+    assert_eq!(minted["cached"], false);
+    assert_eq!(minted["expires_at"], 99_999);
+    let cache_hit = futuresless_block_on(tokens.get("author", Some(1_001.0))).unwrap();
+    assert_eq!(cache_hit["cached"], true);
+    assert_eq!(recorded.lock().unwrap().len(), 2);
+    assert_eq!(recorded.lock().unwrap()[0].method, "GET");
+    assert_eq!(recorded.lock().unwrap()[1].method, "POST");
+
+    let serialized: Value = serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+    assert_eq!(
+        serialized["tokens"]["author"]["token"],
+        "fake-install-token"
+    );
+    futuresless_block_on(tokens.forget(Some("author"))).unwrap();
+    assert!(tokens.cached("author").is_none());
+    assert!(fs::read_to_string(cache_path).unwrap().contains("tokens"));
+}
+
+#[test]
+fn tokens_forget_without_kind_clears_all_cached_entries() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cache.json");
+    fs::write(
+        &path,
+        r#"{"tokens":{"author":{"expires_at":9,"token":"a"},"reviewer":{"expires_at":10,"token":"r"}}}"#,
+    )
+    .unwrap();
+    let tokens = Tokens::new(
+        Some(path.clone()),
+        dir.path().into(),
+        Box::new(FakeTransport::default()),
+        Some(DEFAULT_API.into()),
+    );
+    futuresless_block_on(tokens.forget(None)).unwrap();
+    assert!(tokens.cached("author").is_none());
+    assert!(tokens.cached("reviewer").is_none());
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["tokens"], serde_json::json!({}));
+}
+
+#[test]
+fn open_pulls_paginates_and_maps_python_output_fields() {
+    let fake = FakeTransport::default();
+    let first_page = (1..=100)
+        .map(|number| serde_json::json!({"number":number,"title":"bulk"}))
+        .collect::<Vec<_>>();
+    fake.enqueue(response(serde_json::to_vec(&first_page).unwrap()));
+    fake.enqueue(response(
+        br#"[{"number":"101","title":"","html_url":"https://p/101","draft":"false","head":{"sha":"head-sha","ref":"feature"},"base":{"ref":"main"},"user":{},"created_at":"c","updated_at":"u","mergeable":null,"mergeable_state":"dirty"}]"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    let pulls = futuresless_block_on(open_pulls(
+        &*transport,
+        DEFAULT_API,
+        "owner/repo",
+        "fake-token",
+    ))
+    .unwrap();
+    assert_eq!(pulls.len(), 101);
+    assert_eq!(pulls[100]["number"], 101);
+    assert_eq!(pulls[100]["title"], "");
+    assert_eq!(pulls[100]["draft"], true);
+    assert_eq!(pulls[100]["head"], "head-sha");
+    assert_eq!(pulls[100]["branch"], "feature");
+    assert_eq!(pulls[100]["base"], "main");
+    assert_eq!(pulls[100]["login"], "");
+    assert_eq!(pulls[100]["mergeable"], Value::Null);
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].url.ends_with("?state=open&per_page=100&page=1"));
+    assert!(seen[1].url.ends_with("?state=open&per_page=100&page=2"));
+    assert_eq!(seen[0].headers["Authorization"], "token fake-token");
+}
+
+#[test]
+fn pull_detail_preserves_mergeability_and_post_status_limits_description() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(
+        br#"{"additions":8,"deletions":2,"changed_files":3,"mergeable":false,"mergeable_state":"dirty","body":""}"#.to_vec(),
+    ));
+    fake.enqueue(response(br#"{"id":7}"#.to_vec()));
+    let (transport, recorded) = recorded_transport(fake);
+    let detail =
+        futuresless_block_on(pull_detail(&*transport, DEFAULT_API, "o/r", 7, "token")).unwrap();
+    assert_eq!(detail["additions"], 8);
+    assert_eq!(detail["mergeable"], false);
+    assert_eq!(detail["mergeable_state"], "dirty");
+    assert_eq!(detail["body"], "");
+
+    let description = "é".repeat(150);
+    futuresless_block_on(post_status(
+        &*transport,
+        DEFAULT_API,
+        "o/r",
+        "abc",
+        "success",
+        "token",
+        &description,
+        Some("https://example.test/review"),
+    ))
+    .unwrap();
+    let seen = recorded.lock().unwrap();
+    let payload: Value = serde_json::from_slice(seen[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!(seen[1].method, "POST");
+    assert!(seen[1].url.ends_with("/repos/o/r/statuses/abc"));
+    assert_eq!(seen[1].headers["Authorization"], "token token");
+    assert_eq!(payload["context"], "dunkingsheep/review");
+    assert_eq!(
+        payload["description"].as_str().unwrap().chars().count(),
+        140
+    );
+    assert_eq!(payload["target_url"], "https://example.test/review");
+}
+
+#[test]
+fn merge_review_and_graphql_requests_keep_methods_payloads_and_errors() {
+    let fake = FakeTransport::default();
+    fake.enqueue(response(br#"{"merged":true}"#.to_vec()));
+    fake.enqueue(response(br#"{"id":9}"#.to_vec()));
+    fake.enqueue(response(
+        br#"{"data":{"viewer":{"login":"fixture"}}}"#.to_vec(),
+    ));
+    fake.enqueue(response(
+        br#"{"errors":[{"message":"bad query"},"second error"]}"#.to_vec(),
+    ));
+    let (transport, recorded) = recorded_transport(fake);
+    futuresless_block_on(merge_pull(
+        &*transport,
+        DEFAULT_API,
+        "o/r",
+        5,
+        "reviewer-token",
+        Some("expected-sha"),
+    ))
+    .unwrap();
+    futuresless_block_on(review_pull(
+        &*transport,
+        DEFAULT_API,
+        "o/r",
+        5,
+        "APPROVE",
+        "looks good",
+        "reviewer-token",
+    ))
+    .unwrap();
+    let variables = serde_json::json!({"id":"node"});
+    let data = futuresless_block_on(graphql(
+        &*transport,
+        DEFAULT_API,
+        "query Viewer { viewer { login } }",
+        "author-token",
+        Some(&variables),
+    ))
+    .unwrap();
+    assert_eq!(data["viewer"]["login"], "fixture");
+    let error = futuresless_block_on(graphql(
+        &*transport,
+        DEFAULT_API,
+        "query Bad { nope }",
+        "author-token",
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(error.to_string(), "GitHub GraphQL: bad query; second error");
+
+    let seen = recorded.lock().unwrap();
+    assert_eq!(seen[0].method, "PUT");
+    assert!(seen[0].url.ends_with("/repos/o/r/pulls/5/merge"));
+    let merge_payload: Value = serde_json::from_slice(seen[0].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        merge_payload,
+        serde_json::json!({"merge_method":"merge","sha":"expected-sha"})
+    );
+    assert_eq!(seen[1].method, "POST");
+    let review_payload: Value = serde_json::from_slice(seen[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        review_payload,
+        serde_json::json!({"event":"APPROVE","body":"looks good"})
+    );
+    assert_eq!(seen[2].url, "https://api.github.com/graphql");
+    let query_payload: Value = serde_json::from_slice(seen[2].body.as_ref().unwrap()).unwrap();
+    assert_eq!(query_payload["variables"], variables);
+    assert_eq!(seen[3].url, "https://api.github.com/graphql");
 }
