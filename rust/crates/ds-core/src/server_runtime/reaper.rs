@@ -205,8 +205,8 @@ mod tests {
         Arc::new(|| Box::new(FakeTerminal::new()))
     }
 
-    #[tokio::test]
-    async fn production_env_reaper_adapter_calls_every_helper() {
+    #[test]
+    fn production_env_reaper_adapter_calls_every_helper() {
         let dir = tempfile::tempdir().unwrap();
         let flock = flock(dir.path());
         let for_assert = Arc::clone(&flock);
@@ -225,20 +225,28 @@ mod tests {
         });
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
 
-        let panes = adapter.helper_reaperenv_list_panes().await.unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let panes = runtime
+            .block_on(adapter.helper_reaperenv_list_panes())
+            .unwrap();
 
         assert!(!panes.is_empty());
         assert!(panes
             .iter()
             .all(|pane| pane.get("pane_id").and_then(Value::as_str).is_some()));
         assert!(adapter.helper_reaperenv_is_live());
-        adapter
-            .helper_reaperenv_clear_historical_errors(&BTreeSet::new())
-            .await;
-        adapter
-            .helper_reaperenv_inbox_maintenance(&BTreeSet::new(), &[])
-            .await;
-        adapter.helper_reaperenv_memory_maintenance().await;
+        runtime.block_on(async {
+            adapter
+                .helper_reaperenv_clear_historical_errors(&BTreeSet::new())
+                .await;
+            adapter
+                .helper_reaperenv_inbox_maintenance(&BTreeSet::new(), &[])
+                .await;
+            adapter.helper_reaperenv_memory_maintenance().await;
+        });
         adapter.helper_reaperenv_set_last_message("reaper status");
         assert_eq!("reaper status", for_assert.last_message());
     }
@@ -272,7 +280,7 @@ mod tests {
         finish(
             &mut writer,
             &partial,
-            Outcome::Skipped("stopped by operator".into()),
+            Outcome::Skipped("stopped by operator"),
             &json!({}),
         )
         .unwrap();
@@ -284,7 +292,11 @@ mod tests {
             ..Stores::default()
         });
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
-        adapter.helper_reaperenv_memory_maintenance().await;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(adapter.helper_reaperenv_memory_maintenance());
 
         let connection = open_writer(&db_path).unwrap();
         let queued: i64 = connection
@@ -297,8 +309,8 @@ mod tests {
         assert_eq!(2, queued, "expired leases and stopped partials requeue");
     }
 
-    #[tokio::test]
-    async fn production_env_reaper_maintenance_uses_concrete_services() {
+    #[test]
+    fn production_env_reaper_maintenance_uses_concrete_services() {
         use crate::inbox_store::{Outgoing, Store};
 
         let dir = tempfile::tempdir().unwrap();
@@ -335,9 +347,16 @@ mod tests {
             ..Stores::default()
         });
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
-        adapter
-            .helper_reaperenv_inbox_maintenance(&BTreeSet::from(["%live".to_string()]), &[])
-            .await;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                adapter.helper_reaperenv_inbox_maintenance(
+                    &BTreeSet::from(["%live".to_string()]),
+                    &[],
+                ),
+            );
 
         let connection = crate::db::open_reader(store.path()).unwrap();
         let state = |id: &str| {
