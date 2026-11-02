@@ -611,11 +611,18 @@ impl Tasks {
 
     /// `complete`: done, claim ended.
     pub async fn complete(&self, id: &str) -> Result<Task, DunkError> {
+        self.complete_by(id, None).await
+    }
+
+    async fn complete_by(&self, id: &str, by: Option<&str>) -> Result<Task, DunkError> {
         let before = self.get(id).await?;
-        let done = self.set_status(id, "done", None, None).await?;
+        if before.status == "done" {
+            return Ok(before);
+        }
+        let done = self.set_status(id, "done", None, by).await?;
         // The Python returns early on an already-done task, so it fires nothing.
         if before.status != "done" {
-            self.fire(&done.id, "completed", None, Some(&before.kind));
+            self.fire(&done.id, "completed", by, Some(&before.kind));
             // t1218 A: tell the assignee of each task this completion opened, through the
             // observer (the daemon turns it into a guarded inbox nudge).
             let opened = self.unblocked_by(&done.id).await?;
@@ -635,13 +642,17 @@ impl Tasks {
         landed: bool,
     ) -> Result<Task, DunkError> {
         if landed {
-            return self.complete(id).await;
+            return self.complete_by(id, by).await;
+        }
+        let before = self.get(id).await?;
+        if before.status == "done" {
+            return Ok(before);
         }
         // t1218: record the work as NOT on main BEFORE completing, because completion
         // opens the tasks that depend on this one (auto-unblock) and they must see
         // `landed = 0`; the Python order (complete, then set_landed) would open them first.
         self.set_landed(id, false, by, None, None).await?;
-        match self.complete(id).await {
+        match self.complete_by(id, by).await {
             Ok(done) => Ok(done),
             Err(error) => {
                 // A failed completion must not leave a stray unlanded flag.
