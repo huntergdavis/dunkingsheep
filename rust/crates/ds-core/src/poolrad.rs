@@ -652,7 +652,7 @@ pub fn credit_ready(
     }
     if let Some(status) = statuses
         .get(rid)
-        .filter(|status| !status.is_empty() && status != "full")
+        .filter(|status| !status.is_empty() && status.as_str() != "full")
     {
         return (
             false,
@@ -923,12 +923,12 @@ impl<'a> PoolradSync<'a> {
                 {
                     let (ready, why_not) = credit_ready(&self.repo, rid, Some(&checkers), None);
                     if ready {
+                        let model = evidence["model"].as_str().unwrap_or_default().to_owned();
                         credit.insert(rid.to_owned(), evidence);
                         closed.insert(
                             rid.to_owned(),
                             format!(
-                                "model already on main ({}) and credit-ready; ledger credit pending, nothing to author",
-                                evidence["model"].as_str().unwrap_or_default()
+                                "model already on main ({model}) and credit-ready; ledger credit pending, nothing to author"
                             ),
                         );
                     } else {
@@ -1698,7 +1698,7 @@ mod tests {
                 ("OVL_C".to_owned(), "full".to_owned()),
             ])
         );
-        assert!(model_statuses(tempdir().unwrap().path()).is_empty());
+        assert!(model_statuses(tempdir().path()).is_empty());
     }
 
     #[test]
