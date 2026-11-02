@@ -21,7 +21,11 @@ impl Fixture {
             dir.path().join("lanes.json"),
             persist,
         );
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        // The real daemon keeps its runtime alive while a connection thread drives store
+        // futures via Handle::block_on. A dormant current-thread runtime cannot poll the
+        // Tasks writer actor, so use an active worker even though requests stay synchronous.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .unwrap();
