@@ -516,7 +516,7 @@ fn cli_route_25_owner_inbox_c() {
 #[test]
 fn cli_route_26_owner_fallback_and_body_newlines() {
     let stats = run_daemon_cli(
-        &["--json", "owner"],
+        &["owner", "--json"],
         "owner_stats",
         json!({}),
         json!({"counts": {"queued": 2}}),
