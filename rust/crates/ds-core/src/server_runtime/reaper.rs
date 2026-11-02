@@ -251,8 +251,8 @@ mod tests {
         assert_eq!("reaper status", for_assert.last_message());
     }
 
-    #[tokio::test]
-    async fn production_env_reaper_stores_uses_concrete_services() {
+    #[test]
+    fn production_env_reaper_stores_uses_concrete_services() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("memory.db");
         let first_path = dir.path().join("expired.jsonl");
@@ -292,11 +292,11 @@ mod tests {
             ..Stores::default()
         });
         let adapter = LoopRuntimeAdapter::new(flock, fake_terminal_factory());
-        tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .unwrap()
-            .block_on(adapter.helper_reaperenv_memory_maintenance());
+            .unwrap();
+        runtime.block_on(adapter.helper_reaperenv_memory_maintenance());
 
         let connection = open_writer(&db_path).unwrap();
         let queued: i64 = connection
