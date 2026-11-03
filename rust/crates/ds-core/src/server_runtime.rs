@@ -83,6 +83,7 @@ pub(crate) struct TerminalCallAdapter<'a> {
 pub(crate) struct LoopRuntimeAdapter {
     flock: Arc<Flock>,
     terminal_factory: Arc<dyn Fn() -> Box<dyn Terminal> + Send + Sync + 'static>,
+    runtime_services: Option<Arc<RuntimeServices>>,
 }
 
 impl<'a> RequestRuntimeAdapter<'a> {
@@ -427,7 +428,26 @@ impl LoopRuntimeAdapter {
         Self {
             flock,
             terminal_factory,
+            runtime_services: None,
         }
+    }
+
+    /// Bind the canonical process services required by the production stuck observer.
+    /// A bare adapter remains useful to loops that do not send stale-panel alerts.
+    pub(crate) fn with_stuck_services(
+        mut self,
+        services: Arc<RuntimeServices>,
+    ) -> Result<Self, DunkError> {
+        if !Arc::ptr_eq(&self.flock, &services.flock)
+            || !Arc::ptr_eq(&self.flock, &services.outbox.flock)
+        {
+            return Err(refusal("stuck runtime services flock mismatch"));
+        }
+        if self.flock.stores().inbox.is_none() {
+            return Err(refusal("stuck runtime inbox store is not attached"));
+        }
+        self.runtime_services = Some(services);
+        Ok(self)
     }
 
     #[allow(dead_code)] // Used by the dependent async runtime loop leaves.

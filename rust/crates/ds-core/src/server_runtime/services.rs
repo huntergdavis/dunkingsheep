@@ -12,10 +12,11 @@ use std::sync::{
 
 use tokio::runtime::Runtime;
 
-use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime};
+use super::{dispatcher::RuntimeDispatcher, outbox_runtime::OutboxRuntime, LoopRuntimeAdapter};
 use crate::config::Env;
 use crate::error::{refusal, DunkError};
 use crate::flock::loop_env::LoopTerminalFactory;
+use crate::flock::loops_stuck::StalePanelReporter;
 use crate::flock::panes::Stores;
 use crate::flock::status_runtime::StatusState;
 use crate::flock::Flock;
@@ -66,6 +67,7 @@ pub struct RuntimeServices {
     pub(super) flock: Arc<Flock>,
     pub(super) terminal_factory: LoopTerminalFactory,
     pub(super) runtime: Runtime,
+    pub(super) stuck_reporter: std::sync::Mutex<StalePanelReporter>,
     stopped: AtomicBool,
 }
 
@@ -175,8 +177,17 @@ impl RuntimeServices {
             flock,
             terminal_factory,
             runtime,
+            stuck_reporter: std::sync::Mutex::new(StalePanelReporter::new()),
             stopped: AtomicBool::new(false),
         }))
+    }
+
+    /// Build the stuck observer adapter with the canonical Flock, outbox, and reporter.
+    /// The ordinary loop-adapter constructor intentionally does not imply these services.
+    #[allow(dead_code)] // The dependent startup integration consumes this staged binder.
+    pub(crate) fn stuck_loop_adapter(self: &Arc<Self>) -> Result<LoopRuntimeAdapter, DunkError> {
+        LoopRuntimeAdapter::new(Arc::clone(&self.flock), Arc::clone(&self.terminal_factory))
+            .with_stuck_services(Arc::clone(self))
     }
 
     /// Bind the caller's real API registry to these canonical services.
@@ -196,6 +207,10 @@ impl RuntimeServices {
         if !self.stopped.swap(true, Ordering::AcqRel) {
             self.outbox.stop_and_join();
         }
+    }
+
+    pub(super) fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
     }
 }
 
