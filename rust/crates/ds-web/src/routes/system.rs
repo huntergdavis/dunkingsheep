@@ -20,7 +20,7 @@ use axum::{
 };
 use serde_json::json;
 
-use super::auth::{AuthBackend, AuthError, AuthFuture, Identity, RequestScheme};
+use super::auth::{AuthBackend, AuthError, RequestScheme};
 
 #[derive(Clone, Debug)]
 pub struct SystemConfig {
@@ -337,10 +337,8 @@ mod tests {
     use serde_json::{json, Value};
     use tower::ServiceExt;
 
-    use super::{
-        router as build_router, AuthBackend, AuthError, AuthFuture, Identity, RequestScheme,
-        SystemConfig,
-    };
+    use super::super::auth::{AuthFuture, Identity};
+    use super::{router as build_router, AuthBackend, AuthError, RequestScheme, SystemConfig};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
