@@ -568,6 +568,184 @@ fn task_complete_landed_failure_is_after_wake_and_skips_review_sync() {
         .is_ok());
 }
 
+#[test]
+fn task_complete_foreign_spoofed_and_unevidenced_refusals_do_not_mutate() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("worker", false);
+    let foreign = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "foreign",
+            "",
+            AddOptions {
+                assignees: vec!["w9:p9".into()],
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &foreign.id,
+        None,
+        None,
+        true,
+    )
+    .is_err());
+    assert_eq!(
+        "open",
+        runtime.block_on(tasks.get(&foreign.id)).unwrap().status
+    );
+
+    let spoofed = add_owned_task(&runtime, &tasks, "spoofed");
+    flock.set_socket_peer(Some(true));
+    let request = RequestCtx {
+        caller: Some(Caller::new(
+            Some(std::process::id() as i64),
+            Some("1".into()),
+            None,
+            None,
+            "peer",
+        )),
+        ..completion_request()
+    };
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &request,
+        &spoofed.id,
+        None,
+        None,
+        true,
+    )
+    .is_err());
+    flock.set_socket_peer(None);
+    assert_eq!(
+        "open",
+        runtime.block_on(tasks.get(&spoofed.id)).unwrap().status
+    );
+
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let unevidenced = add_review_task(&runtime, &tasks);
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &unevidenced.id,
+        None,
+        Some("accept"),
+        true,
+    )
+    .is_err());
+    let unchanged = runtime
+        .block_on(tasks.get_full_wire(&unevidenced.id, None))
+        .unwrap();
+    assert_eq!("open", unchanged.typed.status);
+    assert_eq!(None, unchanged.wire["verdict"].as_str());
+}
+
+#[test]
+fn task_complete_self_cancelled_and_done_reviews_refuse_without_rewriting_verdict() {
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let self_review = runtime
+        .block_on(tasks.add_with(
+            "global",
+            "self review",
+            "",
+            AddOptions {
+                kind: Some("review".into()),
+                assignees: vec!["w1:p1".into()],
+                author: Some("w1:p1".into()),
+                repo: Some("o/r".into()),
+                pr: Some("5".into()),
+                head: Some("abc".into()),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &self_review.id,
+        None,
+        Some("accept"),
+        true,
+    )
+    .is_err());
+    let unchanged = runtime
+        .block_on(tasks.get_full_wire(&self_review.id, None))
+        .unwrap();
+    assert_eq!("open", unchanged.typed.status);
+    assert_eq!(None, unchanged.wire["verdict"].as_str());
+
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let cancelled = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("global", "w1:p1", Default::default()))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&cancelled.id, "note", "w1:p1", Some("reviewed")))
+        .unwrap();
+    runtime
+        .block_on(tasks.cancel(&cancelled.id, "head is stale"))
+        .unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &cancelled.id,
+        None,
+        Some("accept"),
+        true,
+    )
+    .is_err());
+    let unchanged = runtime
+        .block_on(tasks.get_full_wire(&cancelled.id, None))
+        .unwrap();
+    assert_eq!("cancelled", unchanged.typed.status);
+    assert_eq!(None, unchanged.wire["verdict"].as_str());
+
+    let (_dir, runtime, flock, tasks, jobs, tokens) = completion_services("reviewer", false);
+    let done = add_review_task(&runtime, &tasks);
+    runtime
+        .block_on(tasks.claim_next("global", "w1:p1", Default::default()))
+        .unwrap();
+    runtime
+        .block_on(tasks.note(&done.id, "note", "w1:p1", Some("reviewed")))
+        .unwrap();
+    runtime
+        .block_on(tasks.set_verdict(&done.id, "needs-fix", Some("w1:p1")))
+        .unwrap();
+    runtime.block_on(tasks.complete(&done.id)).unwrap();
+    let env = completion_env(&jobs, tokens, Box::<NoNetworkTransport>::default());
+    assert!(invoke_task_complete(
+        &flock,
+        &runtime,
+        &env,
+        &completion_request(),
+        &done.id,
+        None,
+        Some("accept"),
+        true,
+    )
+    .is_err());
+    let unchanged = runtime
+        .block_on(tasks.get_full_wire(&done.id, None))
+        .unwrap();
+    assert_eq!("done", unchanged.typed.status);
+    assert_eq!(Some("needs-fix"), unchanged.wire["verdict"].as_str());
+}
+
 fn text(result: Result<(), DunkError>) -> String {
     result.expect_err("expected a refusal").to_string()
 }
