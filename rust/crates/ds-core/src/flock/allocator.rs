@@ -11,10 +11,31 @@ use crate::server_runtime::RuntimeServices;
 use crate::tasks::allocator::{AllocationCandidate, GuardedAllocation};
 
 struct State {
-    last_tick: Option<Instant>,
+    last_tick: Duration,
     last_result: Value,
     active: usize,
     stopped: bool,
+}
+
+impl State {
+    /// Python initializes last_tick to zero on the system monotonic clock.
+    fn begin_tick(&mut self, now: Duration) -> bool {
+        if now.saturating_sub(self.last_tick) < Duration::from_secs(30) {
+            return false;
+        }
+        self.last_tick = now;
+        true
+    }
+}
+
+fn monotonic_since_boot() -> Result<Duration, DunkError> {
+    let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .map_err(|error| DunkError::Unavailable(format!("monotonic clock unavailable: {error}")))?;
+    let seconds = u64::try_from(time.tv_sec())
+        .map_err(|_| DunkError::Unavailable("negative monotonic clock".into()))?;
+    let nanos = u32::try_from(time.tv_nsec())
+        .map_err(|_| DunkError::Unavailable("invalid monotonic clock".into()))?;
+    Ok(Duration::new(seconds, nanos))
 }
 
 /// One cache and lifecycle tracker for the process-owned allocator.
@@ -36,7 +57,7 @@ impl Allocator {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(State {
-                last_tick: None,
+                last_tick: Duration::ZERO,
                 last_result: json!({}),
                 active: 0,
                 stopped: false,
@@ -62,7 +83,7 @@ impl Allocator {
     pub(crate) fn seed_cache(&self, result: Value) {
         let mut state = self.state.lock().unwrap();
         state.last_result = result;
-        state.last_tick = None;
+        state.last_tick = Duration::ZERO;
     }
 
     #[cfg(test)]
@@ -107,14 +128,10 @@ impl Allocator {
             if state.stopped {
                 return Err(DunkError::Unavailable("allocator stopped".into()));
             }
-            let now = Instant::now();
-            if state
-                .last_tick
-                .is_some_and(|last| now.duration_since(last) < Duration::from_secs(30))
-            {
+            let now = monotonic_since_boot()?;
+            if !state.begin_tick(now) {
                 return Ok(state.last_result.clone());
             }
-            state.last_tick = Some(now);
             state.active += 1;
             #[cfg(test)]
             services.allocator.idle.notify_all();
@@ -362,6 +379,21 @@ mod tests {
     use super::*;
     use crate::flock::{panes::Stores, Flock};
     use crate::tasks::Tasks;
+
+    #[test]
+    fn initial_cache_uses_system_monotonic_origin() {
+        let mut state = State {
+            last_tick: Duration::ZERO,
+            last_result: json!({}),
+            active: 0,
+            stopped: false,
+        };
+        assert!(!state.begin_tick(Duration::from_millis(29_999)));
+        assert_eq!(state.last_tick, Duration::ZERO);
+        assert!(state.begin_tick(Duration::from_secs(30)));
+        assert!(!state.begin_tick(Duration::from_millis(59_999)));
+        assert!(state.begin_tick(Duration::from_secs(60)));
+    }
 
     #[tokio::test]
     async fn preflight_outbox_contention_releases_turn_lock_and_actor_progresses() {
