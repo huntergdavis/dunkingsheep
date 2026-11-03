@@ -377,7 +377,7 @@ fn parse_python_decimal_integer(value: &str) -> Option<i64> {
     }
 
     Some(if negative {
-        if magnitude >= (i64::MAX as u64) + 1 {
+        if magnitude > i64::MAX as u64 {
             i64::MIN
         } else {
             -(magnitude as i64)
