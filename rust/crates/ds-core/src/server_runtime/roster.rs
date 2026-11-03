@@ -6,17 +6,14 @@ use super::RequestRuntimeAdapter;
 
 impl RequestRuntimeAdapter<'_> {
     #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
-    fn helper_rosterenv_lanes(&self) -> Vec<Value> {
+    fn helper_rosterenv_lanes(&self) -> Result<Vec<Value>, String> {
         match self
             .terminal
             .flock
             .resolve_lanes(&self.terminal, crate::clock::now_s())
         {
-            Ok(lanes) => lanes,
-            Err(error) => {
-                eprintln!("roster could not resolve lanes: {error}");
-                Vec::new()
-            }
+            Ok(lanes) => Ok(lanes),
+            Err(error) => Err(error.to_string()),
         }
     }
 
@@ -76,7 +73,7 @@ impl RequestRuntimeAdapter<'_> {
 
     #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
     fn helper_rosterenv_activity(&self, lane: &Value, now: f64) -> Result<Value, String> {
-        Ok(self.terminal.flock.lane_activity(lane, now))
+        Ok(self.terminal.flock.roster_activity(lane, now))
     }
 
     #[allow(dead_code)] // The complete RosterEnv implementation is owned by its assembly leaf.
@@ -161,7 +158,7 @@ mod tests {
         let terminal: Mutex<Box<dyn Terminal>> = Mutex::new(Box::new(FakeTerminal::new()));
         let adapter = RequestRuntimeAdapter::new(&flock, &request, runtime.handle(), &terminal);
 
-        let lanes = adapter.helper_rosterenv_lanes();
+        let lanes = adapter.helper_rosterenv_lanes().unwrap();
         assert_eq!(lanes.len(), 3);
         assert!(lanes.iter().any(|lane| lane["pane_id"] == "w1:p1"));
 
@@ -221,11 +218,44 @@ mod tests {
         let activity = adapter
             .helper_rosterenv_activity(&lane, crate::clock::now_s())
             .unwrap();
-        assert_eq!(activity["state"], Value::Null);
+        assert_eq!(activity["state"], "unknown");
         assert!(activity["reason"]
             .as_str()
             .unwrap()
             .contains("no activity source"));
+
+        let terminal_working =
+            json!({"pane_id": "w1:p1", "agent": "pi", "agent_status": "working"});
+        let pi_activity = adapter
+            .helper_rosterenv_activity(&terminal_working, crate::clock::now_s())
+            .unwrap();
+        assert_eq!(pi_activity["state"], "unknown");
+        assert_eq!(pi_activity["source"], "pi turn events");
+
+        adapter.terminal.flock.set_turn(
+            "w1:p1",
+            crate::activity::Turn {
+                started_at: Some(10.0),
+                expires_at: Some(crate::clock::now_s() + 60.0),
+                ended_at: None,
+            },
+        );
+        let turn_activity = adapter
+            .helper_rosterenv_activity(&terminal_working, crate::clock::now_s())
+            .unwrap();
+        assert_eq!(turn_activity["state"], "working");
+        assert_eq!(turn_activity["source"], "pi turn events");
+
+        let claude_terminal_working =
+            json!({"pane_id": "w1:p1", "agent": "claude", "agent_status": "working"});
+        let claude_activity = adapter
+            .helper_rosterenv_activity(&claude_terminal_working, crate::clock::now_s())
+            .unwrap();
+        assert_eq!(claude_activity["state"], "unknown");
+        assert_eq!(
+            claude_activity["reason"],
+            "no claude status client available"
+        );
 
         let absent = adapter
             .helper_rosterenv_cpu_sample(

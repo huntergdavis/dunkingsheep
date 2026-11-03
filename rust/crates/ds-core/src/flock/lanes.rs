@@ -163,6 +163,27 @@ impl Flock {
                "reason": reason, "inferred": true})
     }
 
+    /// `dunk_activity.activity`: roster activity is harness-specific and must not use the
+    /// terminal status that `resolve_lanes` stores for display.
+    pub fn roster_activity(&self, pane: &Value, now: f64) -> Value {
+        let pane_id = pane["pane_id"].as_str().unwrap_or("");
+        let harness = pane["agent"].as_str().unwrap_or("");
+        let turns = self
+            .turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let activity = activity::activity(
+            pane_id,
+            harness,
+            activity::ClaudeProbe::NoClient,
+            None,
+            Some(&turns),
+            now,
+            IDLE_CLAIM_S,
+        );
+        serde_json::to_value(activity).expect("activity serializes to JSON")
+    }
+
     /// `lane_status`: just the state.
     pub fn lane_status(&self, pane: &Value, now: f64) -> Value {
         self.lane_activity(pane, now)["state"].clone()
