@@ -84,9 +84,12 @@ impl GitHubTransport for TestTransport {
         Box::pin(async move {
             let completed = self.completed_task.lock().unwrap().clone();
             if let Some((tasks, id)) = completed {
-                let task = tasks.get(&id).await.map_err(|error| error.to_string())?;
-                assert_eq!("done", task.status);
-                assert_eq!(Some("accept"), task.verdict.as_deref());
+                let task = tasks
+                    .get_full_wire(&id, None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                assert_eq!("done", task.typed.status);
+                assert_eq!("accept", task.wire["verdict"]);
             }
             self.requests.lock().unwrap().push(request);
             self.responses
@@ -248,7 +251,8 @@ async fn after_review_verdict_contains_token_failure_without_rolling_back_verdic
     assert!(transport.requests.lock().unwrap().is_empty());
     let after = tasks.get(&stored.id).await.unwrap();
     assert_eq!("done", after.status);
-    assert_eq!(Some("accept"), after.verdict.as_deref());
+    let after = tasks.get_full_wire(&stored.id, None).await.unwrap();
+    assert_eq!("accept", after.wire["verdict"]);
 }
 
 #[tokio::test]
@@ -299,7 +303,8 @@ async fn after_review_verdict_contains_transport_failure_without_rolling_back_ve
         .contains("GitHub transport unavailable"));
     let after = tasks.get(&stored.id).await.unwrap();
     assert_eq!("done", after.status);
-    assert_eq!(Some("accept"), after.verdict.as_deref());
+    let after = tasks.get_full_wire(&stored.id, None).await.unwrap();
+    assert_eq!("accept", after.wire["verdict"]);
 }
 
 #[tokio::test]
