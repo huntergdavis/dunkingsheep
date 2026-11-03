@@ -869,6 +869,16 @@ fn hold_backoff_s(attempts: i64) -> f64 {
 
 pub type HoldSignature = (String, String);
 
+struct OutboxHold<'a> {
+    message_id: &'a str,
+    pane_id: &'a str,
+    now: f64,
+    permanent: bool,
+    reason: Option<&'a str>,
+    refused_detail: Option<&'a str>,
+    signature: HoldSignature,
+}
+
 pub(super) fn hold_signature(flock: &Flock, env: &dyn SendEnv, pane_id: &str) -> HoldSignature {
     let Some(screen) = env.read_pane(pane_id, CONSUMPTION_READ_LINES, true) else {
         return ("gone".into(), String::new());
@@ -3154,15 +3164,15 @@ pub(crate) fn outbox_step<E: SendPreparationEnv + PaneInfoEnv>(
         let (kind, reason) = send_blocker(env, pane_id).unwrap_or(("unknown", "unknown".into()));
         if kind != "dead" {
             let signature = hold_signature(flock, env, pane_id);
-            return match flock.record_outbox_hold(
-                &head.id,
+            return match flock.record_outbox_hold(OutboxHold {
+                message_id: &head.id,
                 pane_id,
                 now,
-                false,
-                Some(&reason),
-                None,
+                permanent: false,
+                reason: Some(&reason),
+                refused_detail: None,
                 signature,
-            ) {
+            }) {
                 DeliveryOutcome::Held | DeliveryOutcome::Undeliverable => OutboxStep::Held,
                 DeliveryOutcome::Missing => OutboxStep::Empty,
                 DeliveryOutcome::Sent
@@ -3278,16 +3288,16 @@ pub(crate) fn outbox_lock(
 }
 
 impl Flock {
-    fn record_outbox_hold(
-        &self,
-        message_id: &str,
-        pane_id: &str,
-        now: f64,
-        permanent: bool,
-        reason: Option<&str>,
-        refused_detail: Option<&str>,
-        signature: HoldSignature,
-    ) -> DeliveryOutcome {
+    fn record_outbox_hold(&self, hold: OutboxHold<'_>) -> DeliveryOutcome {
+        let OutboxHold {
+            message_id,
+            pane_id,
+            now,
+            permanent,
+            reason,
+            refused_detail,
+            signature,
+        } = hold;
         let (message, attempts, terminal) = {
             let mut outbox = outbox_lock(&self.outbox);
             let Some(queue) = outbox.get_mut(pane_id) else {
@@ -3464,15 +3474,15 @@ impl Flock {
             let reason = blocker_reason.as_deref();
             let permanent = detail.starts_with("dead session (")
                 || detail == "the lane's recorded process is gone";
-            self.record_outbox_hold(
+            self.record_outbox_hold(OutboxHold {
                 message_id,
-                &pane_id,
+                pane_id: &pane_id,
                 now,
                 permanent,
                 reason,
-                Some(&detail),
-                hold_signature,
-            )
+                refused_detail: Some(&detail),
+                signature: hold_signature,
+            })
         } else {
             message.status = if ok.unwrap_or(false) {
                 "sent"

@@ -2470,7 +2470,7 @@ fn hold_signature_preserves_owned_ambiguous_composer_region() {
 fn deliver_message_exhaustion_removes_once_remembers_and_releases_waiter() {
     let dir = tempfile::tempdir().unwrap();
     let flock = Flock::new(dir.path().join("launches.json"), dir.path(), false);
-    let mut message = Message::new("m-exhausted", P, "pane", "hello", "test");
+    let message = Message::new("m-exhausted", P, "pane", "hello", "test");
     let waiter = message.done.clone();
     flock.outbox.lock().unwrap().insert(P.into(), vec![message]);
     let mut pane = Pane::default();
