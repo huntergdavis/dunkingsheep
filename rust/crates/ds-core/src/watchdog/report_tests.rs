@@ -7,16 +7,16 @@ fn recovery_summary_selects_prior_alerts_and_confirmed_pages_in_sorted_order() {
     // `test_resolved_owner_line_only_for_a_confirmed_page`.
     let state = json!({
         "alerts": {
-            "z|rule": {"last_alerted": 10.0},
-            "a|rule": {"last_alerted": 5.0},
-            "not-sent|rule": {"last_alerted": null},
-            "still-current|rule": {"last_alerted": 12.0}
+            "rule|z": {"last_alerted": 10.0},
+            "rule|a": {"last_alerted": 5.0},
+            "rule|not-sent": {"last_alerted": null},
+            "rule|still-current": {"last_alerted": 12.0}
         },
         "owner_pages": {
-            "z-owner|rule": {"confirmed_at": 30.0},
-            "a-owner|rule": {"confirmed_at": 20.0},
-            "pending-owner|rule": {"confirmed_at": null},
-            "still-current|rule": {"confirmed_at": 40.0}
+            "rule|z-owner": {"confirmed_at": 30.0},
+            "rule|a-owner": {"confirmed_at": 20.0},
+            "rule|pending-owner": {"confirmed_at": null},
+            "rule|still-current": {"confirmed_at": 40.0}
         }
     });
     let findings = vec![json!({"rule": "rule", "key": "still-current"})];
@@ -24,8 +24,8 @@ fn recovery_summary_selects_prior_alerts_and_confirmed_pages_in_sorted_order() {
     assert_eq!(
         recoveries(&state, &findings),
         json!({
-            "vp": ["a|rule", "z|rule"],
-            "owner": ["a-owner|rule", "z-owner|rule"]
+            "vp": ["rule|a", "rule|z"],
+            "owner": ["rule|a-owner", "rule|z-owner"]
         })
     );
 }
