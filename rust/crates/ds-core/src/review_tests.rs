@@ -2565,6 +2565,205 @@ async fn run_failed_repo_list_skips_cleanup_and_unknown_or_malformed_detail_pres
 }
 
 #[tokio::test]
+async fn run_dry_run_matches_python_fake_for_fresh_moved_closed_and_terminal_reviews() {
+    // Oracle cases are tests/test_dunk_github.py::TimerTests running the actual
+    // fake GitHub transport and temporary Tasks actor. The unclaimed branch
+    // intentionally yields author=None in both implementations.
+    let dir = crate::testsupport::dir("review-sync-dry-fresh-oracle");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(
+            200,
+            open_pull(
+                7,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "unclaimed/topic",
+            ),
+        ),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(
+            200,
+            json!({"body":"fresh body", "additions":1, "deletions":0, "changed_files":1}),
+        ),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(true).await.unwrap();
+    assert_eq!(report["repos"], json!([{"open":1,"repo":"o/r"}]));
+    assert_eq!(
+        report["filed"],
+        json!([{"author":null,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","pr":7,"repo":"o/r"}])
+    );
+    for key in [
+        "cancelled",
+        "statuses",
+        "followups",
+        "conflicted",
+        "errors",
+        "merged",
+    ] {
+        assert_eq!(report[key], json!([]), "dry-run Python oracle field {key}");
+    }
+    assert!(sync
+        .flock
+        .list_review_rows_visible()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.method == "GET"));
+
+    let dir = crate::testsupport::dir("review-sync-dry-moved-oracle");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let stale = add_actual_review(
+        &store,
+        7,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "stale",
+    )
+    .await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(
+            200,
+            open_pull(
+                7,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "unclaimed/topic",
+            ),
+        ),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(200, json!({"body":"moved body"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(true).await.unwrap();
+    assert_eq!(
+        report["filed"],
+        json!([{"author":null,"head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr":7,"repo":"o/r"}])
+    );
+    assert_eq!(report["cancelled"], json!([stale.id]));
+    assert_eq!(sync.flock.get(&stale.id).await.unwrap().status, "open");
+    assert_eq!(
+        sync.flock.list_review_rows_visible().await.unwrap().len(),
+        1
+    );
+    for key in ["statuses", "followups", "conflicted", "errors", "merged"] {
+        assert_eq!(
+            report[key],
+            json!([]),
+            "moved-head dry-run Python oracle field {key}"
+        );
+    }
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.method == "GET"));
+
+    let dir = crate::testsupport::dir("review-sync-dry-closed-cleanup-oracle");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let closed = add_actual_review(&store, 7, "head-closed", "closed cleanup").await;
+    let transport = FakeReviewTransport::with_responses([github_response(200, json!([]))]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 2 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(true).await.unwrap();
+    assert_eq!(report["repos"], json!([{"open":0,"repo":"o/r"}]));
+    assert_eq!(sync.flock.get(&closed.id).await.unwrap().status, "open");
+    assert_eq!(report["cancelled"], json!([]));
+    assert_eq!(sync.transport.requests.lock().unwrap().len(), 1);
+
+    let dir = crate::testsupport::dir("review-sync-dry-terminal-oracle");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let accepted = add_actual_review(&store, 7, "head-terminal", "accepted").await;
+    finish_review(&store, &accepted.id, "%1", "accept").await;
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "head-terminal", "unclaimed/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+    ]);
+    let sync = ReviewSync::with_transport(
+        store,
+        FakeReviewTokens(Ok("test-token".into())),
+        FakeReviewPolicy { required: 1 },
+        "https://api.example.test",
+        transport,
+    );
+    let report = sync.run(true).await.unwrap();
+    assert_eq!(sync.flock.get(&accepted.id).await.unwrap().status, "done");
+    for key in [
+        "filed",
+        "cancelled",
+        "statuses",
+        "followups",
+        "conflicted",
+        "errors",
+        "merged",
+    ] {
+        assert_eq!(
+            report[key],
+            json!([]),
+            "terminal dry-run Python oracle field {key}"
+        );
+    }
+    assert!(sync
+        .transport
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.method == "GET"));
+}
+
+#[tokio::test]
+async fn run_fresh_unjudged_pull_files_exactly_one_task_and_pending_status() {
+    let dir = crate::testsupport::dir("review-sync-fresh-one-task-pending-status");
+    let store = Tasks::open(dir.path().join("tasks.db")).await.unwrap();
+    let transport = FakeReviewTransport::with_responses([
+        github_response(200, open_pull(7, "fresh-head", "unclaimed/topic")),
+        github_response(200, json!({"mergeable": true, "mergeable_state": "clean"})),
+        github_response(
+            200,
+            json!({"body":"details", "additions":1, "deletions":0, "changed_files":1}),
+        ),
+        github_response(201, json!({"state":"pending"})),
+    ]);
+    let (sync, report) = run_actual_review_sync(store, transport, 2).await;
+    let rows = sync.flock.list_review_rows_visible().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "open");
+    assert_eq!(rows[0].head.as_deref(), Some("fresh-head"));
+    assert_eq!(report["filed"].as_array().unwrap().len(), 1);
+    assert_eq!(report["statuses"][0]["state"], "pending");
+    assert_eq!(report["statuses"][0]["head"], "fresh-head");
+    let requests = sync.transport.requests.lock().unwrap();
+    assert_eq!(4, requests.len());
+    assert!(requests[..3].iter().all(|request| request.method == "GET"));
+    assert_eq!("POST", requests[3].method);
+    assert!(requests[3].url.ends_with("/statuses/fresh-head"));
+}
+
+#[tokio::test]
 async fn run_cancel_race_ignores_terminal_winner_and_propagates_live_refusal() {
     for (tag, mode, expected_status, expect_error) in [
         (
